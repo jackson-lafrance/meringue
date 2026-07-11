@@ -7,21 +7,32 @@ module Meringue
     module Panes
       class LogPane
         LEVEL_LABELS = {
-          "info" => "INFO",
-          "warning" => "WARN",
-          "error" => "ERR "
+          "info" => "info",
+          "warning" => "warn",
+          "error" => "err"
+        }.freeze
+
+        LEVEL_STYLES = {
+          "info" => Style::LOG_INFO,
+          "warning" => Style::LOG_WARNING,
+          "error" => Style::LOG_ERROR
         }.freeze
 
         def render(state)
-          lines(state).join("\n")
+          lines(state).map { |line| plain_text(line) }.join("\n")
         end
 
         def lines(state)
           logs = state.fetch("logs", []) || []
-          return ["No logs yet."] if logs.empty?
+          return [[["No logs yet.", Style::MUTED]]] if logs.empty?
 
           logs.sort_by { |entry| [entry["timestamp"].to_s, entry["id"].to_s] }.map do |entry|
-            "#{timestamp(entry)} #{level(entry)} #{source(entry)} #{entry.fetch("message", "")}".rstrip
+            [
+              [timestamp(entry), Style::DIM],
+              ["  #{level(entry)}", level_style(entry)],
+              ["  #{source(entry)}", Style::MUTED],
+              ["  #{entry.fetch("message", "")}", Style::TEXT]
+            ]
           end
         end
 
@@ -37,10 +48,20 @@ module Meringue
           LEVEL_LABELS.fetch(entry["level"], "????")
         end
 
+        def level_style(entry)
+          LEVEL_STYLES.fetch(entry["level"], Style::MUTED)
+        end
+
         def source(entry)
           source_type = entry.fetch("source_type", "system")
           source_id = entry["source_id"]
           source_id ? "#{source_type}:#{source_id}" : source_type
+        end
+
+        def plain_text(line)
+          return line.to_s unless line.is_a?(Array)
+
+          line.map { |segment| segment.is_a?(Array) ? segment.first.to_s : segment.to_s }.join
         end
       end
     end

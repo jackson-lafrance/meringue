@@ -14,8 +14,8 @@ module Meringue
         @terminal = terminal || Terminal.new(input: input, output: out)
       end
 
-      def render(state, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT)
-        layout.render(state, width: width, height: height)
+      def render(state, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, color: false)
+        layout.render(state, width: width, height: height, color: color)
       end
 
       def run(state: State::Models.empty_state)
@@ -25,7 +25,7 @@ module Meringue
           terminal.raw do
             loop do
               width, height = terminal.dimensions
-              terminal.write_frame(render(state, width: width, height: height))
+              terminal.write_frame(render(state, width: width, height: height, color: true))
               key = terminal.read_key(timeout: REFRESH_INTERVAL)
               break if quit_key?(key)
             end
@@ -42,7 +42,7 @@ module Meringue
       attr_reader :layout, :out, :terminal
 
       def render_once(state)
-        out.puts render(state, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT)
+        out.puts render(state, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, color: false)
         0
       end
 
