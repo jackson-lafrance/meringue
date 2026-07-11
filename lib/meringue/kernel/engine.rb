@@ -3,13 +3,15 @@
 module Meringue
   module Kernel
     class Engine
-      attr_reader :store, :harness_client, :head_runner
+      attr_reader :store, :harness_client, :head_runner, :workspace_manager
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
-                     head_runner: Heads::FakeRunner.new)
+                     head_runner: Heads::FakeRunner.new,
+                     workspace_manager: Workspace::Manager.new)
         @store = store
         @harness_client = harness_client
         @head_runner = head_runner
+        @workspace_manager = workspace_manager
       end
 
       def list_all
