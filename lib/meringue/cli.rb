@@ -5,14 +5,17 @@ require "fileutils"
 module Meringue
   class CLI
     PI_HEAD_SESSION_DIR = File.expand_path("~/.meringue/pi-head-sessions")
-    PI_HEAD_EXTRA_ARGS = %w[
-      --thinking minimal
-      --no-tools
-      --no-extensions
-      --no-skills
-      --no-prompt-templates
-      --no-context-files
-      --no-approve
+    # Heads need local read-only discovery so they can identify nearby git repositories
+    # before proposing AddProject/CreateIssue commands. Keep write/edit tools disabled;
+    # bash is included only for read-only commands such as git rev-parse and git remote -v.
+    PI_HEAD_EXTRA_ARGS = [
+      "--thinking", "minimal",
+      "--tools", "read,bash,grep,find,ls",
+      "--no-extensions",
+      "--no-skills",
+      "--no-prompt-templates",
+      "--no-context-files",
+      "--no-approve"
     ].freeze
 
     def initialize(argv, input: $stdin, out: $stdout, err: $stderr)
