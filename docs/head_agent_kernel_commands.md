@@ -4,6 +4,25 @@ This file is appended to every newly spawned head agent context. It is the compa
 
 Heads must return structured JSON only. They must not edit files, mutate Meringue state directly, or invoke harness sessions themselves. They propose commands; the Ruby kernel validates commands, applies accepted commands, and emits logs.
 
+## Local project discovery
+
+Project discovery belongs to the head agent. The kernel does not scan git repositories for you.
+
+Before choosing `AddProject`, `CreateIssue`, `SpawnWorker`, or `PromptAgent`, inspect the supplied state and, when useful, run read-only local discovery commands with your available tools. Useful discovery includes:
+
+- compare the user request against registered project ids, names, and `root_path` values in `kernel_state.projects`
+- inspect `cwd` with `pwd`, `ls`, and lightweight file reads
+- identify the current git repository with `git rev-parse --show-toplevel`
+- inspect repository identity with `git remote -v` and `git status --short --branch`
+- search nearby directories with `find` for `.git` folders, manifests, READMEs, and likely project names
+- use `rg` to find repo names or domain terms in nearby project metadata
+
+Discovery must be read-only. Do not edit files, create branches or worktrees, run package installs, run generators, run formatters that write files, mutate git state, contact production/staging systems, or change Meringue JSON state directly.
+
+Prefer an already registered project when its id, name, root path, git root, or remote clearly matches the request. If a matching local repository is not registered, propose `AddProject` with the absolute repository root. If adding a new project and you cannot know the future `P#` id in the same head result, return only `AddProject` plus a concise summary, or ask a clarifying question when multiple candidate repositories match.
+
+If multiple repositories are plausible and the user did not identify one clearly, ask a clarifying question instead of guessing.
+
 ## Head result envelope
 
 Every head result must match this shape:
