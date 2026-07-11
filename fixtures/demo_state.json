@@ -7,7 +7,15 @@
       "root_path": ".",
       "status": "working",
       "created_at": "2026-07-11T00:00:00Z",
-      "updated_at": "2026-07-11T00:00:00Z"
+      "updated_at": "2026-07-11T00:08:00Z"
+    },
+    {
+      "id": "P2",
+      "name": "dotfiles",
+      "root_path": "~/dotfiles",
+      "status": "idle",
+      "created_at": "2026-07-11T00:01:00Z",
+      "updated_at": "2026-07-11T00:07:00Z"
     }
   ],
   "issues": [
@@ -15,17 +23,70 @@
       "id": "P1-I1",
       "project_id": "P1",
       "parent_issue_id": null,
-      "title": "Scaffold Ruby CLI app",
-      "description": "Initial fake issue for rendering and kernel development.",
+      "title": "Build fake TUI demo",
+      "description": "Render the three primary panes from fake fixture data without real Pi sessions or state mutation.",
       "status": "working",
-      "agent_ids": ["P1-I1-W1"],
-      "created_at": "2026-07-11T00:00:00Z",
-      "updated_at": "2026-07-11T00:00:00Z"
+      "agent_ids": ["P1-I1-W1", "P1-I1-W2"],
+      "created_at": "2026-07-11T00:02:00Z",
+      "updated_at": "2026-07-11T00:08:00Z"
+    },
+    {
+      "id": "P1-I2",
+      "project_id": "P1",
+      "parent_issue_id": null,
+      "title": "Validate kernel commands",
+      "description": "Future MVP slice for validating structured commands before mutation.",
+      "status": "queued",
+      "agent_ids": ["P1-I2-W1"],
+      "created_at": "2026-07-11T00:03:00Z",
+      "updated_at": "2026-07-11T00:03:00Z"
+    },
+    {
+      "id": "P1-I3",
+      "project_id": "P1",
+      "parent_issue_id": null,
+      "title": "Reconcile stale sessions",
+      "description": "Future work to inspect tracked harness sessions on startup.",
+      "status": "blocked",
+      "agent_ids": ["P1-I3-W1"],
+      "created_at": "2026-07-11T00:04:00Z",
+      "updated_at": "2026-07-11T00:06:00Z"
+    },
+    {
+      "id": "P2-I1",
+      "project_id": "P2",
+      "parent_issue_id": null,
+      "title": "Swap vim file explorer",
+      "description": "Demo completed issue for rendering multiple projects in AgentTree.",
+      "status": "completed",
+      "agent_ids": ["P2-I1-W1"],
+      "created_at": "2026-07-11T00:01:00Z",
+      "updated_at": "2026-07-11T00:05:00Z"
     }
   ],
   "agents": [
     {
       "id": "H1",
+      "type": "head",
+      "status": "working",
+      "project_id": null,
+      "issue_id": null,
+      "workspace_path": null,
+      "workspace_strategy": null,
+      "workspace_branch": null,
+      "harness": "fake",
+      "pid": null,
+      "harness_session_id": "fake-head-H1",
+      "harness_session_file": null,
+      "harness_metadata": {
+        "demo": true,
+        "title": "Plan TUI rendering slice"
+      },
+      "created_at": "2026-07-11T00:02:00Z",
+      "updated_at": "2026-07-11T00:08:00Z"
+    },
+    {
+      "id": "H2",
       "type": "head",
       "status": "completed",
       "project_id": null,
@@ -35,13 +96,14 @@
       "workspace_branch": null,
       "harness": "fake",
       "pid": null,
-      "harness_session_id": "fake-head-session",
+      "harness_session_id": "fake-head-H2",
       "harness_session_file": null,
       "harness_metadata": {
-        "demo": true
+        "demo": true,
+        "title": "Classify dotfiles prompt"
       },
-      "created_at": "2026-07-11T00:00:00Z",
-      "updated_at": "2026-07-11T00:00:00Z"
+      "created_at": "2026-07-11T00:01:00Z",
+      "updated_at": "2026-07-11T00:05:00Z"
     },
     {
       "id": "P1-I1-W1",
@@ -54,13 +116,94 @@
       "workspace_branch": "meringue/P1-I1-W1",
       "harness": "fake",
       "pid": null,
-      "harness_session_id": "fake-worker-session",
+      "harness_session_id": "fake-worker-P1-I1-W1",
       "harness_session_file": null,
       "harness_metadata": {
-        "demo": true
+        "demo": true,
+        "title": "Draw three-pane layout"
       },
-      "created_at": "2026-07-11T00:00:00Z",
-      "updated_at": "2026-07-11T00:00:00Z"
+      "created_at": "2026-07-11T00:02:00Z",
+      "updated_at": "2026-07-11T00:08:00Z"
+    },
+    {
+      "id": "P1-I1-W2",
+      "type": "worker",
+      "status": "idle",
+      "project_id": "P1",
+      "issue_id": "P1-I1",
+      "workspace_path": "~/.meringue/workspaces/P1/P1-I1/P1-I1-W2",
+      "workspace_strategy": "git_worktree",
+      "workspace_branch": "meringue/P1-I1-W2",
+      "harness": "fake",
+      "pid": null,
+      "harness_session_id": "fake-worker-P1-I1-W2",
+      "harness_session_file": null,
+      "harness_metadata": {
+        "demo": true,
+        "title": "Polish fixture state"
+      },
+      "created_at": "2026-07-11T00:03:00Z",
+      "updated_at": "2026-07-11T00:08:00Z"
+    },
+    {
+      "id": "P1-I2-W1",
+      "type": "worker",
+      "status": "queued",
+      "project_id": "P1",
+      "issue_id": "P1-I2",
+      "workspace_path": "~/.meringue/workspaces/P1/P1-I2/P1-I2-W1",
+      "workspace_strategy": "git_worktree",
+      "workspace_branch": "meringue/P1-I2-W1",
+      "harness": "fake",
+      "pid": null,
+      "harness_session_id": "fake-worker-P1-I2-W1",
+      "harness_session_file": null,
+      "harness_metadata": {
+        "demo": true,
+        "title": "Stub command result rows"
+      },
+      "created_at": "2026-07-11T00:03:00Z",
+      "updated_at": "2026-07-11T00:03:00Z"
+    },
+    {
+      "id": "P1-I3-W1",
+      "type": "worker",
+      "status": "blocked",
+      "project_id": "P1",
+      "issue_id": "P1-I3",
+      "workspace_path": "~/.meringue/workspaces/P1/P1-I3/P1-I3-W1",
+      "workspace_strategy": "git_worktree",
+      "workspace_branch": "meringue/P1-I3-W1",
+      "harness": "fake",
+      "pid": null,
+      "harness_session_id": "fake-worker-P1-I3-W1",
+      "harness_session_file": null,
+      "harness_metadata": {
+        "demo": true,
+        "title": "Wait for real harness boundary"
+      },
+      "created_at": "2026-07-11T00:04:00Z",
+      "updated_at": "2026-07-11T00:06:00Z"
+    },
+    {
+      "id": "P2-I1-W1",
+      "type": "worker",
+      "status": "completed",
+      "project_id": "P2",
+      "issue_id": "P2-I1",
+      "workspace_path": "~/.meringue/workspaces/P2/P2-I1/P2-I1-W1",
+      "workspace_strategy": "git_worktree",
+      "workspace_branch": "meringue/P2-I1-W1",
+      "harness": "fake",
+      "pid": null,
+      "harness_session_id": "fake-worker-P2-I1-W1",
+      "harness_session_file": null,
+      "harness_metadata": {
+        "demo": true,
+        "title": "Update vim plugin config"
+      },
+      "created_at": "2026-07-11T00:01:00Z",
+      "updated_at": "2026-07-11T00:05:00Z"
     }
   ],
   "questions": [
@@ -69,12 +212,12 @@
       "head_id": "H1",
       "project_id": "P1",
       "issue_id": "P1-I1",
-      "question": "Should the first TUI demo read from this fixture or in-memory fake state?",
-      "context": "Demo question for fixture rendering.",
+      "question": "Should the first interactive input loop stay fake after rendering lands?",
+      "context": "Demo question for showing unresolved head questions in the AgentTree.",
       "status": "open",
       "answer": null,
-      "created_at": "2026-07-11T00:00:00Z",
-      "updated_at": "2026-07-11T00:00:00Z"
+      "created_at": "2026-07-11T00:08:00Z",
+      "updated_at": "2026-07-11T00:08:00Z"
     }
   ],
   "logs": [
@@ -84,44 +227,108 @@
       "source_type": "system",
       "source_id": null,
       "level": "info",
-      "message": "Loaded fake demo state.",
+      "message": "Loaded fake demo state from fixtures/demo_state.json.",
       "details": {
         "fixture": true
       }
     },
     {
       "id": "L2",
-      "timestamp": "2026-07-11T00:00:00Z",
-      "source_type": "head",
-      "source_id": "H1",
+      "timestamp": "2026-07-11T00:01:00Z",
+      "source_type": "user",
+      "source_id": null,
       "level": "info",
-      "message": "Fake head completed with no real harness work.",
+      "message": "User asked Meringue to update vim config.",
       "details": {}
     },
     {
       "id": "L3",
-      "timestamp": "2026-07-11T00:00:00Z",
+      "timestamp": "2026-07-11T00:02:00Z",
+      "source_type": "head",
+      "source_id": "H1",
+      "level": "info",
+      "message": "Fake head proposed a TUI rendering issue.",
+      "details": {}
+    },
+    {
+      "id": "L4",
+      "timestamp": "2026-07-11T00:03:00Z",
+      "source_type": "kernel",
+      "source_id": "P1-I1",
+      "level": "info",
+      "message": "Kernel accepted CreateIssue for fake TUI demo.",
+      "details": {
+        "command": "CreateIssue"
+      }
+    },
+    {
+      "id": "L5",
+      "timestamp": "2026-07-11T00:04:00Z",
       "source_type": "worker",
       "source_id": "P1-I1-W1",
       "level": "info",
-      "message": "Fake worker is visible for AgentTree rendering.",
+      "message": "Fake worker started drawing a three-pane layout.",
       "details": {}
+    },
+    {
+      "id": "L6",
+      "timestamp": "2026-07-11T00:05:00Z",
+      "source_type": "worker",
+      "source_id": "P2-I1-W1",
+      "level": "info",
+      "message": "Fake dotfiles worker completed successfully.",
+      "details": {}
+    },
+    {
+      "id": "L7",
+      "timestamp": "2026-07-11T00:06:00Z",
+      "source_type": "harness",
+      "source_id": "P1-I3-W1",
+      "level": "warning",
+      "message": "Fake harness event is blocked until real session reconcile exists.",
+      "details": {
+        "real_harness": false
+      }
+    },
+    {
+      "id": "L8",
+      "timestamp": "2026-07-11T00:07:00Z",
+      "source_type": "kernel",
+      "source_id": "Q1",
+      "level": "info",
+      "message": "Kernel stored an open clarifying question.",
+      "details": {}
+    },
+    {
+      "id": "L9",
+      "timestamp": "2026-07-11T00:08:00Z",
+      "source_type": "system",
+      "source_id": null,
+      "level": "info",
+      "message": "Rendered demo panes without mutating ~/.meringue/state.json.",
+      "details": {
+        "state_mutated": false
+      }
     }
   ],
   "counters": {
-    "projects": 1,
-    "heads": 1,
+    "projects": 2,
+    "heads": 2,
     "questions": 1,
-    "logs": 3,
+    "logs": 9,
     "issues_by_project": {
-      "P1": 1
+      "P1": 3,
+      "P2": 1
     },
     "workers_by_issue": {
-      "P1-I1": 1
+      "P1-I1": 2,
+      "P1-I2": 1,
+      "P1-I3": 1,
+      "P2-I1": 1
     }
   },
   "metadata": {
     "created_at": "2026-07-11T00:00:00Z",
-    "updated_at": "2026-07-11T00:00:00Z"
+    "updated_at": "2026-07-11T00:08:00Z"
   }
 }
