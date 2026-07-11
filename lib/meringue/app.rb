@@ -9,7 +9,7 @@ module Meringue
     def run
       out.puts "Meringue #{VERSION}"
       out.puts "Ruby CLI app scaffold is ready."
-      out.puts "Next slice: render fixtures/demo_state.json in a fake-state TUI demo."
+      out.puts "Manual fake head loop: ruby -Ilib bin/meringue head-loop"
       0
     end
 
