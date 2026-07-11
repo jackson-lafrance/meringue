@@ -10,6 +10,7 @@ module Meringue
       def initialize(input: $stdin, out: $stdout, err: $stderr,
                      router: Input::Router.new,
                      runner: FakeRunner.new,
+                     runner_name: "fake",
                      initial_state: State::Models.empty_state,
                      cwd: Dir.pwd)
         @input = input
@@ -17,14 +18,15 @@ module Meringue
         @err = err
         @router = router
         @runner = runner
+        @runner_name = runner_name
         @state = initial_state
         @cwd = File.expand_path(cwd)
         @head_counter = initial_state.fetch("counters", {}).fetch("heads", 0).to_i
       end
 
       def run
-        out.puts "Meringue fake head loop"
-        out.puts "Type a prompt to spawn a fake head. Type /quit to exit."
+        out.puts "Meringue #{runner_name} head loop"
+        out.puts "Type a prompt to spawn a #{runner_name} head. Type /quit to exit."
 
         loop do
           out.print "> " if interactive_input?
@@ -49,7 +51,7 @@ module Meringue
         if route.fetch("kind") == "natural_language"
           spawn_command = route.fetch("commands").first
           payload = spawn_command.fetch("payload")
-          return spawn_fake_head(
+          return spawn_head(
             user_message: payload.fetch("user_message"),
             question_id: payload.fetch("question_id", nil),
             route: route
@@ -58,7 +60,7 @@ module Meringue
 
         {
           "event" => "slash_command_routed",
-          "summary" => "Slash commands bypass the fake head runner in this manual loop.",
+          "summary" => "Slash commands bypass the head runner in this manual loop.",
           "state_mutated" => false,
           "route" => route
         }
@@ -66,9 +68,9 @@ module Meringue
 
       private
 
-      attr_reader :input, :out, :err, :router, :runner, :state, :cwd
+      attr_reader :input, :out, :err, :router, :runner, :runner_name, :state, :cwd
 
-      def spawn_fake_head(user_message:, question_id:, route:)
+      def spawn_head(user_message:, question_id:, route:)
         head_id = next_head_id
         context = Context.new(
           head_id: head_id,
@@ -86,7 +88,8 @@ module Meringue
         )
 
         {
-          "event" => "fake_head_completed",
+          "event" => "head_completed",
+          "runner" => runner_name,
           "head_id" => head_id,
           "state_mutated" => false,
           "spawn" => {
@@ -117,11 +120,18 @@ module Meringue
         {
           "event" => "error",
           "state_mutated" => false,
-          "error" => {
-            "class" => error.class.name,
-            "message" => error.message
-          }
+          "error" => error_details(error)
         }
+      end
+
+      def error_details(error)
+        details = {
+          "class" => error.class.name,
+          "message" => error.message
+        }
+        details["validation_errors"] = error.validation_errors if error.respond_to?(:validation_errors)
+        details["raw_output"] = error.raw_output if error.respond_to?(:raw_output)
+        details
       end
     end
   end

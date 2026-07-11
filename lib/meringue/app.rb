@@ -9,7 +9,8 @@ module Meringue
     def run
       out.puts "Meringue #{VERSION}"
       out.puts "Ruby CLI app scaffold is ready."
-      out.puts "Manual fake head loop: ruby -Ilib bin/meringue head-loop"
+      out.puts "Manual Pi head loop: ruby -Ilib bin/meringue head-loop"
+      out.puts "Manual fake head loop: ruby -Ilib bin/meringue fake-head-loop"
       0
     end
 
