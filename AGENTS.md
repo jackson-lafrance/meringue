@@ -47,6 +47,33 @@ gemini, cursor, and other coding harnesses without rewriting the kernel or TUI.
 We will store Meringue state in a simple JSON file using harness session ids to reconnect, resume, or explain sessions on reload of the tool.
 We should focus on keeping this project extensible and self-modifying for a users specific needs
 
+## Implementation plans and required agent workflow
+`AGENTS.md` is the durable project context and architecture contract. Milestone-specific implementation plans should live in separate files so this document stays focused on product intent, architecture, terminology, and non-negotiable constraints.
+
+The current MVP plan lives in `MVP_IMPLEMENTATION.md`. Agents must read it before working on scaffolding, state, TUI, input routing, kernel command validation, fake heads, fake harness clients, or Pi harness integration.
+
+If an implementation plan conflicts with `AGENTS.md`, follow `AGENTS.md` and call out the conflict before editing code.
+
+### Required self-review before completing implementation tasks
+Before returning a final implementation summary, agents must review their changes against this prompt:
+
+```txt
+Review the changes against AGENTS.md and any relevant implementation plan.
+
+Focus on:
+- Did this stay within the requested MVP slice?
+- Did this avoid implementing real Pi behavior unless explicitly requested?
+- Is harness-specific behavior isolated behind the harness layer?
+- Is the kernel still the only layer that mutates Meringue orchestration state?
+- Are TUI, input routing, state, kernel, heads, and harness responsibilities separated?
+- Are file names, namespaces, and IDs consistent with the project conventions?
+- Can the app or changed slice be run with a simple command?
+- What verification was actually run?
+- What should be the next smallest vertical slice?
+```
+
+Agents should include the outcome of this review in their final response, especially any scope creep, architectural risk, skipped verification, or recommended next slice.
+
 ## Terminology
 AgentTree means the UI hierarchy of projects, issues, heads, and workers.
 Workspace means the filesystem directory where a worker harness session runs. A workspace may be the project root for MVP, or a git worktree/dedicated directory later.
@@ -54,7 +81,7 @@ Harness means the underlying coding agent backend. Pi is the only required harne
 Do not use WorkTree to mean AgentTree.
 
 ## Statuses
-Use these statuses consistently across projects, issues, agents, questions, logs, and TUI rendering:
+Lifecycle statuses apply to projects, issues, and agents:
 - `queued`
 - `working`
 - `idle`
@@ -63,7 +90,17 @@ Use these statuses consistently across projects, issues, agents, questions, logs
 - `errored`
 - `killed`
 
-The TUI should never invent new status strings. If a new status is needed, add it here first and update the kernel state model.
+Question statuses are separate because questions are not executable work:
+- `open`
+- `answered`
+- `dismissed`
+
+Log entries do not have lifecycle statuses. They use log levels:
+- `info`
+- `warning`
+- `error`
+
+The TUI should never invent new lifecycle statuses, question statuses, or log levels. If a new value is needed, add it here first and update the kernel state model, persistence schema, and TUI rendering.
 
 ## Persistence
 Store Meringue state in JSON.
