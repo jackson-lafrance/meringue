@@ -2,16 +2,17 @@
 
 module Meringue
   class CLI
-    def initialize(argv, out: $stdout, err: $stderr)
+    def initialize(argv, input: $stdin, out: $stdout, err: $stderr)
       @argv = argv.dup
+      @input = input
       @out = out
       @err = err
     end
 
     def run
       case argv.first
-      when nil
-        App.new(out: out).run
+      when nil, "tui", "demo"
+        App.new(input: input, out: out, err: err).run
       when "-v", "--version", "version"
         out.puts VERSION
         0
@@ -30,17 +31,22 @@ module Meringue
 
     private
 
-    attr_reader :argv, :out, :err
+    attr_reader :argv, :input, :out, :err
 
     def print_help
       out.puts <<~HELP
         Meringue #{VERSION}
 
         Usage:
-          meringue             # boot the scaffolded app
+          meringue             # run the fake-state TUI demo
+          meringue tui         # run the fake-state TUI demo
+          meringue demo        # run the fake-state TUI demo
           meringue demo-state  # print the fake demo state fixture
           meringue --version   # print the app version
           meringue --help      # print this help
+
+        TUI controls:
+          q, Esc, or Ctrl-C    # quit the rendering demo
       HELP
     end
   end
