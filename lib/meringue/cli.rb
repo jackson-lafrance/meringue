@@ -54,12 +54,14 @@ module Meringue
     attr_reader :argv, :input, :out, :err
 
     def run_pi_head_loop
+      client = pi_harness_client
       Heads::SimpleLoop.new(
         initial_state: demo_state,
         out: out,
         err: err,
-        runner: pi_head_runner,
-        runner_name: "pi"
+        runner: Heads::PiRunner.new(harness_client: client, cwd: Dir.pwd),
+        runner_name: "pi",
+        harness_client: client
       ).run
     end
 
@@ -69,18 +71,16 @@ module Meringue
         out: out,
         err: err,
         runner: Heads::FakeRunner.new,
-        runner_name: "fake"
+        runner_name: "fake",
+        harness_client: Harness::FakeClient.new
       ).run
     end
 
-    def pi_head_runner
+    def pi_harness_client
       FileUtils.mkdir_p(PI_HEAD_SESSION_DIR)
-      Heads::PiRunner.new(
-        harness_client: Harness::PiClient.new(
-          session_dir: PI_HEAD_SESSION_DIR,
-          extra_args: PI_HEAD_EXTRA_ARGS
-        ),
-        cwd: Dir.pwd
+      Harness::PiClient.new(
+        session_dir: PI_HEAD_SESSION_DIR,
+        extra_args: PI_HEAD_EXTRA_ARGS
       )
     end
 
@@ -97,8 +97,8 @@ module Meringue
           meringue tui              # run the fake-state TUI demo
           meringue demo             # run the fake-state TUI demo
           meringue demo-state       # print the fake demo state fixture
-          meringue head-loop        # run the manual real Pi head-agent loop
-          meringue fake-head-loop   # run the manual fake head-agent loop
+          meringue head-loop        # run the manual real Pi head -> kernel -> worker loop
+          meringue fake-head-loop   # run the manual fake head -> kernel -> worker loop
           meringue --version        # print the app version
           meringue --help           # print this help
 

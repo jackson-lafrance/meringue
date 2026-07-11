@@ -54,6 +54,15 @@ Each command in `commands` must use this shape:
 
 Use only the command names documented below unless the kernel command model is updated.
 
+When proposing a simple worker flow for an already registered project, return commands in this order:
+
+1. `CreateIssue`
+2. `SpawnWorker` for that issue
+
+If no project is registered and the user's current working directory is the right target, propose `AddProject` first, then `CreateIssue`, then `SpawnWorker`.
+
+If the worker targets an issue created earlier in the same HeadResult, compute the next issue id from `kernel_state.counters.issues_by_project[project_id]` or the max existing `I<number>` for that project, then use that id in the `SpawnWorker.issue_id` payload. The kernel validates each command in order and rejects any command whose predicted id is wrong.
+
 ## Status and level constants
 
 Lifecycle statuses for projects, issues, and agents:
