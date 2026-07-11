@@ -50,7 +50,7 @@ We should focus on keeping this project extensible and self-modifying for a user
 ## Implementation plans and required agent workflow
 `AGENTS.md` is the durable project context and architecture contract. Milestone-specific implementation plans should live in separate files so this document stays focused on product intent, architecture, terminology, and non-negotiable constraints.
 
-The current MVP plan lives in `MVP_IMPLEMENTATION.md`. Agents must read it before working on scaffolding, state, TUI, input routing, kernel command validation, fake heads, fake harness clients, or Pi harness integration.
+There is currently no separate tracked MVP implementation plan. If a future milestone plan is added, agents must read it before working on the areas it covers.
 
 If an implementation plan conflicts with `AGENTS.md`, follow `AGENTS.md` and call out the conflict before editing code.
 
