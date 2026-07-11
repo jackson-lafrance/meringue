@@ -23,9 +23,16 @@ module Meringue
 
         terminal.with_screen do
           terminal.raw do
+            last_frame = nil
+
             loop do
               width, height = terminal.dimensions
-              terminal.write_frame(render(state, width: width, height: height, color: true))
+              frame = render(state, width: width, height: height, color: true)
+              if frame != last_frame
+                terminal.write_frame(frame)
+                last_frame = frame
+              end
+
               key = terminal.read_key(timeout: REFRESH_INTERVAL)
               break if quit_key?(key)
             end

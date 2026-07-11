@@ -11,6 +11,8 @@ module Meringue
       EXIT_ALT_SCREEN = "\e[?1049l"
       HIDE_CURSOR = "\e[?25l"
       SHOW_CURSOR = "\e[?25h"
+      DISABLE_AUTOWRAP = "\e[?7l"
+      ENABLE_AUTOWRAP = "\e[?7h"
       CLEAR_SCREEN = "\e[2J\e[H"
       HOME = "\e[H"
 
@@ -35,6 +37,9 @@ module Meringue
           columns = tty_columns if tty_columns&.positive?
         end
 
+        columns -= 1 if interactive? && columns > 1
+        rows -= 1 if interactive? && rows > 1
+
         [[columns, 1].max, [rows, 1].max]
       rescue SystemCallError, IOError
         [DEFAULT_WIDTH, DEFAULT_HEIGHT]
@@ -45,12 +50,14 @@ module Meringue
 
         output.write(ENTER_ALT_SCREEN)
         output.write(HIDE_CURSOR)
+        output.write(DISABLE_AUTOWRAP)
         output.write(CLEAR_SCREEN)
         output.flush
 
         yield
       ensure
         if interactive?
+          output.write(ENABLE_AUTOWRAP)
           output.write(SHOW_CURSOR)
           output.write(EXIT_ALT_SCREEN)
           output.flush
@@ -64,7 +71,7 @@ module Meringue
       end
 
       def write_frame(frame)
-        output.write(HOME) if interactive?
+        output.write(CLEAR_SCREEN) if interactive?
         output.write(frame)
         output.flush
       end
