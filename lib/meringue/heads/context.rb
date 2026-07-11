@@ -20,6 +20,10 @@ module Meringue
       end
 
       def to_h
+        to_prompt_h.merge("kernel_command_reference" => kernel_command_reference)
+      end
+
+      def to_prompt_h
         {
           "head_id" => head_id,
           "user_message" => user_message,
@@ -30,7 +34,9 @@ module Meringue
           "active_heads" => active_heads,
           "active_workers" => active_workers,
           "unresolved_questions" => unresolved_questions,
-          "kernel_command_reference" => kernel_command_reference
+          "kernel_command_reference" => reference_metadata.merge(
+            "appended_to_system_prompt" => true
+          )
         }
       end
 
