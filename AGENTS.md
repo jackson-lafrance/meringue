@@ -176,6 +176,7 @@ On spawn the head should have access to
 - other active heads
 - active workers
 - unresolved questions
+- the current working directory and enough local read-only tooling to inspect nearby repositories
 
 An example flow:
 user message
@@ -189,6 +190,25 @@ user message
    -> head agent is killed
 
 Head agents main purpose is to decide, what project to spawn the agent in, if we already have an issue for it, if a previously used agent should be used or if a new one should be spawned.
+
+### Head project discovery
+Project discovery is a head responsibility, not a kernel responsibility.
+
+Heads may inspect the local machine with read-only tools before returning their JSON result. This is how they should understand local projects, git repositories, remotes, and working directories well enough to choose an existing project or propose `AddProject`.
+
+Allowed head discovery examples:
+- `pwd`
+- `ls`
+- `find` for nearby directories and `.git` folders
+- `rg` for project names, package manifests, READMEs, and repo hints
+- `git rev-parse --show-toplevel`
+- `git remote -v`
+- `git status --short --branch`
+- reading lightweight files such as `README.md`, `AGENTS.md`, `package.json`, `Gemfile`, `pyproject.toml`, or similar manifests
+
+Heads must not mutate files, git state, Meringue state, dependencies, databases, credentials, or remote services while doing discovery. Do not run commands such as `git checkout`, `git switch`, `git worktree add`, `git pull`, `git fetch`, package installs, generators, formatters that write files, or destructive shell commands from a head. If a head cannot confidently choose between multiple matching local repositories, it should return a clarifying question instead of guessing.
+
+The kernel still validates `AddProject` paths and owns all Meringue state mutation. The kernel also still owns worker workspace allocation and git worktree creation for accepted `SpawnWorker` commands.
 
 ### Head result format
 Heads should return structured JSON only.
