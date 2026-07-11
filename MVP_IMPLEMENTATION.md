@@ -8,11 +8,13 @@ If this file conflicts with `AGENTS.md`, follow `AGENTS.md` and update this plan
 
 Build Meringue in small, reviewable vertical slices. Agents should not try to build the full orchestration system in one pass.
 
-### 1. Scaffold a gem-style Ruby CLI app
+### 1. Scaffold a Ruby CLI app
 
 - Use the top-level Ruby namespace `Meringue`.
 - Use `bin/meringue` as the executable entrypoint.
 - Put application code under `lib/meringue`.
+- Treat Meringue as an app, not a gem; do not add a gemspec or Gemfile during the MVP scaffold unless explicitly requested.
+- Keep the scaffold stdlib-only and do not add a test framework or test directory.
 - Prefer small modules/classes with clear ownership over one large script.
 - Do not implement real Pi process management during the scaffold step.
 - Empty placeholder files are acceptable only when the surrounding load path and module structure are clear.

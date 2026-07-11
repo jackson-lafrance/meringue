@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "projects": [
+    {
+      "id": "P1",
+      "name": "Meringue",
+      "root_path": ".",
+      "status": "working",
+      "created_at": "2026-07-11T00:00:00Z",
+      "updated_at": "2026-07-11T00:00:00Z"
+    }
+  ],
+  "issues": [
+    {
+      "id": "P1-I1",
+      "project_id": "P1",
+      "parent_issue_id": null,
+      "title": "Scaffold Ruby CLI app",
+      "description": "Initial fake issue for rendering and kernel development.",
+      "status": "working",
+      "agent_ids": ["P1-I1-W1"],
+      "created_at": "2026-07-11T00:00:00Z",
+      "updated_at": "2026-07-11T00:00:00Z"
+    }
+  ],
+  "agents": [
+    {
+      "id": "H1",
+      "type": "head",
+      "status": "completed",
+      "project_id": null,
+      "issue_id": null,
+      "workspace_path": null,
+      "harness": "fake",
+      "pid": null,
+      "harness_session_id": "fake-head-session",
+      "harness_session_file": null,
+      "harness_metadata": {
+        "demo": true
+      },
+      "created_at": "2026-07-11T00:00:00Z",
+      "updated_at": "2026-07-11T00:00:00Z"
+    },
+    {
+      "id": "P1-I1-W1",
+      "type": "worker",
+      "status": "working",
+      "project_id": "P1",
+      "issue_id": "P1-I1",
+      "workspace_path": ".",
+      "harness": "fake",
+      "pid": null,
+      "harness_session_id": "fake-worker-session",
+      "harness_session_file": null,
+      "harness_metadata": {
+        "demo": true
+      },
+      "created_at": "2026-07-11T00:00:00Z",
+      "updated_at": "2026-07-11T00:00:00Z"
+    }
+  ],
+  "questions": [
+    {
+      "id": "Q1",
+      "head_id": "H1",
+      "project_id": "P1",
+      "issue_id": "P1-I1",
+      "question": "Should the first TUI demo read from this fixture or in-memory fake state?",
+      "context": "Demo question for fixture rendering.",
+      "status": "open",
+      "answer": null,
+      "created_at": "2026-07-11T00:00:00Z",
+      "updated_at": "2026-07-11T00:00:00Z"
+    }
+  ],
+  "logs": [
+    {
+      "id": "L1",
+      "timestamp": "2026-07-11T00:00:00Z",
+      "source_type": "system",
+      "source_id": null,
+      "level": "info",
+      "message": "Loaded fake demo state.",
+      "details": {
+        "fixture": true
+      }
+    },
+    {
+      "id": "L2",
+      "timestamp": "2026-07-11T00:00:00Z",
+      "source_type": "head",
+      "source_id": "H1",
+      "level": "info",
+      "message": "Fake head completed with no real harness work.",
+      "details": {}
+    },
+    {
+      "id": "L3",
+      "timestamp": "2026-07-11T00:00:00Z",
+      "source_type": "worker",
+      "source_id": "P1-I1-W1",
+      "level": "info",
+      "message": "Fake worker is visible for AgentTree rendering.",
+      "details": {}
+    }
+  ],
+  "counters": {
+    "projects": 1,
+    "heads": 1,
+    "questions": 1,
+    "logs": 3,
+    "issues_by_project": {
+      "P1": 1
+    },
+    "workers_by_issue": {
+      "P1-I1": 1
+    }
+  },
+  "metadata": {
+    "created_at": "2026-07-11T00:00:00Z",
+    "updated_at": "2026-07-11T00:00:00Z"
+  }
+}

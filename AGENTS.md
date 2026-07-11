@@ -54,6 +54,20 @@ The current MVP plan lives in `MVP_IMPLEMENTATION.md`. Agents must read it befor
 
 If an implementation plan conflicts with `AGENTS.md`, follow `AGENTS.md` and call out the conflict before editing code.
 
+### Branch and PR workflow
+Agents must do implementation work on a fresh task branch, not directly on `main`, `master`, or any shared base branch.
+
+Before changing files:
+- Check the current git branch and working tree.
+- If not already on a branch created specifically for the current task, create or switch to a new branch with a short descriptive name.
+- If branch creation is blocked by permissions, uncommitted user work, or tooling, stop and ask the user how to proceed before editing.
+
+Before finishing:
+- Commit only the task's intended changes.
+- Push the task branch and open a pull request.
+- Include the PR link in the final response.
+- If the PR cannot be opened because of missing auth, network access, or unavailable tooling, report the exact blocker and provide the PR title, description, and command the user can run.
+
 ### Required self-review before completing implementation tasks
 Before returning a final implementation summary, agents must review their changes against this prompt:
 
@@ -62,6 +76,7 @@ Review the changes against AGENTS.md and any relevant implementation plan.
 
 Focus on:
 - Did this stay within the requested MVP slice?
+- Did all file changes happen on a fresh task branch rather than a shared base branch?
 - Did this avoid implementing real Pi behavior unless explicitly requested?
 - Is harness-specific behavior isolated behind the harness layer?
 - Is the kernel still the only layer that mutates Meringue orchestration state?
@@ -69,6 +84,7 @@ Focus on:
 - Are file names, namespaces, and IDs consistent with the project conventions?
 - Can the app or changed slice be run with a simple command?
 - What verification was actually run?
+- Was a PR opened from the task branch, and is the PR link included in the final response?
 - What should be the next smallest vertical slice?
 ```
 
