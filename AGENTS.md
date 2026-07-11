@@ -54,6 +54,23 @@ The current MVP plan lives in `MVP_IMPLEMENTATION.md`. Agents must read it befor
 
 If an implementation plan conflicts with `AGENTS.md`, follow `AGENTS.md` and call out the conflict before editing code.
 
+### Branch, worktree, and PR workflow
+Agents must do implementation work on a fresh task branch, not directly on `main`, `master`, or any shared base branch.
+
+When multiple coding agents or subagents may work at once, each task branch should live in its own git worktree. Do not let multiple agents edit the same checkout concurrently.
+
+Before changing files:
+- Check the current git branch, working tree, and existing git worktrees.
+- If not already in a worktree created specifically for the current task, create or switch to a task-specific worktree and branch with a short descriptive name.
+- Prefer a predictable local worktree location such as `../meringue-worktrees/<task-name>` when creating new task worktrees.
+- If worktree or branch creation is blocked by permissions, uncommitted user work, existing paths, or tooling, stop and ask the user how to proceed before editing.
+
+Before finishing:
+- Commit only the task's intended changes from that task's worktree.
+- Push the task branch and open a pull request.
+- Include the PR link in the final response.
+- If the PR cannot be opened because of missing auth, network access, or unavailable tooling, report the exact blocker and provide the PR title, description, and command the user can run.
+
 ### Required self-review before completing implementation tasks
 Before returning a final implementation summary, agents must review their changes against this prompt:
 
@@ -62,6 +79,7 @@ Review the changes against AGENTS.md and any relevant implementation plan.
 
 Focus on:
 - Did this stay within the requested MVP slice?
+- Did all file changes happen on a fresh task branch/worktree rather than a shared base checkout?
 - Did this avoid implementing real Pi behavior unless explicitly requested?
 - Is harness-specific behavior isolated behind the harness layer?
 - Is the kernel still the only layer that mutates Meringue orchestration state?
@@ -69,6 +87,7 @@ Focus on:
 - Are file names, namespaces, and IDs consistent with the project conventions?
 - Can the app or changed slice be run with a simple command?
 - What verification was actually run?
+- Was a PR opened from the task branch/worktree, and is the PR link included in the final response?
 - What should be the next smallest vertical slice?
 ```
 
@@ -76,7 +95,7 @@ Agents should include the outcome of this review in their final response, especi
 
 ## Terminology
 AgentTree means the UI hierarchy of projects, issues, heads, and workers.
-Workspace means the filesystem directory where a worker harness session runs. A workspace may be the project root for MVP, or a git worktree/dedicated directory later.
+Workspace means the filesystem directory where a worker harness session runs. To support multiple workers/subagents editing safely at the same time, prefer a dedicated git worktree per worker when the managed project is a git repository. A workspace may fall back to the project root or a dedicated directory only when worktrees are unavailable or explicitly disabled.
 Harness means the underlying coding agent backend. Pi is the only required harness for the MVP, but the core architecture should not hard-code Pi outside the harness integration layer.
 Do not use WorkTree to mean AgentTree.
 
@@ -175,7 +194,8 @@ The `questions` array should contain clarifying questions only when ambiguity wo
 
 ## Workers
 Workers are real harness sessions. For the MVP, that means real Pi sessions.
-They run in a specific project root or workspace decided by the head agent.
+They run in a specific workspace decided by the kernel from the head agent's proposed issue/project context.
+The preferred worker workspace is a dedicated git worktree so multiple workers/subagents can edit concurrently without trampling the same checkout.
 They are attached to one specific issue, but multiple agents can be attached to one issue.
 They may follow up, but should not be used many times.
 They should automatically be pruned if they complete over 50% context full.
@@ -295,6 +315,14 @@ Slash command    -> command parser    -> KernelCommand[]
 
 Heads should not directly edit Meringue JSON state or project files. They propose commands. Workers may edit assigned project files through their harness sessions.
 
+## Workspace management
+Worker isolation is a kernel-owned responsibility.
+
+The kernel should allocate worker workspaces before spawning harness sessions, then pass the resolved workspace path to the harness client as `cwd`.
+For git-backed projects, the preferred allocation strategy is one git worktree per worker using a Meringue-owned branch name, such as `meringue/P1-I2-W1`.
+Workspace metadata should be persisted on the agent record so sessions can be reconciled, resumed, killed, or cleaned up later.
+The TUI, heads, and harness clients should not directly create, prune, or mutate worktrees.
+
 ## Harness integration
 Meringue must be designed as harness-independent orchestration software, even though the MVP only needs Pi.
 
@@ -376,6 +404,8 @@ Fields should include:
 - `project_id`
 - `issue_id`
 - `workspace_path`
+- `workspace_strategy`: `git_worktree`, `project_root`, or `dedicated_directory`
+- `workspace_branch`: git branch used by the worktree when relevant
 - `harness`: `pi` for the MVP
 - `pid`
 - `harness_session_id`: Pi `sessionId` for the MVP
@@ -464,8 +494,10 @@ This supports title/description edits, reparenting, and status changes such as `
 Spawns a real worker harness session for an issue. For the MVP, this is a Pi worker session.
 
 Workers are usually one-to-one with issues.
-The worker should run in the project root or assigned workspace path.
-The returned agent should include a Meringue id like `P1-I1-W1`, pid, harness session id,
+If `WorkspacePath` is omitted, the kernel should allocate a worker-specific workspace through the workspace manager.
+Prefer a dedicated git worktree for git-backed projects so concurrent workers/subagents can edit safely.
+The harness should receive the allocated workspace as its `cwd`; harness clients should not create or mutate worktrees directly.
+The returned agent should include a Meringue id like `P1-I1-W1`, workspace metadata, pid, harness session id,
 and harness session file when available.
 
 ### `PromptAgent(AgentID, Prompt, Mode?) -> Agent`
