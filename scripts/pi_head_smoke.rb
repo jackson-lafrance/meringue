@@ -41,7 +41,7 @@ client = Meringue::Harness::PiClient.new(
   session_dir: session_dir,
   extra_args: [
     "--thinking", "minimal",
-    "--no-tools",
+    "--tools", "read,bash,grep,find,ls",
     "--no-extensions",
     "--no-skills",
     "--no-prompt-templates",
