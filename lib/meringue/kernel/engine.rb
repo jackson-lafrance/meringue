@@ -14,18 +14,23 @@ module Meringue
         "add_project" => "AddProject",
         "create_issue" => "CreateIssue",
         "spawn_worker" => "SpawnWorker",
+        "spawn_head" => "SpawnHead",
+        "apply_head_result" => "ApplyHeadResult",
+        "ask_question" => "AskQuestion",
         "list_all" => "ListAll"
       }.freeze
 
-      attr_reader :store, :harness_client, :head_runner, :workspace_manager
+      attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
                      head_runner: Heads::FakeRunner.new,
-                     workspace_manager: Workspace::Manager.new)
+                     workspace_manager: Workspace::Manager.new,
+                     cwd: Dir.pwd)
         @store = store
         @harness_client = harness_client
         @head_runner = head_runner
         @workspace_manager = workspace_manager
+        @cwd = File.expand_path(cwd)
       end
 
       def list_all
@@ -51,6 +56,12 @@ module Meringue
           create_issue(command_id, command_type, payload)
         when "SpawnWorker"
           spawn_worker(command_id, command_type, payload)
+        when "SpawnHead"
+          spawn_head(command_id, command_type, payload)
+        when "ApplyHeadResult"
+          apply_head_result(command_id, command_type, payload)
+        when "AskQuestion"
+          ask_question(command_id, command_type, payload)
         else
           rejected_result(
             command_id,
@@ -73,6 +84,212 @@ module Meringue
       end
 
       private
+
+      def spawn_head(command_id, command_type, payload)
+        user_message = value_at(payload, "user_message", "UserMessage", "message")
+        question_id = value_at(payload, "question_id", "QuestionID", "questionId")
+        errors = []
+
+        errors << "user_message is required" if blank?(user_message)
+        return rejected_result(command_id, command_type, "Head was not spawned.", errors) unless errors.empty?
+
+        state = normalized_state
+        if present_string(question_id) && !find_question(state, question_id)
+          return rejected_result(command_id, command_type, "Question #{question_id} does not exist.", ["question_not_found"])
+        end
+
+        now = timestamp
+        head_id = next_head_id!(state)
+        agent = build_head_agent(head_id: head_id, now: now)
+        state.fetch("agents") << agent
+
+        log_ids = []
+        log_ids.concat(append_log(
+          state,
+          source_type: "user",
+          source_id: head_id,
+          level: "info",
+          message: "User prompt routed to head #{head_id}.",
+          details: {
+            "user_message" => user_message.to_s,
+            "question_id" => present_string(question_id)
+          }
+        ))
+        log_ids.concat(append_log(
+          state,
+          source_type: "head",
+          source_id: head_id,
+          level: "info",
+          message: "Spawned head #{head_id}.",
+          details: { "runner" => head_runner.class.name, "cwd" => cwd }
+        ))
+        touch_state!(state, now)
+        store.save(state)
+
+        context = Heads::Context.new(
+          head_id: head_id,
+          user_message: user_message.to_s,
+          snapshot: state,
+          question_id: present_string(question_id),
+          cwd: cwd
+        )
+        head_result = head_runner.run(
+          user_message: user_message.to_s,
+          snapshot: state,
+          question_id: present_string(question_id),
+          context: context
+        )
+
+        state = normalized_state
+        agent = find_agent(state, head_id)
+        agent["status"] = "completed"
+        agent["updated_at"] = timestamp
+        agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+          "title" => head_result.is_a?(Hash) ? head_result["title"] : nil,
+          "summary" => head_result.is_a?(Hash) ? head_result["summary"] : nil,
+          "head_result" => head_result
+        ).compact
+        log_ids.concat(append_log(
+          state,
+          source_type: "head",
+          source_id: head_id,
+          level: "info",
+          message: "Head #{head_id} completed with #{Array(head_result.is_a?(Hash) ? head_result["commands"] : []).length} proposed command(s).",
+          details: { "head_result" => head_result }
+        ))
+        touch_state!(state)
+        store.save(state)
+
+        accepted_result(command_id, command_type, head_id, "Spawned and completed head #{head_id}.", agent, log_ids)
+      rescue StandardError => e
+        mark_head_errored(head_id, e) if defined?(head_id) && head_id
+        failed_result(
+          command_id,
+          command_type,
+          "Head failed: #{e.message}",
+          [e.class.name, e.message]
+        )
+      end
+
+      def apply_head_result(command_id, command_type, payload)
+        head_id = value_at(payload, "head_id", "HeadID", "headId")
+        head_result = value_at(payload, "head_result", "HeadResult", "result")
+        errors = validate_head_result_shape(head_result)
+        errors << "head_id is required" if blank?(head_id)
+        return rejected_result(command_id, command_type, "Head result was not applied.", errors) unless errors.empty?
+
+        state = normalized_state
+        head = find_agent(state, head_id)
+        return rejected_result(command_id, command_type, "Head #{head_id} does not exist.", ["head_not_found"]) unless head
+        return rejected_result(command_id, command_type, "Agent #{head_id} is not a head.", ["agent_is_not_head"]) unless head.fetch("type", nil) == "head"
+
+        log_ids = []
+        head["status"] = "completed" unless head.fetch("status", nil) == "errored"
+        head["updated_at"] = timestamp
+        head["harness_metadata"] = (head.fetch("harness_metadata", {}) || {}).merge(
+          "title" => head_result.fetch("title"),
+          "summary" => head_result.fetch("summary"),
+          "head_result" => head_result
+        )
+        log_ids.concat(append_log(
+          state,
+          source_type: "kernel",
+          source_id: head_id.to_s,
+          level: "info",
+          message: "Applying head result for #{head_id}.",
+          details: {
+            "title" => head_result.fetch("title"),
+            "summary" => head_result.fetch("summary"),
+            "command_count" => head_result.fetch("commands").length,
+            "question_count" => head_result.fetch("questions").length
+          }
+        ))
+
+        question_ids = create_head_questions!(state, head_id, head_result.fetch("questions"), log_ids)
+        touch_state!(state)
+        store.save(state)
+
+        command_results = head_result.fetch("commands").each_with_index.map do |proposed_command, index|
+          apply(command_with_default_id(proposed_command, head_id: head_id.to_s, index: index))
+        end
+
+        state = normalized_state
+        accepted_count = command_results.count { |result| result.fetch("status", nil) == "accepted" }
+        rejected_count = command_results.count { |result| result.fetch("status", nil) == "rejected" }
+        failed_count = command_results.count { |result| result.fetch("status", nil) == "failed" }
+        summary_log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: head_id.to_s,
+          level: failed_count.positive? ? "error" : "info",
+          message: "Applied head result for #{head_id}: #{accepted_count} accepted, #{rejected_count} rejected, #{failed_count} failed.",
+          details: {
+            "head_id" => head_id.to_s,
+            "question_ids" => question_ids,
+            "command_results" => command_results
+          }
+        )
+        touch_state!(state)
+        store.save(state)
+        log_ids.concat(command_results.flat_map { |result| result.fetch("log_entry_ids", []) })
+        log_ids.concat(summary_log_ids)
+
+        accepted_result(
+          command_id,
+          command_type,
+          head_id.to_s,
+          "Applied head result for #{head_id}.",
+          {
+            "head_id" => head_id.to_s,
+            "title" => head_result.fetch("title"),
+            "summary" => head_result.fetch("summary"),
+            "question_ids" => question_ids,
+            "command_results" => command_results
+          },
+          log_ids.uniq
+        )
+      end
+
+      def ask_question(command_id, command_type, payload)
+        head_id = value_at(payload, "head_id", "HeadID", "headId")
+        question_text = value_at(payload, "question", "Question")
+        context = value_at(payload, "context", "Context")
+        project_id = value_at(payload, "project_id", "ProjectID", "projectId")
+        issue_id = value_at(payload, "issue_id", "IssueID", "issueId")
+        errors = []
+
+        errors << "head_id is required" if blank?(head_id)
+        errors << "question is required" if blank?(question_text)
+        return rejected_result(command_id, command_type, "Question was not stored.", errors) unless errors.empty?
+
+        state = normalized_state
+        return rejected_result(command_id, command_type, "Head #{head_id} does not exist.", ["head_not_found"]) unless find_agent(state, head_id)
+        return rejected_result(command_id, command_type, "Project #{project_id} does not exist.", ["project_not_found"]) if present_string(project_id) && !find_project(state, project_id)
+        return rejected_result(command_id, command_type, "Issue #{issue_id} does not exist.", ["issue_not_found"]) if present_string(issue_id) && !find_issue(state, issue_id)
+
+        log_ids = []
+        question = build_question(
+          state: state,
+          head_id: head_id.to_s,
+          question_text: question_text.to_s,
+          context: context.to_s,
+          project_id: present_string(project_id),
+          issue_id: present_string(issue_id)
+        )
+        state.fetch("questions") << question
+        log_ids.concat(append_log(
+          state,
+          source_type: "kernel",
+          source_id: question.fetch("id"),
+          level: "info",
+          message: "Stored question #{question.fetch("id")} from #{head_id}.",
+          details: { "head_id" => head_id.to_s }
+        ))
+        touch_state!(state)
+        store.save(state)
+
+        accepted_result(command_id, command_type, question.fetch("id"), "Stored question #{question.fetch("id")}.", question, log_ids)
+      end
 
       def add_project(command_id, command_type, payload)
         root_path = value_at(payload, "path", "Path", "root_path", "RootPath")
@@ -274,6 +491,29 @@ module Meringue
         raise e
       end
 
+      def build_head_agent(head_id:, now:)
+        {
+          "id" => head_id,
+          "type" => "head",
+          "status" => "working",
+          "project_id" => nil,
+          "issue_id" => nil,
+          "workspace_path" => nil,
+          "workspace_strategy" => nil,
+          "workspace_branch" => nil,
+          "harness" => head_harness_name,
+          "pid" => nil,
+          "harness_session_id" => nil,
+          "harness_session_file" => nil,
+          "harness_metadata" => {
+            "runner" => head_runner.class.name,
+            "cwd" => cwd
+          },
+          "created_at" => now,
+          "updated_at" => now
+        }
+      end
+
       def build_worker_agent(agent_id:, issue:, project:, workspace:, session_ref:, now:)
         session_metadata = session_ref.fetch("metadata", {}) || {}
         {
@@ -363,6 +603,129 @@ module Meringue
         "#{agent_id} #{title}"[0, 96]
       end
 
+      def validate_head_result_shape(head_result)
+        errors = []
+        unless head_result.is_a?(Hash)
+          errors << "head_result must be an object"
+          return errors
+        end
+
+        errors << "head_result.title must be a string" unless head_result["title"].is_a?(String)
+        errors << "head_result.summary must be a string" unless head_result["summary"].is_a?(String)
+        validate_head_commands(head_result["commands"], errors)
+        validate_head_questions(head_result["questions"], errors)
+        errors
+      end
+
+      def validate_head_commands(commands, errors)
+        unless commands.is_a?(Array)
+          errors << "head_result.commands must be an array"
+          return
+        end
+
+        commands.each_with_index do |command, index|
+          unless command.is_a?(Hash)
+            errors << "head_result.commands[#{index}] must be an object"
+            next
+          end
+
+          errors << "head_result.commands[#{index}].type must be a string" unless command["type"].is_a?(String)
+          errors << "head_result.commands[#{index}].payload must be an object" unless command["payload"].is_a?(Hash)
+        end
+      end
+
+      def validate_head_questions(questions, errors)
+        unless questions.is_a?(Array)
+          errors << "head_result.questions must be an array"
+          return
+        end
+
+        questions.each_with_index do |question, index|
+          unless question.is_a?(Hash)
+            errors << "head_result.questions[#{index}] must be an object"
+            next
+          end
+
+          errors << "head_result.questions[#{index}].question must be a string" unless question["question"].is_a?(String)
+        end
+      end
+
+      def create_head_questions!(state, head_id, questions, log_ids)
+        questions.map do |question_payload|
+          question = build_question(
+            state: state,
+            head_id: head_id.to_s,
+            question_text: question_payload.fetch("question").to_s,
+            context: question_payload.fetch("context", "").to_s,
+            project_id: present_string(value_at(question_payload, "project_id", "projectId")),
+            issue_id: present_string(value_at(question_payload, "issue_id", "issueId"))
+          )
+          state.fetch("questions") << question
+          log_ids.concat(append_log(
+            state,
+            source_type: "kernel",
+            source_id: question.fetch("id"),
+            level: "info",
+            message: "Stored question #{question.fetch("id")} from #{head_id}.",
+            details: {
+              "head_id" => head_id.to_s,
+              "project_id" => question.fetch("project_id"),
+              "issue_id" => question.fetch("issue_id")
+            }
+          ))
+          question.fetch("id")
+        end
+      end
+
+      def command_with_default_id(command, head_id:, index:)
+        return command unless command.is_a?(Hash) && blank?(value_at(command, "command_id", "id"))
+
+        command.merge("command_id" => "#{head_id}-C#{index + 1}")
+      end
+
+      def build_question(state:, head_id:, question_text:, context:, project_id:, issue_id:)
+        now = timestamp
+        question_id = next_question_id!(state)
+        {
+          "id" => question_id,
+          "head_id" => head_id,
+          "project_id" => project_id,
+          "issue_id" => issue_id,
+          "question" => question_text,
+          "context" => context,
+          "status" => "open",
+          "answer" => nil,
+          "created_at" => now,
+          "updated_at" => now
+        }
+      end
+
+      def mark_head_errored(head_id, error)
+        state = normalized_state
+        head = find_agent(state, head_id)
+        return unless head
+
+        now = timestamp
+        head["status"] = "errored"
+        head["updated_at"] = now
+        head["harness_metadata"] = (head.fetch("harness_metadata", {}) || {}).merge(
+          "error_class" => error.class.name,
+          "error_message" => error.message
+        )
+        append_log(
+          state,
+          source_type: "head",
+          source_id: head_id,
+          level: "error",
+          message: "Head #{head_id} failed: #{error.message}",
+          details: { "class" => error.class.name }
+        )
+        touch_state!(state, now)
+        store.save(state)
+      rescue StandardError
+        nil
+      end
+
       def normalized_state
         state = store.load
         ensure_state_shape!(state)
@@ -395,6 +758,11 @@ module Meringue
         end.max || 0
       end
 
+      def next_head_id!(state)
+        state.fetch("counters")["heads"] = state.fetch("counters").fetch("heads", 0).to_i + 1
+        "H#{state.fetch("counters").fetch("heads")}"
+      end
+
       def next_project_id!(state)
         state.fetch("counters")["projects"] = state.fetch("counters").fetch("projects", 0).to_i + 1
         "P#{state.fetch("counters").fetch("projects")}"
@@ -418,6 +786,11 @@ module Meringue
         counters[issue_id] ||= max_worker_number(state, issue_id)
         counters[issue_id] = counters.fetch(issue_id).to_i + 1
         "#{issue_id}-W#{counters.fetch(issue_id)}"
+      end
+
+      def next_question_id!(state)
+        state.fetch("counters")["questions"] = state.fetch("counters").fetch("questions", 0).to_i + 1
+        "Q#{state.fetch("counters").fetch("questions")}"
       end
 
       def decrement_worker_counter!(state, issue_id)
@@ -464,6 +837,14 @@ module Meringue
 
       def find_issue(state, issue_id)
         state.fetch("issues").find { |issue| issue.fetch("id", nil) == issue_id.to_s }
+      end
+
+      def find_agent(state, agent_id)
+        state.fetch("agents").find { |agent| agent.fetch("id", nil) == agent_id.to_s }
+      end
+
+      def find_question(state, question_id)
+        state.fetch("questions").find { |question| question.fetch("id", nil) == question_id.to_s }
       end
 
       def normalize_command(command)
@@ -585,6 +966,16 @@ module Meringue
         harness_client.kill_session(session_ref)
       rescue StandardError
         nil
+      end
+
+      def head_harness_name
+        if head_runner.respond_to?(:harness_client) && head_runner.harness_client
+          head_runner.harness_client.class.name.to_s.split("::").last.to_s.sub(/Client\z/, "").downcase
+        elsif head_runner.class.name.to_s.end_with?("FakeRunner")
+          "fake"
+        else
+          "unknown"
+        end
       end
 
       def same_path?(left, right)

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "json"
+require "tmpdir"
 
 module Meringue
   module Heads
@@ -12,21 +13,33 @@ module Meringue
                      runner: FakeRunner.new,
                      runner_name: "fake",
                      initial_state: State::Models.empty_state,
-                     cwd: Dir.pwd)
+                     cwd: Dir.pwd,
+                     store: nil,
+                     harness_client: Harness::FakeClient.new,
+                     workspace_manager: Workspace::Manager.new,
+                     engine: nil)
         @input = input
         @out = out
         @err = err
         @router = router
-        @runner = runner
         @runner_name = runner_name
-        @state = initial_state
         @cwd = File.expand_path(cwd)
-        @head_counter = initial_state.fetch("counters", {}).fetch("heads", 0).to_i
+        @store = store || build_temp_store
+        seed_store!(initial_state)
+        @engine = engine || Kernel::Engine.new(
+          store: @store,
+          harness_client: harness_client,
+          head_runner: runner,
+          workspace_manager: workspace_manager,
+          cwd: @cwd
+        )
       end
 
       def run
         out.puts "Meringue #{runner_name} head loop"
+        out.puts "Natural-language prompts run through SpawnHead -> ApplyHeadResult -> proposed kernel commands."
         out.puts "Type a prompt to spawn a #{runner_name} head. Type /quit to exit."
+        out.puts "State path: #{state_path_description}"
 
         loop do
           out.print "> " if interactive_input?
@@ -49,63 +62,97 @@ module Meringue
         route = router.route(text)
 
         if route.fetch("kind") == "natural_language"
-          spawn_command = route.fetch("commands").first
-          payload = spawn_command.fetch("payload")
-          return spawn_head(
-            user_message: payload.fetch("user_message"),
-            question_id: payload.fetch("question_id", nil),
-            route: route
-          )
+          return handle_natural_language(route)
         end
 
+        command_results = engine.apply_all(route.fetch("commands", []))
         {
-          "event" => "slash_command_routed",
-          "summary" => "Slash commands bypass the head runner in this manual loop.",
-          "state_mutated" => false,
-          "route" => route
+          "event" => "slash_command_applied",
+          "summary" => "Slash command bypassed the head runner and was sent to kernel validation.",
+          "state_mutated" => command_results.any? { |result| result.fetch("status", nil) == "accepted" },
+          "route" => route,
+          "command_results" => command_results,
+          "state_summary" => state_summary
         }
       end
 
       private
 
-      attr_reader :input, :out, :err, :router, :runner, :runner_name, :state, :cwd
+      attr_reader :input, :out, :err, :router, :runner_name, :store, :engine, :cwd
 
-      def spawn_head(user_message:, question_id:, route:)
-        head_id = next_head_id
-        context = Context.new(
-          head_id: head_id,
-          user_message: user_message,
-          snapshot: state,
-          question_id: question_id,
-          cwd: cwd
-        )
-        system_prompt = context.system_prompt
-        head_result = runner.run(
-          user_message: user_message,
-          snapshot: state,
-          question_id: question_id,
-          context: context
-        )
-
-        {
-          "event" => "head_completed",
-          "runner" => runner_name,
-          "head_id" => head_id,
+      def handle_natural_language(route)
+        spawn_command = route.fetch("commands").first
+        spawn_result = engine.apply(spawn_command)
+        payload = {
+          "event" => "head_loop_iteration",
+          "summary" => "Spawned a head, collected its HeadResult, and asked the kernel to apply the proposed commands.",
           "state_mutated" => false,
-          "spawn" => {
-            "context_built" => true,
-            "system_prompt_bytes" => system_prompt.bytesize,
-            "kernel_command_reference_appended" => true,
-            "kernel_command_reference" => context.reference_metadata
-          },
           "route" => route,
-          "head_result" => head_result
+          "spawn_head_result" => spawn_result
+        }
+
+        unless spawn_result.fetch("status", nil) == "accepted"
+          payload["summary"] = "Head spawn failed or was rejected; proposed commands were not applied."
+          payload["state_summary"] = state_summary
+          return payload
+        end
+
+        head_result = head_result_from(spawn_result)
+        unless head_result
+          payload["summary"] = "Head completed but did not return a stored HeadResult; proposed commands were not applied."
+          payload["state_summary"] = state_summary
+          return payload
+        end
+
+        apply_result = engine.apply(
+          "type" => "ApplyHeadResult",
+          "payload" => {
+            "head_id" => spawn_result.fetch("target_id"),
+            "head_result" => head_result
+          }
+        )
+        payload["apply_head_result"] = apply_result
+        payload["state_mutated"] = apply_result.fetch("status", nil) == "accepted"
+        payload["state_summary"] = state_summary
+        payload
+      end
+
+      def head_result_from(spawn_result)
+        result = spawn_result.fetch("result", {}) || {}
+        metadata = result.fetch("harness_metadata", {}) || {}
+        metadata["head_result"]
+      end
+
+      def state_summary
+        state = store.load
+        {
+          "project_count" => state.fetch("projects", []).length,
+          "issue_count" => state.fetch("issues", []).length,
+          "agent_count" => state.fetch("agents", []).length,
+          "open_question_count" => state.fetch("questions", []).count { |question| question.fetch("status", nil) == "open" },
+          "recent_projects" => state.fetch("projects", []).last(3).map { |project| project.slice("id", "name", "status", "root_path") },
+          "recent_issues" => state.fetch("issues", []).last(5).map { |issue| issue.slice("id", "project_id", "title", "status", "agent_ids") },
+          "recent_agents" => state.fetch("agents", []).last(5).map { |agent| agent.slice("id", "type", "status", "project_id", "issue_id", "harness") },
+          "recent_logs" => state.fetch("logs", []).last(8).map { |log| log.slice("id", "source_type", "source_id", "level", "message") }
         }
       end
 
-      def next_head_id
-        @head_counter += 1
-        "H#{@head_counter}"
+      def seed_store!(initial_state)
+        return if store.respond_to?(:path) && File.exist?(store.path)
+
+        state = JSON.parse(JSON.generate(initial_state || State::Models.empty_state))
+        store.save(state)
+      end
+
+      def build_temp_store
+        @temporary_state_root = Dir.mktmpdir("meringue-head-loop-")
+        State::Store.new(path: File.join(@temporary_state_root, "state.json"))
+      end
+
+      def state_path_description
+        return store.path if store.respond_to?(:path)
+
+        "in-memory"
       end
 
       def exit_command?(text)
@@ -120,7 +167,8 @@ module Meringue
         {
           "event" => "error",
           "state_mutated" => false,
-          "error" => error_details(error)
+          "error" => error_details(error),
+          "state_summary" => state_summary
         }
       end
 
