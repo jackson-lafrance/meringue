@@ -71,8 +71,12 @@ module Meringue
       end
 
       def write_frame(frame)
-        output.write(CLEAR_SCREEN) if interactive?
-        output.write(frame)
+        if interactive?
+          output.write(CLEAR_SCREEN)
+          output.write(frame.gsub("\n", "\r\n"))
+        else
+          output.write(frame)
+        end
         output.flush
       end
 
