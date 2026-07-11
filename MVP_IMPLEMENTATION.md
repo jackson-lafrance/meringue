@@ -8,21 +8,25 @@ If this file conflicts with `AGENTS.md`, follow `AGENTS.md` and update this plan
 
 Build Meringue in small, reviewable vertical slices. Agents should not try to build the full orchestration system in one pass.
 
-### 1. Scaffold a gem-style Ruby CLI app
+### 1. Scaffold a Ruby CLI app
 
 - Use the top-level Ruby namespace `Meringue`.
 - Use `bin/meringue` as the executable entrypoint.
 - Put application code under `lib/meringue`.
+- Treat Meringue as an app, not a gem; do not add a gemspec or Gemfile during the MVP scaffold unless explicitly requested.
+- Keep the scaffold stdlib-only and do not add a test framework or test directory.
 - Prefer small modules/classes with clear ownership over one large script.
 - Do not implement real Pi process management during the scaffold step.
 - Empty placeholder files are acceptable only when the surrounding load path and module structure are clear.
 
 ### 2. Establish the initial project structure and state foundation
 
-- Add folders for CLI, kernel, state, input routing, TUI, harness integration, heads, and fixtures.
+- Add folders for CLI, kernel, state, input routing, TUI, workspace management, harness integration, heads, and fixtures.
 - Define the JSON state shape before building features that mutate it.
+- Define workspace metadata up front so worker sessions can later run in dedicated git worktrees.
 - Add a fake/demo state fixture for TUI and kernel development.
 - Use atomic JSON writes when implementing persistence, but the first scaffold may stub persistence behind a clear interface.
+- Do not run `git worktree` during the scaffold step; add the workspace manager boundary first.
 
 ### 3. Build a TUI demo mode before real orchestration
 
@@ -54,6 +58,7 @@ Build Meringue in small, reviewable vertical slices. Agents should not try to bu
 
 ### 7. Add real Pi harness integration last
 
+- Worker sessions should receive an already allocated workspace path, preferably a worker-specific git worktree for git-backed projects.
 - Pi-specific code belongs only behind the harness client/process manager.
 - The TUI and kernel should depend on generic harness operations, not direct Pi commands.
 - Long-lived workers should eventually use `pi --mode rpc` over JSONL stdin/stdout.
@@ -74,6 +79,7 @@ lib/meringue/kernel/commands.rb
 lib/meringue/kernel/results.rb
 lib/meringue/input/router.rb
 lib/meringue/input/slash_command_parser.rb
+lib/meringue/workspace/manager.rb
 lib/meringue/tui/app.rb
 lib/meringue/tui/layout.rb
 lib/meringue/tui/panes/chat_pane.rb
@@ -106,6 +112,7 @@ Constraints:
 - Keep files minimal but loadable.
 - Add tiny class/module stubs where useful.
 - Do not implement real Pi integration.
+- Do not run real `git worktree` commands yet; keep workspace allocation behind a scaffolded manager.
 - Do not build the TUI yet.
 - Do not implement full kernel behavior yet.
 - Prefer fake/stub interfaces where needed.
