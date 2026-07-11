@@ -59,6 +59,20 @@ Agents must do implementation work on a fresh task branch, not directly on `main
 
 When multiple coding agents or subagents may work at once, each task branch should live in its own git worktree. Do not let multiple agents edit the same checkout concurrently.
 
+#### Standing approval for agent git workflow
+Once the user asks an agent to implement a task, edit files, or make a PR in this repo, the full task-branch/worktree/PR workflow is pre-approved. Do not stop only to ask for permission to run git or GitHub commands needed for that workflow, including fetching, creating branches/worktrees, switching into the task worktree, staging the task's intended changes, committing, pushing the task branch, or opening/updating the requested pull request.
+
+New task worktrees must be based on `origin/main`, not local `main` or another in-progress branch. Refresh the remote tracking branch first, then create the worktree from `origin/main`, for example:
+
+```bash
+git fetch origin main
+git worktree add -b <branch> ../meringue-worktrees/<task-name> origin/main
+```
+
+If `origin/main` cannot be fetched or resolved, stop and report that blocker rather than basing a task worktree on local `main`.
+
+Agents have standing permission to complete the requested task through PR creation without additional approval. The hard boundary is `main`: never merge a PR into `main`, push directly to `main`, create commits on `main`, or otherwise mutate `main` unless the user gives explicit approval for that specific action. If setup is blocked by permissions, auth, missing remotes, an existing branch/path collision, or unrelated uncommitted user work, report the exact blocker and ask how to proceed.
+
 Before changing files:
 - Check the current git branch, working tree, and existing git worktrees.
 - If not already in a worktree created specifically for the current task, create or switch to a task-specific worktree and branch with a short descriptive name.
