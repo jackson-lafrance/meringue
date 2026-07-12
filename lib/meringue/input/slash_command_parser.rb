@@ -13,6 +13,7 @@ module Meringue
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker session."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump", "Open an agent harness session in Alacritty, or navigate the AgentTree when no id is provided."],
+        ["/jumpr", "Open an agent pull request, or navigate agents with attached PRs when no id is provided."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
@@ -26,6 +27,7 @@ module Meringue
         { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
         { "prefix" => "/kill", "source" => "targets", "append_space" => false },
         { "prefix" => "/jump", "source" => "agents", "append_space" => false },
+        { "prefix" => "/jumpr", "source" => "pr_agents", "append_space" => false },
         { "prefix" => "/answer", "source" => "open_questions", "append_space" => true }
       ].freeze
 
@@ -116,6 +118,8 @@ module Meringue
                   Array(state["agents"]) + Array(state["issues"]) + Array(state["projects"])
                 when "agents"
                   Array(state["agents"])
+                when "pr_agents"
+                  pr_agents(state)
                 when "open_questions"
                   Array(state["questions"]).select { |question| question["status"] == "open" }
                 else
@@ -146,6 +150,46 @@ module Meringue
         end
       end
 
+      def self.pr_agents(state)
+        Array(state["agents"]).filter_map do |agent|
+          pr_url = first_pr_url_for_agent(agent)
+          pr_url ? agent.merge("_pr_url" => pr_url) : nil
+        end
+      end
+
+      def self.first_pr_url_for_agent(agent)
+        agent["_pr_url"] || pr_urls_from_record(agent).find { |url| pull_request_url?(url) }
+      end
+
+      def self.pr_urls_from_record(record)
+        metadata = record.fetch("harness_metadata", {}) || {}
+        issue_metadata = record.fetch("metadata", {}) || {}
+        [
+          record["pr_url"],
+          record["pull_request_url"],
+          record["pull_request"],
+          *Array(record["pr_urls"]),
+          *Array(record["pull_request_urls"]),
+          *Array(record["pull_requests"]),
+          metadata["pr_url"],
+          metadata["pull_request_url"],
+          metadata["pull_request"],
+          *Array(metadata["pr_urls"]),
+          *Array(metadata["reported_pr_urls"]),
+          *Array(metadata["pull_request_urls"]),
+          issue_metadata["pr_url"],
+          issue_metadata["pull_request_url"],
+          issue_metadata["pull_request"],
+          *Array(issue_metadata["pr_urls"]),
+          *Array(issue_metadata["reported_pr_urls"]),
+          *Array(issue_metadata["pull_request_urls"])
+        ].compact.map(&:to_s)
+      end
+
+      def self.pull_request_url?(url)
+        url.to_s.match?(%r{\Ahttps?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+(?:[/?#].*)?\z})
+      end
+
       def self.description_for_suggestion(item, source)
         case source
         when "projects"
@@ -160,6 +204,9 @@ module Meringue
         when "agents"
           metadata = item.fetch("harness_metadata", {}) || {}
           [item["type"] || "agent", item["status"], metadata["title"] || item["issue_id"]].compact.join(" · ")
+        when "pr_agents"
+          metadata = item.fetch("harness_metadata", {}) || {}
+          ["agent PR", item["type"], metadata["title"] || item["issue_id"], first_pr_url_for_agent(item)].compact.join(" · ")
         when "open_questions"
           ["question", item["question"].to_s[0, 60]].reject(&:empty?).join(" · ")
         else
@@ -190,6 +237,8 @@ module Meringue
           parse_kill(arguments)
         when "jump"
           invalid("/jump is a local TUI command. Run it in the interactive TUI to open an agent session.", usage: "/jump [agent_id]")
+        when "jumpr"
+          invalid("/jumpr is a local TUI command. Run it in the interactive TUI to open an agent pull request.", usage: "/jumpr [agent_id]")
         when "tree"
           kernel_command("ListAll", "view" => "tree")
         when "state"
