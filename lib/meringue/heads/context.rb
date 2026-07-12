@@ -22,6 +22,7 @@ module Meringue
         "generators, migrations, or formatters that write files",
         "production/staging, credential, database, or destructive commands"
       ].freeze
+      RECENT_LOG_LIMIT = 20
 
       attr_reader :head_id, :user_message, :snapshot, :question_id,
                   :kernel_commands_path, :cwd
@@ -47,10 +48,10 @@ module Meringue
           "question_id" => question_id,
           "cwd" => cwd,
           "project_discovery" => project_discovery,
-          "kernel_state" => snapshot,
+          "kernel_state" => compact_kernel_state,
           "agent_tree" => agent_tree,
-          "active_heads" => active_heads,
-          "active_workers" => active_workers,
+          "active_heads" => compact_agents(active_heads),
+          "active_workers" => compact_agents(active_workers),
           "unresolved_questions" => unresolved_questions,
           "kernel_command_reference" => reference_metadata.merge(
             "appended_to_system_prompt" => true
@@ -86,14 +87,81 @@ module Meringue
         raise ArgumentError, "Head kernel command reference not found: #{kernel_commands_path}"
       end
 
+      def compact_kernel_state
+        {
+          "schema_version" => snapshot.fetch("schema_version", nil),
+          "metadata" => snapshot.fetch("metadata", {}),
+          "counters" => snapshot.fetch("counters", {}),
+          "projects" => compact_projects(snapshot.fetch("projects", [])),
+          "issues" => compact_issues(snapshot.fetch("issues", [])),
+          "agents" => compact_agents(snapshot.fetch("agents", [])),
+          "questions" => compact_questions(snapshot.fetch("questions", [])),
+          "recent_logs" => compact_logs(snapshot.fetch("logs", []).last(RECENT_LOG_LIMIT))
+        }
+      end
+
       def agent_tree
         {
-          "projects" => snapshot.fetch("projects", []),
-          "issues" => snapshot.fetch("issues", []),
-          "agents" => snapshot.fetch("agents", []),
-          "questions" => snapshot.fetch("questions", []),
+          "projects" => compact_projects(snapshot.fetch("projects", [])),
+          "issues" => compact_issues(snapshot.fetch("issues", [])),
+          "agents" => compact_agents(snapshot.fetch("agents", [])),
+          "questions" => compact_questions(snapshot.fetch("questions", [])),
           "status_counts" => status_counts
         }
+      end
+
+      def compact_projects(projects)
+        projects.map do |project|
+          project.slice("id", "name", "root_path", "status", "created_at", "updated_at")
+        end
+      end
+
+      def compact_issues(issues)
+        issues.map do |issue|
+          issue.slice("id", "project_id", "parent_issue_id", "title", "status", "agent_ids", "created_at", "updated_at").merge(
+            "description" => compact_text(issue["description"], max: 1_500)
+          )
+        end
+      end
+
+      def compact_agents(agents)
+        agents.map do |agent|
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          agent.slice(
+            "id", "type", "status", "project_id", "issue_id", "workspace_path",
+            "workspace_strategy", "workspace_branch", "harness", "harness_session_id",
+            "harness_session_file", "created_at", "updated_at"
+          ).merge(
+            "title" => metadata["title"],
+            "summary" => metadata["summary"],
+            "reported_pr_urls" => metadata["reported_pr_urls"],
+            "reconcile_state" => metadata["reconcile_state"],
+            "reconcile" => metadata["reconcile"]
+          ).compact
+        end
+      end
+
+      def compact_questions(questions)
+        questions.map do |question|
+          question.slice("id", "head_id", "project_id", "issue_id", "question", "status", "answer", "created_at", "updated_at").merge(
+            "context" => compact_text(question["context"], max: 1_000)
+          )
+        end
+      end
+
+      def compact_logs(logs)
+        logs.map do |log|
+          log.slice("id", "timestamp", "source_type", "source_id", "level", "message").merge(
+            "details" => compact_text(log["details"], max: 1_000)
+          )
+        end
+      end
+
+      def compact_text(value, max:)
+        return nil if value.nil?
+
+        text = value.is_a?(String) ? value : value.inspect
+        text.length > max ? "#{text[0, max]}…" : text
       end
 
       def active_heads
