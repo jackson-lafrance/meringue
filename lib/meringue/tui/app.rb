@@ -836,13 +836,13 @@ module Meringue
                     [
                       "Handing this to a fresh head agent…",
                       "Starting a head to read the prompt and current state…",
-                      "Queueing a head to plan the next kernel-safe step…"
+                      "Queueing a head to plan the next safe action…"
                     ]
                   else
                     [
                       "A head is reading the prompt against current Meringue state…",
                       "A head is deciding whether to ask, route, or spawn work…",
-                      "A head is shaping this into validated kernel commands…",
+                      "A head is shaping this into safe Meringue actions…",
                       "A head is keeping the request moving without blocking chat…"
                     ]
                   end

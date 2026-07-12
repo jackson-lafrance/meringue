@@ -27,7 +27,7 @@ module Meringue
         spawn_result = apply_kernel(spawn_command)
         payload = {
           "event" => "head_loop_iteration",
-          "summary" => "Spawned a head, collected its HeadResult, and asked the kernel to apply the proposed commands.",
+          "summary" => "Started a head and applied its next steps.",
           "state_mutated" => false,
           "route" => route,
           "spawn_head_result" => spawn_result
@@ -262,7 +262,7 @@ module Meringue
         prompt = user_message_from_route(route)
         activity = contextual_head_activity(head_label, prompt, summary)
 
-        "#{activity} Its HeadResult will be applied as soon as the session settles."
+        "#{activity} Meringue will update the tree or ask a question when it finishes."
       end
 
       def contextual_head_activity(head_label, prompt, summary)
@@ -272,22 +272,22 @@ module Meringue
         open_questions = summary.fetch("open_question_count", 0).to_i
 
         if working_workers.positive?
-          return "#{head_label}: checking #{count_label(working_workers, "active worker")} before proposing next steps."
+          return "#{head_label}: reviewing #{count_label(working_workers, "running worker")} to decide whether to wait or start more work."
         end
 
         if open_questions.positive?
-          return "#{head_label}: comparing this prompt with #{count_label(open_questions, "open question")} and current state."
+          return "#{head_label}: checking #{count_label(open_questions, "open question")} to see whether this prompt answers one."
         end
 
         if project_count.zero?
-          return "#{head_label}: orienting on the prompt and looking for the right project context."
+          return "#{head_label}: looking for the right project to use for this request."
         end
 
         choices = [
-          "#{head_label}: reading the prompt against current Meringue state.",
-          "#{head_label}: choosing whether to ask a question, prompt a worker, or update an issue.",
-          "#{head_label}: shaping the request into kernel-safe next steps.",
-          "#{head_label}: keeping the request in flight while the head session finishes."
+          "#{head_label}: reading your prompt against current Meringue state.",
+          "#{head_label}: deciding whether to ask a question, update an issue, or start a worker.",
+          "#{head_label}: turning your request into safe next actions.",
+          "#{head_label}: planning next actions while chat stays available."
         ]
         choices[stable_activity_index(head_label, prompt, active_heads, choices.length)]
       end

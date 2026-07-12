@@ -46,7 +46,7 @@ module Meringue
 
       def run
         out.puts "Meringue #{runner_name} head loop"
-        out.puts "Natural-language prompts run through SpawnHead -> ApplyHeadResult -> proposed kernel commands."
+        out.puts "Natural-language prompts ask a head to plan the next validated Meringue actions."
         out.puts "Type a prompt to spawn a #{runner_name} head. Type /quit to exit."
         out.puts "State path: #{state_path_description}"
 

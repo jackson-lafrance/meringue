@@ -10,7 +10,7 @@ module Meringue
       def initialize(raw_output:, validation_errors:)
         @raw_output = raw_output
         @validation_errors = validation_errors
-        super("Head returned invalid HeadResult JSON: #{validation_errors.join(", ")}")
+        super("Head returned invalid planning JSON: #{validation_errors.join(", ")}")
       end
     end
 

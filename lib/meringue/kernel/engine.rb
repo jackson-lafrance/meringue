@@ -667,7 +667,7 @@ module Meringue
               source_type: "harness",
               source_id: head_id,
               level: "info",
-              message: "Started #{agent.fetch("harness")} head session for #{head_id}; polling will apply its HeadResult when it settles.",
+              message: "Started #{agent.fetch("harness")} head session for #{head_id}; Meringue will update the tree when it finishes.",
               details: {
                 "pid" => agent.fetch("pid", nil),
                 "harness_session_id" => agent.fetch("harness_session_id", nil),
@@ -678,7 +678,7 @@ module Meringue
             touch_state!(state)
             store.save(state)
 
-            accepted_result(command_id, command_type, head_id, "Spawned head #{head_id}; polling will apply its HeadResult when complete.", agent, log_ids)
+            accepted_result(command_id, command_type, head_id, "Started head #{head_id}; Meringue will update the tree when it finishes.", agent, log_ids)
           end
         end
 
@@ -732,7 +732,7 @@ module Meringue
         head_result = value_at(payload, "head_result", "HeadResult", "result")
         errors = validate_head_result_shape(head_result)
         errors << "head_id is required" if blank?(head_id)
-        return synchronized_state { rejected_result(command_id, command_type, "Head result was not applied.", errors) } unless errors.empty?
+        return synchronized_state { rejected_result(command_id, command_type, "Head output was not applied.", errors) } unless errors.empty?
 
         log_ids = []
         question_ids = synchronized_state do
@@ -753,7 +753,7 @@ module Meringue
             source_type: "kernel",
             source_id: head_id.to_s,
             level: "info",
-            message: "Applying head result for #{head_id}.",
+            message: "Applying next steps from #{head_id}.",
             details: {
               "title" => head_result.fetch("title"),
               "summary" => head_result.fetch("summary"),
@@ -782,7 +782,7 @@ module Meringue
             source_type: "kernel",
             source_id: head_id.to_s,
             level: failed_count.positive? ? "error" : "info",
-            message: "Applied head result for #{head_id}: #{accepted_count} accepted, #{rejected_count} rejected, #{failed_count} failed.",
+            message: "Applied next steps from #{head_id}: #{accepted_count} accepted, #{rejected_count} rejected, #{failed_count} failed.",
             details: {
               "head_id" => head_id.to_s,
               "question_ids" => question_ids,
@@ -798,7 +798,7 @@ module Meringue
             command_id,
             command_type,
             head_id.to_s,
-            "Applied head result for #{head_id}.",
+            "Applied next steps from #{head_id}.",
             {
               "head_id" => head_id.to_s,
               "title" => head_result.fetch("title"),
@@ -2549,7 +2549,7 @@ module Meringue
             source_type: "head",
             source_id: head.fetch("id"),
             level: "warning",
-            message: "Head #{head.fetch("id")} returned invalid HeadResult JSON; requested one repair response.",
+            message: "Head #{head.fetch("id")} returned invalid planning JSON; requested one repair response.",
             details: {
               "repair_count" => repair_count,
               "error_class" => error.class.name,
@@ -2584,7 +2584,7 @@ module Meringue
             source_type: "head",
             source_id: head.fetch("id"),
             level: apply_result.fetch("status", nil) == "accepted" ? "info" : "error",
-            message: apply_result.fetch("status", nil) == "accepted" ? "Polled head #{head.fetch("id")} completed and applied its HeadResult." : "Polled head #{head.fetch("id")} completed but its HeadResult was not applied.",
+            message: apply_result.fetch("status", nil) == "accepted" ? "Head #{head.fetch("id")} finished and Meringue applied its next steps." : "Head #{head.fetch("id")} finished but Meringue could not apply its next steps.",
             details: {
               "head_result" => head_result,
               "apply_status" => apply_result.fetch("status", nil),
