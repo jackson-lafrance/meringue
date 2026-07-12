@@ -104,7 +104,14 @@ module Meringue
       end
 
       def apply_kernel(command)
+        return engine.apply(command) if spawn_head_command?(command)
+
         @engine_mutex.synchronize { engine.apply(command) }
+      end
+
+      def spawn_head_command?(command)
+        type = command.respond_to?(:[]) && (command["type"] || command[:type] || command["command_type"] || command[:command_type])
+        type.to_s == "SpawnHead" || type.to_s == "spawn_head"
       end
 
       def mark_worker_completed(agent_id:, harness_events:, last_assistant_text:)
