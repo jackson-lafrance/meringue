@@ -13,9 +13,6 @@ module Meringue
       BOTTOM_HINT_HEIGHT = 1
       MAX_COMPOSER_HEIGHT = 12
       MIN_CHAT_HEIGHT = 5
-      MIN_LOG_HEIGHT = 3
-      MAX_LOG_HEIGHT = 9
-
       def initialize(agent_tree_pane: Panes::AgentTreePane.new,
                      log_pane: Panes::LogPane.new,
                      chat_pane: Panes::ChatPane.new)
@@ -49,23 +46,11 @@ module Meringue
           metrics.fetch(:top_y),
           metrics.fetch(:main_width),
           metrics.fetch(:conversation_height),
-          "conversation",
+          "conversation + kernel",
           chat_pane.conversation_lines(state, width: metrics.fetch(:main_width) - 4),
           active: scroll_pane_active?(state, "conversation"),
           overflow: :tail,
           scroll_offset: pane_scroll_offset(state, "conversation")
-        )
-        draw_pane(
-          canvas,
-          metrics.fetch(:main_x),
-          metrics.fetch(:log_y),
-          metrics.fetch(:main_width),
-          metrics.fetch(:log_height),
-          "kernel logs",
-          log_pane.lines(state),
-          active: scroll_pane_active?(state, "logs"),
-          overflow: :tail,
-          scroll_offset: pane_scroll_offset(state, "logs")
         )
         if metrics.fetch(:suggestion_height).positive?
           draw_pane(
@@ -116,12 +101,10 @@ module Meringue
         metrics = layout_metrics(width, height, state)
         agent_tree_lines = agent_tree_pane.lines(state, width: metrics.fetch(:sidebar_width) - 4)
         conversation_lines = chat_pane.conversation_lines(state, width: metrics.fetch(:main_width) - 4)
-        log_lines = log_pane.lines(state)
-
         {
           "agent_tree" => scroll_max(agent_tree_lines.length, metrics.fetch(:top_height) - 2),
           "conversation" => tail_scroll_max(conversation_lines.length, metrics.fetch(:conversation_height) - 2),
-          "logs" => tail_scroll_max(log_lines.length, metrics.fetch(:log_height) - 2),
+          "logs" => 0,
           "chat" => 0
         }
       end
@@ -145,14 +128,7 @@ module Meringue
         vertical_gaps = GAP + (suggestion_height.positive? ? GAP : 0)
         top_height = height - BOTTOM_HINT_HEIGHT - composer_height - suggestion_height - vertical_gaps
 
-        remaining = top_height - GAP
-        log_height = log_height_for(remaining)
-        conversation_height = remaining - log_height
-
-        if conversation_height < MIN_CHAT_HEIGHT
-          conversation_height = [remaining - MIN_LOG_HEIGHT, MIN_CHAT_HEIGHT].max
-          log_height = remaining - conversation_height
-        end
+        conversation_height = top_height
 
         {
           top_y: top_y,
@@ -162,8 +138,6 @@ module Meringue
           main_x: main_x,
           main_width: main_width,
           conversation_height: conversation_height,
-          log_y: top_y + conversation_height + GAP,
-          log_height: log_height,
           suggestion_x: composer_x,
           suggestion_y: top_y + top_height + GAP,
           suggestion_width: composer_width,
@@ -183,7 +157,7 @@ module Meringue
         raw_height = slash_suggestion_height(state)
         return 0 unless raw_height.positive?
 
-        reserved_top_height = MIN_CHAT_HEIGHT + GAP + MIN_LOG_HEIGHT
+        reserved_top_height = MIN_CHAT_HEIGHT
         max_height = total_height - BOTTOM_HINT_HEIGHT - composer_height - GAP - reserved_top_height - GAP
         bounded_height = [raw_height, [max_height, 0].max].min
         bounded_height >= 3 ? bounded_height : 0
@@ -204,16 +178,10 @@ module Meringue
       def composer_height_for(total_height, content_line_count)
         base_height = COMPOSER_HEIGHT
         desired_height = [content_line_count.to_i + 2, base_height].max
-        max_available_height = [total_height - (GAP * 2) - MIN_CHAT_HEIGHT - MIN_LOG_HEIGHT, base_height].max
+        max_available_height = [total_height - GAP - MIN_CHAT_HEIGHT, base_height].max
         max_height = [[total_height / 3, base_height].max, MAX_COMPOSER_HEIGHT, max_available_height].min
 
         [desired_height, max_height].min
-      end
-
-      def log_height_for(remaining_height)
-        desired = [[remaining_height / 3, MIN_LOG_HEIGHT].max, MAX_LOG_HEIGHT].min
-        max_log_height = [remaining_height - MIN_CHAT_HEIGHT, MIN_LOG_HEIGHT].max
-        [desired, max_log_height].min
       end
 
       def agent_tree_scroll_offset(state, lines, content_height)
@@ -239,7 +207,6 @@ module Meringue
         {
           "agent_tree" => pane_bounds(metrics, :sidebar_x, :top_y, :sidebar_width, :top_height),
           "conversation" => pane_bounds(metrics, :main_x, :top_y, :main_width, :conversation_height),
-          "logs" => pane_bounds(metrics, :main_x, :log_y, :main_width, :log_height),
           "chat" => pane_bounds(metrics, :composer_x, :composer_y, :composer_width, :composer_height)
         }
       end
