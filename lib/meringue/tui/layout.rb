@@ -38,6 +38,7 @@ module Meringue
           metrics.fetch(:top_height),
           "agent tree",
           agent_tree_lines,
+          active: scroll_pane_active?(state, "agent_tree"),
           overflow: :agent_tree,
           scroll_offset: agent_tree_scroll_offset(state, agent_tree_lines, metrics.fetch(:top_height) - 2)
         )
@@ -49,8 +50,9 @@ module Meringue
           metrics.fetch(:conversation_height),
           "conversation",
           chat_pane.conversation_lines(state, width: metrics.fetch(:main_width) - 4),
-          active: true,
-          overflow: :tail
+          active: scroll_pane_active?(state, "conversation"),
+          overflow: :tail,
+          scroll_offset: pane_scroll_offset(state, "conversation")
         )
         draw_pane(
           canvas,
@@ -60,7 +62,9 @@ module Meringue
           metrics.fetch(:log_height),
           "kernel logs",
           log_pane.lines(state),
-          overflow: :tail
+          active: scroll_pane_active?(state, "logs"),
+          overflow: :tail,
+          scroll_offset: pane_scroll_offset(state, "logs")
         )
         if metrics.fetch(:suggestion_height).positive?
           draw_pane(
@@ -187,10 +191,18 @@ module Meringue
           return (selected_index - (content_height / 2)).clamp(0, max_offset)
         end
 
-        tick = (state.fetch("_agent_tree_scroll", {}) || {}).fetch("tick", 0).to_i
-        cycle = [max_offset * 2, 1].max
-        position = tick % cycle
-        position <= max_offset ? position : cycle - position
+        pane_scroll_offset(state, "agent_tree").clamp(0, max_offset)
+      end
+
+      def pane_scroll_offset(state, pane)
+        scroll = state.fetch("_scroll", {}) || {}
+        offsets = scroll.fetch("offsets", {}) || {}
+        offsets.fetch(pane, 0).to_i
+      end
+
+      def scroll_pane_active?(state, pane)
+        scroll = state.fetch("_scroll", {}) || {}
+        scroll.fetch("active_pane", nil).to_s == pane.to_s
       end
 
       def selected_agent_tree_line_index(lines)
@@ -213,7 +225,7 @@ module Meringue
 
         case overflow
         when :tail
-          draw_tail_content(canvas, x, y, content_width, content_height, lines)
+          draw_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset)
         when :agent_tree
           draw_scroll_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset)
         else
@@ -241,7 +253,7 @@ module Meringue
         canvas.write(x + 2, y + height - 2, overflow.ljust(content_width), max_width: content_width, style: Style::DIM)
       end
 
-      def draw_tail_content(canvas, x, y, content_width, content_height, lines)
+      def draw_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: 0)
         has_overflow = lines.length > content_height
         unless has_overflow
           lines.each_with_index do |line, index|
@@ -251,9 +263,15 @@ module Meringue
         end
 
         visible_capacity = [content_height - 1, 0].max
-        hidden_count = lines.length - visible_capacity
-        canvas.write(x + 2, y + 1, "… #{hidden_count} earlier".ljust(content_width), max_width: content_width, style: Style::DIM)
-        lines.last(visible_capacity).each_with_index do |line, index|
+        max_offset = [lines.length - visible_capacity, 0].max
+        offset = scroll_offset.to_i.clamp(0, max_offset)
+        finish_index = lines.length - offset
+        start_index = [finish_index - visible_capacity, 0].max
+        visible_lines = lines[start_index...finish_index] || []
+        hidden_count = start_index
+        label = offset.positive? ? "… #{hidden_count} earlier · #{offset} later" : "… #{hidden_count} earlier"
+        canvas.write(x + 2, y + 1, label.ljust(content_width), max_width: content_width, style: Style::DIM)
+        visible_lines.each_with_index do |line, index|
           draw_line(canvas, x + 2, y + 2 + index, content_width, line)
         end
       end

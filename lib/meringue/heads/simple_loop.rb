@@ -148,7 +148,11 @@ module Meringue
       def worker_pr_urls_from_completion(completion_result)
         result = completion_result.fetch("result", {}) || {}
         metadata = result.fetch("harness_metadata", {}) || {}
-        Array(metadata.fetch("reported_pr_urls", [])).compact.uniq
+        delivery_pull_requests = [
+          metadata["delivery_pull_request"],
+          *Array(metadata["delivery_pull_requests"])
+        ].compact
+        delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }.uniq
       end
 
       def wait_for_workers?

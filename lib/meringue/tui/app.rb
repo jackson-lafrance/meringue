@@ -8,7 +8,7 @@ module Meringue
       DEFAULT_WIDTH = 100
       DEFAULT_HEIGHT = 32
       REFRESH_INTERVAL = 0.2
-      AGENT_TREE_SCROLL_INTERVAL = 0.75
+      SCROLL_STEP = 4
       CTRL_C = "\u0003"
       CTRL_D = "\u0004"
       CTRL_W = "\u0017"
@@ -27,6 +27,18 @@ module Meringue
       WORD_RIGHT_KEYS = ["\ef", "\eF", "\e[1;3C", "\e[1;5C", "\e[1;9C"].freeze
       WORD_BACKSPACE_KEYS = ["\e\u007f", "\e\b", CTRL_W].freeze
       WORD_DELETE_KEYS = ["\ed", "\eD", "\e[3;3~", "\e[3;5~"].freeze
+      PAGE_UP_KEYS = ["\e[5~"].freeze
+      PAGE_DOWN_KEYS = ["\e[6~"].freeze
+      SCROLL_PANE_KEYS = {
+        "\e1" => "agent_tree",
+        "\e2" => "conversation",
+        "\e3" => "logs"
+      }.freeze
+      SCROLL_PANE_LABELS = {
+        "agent_tree" => "agent tree",
+        "conversation" => "conversation",
+        "logs" => "kernel logs"
+      }.freeze
       AGENT_TREE_FORWARD_KEYS = (DOWN_KEYS + RIGHT_KEYS).freeze
       AGENT_TREE_BACK_KEYS = (UP_KEYS + LEFT_KEYS).freeze
 
@@ -42,6 +54,8 @@ module Meringue
         @agent_tree_navigation_active = false
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = nil
+        @active_scroll_pane = "agent_tree"
+        @scroll_offsets = Hash.new(0)
         @conversation_event_keys = {}
         @started_at = Time.iso8601(Time.now.utc.iso8601)
         @chat_mutex = Mutex.new
@@ -162,6 +176,9 @@ module Meringue
           return [buffer, buffer.chars.length, index]
         end
 
+        scroll_result = handle_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        return scroll_result if scroll_result
+
         if @agent_tree_navigation_active
           return handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         end
@@ -238,6 +255,30 @@ module Meringue
       end
 
 
+      def handle_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        if SCROLL_PANE_KEYS.key?(key)
+          @active_scroll_pane = SCROLL_PANE_KEYS.fetch(key)
+          append_jump_response("Scroll target: #{SCROLL_PANE_LABELS.fetch(@active_scroll_pane)}. PageUp/PageDown scrolls it.")
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if PAGE_UP_KEYS.include?(key)
+          scroll_active_pane(SCROLL_STEP)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if PAGE_DOWN_KEYS.include?(key)
+          scroll_active_pane(-SCROLL_STEP)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        nil
+      end
+
+      def scroll_active_pane(delta)
+        @scroll_offsets[@active_scroll_pane] = [@scroll_offsets[@active_scroll_pane].to_i + delta.to_i, 0].max
+      end
+
       def handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         if key == "\e"
           exit_agent_tree_navigation("Agent tree navigation cancelled.")
@@ -266,6 +307,7 @@ module Meringue
         text = input_buffer.to_s.strip
         return handle_local_jump_command(text, state) if jump_command?(text)
         return handle_local_jumpr_command(text, state) if jumpr_command?(text)
+        return handle_local_scroll_command(text) if scroll_command?(text)
 
         false
       end
@@ -290,12 +332,53 @@ module Meringue
         true
       end
 
+      def handle_local_scroll_command(text)
+        _command, pane, direction = text.split(/\s+/, 3)
+        pane = normalize_scroll_pane(pane)
+        unless pane
+          append_jump_response("Usage: /scroll <tree|chat|logs> <up|down|top|bottom>")
+          return true
+        end
+
+        @active_scroll_pane = pane
+        case direction.to_s.downcase
+        when "up"
+          scroll_active_pane(SCROLL_STEP)
+        when "down"
+          scroll_active_pane(-SCROLL_STEP)
+        when "top"
+          @scroll_offsets[pane] = 10_000
+        when "bottom", "reset", ""
+          @scroll_offsets[pane] = 0
+        else
+          append_jump_response("Usage: /scroll <tree|chat|logs> <up|down|top|bottom>")
+          return true
+        end
+        append_jump_response("Scrolled #{SCROLL_PANE_LABELS.fetch(pane)} #{direction.to_s.empty? ? "bottom" : direction}.")
+        true
+      end
+
+      def normalize_scroll_pane(value)
+        case value.to_s.downcase
+        when "tree", "agent", "agents", "agent_tree", "agent-tree"
+          "agent_tree"
+        when "chat", "conversation"
+          "conversation"
+        when "log", "logs", "kernel", "kernel_logs", "kernel-logs"
+          "logs"
+        end
+      end
+
       def jump_command?(text)
         text == "/jump" || text.start_with?("/jump ")
       end
 
       def jumpr_command?(text)
         text == "/jumpr" || text.start_with?("/jumpr ")
+      end
+
+      def scroll_command?(text)
+        text == "/scroll" || text.start_with?("/scroll ")
       end
 
       def local_navigation_command_without_id?(input_buffer)
@@ -840,7 +923,7 @@ module Meringue
         state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
-          "_agent_tree_scroll" => agent_tree_scroll_snapshot
+          "_scroll" => scroll_snapshot
         )
       end
 
@@ -852,8 +935,11 @@ module Meringue
         }
       end
 
-      def agent_tree_scroll_snapshot
-        { "tick" => (Time.now.to_f / AGENT_TREE_SCROLL_INTERVAL).floor }
+      def scroll_snapshot
+        {
+          "active_pane" => @active_scroll_pane,
+          "offsets" => @scroll_offsets.to_h
+        }
       end
 
       def sync_state_conversation!(state)
@@ -912,13 +998,22 @@ module Meringue
         agent_id = agent.fetch("id", "worker")
         branch = agent.fetch("workspace_branch", nil)
         branch_text = branch.to_s.empty? ? "" : " on #{branch}"
-        pr_urls = Array((agent.fetch("harness_metadata", {}) || {})["reported_pr_urls"]).compact
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        pr_urls = verified_agent_pr_urls(metadata)
         return "#{agent_id} completed#{branch_text}." if pr_urls.empty?
 
         [
           "#{agent_id} completed#{branch_text} and reported PR#{pr_urls.length == 1 ? "" : "s"}:",
           *pr_urls.map { |url| "PR: #{url}" }
         ].join("\n")
+      end
+
+      def verified_agent_pr_urls(metadata)
+        delivery_pull_requests = [
+          metadata["delivery_pull_request"],
+          *Array(metadata["delivery_pull_requests"])
+        ].compact
+        delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
       end
 
       def head_completed_key(head_id)

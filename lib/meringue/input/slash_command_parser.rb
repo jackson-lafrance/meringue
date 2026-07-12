@@ -166,27 +166,13 @@ module Meringue
 
       def self.pr_urls_from_record(record)
         metadata = record.fetch("harness_metadata", {}) || {}
-        issue_metadata = record.fetch("metadata", {}) || {}
-        [
-          record["pr_url"],
-          record["pull_request_url"],
-          record["pull_request"],
-          *Array(record["pr_urls"]),
-          *Array(record["pull_request_urls"]),
-          *Array(record["pull_requests"]),
-          metadata["pr_url"],
-          metadata["pull_request_url"],
-          metadata["pull_request"],
-          *Array(metadata["pr_urls"]),
-          *Array(metadata["reported_pr_urls"]),
-          *Array(metadata["pull_request_urls"]),
-          issue_metadata["pr_url"],
-          issue_metadata["pull_request_url"],
-          issue_metadata["pull_request"],
-          *Array(issue_metadata["pr_urls"]),
-          *Array(issue_metadata["reported_pr_urls"]),
-          *Array(issue_metadata["pull_request_urls"])
-        ].compact.map(&:to_s)
+        delivery_pull_requests = [
+          record["delivery_pull_request"],
+          metadata["delivery_pull_request"],
+          *Array(record["delivery_pull_requests"]),
+          *Array(metadata["delivery_pull_requests"])
+        ].compact
+        delivery_pull_requests.map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
       end
 
       def self.pull_request_url?(url)
