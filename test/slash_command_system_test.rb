@@ -86,7 +86,7 @@ class SlashCommandSystemTest < Minitest::Test
 
     assert_includes plain_line(line), "info  user  User ran kernel command: /help"
     assert_equal Meringue::TUI::Style::LOG_INFO, line[1].last
-    assert_equal Meringue::TUI::Style::USER, line[2].last
+    assert_equal Meringue::TUI::Style::MUTED, line[2].last
     assert_equal Meringue::TUI::Style::TEXT, line[3].last
   end
 
