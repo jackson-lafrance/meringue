@@ -5,15 +5,20 @@ module Meringue
     class PromptLoop
       attr_reader :engine, :worker_wait_timeout
 
-      def initialize(engine:, wait_for_workers: false, worker_wait_timeout: 120, engine_mutex: Mutex.new)
+      def initialize(engine:, wait_for_workers: false, worker_wait_timeout: 120,
+                     engine_mutex: Mutex.new, router: Input::Router.new)
         @engine = engine
         @wait_for_workers = wait_for_workers
         @worker_wait_timeout = worker_wait_timeout
         @engine_mutex = engine_mutex
+        @router = router
       end
 
       def call(text, &on_event)
-        handle_prompt(text, on_event: on_event)
+        route = router.route(text)
+        return handle_slash_command(route, on_event: on_event) if route.fetch("kind", nil) == "slash_command"
+
+        handle_prompt(text, route: route, on_event: on_event)
       end
 
       def handle_prompt(text, route: nil, on_event: nil)
@@ -59,6 +64,29 @@ module Meringue
       end
 
       private
+
+      attr_reader :router
+
+      def handle_slash_command(route, on_event: nil)
+        command_results = route.fetch("commands", []).map { |command| apply_kernel(command) }
+        payload = {
+          "event" => "slash_command_applied",
+          "summary" => slash_summary(command_results),
+          "state_mutated" => command_results.any? { |result| result.fetch("status", nil) == "accepted" },
+          "route" => route,
+          "command_results" => command_results,
+          "state_summary" => state_summary
+        }
+        emit(on_event, "slash_command_applied", "command_results" => command_results)
+        payload
+      end
+
+      def slash_summary(command_results)
+        accepted = command_results.select { |result| result.fetch("status", nil) == "accepted" }
+        return accepted.map { |result| result.fetch("message", "Command accepted.") }.join("\n") unless accepted.empty?
+
+        command_results.map { |result| result.fetch("message", "Command was not accepted.") }.join("\n")
+      end
 
       def natural_language_route(text)
         {
