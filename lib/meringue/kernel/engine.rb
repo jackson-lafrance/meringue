@@ -89,6 +89,7 @@ module Meringue
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
                      head_runner: Heads::FakeRunner.new,
+                     harness_client_resolver: nil,
                      workspace_manager: Workspace::Manager.new,
                      cwd: Dir.pwd,
                      async_heads: false,
@@ -100,6 +101,7 @@ module Meringue
         @cwd = File.expand_path(cwd)
         @async_heads = async_heads
         @forge_client = forge_client
+        @harness_client_resolver = harness_client_resolver
         @state_mutex = Monitor.new
         @head_result_mutex = Mutex.new
       end
@@ -292,7 +294,7 @@ module Meringue
           command_id,
           command_type,
           nil,
-          "Reconciled #{agents.length} Pi-backed agent session(s).",
+          "Reconciled #{agents.length} harness-backed agent session(s).",
           {
             "checked_count" => agents.length,
             "changed_count" => changed_count,
@@ -425,7 +427,7 @@ module Meringue
           agent = find_agent(state, agent_id)
           next unless agent
 
-          kill_session_safely(session_ref_from_agent(agent)) if present_string(agent.fetch("harness", nil))
+          kill_session_safely(session_ref_from_agent(agent), agent: agent) if present_string(agent.fetch("harness", nil))
         end
 
         log_ids = append_log(
@@ -2090,12 +2092,19 @@ module Meringue
       end
 
       def reconcile_candidate?(agent)
-        return false unless agent.fetch("harness", nil) == "pi"
+        return false if blank?(agent.fetch("harness", nil)) || agent.fetch("harness", nil) == "fake"
         return false unless agent_has_session_reference?(agent)
         return false if %w[completed killed].include?(agent.fetch("status", nil))
+        return false unless harness_client_available_for_agent?(agent)
         return true unless agent.fetch("status", nil) == "errored"
 
         resumable_worker_reconcile_candidate?(agent)
+      end
+
+      def harness_client_available_for_agent?(agent)
+        !!harness_client_for_agent(agent)
+      rescue StandardError
+        false
       end
 
       def agent_has_session_reference?(agent)
@@ -2181,7 +2190,7 @@ module Meringue
         head_result = if head_runner.respond_to?(:parse_head_result_text)
                         head_runner.parse_head_result_text(poll_result.fetch("last_assistant_text", nil).to_s)
                       else
-                        JSON.parse(poll_result.fetch("last_assistant_text", nil).to_s)
+                        Heads::ResultParser.parse(poll_result.fetch("last_assistant_text", nil).to_s)
                       end
         apply_result = @head_result_mutex.synchronize do
           apply_head_result(
@@ -2199,7 +2208,7 @@ module Meringue
           "apply_result" => apply_result,
           "log_entry_ids" => (apply_result.fetch("log_entry_ids", []) + log_ids).uniq
         )
-      rescue Heads::PiRunner::InvalidHeadResultError => e
+      rescue Heads::InvalidHeadResultError => e
         repair_invalid_head_result(poll_result, e)
       rescue StandardError => e
         mark_agent_errored_from_poll(
@@ -2460,7 +2469,7 @@ module Meringue
               source_type: "head",
               source_id: agent.fetch("id"),
               level: "warning",
-              message: "Head #{agent.fetch("id")} had a transient Pi reconciliation error; keeping it working during the startup grace window.",
+              message: "Head #{agent.fetch("id")} had a transient harness reconciliation error; keeping it working during the startup grace window.",
               details: reconcile
             )
           end
@@ -2503,7 +2512,7 @@ module Meringue
             source_type: "worker",
             source_id: agent.fetch("id"),
             level: "warning",
-            message: "Worker #{agent.fetch("id")} could not resume its Pi session; will retry reconciliation.",
+            message: "Worker #{agent.fetch("id")} could not resume its harness session; will retry reconciliation.",
             details: reconcile
           )
           touch_state!(state, now)
@@ -2544,7 +2553,7 @@ module Meringue
             source_type: agent.fetch("type", nil) == "head" ? "head" : "worker",
             source_id: agent.fetch("id"),
             level: "error",
-            message: "#{agent.fetch("type", "Agent").capitalize} #{agent.fetch("id")} errored while reconciling its Pi session.",
+            message: "#{agent.fetch("type", "Agent").capitalize} #{agent.fetch("id")} errored while reconciling its harness session.",
             details: reconcile
           )
           touch_state!(state, now)
@@ -2600,13 +2609,15 @@ module Meringue
           source_type: "worker",
           source_id: agent.fetch("id"),
           level: "info",
-          message: "Resumed worker #{agent.fetch("id")} from its Pi session and prompted it to continue.",
+          message: "Resumed worker #{agent.fetch("id")} from its harness session and prompted it to continue.",
           details: poll_result.fetch("reconcile", {})
         )
       end
 
       def completed_session?(session_ref)
         metadata = session_ref.fetch("metadata", {}) || {}
+        return true if metadata.fetch("completed", false)
+
         pi_state = metadata.fetch("pi_state", {}) || {}
         return true if pi_state["completed"]
 
@@ -2622,7 +2633,12 @@ module Meringue
       end
 
       def harness_client_for_agent(agent)
-        return head_runner.harness_client if agent.fetch("type", nil) == "head" && head_runner.respond_to?(:harness_client)
+        resolved = @harness_client_resolver&.call(agent)
+        return resolved if resolved
+
+        if agent.fetch("type", nil) == "head" && head_runner.respond_to?(:harness_client)
+          return head_runner.harness_client
+        end
 
         harness_client
       end
@@ -2645,7 +2661,8 @@ module Meringue
       end
 
       def kill_completed_head_session(session_ref)
-        client = head_runner.respond_to?(:harness_client) ? head_runner.harness_client : harness_client
+        agent_like = { "type" => "head", "harness" => session_ref.fetch("harness", nil) }
+        client = harness_client_for_agent(agent_like)
         client.kill_session(session_ref) if client.respond_to?(:kill_session)
       rescue StandardError
         nil
@@ -2746,15 +2763,19 @@ module Meringue
         []
       end
 
-      def kill_session_safely(session_ref)
-        harness_client.kill_session(session_ref)
+      def kill_session_safely(session_ref, agent: nil)
+        client = agent ? harness_client_for_agent(agent) : harness_client
+        client.kill_session(session_ref)
       rescue StandardError
         nil
       end
 
       def head_harness_name
         if head_runner.respond_to?(:harness_client) && head_runner.harness_client
-          head_runner.harness_client.class.name.to_s.split("::").last.to_s.sub(/Client\z/, "").downcase
+          client = head_runner.harness_client
+          return client.harness_name if client.respond_to?(:harness_name)
+
+          client.class.name.to_s.split("::").last.to_s.sub(/Client\z/, "").downcase
         elsif head_runner.class.name.to_s.end_with?("FakeRunner")
           "fake"
         else
@@ -2798,6 +2819,16 @@ module Meringue
       end
 
       def timestamp
+        local_timestamp
+      rescue StandardError
+        global_timestamp
+      end
+
+      def local_timestamp
+        Time.now.getlocal.iso8601
+      end
+
+      def global_timestamp
         Time.now.utc.iso8601
       end
     end

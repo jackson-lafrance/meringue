@@ -5,6 +5,9 @@ module Meringue
     module Panes
       class ChatPane
         VISIBLE_SUGGESTION_LIMIT = 3
+        MAX_CONVERSATION_ENTRY_LINES = 10
+        AGENT_ICON = "✦"
+        USER_ICON = "●"
 
         def render(state)
           conversation_lines(state).map { |line| plain_text(line) }.join("\n")
@@ -102,7 +105,7 @@ module Meringue
 
         def role_line(role, style)
           [
-            ["✦", style],
+            [role == "you" ? USER_ICON : AGENT_ICON, style],
             [" #{role}", style]
           ]
         end
