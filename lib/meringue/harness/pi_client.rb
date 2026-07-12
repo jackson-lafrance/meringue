@@ -33,6 +33,10 @@ module Meringue
       attr_reader :command, :env, :extra_args, :session_dir, :command_timeout,
                   :event_timeout, :shutdown_timeout
 
+      def harness_name
+        "pi"
+      end
+
       def initialize(command: DEFAULT_COMMAND, env: {}, extra_args: [], session_dir: nil,
                      command_timeout: DEFAULT_COMMAND_TIMEOUT,
                      event_timeout: DEFAULT_EVENT_TIMEOUT,
