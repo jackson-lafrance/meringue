@@ -32,7 +32,7 @@ module Meringue
               ["  #{level(entry)}", level_style(entry)]
             ]
             log_source = source(entry)
-            line << ["  #{log_source}", source_style(entry)] if log_source
+            line << ["  #{log_source}", Style::MUTED] if log_source
             line << ["  #{entry.fetch("message", "")}", Style::TEXT]
             line
           end
@@ -52,10 +52,6 @@ module Meringue
 
         def level_style(entry)
           LEVEL_STYLES.fetch(entry["level"], Style::MUTED)
-        end
-
-        def source_style(entry)
-          entry["source_type"] == "user" ? Style::USER : Style::MUTED
         end
 
         def source(entry)
