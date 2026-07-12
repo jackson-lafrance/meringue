@@ -43,6 +43,14 @@ module Meringue
         layout.render(state, width: width, height: height, color: color)
       end
 
+      def remember_existing_conversation_events!(state)
+        Array(state.fetch("agents", [])).each do |agent|
+          next unless existing_worker_completion_event?(agent)
+
+          remember_conversation_event(worker_completed_key(agent.fetch("id", nil)))
+        end
+      end
+
       def run(state: nil, state_provider: nil, on_submit: nil)
         state_provider ||= -> { state || State::Models.empty_state }
         return render_once(compose_state(state_provider, "")) unless terminal.interactive?
@@ -603,11 +611,9 @@ module Meringue
 
       def sync_worker_completion_updates!(state)
         Array(state.fetch("agents", [])).each do |agent|
-          next unless agent.fetch("type", nil) == "worker"
-          next unless agent.fetch("status", nil) == "completed"
+          next unless existing_worker_completion_event?(agent)
 
           metadata = agent.fetch("harness_metadata", {}) || {}
-          next unless metadata["completed_at"] || Array(metadata["reported_pr_urls"]).any?
           next unless conversation_sync_after_start?(metadata["completed_at"])
 
           append_message_once(
@@ -616,6 +622,14 @@ module Meringue
             worker_completed_text_from_agent(agent)
           )
         end
+      end
+
+      def existing_worker_completion_event?(agent)
+        return false unless agent.fetch("type", nil) == "worker"
+        return false unless agent.fetch("status", nil) == "completed"
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata["completed_at"] || Array(metadata["reported_pr_urls"]).any?
       end
 
       def conversation_sync_after_start?(timestamp)
