@@ -145,6 +145,20 @@ class SlashCommandSystemTest < Minitest::Test
     refute_includes suggestion_text, "/prompt <worker_id>"
   end
 
+  def test_chat_pane_shows_three_suggestion_window_around_selection
+    pane = Meringue::TUI::Panes::ChatPane.new
+    state = Meringue::State::Models.empty_state.merge("_chat" => { "input_buffer" => "/", "slash_suggestion_index" => 4 })
+
+    suggestion_lines = pane.slash_suggestion_lines(state).map { |line| plain_line(line) }
+    suggestion_text = suggestion_lines.join("\n")
+
+    assert_equal 3, suggestion_lines.length
+    assert_includes suggestion_text, "› /prompt"
+    assert_includes suggestion_text, "/issue create"
+    assert_includes suggestion_text, "/worker spawn"
+    refute_includes suggestion_text, "/help"
+  end
+
   def test_layout_places_suggestions_above_chat_input
     layout = Meringue::TUI::Layout.new
     state = Meringue::State::Models.empty_state.merge("_chat" => { "input_buffer" => "/p", "slash_suggestion_index" => 0 })
@@ -196,6 +210,21 @@ class SlashCommandSystemTest < Minitest::Test
     assert_equal "/prompt P1-I1-W1 ", buffer
     assert_equal 0, index
     assert submitted_prompts.empty?
+  end
+
+  def test_tui_navigation_moves_beyond_visible_suggestion_window
+    app = Meringue::TUI::App.new
+    submitter = ->(_text) { { "summary" => "ok" } }
+    buffer = "/"
+    index = 0
+
+    3.times do
+      buffer, index = app.send(:handle_key, "\e[B", buffer, index, submitter)
+    end
+    buffer, index = app.send(:handle_key, "\t", buffer, index, submitter)
+
+    assert_equal "/worker spawn ", buffer
+    assert_equal 0, index
   end
 
   private
