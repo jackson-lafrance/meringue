@@ -23,7 +23,7 @@ module Meringue
         issues = records(state, "issues")
         projects = records(state, "projects")
 
-        ids = agents.select { |agent| agent["type"] == "head" && agent_pr_url(agent) }
+        ids = agents.select { |agent| agent["type"] == "head" && active_agent_pr_url(agent) }
                     .sort_by { |agent| sort_key(agent["id"]) }
                     .map { |agent| agent.fetch("id") }
 
@@ -33,6 +33,10 @@ module Meringue
 
       def agent_pr_url(agent)
         pr_urls_from_record(agent).compact.map(&:to_s).find { |url| pull_request_url?(url) }
+      end
+
+      def active_agent_pr_url(agent)
+        active_pr_urls_from_record(agent).compact.map(&:to_s).find { |url| pull_request_url?(url) }
       end
 
       def sort_key(id)
@@ -89,7 +93,7 @@ module Meringue
 
       def pr_worker_ids(issues_by_parent, agents, parent_id)
         issues_by_parent.fetch(parent_id, []).sort_by { |issue| sort_key(issue["id"]) }.flat_map do |issue|
-          workers = agents.select { |agent| agent["type"] == "worker" && agent["issue_id"] == issue["id"] && agent_pr_url(agent) }
+          workers = agents.select { |agent| agent["type"] == "worker" && agent["issue_id"] == issue["id"] && active_agent_pr_url(agent) }
                           .sort_by { |worker| sort_key(worker["id"]) }
                           .map { |worker| worker.fetch("id") }
           workers + pr_worker_ids(issues_by_parent, agents, issue["id"])
@@ -97,14 +101,32 @@ module Meringue
       end
 
       def pr_urls_from_record(record)
+        pull_request_records_from_record(record).map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
+      end
+
+      def active_pr_urls_from_record(record)
+        pull_request_records_from_record(record).filter_map do |pull_request|
+          next unless active_pull_request?(pull_request)
+
+          pull_request["url"]
+        end
+      end
+
+      def pull_request_records_from_record(record)
         metadata = record.fetch("harness_metadata", {}) || {}
-        delivery_pull_requests = [
+        [
           record["delivery_pull_request"],
           metadata["delivery_pull_request"],
           *Array(record["delivery_pull_requests"]),
           *Array(metadata["delivery_pull_requests"])
         ].compact
-        delivery_pull_requests.map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
+      end
+
+      def active_pull_request?(pull_request)
+        return false unless pull_request.is_a?(Hash)
+
+        state = pull_request["state"] || pull_request["status"] || pull_request["raw_state"]
+        state.to_s.downcase == "open"
       end
 
       def pull_request_url?(url)

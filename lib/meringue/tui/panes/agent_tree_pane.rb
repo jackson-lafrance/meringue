@@ -60,6 +60,7 @@ module Meringue
               record: head,
               id: head.fetch("id"),
               title: record_title(head),
+              suffix: active_pr_marker(head),
               selected: AgentTreeNavigation.selected_agent?(head, selected_agent_id),
               width: width
             ))
@@ -104,6 +105,7 @@ module Meringue
                 record: worker,
                 id: short_id(worker["id"]),
                 title: record_title(worker),
+                suffix: active_pr_marker(worker),
                 selected: AgentTreeNavigation.selected_agent?(worker, selected_agent_id),
                 width: width
               ))
@@ -301,6 +303,10 @@ module Meringue
 
           completed = workers.count { |worker| worker["status"] == "completed" }
           "#{completed}/#{workers.length}"
+        end
+
+        def active_pr_marker(record)
+          AgentTreeNavigation.active_agent_pr_url(record) ? "↗ PR" : ""
         end
 
         def short_id(id)

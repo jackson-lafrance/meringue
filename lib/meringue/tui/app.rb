@@ -481,7 +481,7 @@ module Meringue
           Slash commands: type / for suggestions; Tab completes; Up/Down changes the selected suggestion.
           Agent tree: focus the agent tree and press Enter to enter jump mode.
           Jump mode: /jump or agent-tree Enter starts agent navigation; ↑/↓ or ←/→ selects an agent; Enter opens the selected agent session; p opens the selected agent PR when one is available; Esc cancels.
-          PR navigation: /jumpr starts PR navigation; ↑/↓ or ←/→ selects an agent with a PR; Enter or p opens the selected PR; Esc cancels.
+          PR navigation: /jumpr starts PR navigation; ↑/↓ or ←/→ selects an agent with an open PR; Enter or p opens the selected PR; Esc cancels.
         TEXT
       end
 
@@ -518,7 +518,7 @@ module Meringue
       def enter_pr_agent_navigation(state)
         ids = pr_agent_selectable_ids(state)
         if ids.empty?
-          append_jump_response("No agents with attached pull requests are available yet.")
+          append_jump_response("No agents with open pull requests are available yet.")
           return
         end
 
@@ -549,7 +549,7 @@ module Meringue
 
       def move_pr_agent_selection(state, delta)
         ids = pr_agent_selectable_ids(state)
-        return exit_agent_tree_navigation("No agents with attached pull requests are available yet.") if ids.empty?
+        return exit_agent_tree_navigation("No agents with open pull requests are available yet.") if ids.empty?
 
         current_index = ids.index(@selected_agent_id) || 0
         @selected_agent_id = ids[(current_index + delta) % ids.length]
@@ -573,7 +573,7 @@ module Meringue
 
       def open_selected_pr_agent(state)
         selected_id = normalized_selected_pr_agent_id(state)
-        return exit_agent_tree_navigation("No agents with attached pull requests are available yet.") unless selected_id
+        return exit_agent_tree_navigation("No agents with open pull requests are available yet.") unless selected_id
 
         open_pr_by_agent_id(state, selected_id)
         exit_agent_tree_navigation
