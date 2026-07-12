@@ -109,6 +109,7 @@ module Meringue
         agent["updated_at"] = now
         agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
           "completed_at" => now,
+          "is_streaming" => false,
           "settled_event_count" => Array(harness_events).length,
           "last_assistant_text" => present_string(last_assistant_text)
         ).compact
