@@ -12,9 +12,11 @@ module Meringue
         You are a Meringue worker agent. Work only on the assigned issue and workspace.
         Follow the user's prompt and the repository instructions in your working directory.
 
-        You do not directly interface with the user, so do not ask for permission before taking normal implementation or delivery actions requested by the assigned issue. You may edit files, create or switch to a suitable task branch or worktree, commit, push, and open or update pull requests when the assigned issue asks for those actions.
+        You do not directly interface with the user, so do not ask for permission before taking normal implementation or delivery actions requested by the assigned issue. You may edit files, commit, push, and open or update pull requests when the assigned issue asks for those actions.
 
-        Before editing, inspect the repository status and active instructions. Avoid overwriting unrelated active work. Prefer a separate task branch for git-backed projects, commit only the assigned issue's changes, and open a pull request when requested and the environment allows.
+        The Meringue kernel allocates your workspace before you start. Stay in the assigned workspace and current branch unless the assigned workspace is unusable or the user explicitly asks for a different branch/worktree; report that as a blocker instead of silently creating nested worktrees.
+
+        Before editing, inspect the repository status and active instructions. Avoid overwriting unrelated active work. Treat the assigned workspace as your task branch/worktree for git-backed projects, commit only the assigned issue's changes, and open a pull request when requested and the environment allows.
 
         Use human-facing delivery names. Branch names, pull request titles, and pull request metadata should be derived from the assigned issue title or requested change, not from Meringue agent ids, worker ids, Pi ids, or subagent implementation details. If a unique suffix is needed, use a short opaque suffix rather than an orchestration id.
 
@@ -754,6 +756,7 @@ module Meringue
 
       def prune_merged(command_id, command_type)
         state = normalized_state
+        delivery_refreshes = refresh_worker_delivery_pull_requests!(state)
         worker_checks = merged_pr_worker_checks(state)
         issue_decisions = merged_pr_issue_decisions(state, worker_checks)
         issue_ids = issue_decisions.select { |decision| decision.fetch("prunable", false) }.map { |decision| decision.fetch("issue_id") }
@@ -773,13 +776,14 @@ module Meringue
             "checked_pr_urls" => checked_urls,
             "skipped_pr_urls" => skipped_urls,
             "worker_checks" => worker_checks,
-            "issue_decisions" => issue_decisions
+            "issue_decisions" => issue_decisions,
+            "delivery_pull_request_refreshes" => delivery_refreshes
           )
         )
         touch_state!(state, now)
         store.save(state)
 
-        accepted_result(command_id, command_type, nil, "Pruned #{prune_result.fetch("removed_issue_ids").length} merged issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"}.", prune_result.merge("checked_pr_urls" => checked_urls, "skipped_pr_urls" => skipped_urls, "issue_decisions" => issue_decisions), log_ids)
+        accepted_result(command_id, command_type, nil, "Pruned #{prune_result.fetch("removed_issue_ids").length} merged issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"}.", prune_result.merge("checked_pr_urls" => checked_urls, "skipped_pr_urls" => skipped_urls, "issue_decisions" => issue_decisions, "delivery_pull_request_refreshes" => delivery_refreshes), log_ids)
       end
 
       def prune_errored(command_id, command_type)
@@ -800,6 +804,34 @@ module Meringue
         store.save(state)
 
         accepted_result(command_id, command_type, nil, "Pruned #{prune_result.fetch("removed_issue_ids").length} errored issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"} and #{prune_result.fetch("removed_standalone_agent_ids").length} standalone errored agent#{prune_result.fetch("removed_standalone_agent_ids").length == 1 ? "" : "s"}.", prune_result, log_ids)
+      end
+
+      def refresh_worker_delivery_pull_requests!(state)
+        state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }.filter_map do |worker|
+          metadata = worker.fetch("harness_metadata", {}) || {}
+          candidate_urls = Array(metadata.fetch("candidate_pr_urls", nil)).map(&:to_s).map(&:strip).reject(&:empty?).uniq
+          next if candidate_urls.empty?
+
+          issue = find_issue(state, worker.fetch("issue_id", nil))
+          project = issue && find_project(state, issue.fetch("project_id", nil))
+          next unless project
+
+          delivery_pull_request = verified_worker_pull_request(agent: worker, project: project, candidate_urls: candidate_urls) ||
+                                  merged_same_repo_candidate_pull_request(agent: worker, project: project, candidate_urls: candidate_urls)
+          next unless delivery_pull_request
+
+          worker["harness_metadata"] = metadata.merge(
+            "delivery_pull_request" => delivery_pull_request,
+            "reported_pr_urls" => [delivery_pull_request.fetch("url")]
+          )
+
+          {
+            "agent_id" => worker.fetch("id", nil),
+            "issue_id" => worker.fetch("issue_id", nil),
+            "url" => delivery_pull_request.fetch("url", nil),
+            "matched_by" => delivery_pull_request.fetch("matched_by", nil)
+          }.compact
+        end
       end
 
       def merged_pr_worker_checks(state)
@@ -873,13 +905,43 @@ module Meringue
           normalized_branch_name(status.fetch("head_branch", nil)) == normalized_branch_name(branch)
       end
 
-      def worker_delivery_branch(agent)
-        metadata = agent.fetch("harness_metadata", {}) || {}
-        normalized_branch_name(
-          present_string(metadata.fetch("delivery_branch", nil)) ||
-            current_workspace_branch(agent) ||
-            present_string(agent.fetch("workspace_branch", nil))
+      def merged_same_repo_candidate_pull_request(agent:, project:, candidate_urls:)
+        return nil unless agent.fetch("status", nil) == "completed"
+        return nil unless Array(candidate_urls).compact.uniq.length == 1
+        return nil if persisted_worker_delivery_branch(agent)
+
+        project_repository = project && project_github_repository(project)
+        return nil if blank?(project_repository)
+
+        status = pull_request_status(Array(candidate_urls).first)
+        return nil unless status.fetch("provider", nil) == "github"
+        return nil unless status.fetch("state", nil) == "merged"
+        return nil unless status.fetch("base_repository", nil).to_s.downcase == project_repository.to_s.downcase
+        return nil if status.fetch("is_cross_repository", false)
+        return nil unless status.fetch("head_repository", nil).to_s.downcase == project_repository.to_s.downcase
+
+        status.merge(
+          "matched_by" => "merged_same_repo_candidate_without_branch",
+          "verified_at" => timestamp
         )
+      end
+
+      def worker_delivery_branch(agent)
+        normalized_branch_name(
+          persisted_worker_delivery_branch(agent) ||
+            current_workspace_branch_for_delivery(agent)
+        )
+      end
+
+      def persisted_worker_delivery_branch(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        present_string(metadata.fetch("delivery_branch", nil)) || present_string(agent.fetch("workspace_branch", nil))
+      end
+
+      def current_workspace_branch_for_delivery(agent)
+        return nil if agent.fetch("workspace_strategy", nil) == "project_root"
+
+        current_workspace_branch(agent)
       end
 
       def current_workspace_branch(agent)
@@ -1301,7 +1363,8 @@ module Meringue
             issue: issue,
             requested_workspace_path: requested_workspace_path,
             preview_agent_id: preview_worker_id(state, issue.fetch("id")),
-            task_title: worker_display_title(worker_title, issue)
+            task_title: worker_display_title(worker_title, issue),
+            create: false
           )
           return rejected_result(command_id, command_type, "Worker workspace is invalid.", workspace.fetch("errors")) unless workspace.fetch("errors").empty?
 
@@ -1312,7 +1375,8 @@ module Meringue
             issue: issue,
             requested_workspace_path: requested_workspace_path,
             preview_agent_id: agent_id,
-            task_title: worker_display_title(worker_title, issue)
+            task_title: worker_display_title(worker_title, issue),
+            create: true
           )
           touch_state!(state, now)
           store.save(state)
@@ -1336,6 +1400,7 @@ module Meringue
             session_name: worker_session_name(reservation.fetch("issue"), worker_title: worker_title)
           )
         rescue StandardError => e
+          cleanup_worker_workspace_safely(reservation.fetch("workspace"))
           return synchronized_state do
             failed_result(
               command_id,
@@ -1352,6 +1417,7 @@ module Meringue
           project = issue && find_project(state, issue.fetch("project_id"))
           unless issue && project
             kill_session_safely(session_ref)
+            cleanup_worker_workspace_safely(reservation.fetch("workspace"))
             return failed_result(
               command_id,
               command_type,
@@ -1389,6 +1455,7 @@ module Meringue
               "project_id" => project.fetch("id"),
               "workspace_path" => agent.fetch("workspace_path"),
               "workspace_strategy" => agent.fetch("workspace_strategy"),
+              "workspace_branch" => agent.fetch("workspace_branch"),
               "title" => agent.fetch("harness_metadata", {}).fetch("title", nil)
             }
           ))
@@ -1412,6 +1479,7 @@ module Meringue
         end
       rescue StandardError => e
         kill_session_safely(session_ref) if session_ref
+        cleanup_worker_workspace_safely(reservation.fetch("workspace")) if defined?(reservation) && reservation
         raise e
       end
 
@@ -1460,7 +1528,8 @@ module Meringue
             "is_streaming" => session_ref.fetch("is_streaming", false),
             "last_event_at" => session_ref.fetch("last_event_at", nil),
             "workspace_note" => workspace.fetch("note", nil),
-            "workspace_plan" => workspace.fetch("plan", nil)
+            "workspace_plan" => workspace.fetch("plan", nil),
+            "delivery_branch" => workspace.fetch("workspace_branch", nil)
           ).compact,
           "created_at" => now,
           "updated_at" => now
@@ -1534,7 +1603,7 @@ module Meringue
         agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("killed_at" => now)
       end
 
-      def resolve_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:, task_title:)
+      def resolve_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:, task_title:, create: false)
         if present_string(requested_workspace_path)
           expanded_path = File.expand_path(requested_workspace_path.to_s)
           errors = Dir.exist?(expanded_path) ? [] : ["workspace_path must be an existing directory"]
@@ -1550,21 +1619,56 @@ module Meringue
           }
         end
 
-        plan = workspace_manager.plan_worker_workspace(
-          project_root: project.fetch("root_path"),
-          project_id: project.fetch("id"),
-          issue_id: issue.fetch("id"),
-          agent_id: preview_agent_id,
-          task_title: task_title
-        )
+        plan = if create
+                 workspace_manager.allocate_worker_workspace(
+                   project_root: project.fetch("root_path"),
+                   project_id: project.fetch("id"),
+                   issue_id: issue.fetch("id"),
+                   agent_id: preview_agent_id,
+                   task_title: task_title
+                 )
+               else
+                 workspace_manager.plan_worker_workspace(
+                   project_root: project.fetch("root_path"),
+                   project_id: project.fetch("id"),
+                   issue_id: issue.fetch("id"),
+                   agent_id: preview_agent_id,
+                   task_title: task_title
+                 ).merge("errors" => [])
+               end
 
-        if plan.fetch("created", false) && Dir.exist?(plan.fetch("workspace_path"))
+        if plan.fetch("errors", []).any?
+          return {
+            "workspace_path" => File.expand_path(project.fetch("root_path")),
+            "workspace_strategy" => plan.fetch("strategy", "git_worktree"),
+            "workspace_branch" => plan.fetch("workspace_branch", nil),
+            "plan" => plan,
+            "note" => nil,
+            "created" => plan.fetch("created", false),
+            "errors" => plan.fetch("errors")
+          }
+        end
+
+        if plan.fetch("strategy", nil) == "project_root"
+          return {
+            "workspace_path" => File.expand_path(plan.fetch("workspace_path", project.fetch("root_path"))),
+            "workspace_strategy" => "project_root",
+            "workspace_branch" => nil,
+            "plan" => plan.fetch("plan", nil),
+            "note" => plan.fetch("fallback_reason", nil),
+            "created" => false,
+            "errors" => Dir.exist?(project.fetch("root_path")) ? [] : ["project root must be an existing directory"]
+          }
+        end
+
+        if create && plan.fetch("created", false) && Dir.exist?(plan.fetch("workspace_path"))
           return {
             "workspace_path" => File.expand_path(plan.fetch("workspace_path")),
             "workspace_strategy" => plan.fetch("strategy"),
             "workspace_branch" => plan.fetch("workspace_branch"),
             "plan" => plan,
             "note" => nil,
+            "created" => true,
             "errors" => []
           }
         end
@@ -1574,9 +1678,16 @@ module Meringue
           "workspace_strategy" => "project_root",
           "workspace_branch" => nil,
           "plan" => plan,
-          "note" => "Workspace manager only planned a git worktree; real worktree creation is deferred, so the worker uses the project root cwd.",
+          "note" => create ? "Workspace manager did not create a git worktree, so the worker uses the project root cwd." : "Workspace manager planned a git worktree for this worker.",
+          "created" => false,
           "errors" => Dir.exist?(project.fetch("root_path")) ? [] : ["project root must be an existing directory"]
         }
+      end
+
+      def cleanup_worker_workspace_safely(workspace)
+        workspace_manager.release_worker_workspace(workspace, delete_branch: true)
+      rescue StandardError
+        false
       end
 
       def worker_system_prompt(issue)
