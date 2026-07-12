@@ -213,7 +213,6 @@ module Meringue
             message: "Worker #{agent.fetch("id")} completed.",
             details: completion_details
           )
-          log_ids.concat(append_worker_pr_log(state, agent, pr_urls)) unless pr_urls.empty?
           touch_state!(state, now)
           store.save(state)
 
@@ -1515,25 +1514,6 @@ module Meringue
 
       def max_worker_number(state, issue_id)
         max_numeric_suffix(state.fetch("agents").select { |agent| agent.fetch("issue_id", nil) == issue_id }, /^#{Regexp.escape(issue_id)}-W(\d+)$/)
-      end
-
-      def append_worker_pr_log(state, agent, pr_urls)
-        branch = agent.fetch("workspace_branch", nil)
-        branch_text = present_string(branch) ? " on #{branch}" : ""
-        append_log(
-          state,
-          source_type: "worker",
-          source_id: agent.fetch("id"),
-          level: "info",
-          message: "Worker #{agent.fetch("id")} reported PR#{pr_urls.length == 1 ? "" : "s"}#{branch_text}: #{pr_urls.join(", ")}",
-          details: {
-            "issue_id" => agent.fetch("issue_id", nil),
-            "project_id" => agent.fetch("project_id", nil),
-            "workspace_branch" => branch,
-            "workspace_path" => agent.fetch("workspace_path", nil),
-            "pr_urls" => pr_urls
-          }.compact
-        )
       end
 
       def worker_pr_urls(last_assistant_text:, harness_events:)
