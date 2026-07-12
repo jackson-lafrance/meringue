@@ -18,7 +18,6 @@ module Meringue
         @next_message_id = 0
         @pending_count = 0
         @chat_mutex = Mutex.new
-        @submission_mutex = Mutex.new
       end
 
       def render(state, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, color: false)
@@ -99,10 +98,14 @@ module Meringue
 
         Thread.new do
           begin
-            result = @submission_mutex.synchronize do
-              update_message(assistant_message_id, text: "Running head agent loop…", status: "working")
-              on_submit ? on_submit.call(text) : unavailable_prompt_handler_result
-            end
+            update_message(assistant_message_id, text: "Running head agent loop…", status: "working")
+            result = if on_submit
+                       on_submit.call(text) do |event|
+                         update_message_from_event(assistant_message_id, event)
+                       end
+                     else
+                       unavailable_prompt_handler_result
+                     end
             update_message(assistant_message_id, text: conversation_text_for(result), status: nil)
           rescue StandardError => e
             update_message(assistant_message_id, text: "Head loop failed: #{e.class}: #{e.message}", status: "errored")
@@ -119,33 +122,85 @@ module Meringue
         }
       end
 
+      def update_message_from_event(message_id, event)
+        case event.fetch("event", nil)
+        when "head_completed"
+          update_message(message_id, text: head_completed_text(event), status: "applying commands")
+        when "head_result_applied"
+          append_head_result_applied_summary(message_id, event)
+        when "worker_wait_started"
+          append_to_message(message_id, "Waiting for #{event.fetch("agent_id", "worker")}…", status: "workers running")
+        when "worker_completed"
+          append_to_message(message_id, "#{event.fetch("agent_id", "worker")} completed.", status: "workers running")
+        when "worker_wait_failed"
+          append_to_message(message_id, "#{event.fetch("agent_id", "worker")} wait failed.", status: "worker wait failed")
+        end
+      end
+
       def conversation_text_for(result)
         spawn_result = result.fetch("spawn_head_result", {}) || {}
         apply_result = result.fetch("apply_head_result", {}) || {}
         head = spawn_result.fetch("result", {}) || {}
         metadata = head.fetch("harness_metadata", {}) || {}
         head_result = metadata.fetch("head_result", {}) || {}
-        head_id = spawn_result.fetch("target_id", "head")
 
         lines = []
         if head_result.any?
-          lines << "#{head_id}: #{head_result.fetch("title", "Head completed")}".strip
-          lines << head_result.fetch("summary", "")
+          lines << format_head_result(spawn_result.fetch("target_id", "head"), head_result)
         else
           lines << result.fetch("summary", spawn_result.fetch("message", "Head loop completed."))
         end
 
+        lines.concat(command_summary_lines(apply_result))
+        lines.concat(worker_summary_lines(result.fetch("worker_wait_results", []) || []))
+        lines.reject { |line| line.to_s.empty? }.join("\n")
+      end
+
+      def head_completed_text(event)
+        format_head_result(event.fetch("head_id", "head"), event.fetch("head_result", {}) || {})
+      end
+
+      def append_head_result_applied_summary(message_id, event)
+        lines = command_summary_lines(event.fetch("apply_result", {}) || {})
+        status = worker_wait_status(event)
+        if lines.empty?
+          update_message_status(message_id, status)
+        else
+          append_to_message(message_id, lines.join("\n"), status: status)
+        end
+      end
+
+      def format_head_result(head_id, head_result)
+        [
+          "#{head_id}: #{head_result.fetch("title", "Head completed")}".strip,
+          head_result.fetch("summary", "")
+        ].reject { |line| line.to_s.empty? }.join("\n")
+      end
+
+      def command_summary_lines(apply_result)
         command_results = (apply_result.fetch("result", {}) || {}).fetch("command_results", [])
         spawned_workers = command_results.select do |command_result|
           command_result.fetch("command_type", nil) == "SpawnWorker" && command_result.fetch("status", nil) == "accepted"
         end
-        lines << "Spawned workers: #{spawned_workers.map { |worker| worker.fetch("target_id", nil) }.compact.join(", ")}" if spawned_workers.any?
+        return [] if spawned_workers.empty?
 
-        worker_wait_results = result.fetch("worker_wait_results", []) || []
+        ["Spawned workers: #{spawned_workers.map { |worker| worker.fetch("target_id", nil) }.compact.join(", ")}"]
+      end
+
+      def worker_summary_lines(worker_wait_results)
         completed_workers = worker_wait_results.select { |worker| worker.fetch("status", nil) == "settled" }
-        lines << "Completed workers: #{completed_workers.map { |worker| worker.fetch("agent_id", nil) }.compact.join(", ")}" if completed_workers.any?
+        return [] if completed_workers.empty?
 
-        lines.reject { |line| line.to_s.empty? }.join("\n")
+        ["Completed workers: #{completed_workers.map { |worker| worker.fetch("agent_id", nil) }.compact.join(", ")}"]
+      end
+
+      def worker_wait_status(event)
+        command_results = (event.fetch("apply_result", {}).fetch("result", {}) || {}).fetch("command_results", [])
+        has_workers = command_results.any? do |command_result|
+          command_result.fetch("command_type", nil) == "SpawnWorker" && command_result.fetch("status", nil) == "accepted"
+        end
+
+        has_workers ? "workers running" : nil
       end
 
       def compose_state(state_provider, input_buffer)
@@ -187,6 +242,33 @@ module Meringue
           else
             message.delete("status")
           end
+        end
+      end
+
+      def append_to_message(id, line, status: nil)
+        @chat_mutex.synchronize do
+          message = @messages.find { |candidate| candidate.fetch("id") == id }
+          return unless message
+
+          message["text"] = [message.fetch("text", ""), line].reject { |part| part.to_s.empty? }.join("\n")
+          apply_message_status(message, status)
+        end
+      end
+
+      def update_message_status(id, status)
+        @chat_mutex.synchronize do
+          message = @messages.find { |candidate| candidate.fetch("id") == id }
+          return unless message
+
+          apply_message_status(message, status)
+        end
+      end
+
+      def apply_message_status(message, status)
+        if status
+          message["status"] = status
+        else
+          message.delete("status")
         end
       end
 
