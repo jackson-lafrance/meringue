@@ -1013,7 +1013,7 @@ module Meringue
           workers = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" && agent.fetch("issue_id", nil) == issue_id }
           statuses = checks.flat_map { |check| check.fetch("statuses", []) }
           active_worker_ids = workers.select { |worker| prune_blocking_worker_status?(worker.fetch("status", nil)) }.map { |worker| worker.fetch("id", nil) }.compact
-          non_merged_statuses = statuses.reject { |status| status.fetch("state", nil) == "merged" }
+          non_merged_statuses = statuses.reject { |status| %w[merged closed].include?(status.fetch("state", nil).to_s) }
           merged = statuses.any? { |status| status.fetch("state", nil) == "merged" }
           blockers = []
           blockers << "active_workers" if active_worker_ids.any?
