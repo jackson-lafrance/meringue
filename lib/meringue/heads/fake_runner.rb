@@ -8,7 +8,7 @@ module Meringue
 
         {
           "title" => title_from(user_message),
-          "summary" => "Fake head proposed #{commands.length} deterministic kernel command(s): create an issue and spawn a worker.",
+          "summary" => "Fake head proposed #{commands.length} deterministic kernel command(s): reuse an issue when possible and spawn a worker.",
           "commands" => commands,
           "questions" => []
         }
@@ -26,13 +26,20 @@ module Meringue
         end
 
         project_id ||= project.fetch("id")
-        issue_id = next_issue_id(snapshot, project_id)
+        existing_issue = snapshot.fetch("issues", []).find { |issue| issue.fetch("project_id", nil) == project_id }
         title = title_from(user_message)
-        commands << create_issue_command(
-          project_id: project_id,
-          title: title,
-          user_message: user_message
-        )
+
+        if existing_issue
+          issue_id = existing_issue.fetch("id")
+        else
+          issue_id = next_issue_id(snapshot, project_id)
+          commands << create_issue_command(
+            project_id: project_id,
+            title: title,
+            user_message: user_message
+          )
+        end
+
         commands << spawn_worker_command(
           issue_id: issue_id,
           title: title,
@@ -70,6 +77,7 @@ module Meringue
           "type" => "SpawnWorker",
           "payload" => {
             "issue_id" => issue_id,
+            "title" => title,
             "prompt" => "Work on issue '#{title}' from this user request:\n\n#{user_message}\n\nKeep the change focused and summarize what you did.",
             "workspace_path" => nil
           }

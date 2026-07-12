@@ -17,6 +17,9 @@ module Meringue
         "spawn_head" => "SpawnHead",
         "apply_head_result" => "ApplyHeadResult",
         "ask_question" => "AskQuestion",
+        "answer_question" => "AnswerQuestion",
+        "clear" => "ClearState",
+        "clear_state" => "ClearState",
         "list_all" => "ListAll"
       }.freeze
 
@@ -62,6 +65,10 @@ module Meringue
           apply_head_result(command_id, command_type, payload)
         when "AskQuestion"
           ask_question(command_id, command_type, payload)
+        when "AnswerQuestion"
+          answer_question(command_id, command_type, payload)
+        when "ClearState"
+          clear_state(command_id, command_type)
         else
           rejected_result(
             command_id,
@@ -291,6 +298,49 @@ module Meringue
         )
       end
 
+      def answer_question(command_id, command_type, payload)
+        question_id = value_at(payload, "question_id", "QuestionID", "questionId")
+        answer = value_at(payload, "answer", "Answer")
+        errors = []
+
+        errors << "question_id is required" if blank?(question_id)
+        errors << "answer is required" if blank?(answer)
+        return rejected_result(command_id, command_type, "Question was not answered.", errors) unless errors.empty?
+
+        state = normalized_state
+        question = find_question(state, question_id)
+        return rejected_result(command_id, command_type, "Question #{question_id} does not exist.", ["question_not_found"]) unless question
+
+        now = timestamp
+        question["status"] = "answered"
+        question["answer"] = answer.to_s
+        question["updated_at"] = now
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: question.fetch("id"),
+          level: "info",
+          message: "Answered question #{question.fetch("id")}.",
+          details: {
+            "head_id" => question.fetch("head_id", nil),
+            "project_id" => question.fetch("project_id", nil),
+            "issue_id" => question.fetch("issue_id", nil)
+          }
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, question.fetch("id"), "Answered question #{question.fetch("id")}.", question, log_ids)
+      end
+
+      def clear_state(command_id, command_type)
+        now = timestamp
+        state = State::Models.empty_state(now: now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, nil, "Cleared Meringue state.", state, [])
+      end
+
       def ask_question(command_id, command_type, payload)
         head_id = value_at(payload, "head_id", "HeadID", "headId")
         question_text = value_at(payload, "question", "Question")
@@ -430,6 +480,7 @@ module Meringue
       def spawn_worker(command_id, command_type, payload)
         issue_id = value_at(payload, "issue_id", "IssueID", "issueId")
         prompt = value_at(payload, "prompt", "Prompt")
+        worker_title = value_at(payload, "title", "Title", "worker_title", "workerTitle")
         requested_workspace_path = value_at(payload, "workspace_path", "WorkspacePath", "workspacePath")
         errors = []
 
@@ -468,7 +519,7 @@ module Meringue
             cwd: workspace.fetch("workspace_path"),
             prompt: prompt.to_s,
             system_prompt: worker_system_prompt(issue),
-            session_name: worker_session_name(agent_id, issue)
+            session_name: worker_session_name(agent_id, issue, worker_title: worker_title)
           )
         rescue StandardError => e
           decrement_worker_counter!(state, issue.fetch("id"))
@@ -486,7 +537,8 @@ module Meringue
           project: project,
           workspace: workspace,
           session_ref: session_ref,
-          now: now
+          now: now,
+          title: worker_title
         )
 
         state.fetch("agents") << agent
@@ -507,7 +559,8 @@ module Meringue
             "issue_id" => issue.fetch("id"),
             "project_id" => project.fetch("id"),
             "workspace_path" => agent.fetch("workspace_path"),
-            "workspace_strategy" => agent.fetch("workspace_strategy")
+            "workspace_strategy" => agent.fetch("workspace_strategy"),
+            "title" => agent.fetch("harness_metadata", {}).fetch("title", nil)
           }
         ))
         log_ids.concat(append_log(
@@ -555,8 +608,9 @@ module Meringue
         }
       end
 
-      def build_worker_agent(agent_id:, issue:, project:, workspace:, session_ref:, now:)
+      def build_worker_agent(agent_id:, issue:, project:, workspace:, session_ref:, now:, title: nil)
         session_metadata = session_ref.fetch("metadata", {}) || {}
+        display_title = worker_display_title(title, issue)
         {
           "id" => agent_id,
           "type" => "worker",
@@ -571,6 +625,7 @@ module Meringue
           "harness_session_id" => session_ref.fetch("session_id", nil),
           "harness_session_file" => session_ref.fetch("session_file", nil),
           "harness_metadata" => session_metadata.merge(
+            "title" => display_title,
             "cwd" => session_ref.fetch("cwd", workspace.fetch("workspace_path")),
             "is_streaming" => session_ref.fetch("is_streaming", false),
             "last_event_at" => session_ref.fetch("last_event_at", nil),
@@ -638,10 +693,15 @@ module Meringue
         PROMPT
       end
 
-      def worker_session_name(agent_id, issue)
-        title = issue.fetch("title").to_s.strip.gsub(/\s+/, " ")
+      def worker_session_name(agent_id, issue, worker_title: nil)
+        title = worker_display_title(worker_title, issue).to_s.strip.gsub(/\s+/, " ")
         title = "worker" if title.empty?
         "#{agent_id} #{title}"[0, 96]
+      end
+
+      def worker_display_title(worker_title, issue)
+        title = present_string(worker_title)
+        title || issue.fetch("title").to_s.strip
       end
 
       def validate_head_result_shape(head_result)

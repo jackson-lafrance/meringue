@@ -9,17 +9,19 @@ module Meringue
     def initialize(input: $stdin, out: $stdout, err: $stderr,
                    state_path: State::Store::DEFAULT_PATH,
                    state_store: nil,
-                   tui_app: nil)
+                   tui_app: nil,
+                   prompt_handler: nil)
       @input = input
       @out = out
       @err = err
       @state_path = state_path
       @state_store = state_store || State::Store.new(path: state_path)
       @tui_app = tui_app
+      @prompt_handler = prompt_handler
     end
 
     def run
-      tui.run(state_provider: -> { current_state })
+      tui.run(state_provider: -> { current_state }, on_submit: prompt_handler)
     rescue JSON::ParserError => e
       err.puts "Could not load Meringue state from #{state_path}: #{e.message}"
       1
@@ -27,7 +29,7 @@ module Meringue
 
     private
 
-    attr_reader :input, :out, :err, :state_path, :state_store, :tui_app
+    attr_reader :input, :out, :err, :state_path, :state_store, :tui_app, :prompt_handler
 
     def current_state
       state_store.load

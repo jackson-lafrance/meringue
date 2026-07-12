@@ -10,7 +10,7 @@ module Meringue
     # before proposing AddProject/CreateIssue commands. Keep write/edit tools disabled;
     # bash is included only for read-only commands such as git rev-parse and git remote -v.
     PI_HEAD_EXTRA_ARGS = [
-      "--thinking", "minimal",
+      "--thinking", "high",
       "--tools", "read,bash,grep,find,ls",
       "--no-extensions",
       "--no-skills",
@@ -21,7 +21,7 @@ module Meringue
     # Workers are the only agents that should edit project files. Keep Pi-specific
     # tool configuration here so the kernel and TUI stay harness-agnostic.
     PI_WORKER_EXTRA_ARGS = [
-      "--thinking", "minimal",
+      "--thinking", "high",
       "--tools", "read,bash,grep,find,ls,edit,write",
       "--no-extensions",
       "--no-skills",
@@ -42,9 +42,9 @@ module Meringue
 
       case command
       when nil, "tui"
-        run_tui(default_state_path: State::Store::DEFAULT_PATH)
+        run_tui(default_state_path: State::Store::DEFAULT_PATH, enable_agents: true)
       when "demo"
-        run_tui(default_state_path: App::DEMO_STATE_PATH)
+        run_tui(default_state_path: App::DEMO_STATE_PATH, enable_agents: false)
       when "-v", "--version", "version"
         out.puts VERSION
         0
@@ -71,11 +71,19 @@ module Meringue
 
     attr_reader :argv, :input, :out, :err
 
-    def run_tui(default_state_path:)
+    def run_tui(default_state_path:, enable_agents:)
       options = parse_tui_options(default_state_path: default_state_path)
       return 1 unless options
 
-      App.new(input: input, out: out, err: err, state_path: options.fetch(:state_path)).run
+      store = state_store(path: options.fetch(:state_path))
+      App.new(
+        input: input,
+        out: out,
+        err: err,
+        state_path: options.fetch(:state_path),
+        state_store: store,
+        prompt_handler: enable_agents ? tui_prompt_handler(store) : nil
+      ).run
     end
 
     def parse_tui_options(default_state_path:)
@@ -138,8 +146,22 @@ module Meringue
       0
     end
 
-    def state_store
-      @state_store ||= State::Store.new
+    def state_store(path: State::Store.default_path)
+      @state_stores ||= {}
+      @state_stores[File.expand_path(path)] ||= State::Store.new(path: path)
+    end
+
+    def tui_prompt_handler(store)
+      head_client = pi_harness_client(extra_args: PI_HEAD_EXTRA_ARGS)
+      worker_client = pi_harness_client(extra_args: PI_WORKER_EXTRA_ARGS)
+      engine = Kernel::Engine.new(
+        store: store,
+        harness_client: worker_client,
+        head_runner: Heads::PiRunner.new(harness_client: head_client, cwd: Dir.pwd),
+        workspace_manager: Workspace::Manager.new,
+        cwd: Dir.pwd
+      )
+      Heads::PromptLoop.new(engine: engine, wait_for_workers: true)
     end
 
     def demo_state
@@ -151,10 +173,10 @@ module Meringue
         Meringue #{VERSION}
 
         Usage:
-          meringue                  # display ~/.meringue/state.json in the read-only TUI
-          meringue tui              # display ~/.meringue/state.json in the read-only TUI
-          meringue tui --state PATH # display a specific Meringue state JSON file
-          meringue demo             # display the fake demo state fixture
+          meringue                  # open the TUI and route chat prompts through real Pi head agents
+          meringue tui              # open the TUI and route chat prompts through real Pi head agents
+          meringue tui --state PATH # open the TUI against a specific Meringue state JSON file
+          meringue demo             # display the fake demo state fixture without agent prompting
           meringue demo-state       # print the fake demo state fixture
           meringue reset-state      # reset ~/.meringue/state.json to an empty Meringue state
           meringue head-loop        # run the manual real Pi head -> kernel -> worker loop
@@ -163,7 +185,9 @@ module Meringue
           meringue --help           # print this help
 
         TUI controls:
-          q, Esc, or Ctrl-C         # quit the read-only TUI
+          Enter                     # send the chat prompt to a head agent
+          /clear                    # reset the persisted Meringue state
+          Esc on an empty prompt or Ctrl-C # quit the TUI
       HELP
     end
   end
