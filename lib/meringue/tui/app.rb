@@ -11,6 +11,9 @@ module Meringue
       MOUSE_SCROLL_STEP = 3
       PAGE_SCROLL_STEP = 8
       CTRL_C = "\u0003"
+      # Keyboard-disambiguation modes used for Shift+Enter can encode Ctrl-C as
+      # CSI-u or xterm modifyOtherKeys instead of the raw ETX byte.
+      CTRL_C_KEYS = [CTRL_C, "\e[99;5u", "\e[67;5u", "\e[27;5;99~", "\e[27;5;67~"].freeze
       CTRL_D = "\u0004"
       CTRL_W = "\u0017"
       BACKSPACE_KEYS = ["\u007f", "\b"].freeze
@@ -138,7 +141,7 @@ module Meringue
         return false unless key
         return true if key == CTRL_D
 
-        key == CTRL_C && input_buffer.empty? && !@agent_tree_navigation_active
+        ctrl_c_key?(key) && input_buffer.empty? && !@agent_tree_navigation_active
       end
 
       def handle_key(key, input_buffer, input_cursor_or_slash_index = 0, slash_index_or_on_submit = nil, on_submit_or_state = nil, state_arg = nil)
@@ -223,7 +226,7 @@ module Meringue
           return [+"", 0, 0]
         end
 
-        if key == CTRL_C
+        if ctrl_c_key?(key)
           return [+"", 0, 0]
         end
 
@@ -250,6 +253,10 @@ module Meringue
 
         @focused_pane = "chat"
         insert_text(input_buffer, input_cursor, key) + [0]
+      end
+
+      def ctrl_c_key?(key)
+        CTRL_C_KEYS.include?(key)
       end
 
       def slash_suggestion_key?(key)
