@@ -1,4 +1,4 @@
-# Meringue harness config
+# Meringue config
 
 Meringue reads an optional TOML config file from:
 
@@ -7,6 +7,24 @@ Meringue reads an optional TOML config file from:
 ```
 
 Use `--config PATH` to load a different file for a single run.
+
+## Selecting a TUI colorscheme
+
+```toml
+[tui]
+colorscheme = "meringue"
+```
+
+Supported colorschemes:
+
+- `meringue` (default yellow/white palette)
+- `rose-pine` (the original Meringue palette)
+- `tokyonight`
+- `gruvbox`
+- `catppuccin`
+- `kanagawa`
+
+`color_scheme` is accepted as a compatibility alias for `colorscheme`.
 
 ## Selecting harnesses
 

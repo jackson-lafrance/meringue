@@ -1,5 +1,10 @@
 # Copy to ~/.meringue/config.toml and adjust for your machine.
 
+[tui]
+# Default yellow/white Meringue palette. Other options:
+# rose-pine, tokyonight, gruvbox, catppuccin, kanagawa
+colorscheme = "meringue"
+
 [harness]
 # provider applies to both head and worker agents unless overridden below.
 provider = "pi"
