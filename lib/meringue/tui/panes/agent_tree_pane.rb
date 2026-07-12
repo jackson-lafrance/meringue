@@ -35,14 +35,11 @@ module Meringue
           projects = records(state, "projects")
           issues = records(state, "issues")
           agents = records(state, "agents")
-          questions = records(state, "questions")
-
           selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
 
           output = []
           append_heads(output, agents, selected_agent_id, width)
           append_projects(output, projects, issues, agents, selected_agent_id, width)
-          append_questions(output, questions, width)
           output.empty? ? [[['No AgentTree data yet.', Style::MUTED]]] : output
         end
 
@@ -116,17 +113,6 @@ module Meringue
           end
         end
 
-        def append_questions(output, questions, width)
-          open_questions = questions.select { |question| question["status"] == "open" }.sort_by { |question| sort_key(question["id"]) }
-          return if open_questions.empty?
-
-          output << spacer_line
-          output << section_line("questions")
-          open_questions.each_with_index do |question, index|
-            output.concat(question_lines(question, index == open_questions.length - 1, width: width))
-          end
-        end
-
         def section_line(title)
           [[title.upcase, Style::DIM]]
         end
@@ -176,16 +162,6 @@ module Meringue
             width: width,
             selected: true
           )
-        end
-
-        def question_lines(question, last, width: nil)
-          leader_segments = [
-            [last ? "└─ " : "├─ ", Style::DIM],
-            ["?", Style::WARNING],
-            [" #{question.fetch("id")}", Style::MUTED],
-            ["  ", Style::DIM]
-          ]
-          wrapped_lines(leader_segments, question.fetch("question", "Open question"), title_style: Style::TEXT, continuation_style: Style::TEXT, width: width)
         end
 
         def wrapped_lines(leader_segments, content, title_style:, continuation_style:, width:, selected: false)
