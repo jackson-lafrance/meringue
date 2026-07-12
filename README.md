@@ -1,8 +1,8 @@
-# MIRANG / Meringue
+# Meringue
 
-MIRANG / Meringue is a terminal-first orchestration layer for running many coding agents at once without making the developer mentally jump between a pile of terminals. It sits on top of a coding harness, starts and monitors head and worker agents, and keeps their work organized as projects, issues, agents, questions, and logs.
+Meringue is an open-source, terminal-first control plane for running many coding agents at once. It is designed to sit above the coding-agent harnesses developers already like, so teams can coordinate work across Pi, Claude Code, Antigravity, or future backends without rebuilding their workflow around one vendor.
 
-The project is intentionally self-hosting: MIRANG uses Meringue to build itself. New product work is broken into Meringue issues, workers are assigned isolated workspaces and human-readable branches, and completed slices are delivered through normal commits and pull requests. `AGENTS.md` is the durable product and architecture contract that every agent reads before working.
+The goal is simple: keep the developer in one place while many agents work in parallel. Meringue organizes that work as projects, issues, agents, questions, and logs, then routes each task to the configured harness behind a small integration layer.
 
 ## The problem
 
@@ -11,49 +11,64 @@ Modern coding harnesses are excellent at giving one agent a focused environment 
 - each issue lives in a different terminal or harness session;
 - the developer has to reread the last output before every prompt;
 - prompts, blockers, PRs, and status updates are spread across windows;
-- switching contexts all day becomes tiring and error-prone.
+- switching contexts all day becomes tiring and error-prone;
+- switching harnesses can mean switching the entire way work is managed.
 
 Meringue keeps that parallel work in one place. The developer can keep typing, monitor structured progress, jump into a specific worker only when needed, and stay oriented around the product goals instead of terminal bookkeeping.
+
+## Why open source and harness agnostic
+
+Meringue is meant to be infrastructure that developers can adapt, inspect, and extend. Coding-agent harnesses will keep changing, and different teams will prefer different backends. Meringue should make those choices pluggable rather than forcing a single blessed agent runtime.
+
+The MVP backend is Pi because it is the fastest path for this project today. The architecture still keeps harness-specific behavior behind provider clients so the kernel and TUI can depend on generic operations such as spawning a session, prompting a session, reading events, aborting work, and attaching to a session.
+
+Supported provider names in the current config surface include:
+
+- `pi`
+- `claude` / `claude_code` / `claude-code` / `cc`
+- `antigravity`
+
+That provider list should grow over time without changing the core product model.
 
 ## Product value
 
 Meringue provides a single control plane for multi-agent development:
 
+- **Bring your own harness.** Use the coding-agent backend you want while Meringue handles orchestration, state, logs, and navigation.
 - **One chat stream for new work.** Natural-language prompts spawn short-lived head agents that decide what should happen next.
 - **A kernel-owned state model.** The kernel validates commands, mutates JSON state, allocates worker workspaces, and records logs.
 - **An AgentTree view.** Projects, issues, heads, workers, questions, and PR markers are shown in a filesystem-like hierarchy.
 - **Structured logs.** Important lifecycle events are captured without flooding the UI with every streamed token.
-- **Harness independence.** Pi is the default/MVP harness, while the harness interface also supports configured providers such as Claude Code and Antigravity.
 - **Safe parallelism.** For git-backed projects, workers should run in dedicated worktrees and branches so multiple agents can edit safely at once.
 
-## How Meringue builds itself
+## How Meringue coordinates work
 
-This repository is managed the same way Meringue expects users to manage their own projects:
+A typical flow looks like this:
 
 1. A developer describes a goal in the Meringue chat.
-2. A stateless head agent reads lightweight project context, including `AGENTS.md`, and proposes structured kernel commands.
+2. A stateless head agent reads lightweight project context and proposes structured kernel commands.
 3. The kernel validates those commands, creates or reuses issues, and spawns worker agents.
-4. Each worker receives a dedicated workspace for the assigned issue, makes the requested change, and reports verification.
-5. Finished slices are committed, pushed, and opened as pull requests with manual test instructions.
+4. Each worker receives an assigned workspace and runs through the configured harness.
+5. The TUI keeps the AgentTree, logs, questions, and delivery state visible so the developer can intervene only when needed.
 
-That feedback loop is part of the product thesis: Meringue should make it easier to run the next Meringue worker than it was to manage the previous one manually.
+This repository also uses that workflow while developing Meringue itself, but self-hosting is a proof point rather than the product boundary. The product is a general open orchestration layer for any project and any supported harness.
 
 ## Repository layout
 
 ```txt
-bin/meringue                      # executable CLI entrypoint
-lib/meringue/cli.rb               # command parsing and runtime setup
-lib/meringue/app.rb               # TUI application lifecycle
-lib/meringue/kernel/              # command validation and state mutation
-lib/meringue/heads/               # head-agent context, runners, and parsing
-lib/meringue/harness/             # Pi and other harness integrations
-lib/meringue/tui/                 # terminal rendering, panes, navigation, styles
-lib/meringue/state/               # JSON persistence models and store
-docs/config.md                    # config and harness provider reference
+bin/meringue                       # executable CLI entrypoint
+lib/meringue/cli.rb                # command parsing and runtime setup
+lib/meringue/app.rb                # TUI application lifecycle
+lib/meringue/kernel/               # command validation and state mutation
+lib/meringue/heads/                # head-agent context, runners, and parsing
+lib/meringue/harness/              # Pi and other harness integrations
+lib/meringue/tui/                  # terminal rendering, panes, navigation, styles
+lib/meringue/state/                # JSON persistence models and store
+docs/config.md                     # config and harness provider reference
 docs/head_agent_kernel_commands.md # compact head-agent command contract
-docs/keybindings.md               # TUI keyboard and jump-mode controls
-fixtures/config.example.toml      # example local config
-fixtures/demo_state.json          # demo state for the TUI
+docs/keybindings.md                # TUI keyboard and jump-mode controls
+fixtures/config.example.toml       # example local config
+fixtures/demo_state.json           # demo state for the TUI
 ```
 
 ## Setup
@@ -97,13 +112,19 @@ Print the CLI help:
 bin/meringue --help
 ```
 
-Useful runtime flags:
+Choose a harness at runtime:
+
+```bash
+bin/meringue tui --harness pi
+bin/meringue tui --harness claude
+bin/meringue tui --head-harness antigravity --worker-harness claude
+```
+
+Use a custom state or config file:
 
 ```bash
 bin/meringue tui --state /tmp/meringue-state.json
 bin/meringue tui --config ./fixtures/config.example.toml
-bin/meringue tui --harness pi
-bin/meringue tui --head-harness antigravity --worker-harness claude
 ```
 
 Useful slash commands inside the TUI include:
@@ -140,6 +161,7 @@ User prompt
   -> fresh head agent reads context and proposes KernelCommand[]
   -> kernel validates commands and mutates JSON state
   -> kernel allocates worker workspaces and starts harness sessions
+  -> configured harness backend runs the agent work
   -> AgentTree and logs rerender in the TUI
   -> developer jumps into worker sessions or PRs only when needed
 ```
