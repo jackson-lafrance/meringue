@@ -93,12 +93,20 @@ module Meringue
         sequence = key.dup
         while IO.select([input], nil, nil, 0.001)
           sequence << input.getch
-          break if sequence.length >= 3
+          break if complete_escape_sequence?(sequence)
+          break if sequence.length >= 16
         end
         sequence
       end
 
       private
+
+      def complete_escape_sequence?(sequence)
+        return true if ["\e\r", "\e\n"].include?(sequence)
+        return false unless sequence.start_with?("\e[")
+
+        sequence.length >= 3 && sequence[-1].match?(/[A-Za-z~]/)
+      end
 
       def write_interactive_frame(frame)
         if @last_frame.nil? || frame.lines.length != @last_frame.lines.length
