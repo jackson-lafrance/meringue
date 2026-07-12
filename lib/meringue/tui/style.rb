@@ -17,6 +17,8 @@ module Meringue
         AGENT_TREE_SELECTED
         AGENT_TREE_SELECTED_DIM
         AGENT_TREE_SELECTED_STATUS
+        PR_MARKER
+        PR_MARKER_SELECTED
         TITLE
         PANEL_TITLE
         HEADER
@@ -85,6 +87,8 @@ module Meringue
         AGENT_TREE_SELECTED: [1, 38, 5, 231, 48, 5, 61],
         AGENT_TREE_SELECTED_DIM: [38, 5, 189, 48, 5, 61],
         AGENT_TREE_SELECTED_STATUS: [1, 38, 5, 159, 48, 5, 61],
+        PR_MARKER: [1, 38, 5, 51],
+        PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 61],
         TITLE: [1, 38, 5, 255],
         PANEL_TITLE: [1, 38, 5, 225],
         HEADER: [1, 38, 5, 255, 48, 5, 235],
@@ -113,6 +117,8 @@ module Meringue
         AGENT_TREE_SELECTED: [1, 38, 5, 231, 48, 5, 94],
         AGENT_TREE_SELECTED_DIM: [38, 5, 229, 48, 5, 94],
         AGENT_TREE_SELECTED_STATUS: [1, 38, 5, 226, 48, 5, 94],
+        PR_MARKER: [1, 38, 5, 51],
+        PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 94],
         TITLE: [1, 38, 5, 231],
         PANEL_TITLE: [1, 38, 5, 229],
         HEADER: [1, 38, 5, 230, 48, 5, 94],
@@ -141,6 +147,8 @@ module Meringue
         AGENT_TREE_SELECTED: [1, 38, 5, 231, 48, 5, 24],
         AGENT_TREE_SELECTED_DIM: [38, 5, 153, 48, 5, 24],
         AGENT_TREE_SELECTED_STATUS: [1, 38, 5, 120, 48, 5, 24],
+        PR_MARKER: [1, 38, 5, 51],
+        PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 24],
         TITLE: [1, 38, 5, 255],
         PANEL_TITLE: [1, 38, 5, 147],
         HEADER: [1, 38, 5, 255, 48, 5, 235],
@@ -169,6 +177,8 @@ module Meringue
         AGENT_TREE_SELECTED: [1, 38, 5, 223, 48, 5, 94],
         AGENT_TREE_SELECTED_DIM: [38, 5, 248, 48, 5, 94],
         AGENT_TREE_SELECTED_STATUS: [1, 38, 5, 142, 48, 5, 94],
+        PR_MARKER: [1, 38, 5, 51],
+        PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 94],
         TITLE: [1, 38, 5, 230],
         PANEL_TITLE: [1, 38, 5, 222],
         HEADER: [1, 38, 5, 223, 48, 5, 236],
@@ -197,6 +207,8 @@ module Meringue
         AGENT_TREE_SELECTED: [1, 38, 5, 231, 48, 5, 60],
         AGENT_TREE_SELECTED_DIM: [38, 5, 189, 48, 5, 60],
         AGENT_TREE_SELECTED_STATUS: [1, 38, 5, 158, 48, 5, 60],
+        PR_MARKER: [1, 38, 5, 51],
+        PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 60],
         TITLE: [1, 38, 5, 255],
         PANEL_TITLE: [1, 38, 5, 219],
         HEADER: [1, 38, 5, 255, 48, 5, 235],
@@ -225,6 +237,8 @@ module Meringue
         AGENT_TREE_SELECTED: [1, 38, 5, 231, 48, 5, 24],
         AGENT_TREE_SELECTED_DIM: [38, 5, 152, 48, 5, 24],
         AGENT_TREE_SELECTED_STATUS: [1, 38, 5, 179, 48, 5, 24],
+        PR_MARKER: [1, 38, 5, 51],
+        PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 24],
         TITLE: [1, 38, 5, 255],
         PANEL_TITLE: [1, 38, 5, 176],
         HEADER: [1, 38, 5, 252, 48, 5, 235],
