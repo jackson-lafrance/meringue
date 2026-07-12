@@ -36,7 +36,7 @@ module Meringue
           metrics.fetch(:sidebar_width),
           metrics.fetch(:top_height),
           "agent tree",
-          agent_tree_pane.lines(state)
+          agent_tree_pane.lines(state, width: metrics.fetch(:sidebar_width) - 4)
         )
         draw_pane(
           canvas,
