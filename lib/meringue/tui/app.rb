@@ -9,6 +9,7 @@ module Meringue
       QUIT_KEYS = ["\u0003", "\u0004"].freeze
       BACKSPACE_KEYS = ["\u007f", "\b"].freeze
       ENTER_KEYS = ["\r", "\n"].freeze
+      NEWLINE_KEYS = ["\e\r", "\e\n", "\e[13;2u", "\e[27;2;13~", "\e[13;2~"].freeze
       TAB_KEYS = ["\t"].freeze
       UP_KEYS = ["\e[A"].freeze
       DOWN_KEYS = ["\e[B"].freeze
@@ -90,6 +91,10 @@ module Meringue
           return [+"", 0]
         end
 
+        if NEWLINE_KEYS.include?(key)
+          return [input_buffer + "\n", 0]
+        end
+
         if BACKSPACE_KEYS.include?(key)
           return [input_buffer[0...-1], 0]
         end
@@ -160,7 +165,7 @@ module Meringue
         append_message("you", text)
         assistant_message_id = append_message(
           "meringue",
-          slash_command ? "Queued slash command…" : "Queued for the head agent loop…",
+          slash_command ? "Queued slash command…" : head_activity_text(text, phase: :queued),
           status: "queued"
         )
         increment_pending_count
@@ -169,8 +174,8 @@ module Meringue
           begin
             update_message(
               assistant_message_id,
-              text: slash_command ? "Applying slash command…" : "Running head agent loop…",
-              status: "working"
+              text: slash_command ? "Applying slash command…" : head_activity_text(text, phase: :working),
+              status: slash_command ? "working" : "head working"
             )
             result = if on_submit
                        on_submit.call(text) do |event|
@@ -193,6 +198,29 @@ module Meringue
           "summary" => "Prompt handling is not enabled for this TUI session.",
           "spawn_head_result" => { "status" => "rejected", "message" => "No prompt handler configured." }
         }
+      end
+
+      def head_activity_text(text, phase:)
+        prompt = text.to_s.strip
+        options = if phase == :queued
+                    [
+                      "Handing this to a fresh head agent…",
+                      "Starting a head to read the prompt and current state…",
+                      "Queueing a head to plan the next kernel-safe step…"
+                    ]
+                  else
+                    [
+                      "A head is reading the prompt against current Meringue state…",
+                      "A head is deciding whether to ask, route, or spawn work…",
+                      "A head is shaping this into validated kernel commands…",
+                      "A head is keeping the request moving without blocking chat…"
+                    ]
+                  end
+        options[stable_activity_index(prompt, phase, options.length)]
+      end
+
+      def stable_activity_index(prompt, phase, length)
+        "#{phase}:#{prompt}".bytes.sum % length
       end
 
       def update_message_from_event(message_id, event)
@@ -383,7 +411,11 @@ module Meringue
           message = @messages.find { |candidate| candidate.fetch("id") == id }
           return unless message
 
-          message["text"] = [message.fetch("text", ""), line].reject { |part| part.to_s.empty? }.join("\n")
+          existing = message.fetch("text", "").to_s
+          addition = line.to_s
+          unless duplicate_trailing_line?(existing, addition)
+            message["text"] = [existing, addition].reject { |part| part.to_s.empty? }.join("\n")
+          end
           apply_message_status(message, status)
         end
       end
@@ -395,6 +427,13 @@ module Meringue
 
           apply_message_status(message, status)
         end
+      end
+
+      def duplicate_trailing_line?(existing, addition)
+        return true if addition.empty?
+        return false if existing.empty?
+
+        existing == addition || existing.end_with?("\n#{addition}")
       end
 
       def apply_message_status(message, status)

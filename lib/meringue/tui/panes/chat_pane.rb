@@ -51,7 +51,7 @@ module Meringue
               ["  ·  ", Style::DIM],
               ["open questions: #{open_questions}", Style::MUTED],
               ["  ·  ", Style::DIM],
-              ["enter sends · tab completes slash commands · esc/ctrl-c quits", Style::MUTED]
+              ["enter sends · shift/alt-enter newline · tab completes slash commands · esc/ctrl-c quits", Style::MUTED]
             ]
           ]
         end
@@ -153,19 +153,47 @@ module Meringue
           end
 
           display_text = "#{input_buffer}_"
-          available_width = width ? [width.to_i - 2, 1].max : display_text.length
-          chunks = display_text.chars.each_slice(available_width).map(&:join)
-          chunks.each_with_index.map do |chunk, index|
-            input_line_segments(chunk, first_line: index.zero?, cursor_line: index == chunks.length - 1)
+          content_width = input_content_width(display_text, width)
+          logical_lines = display_text.split("\n", -1)
+          rows = []
+
+          logical_lines.each_with_index do |logical_line, logical_index|
+            chunks = wrapped_input_chunks(logical_line, content_width)
+            chunks.each_with_index do |chunk, chunk_index|
+              cursor_line = logical_index == logical_lines.length - 1 && chunk_index == chunks.length - 1
+              rows << input_line_segments(chunk, first_line: rows.empty?, cursor_line: cursor_line)
+            end
           end
+
+          rows
+        end
+
+        def input_content_width(display_text, width)
+          return [display_text.lines.map { |line| line.chomp.length }.max.to_i, 1].max unless width
+
+          [width.to_i - input_prefix_width, 1].max
+        end
+
+        def input_prefix_width
+          2
+        end
+
+        def wrapped_input_chunks(text, content_width)
+          return [""] if text.empty?
+
+          text.chars.each_slice(content_width).map(&:join)
         end
 
         def input_line_segments(chunk, first_line:, cursor_line:)
           prefix = first_line ? "› " : "  "
-          return [[prefix, Style::ACCENT_BOLD], [chunk, Style::TEXT]] unless cursor_line && chunk.end_with?("_")
+          prefix_style = first_line ? Style::ACCENT_BOLD : Style::DIM
+          return [[prefix, prefix_style], [chunk, Style::TEXT]] unless cursor_line && chunk.end_with?("_")
 
           text = chunk[0...-1]
-          [[prefix, Style::ACCENT_BOLD], [text, Style::TEXT], ["_", Style::ACCENT_BOLD]]
+          segments = [[prefix, prefix_style]]
+          segments << [text, Style::TEXT] unless text.empty?
+          segments << ["_", Style::ACCENT_BOLD]
+          segments
         end
 
         def wrapped_text_lines(text)
@@ -177,7 +205,7 @@ module Meringue
         def pending_status(pending_count)
           return "head loop idle" unless pending_count.positive?
 
-          "#{pending_count} prompt#{pending_count == 1 ? "" : "s"} running"
+          "#{pending_count} head prompt#{pending_count == 1 ? "" : "s"} in flight"
         end
 
         def chat_state(state)
