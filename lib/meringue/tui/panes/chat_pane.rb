@@ -72,7 +72,7 @@ module Meringue
           input_buffer = chat_state(state).fetch("input_buffer", "")
           return [] unless slash_prompt?(input_buffer)
 
-          Meringue::Input::SlashCommandParser.command_suggestion_records(input_buffer, limit: 5)
+          Meringue::Input::SlashCommandParser.command_suggestion_records(input_buffer, limit: 3)
         end
 
         def slash_prompt?(input_buffer)
