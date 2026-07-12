@@ -861,6 +861,7 @@ module Meringue
         when "head_result_applied"
           append_head_result_applied_summary(message_id, event)
         when "slash_command_applied"
+          apply_theme_command_results(event.fetch("command_results", []) || [])
           append_user_facing_line(message_id, slash_command_text(event.fetch("command_results", []) || []), status: nil)
         when "worker_wait_started"
           remember_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
@@ -876,6 +877,7 @@ module Meringue
 
       def conversation_text_for(result)
         if result.fetch("event", nil) == "slash_command_applied"
+          apply_theme_command_results(result.fetch("command_results", []) || [])
           lines = [slash_command_text(result.fetch("command_results", []) || [])]
           lines.concat(worker_summary_lines(result.fetch("worker_wait_results", []) || []))
           return lines.reject { |line| line.to_s.empty? }.join("\n")
@@ -899,6 +901,18 @@ module Meringue
         lines.reject { |line| line.to_s.empty? }.join("\n")
       end
 
+      def apply_theme_command_results(command_results)
+        Array(command_results).each do |result|
+          next unless result.fetch("command_type", nil) == "SetTheme"
+          next unless result.fetch("status", nil) == "accepted"
+
+          theme = (result.fetch("result", {}) || {})["theme"]
+          Style.configure!(theme) if theme
+        end
+      rescue StandardError
+        nil
+      end
+
       def slash_command_text(command_results)
         return "Slash command did not produce a kernel result." if command_results.empty?
 
@@ -920,6 +934,10 @@ module Meringue
 
       def slash_result_detail_lines(command_type, result)
         case command_type
+        when "SetTheme"
+          theme = result.is_a?(Hash) ? result["theme"] : nil
+          config_path = result.is_a?(Hash) ? result["config_path"] : nil
+          ["  theme: #{theme}", config_path ? "  config: #{config_path}" : nil].compact
         when "Help"
           Array(result).map { |item| "  #{item.fetch("usage", "")} — #{item.fetch("description", "")}" }
         when "ListQuestions"
