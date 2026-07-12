@@ -57,6 +57,13 @@ module Meringue
           prefix + separator + interaction_hint_segments
         end
 
+        def bottom_right_status_line(state)
+          label = active_harness_label(state)
+          return [] if label.empty?
+
+          [["harness: ", Style::DIM], [label, Style::ACCENT_BOLD]]
+        end
+
         def slash_suggestions?(state)
           slash_suggestion_records(state).any?
         end
@@ -207,6 +214,17 @@ module Meringue
             [" • ", Style::DIM],
             ["/keybind help", Style::MUTED]
           ]
+        end
+
+        def active_harness_label(state)
+          metadata = state.fetch("metadata", {}) || {}
+          explicit_label = metadata.fetch("active_harness_label", "").to_s.strip
+          return explicit_label unless explicit_label.empty?
+
+          provider = metadata.fetch("active_harness", "").to_s.strip
+          return "" if provider.empty?
+
+          Meringue::Harness::Registry.provider_label(provider)
         end
 
         def compact_status_segments(state, pending_count)
