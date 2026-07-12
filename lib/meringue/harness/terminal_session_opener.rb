@@ -8,7 +8,7 @@ module Meringue
       DEFAULT_COMMANDS = {
         "pi" => "pi",
         "claude" => "claude",
-        "gemini" => "gemini"
+        "gemini" => "antigravity"
       }.freeze
       DEFAULT_ALACRITTY_COMMAND = "alacritty"
       DEFAULT_PI_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
