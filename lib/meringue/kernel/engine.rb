@@ -49,6 +49,8 @@ module Meringue
         "modify_issue" => "ModifyIssue",
         "prompt_agent" => "PromptAgent",
         "kill" => "Kill",
+        "set_harness" => "SetHarness",
+        "harness" => "SetHarness",
         "help" => "Help",
         "theme" => "SetTheme",
         "set_theme" => "SetTheme",
@@ -68,6 +70,7 @@ module Meringue
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker harness session."],
+        ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "TUI local: open an agent harness session in Alacritty, or navigate the AgentTree when no id is provided."],
         ["/jumpr [agent_id]", "TUI local: open an agent pull request, or navigate agents with attached PRs when no id is provided."],
@@ -91,10 +94,14 @@ module Meringue
       RECONCILE_STATE_TERMINAL_ERROR = "terminal_error"
 
       attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path
+      attr_reader :store, :workspace_manager, :cwd, :forge_client
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
                      head_runner: Heads::FakeRunner.new,
                      harness_client_resolver: nil,
+                     harness_client_provider: nil,
+                     head_runner_provider: nil,
+                     default_harness_provider: nil,
                      workspace_manager: Workspace::Manager.new,
                      cwd: Dir.pwd,
                      async_heads: false,
@@ -103,6 +110,9 @@ module Meringue
         @store = store
         @harness_client = harness_client
         @head_runner = head_runner
+        @harness_client_provider = harness_client_provider
+        @head_runner_provider = head_runner_provider
+        @default_harness_provider = normalize_initial_harness_provider(default_harness_provider || inferred_default_harness_provider)
         @workspace_manager = workspace_manager
         @cwd = File.expand_path(cwd)
         @async_heads = async_heads
@@ -162,6 +172,8 @@ module Meringue
           invalid_slash_command(command_id, command_type, payload)
         when "SetTheme"
           set_theme(command_id, command_type, payload)
+        when "SetHarness"
+          set_harness(command_id, command_type, payload)
         when "AddProject"
           add_project(command_id, command_type, payload)
         when "CreateIssue"
@@ -402,6 +414,43 @@ module Meringue
         apply_tui_theme(theme)
 
         state = normalized_state
+      def set_harness(command_id, command_type, payload)
+        requested_provider = value_at(payload, "provider", "Provider", "harness", "Harness")
+        return rejected_result(command_id, command_type, "Harness was not changed.", ["provider is required"]) if blank?(requested_provider)
+
+        provider = normalize_selectable_harness_provider(requested_provider)
+        unless provider
+          supported = Meringue::Harness::Registry.supported_provider_names.join(", ")
+          return rejected_result(
+            command_id,
+            command_type,
+            "Unsupported harness provider #{requested_provider.inspect}. Choose one of: #{supported}.",
+            ["unsupported_harness_provider"]
+          )
+        end
+
+        state = normalized_state
+        active_agents = active_harness_selection_blockers(state)
+        if active_agents.any?
+          return rejected_result(
+            command_id,
+            command_type,
+            "Harness was not changed because #{active_agents.length} agent#{active_agents.length == 1 ? " is" : "s are"} active or working: #{active_agents.join(", ")}.",
+            ["active_agents", *active_agents]
+          )
+        end
+
+        previous_provider = active_harness_provider(state)
+        previous_public_provider = Meringue::Harness::Registry.public_provider_name(previous_provider)
+        public_provider = Meringue::Harness::Registry.public_provider_name(provider)
+        now = timestamp
+        metadata = state.fetch("metadata")
+        changed = previous_provider != provider
+        metadata["active_harness"] = public_provider
+        metadata["active_harness_label"] = Meringue::Harness::Registry.provider_label(provider)
+        metadata["harness_selected_at"] = now
+        metadata["harness_generation"] = metadata.fetch("harness_generation", 0).to_i + (changed ? 1 : 0)
+
         log_ids = append_log(
           state,
           source_type: "kernel",
@@ -411,6 +460,15 @@ module Meringue
           details: { "theme" => theme, "config_path" => config_path }
         )
         touch_state!(state)
+          message: changed ? "Selected #{metadata.fetch("active_harness_label")} harness for future agents." : "#{metadata.fetch("active_harness_label")} harness is already selected.",
+          details: {
+            "previous_harness" => previous_public_provider,
+            "active_harness" => public_provider,
+            "internal_active_harness" => provider,
+            "harness_generation" => metadata.fetch("harness_generation")
+          }
+        )
+        touch_state!(state, now)
         store.save(state)
 
         accepted_result(
@@ -423,6 +481,17 @@ module Meringue
         )
       rescue Config::ParseError => e
         rejected_result(command_id, command_type, "Theme was not changed because config could not be read.", [e.message])
+          public_provider,
+          changed ? "Selected #{metadata.fetch("active_harness_label")} for future heads and workers." : "#{metadata.fetch("active_harness_label")} is already the active harness.",
+          {
+            "active_harness" => public_provider,
+            "active_harness_label" => metadata.fetch("active_harness_label"),
+            "previous_harness" => previous_public_provider,
+            "internal_active_harness" => provider,
+            "harness_generation" => metadata.fetch("harness_generation")
+          },
+          log_ids
+        )
       end
 
       def prompt_agent(command_id, command_type, payload)
@@ -510,9 +579,17 @@ module Meringue
             return rejected_result(command_id, command_type, "Question #{question_id} does not exist.", ["question_not_found"])
           end
 
+          active_provider = active_harness_provider(state)
+          active_runner = active_head_runner(provider: active_provider)
           now = timestamp
           head_id = next_head_id!(state)
-          agent = build_head_agent(head_id: head_id, now: now)
+          agent = build_head_agent(
+            head_id: head_id,
+            now: now,
+            provider: active_provider,
+            runner: active_runner,
+            harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
+          )
           state.fetch("agents") << agent
 
           log_ids = []
@@ -533,7 +610,7 @@ module Meringue
             source_id: head_id,
             level: "info",
             message: "Spawned head #{head_id}.",
-            details: { "runner" => head_runner.class.name, "cwd" => cwd }
+            details: { "runner" => active_runner.class.name, "cwd" => cwd, "harness" => active_provider }
           ))
           touch_state!(state, now)
           store.save(state)
@@ -550,12 +627,14 @@ module Meringue
           {
             "context" => context,
             "log_ids" => log_ids,
-            "snapshot" => snapshot
+            "snapshot" => snapshot,
+            "head_runner" => active_runner
           }
         end
 
-        if async_heads? && head_runner.respond_to?(:spawn_head_session)
-          session_ref = head_runner.spawn_head_session(
+        runner = started.fetch("head_runner")
+        if async_heads? && runner.respond_to?(:spawn_head_session)
+          session_ref = runner.spawn_head_session(
             user_message: user_message.to_s,
             snapshot: started.fetch("snapshot"),
             question_id: present_string(question_id),
@@ -591,7 +670,7 @@ module Meringue
           end
         end
 
-        head_result = head_runner.run(
+        head_result = runner.run(
           user_message: user_message.to_s,
           snapshot: started.fetch("snapshot"),
           question_id: present_string(question_id),
@@ -1349,7 +1428,7 @@ module Meringue
 
         session_ref = agent_session_ref(agent)
         begin
-          session_ref = harness_client.prompt_session(session_ref, prompt.to_s, mode: mode.to_s)
+          session_ref = harness_client_for_agent(agent).prompt_session(session_ref, prompt.to_s, mode: mode.to_s)
         rescue StandardError => e
           return failed_result(
             command_id,
@@ -1421,6 +1500,7 @@ module Meringue
           )
           return rejected_result(command_id, command_type, "Worker workspace is invalid.", workspace.fetch("errors")) unless workspace.fetch("errors").empty?
 
+          active_provider = active_harness_provider(state)
           now = timestamp
           agent_id = next_worker_id!(state, issue.fetch("id"))
           workspace = resolve_worker_workspace(
@@ -1439,13 +1519,15 @@ module Meringue
             "issue" => deep_copy(issue),
             "project" => deep_copy(project),
             "workspace" => workspace,
-            "now" => now
+            "now" => now,
+            "harness" => active_provider,
+            "harness_generation" => state.fetch("metadata").fetch("harness_generation", 0).to_i
           }
         end
 
         session_ref = nil
         begin
-          session_ref = harness_client.spawn_session(
+          session_ref = active_harness_client(provider: reservation.fetch("harness")).spawn_session(
             kind: "worker",
             cwd: reservation.fetch("workspace").fetch("workspace_path"),
             prompt: prompt.to_s,
@@ -1486,7 +1568,8 @@ module Meringue
             workspace: reservation.fetch("workspace"),
             session_ref: session_ref,
             now: reservation.fetch("now"),
-            title: worker_title
+            title: worker_title,
+            harness_generation: reservation.fetch("harness_generation")
           )
 
           state.fetch("agents") << agent
@@ -1536,7 +1619,7 @@ module Meringue
         raise e
       end
 
-      def build_head_agent(head_id:, now:)
+      def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0)
         {
           "id" => head_id,
           "type" => "head",
@@ -1546,20 +1629,21 @@ module Meringue
           "workspace_path" => nil,
           "workspace_strategy" => nil,
           "workspace_branch" => nil,
-          "harness" => head_harness_name,
+          "harness" => provider,
           "pid" => nil,
           "harness_session_id" => nil,
           "harness_session_file" => nil,
           "harness_metadata" => {
-            "runner" => head_runner.class.name,
-            "cwd" => cwd
+            "runner" => runner.class.name,
+            "cwd" => cwd,
+            "harness_generation" => harness_generation
           },
           "created_at" => now,
           "updated_at" => now
         }
       end
 
-      def build_worker_agent(agent_id:, issue:, project:, workspace:, session_ref:, now:, title: nil)
+      def build_worker_agent(agent_id:, issue:, project:, workspace:, session_ref:, now:, title: nil, harness_generation: 0)
         session_metadata = session_ref.fetch("metadata", {}) || {}
         display_title = worker_display_title(title, issue)
         {
@@ -1580,6 +1664,7 @@ module Meringue
             "cwd" => session_ref.fetch("cwd", workspace.fetch("workspace_path")),
             "is_streaming" => session_ref.fetch("is_streaming", false),
             "last_event_at" => session_ref.fetch("last_event_at", nil),
+            "harness_generation" => harness_generation,
             "workspace_note" => workspace.fetch("note", nil),
             "workspace_plan" => workspace.fetch("plan", nil),
             "delivery_branch" => workspace.fetch("workspace_branch", nil)
@@ -1953,6 +2038,24 @@ module Meringue
         @state_mutex.synchronize(&block)
       end
 
+      def harness_client
+        active_harness_client
+      end
+
+      def head_runner
+        active_head_runner
+      end
+
+      def active_harness_client(provider: nil)
+        selected_provider = normalize_harness_provider(provider || active_harness_provider)
+        @harness_client_provider&.call(selected_provider) || @harness_client
+      end
+
+      def active_head_runner(provider: nil)
+        selected_provider = normalize_harness_provider(provider || active_harness_provider)
+        @head_runner_provider&.call(selected_provider) || @head_runner
+      end
+
       def deep_copy(value)
         JSON.parse(JSON.generate(value))
       end
@@ -2000,6 +2103,10 @@ module Meringue
         state["metadata"] ||= {}
         state["metadata"]["created_at"] ||= timestamp
         state["metadata"]["updated_at"] ||= state["metadata"].fetch("created_at")
+        internal_harness = normalize_harness_provider(state["metadata"]["active_harness"] || @default_harness_provider)
+        state["metadata"]["active_harness"] = selectable_harness_provider?(internal_harness) ? Meringue::Harness::Registry.public_provider_name(internal_harness) : internal_harness
+        state["metadata"]["active_harness_label"] = Meringue::Harness::Registry.provider_label(internal_harness) if selectable_harness_provider?(internal_harness)
+        state["metadata"]["harness_generation"] ||= 0
       end
 
       def max_numeric_suffix(records, pattern)
@@ -2706,11 +2813,54 @@ module Meringue
         resolved = @harness_client_resolver&.call(agent)
         return resolved if resolved
 
-        if agent.fetch("type", nil) == "head" && head_runner.respond_to?(:harness_client)
-          return head_runner.harness_client
+        if agent.fetch("type", nil) == "head" && active_head_runner(provider: agent.fetch("harness", nil)).respond_to?(:harness_client)
+          return active_head_runner(provider: agent.fetch("harness", nil)).harness_client
         end
 
-        harness_client
+        active_harness_client(provider: agent.fetch("harness", nil))
+      end
+
+      def active_harness_provider(state = nil)
+        source_state = state || normalized_state
+        normalize_harness_provider(source_state.fetch("metadata", {}).fetch("active_harness", @default_harness_provider))
+      end
+
+      def normalize_harness_provider(provider)
+        normalized = Meringue::Harness::Registry.normalize_provider(provider)
+        selectable_harness_provider?(normalized) || normalized == "fake" ? normalized : @default_harness_provider.to_s
+      end
+
+      def normalize_initial_harness_provider(provider)
+        normalized = Meringue::Harness::Registry.normalize_provider(provider)
+        selectable_harness_provider?(normalized) || normalized == "fake" ? normalized : Meringue::Harness::Registry::DEFAULT_PROVIDER
+      end
+
+      def normalize_selectable_harness_provider(provider)
+        normalized = Meringue::Harness::Registry.normalize_provider(provider)
+        selectable_harness_provider?(normalized) ? normalized : nil
+      end
+
+      def selectable_harness_provider?(provider)
+        Meringue::Harness::Registry::PROVIDERS.include?(provider.to_s)
+      end
+
+      def active_harness_selection_blockers(state)
+        state.fetch("agents", []).select do |agent|
+          %w[queued working].include?(agent.fetch("status", nil).to_s) ||
+            (agent.fetch("harness_metadata", {}) || {}).fetch("is_streaming", false)
+        end.map { |agent| agent.fetch("id", nil) }.compact
+      end
+
+      def inferred_default_harness_provider
+        if @harness_client.respond_to?(:harness_name)
+          @harness_client.harness_name
+        elsif @head_runner.respond_to?(:harness_client) && @head_runner.harness_client&.respond_to?(:harness_name)
+          @head_runner.harness_client.harness_name
+        elsif @head_runner.class.name.to_s.end_with?("FakeRunner")
+          "fake"
+        else
+          Meringue::Harness::Registry::DEFAULT_PROVIDER
+        end
       end
 
       def merge_session_ref_into_agent!(agent, session_ref)

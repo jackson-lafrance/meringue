@@ -87,13 +87,13 @@ module Meringue
         option_parser.on("--config PATH", "Read Meringue harness config TOML from PATH. Defaults to #{Config::DEFAULT_PATH}.") do |path|
           options[:config_path] = path
         end
-        option_parser.on("--harness NAME", "Use one harness provider for heads and workers: pi, claude, or gemini.") do |name|
+        option_parser.on("--harness NAME", "Use one harness provider for heads and workers: pi, claude, or antigravity.") do |name|
           options[:harness] = name
         end
-        option_parser.on("--head-harness NAME", "Use a specific head harness provider: pi, claude, or gemini.") do |name|
+        option_parser.on("--head-harness NAME", "Use a specific head harness provider: pi, claude, or antigravity.") do |name|
           options[:head_harness] = name
         end
-        option_parser.on("--worker-harness NAME", "Use a specific worker harness provider: pi, claude, or gemini.") do |name|
+        option_parser.on("--worker-harness NAME", "Use a specific worker harness provider: pi, claude, or antigravity.") do |name|
           options[:worker_harness] = name
         end
       end
@@ -161,6 +161,9 @@ module Meringue
         harness_client: registry.worker_client,
         head_runner: registry.head_runner(cwd: Dir.pwd),
         harness_client_resolver: ->(agent) { registry.client_for_agent(agent) },
+        harness_client_provider: ->(provider) { registry.worker_client_for(provider: provider) },
+        head_runner_provider: ->(provider) { registry.head_runner_for(provider: provider, cwd: Dir.pwd) },
+        default_harness_provider: registry.worker_provider,
         workspace_manager: Workspace::Manager.new,
         cwd: Dir.pwd,
         async_heads: true,
@@ -207,7 +210,7 @@ module Meringue
           meringue tui --state PATH              # open the TUI against a specific Meringue state JSON file
           meringue tui --config PATH             # open the TUI with a specific harness/config TOML file
           meringue tui --harness claude          # use Claude Code for both heads and workers
-          meringue tui --head-harness gemini --worker-harness claude
+          meringue tui --head-harness antigravity --worker-harness claude
           meringue demo                          # display the fake demo state fixture without agent prompting
           meringue demo-state                    # print the fake demo state fixture
           meringue reset-state                   # reset ~/.meringue/state.json to an empty Meringue state
@@ -218,7 +221,7 @@ module Meringue
 
         Config:
           Default path: #{Config::DEFAULT_PATH}
-          Supported harness providers: pi, claude, gemini
+          Supported harness providers: pi, claude, antigravity
           Supported TUI colorschemes: #{TUI::Style.colorschemes.join(", ")}
           CLI flags override config.toml, and MERINGUE_HARNESS / MERINGUE_HEAD_HARNESS / MERINGUE_WORKER_HARNESS override both.
 
@@ -227,6 +230,7 @@ module Meringue
           /                         # show slash command suggestions in an otherwise empty prompt
           /help                     # list command syntax
           /theme <name>             # set and persist the TUI theme
+          /harness <pi|claude|antigravity> # select the harness backend for future agents
           /keybind                  # show all TUI keybindings
           /jump [agent_id]          # open an agent session in Alacritty; omit id to navigate the AgentTree
           /jumpr [agent_id]         # open an agent PR; omit id to navigate only agents with attached PRs

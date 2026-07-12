@@ -14,6 +14,7 @@ module Meringue
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker session."],
+        ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent harness session in Alacritty, or navigate the AgentTree when no id is provided."],
         ["/jumpr [agent_id]", "Open an agent pull request, or navigate agents with attached PRs when no id is provided."],
@@ -28,6 +29,7 @@ module Meringue
       ].freeze
 
       ARGUMENT_SUGGESTION_CONTEXTS = [
+        { "prefix" => "/harness", "source" => "harness_providers", "append_space" => false },
         { "prefix" => "/issue create", "source" => "projects", "append_space" => true },
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
         { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
@@ -117,6 +119,8 @@ module Meringue
       end
 
       def self.records_for_context(context, state)
+        return harness_provider_suggestion_records(context) if context.fetch("source") == "harness_providers"
+
         items = case context.fetch("source")
                 when "projects"
                   Array(state["projects"])
@@ -139,6 +143,25 @@ module Meringue
                 end
 
         id_suggestion_records(items, context)
+      end
+
+      def self.harness_provider_suggestion_records(context)
+        query = context.fetch("query", "").to_s.downcase
+        Meringue::Harness::Registry.provider_choices.filter_map.with_index do |choice, index|
+          provider = choice.fetch("provider")
+          label = choice.fetch("label")
+          next unless query.empty? || provider.include?(query) || label.downcase.include?(query)
+
+          {
+            "usage" => provider,
+            "description" => choice.fetch("description"),
+            "completion" => "#{context.fetch("prefix")} #{provider}",
+            "requires_arguments" => false,
+            "append_space" => false,
+            "index" => index,
+            "kind" => "harness_providers"
+          }
+        end
       end
 
       def self.id_suggestion_records(items, context)
@@ -198,6 +221,8 @@ module Meringue
 
       def self.description_for_suggestion(item, source)
         case source
+        when "harness_providers"
+          ["harness", item["label"]].compact.join(" · ")
         when "projects"
           ["project", item["name"], item["status"]].compact.join(" · ")
         when "issues"
@@ -235,6 +260,8 @@ module Meringue
           kernel_command("Help")
         when "theme"
           parse_theme(arguments)
+        when "harness"
+          parse_harness(arguments)
         when "project"
           parse_project(arguments)
         when "issue"
@@ -279,6 +306,11 @@ module Meringue
         return invalid("Usage: /theme <name>") unless tokens.length == 1
 
         kernel_command("SetTheme", "theme" => tokens[0])
+      def parse_harness(arguments)
+        tokens = split_arguments(arguments)
+        return invalid("Usage: /harness <pi|claude|antigravity>") unless tokens.length == 1
+
+        kernel_command("SetHarness", "provider" => tokens[0])
       end
 
       def parse_project(arguments)
