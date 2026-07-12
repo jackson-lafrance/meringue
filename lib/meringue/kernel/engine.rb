@@ -52,6 +52,7 @@ module Meringue
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."]
       ].freeze
       TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
+      HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
 
       attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd
 
@@ -1675,7 +1676,11 @@ module Meringue
                               "log_entry_ids" => result.fetch("log_entry_ids", []))
           end
         when "errored"
-          mark_agent_errored_from_poll(poll_result)
+          if poll_result.fetch("agent_type", nil) == "head"
+            defer_head_reconcile_error_from_poll(poll_result)
+          else
+            mark_agent_errored_from_poll(poll_result)
+          end
         else
           poll_result.merge("changed" => false, "log_entry_ids" => [])
         end
@@ -1763,6 +1768,52 @@ module Meringue
         end
       end
 
+      def defer_head_reconcile_error_from_poll(poll_result)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, poll_result.fetch("agent_id"))
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless agent
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+          return mark_agent_errored_from_poll(poll_result) unless agent.fetch("type", nil) == "head"
+
+          now = timestamp
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          first_error_at = metadata.fetch("first_reconcile_error_at", nil) || now
+          error_count = metadata.fetch("reconcile_error_count", 0).to_i + 1
+
+          return mark_agent_errored_from_poll(poll_result) unless head_reconcile_grace_active?(first_error_at, now)
+
+          agent["status"] = "working"
+          agent["updated_at"] = now
+          agent["harness_metadata"] = metadata.merge(
+            "first_reconcile_error_at" => first_error_at,
+            "last_reconcile_error_at" => now,
+            "reconcile_error_count" => error_count,
+            "last_reconcile_error_class" => poll_result.dig("error", "class"),
+            "last_reconcile_error_message" => poll_result.dig("error", "message")
+          ).compact
+
+          log_ids = []
+          if error_count == 1
+            log_ids = append_log(
+              state,
+              source_type: "head",
+              source_id: agent.fetch("id"),
+              level: "warning",
+              message: "Head #{agent.fetch("id")} had a transient Pi reconciliation error; keeping it working during the startup grace window.",
+              details: poll_result.fetch("error", {}).merge(
+                "grace_seconds" => HEAD_RECONCILE_ERROR_GRACE_SECONDS,
+                "first_reconcile_error_at" => first_error_at
+              )
+            )
+          end
+
+          touch_state!(state, now)
+          store.save(state)
+          poll_result.merge("state" => "working", "changed" => true, "deferred" => true, "log_entry_ids" => log_ids)
+        end
+      end
+
       def mark_agent_errored_from_poll(poll_result)
         synchronized_state do
           state = normalized_state
@@ -1801,6 +1852,12 @@ module Meringue
         end
       end
 
+      def head_reconcile_grace_active?(first_error_at, now)
+        (Time.iso8601(now) - Time.iso8601(first_error_at.to_s)) < HEAD_RECONCILE_ERROR_GRACE_SECONDS
+      rescue ArgumentError, TypeError
+        false
+      end
+
       def completed_session?(session_ref)
         metadata = session_ref.fetch("metadata", {}) || {}
         pi_state = metadata.fetch("pi_state", {}) || {}
@@ -1834,7 +1891,12 @@ module Meringue
           metadata,
           "cwd" => session_ref.fetch("cwd", metadata.fetch("cwd", nil)),
           "is_streaming" => session_ref.fetch("is_streaming", false),
-          "last_event_at" => session_ref.fetch("last_event_at", nil)
+          "last_event_at" => session_ref.fetch("last_event_at", nil),
+          "first_reconcile_error_at" => nil,
+          "last_reconcile_error_at" => nil,
+          "reconcile_error_count" => nil,
+          "last_reconcile_error_class" => nil,
+          "last_reconcile_error_message" => nil
         ).compact
       end
 
