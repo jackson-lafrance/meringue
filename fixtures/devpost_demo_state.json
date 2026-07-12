@@ -239,8 +239,14 @@
     }
   ],
   "conversation": {
-    "messages": [],
-    "next_message_id": 0
+    "messages": [
+      {
+        "id": 1,
+        "role": "meringue",
+        "text": "Demo state loaded. This resettable snapshot gives the dashboard a real story before the live prompts start: Meringue has already used Meringue to improve itself, and .config shows a second local project. The seeded completed workers are demo receipts; anything you ask next still goes through fresh heads, validated kernel commands, and real worker sessions."
+      }
+    ],
+    "next_message_id": 1
   },
   "counters": {
     "projects": 2,

@@ -25,6 +25,8 @@ The seeded state preloads:
 
 It intentionally does not preload SimplyLift, so the demo can still show Meringue discovering/registering another project during the live flow.
 
+The conversation pane also starts with a short explainer message that frames these seeded workers as demo receipts and reminds the presenter that new prompts still run through fresh heads, validated kernel commands, and real worker sessions.
+
 ## Reset before a new recording or live walkthrough
 
 ```bash
