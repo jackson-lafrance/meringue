@@ -240,6 +240,7 @@ The `questions` array should contain clarifying questions only when ambiguity wo
 Workers are real harness sessions. For the MVP, that means real Pi sessions.
 They run in a specific workspace decided by the kernel from the head agent's proposed issue/project context.
 The preferred worker workspace is a dedicated git worktree so multiple workers/subagents can edit concurrently without trampling the same checkout.
+Workers do not directly interface with the user, so normal implementation and delivery privileges are pre-approved by the assigned issue: when requested they should edit files, use a separate branch/worktree, commit, push, and open or update a PR without asking for additional permission. They should still inspect git status and repository instructions before editing, avoid overwriting unrelated active work, and report true blockers such as missing credentials/auth, remote setup problems, branch/worktree collisions, unrelated work that would be overwritten, or unsafe/destructive operations.
 They are attached to one specific issue, but multiple agents can be attached to one issue.
 They may follow up, but should not be used many times.
 They should automatically be pruned if they complete over 50% context full.
