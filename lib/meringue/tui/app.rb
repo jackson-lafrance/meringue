@@ -52,6 +52,7 @@ module Meringue
         @next_message_id = 0
         @pending_count = 0
         @agent_tree_navigation_active = false
+        @quit_requested = false
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = nil
         @focused_pane = "chat"
@@ -90,6 +91,7 @@ module Meringue
         state_provider ||= -> { state || State::Models.empty_state }
         return render_once(compose_state(state_provider, "")) unless terminal.interactive?
 
+        @quit_requested = false
         input_buffer = +""
         input_cursor = 0
         slash_suggestion_index = 0
@@ -119,6 +121,7 @@ module Meringue
                 on_submit,
                 current_state
               )
+              break if @quit_requested
             end
           end
         end
@@ -450,6 +453,7 @@ module Meringue
         return handle_local_jump_command(text, state) if jump_command?(text)
         return handle_local_jumpr_command(text, state) if jumpr_command?(text)
         return handle_local_keybind_command if keybind_command?(text)
+        return handle_local_quit_command if quit_command?(text)
 
         false
       end
@@ -479,10 +483,15 @@ module Meringue
         true
       end
 
+      def handle_local_quit_command
+        @quit_requested = true
+        true
+      end
+
       def keybinding_help_text
         <<~TEXT.strip
           Keybindings:
-          Global: Ctrl-D quits; Ctrl-C clears input or quits when input is empty; Esc cancels jump/PR navigation mode.
+          Global: /quit or Ctrl-D quits; Ctrl-C clears input or quits when input is empty; Esc cancels jump/PR navigation mode.
           Focus: click a dashboard section to focus it; Tab/Ctrl-Tab moves focus forward; Shift-Tab moves focus backward; arrows, PageUp/PageDown, and mouse wheel scroll the focused pane.
           Chat: Enter sends or applies the selected slash completion; Shift-Enter inserts a newline; arrows move the cursor; Home/Ctrl-A and End/Ctrl-E jump within a line; Alt/Ctrl-Left and Alt/Ctrl-Right move by word; Backspace/Delete edit characters; Alt/Ctrl-Backspace, Ctrl-W, and Alt/Ctrl-Delete edit words.
           Slash commands: type / for suggestions; Tab completes; Up/Down changes the selected suggestion.
@@ -502,6 +511,10 @@ module Meringue
 
       def keybind_command?(text)
         text == "/keybind"
+      end
+
+      def quit_command?(text)
+        text == "/quit"
       end
 
       def local_navigation_command_without_id?(input_buffer)
