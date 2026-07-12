@@ -46,9 +46,10 @@ Start jump mode with `/jump` or by focusing the agent tree and pressing `Enter`.
 
 ## PR navigation
 
+Agents with an open pull request are marked `↗ PR` in the AgentTree.
 Start PR navigation with `/jumpr`.
 
-- `Up` / `Down` / `Left` / `Right`: select an agent with an attached PR.
+- `Up` / `Down` / `Left` / `Right`: select an agent with an open PR.
 - `Enter`: open the selected PR.
 - `p`: also opens the selected PR.
 - `Esc`: cancel PR navigation.

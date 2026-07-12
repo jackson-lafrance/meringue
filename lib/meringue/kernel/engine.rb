@@ -79,7 +79,7 @@ module Meringue
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "TUI local: open an agent harness session in Alacritty, or navigate the AgentTree when no id is provided."],
-        ["/jumpr [agent_id]", "TUI local: open an agent pull request, or navigate agents with attached PRs when no id is provided."],
+        ["/jumpr [agent_id]", "TUI local: open an agent pull request, or navigate agents with open PRs when no id is provided."],
         ["/keybind", "TUI local: show all keybindings."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
