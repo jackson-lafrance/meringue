@@ -86,6 +86,7 @@ Before changing files:
 Before finishing:
 - Commit only the task's intended changes from that task's worktree.
 - Push the task branch and open a pull request.
+- Include the PR description's testing section with exact reviewer commands for manually testing the change, including the task worktree path, a `cd <worktree>` command, and the command to run or open the changed slice.
 - Include the PR link in the final response.
 - If the PR cannot be opened because of missing auth, network access, or unavailable tooling, report the exact blocker and provide the PR title, description, and command the user can run.
 
