@@ -87,7 +87,15 @@ module Meringue
         ready = IO.select([input], nil, nil, timeout)
         return nil unless ready
 
-        input.getch
+        key = input.getch
+        return key unless key == "\e"
+
+        sequence = key.dup
+        while IO.select([input], nil, nil, 0.001)
+          sequence << input.getch
+          break if sequence.length >= 3
+        end
+        sequence
       end
 
       private
