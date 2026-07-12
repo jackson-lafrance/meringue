@@ -15,6 +15,8 @@ module Meringue
 
         Before editing, inspect the repository status and active instructions. Avoid overwriting unrelated active work. Prefer a separate task branch for git-backed projects, commit only the assigned issue's changes, and open a pull request when requested and the environment allows.
 
+        Use human-facing delivery names. Branch names, pull request titles, and pull request metadata should be derived from the assigned issue title or requested change, not from Meringue agent ids, worker ids, Pi ids, or subagent implementation details. If a unique suffix is needed, use a short opaque suffix rather than an orchestration id.
+
         Report true blockers instead of asking for routine approval: missing credentials, authentication or authorization failures, missing or invalid remotes, branch/worktree collisions, unrelated uncommitted work that would be overwritten, or unsafe/destructive operations.
       PROMPT
       WORKER_RESUME_PROMPT = <<~PROMPT.freeze
@@ -960,7 +962,8 @@ module Meringue
             project: project,
             issue: issue,
             requested_workspace_path: requested_workspace_path,
-            preview_agent_id: preview_worker_id(state, issue.fetch("id"))
+            preview_agent_id: preview_worker_id(state, issue.fetch("id")),
+            task_title: worker_display_title(worker_title, issue)
           )
           return rejected_result(command_id, command_type, "Worker workspace is invalid.", workspace.fetch("errors")) unless workspace.fetch("errors").empty?
 
@@ -970,7 +973,8 @@ module Meringue
             project: project,
             issue: issue,
             requested_workspace_path: requested_workspace_path,
-            preview_agent_id: agent_id
+            preview_agent_id: agent_id,
+            task_title: worker_display_title(worker_title, issue)
           )
           touch_state!(state, now)
           store.save(state)
@@ -991,7 +995,7 @@ module Meringue
             cwd: reservation.fetch("workspace").fetch("workspace_path"),
             prompt: prompt.to_s,
             system_prompt: worker_system_prompt(reservation.fetch("issue")),
-            session_name: worker_session_name(reservation.fetch("agent_id"), reservation.fetch("issue"), worker_title: worker_title)
+            session_name: worker_session_name(reservation.fetch("issue"), worker_title: worker_title)
           )
         rescue StandardError => e
           return synchronized_state do
@@ -1192,7 +1196,7 @@ module Meringue
         agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("killed_at" => now)
       end
 
-      def resolve_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:)
+      def resolve_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:, task_title:)
         if present_string(requested_workspace_path)
           expanded_path = File.expand_path(requested_workspace_path.to_s)
           errors = Dir.exist?(expanded_path) ? [] : ["workspace_path must be an existing directory"]
@@ -1212,7 +1216,8 @@ module Meringue
           project_root: project.fetch("root_path"),
           project_id: project.fetch("id"),
           issue_id: issue.fetch("id"),
-          agent_id: preview_agent_id
+          agent_id: preview_agent_id,
+          task_title: task_title
         )
 
         if plan.fetch("created", false) && Dir.exist?(plan.fetch("workspace_path"))
@@ -1248,10 +1253,17 @@ module Meringue
         PROMPT
       end
 
-      def worker_session_name(agent_id, issue, worker_title: nil)
-        title = worker_display_title(worker_title, issue).to_s.strip.gsub(/\s+/, " ")
-        title = "worker" if title.empty?
-        "#{agent_id} #{title}"[0, 96]
+      def worker_session_name(issue, worker_title: nil)
+        title = human_delivery_title(worker_display_title(worker_title, issue))
+        title = "Task" if title.empty?
+        title[0, 96]
+      end
+
+      def human_delivery_title(value)
+        value.to_s.gsub(/\bP\d+(?:-I\d+)?(?:-W\d+)?\b/i, " ")
+             .gsub(/\b[HQ]\d+\b/i, " ")
+             .strip
+             .gsub(/\s+/, " ")
       end
 
       def worker_display_title(worker_title, issue)
