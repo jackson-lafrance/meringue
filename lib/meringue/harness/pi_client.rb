@@ -298,7 +298,7 @@ module Meringue
 
       def session_file_summary(session_ref)
         path = session_file_path(session_ref)
-        raise ProcessNotFoundError, "Pi session file is missing for #{session_ref.inspect}" unless path && File.file?(path)
+        raise ProcessNotFoundError, "Pi session file is missing for #{session_ref_summary(session_ref)}" unless path && File.file?(path)
 
         summary = {
           "session_file" => path,
@@ -355,7 +355,19 @@ module Meringue
         session_id = session_ref["session_id"] || session_ref[:session_id]
         return session_id if present?(session_id)
 
-        raise ProcessNotFoundError, "Pi session cannot be resumed without a session file or session id: #{session_ref.inspect}"
+        raise ProcessNotFoundError, "Pi session cannot be resumed without a session file or session id: #{session_ref_summary(session_ref)}"
+      end
+
+      def session_ref_summary(session_ref)
+        metadata = session_ref["metadata"] || session_ref[:metadata] || {}
+        {
+          "pid" => session_ref["pid"] || session_ref[:pid],
+          "session_id" => session_ref["session_id"] || session_ref[:session_id],
+          "session_file" => session_ref["session_file"] || session_ref[:session_file],
+          "cwd" => session_ref["cwd"] || session_ref[:cwd],
+          "kind" => metadata["kind"] || metadata[:kind],
+          "session_name" => metadata["session_name"] || metadata[:session_name]
+        }.compact
       end
 
       def assistant_text_from_message(record)

@@ -30,6 +30,7 @@ module Meringue
         Do not include markdown, prose, code fences, or tool calls.
       PROMPT
       PULL_REQUEST_URL_PATTERN = /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+(?:[\/?#][^\s<>"'\])}]*)?/.freeze
+      ERROR_MESSAGE_MAX_BYTES = 2_000
 
       COMMAND_ALIASES = {
         "add_project" => "AddProject",
@@ -124,11 +125,12 @@ module Meringue
         end
       rescue StandardError => e
         synchronized_state do
+          error = error_payload(e)
           failed_result(
             command_id,
             command_type || "Unknown",
-            "Kernel command failed: #{e.message}",
-            [e.class.name, e.message]
+            "Kernel command failed: #{error.fetch("message")}",
+            [error.fetch("class"), error.fetch("message")]
           )
         end
       end
@@ -287,7 +289,8 @@ module Meringue
           (prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
         )
       rescue StandardError => e
-        failed_result(command_id, command_type, "Session reconciliation failed: #{e.message}", [e.class.name, e.message])
+        error = error_payload(e)
+        failed_result(command_id, command_type, "Session reconciliation failed: #{error.fetch("message")}", [error.fetch("class"), error.fetch("message")])
       end
 
       private
@@ -1673,19 +1676,20 @@ module Meringue
           return unless head
 
           now = timestamp
+          error_info = error_payload(error)
           head["status"] = "errored"
           head["updated_at"] = now
           head["harness_metadata"] = (head.fetch("harness_metadata", {}) || {}).merge(
-            "error_class" => error.class.name,
-            "error_message" => error.message
+            "error_class" => error_info.fetch("class"),
+            "error_message" => error_info.fetch("message")
           )
           append_log(
             state,
             source_type: "head",
             source_id: head_id,
             level: "error",
-            message: "Head #{head_id} failed: #{error.message}",
-            details: { "class" => error.class.name }
+            message: "Head #{head_id} failed: #{error_info.fetch("message")}",
+            details: { "class" => error_info.fetch("class") }
           )
           touch_state!(state, now)
           store.save(state)
@@ -1931,7 +1935,7 @@ module Meringue
           "agent_id" => agent.fetch("id", nil),
           "agent_type" => agent.fetch("type", nil),
           "state" => "errored",
-          "error" => { "class" => e.class.name, "message" => e.message },
+          "error" => error_payload(e),
           "reconcile" => reconcile_error_model(agent, e)
         }
       end
@@ -2159,7 +2163,7 @@ module Meringue
           "state" => state,
           "agent_type" => agent.fetch("type", nil),
           "error_class" => error.class.name,
-          "error_message" => error.message
+          "error_message" => sanitized_error_message(error)
         }
       end
 
@@ -2187,7 +2191,7 @@ module Meringue
             "resume_attempt_count" => attempt,
             "resume_attempted_at" => timestamp,
             "original_error_class" => original_error.class.name,
-            "original_error_message" => original_error.message
+            "original_error_message" => sanitized_error_message(original_error)
           }
         }
       rescue StandardError => resume_error
@@ -2195,7 +2199,7 @@ module Meringue
           "agent_id" => agent.fetch("id", nil),
           "agent_type" => "worker",
           "state" => "errored",
-          "error" => { "class" => resume_error.class.name, "message" => resume_error.message },
+          "error" => error_payload(resume_error),
           "reconcile" => worker_resume_failed_reconcile_model(agent, original_error, resume_error, attempt)
         }
       end
@@ -2214,9 +2218,9 @@ module Meringue
           "resume_attempts_remaining" => [WORKER_RECONCILE_RESUME_MAX_ATTEMPTS - attempt, 0].max,
           "resume_attempted_at" => timestamp,
           "original_error_class" => original_error.class.name,
-          "original_error_message" => original_error.message,
+          "original_error_message" => sanitized_error_message(original_error),
           "error_class" => resume_error.class.name,
-          "error_message" => resume_error.message
+          "error_message" => sanitized_error_message(resume_error)
         }
       end
 
@@ -2579,6 +2583,23 @@ module Meringue
 
       def blank?(value)
         value.nil? || value.to_s.strip.empty?
+      end
+
+      def error_payload(error)
+        {
+          "class" => error.class.name,
+          "message" => sanitized_error_message(error)
+        }
+      end
+
+      def sanitized_error_message(error)
+        truncate_for_state(error.message.to_s, ERROR_MESSAGE_MAX_BYTES)
+      end
+
+      def truncate_for_state(text, max_bytes)
+        return text if text.bytesize <= max_bytes
+
+        text.byteslice(0, max_bytes).to_s.scrub + "\n… [truncated #{text.bytesize - max_bytes} bytes]"
       end
 
       def timestamp
