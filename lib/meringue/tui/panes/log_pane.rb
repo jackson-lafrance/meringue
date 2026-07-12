@@ -27,12 +27,14 @@ module Meringue
           return [[["No logs yet.", Style::MUTED]]] if logs.empty?
 
           logs.sort_by { |entry| [entry["timestamp"].to_s, entry["id"].to_s] }.map do |entry|
-            [
+            line = [
               [timestamp(entry), Style::DIM],
-              ["  #{level(entry)}", level_style(entry)],
-              ["  #{source(entry)}", Style::MUTED],
-              ["  #{entry.fetch("message", "")}", Style::TEXT]
+              ["  #{level(entry)}", level_style(entry)]
             ]
+            log_source = source(entry)
+            line << ["  #{log_source}", Style::MUTED] if log_source
+            line << ["  #{entry.fetch("message", "")}", Style::TEXT]
+            line
           end
         end
 

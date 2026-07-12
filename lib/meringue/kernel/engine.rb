@@ -29,12 +29,28 @@ module Meringue
         "answer_question" => "AnswerQuestion",
         "modify_issue" => "ModifyIssue",
         "prompt_agent" => "PromptAgent",
+        "kill" => "Kill",
+        "help" => "Help",
+        "get_state" => "GetState",
+        "list_questions" => "ListQuestions",
         "reconcile_sessions" => "ReconcileSessions",
         "clear" => "ClearState",
         "clear_state" => "ClearState",
         "list_all" => "ListAll"
       }.freeze
 
+      HELP_COMMANDS = [
+        ["/help", "Show slash command help."],
+        ["/project add <path> [name]", "Register a project directory."],
+        ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
+        ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
+        ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker harness session."],
+        ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
+        ["/tree", "Show the current AgentTree state."],
+        ["/state", "Show the raw Meringue state."],
+        ["/questions", "List questions and their statuses."],
+        ["/answer <question_id> \"<answer>\"", "Answer a pending question."]
+      ].freeze
       TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
 
       attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd
@@ -92,6 +108,14 @@ module Meringue
         case command_type
         when "ListAll"
           accepted_result(command_id, command_type, nil, "Loaded Meringue state.", store.load, [])
+        when "GetState"
+          get_state(command_id, command_type)
+        when "ListQuestions"
+          list_questions(command_id, command_type)
+        when "Help"
+          help(command_id, command_type)
+        when "InvalidSlashCommand"
+          invalid_slash_command(command_id, command_type, payload)
         when "AddProject"
           add_project(command_id, command_type, payload)
         when "CreateIssue"
@@ -102,6 +126,8 @@ module Meringue
           spawn_worker(command_id, command_type, payload)
         when "PromptAgent"
           prompt_agent(command_id, command_type, payload)
+        when "Kill"
+          kill(command_id, command_type, payload)
         when "ApplyHeadResult"
           apply_head_result(command_id, command_type, payload)
         when "AskQuestion"
@@ -183,13 +209,38 @@ module Meringue
         end
       end
 
+      def record_user_kernel_command(input:, commands: [])
+        synchronized_state do
+          state = normalized_state
+          command_types = Array(commands).filter_map do |command|
+            next unless command.respond_to?(:[])
+
+            command["type"] || command[:type] || command["command_type"] || command[:command_type]
+          end
+          log_ids = append_log(
+            state,
+            source_type: "user",
+            source_id: nil,
+            level: "info",
+            message: "User ran kernel command: #{input.to_s}",
+            details: { "input" => input.to_s, "command_types" => command_types }
+          )
+          touch_state!(state)
+          store.save(state)
+          log_ids
+        end
+      end
+
       def reconcile_sessions(command_id: nil, command_type: "ReconcileSessions")
+        prune_result = prune_killed_agents
         agents = synchronized_state do
           normalized_state.fetch("agents").select { |agent| reconcile_candidate?(agent) }.map { |agent| deep_copy(agent) }
         end
 
         poll_results = agents.map { |agent| poll_agent_session(agent) }
         applied_results = poll_results.map { |poll_result| apply_poll_result(poll_result) }
+        changed_count = applied_results.count { |result| result.fetch("changed", false) }
+        changed_count += 1 if prune_result.fetch("changed", false)
         accepted_result(
           command_id,
           command_type,
@@ -197,16 +248,152 @@ module Meringue
           "Reconciled #{agents.length} Pi-backed agent session(s).",
           {
             "checked_count" => agents.length,
-            "changed_count" => applied_results.count { |result| result.fetch("changed", false) },
+            "changed_count" => changed_count,
+            "pruned_agent_ids" => prune_result.fetch("removed_agent_ids", []),
             "poll_results" => applied_results
           },
-          applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }.uniq
+          (prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
         )
       rescue StandardError => e
         failed_result(command_id, command_type, "Session reconciliation failed: #{e.message}", [e.class.name, e.message])
       end
 
       private
+
+      def prune_killed_agents
+        synchronized_state do
+          state = normalized_state
+          killed_agents = state.fetch("agents").select { |agent| agent.fetch("status", nil) == "killed" }
+          removed_agent_ids = killed_agents.map { |agent| agent.fetch("id") }
+          return { "changed" => false, "removed_agent_ids" => [], "log_entry_ids" => [] } if removed_agent_ids.empty?
+
+          state["agents"] = state.fetch("agents").reject { |agent| removed_agent_ids.include?(agent.fetch("id", nil)) }
+          state.fetch("issues").each do |issue|
+            next unless issue.key?("agent_ids")
+
+            issue["agent_ids"] = Array(issue["agent_ids"]) - removed_agent_ids
+          end
+
+          now = timestamp
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: nil,
+            level: "info",
+            message: "Removed #{removed_agent_ids.length} killed agent#{removed_agent_ids.length == 1 ? "" : "s"} from active state.",
+            details: { "removed_agent_ids" => removed_agent_ids }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          { "changed" => true, "removed_agent_ids" => removed_agent_ids, "log_entry_ids" => log_ids }
+        end
+      end
+
+      def get_state(command_id, command_type)
+        accepted_result(command_id, command_type, nil, "Loaded Meringue state.", store.load, [])
+      end
+
+      def list_questions(command_id, command_type)
+        state = normalized_state
+        questions = state.fetch("questions", [])
+        accepted_result(
+          command_id,
+          command_type,
+          nil,
+          "Loaded #{questions.length} question#{questions.length == 1 ? "" : "s"}.",
+          questions,
+          []
+        )
+      end
+
+      def help(command_id, command_type)
+        accepted_result(
+          command_id,
+          command_type,
+          nil,
+          "Loaded slash command help.",
+          HELP_COMMANDS.map { |usage, description| { "usage" => usage, "description" => description } },
+          []
+        )
+      end
+
+      def invalid_slash_command(command_id, command_type, payload)
+        message = value_at(payload, "message") || "Invalid slash command."
+        usage = value_at(payload, "usage")
+        errors = [message.to_s]
+        errors << "Try #{usage}" if present_string(usage)
+        rejected_result(command_id, command_type, message.to_s, errors)
+      end
+
+      def prompt_agent(command_id, command_type, payload)
+        agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
+        prompt = value_at(payload, "prompt", "Prompt", "message", "Message")
+        mode = value_at(payload, "mode", "Mode") || "normal"
+        errors = []
+
+        errors << "agent_id is required" if blank?(agent_id)
+        errors << "prompt is required" if blank?(prompt)
+        return rejected_result(command_id, command_type, "Agent was not prompted.", errors) unless errors.empty?
+
+        state = normalized_state
+        agent = find_agent(state, agent_id)
+        return rejected_result(command_id, command_type, "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
+        return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
+        return rejected_result(command_id, command_type, "Agent #{agent_id} has no harness session.", ["agent_has_no_harness_session"]) if blank?(agent.fetch("harness", nil))
+        return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"]) if agent.fetch("status", nil) == "killed"
+
+        session_ref = session_ref_from_agent(agent)
+        updated_ref = harness_client.prompt_session(session_ref, prompt.to_s, mode: mode.to_s)
+        now = timestamp
+        apply_session_ref_to_agent!(agent, updated_ref)
+        agent["status"] = "working" if agent.fetch("status", nil) == "idle"
+        agent["updated_at"] = now
+
+        log_ids = append_log(
+          state,
+          source_type: "worker",
+          source_id: agent.fetch("id"),
+          level: "info",
+          message: "Prompted agent #{agent.fetch("id")}.",
+          details: { "mode" => mode.to_s, "prompt" => prompt.to_s }
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, agent.fetch("id"), "Prompted agent #{agent.fetch("id")}.", agent, log_ids)
+      end
+
+      def kill(command_id, command_type, payload)
+        target_id = value_at(payload, "target_id", "TargetID", "targetId", "id")
+        return rejected_result(command_id, command_type, "Target was not killed.", ["target_id is required"]) if blank?(target_id)
+
+        state = normalized_state
+        target = find_agent(state, target_id) || find_issue(state, target_id) || find_project(state, target_id)
+        return rejected_result(command_id, command_type, "Target #{target_id} does not exist.", ["target_not_found"]) unless target
+
+        now = timestamp
+        killed_agent_ids = kill_target_in_state!(state, target_id.to_s, now)
+        killed_agent_ids.each do |agent_id|
+          agent = find_agent(state, agent_id)
+          next unless agent
+
+          kill_session_safely(session_ref_from_agent(agent)) if present_string(agent.fetch("harness", nil))
+        end
+
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: target_id.to_s,
+          level: "info",
+          message: "Killed #{target_id}.",
+          details: { "target_id" => target_id.to_s, "killed_agent_ids" => killed_agent_ids }
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        result = find_agent(state, target_id) || find_issue(state, target_id) || find_project(state, target_id)
+        accepted_result(command_id, command_type, target_id.to_s, "Killed #{target_id}.", result, log_ids)
+      end
 
       def spawn_head(command_id, command_type, payload)
         user_message = value_at(payload, "user_message", "UserMessage", "message")
@@ -925,6 +1112,73 @@ module Meringue
           "created_at" => now,
           "updated_at" => now
         }
+      end
+
+      def session_ref_from_agent(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        {
+          "harness" => agent.fetch("harness", nil),
+          "pid" => agent.fetch("pid", nil),
+          "cwd" => metadata.fetch("cwd", agent.fetch("workspace_path", nil)),
+          "session_id" => agent.fetch("harness_session_id", nil),
+          "session_file" => agent.fetch("harness_session_file", nil),
+          "is_streaming" => metadata.fetch("is_streaming", false),
+          "last_event_at" => metadata.fetch("last_event_at", nil),
+          "metadata" => metadata
+        }
+      end
+
+      def apply_session_ref_to_agent!(agent, session_ref)
+        metadata = session_ref.fetch("metadata", {}) || {}
+        agent["pid"] = session_ref.fetch("pid", agent.fetch("pid", nil))
+        agent["harness_session_id"] = session_ref.fetch("session_id", agent.fetch("harness_session_id", nil))
+        agent["harness_session_file"] = session_ref.fetch("session_file", agent.fetch("harness_session_file", nil))
+        agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+          metadata.merge(
+            "cwd" => session_ref.fetch("cwd", metadata.fetch("cwd", agent.fetch("workspace_path", nil))),
+            "is_streaming" => session_ref.fetch("is_streaming", metadata.fetch("is_streaming", false)),
+            "last_event_at" => session_ref.fetch("last_event_at", metadata.fetch("last_event_at", nil))
+          ).compact
+        )
+      end
+
+      def kill_target_in_state!(state, target_id, now)
+        if (agent = find_agent(state, target_id))
+          mark_agent_killed!(agent, now)
+          return [agent.fetch("id")]
+        end
+
+        if (issue = find_issue(state, target_id))
+          return kill_issue_subtree!(state, issue, now)
+        end
+
+        project = find_project(state, target_id)
+        return [] unless project
+
+        project["status"] = "killed"
+        project["updated_at"] = now
+        state.fetch("issues").select { |issue| issue.fetch("project_id", nil) == project.fetch("id") }
+             .flat_map { |issue| kill_issue_subtree!(state, issue, now) }
+             .uniq
+      end
+
+      def kill_issue_subtree!(state, issue, now)
+        issue["status"] = "killed"
+        issue["updated_at"] = now
+        child_agent_ids = state.fetch("agents").select { |agent| agent.fetch("issue_id", nil) == issue.fetch("id") }.map do |agent|
+          mark_agent_killed!(agent, now)
+          agent.fetch("id")
+        end
+        child_issue_agent_ids = state.fetch("issues")
+                                     .select { |candidate| candidate.fetch("parent_issue_id", nil) == issue.fetch("id") }
+                                     .flat_map { |child_issue| kill_issue_subtree!(state, child_issue, now) }
+        (child_agent_ids + child_issue_agent_ids).uniq
+      end
+
+      def mark_agent_killed!(agent, now)
+        agent["status"] = "killed"
+        agent["updated_at"] = now
+        agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("killed_at" => now)
       end
 
       def resolve_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:)
