@@ -29,6 +29,7 @@ module Meringue
         canvas = Canvas.new(width: width, height: height)
 
         metrics = layout_metrics(width, height, state)
+        agent_tree_lines = agent_tree_pane.lines(state, width: metrics.fetch(:sidebar_width) - 4)
         draw_pane(
           canvas,
           metrics.fetch(:sidebar_x),
@@ -36,7 +37,9 @@ module Meringue
           metrics.fetch(:sidebar_width),
           metrics.fetch(:top_height),
           "agent tree",
-          agent_tree_pane.lines(state, width: metrics.fetch(:sidebar_width) - 4)
+          agent_tree_lines,
+          overflow: :agent_tree,
+          scroll_offset: agent_tree_scroll_offset(state, agent_tree_lines, metrics.fetch(:top_height) - 2)
         )
         draw_pane(
           canvas,
@@ -174,17 +177,54 @@ module Meringue
         [desired, max_log_height].min
       end
 
-      def draw_pane(canvas, x, y, width, height, title, lines, active: false, overflow: :head)
+      def agent_tree_scroll_offset(state, lines, content_height)
+        content_height = content_height.to_i
+        return 0 if content_height <= 0 || lines.length <= content_height
+
+        max_offset = lines.length - content_height
+        selected_index = selected_agent_tree_line_index(lines)
+        if AgentTreeNavigation.active?(state) && selected_index
+          return (selected_index - (content_height / 2)).clamp(0, max_offset)
+        end
+
+        tick = (state.fetch("_agent_tree_scroll", {}) || {}).fetch("tick", 0).to_i
+        cycle = [max_offset * 2, 1].max
+        position = tick % cycle
+        position <= max_offset ? position : cycle - position
+      end
+
+      def selected_agent_tree_line_index(lines)
+        selected_styles = [
+          Style::AGENT_TREE_SELECTED,
+          Style::AGENT_TREE_SELECTED_DIM,
+          Style::AGENT_TREE_SELECTED_STATUS
+        ]
+        lines.index do |line|
+          Array(line).any? { |segment| segment.is_a?(Array) && selected_styles.include?(segment[1]) }
+        end
+      end
+
+      def draw_pane(canvas, x, y, width, height, title, lines, active: false, overflow: :head, scroll_offset: 0)
         border_style = active ? Style::BORDER_ACTIVE : Style::BORDER
         canvas.draw_box(x, y, width, height, title: title, style: border_style, title_style: Style::PANEL_TITLE)
         content_width = width - 4
         content_height = height - 2
         return if content_width <= 0 || content_height <= 0
 
-        if overflow == :tail
+        case overflow
+        when :tail
           draw_tail_content(canvas, x, y, content_width, content_height, lines)
+        when :agent_tree
+          draw_scroll_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset)
         else
           draw_head_content(canvas, x, y, height, content_width, content_height, lines)
+        end
+      end
+
+      def draw_scroll_content(canvas, x, y, content_width, content_height, lines, scroll_offset:)
+        offset = scroll_offset.to_i.clamp(0, [lines.length - content_height, 0].max)
+        lines.drop(offset).first(content_height).each_with_index do |line, index|
+          draw_line(canvas, x + 2, y + 1 + index, content_width, line)
         end
       end
 
