@@ -4,38 +4,51 @@ module Meringue
   module Heads
     class FakeRunner < Runner
       def run(user_message:, snapshot:, context: nil, question_id: nil)
-        command = build_command(user_message: user_message, snapshot: snapshot, context: context)
+        commands = build_commands(user_message: user_message, snapshot: snapshot, context: context)
 
         {
           "title" => title_from(user_message),
-          "summary" => "Fake head generated a deterministic #{command.fetch("type")} command from the prompt.",
-          "commands" => [command],
+          "summary" => "Fake head proposed #{commands.length} deterministic kernel command(s): create an issue and spawn a worker.",
+          "commands" => commands,
           "questions" => []
         }
       end
 
       private
 
-      def build_command(user_message:, snapshot:, context:)
+      def build_commands(user_message:, snapshot:, context:)
         project = snapshot.fetch("projects", []).first
+        commands = []
 
-        return add_project_command(context) unless project
+        unless project
+          project_id = next_project_id(snapshot)
+          commands << add_project_command(context)
+        end
 
-        create_issue_command(
-          project_id: project.fetch("id"),
-          title: title_from(user_message),
+        project_id ||= project.fetch("id")
+        issue_id = next_issue_id(snapshot, project_id)
+        title = title_from(user_message)
+        commands << create_issue_command(
+          project_id: project_id,
+          title: title,
           user_message: user_message
         )
+        commands << spawn_worker_command(
+          issue_id: issue_id,
+          title: title,
+          user_message: user_message
+        )
+        commands
       end
 
       def add_project_command(context)
-        cwd = context&.cwd || Dir.pwd
+        project_root = default_project_root(context&.cwd || Dir.pwd)
 
         {
           "type" => "AddProject",
           "payload" => {
-            "path" => cwd,
-            "name" => File.basename(cwd)
+            "path" => project_root,
+            "name" => File.basename(project_root)
           }
         }
       end
@@ -46,10 +59,65 @@ module Meringue
           "payload" => {
             "project_id" => project_id,
             "title" => title,
-            "description" => "Fake issue generated from user prompt:\n\n#{user_message}\n\nThis manual loop only prints the proposed command; the kernel has not applied it.",
+            "description" => "Fake issue generated from user prompt:\n\n#{user_message}\n\nThe simple loop will ask the kernel to validate and apply this command before spawning the worker.",
             "parent_issue_id" => nil
           }
         }
+      end
+
+      def spawn_worker_command(issue_id:, title:, user_message:)
+        {
+          "type" => "SpawnWorker",
+          "payload" => {
+            "issue_id" => issue_id,
+            "prompt" => "Work on issue '#{title}' from this user request:\n\n#{user_message}\n\nKeep the change focused and summarize what you did.",
+            "workspace_path" => nil
+          }
+        }
+      end
+
+      def next_project_id(snapshot)
+        next_number = snapshot.fetch("counters", {}).fetch("projects", max_project_number(snapshot)).to_i + 1
+        "P#{next_number}"
+      end
+
+      def next_issue_id(snapshot, project_id)
+        issue_counters = snapshot.fetch("counters", {}).fetch("issues_by_project", {})
+        next_number = issue_counters.fetch(project_id, max_issue_number(snapshot, project_id)).to_i + 1
+        "#{project_id}-I#{next_number}"
+      end
+
+      def default_project_root(path)
+        nearest_git_root(path) || File.expand_path(path)
+      end
+
+      def nearest_git_root(path)
+        current = File.expand_path(path.to_s)
+
+        loop do
+          return current if File.exist?(File.join(current, ".git"))
+
+          parent = File.dirname(current)
+          return nil if parent == current
+
+          current = parent
+        end
+      end
+
+      def max_project_number(snapshot)
+        snapshot.fetch("projects", []).filter_map do |project|
+          match = project.fetch("id", "").match(/\AP(\d+)\z/)
+          match && match[1].to_i
+        end.max || 0
+      end
+
+      def max_issue_number(snapshot, project_id)
+        snapshot.fetch("issues", []).filter_map do |issue|
+          next unless issue.fetch("project_id", nil) == project_id
+
+          match = issue.fetch("id", "").match(/\A#{Regexp.escape(project_id)}-I(\d+)\z/)
+          match && match[1].to_i
+        end.max || 0
       end
 
       def title_from(user_message)

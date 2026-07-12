@@ -19,9 +19,9 @@ Before choosing `AddProject`, `CreateIssue`, `SpawnWorker`, or `PromptAgent`, in
 
 Discovery must be read-only. Do not edit files, create branches or worktrees, run package installs, run generators, run formatters that write files, mutate git state, contact production/staging systems, or change Meringue JSON state directly.
 
-Prefer an already registered project when its id, name, root path, git root, or remote clearly matches the request. If a matching local repository is not registered, propose `AddProject` with the absolute repository root. If adding a new project and you cannot know the future `P#` id in the same head result, return only `AddProject` plus a concise summary, or ask a clarifying question when multiple candidate repositories match.
+Prefer an already registered project when its id, name, root path, git root, or remote clearly matches the request. For prompts like "this project", "current project", "here", or "this repo", prefer the current git root from the supplied `project_discovery.current_directory.git_root`; if there is no git root, use `cwd`. If that local repository/directory is not registered, propose `AddProject` with the absolute root before creating issues or workers.
 
-If multiple repositories are plausible and the user did not identify one clearly, ask a clarifying question instead of guessing.
+If the app was launched outside the target project, use registered projects, explicit paths/names in the prompt, and `project_discovery.candidate_search_roots` to inspect likely local repositories. If multiple repositories are plausible and the user did not identify one clearly, ask a clarifying question instead of guessing.
 
 ## Head result envelope
 
@@ -53,6 +53,15 @@ Each command in `commands` must use this shape:
 ```
 
 Use only the command names documented below unless the kernel command model is updated.
+
+When proposing a simple worker flow for an already registered project, return commands in this order:
+
+1. `CreateIssue`
+2. `SpawnWorker` for that issue
+
+If no matching project is registered and the discovered local repository/directory is the right target, propose `AddProject` first, then `CreateIssue`, then `SpawnWorker`.
+
+If `CreateIssue` targets a project created earlier in the same HeadResult, compute the new project id from `kernel_state.counters.projects` or the max existing `P<number>` and use that id in `CreateIssue.project_id`. If the worker targets an issue created earlier in the same HeadResult, compute the next issue id from `kernel_state.counters.issues_by_project[project_id]` or the max existing `I<number>` for that project, then use that id in the `SpawnWorker.issue_id` payload. The kernel validates each command in order and rejects any command whose predicted id is wrong.
 
 ## Status and level constants
 

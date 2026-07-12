@@ -8,9 +8,13 @@ module Meringue
     class Store
       DEFAULT_PATH = File.expand_path("~/.meringue/state.json")
 
+      def self.default_path
+        File.expand_path(ENV.fetch("MERINGUE_STATE_PATH", DEFAULT_PATH))
+      end
+
       attr_reader :path
 
-      def initialize(path: DEFAULT_PATH)
+      def initialize(path: self.class.default_path)
         @path = File.expand_path(path)
       end
 
