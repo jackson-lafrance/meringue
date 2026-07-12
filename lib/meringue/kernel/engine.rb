@@ -41,7 +41,7 @@ module Meringue
         response state session session_state ping pong heartbeat token text_delta
         content_delta message_delta thinking_delta stream_delta stream_chunk
       ].freeze
-      HARNESS_EVENT_LOG_PATTERN = /(agent|tool|process|error|exit|settled|start|end|complete|stop|failed)/i.freeze
+      HARNESS_EVENT_LOG_PATTERN = /(process_(?:exit|error|failed)|rpc_parse_error|error|failed|failure)/i.freeze
 
       COMMAND_ALIASES = {
         "add_project" => "AddProject",
@@ -2326,11 +2326,9 @@ module Meringue
         return nil unless event.is_a?(Hash)
 
         event = stringify_keys(event)
-        message_event = visible_harness_message_event(event)
-        return message_event if message_event
-
         event_type = event.fetch("type", "event").to_s
         return nil if HARNESS_EVENT_IGNORED_TYPES.include?(event_type)
+        return nil if internal_harness_event_type?(event_type)
         return nil unless event_type.match?(HARNESS_EVENT_LOG_PATTERN)
 
         details = compact_harness_event_details(event)
@@ -2342,30 +2340,14 @@ module Meringue
         }
       end
 
-      def visible_harness_message_event(event)
-        return nil unless event.fetch("type", nil).to_s == "message"
+      def internal_harness_event_type?(event_type)
+        normalized_type = event_type.to_s
+                                    .gsub(/([a-z])([A-Z])/, "\\1_\\2")
+                                    .tr("-", "_")
+                                    .downcase
+        return true if %w[turn message tool_execution tool_call tool_result].include?(normalized_type)
 
-        role = event.dig("message", "role").to_s
-        content = Array(event.dig("message", "content"))
-        tool_call = content.find { |part| part.is_a?(Hash) && part["type"].to_s == "toolCall" }
-        if tool_call
-          tool_call = stringify_keys(tool_call)
-          return {
-            "type" => "tool_call",
-            "label" => harness_event_first_present(tool_call, "name", "toolName", "tool_name", "id"),
-            "level" => "info",
-            "details" => compact_harness_event_details(event.merge("tool_call" => tool_call))
-          }
-        end
-
-        return nil unless role == "toolResult"
-
-        {
-          "type" => "tool_result",
-          "label" => event.dig("message", "toolCallId") || event.dig("message", "tool_call_id"),
-          "level" => "info",
-          "details" => compact_harness_event_details(event)
-        }
+        normalized_type.start_with?("turn_", "message_", "tool_execution_")
       end
 
       def compact_harness_event_details(event)
