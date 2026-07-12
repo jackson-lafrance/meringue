@@ -1,18 +1,31 @@
 # frozen_string_literal: true
 
+require "time"
+
 module Meringue
   module TUI
     class App
       DEFAULT_WIDTH = 100
       DEFAULT_HEIGHT = 32
       REFRESH_INTERVAL = 0.2
-      QUIT_KEYS = ["\u0003", "\u0004"].freeze
+      CTRL_C = "\u0003"
+      CTRL_D = "\u0004"
+      CTRL_W = "\u0017"
       BACKSPACE_KEYS = ["\u007f", "\b"].freeze
+      DELETE_KEYS = ["\e[3~"].freeze
       ENTER_KEYS = ["\r", "\n"].freeze
-      NEWLINE_KEYS = ["\e\r", "\e\n", "\e[13;2u", "\e[27;2;13~", "\e[13;2~"].freeze
+      MULTILINE_ENTER_KEYS = ["\e\r", "\e\n", "\e[13;2u", "\e[27;2;13~", "\e[13;2~"].freeze
       TAB_KEYS = ["\t"].freeze
+      LEFT_KEYS = ["\e[D"].freeze
+      RIGHT_KEYS = ["\e[C"].freeze
       UP_KEYS = ["\e[A"].freeze
       DOWN_KEYS = ["\e[B"].freeze
+      HOME_KEYS = ["\e[H", "\e[1~", "\u0001"].freeze
+      END_KEYS = ["\e[F", "\e[4~", "\u0005"].freeze
+      WORD_LEFT_KEYS = ["\eb", "\eB", "\e[1;3D", "\e[1;5D", "\e[1;9D"].freeze
+      WORD_RIGHT_KEYS = ["\ef", "\eF", "\e[1;3C", "\e[1;5C", "\e[1;9C"].freeze
+      WORD_BACKSPACE_KEYS = ["\e\u007f", "\e\b", CTRL_W].freeze
+      WORD_DELETE_KEYS = ["\ed", "\eD", "\e[3;3~", "\e[3;5~"].freeze
 
       def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil)
         @layout = layout
@@ -21,6 +34,8 @@ module Meringue
         @messages = []
         @next_message_id = 0
         @pending_count = 0
+        @conversation_event_keys = {}
+        @started_at = Time.iso8601(Time.now.utc.iso8601)
         @chat_mutex = Mutex.new
       end
 
@@ -33,6 +48,7 @@ module Meringue
         return render_once(compose_state(state_provider, "")) unless terminal.interactive?
 
         input_buffer = +""
+        input_cursor = 0
         slash_suggestion_index = 0
         terminal.with_screen do
           terminal.raw do
@@ -40,7 +56,7 @@ module Meringue
 
             loop do
               width, height = terminal.dimensions
-              current_state = compose_state(state_provider, input_buffer, slash_suggestion_index)
+              current_state = compose_state(state_provider, input_buffer, slash_suggestion_index, input_cursor)
               frame = render(current_state, width: width, height: height, color: true)
               if frame != last_frame
                 terminal.write_frame(frame)
@@ -50,7 +66,14 @@ module Meringue
               key = terminal.read_key(timeout: REFRESH_INTERVAL)
               break if quit_key?(key, input_buffer)
 
-              input_buffer, slash_suggestion_index = handle_key(key, input_buffer, slash_suggestion_index, on_submit, current_state)
+              input_buffer, input_cursor, slash_suggestion_index = handle_key(
+                key,
+                input_buffer,
+                input_cursor,
+                slash_suggestion_index,
+                on_submit,
+                current_state
+              )
             end
           end
         end
@@ -71,43 +94,111 @@ module Meringue
 
       def quit_key?(key, input_buffer)
         return false unless key
-        return true if QUIT_KEYS.include?(key)
+        return true if key == CTRL_D
+        return true if key == CTRL_C && input_buffer.empty?
 
         key == "\e" && input_buffer.empty?
       end
 
-      def handle_key(key, input_buffer, slash_suggestion_index, on_submit, state = State::Models.empty_state)
-        return [input_buffer, slash_suggestion_index] unless key
+      def handle_key(key, input_buffer, input_cursor_or_slash_index = 0, slash_index_or_on_submit = nil, on_submit_or_state = nil, state_arg = nil)
+        old_signature = !slash_index_or_on_submit.is_a?(Integer)
+        if old_signature
+          slash_suggestion_index = input_cursor_or_slash_index.to_i
+          on_submit = slash_index_or_on_submit
+          state = on_submit_or_state || State::Models.empty_state
+          buffer, _cursor, index = handle_chat_key(
+            key,
+            input_buffer,
+            input_buffer.chars.length,
+            slash_suggestion_index,
+            on_submit,
+            state,
+            legacy_slash_navigation: true
+          )
+          return [buffer, index]
+        end
+
+        handle_chat_key(
+          key,
+          input_buffer,
+          input_cursor_or_slash_index,
+          slash_index_or_on_submit,
+          on_submit_or_state,
+          state_arg || State::Models.empty_state
+        )
+      end
+
+      def handle_chat_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state, legacy_slash_navigation: false)
+        input_cursor = clamp_cursor(input_buffer, input_cursor)
+        return [input_buffer, input_cursor, slash_suggestion_index] unless key
+
+        if paste_key?(key)
+          return insert_text(input_buffer, input_cursor, paste_text(key)) + [0]
+        end
+
+        if plain_text_paste_key?(key)
+          return insert_text(input_buffer, input_cursor, key) + [0]
+        end
+
+        if legacy_slash_navigation && slash_suggestion_navigation_key?(key) && slash_suggestions_active?(input_buffer)
+          buffer, index = handle_legacy_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
+          return [buffer, buffer.chars.length, index]
+        end
 
         if slash_suggestion_key?(key) && slash_suggestions_active?(input_buffer)
-          return handle_slash_suggestion_key(key, input_buffer, slash_suggestion_index, state)
+          completion = safe_slash_completion(input_buffer, slash_suggestion_index, state)
+          return [completion, completion.chars.length, 0] if completion
         end
 
         if ENTER_KEYS.include?(key)
           completion = safe_slash_completion(input_buffer, slash_suggestion_index, state)
-          return [completion, 0] if completion
+          return [completion, completion.chars.length, 0] if completion
 
           submit_prompt(input_buffer, on_submit)
-          return [+"", 0]
+          return [+"", 0, 0]
         end
 
-        if NEWLINE_KEYS.include?(key)
-          return [input_buffer + "\n", 0]
+        if MULTILINE_ENTER_KEYS.include?(key)
+          return insert_text(input_buffer, input_cursor, "\n") + [0]
+        end
+
+        if key == CTRL_C
+          return [+"", 0, 0]
         end
 
         if BACKSPACE_KEYS.include?(key)
-          return [input_buffer[0...-1], 0]
+          return delete_backward(input_buffer, input_cursor) + [0]
         end
-        return [input_buffer, slash_suggestion_index] unless printable_key?(key)
 
-        [input_buffer + key, 0]
+        if DELETE_KEYS.include?(key)
+          return delete_forward(input_buffer, input_cursor) + [0]
+        end
+
+        if WORD_BACKSPACE_KEYS.include?(key)
+          return delete_backward_word(input_buffer, input_cursor) + [0]
+        end
+
+        if WORD_DELETE_KEYS.include?(key)
+          return delete_forward_word(input_buffer, input_cursor) + [0]
+        end
+
+        new_cursor = cursor_after_navigation(key, input_buffer, input_cursor)
+        return [input_buffer, new_cursor, slash_suggestion_index] if new_cursor != input_cursor
+
+        return [input_buffer, input_cursor, slash_suggestion_index] unless printable_key?(key)
+
+        insert_text(input_buffer, input_cursor, key) + [0]
       end
 
       def slash_suggestion_key?(key)
+        TAB_KEYS.include?(key)
+      end
+
+      def slash_suggestion_navigation_key?(key)
         TAB_KEYS.include?(key) || UP_KEYS.include?(key) || DOWN_KEYS.include?(key)
       end
 
-      def handle_slash_suggestion_key(key, input_buffer, slash_suggestion_index, state)
+      def handle_legacy_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
         records = slash_suggestion_records(input_buffer, state)
         return [input_buffer, 0] if records.empty?
 
@@ -119,6 +210,141 @@ module Meringue
         end
 
         [slash_completion_for(records.fetch(slash_suggestion_index.clamp(0, records.length - 1))), 0]
+      end
+
+      def paste_key?(key)
+        key.is_a?(Hash) && key.fetch("type", nil) == "paste"
+      end
+
+      def paste_text(key)
+        key.fetch("text", "").to_s.tr("\r", "\n")
+      end
+
+      def plain_text_paste_key?(key)
+        key.is_a?(String) && key.length > 1 && !key.start_with?("\e")
+      end
+
+      def insert_text(input_buffer, input_cursor, text)
+        normalized = text.to_s.gsub("\r\n", "\n").tr("\r", "\n")
+        chars = input_buffer.chars
+        cursor = clamp_cursor(input_buffer, input_cursor)
+        chars.insert(cursor, *normalized.chars)
+        [chars.join, cursor + normalized.length]
+      end
+
+      def delete_backward(input_buffer, input_cursor)
+        chars = input_buffer.chars
+        cursor = clamp_cursor(input_buffer, input_cursor)
+        return [input_buffer, cursor] if cursor.zero?
+
+        chars.delete_at(cursor - 1)
+        [chars.join, cursor - 1]
+      end
+
+      def delete_forward(input_buffer, input_cursor)
+        chars = input_buffer.chars
+        cursor = clamp_cursor(input_buffer, input_cursor)
+        return [input_buffer, cursor] if cursor >= chars.length
+
+        chars.delete_at(cursor)
+        [chars.join, cursor]
+      end
+
+      def delete_backward_word(input_buffer, input_cursor)
+        chars = input_buffer.chars
+        cursor = clamp_cursor(input_buffer, input_cursor)
+        start_index = previous_word_boundary(chars, cursor)
+        return [input_buffer, cursor] if start_index == cursor
+
+        chars.slice!(start_index...cursor)
+        [chars.join, start_index]
+      end
+
+      def delete_forward_word(input_buffer, input_cursor)
+        chars = input_buffer.chars
+        cursor = clamp_cursor(input_buffer, input_cursor)
+        finish_index = next_word_boundary(chars, cursor)
+        return [input_buffer, cursor] if finish_index == cursor
+
+        chars.slice!(cursor...finish_index)
+        [chars.join, cursor]
+      end
+
+      def cursor_after_navigation(key, input_buffer, input_cursor)
+        cursor = clamp_cursor(input_buffer, input_cursor)
+        chars = input_buffer.chars
+
+        return [cursor - 1, 0].max if LEFT_KEYS.include?(key)
+        return [cursor + 1, chars.length].min if RIGHT_KEYS.include?(key)
+        return cursor_up(chars, cursor) if UP_KEYS.include?(key)
+        return cursor_down(chars, cursor) if DOWN_KEYS.include?(key)
+        return current_line_start(chars, cursor) if HOME_KEYS.include?(key)
+        return current_line_end(chars, cursor) if END_KEYS.include?(key)
+        return previous_word_boundary(chars, cursor) if WORD_LEFT_KEYS.include?(key)
+        return next_word_start(chars, cursor) if WORD_RIGHT_KEYS.include?(key)
+
+        cursor
+      end
+
+      def clamp_cursor(input_buffer, input_cursor)
+        input_cursor.to_i.clamp(0, input_buffer.chars.length)
+      end
+
+      def current_line_start(chars, cursor)
+        index = cursor
+        index -= 1 while index.positive? && chars[index - 1] != "\n"
+        index
+      end
+
+      def current_line_end(chars, cursor)
+        index = cursor
+        index += 1 while index < chars.length && chars[index] != "\n"
+        index
+      end
+
+      def cursor_up(chars, cursor)
+        line_start = current_line_start(chars, cursor)
+        return cursor if line_start.zero?
+
+        column = cursor - line_start
+        previous_line_end = line_start - 1
+        previous_line_start = current_line_start(chars, previous_line_end)
+        previous_line_start + [column, previous_line_end - previous_line_start].min
+      end
+
+      def cursor_down(chars, cursor)
+        line_end = current_line_end(chars, cursor)
+        return cursor if line_end >= chars.length
+
+        column = cursor - current_line_start(chars, cursor)
+        next_line_start = line_end + 1
+        next_line_end = current_line_end(chars, next_line_start)
+        next_line_start + [column, next_line_end - next_line_start].min
+      end
+
+      def previous_word_boundary(chars, cursor)
+        index = cursor
+        index -= 1 while index.positive? && word_separator?(chars[index - 1])
+        index -= 1 while index.positive? && !word_separator?(chars[index - 1])
+        index
+      end
+
+      def next_word_boundary(chars, cursor)
+        index = cursor
+        index += 1 while index < chars.length && word_separator?(chars[index])
+        index += 1 while index < chars.length && !word_separator?(chars[index])
+        index
+      end
+
+      def next_word_start(chars, cursor)
+        index = cursor
+        index += 1 while index < chars.length && !word_separator?(chars[index])
+        index += 1 while index < chars.length && word_separator?(chars[index])
+        index
+      end
+
+      def word_separator?(character)
+        character.to_s.match?(/\s/)
       end
 
       def safe_slash_completion(input_buffer, slash_suggestion_index, state)
@@ -154,7 +380,7 @@ module Meringue
       end
 
       def printable_key?(key)
-        key.bytes.all? { |byte| byte >= 32 && byte != 127 }
+        key.is_a?(String) && key.bytes.all? { |byte| byte >= 32 && byte != 127 }
       end
 
       def submit_prompt(input_buffer, on_submit)
@@ -226,22 +452,30 @@ module Meringue
       def update_message_from_event(message_id, event)
         case event.fetch("event", nil)
         when "head_completed"
+          remember_conversation_event(head_completed_key(event.fetch("head_id", nil)))
           update_message(message_id, text: head_completed_text(event), status: "applying commands")
         when "head_result_applied"
           append_head_result_applied_summary(message_id, event)
         when "slash_command_applied"
           append_to_message(message_id, slash_command_text(event.fetch("command_results", []) || []), status: nil)
         when "worker_wait_started"
+          remember_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
           append_to_message(message_id, "Waiting for #{event.fetch("agent_id", "worker")}…", status: "workers running")
         when "worker_completed"
+          remember_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
           append_to_message(message_id, worker_completed_line(event), status: "workers running")
         when "worker_wait_failed"
+          forget_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
           append_to_message(message_id, "#{event.fetch("agent_id", "worker")} wait failed.", status: "worker wait failed")
         end
       end
 
       def conversation_text_for(result)
-        return slash_command_text(result.fetch("command_results", []) || []) if result.fetch("event", nil) == "slash_command_applied"
+        if result.fetch("event", nil) == "slash_command_applied"
+          lines = [slash_command_text(result.fetch("command_results", []) || [])]
+          lines.concat(worker_summary_lines(result.fetch("worker_wait_results", []) || []))
+          return lines.reject { |line| line.to_s.empty? }.join("\n")
+        end
 
         spawn_result = result.fetch("spawn_head_result", {}) || {}
         apply_result = result.fetch("apply_head_result", {}) || {}
@@ -363,16 +597,108 @@ module Meringue
         has_workers ? "workers running" : nil
       end
 
-      def compose_state(state_provider, input_buffer, slash_suggestion_index = 0)
+      def compose_state(state_provider, input_buffer, slash_suggestion_index = 0, input_cursor = nil)
         state = state_provider.call || State::Models.empty_state
-        state.merge("_chat" => chat_snapshot(input_buffer, slash_suggestion_index))
+        sync_state_conversation!(state)
+        state.merge("_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor))
       end
 
-      def chat_snapshot(input_buffer, slash_suggestion_index = 0)
+      def sync_state_conversation!(state)
+        sync_polled_head_updates!(state)
+        sync_worker_completion_updates!(state)
+      end
+
+      def sync_polled_head_updates!(state)
+        Array(state.fetch("agents", [])).each do |agent|
+          next unless agent.fetch("type", nil) == "head"
+
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          head_result = metadata["head_result"]
+          next unless metadata["head_result_applied_at"] && head_result.is_a?(Hash)
+
+          append_message_once(
+            head_completed_key(agent.fetch("id", nil)),
+            "meringue",
+            format_head_result(agent.fetch("id", "head"), head_result)
+          )
+        end
+      end
+
+      def sync_worker_completion_updates!(state)
+        Array(state.fetch("agents", [])).each do |agent|
+          next unless agent.fetch("type", nil) == "worker"
+          next unless agent.fetch("status", nil) == "completed"
+
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          next unless metadata["completed_at"] || Array(metadata["reported_pr_urls"]).any?
+          next unless conversation_sync_after_start?(metadata["completed_at"])
+
+          append_message_once(
+            worker_completed_key(agent.fetch("id", nil)),
+            "meringue",
+            worker_completed_text_from_agent(agent)
+          )
+        end
+      end
+
+      def conversation_sync_after_start?(timestamp)
+        return false if timestamp.to_s.empty?
+
+        Time.iso8601(timestamp.to_s) >= @started_at
+      rescue ArgumentError, TypeError
+        false
+      end
+
+      def worker_completed_text_from_agent(agent)
+        agent_id = agent.fetch("id", "worker")
+        branch = agent.fetch("workspace_branch", nil)
+        branch_text = branch.to_s.empty? ? "" : " on #{branch}"
+        pr_urls = Array((agent.fetch("harness_metadata", {}) || {})["reported_pr_urls"]).compact
+        return "#{agent_id} completed#{branch_text}." if pr_urls.empty?
+
+        [
+          "#{agent_id} completed#{branch_text} and reported PR#{pr_urls.length == 1 ? "" : "s"}:",
+          *pr_urls.map { |url| "PR: #{url}" }
+        ].join("\n")
+      end
+
+      def head_completed_key(head_id)
+        "head_completed:#{head_id}"
+      end
+
+      def worker_completed_key(agent_id)
+        "worker_completed:#{agent_id}"
+      end
+
+      def remember_conversation_event(key)
+        return if key.to_s.empty?
+
+        @chat_mutex.synchronize { @conversation_event_keys[key] = true }
+      end
+
+      def forget_conversation_event(key)
+        return if key.to_s.empty?
+
+        @chat_mutex.synchronize { @conversation_event_keys.delete(key) }
+      end
+
+      def append_message_once(key, role, text, status: nil)
+        return if key.to_s.empty? || text.to_s.empty?
+
+        @chat_mutex.synchronize do
+          return if @conversation_event_keys[key]
+
+          @conversation_event_keys[key] = true
+          append_message_unlocked(role, text, status: status)
+        end
+      end
+
+      def chat_snapshot(input_buffer, slash_suggestion_index = 0, input_cursor = nil)
         @chat_mutex.synchronize do
           {
             "messages" => @messages.map(&:dup),
             "input_buffer" => input_buffer,
+            "input_cursor" => clamp_cursor(input_buffer, input_cursor || input_buffer.chars.length),
             "slash_suggestion_index" => slash_suggestion_index,
             "pending_count" => @pending_count
           }
@@ -380,16 +706,18 @@ module Meringue
       end
 
       def append_message(role, text, status: nil)
-        @chat_mutex.synchronize do
-          @next_message_id += 1
-          @messages << {
-            "id" => @next_message_id,
-            "role" => role,
-            "text" => text,
-            "status" => status
-          }.compact
-          @next_message_id
-        end
+        @chat_mutex.synchronize { append_message_unlocked(role, text, status: status) }
+      end
+
+      def append_message_unlocked(role, text, status: nil)
+        @next_message_id += 1
+        @messages << {
+          "id" => @next_message_id,
+          "role" => role,
+          "text" => text,
+          "status" => status
+        }.compact
+        @next_message_id
       end
 
       def update_message(id, text:, status: nil)

@@ -15,12 +15,19 @@ module Meringue
 
         Before editing, inspect the repository status and active instructions. Avoid overwriting unrelated active work. Prefer a separate task branch for git-backed projects, commit only the assigned issue's changes, and open a pull request when requested and the environment allows.
 
+        Use human-facing delivery names. Branch names, pull request titles, and pull request metadata should be derived from the assigned issue title or requested change, not from Meringue agent ids, worker ids, Pi ids, or subagent implementation details. If a unique suffix is needed, use a short opaque suffix rather than an orchestration id.
+
         Report true blockers instead of asking for routine approval: missing credentials, authentication or authorization failures, missing or invalid remotes, branch/worktree collisions, unrelated uncommitted work that would be overwritten, or unsafe/destructive operations.
       PROMPT
       WORKER_RESUME_PROMPT = <<~PROMPT.freeze
         Continue this Meringue worker session from the existing conversation and workspace state.
         First inspect the current repository state, then continue the assigned issue from the last incomplete step.
         If the issue is already complete, summarize the final status and include any pull request link.
+      PROMPT
+      HEAD_RESULT_REPAIR_PROMPT = <<~PROMPT.freeze
+        Your previous response was not valid Meringue HeadResult JSON.
+        Return exactly one JSON object with string fields "title" and "summary", an array field "commands", and an array field "questions".
+        Do not include markdown, prose, code fences, or tool calls.
       PROMPT
       PULL_REQUEST_URL_PATTERN = /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+(?:[\/?#][^\s<>"'\])}]*)?/.freeze
 
@@ -58,6 +65,8 @@ module Meringue
       ].freeze
       TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
+      HEAD_RECONCILE_WARNING_DELAY_SECONDS = 5
+      HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
       RECONCILE_STATE_HEALTHY = "healthy"
       RECONCILE_STATE_RESUMING = "resuming"
@@ -213,7 +222,6 @@ module Meringue
             message: "Worker #{agent.fetch("id")} completed.",
             details: completion_details
           )
-          log_ids.concat(append_worker_pr_log(state, agent, pr_urls)) unless pr_urls.empty?
           touch_state!(state, now)
           store.save(state)
 
@@ -961,7 +969,8 @@ module Meringue
             project: project,
             issue: issue,
             requested_workspace_path: requested_workspace_path,
-            preview_agent_id: preview_worker_id(state, issue.fetch("id"))
+            preview_agent_id: preview_worker_id(state, issue.fetch("id")),
+            task_title: worker_display_title(worker_title, issue)
           )
           return rejected_result(command_id, command_type, "Worker workspace is invalid.", workspace.fetch("errors")) unless workspace.fetch("errors").empty?
 
@@ -971,7 +980,8 @@ module Meringue
             project: project,
             issue: issue,
             requested_workspace_path: requested_workspace_path,
-            preview_agent_id: agent_id
+            preview_agent_id: agent_id,
+            task_title: worker_display_title(worker_title, issue)
           )
           touch_state!(state, now)
           store.save(state)
@@ -992,7 +1002,7 @@ module Meringue
             cwd: reservation.fetch("workspace").fetch("workspace_path"),
             prompt: prompt.to_s,
             system_prompt: worker_system_prompt(reservation.fetch("issue")),
-            session_name: worker_session_name(reservation.fetch("agent_id"), reservation.fetch("issue"), worker_title: worker_title)
+            session_name: worker_session_name(reservation.fetch("issue"), worker_title: worker_title)
           )
         rescue StandardError => e
           return synchronized_state do
@@ -1193,7 +1203,7 @@ module Meringue
         agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("killed_at" => now)
       end
 
-      def resolve_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:)
+      def resolve_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:, task_title:)
         if present_string(requested_workspace_path)
           expanded_path = File.expand_path(requested_workspace_path.to_s)
           errors = Dir.exist?(expanded_path) ? [] : ["workspace_path must be an existing directory"]
@@ -1213,7 +1223,8 @@ module Meringue
           project_root: project.fetch("root_path"),
           project_id: project.fetch("id"),
           issue_id: issue.fetch("id"),
-          agent_id: preview_agent_id
+          agent_id: preview_agent_id,
+          task_title: task_title
         )
 
         if plan.fetch("created", false) && Dir.exist?(plan.fetch("workspace_path"))
@@ -1249,10 +1260,17 @@ module Meringue
         PROMPT
       end
 
-      def worker_session_name(agent_id, issue, worker_title: nil)
-        title = worker_display_title(worker_title, issue).to_s.strip.gsub(/\s+/, " ")
-        title = "worker" if title.empty?
-        "#{agent_id} #{title}"[0, 96]
+      def worker_session_name(issue, worker_title: nil)
+        title = human_delivery_title(worker_display_title(worker_title, issue))
+        title = "Task" if title.empty?
+        title[0, 96]
+      end
+
+      def human_delivery_title(value)
+        value.to_s.gsub(/\bP\d+(?:-I\d+)?(?:-W\d+)?\b/i, " ")
+             .gsub(/\b[HQ]\d+\b/i, " ")
+             .strip
+             .gsub(/\s+/, " ")
       end
 
       def worker_display_title(worker_title, issue)
@@ -1517,25 +1535,6 @@ module Meringue
         max_numeric_suffix(state.fetch("agents").select { |agent| agent.fetch("issue_id", nil) == issue_id }, /^#{Regexp.escape(issue_id)}-W(\d+)$/)
       end
 
-      def append_worker_pr_log(state, agent, pr_urls)
-        branch = agent.fetch("workspace_branch", nil)
-        branch_text = present_string(branch) ? " on #{branch}" : ""
-        append_log(
-          state,
-          source_type: "worker",
-          source_id: agent.fetch("id"),
-          level: "info",
-          message: "Worker #{agent.fetch("id")} reported PR#{pr_urls.length == 1 ? "" : "s"}#{branch_text}: #{pr_urls.join(", ")}",
-          details: {
-            "issue_id" => agent.fetch("issue_id", nil),
-            "project_id" => agent.fetch("project_id", nil),
-            "workspace_branch" => branch,
-            "workspace_path" => agent.fetch("workspace_path", nil),
-            "pr_urls" => pr_urls
-          }.compact
-        )
-      end
-
       def worker_pr_urls(last_assistant_text:, harness_events:)
         sources = [present_string(last_assistant_text)]
         Array(harness_events).each do |event|
@@ -1748,6 +1747,8 @@ module Meringue
           "apply_result" => apply_result,
           "log_entry_ids" => (apply_result.fetch("log_entry_ids", []) + log_ids).uniq
         )
+      rescue Heads::PiRunner::InvalidHeadResultError => e
+        repair_invalid_head_result(poll_result, e)
       rescue StandardError => e
         mark_agent_errored_from_poll(
           poll_result.merge(
@@ -1755,6 +1756,93 @@ module Meringue
             "error" => { "class" => e.class.name, "message" => e.message }
           )
         )
+      end
+
+      def repair_invalid_head_result(poll_result, error)
+        agent = synchronized_state { find_agent(normalized_state, poll_result.fetch("agent_id")) }
+        return mark_agent_errored_from_poll(invalid_head_result_poll_error(poll_result, error)) unless head_result_repair_eligible?(agent)
+
+        session_ref = poll_result.fetch("session_ref", {})
+        client = harness_client_for_agent(agent)
+        repaired_ref = prompt_head_result_repair(client, session_ref, error)
+        record_head_result_repair_requested(poll_result, error, repaired_ref)
+      rescue StandardError => repair_error
+        mark_agent_errored_from_poll(
+          poll_result.merge(
+            "state" => "errored",
+            "error" => { "class" => repair_error.class.name, "message" => repair_error.message },
+            "reconcile" => {
+              "state" => RECONCILE_STATE_TERMINAL_ERROR,
+              "error_class" => error.class.name,
+              "error_message" => error.message,
+              "repair_error_class" => repair_error.class.name,
+              "repair_error_message" => repair_error.message
+            }
+          )
+        )
+      end
+
+      def invalid_head_result_poll_error(poll_result, error)
+        poll_result.merge(
+          "state" => "errored",
+          "error" => { "class" => error.class.name, "message" => error.message }
+        )
+      end
+
+      def head_result_repair_eligible?(agent)
+        return false unless agent
+        return false unless agent.fetch("type", nil) == "head"
+        return false if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata.fetch("head_result_repair_count", 0).to_i < HEAD_RESULT_REPAIR_MAX_ATTEMPTS
+      end
+
+      def prompt_head_result_repair(client, session_ref, error)
+        mode = session_ref.fetch("is_streaming", false) ? "follow_up" : "normal"
+        prompt = <<~PROMPT
+          #{HEAD_RESULT_REPAIR_PROMPT}
+
+          Validation error: #{error.message}
+        PROMPT
+        client.prompt_session(session_ref, prompt, mode: mode)
+      end
+
+      def record_head_result_repair_requested(poll_result, error, repaired_ref)
+        synchronized_state do
+          state = normalized_state
+          head = find_agent(state, poll_result.fetch("agent_id"))
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless head
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if TERMINAL_AGENT_STATUSES.include?(head.fetch("status", nil))
+
+          now = timestamp
+          metadata = head.fetch("harness_metadata", {}) || {}
+          repair_count = metadata.fetch("head_result_repair_count", 0).to_i + 1
+          merge_session_ref_into_agent!(head, repaired_ref)
+          head["status"] = "working"
+          head["updated_at"] = now
+          head["harness_metadata"] = (head.fetch("harness_metadata", {}) || {}).merge(
+            "head_result_repair_count" => repair_count,
+            "head_result_repair_requested_at" => now,
+            "head_result_repair_error_class" => error.class.name,
+            "head_result_repair_error_message" => error.message
+          ).compact
+          log_ids = append_log(
+            state,
+            source_type: "head",
+            source_id: head.fetch("id"),
+            level: "warning",
+            message: "Head #{head.fetch("id")} returned invalid HeadResult JSON; requested one repair response.",
+            details: {
+              "repair_count" => repair_count,
+              "error_class" => error.class.name,
+              "error_message" => error.message
+            }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          poll_result.merge("state" => "working", "changed" => true, "repaired" => true, "session_ref" => repaired_ref, "log_entry_ids" => log_ids)
+        end
       end
 
       def record_polled_head_completion(poll_result, head_result, apply_result)
@@ -1898,26 +1986,23 @@ module Meringue
           previous_reconcile = metadata.fetch("reconcile", {}) || {}
           first_error_at = previous_reconcile.fetch("first_error_at", nil) || now
           error_count = previous_reconcile.fetch("error_count", 0).to_i + 1
+          warning_logged_at = previous_reconcile.fetch("warning_logged_at", nil)
 
           reconcile = poll_result.fetch("reconcile", {}).merge(
             "state" => RECONCILE_STATE_TRANSIENT_ERROR,
             "first_error_at" => first_error_at,
             "last_error_at" => now,
             "error_count" => error_count,
-            "grace_seconds" => HEAD_RECONCILE_ERROR_GRACE_SECONDS
+            "grace_seconds" => HEAD_RECONCILE_ERROR_GRACE_SECONDS,
+            "warning_delay_seconds" => HEAD_RECONCILE_WARNING_DELAY_SECONDS,
+            "warning_logged_at" => warning_logged_at
           ).compact
 
           return mark_agent_errored_from_poll(poll_result.merge("reconcile" => reconcile)) unless head_reconcile_grace_active?(first_error_at, now)
 
-          agent["status"] = "working"
-          agent["updated_at"] = now
-          agent["harness_metadata"] = metadata.merge(
-            "reconcile_state" => RECONCILE_STATE_TRANSIENT_ERROR,
-            "reconcile" => reconcile
-          ).compact
-
           log_ids = []
-          if error_count == 1
+          if warning_logged_at.nil? && head_reconcile_warning_due?(agent, first_error_at, now)
+            reconcile["warning_logged_at"] = now
             log_ids = append_log(
               state,
               source_type: "head",
@@ -1927,6 +2012,13 @@ module Meringue
               details: reconcile
             )
           end
+
+          agent["status"] = "working"
+          agent["updated_at"] = now
+          agent["harness_metadata"] = metadata.merge(
+            "reconcile_state" => RECONCILE_STATE_TRANSIENT_ERROR,
+            "reconcile" => reconcile
+          ).compact
 
           touch_state!(state, now)
           store.save(state)
@@ -2023,6 +2115,22 @@ module Meringue
         (Time.iso8601(now) - Time.iso8601(first_error_at.to_s)) < HEAD_RECONCILE_ERROR_GRACE_SECONDS
       rescue ArgumentError, TypeError
         false
+      end
+
+      def head_reconcile_warning_due?(agent, first_error_at, now)
+        started_at = agent.fetch("created_at", nil) || first_error_at
+        reference_time = [parse_time_or_nil(started_at), parse_time_or_nil(first_error_at)].compact.min
+        return true unless reference_time
+
+        (Time.iso8601(now) - reference_time) >= HEAD_RECONCILE_WARNING_DELAY_SECONDS
+      rescue ArgumentError, TypeError
+        true
+      end
+
+      def parse_time_or_nil(value)
+        Time.iso8601(value.to_s)
+      rescue ArgumentError, TypeError
+        nil
       end
 
       def refresh_worker_parent_statuses!(state, agent, now)
