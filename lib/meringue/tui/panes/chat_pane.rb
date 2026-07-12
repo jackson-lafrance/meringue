@@ -39,17 +39,32 @@ module Meringue
           ]
           input_line << ["_", Style::ACCENT_BOLD] unless input_buffer.empty?
 
-          [
-            input_line,
+          lines = [input_line]
+          lines.concat(slash_helper_lines) if slash_helper?(input_buffer)
+          lines.concat([
             [["", Style::DIM]],
             [
               [pending_status(pending_count), pending_count.positive? ? Style::WARNING : Style::SUCCESS],
               ["  ·  ", Style::DIM],
               ["open questions: #{open_questions}", Style::MUTED],
               ["  ·  ", Style::DIM],
-              ["enter sends · /clear resets · esc/ctrl-c quits", Style::MUTED]
+              ["enter sends · /help commands · esc/ctrl-c quits", Style::MUTED]
             ]
-          ]
+          ])
+          lines
+        end
+
+        def slash_helper?(input_buffer)
+          input_buffer.to_s.match?(/\A\s*\/\z/)
+        end
+
+        def slash_helper_lines
+          header = [["╭ slash commands", Style::ACCENT_BOLD]]
+          command_lines = Meringue::Input::SlashCommandParser.command_suggestions.first(10).map do |usage, description|
+            [["│ ", Style::DIM], [usage, Style::ACCENT_BOLD], [" — #{description}", Style::MUTED]]
+          end
+          footer = [["╰ use quotes for multi-word titles, prompts, and answers", Style::DIM]]
+          [[["", Style::DIM]], header] + command_lines + [footer]
         end
 
         private

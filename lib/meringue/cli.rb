@@ -185,8 +185,9 @@ module Meringue
           meringue --help           # print this help
 
         TUI controls:
-          Enter                     # send the chat prompt to a head agent
-          /clear                    # reset the persisted Meringue state
+          Enter                     # send natural language to a head, or apply a slash command directly in the kernel
+          /                         # show slash command suggestions in an otherwise empty prompt
+          /help                     # list command syntax
           Esc on an empty prompt or Ctrl-C # quit the TUI
       HELP
     end
