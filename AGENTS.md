@@ -43,7 +43,7 @@ Terminal rendering with screen blitting of our three main sections
 
 The MVP backend harness is Pi because that is what we know and can move fastest with.
 Pi-specific code should still be isolated behind a harness interface so the future product can support cc, codex,
-gemini, cursor, and other coding harnesses without rewriting the kernel or TUI.
+antigravity, cursor, and other coding harnesses without rewriting the kernel or TUI.
 We will store Meringue state in a simple JSON file using harness session ids to reconnect, resume, or explain sessions on reload of the tool.
 We should focus on keeping this project extensible and self-modifying for a users specific needs
 
