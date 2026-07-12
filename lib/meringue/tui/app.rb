@@ -92,13 +92,22 @@ module Meringue
         text = input_buffer.to_s.strip
         return if text.empty?
 
+        slash_command = text.start_with?("/")
         append_message("you", text)
-        assistant_message_id = append_message("meringue", "Queued for the head agent loop…", status: "queued")
+        assistant_message_id = append_message(
+          "meringue",
+          slash_command ? "Queued slash command…" : "Queued for the head agent loop…",
+          status: "queued"
+        )
         increment_pending_count
 
         Thread.new do
           begin
-            update_message(assistant_message_id, text: "Running head agent loop…", status: "working")
+            update_message(
+              assistant_message_id,
+              text: slash_command ? "Applying slash command…" : "Running head agent loop…",
+              status: "working"
+            )
             result = if on_submit
                        on_submit.call(text) do |event|
                          update_message_from_event(assistant_message_id, event)
@@ -128,6 +137,8 @@ module Meringue
           update_message(message_id, text: head_completed_text(event), status: "applying commands")
         when "head_result_applied"
           append_head_result_applied_summary(message_id, event)
+        when "slash_command_applied"
+          append_to_message(message_id, slash_command_text(event.fetch("command_results", []) || []), status: nil)
         when "worker_wait_started"
           append_to_message(message_id, "Waiting for #{event.fetch("agent_id", "worker")}…", status: "workers running")
         when "worker_completed"
@@ -138,6 +149,8 @@ module Meringue
       end
 
       def conversation_text_for(result)
+        return slash_command_text(result.fetch("command_results", []) || []) if result.fetch("event", nil) == "slash_command_applied"
+
         spawn_result = result.fetch("spawn_head_result", {}) || {}
         apply_result = result.fetch("apply_head_result", {}) || {}
         head = spawn_result.fetch("result", {}) || {}
@@ -154,6 +167,48 @@ module Meringue
         lines.concat(command_summary_lines(apply_result))
         lines.concat(worker_summary_lines(result.fetch("worker_wait_results", []) || []))
         lines.reject { |line| line.to_s.empty? }.join("\n")
+      end
+
+      def slash_command_text(command_results)
+        return "Slash command did not produce a kernel result." if command_results.empty?
+
+        command_results.flat_map { |result| slash_result_lines(result) }.reject { |line| line.to_s.empty? }.join("\n")
+      end
+
+      def slash_result_lines(result)
+        status = result.fetch("status", "unknown")
+        command_type = result.fetch("command_type", "command")
+        lines = ["#{command_type}: #{status} — #{result.fetch("message", "")}".strip]
+        if status == "accepted"
+          lines.concat(slash_result_detail_lines(command_type, result.fetch("result", nil)))
+        else
+          errors = result.fetch("errors", []) || []
+          lines.concat(errors.map { |error| "  - #{error}" })
+        end
+        lines
+      end
+
+      def slash_result_detail_lines(command_type, result)
+        case command_type
+        when "Help"
+          Array(result).map { |item| "  #{item.fetch("usage", "")} — #{item.fetch("description", "")}" }
+        when "ListQuestions"
+          questions = Array(result)
+          return ["  No questions."] if questions.empty?
+
+          questions.map { |question| "  #{question.fetch("id", "?")} [#{question.fetch("status", "?")}] #{question.fetch("question", "")}" }
+        when "ListAll", "GetState"
+          state = result || {}
+          [
+            "  projects: #{Array(state["projects"]).length}",
+            "  issues: #{Array(state["issues"]).length}",
+            "  agents: #{Array(state["agents"]).length}",
+            "  questions: #{Array(state["questions"]).length}"
+          ]
+        else
+          target_id = result.is_a?(Hash) ? result["id"] : nil
+          target_id ? ["  target: #{target_id}"] : []
+        end
       end
 
       def head_completed_text(event)
