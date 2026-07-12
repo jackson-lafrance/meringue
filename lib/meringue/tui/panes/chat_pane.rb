@@ -185,7 +185,7 @@ module Meringue
         def footer_status_line(state, pending_count)
           status_segments(state, pending_count) + question_segments(state) + [
             ["  ·  ", Style::DIM],
-            ["enter sends · shift/alt-enter newline · ctrl-c clears/quits · tab completes slash commands · tab/ctrl-tab focuses panes · focused pane scrolls with ↑/↓ or mouse", Style::MUTED]
+            ["enter sends · shift/alt-enter newline · ctrl-c clears/quits · tab completes slash commands · tab/ctrl-tab focuses panes · focused pane scrolls with ↑/↓/PageUp/PageDown", Style::MUTED]
           ]
         end
 
