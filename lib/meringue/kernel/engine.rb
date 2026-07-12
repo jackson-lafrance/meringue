@@ -46,6 +46,7 @@ module Meringue
         "get_state" => "GetState",
         "list_questions" => "ListQuestions",
         "reconcile_sessions" => "ReconcileSessions",
+        "prune" => "Prune",
         "clear" => "ClearState",
         "clear_state" => "ClearState",
         "list_all" => "ListAll"
@@ -61,7 +62,8 @@ module Meringue
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
-        ["/answer <question_id> \"<answer>\"", "Answer a pending question."]
+        ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
+        ["/prune <merged|errored>", "Remove merged PR issue bundles or errored records from active state."]
       ].freeze
       TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
@@ -74,19 +76,21 @@ module Meringue
       RECONCILE_STATE_TRANSIENT_ERROR = "transient_error"
       RECONCILE_STATE_TERMINAL_ERROR = "terminal_error"
 
-      attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd
+      attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
                      head_runner: Heads::FakeRunner.new,
                      workspace_manager: Workspace::Manager.new,
                      cwd: Dir.pwd,
-                     async_heads: false)
+                     async_heads: false,
+                     forge_client: Forge::GitHubClient.new)
         @store = store
         @harness_client = harness_client
         @head_runner = head_runner
         @workspace_manager = workspace_manager
         @cwd = File.expand_path(cwd)
         @async_heads = async_heads
+        @forge_client = forge_client
         @state_mutex = Monitor.new
         @head_result_mutex = Mutex.new
       end
@@ -157,6 +161,8 @@ module Meringue
           answer_question(command_id, command_type, payload)
         when "ReconcileSessions"
           reconcile_sessions(command_id: command_id, command_type: command_type)
+        when "Prune"
+          prune(command_id, command_type, payload)
         when "ClearState"
           clear_state(command_id, command_type)
         else
@@ -675,6 +681,167 @@ module Meringue
         accepted_result(command_id, command_type, question.fetch("id"), "Answered question #{question.fetch("id")}.", question, log_ids)
       end
 
+      def prune(command_id, command_type, payload)
+        selector = value_at(payload, "selector", "Selector", "kind", "status")
+        return rejected_result(command_id, command_type, "Prune selector is required.", ["selector is required: merged or errored"]) if blank?(selector)
+
+        case selector.to_s.downcase
+        when "merged"
+          prune_merged(command_id, command_type)
+        when "errored"
+          prune_errored(command_id, command_type)
+        else
+          rejected_result(command_id, command_type, "Unknown prune selector: #{selector}", ["supported selectors: merged, errored"])
+        end
+      end
+
+      def prune_merged(command_id, command_type)
+        state = normalized_state
+        worker_checks = merged_pr_worker_checks(state)
+        issue_ids = worker_checks.select { |check| check.fetch("merged", false) }.map { |check| check.fetch("issue_id", nil) }.compact.uniq
+        now = timestamp
+        prune_result = remove_issue_bundles_and_agents!(state, issue_ids: issue_ids, extra_agent_ids: [], reason: "pull_request_merged", now: now)
+        checked_urls = worker_checks.flat_map { |check| check.fetch("statuses", []).map { |status| status.fetch("url", nil) } }.compact.uniq
+        skipped_urls = worker_checks.flat_map do |check|
+          check.fetch("statuses", []).reject { |status| status.fetch("state", nil) == "merged" }.map { |status| status.fetch("url", nil) }
+        end.compact.uniq
+
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: nil,
+          level: "info",
+          message: "Pruned #{prune_result.fetch("removed_issue_ids").length} merged issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"}.",
+          details: prune_result.merge(
+            "selector" => "merged",
+            "checked_pr_urls" => checked_urls,
+            "skipped_pr_urls" => skipped_urls,
+            "worker_checks" => worker_checks
+          )
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, nil, "Pruned #{prune_result.fetch("removed_issue_ids").length} merged issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"}.", prune_result.merge("checked_pr_urls" => checked_urls, "skipped_pr_urls" => skipped_urls), log_ids)
+      end
+
+      def prune_errored(command_id, command_type)
+        state = normalized_state
+        errored_issue_ids = state.fetch("issues").select { |issue| errored_issue_prune_candidate?(state, issue) }.map { |issue| issue.fetch("id") }
+        errored_head_ids = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "head" && agent.fetch("status", nil) == "errored" }.map { |agent| agent.fetch("id") }
+        now = timestamp
+        prune_result = remove_issue_bundles_and_agents!(state, issue_ids: errored_issue_ids, extra_agent_ids: errored_head_ids, reason: "errored", now: now)
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: nil,
+          level: "info",
+          message: "Pruned #{prune_result.fetch("removed_issue_ids").length} errored issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"} and #{prune_result.fetch("removed_standalone_agent_ids").length} standalone errored agent#{prune_result.fetch("removed_standalone_agent_ids").length == 1 ? "" : "s"}.",
+          details: prune_result.merge("selector" => "errored")
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, nil, "Pruned #{prune_result.fetch("removed_issue_ids").length} errored issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"} and #{prune_result.fetch("removed_standalone_agent_ids").length} standalone errored agent#{prune_result.fetch("removed_standalone_agent_ids").length == 1 ? "" : "s"}.", prune_result, log_ids)
+      end
+
+      def merged_pr_worker_checks(state)
+        state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }.filter_map do |worker|
+          urls = agent_pr_urls(worker)
+          next if urls.empty?
+
+          statuses = urls.map { |url| pull_request_status(url) }
+          {
+            "agent_id" => worker.fetch("id", nil),
+            "issue_id" => worker.fetch("issue_id", nil),
+            "pr_urls" => urls,
+            "statuses" => statuses,
+            "merged" => statuses.any? { |status| status.fetch("state", nil) == "merged" }
+          }
+        end
+      end
+
+      def pull_request_status(url)
+        forge_client.pull_request_status(url)
+      rescue StandardError => e
+        {
+          "provider" => "unknown",
+          "url" => url.to_s,
+          "state" => "unknown",
+          "merged_at" => nil,
+          "error" => e.message
+        }
+      end
+
+      def agent_pr_urls(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        values = []
+        values.concat(Array(agent.fetch("pull_request_url", nil)))
+        values.concat(Array(agent.fetch("pull_request_urls", nil)))
+        values.concat(Array(metadata.fetch("pull_request_url", nil)))
+        values.concat(Array(metadata.fetch("pull_request_urls", nil)))
+        values.concat(Array(metadata.fetch("reported_pr_urls", nil)))
+        values.compact.map(&:to_s).map(&:strip).reject(&:empty?).uniq
+      end
+
+      def errored_issue_prune_candidate?(state, issue)
+        return false unless issue.fetch("status", nil) == "errored"
+
+        workers = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" && agent.fetch("issue_id", nil) == issue.fetch("id") }
+        workers.none? { |worker| %w[queued working idle blocked].include?(worker.fetch("status", nil)) }
+      end
+
+      def remove_issue_bundles_and_agents!(state, issue_ids:, extra_agent_ids:, reason:, now:)
+        root_issue_ids = Array(issue_ids).compact.uniq
+        issue_ids_to_remove = root_issue_ids.flat_map { |issue_id| issue_subtree_ids(state, issue_id) }.uniq
+        issues_to_remove = state.fetch("issues").select { |issue| issue_ids_to_remove.include?(issue.fetch("id", nil)) }
+        project_ids = issues_to_remove.map { |issue| issue.fetch("project_id", nil) }.compact.uniq
+        issue_agent_ids = issues_to_remove.flat_map { |issue| Array(issue.fetch("agent_ids", [])) }
+        worker_agent_ids = state.fetch("agents").select { |agent| issue_ids_to_remove.include?(agent.fetch("issue_id", nil)) }.map { |agent| agent.fetch("id", nil) }
+        originating_head_ids = issues_to_remove.map { |issue| issue.fetch("originating_head_id", nil) }.compact
+        agent_ids_to_remove = (issue_agent_ids + worker_agent_ids + originating_head_ids + Array(extra_agent_ids)).compact.uniq
+        standalone_agent_ids = Array(extra_agent_ids).compact.uniq - (issue_agent_ids + worker_agent_ids + originating_head_ids).compact.uniq
+
+        state["issues"] = state.fetch("issues").reject { |issue| issue_ids_to_remove.include?(issue.fetch("id", nil)) }
+        state["agents"] = state.fetch("agents").reject { |agent| agent_ids_to_remove.include?(agent.fetch("id", nil)) }
+        state.fetch("issues").each do |issue|
+          issue["agent_ids"] = Array(issue.fetch("agent_ids", [])) - agent_ids_to_remove if issue.key?("agent_ids")
+        end
+        refresh_projects_after_prune!(state, project_ids, now)
+
+        {
+          "reason" => reason,
+          "root_issue_ids" => root_issue_ids,
+          "removed_issue_ids" => issue_ids_to_remove,
+          "removed_agent_ids" => agent_ids_to_remove,
+          "removed_standalone_agent_ids" => standalone_agent_ids,
+          "updated_project_ids" => project_ids
+        }
+      end
+
+      def issue_subtree_ids(state, root_issue_id)
+        root = root_issue_id.to_s
+        return [] unless find_issue(state, root)
+
+        children = state.fetch("issues").select { |issue| issue.fetch("parent_issue_id", nil) == root }.map { |issue| issue.fetch("id") }
+        [root] + children.flat_map { |child_id| issue_subtree_ids(state, child_id) }
+      end
+
+      def refresh_projects_after_prune!(state, project_ids, now)
+        Array(project_ids).each do |project_id|
+          project = find_project(state, project_id)
+          next unless project
+
+          remaining_issues = state.fetch("issues").select { |issue| issue.fetch("project_id", nil) == project.fetch("id") }
+          if remaining_issues.empty?
+            project["status"] = "idle"
+            project["updated_at"] = now
+          else
+            update_project_status_from_issues!(state, project, now)
+          end
+        end
+      end
+
       def clear_state(command_id, command_type)
         now = timestamp
         state = State::Models.empty_state(now: now)
@@ -770,6 +937,7 @@ module Meringue
         title = value_at(payload, "title", "Title")
         description = value_at(payload, "description", "Description") || ""
         parent_issue_id = value_at(payload, "parent_issue_id", "ParentIssueID", "parentIssueId")
+        originating_head_id = value_at(payload, "originating_head_id", "originatingHeadId", "_head_id")
         status = value_at(payload, "status", "Status") || "queued"
         errors = []
 
@@ -795,6 +963,7 @@ module Meringue
           "id" => issue_id,
           "project_id" => project.fetch("id"),
           "parent_issue_id" => present_string(parent_issue_id),
+          "originating_head_id" => present_string(originating_head_id),
           "title" => title.to_s.strip,
           "description" => description.to_s,
           "status" => status.to_s,
@@ -1353,9 +1522,17 @@ module Meringue
       end
 
       def command_with_default_id(command, head_id:, index:)
-        return command unless command.is_a?(Hash) && blank?(value_at(command, "command_id", "id"))
+        return command unless command.is_a?(Hash)
 
-        command.merge("command_id" => "#{head_id}-C#{index + 1}")
+        payload = value_at(command, "payload") || {}
+        enriched_command = if value_at(command, "type", "command_type").to_s == "CreateIssue" && payload.is_a?(Hash)
+                             command.merge("payload" => payload.merge("_head_id" => head_id.to_s))
+                           else
+                             command
+                           end
+        return enriched_command unless blank?(value_at(enriched_command, "command_id", "id"))
+
+        enriched_command.merge("command_id" => "#{head_id}-C#{index + 1}")
       end
 
       def build_question(state:, head_id:, question_text:, context:, project_id:, issue_id:)

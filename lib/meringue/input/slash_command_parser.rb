@@ -189,6 +189,8 @@ module Meringue
           kernel_command("ListQuestions")
         when "answer"
           parse_answer(arguments)
+        when "prune"
+          parse_prune(arguments)
         when "clear"
           kernel_command("ClearState")
         else
@@ -255,6 +257,14 @@ module Meringue
           "question_id" => tokens[0],
           "answer" => tokens[1..]&.join(" ")
         )
+      end
+
+      def parse_prune(arguments)
+        tokens = split_arguments(arguments)
+        selector = tokens[0]
+        return invalid("Usage: /prune <merged|errored>") unless %w[merged errored].include?(selector.to_s.downcase)
+
+        kernel_command("Prune", "selector" => selector.to_s.downcase)
       end
 
       def split_arguments(arguments)

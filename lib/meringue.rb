@@ -11,6 +11,7 @@ end
 require_relative "meringue/version"
 require_relative "meringue/state/models"
 require_relative "meringue/state/store"
+require_relative "meringue/forge/github_client"
 require_relative "meringue/kernel/commands"
 require_relative "meringue/kernel/results"
 require_relative "meringue/kernel/engine"
