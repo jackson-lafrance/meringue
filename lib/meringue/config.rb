@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "fileutils"
 require "json"
 
 module Meringue
@@ -20,6 +21,26 @@ module Meringue
     def self.parse(source, path: nil)
       parser = TomlParser.new(source.to_s, path: path)
       parser.parse
+    end
+
+    def self.save_tui_theme!(theme, path: DEFAULT_PATH)
+      expanded_path = File.expand_path(path.to_s)
+      config = load(path: expanded_path)
+      data = config.to_h
+      data["tui"] = {} unless data["tui"].is_a?(Hash)
+      data.fetch("tui").delete("color_scheme")
+      data.fetch("tui")["colorscheme"] = theme.to_s
+      write_toml(expanded_path, data)
+      new(data, path: expanded_path, loaded: true)
+    end
+
+    def self.write_toml(path, data)
+      FileUtils.mkdir_p(File.dirname(path))
+      temp_path = "#{path}.tmp.#{$$}"
+      File.write(temp_path, TomlWriter.new(data).to_s)
+      File.rename(temp_path, path)
+    ensure
+      File.delete(temp_path) if temp_path && File.exist?(temp_path)
     end
 
     def initialize(data, path:, loaded: false)
@@ -94,6 +115,54 @@ module Meringue
 
     def deep_copy(value)
       self.class.deep_copy(value)
+    end
+
+    class TomlWriter
+      def initialize(data)
+        @data = Config.deep_stringify(data || {})
+      end
+
+      def to_s
+        lines = []
+        emit_table(data, [], lines)
+        lines << "" unless lines.empty? || lines.last == ""
+        lines.join("\n")
+      end
+
+      private
+
+      attr_reader :data
+
+      def emit_table(table, path, lines)
+        scalars, children = table.partition { |_key, value| !value.is_a?(Hash) }
+        unless path.empty?
+          lines << "" unless lines.empty?
+          lines << "[#{path.join(".")}]"
+        end
+        scalars.each do |key, value|
+          next if value.nil?
+
+          lines << "#{key} = #{format_value(value)}"
+        end
+        children.each do |key, child|
+          emit_table(child, path + [key], lines)
+        end
+      end
+
+      def format_value(value)
+        case value
+        when String
+          JSON.generate(value)
+        when TrueClass, FalseClass
+          value ? "true" : "false"
+        when Integer
+          value.to_s
+        when Array
+          "[#{value.map { |child| format_value(child) }.join(", ")}]"
+        else
+          JSON.generate(value.to_s)
+        end
+      end
     end
 
     class TomlParser

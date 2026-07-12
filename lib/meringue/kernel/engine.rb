@@ -5,6 +5,8 @@ require "monitor"
 require "open3"
 require "time"
 
+require_relative "../config"
+
 module Meringue
   module Kernel
     class Engine
@@ -50,6 +52,8 @@ module Meringue
         "set_harness" => "SetHarness",
         "harness" => "SetHarness",
         "help" => "Help",
+        "theme" => "SetTheme",
+        "set_theme" => "SetTheme",
         "get_state" => "GetState",
         "list_questions" => "ListQuestions",
         "reconcile_sessions" => "ReconcileSessions",
@@ -61,6 +65,7 @@ module Meringue
 
       HELP_COMMANDS = [
         ["/help", "Show slash command help."],
+        ["/theme <name>", "Set and persist the TUI theme. Available: catppuccin, gruvbox, kanagawa, meringue, rose-pine, tokyonight."],
         ["/project add <path> [name]", "Register a project directory."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
@@ -88,6 +93,7 @@ module Meringue
       RECONCILE_STATE_TRANSIENT_ERROR = "transient_error"
       RECONCILE_STATE_TERMINAL_ERROR = "terminal_error"
 
+      attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path
       attr_reader :store, :workspace_manager, :cwd, :forge_client
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
@@ -99,7 +105,8 @@ module Meringue
                      workspace_manager: Workspace::Manager.new,
                      cwd: Dir.pwd,
                      async_heads: false,
-                     forge_client: Forge::GitHubClient.new)
+                     forge_client: Forge::GitHubClient.new,
+                     config_path: Config::DEFAULT_PATH)
         @store = store
         @harness_client = harness_client
         @head_runner = head_runner
@@ -110,6 +117,7 @@ module Meringue
         @cwd = File.expand_path(cwd)
         @async_heads = async_heads
         @forge_client = forge_client
+        @config_path = File.expand_path(config_path.to_s)
         @harness_client_resolver = harness_client_resolver
         @state_mutex = Monitor.new
         @head_result_mutex = Mutex.new
@@ -162,6 +170,8 @@ module Meringue
           help(command_id, command_type)
         when "InvalidSlashCommand"
           invalid_slash_command(command_id, command_type, payload)
+        when "SetTheme"
+          set_theme(command_id, command_type, payload)
         when "SetHarness"
           set_harness(command_id, command_type, payload)
         when "AddProject"
@@ -386,6 +396,24 @@ module Meringue
         rejected_result(command_id, command_type, message.to_s, errors)
       end
 
+      def set_theme(command_id, command_type, payload)
+        requested_theme = value_at(payload, "theme", "Theme", "name", "Name")
+        return rejected_result(command_id, command_type, "Theme was not changed.", ["theme is required"]) if blank?(requested_theme)
+
+        theme = normalized_theme_name(requested_theme)
+        unless theme_names.include?(theme)
+          return rejected_result(
+            command_id,
+            command_type,
+            "Unknown theme: #{requested_theme}",
+            ["available themes: #{theme_names.join(", ")}"]
+          )
+        end
+
+        Config.save_tui_theme!(theme, path: config_path)
+        apply_tui_theme(theme)
+
+        state = normalized_state
       def set_harness(command_id, command_type, payload)
         requested_provider = value_at(payload, "provider", "Provider", "harness", "Harness")
         return rejected_result(command_id, command_type, "Harness was not changed.", ["provider is required"]) if blank?(requested_provider)
@@ -428,6 +456,10 @@ module Meringue
           source_type: "kernel",
           source_id: nil,
           level: "info",
+          message: "Set TUI theme to #{theme}.",
+          details: { "theme" => theme, "config_path" => config_path }
+        )
+        touch_state!(state)
           message: changed ? "Selected #{metadata.fetch("active_harness_label")} harness for future agents." : "#{metadata.fetch("active_harness_label")} harness is already selected.",
           details: {
             "previous_harness" => previous_public_provider,
@@ -442,6 +474,13 @@ module Meringue
         accepted_result(
           command_id,
           command_type,
+          theme,
+          "Set TUI theme to #{theme} and saved it to #{config_path}.",
+          { "theme" => theme, "config_path" => config_path, "available_themes" => theme_names },
+          log_ids
+        )
+      rescue Config::ParseError => e
+        rejected_result(command_id, command_type, "Theme was not changed because config could not be read.", [e.message])
           public_provider,
           changed ? "Selected #{metadata.fetch("active_harness_label")} for future heads and workers." : "#{metadata.fetch("active_harness_label")} is already the active harness.",
           {
@@ -2025,6 +2064,26 @@ module Meringue
         state = store.load
         ensure_state_shape!(state)
         state
+      end
+
+      def theme_names
+        if defined?(Meringue::TUI::Style)
+          Meringue::TUI::Style.colorschemes
+        else
+          %w[catppuccin gruvbox kanagawa meringue rose-pine tokyonight]
+        end
+      end
+
+      def normalized_theme_name(theme)
+        if defined?(Meringue::TUI::Style)
+          Meringue::TUI::Style.normalize_colorscheme_name(theme)
+        else
+          theme.to_s.strip.downcase.tr("_", "-")
+        end
+      end
+
+      def apply_tui_theme(theme)
+        Meringue::TUI::Style.configure!(theme) if defined?(Meringue::TUI::Style)
       end
 
       def ensure_state_shape!(state)

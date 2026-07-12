@@ -2,11 +2,14 @@
 
 require "shellwords"
 
+require_relative "../tui/style"
+
 module Meringue
   module Input
     class SlashCommandParser
       COMMAND_SPECS = [
         ["/help", "Show slash command help."],
+        ["/theme <name>", "Set and persist the TUI theme."],
         ["/project add <path> [name]", "Register a project directory."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
@@ -31,6 +34,7 @@ module Meringue
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
         { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
         { "prefix" => "/kill", "source" => "targets", "append_space" => false },
+        { "prefix" => "/theme", "source" => "themes", "append_space" => false },
         { "prefix" => "/jump", "source" => "agents", "append_space" => false },
         { "prefix" => "/jumpr", "source" => "pr_agents", "append_space" => false },
         { "prefix" => "/answer", "source" => "open_questions", "append_space" => true },
@@ -89,7 +93,7 @@ module Meringue
       end
 
       def self.argument_suggestion_records(input, state)
-        return nil unless state && normalized_query(input)
+        return nil unless normalized_query(input)
 
         context = argument_suggestion_context(input)
         return nil unless context
@@ -124,6 +128,8 @@ module Meringue
                   Array(state["issues"])
                 when "workers"
                   Array(state["agents"]).select { |agent| agent["type"] == "worker" }
+                when "themes"
+                  available_theme_names.map { |theme| { "id" => theme, "theme" => theme } }
                 when "targets"
                   Array(state["agents"]) + Array(state["issues"]) + Array(state["projects"])
                 when "agents"
@@ -205,6 +211,14 @@ module Meringue
         url.to_s.match?(%r{\Ahttps?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+(?:[/?#].*)?\z})
       end
 
+      def self.available_theme_names
+        if defined?(Meringue::TUI::Style)
+          Meringue::TUI::Style.colorschemes
+        else
+          %w[catppuccin gruvbox kanagawa meringue rose-pine tokyonight]
+        end
+      end
+
       def self.description_for_suggestion(item, source)
         case source
         when "harness_providers"
@@ -215,6 +229,8 @@ module Meringue
           ["issue", item["title"], item["status"]].compact.join(" · ")
         when "workers"
           ["worker", item["status"], item["issue_id"]].compact.join(" · ")
+        when "themes"
+          "theme"
         when "targets"
           type = item["type"] || (item.key?("root_path") ? "project" : "issue")
           [type, item["title"] || item["name"], item["status"]].compact.join(" · ")
@@ -242,6 +258,8 @@ module Meringue
         case command_text
         when "help"
           kernel_command("Help")
+        when "theme"
+          parse_theme(arguments)
         when "harness"
           parse_harness(arguments)
         when "project"
@@ -283,6 +301,11 @@ module Meringue
 
       private
 
+      def parse_theme(arguments)
+        tokens = split_arguments(arguments)
+        return invalid("Usage: /theme <name>") unless tokens.length == 1
+
+        kernel_command("SetTheme", "theme" => tokens[0])
       def parse_harness(arguments)
         tokens = split_arguments(arguments)
         return invalid("Usage: /harness <pi|claude|antigravity>") unless tokens.length == 1
