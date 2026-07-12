@@ -96,7 +96,8 @@ module Meringue
           metrics.fetch(:hint_x),
           metrics.fetch(:hint_y),
           metrics.fetch(:hint_width),
-          chat_pane.bottom_hint_line(state)
+          chat_pane.bottom_hint_line(state),
+          chat_pane.bottom_right_status_line(state)
         )
 
         canvas.render(color: color)
@@ -257,8 +258,25 @@ module Meringue
         end
       end
 
-      def draw_hint_line(canvas, x, y, width, line)
-        canvas.write_segments(x, y, line, max_width: width, default_style: Style::MUTED)
+      def draw_hint_line(canvas, x, y, width, line, right_line = [])
+        right_width = segment_text_width(right_line)
+        if right_width.positive? && right_width < width
+          left_width = [width - right_width - 2, 0].max
+          canvas.write_segments(x, y, line, max_width: left_width, default_style: Style::MUTED)
+          canvas.write_segments(x + width - right_width, y, right_line, max_width: right_width, default_style: Style::MUTED)
+        else
+          canvas.write_segments(x, y, line, max_width: width, default_style: Style::MUTED)
+        end
+      end
+
+      def segment_text_width(segments)
+        Array(segments).sum do |segment|
+          if segment.is_a?(Array)
+            segment.fetch(0, "").to_s.length
+          else
+            segment.to_s.length
+          end
+        end
       end
 
       def draw_pane(canvas, x, y, width, height, title, lines, active: false, overflow: :head, scroll_offset: 0)

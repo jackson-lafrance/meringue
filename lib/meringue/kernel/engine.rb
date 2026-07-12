@@ -309,6 +309,7 @@ module Meringue
       end
 
       def reconcile_sessions(command_id: nil, command_type: "ReconcileSessions")
+        normalized_state_changed = persist_normalized_state_if_changed
         prune_result = prune_killed_agents
         agents = synchronized_state do
           normalized_state.fetch("agents").select { |agent| reconcile_candidate?(agent) }.map { |agent| deep_copy(agent) }
@@ -317,6 +318,7 @@ module Meringue
         poll_results = agents.map { |agent| poll_agent_session(agent) }
         applied_results = poll_results.map { |poll_result| apply_poll_result(poll_result) }
         changed_count = applied_results.count { |result| result.fetch("changed", false) }
+        changed_count += 1 if normalized_state_changed
         changed_count += 1 if prune_result.fetch("changed", false)
         accepted_result(
           command_id,
@@ -2152,6 +2154,17 @@ module Meringue
         state = store.load
         ensure_state_shape!(state)
         state
+      end
+
+      def persist_normalized_state_if_changed
+        synchronized_state do
+          state = store.load
+          before = JSON.generate(state)
+          ensure_state_shape!(state)
+          changed = JSON.generate(state) != before
+          store.save(state) if changed
+          changed
+        end
       end
 
       def theme_names
