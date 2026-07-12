@@ -56,7 +56,7 @@ module Meringue
 
       registry = Harness::Registry.new(config: config)
       store = state_store(path: options.fetch(:state_path))
-      engine = enable_agents ? tui_engine(store, registry) : nil
+      engine = enable_agents ? tui_engine(store, registry, config_path: options.fetch(:config_path)) : nil
       App.new(
         input: input,
         out: out,
@@ -155,7 +155,7 @@ module Meringue
       @state_stores[File.expand_path(path)] ||= State::Store.new(path: path)
     end
 
-    def tui_engine(store, registry)
+    def tui_engine(store, registry, config_path: Config::DEFAULT_PATH)
       Kernel::Engine.new(
         store: store,
         harness_client: registry.worker_client,
@@ -163,7 +163,8 @@ module Meringue
         harness_client_resolver: ->(agent) { registry.client_for_agent(agent) },
         workspace_manager: Workspace::Manager.new,
         cwd: Dir.pwd,
-        async_heads: true
+        async_heads: true,
+        config_path: config_path
       )
     end
 
@@ -225,6 +226,7 @@ module Meringue
           Enter                     # send chat; when agent tree is focused, enter jump mode
           /                         # show slash command suggestions in an otherwise empty prompt
           /help                     # list command syntax
+          /theme <name>             # set and persist the TUI theme
           /keybind                  # show all TUI keybindings
           /jump [agent_id]          # open an agent session in Alacritty; omit id to navigate the AgentTree
           /jumpr [agent_id]         # open an agent PR; omit id to navigate only agents with attached PRs
