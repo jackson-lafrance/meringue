@@ -58,7 +58,13 @@ module Meringue
           }
         )
         payload["apply_head_result"] = apply_result
-        emit(on_event, "head_result_applied", "head_id" => spawn_result.fetch("target_id"), "apply_result" => apply_result)
+        emit(
+          on_event,
+          "head_result_applied",
+          "head_id" => spawn_result.fetch("target_id"),
+          "head_result" => head_result,
+          "apply_result" => apply_result
+        )
         payload["worker_wait_results"] = wait_for_spawned_workers(apply_result, on_event: on_event)
         payload["state_mutated"] = apply_result.fetch("status", nil) == "accepted"
         payload["state_summary"] = state_summary
