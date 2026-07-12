@@ -86,7 +86,9 @@ Before changing files:
 Before finishing:
 - Commit only the task's intended changes from that task's worktree.
 - Push the task branch and open a pull request.
-- Include the PR description's testing section with exact reviewer commands for manually testing the change, including the task worktree path, a `cd <worktree>` command, and the command to run or open the changed slice.
+- Include a `How to test this change` section in the PR description with exact reviewer commands for manually testing the change, including the task worktree path, a `cd <worktree>` command, and the command to run or open the changed slice.
+- Do not rely on a generated PR body that may be truncated. Prefer writing the complete PR description to a markdown file or heredoc and creating/updating the PR with `gh pr create --body-file <file>` or `gh pr edit --body-file <file>`.
+- After opening or updating the PR, inspect the rendered PR body or `gh pr view --json body` output enough to confirm the testing section is present and not cut off.
 - Include the PR link in the final response.
 - If the PR cannot be opened because of missing auth, network access, or unavailable tooling, report the exact blocker and provide the PR title, description, and command the user can run.
 
