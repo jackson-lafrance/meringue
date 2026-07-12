@@ -47,11 +47,20 @@ module Meringue
         end
 
         def level(entry)
+          return "cmd" if command_log?(entry)
+
           LEVEL_LABELS.fetch(entry["level"], "????")
         end
 
         def level_style(entry)
+          return Style::LOG_COMMAND if command_log?(entry)
+
           LEVEL_STYLES.fetch(entry["level"], Style::MUTED)
+        end
+
+        def command_log?(entry)
+          details = entry.fetch("details", {}) || {}
+          details["presentation"] == "cmd" || details["kind"].to_s.start_with?("kernel_command")
         end
 
         def source(entry)

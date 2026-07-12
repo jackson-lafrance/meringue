@@ -30,6 +30,7 @@ module Meringue
         USER
         ASSISTANT
         LOG_INFO
+        LOG_COMMAND
         LOG_WARNING
         LOG_ERROR
       ].freeze
@@ -98,6 +99,7 @@ module Meringue
         USER: [1, 38, 5, 117],
         ASSISTANT: [1, 38, 5, 183],
         LOG_INFO: [38, 5, 117],
+        LOG_COMMAND: [38, 5, 203],
         LOG_WARNING: [38, 5, 221],
         LOG_ERROR: [38, 5, 203]
       }.freeze
@@ -126,6 +128,7 @@ module Meringue
         USER: [1, 38, 5, 231],
         ASSISTANT: [1, 38, 5, 226],
         LOG_INFO: [38, 5, 220],
+        LOG_COMMAND: [38, 5, 203],
         LOG_WARNING: [38, 5, 214],
         LOG_ERROR: [38, 5, 203]
       }.freeze
@@ -154,6 +157,7 @@ module Meringue
         USER: [1, 38, 5, 117],
         ASSISTANT: [1, 38, 5, 147],
         LOG_INFO: [38, 5, 117],
+        LOG_COMMAND: [38, 5, 203],
         LOG_WARNING: [38, 5, 221],
         LOG_ERROR: [38, 5, 203]
       }.freeze
@@ -182,6 +186,7 @@ module Meringue
         USER: [1, 38, 5, 109],
         ASSISTANT: [1, 38, 5, 220],
         LOG_INFO: [38, 5, 109],
+        LOG_COMMAND: [38, 5, 167],
         LOG_WARNING: [38, 5, 214],
         LOG_ERROR: [38, 5, 167]
       }.freeze
@@ -210,6 +215,7 @@ module Meringue
         USER: [1, 38, 5, 117],
         ASSISTANT: [1, 38, 5, 219],
         LOG_INFO: [38, 5, 117],
+        LOG_COMMAND: [38, 5, 210],
         LOG_WARNING: [38, 5, 222],
         LOG_ERROR: [38, 5, 210]
       }.freeze
@@ -238,6 +244,7 @@ module Meringue
         USER: [1, 38, 5, 110],
         ASSISTANT: [1, 38, 5, 176],
         LOG_INFO: [38, 5, 110],
+        LOG_COMMAND: [38, 5, 203],
         LOG_WARNING: [38, 5, 179],
         LOG_ERROR: [38, 5, 203]
       }.freeze

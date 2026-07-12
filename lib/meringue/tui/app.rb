@@ -827,13 +827,16 @@ module Meringue
         return if text.empty?
 
         slash_command = text.start_with?("/")
-        append_message("you", text)
-        assistant_message_id = append_message(
-          "meringue",
-          "",
-          status: "queued",
-          visible: false
-        )
+        assistant_message_id = nil
+        unless slash_command
+          append_message("you", text)
+          assistant_message_id = append_message(
+            "meringue",
+            "",
+            status: "queued",
+            visible: false
+          )
+        end
         increment_pending_count
 
         Thread.new do
@@ -841,9 +844,9 @@ module Meringue
             update_message(
               assistant_message_id,
               text: "",
-              status: slash_command ? "working" : "head working",
+              status: "head working",
               visible: false
-            )
+            ) if assistant_message_id
             result = if on_submit
                        on_submit.call(text) do |event|
                          update_message_from_event(assistant_message_id, event)
@@ -851,10 +854,16 @@ module Meringue
                      else
                        unavailable_prompt_handler_result
                      end
-            final_text = conversation_text_for(result)
-            update_message(assistant_message_id, text: final_text, status: nil, visible: !final_text.to_s.strip.empty?)
+            if slash_command
+              apply_theme_command_results(result.fetch("command_results", []) || []) if result.fetch("event", nil) == "slash_command_applied"
+            else
+              final_text = conversation_text_for(result)
+              update_message(assistant_message_id, text: final_text, status: nil, visible: !final_text.to_s.strip.empty?)
+            end
           rescue StandardError => e
-            update_message(assistant_message_id, text: "Head loop failed: #{e.class}: #{e.message}", status: "errored", visible: true)
+            if assistant_message_id
+              update_message(assistant_message_id, text: "Head loop failed: #{e.class}: #{e.message}", status: "errored", visible: true)
+            end
           ensure
             decrement_pending_count
           end
@@ -900,7 +909,6 @@ module Meringue
           append_head_result_applied_summary(message_id, event)
         when "slash_command_applied"
           apply_theme_command_results(event.fetch("command_results", []) || [])
-          append_user_facing_line(message_id, slash_command_text(event.fetch("command_results", []) || []), status: nil)
         when "worker_wait_started"
           remember_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
           update_message_status(message_id, "workers running")
@@ -916,9 +924,7 @@ module Meringue
       def conversation_text_for(result)
         if result.fetch("event", nil) == "slash_command_applied"
           apply_theme_command_results(result.fetch("command_results", []) || [])
-          lines = [slash_command_text(result.fetch("command_results", []) || [])]
-          lines.concat(worker_summary_lines(result.fetch("worker_wait_results", []) || []))
-          return lines.reject { |line| line.to_s.empty? }.join("\n")
+          return ""
         end
 
         spawn_result = result.fetch("spawn_head_result", {}) || {}
