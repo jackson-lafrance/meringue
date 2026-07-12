@@ -40,13 +40,14 @@ provider = "pi"              # default for heads and workers
 Supported provider names in this slice:
 
 - `pi`
-- `claude`
+- `claude` for Claude Code (aliases: `claude_code`, `claude-code`, `cc`)
 - `antigravity`
 
 CLI flags override `config.toml`:
 
 ```bash
 bin/meringue tui --harness claude
+bin/meringue tui --harness claude_code
 bin/meringue tui --head-harness antigravity --worker-harness claude
 ```
 
@@ -79,5 +80,7 @@ command = "antigravity"
 head_extra_args = []
 worker_extra_args = []
 ```
+
+Claude Code runs through `claude --print --output-format stream-json --verbose`; Meringue stores the returned session id and resumes completed turns with `claude --resume`. Live steer/follow-up prompting is currently Pi-only.
 
 Do not store API keys or secrets in the config file. Prefer each provider CLI's normal auth flow or environment setup.

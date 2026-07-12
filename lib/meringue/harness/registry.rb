@@ -207,7 +207,7 @@ module Meringue
           FileUtils.mkdir_p(session_dir)
           PiClient.new(command: command, session_dir: session_dir, env: env, extra_args: extra_args)
         when "claude"
-          ClaudeClient.new(
+          ClaudeCodeClient.new(
             command: command,
             env: env,
             extra_args: extra_args,

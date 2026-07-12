@@ -87,13 +87,13 @@ module Meringue
         option_parser.on("--config PATH", "Read Meringue harness config TOML from PATH. Defaults to #{Config::DEFAULT_PATH}.") do |path|
           options[:config_path] = path
         end
-        option_parser.on("--harness NAME", "Use one harness provider for heads and workers: pi, claude, or antigravity.") do |name|
+        option_parser.on("--harness NAME", "Use one harness provider for heads and workers: pi, claude/claude_code, or antigravity.") do |name|
           options[:harness] = name
         end
-        option_parser.on("--head-harness NAME", "Use a specific head harness provider: pi, claude, or antigravity.") do |name|
+        option_parser.on("--head-harness NAME", "Use a specific head harness provider: pi, claude/claude_code, or antigravity.") do |name|
           options[:head_harness] = name
         end
-        option_parser.on("--worker-harness NAME", "Use a specific worker harness provider: pi, claude, or antigravity.") do |name|
+        option_parser.on("--worker-harness NAME", "Use a specific worker harness provider: pi, claude/claude_code, or antigravity.") do |name|
           options[:worker_harness] = name
         end
       end
@@ -221,7 +221,7 @@ module Meringue
 
         Config:
           Default path: #{Config::DEFAULT_PATH}
-          Supported harness providers: pi, claude, antigravity
+          Supported harness providers: pi, claude (aliases: claude_code, claude-code, cc), antigravity
           Supported TUI colorschemes: #{TUI::Style.colorschemes.join(", ")}
           CLI flags override config.toml, and MERINGUE_HARNESS / MERINGUE_HEAD_HARNESS / MERINGUE_WORKER_HARNESS override both.
 

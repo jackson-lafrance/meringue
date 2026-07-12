@@ -36,5 +36,8 @@ module Meringue
         command_argv + ["--print", "--output-format", "stream-json", "--verbose"]
       end
     end
+
+    # Backward-compatible explicit name for the Claude Code harness backend.
+    class ClaudeCodeClient < ClaudeClient; end
   end
 end
