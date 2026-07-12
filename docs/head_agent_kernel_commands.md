@@ -272,9 +272,9 @@ Example:
 
 ### SpawnWorker
 
-Spawns a real worker harness session for an issue. The kernel owns workspace allocation before calling the harness. Use this directly on an existing issue for follow-up prompts instead of creating nested issues.
+Spawns a real worker harness session for an issue. The kernel owns workspace allocation before calling the harness. For git-backed projects, the kernel creates a dedicated Meringue-owned worktree/branch and passes that workspace to the harness. Use this directly on an existing issue for follow-up prompts instead of creating nested issues.
 
-Workers receive standing guidance that they do not need to ask for user permission before editing files, creating a task branch/worktree, committing, pushing, or opening/updating a PR when the assigned issue asks for those actions. Do not add worker prompts that tell them to wait for routine git/PR approval; do include requested delivery actions in the prompt, and let the worker report only true blockers such as missing auth, remote setup problems, branch/worktree collisions, unrelated work that would be overwritten, or unsafe/destructive operations.
+Workers receive standing guidance that they do not need to ask for user permission before editing files, committing, pushing, or opening/updating a PR when the assigned issue asks for those actions. Do not add worker prompts that tell them to wait for routine git/PR approval; do include requested delivery actions in the prompt, and let the worker report only true blockers such as missing auth, remote setup problems, branch/worktree collisions, unrelated work that would be overwritten, or unsafe/destructive operations. Workers should stay in the kernel-assigned workspace/branch unless it is unusable or the user explicitly asks for a different branch/worktree.
 
 Worker delivery names should be human-facing. When a head supplies a worker title or prompt, prefer the issue/task title or requested change that should become the branch/PR name. Do not ask workers to put Meringue agent ids, worker ids, Pi ids, or subagent implementation details in branch names, PR titles, or PR metadata.
 
@@ -451,7 +451,7 @@ Supported selectors:
 merged, errored
 ```
 
-- `merged` checks verified worker delivery PRs and prunes only issue bundles with at least one confirmed merged PR, no active workers, and no tracked delivery PRs that are still open, closed without merge, or unknown. Worker output URLs are candidates only; Meringue tracks a delivery PR only when its GitHub base repo matches the project remote and its head branch matches the worker delivery branch.
+- `merged` checks verified worker delivery PRs and prunes only issue bundles with at least one confirmed merged PR, no active workers, and no tracked delivery PRs that are still open, closed without merge, or unknown. Worker output URLs are candidates only; Meringue normally tracks a delivery PR only when its GitHub base repo matches the project remote and its head branch matches the worker delivery branch. As a legacy repair path for older records that predate real worker worktrees, prune may promote a single merged same-repository candidate PR from a completed worker when no delivery branch was persisted.
 - `errored` prunes errored issue bundles that have no active workers, plus standalone errored heads.
 
 Example:
