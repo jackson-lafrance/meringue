@@ -34,7 +34,6 @@ module Meringue
         end
 
         def composer_lines(state, width: nil)
-          open_questions = state.fetch("questions", []).count { |question| question["status"] == "open" }
           chat = chat_state(state)
           input_buffer = chat.fetch("input_buffer", "").to_s
           input_cursor = chat.fetch("input_cursor", input_buffer.chars.length).to_i
@@ -43,13 +42,7 @@ module Meringue
           input_lines = wrapped_input_lines(input_buffer, input_cursor: input_cursor, width: width)
           input_lines + [
             [["", Style::DIM]],
-            [
-              [pending_status(pending_count), pending_count.positive? ? Style::WARNING : Style::SUCCESS],
-              ["  ·  ", Style::DIM],
-              ["open questions: #{open_questions}", Style::MUTED],
-              ["  ·  ", Style::DIM],
-              ["enter sends · shift/alt-enter newline · ctrl-c clears/quits · tab completes slash commands", Style::MUTED]
-            ]
+            footer_status_line(state, pending_count)
           ]
         end
 
@@ -189,10 +182,55 @@ module Meringue
           lines.first(visible_count) + ["… #{hidden_count} more line#{hidden_count == 1 ? "" : "s"}"]
         end
 
-        def pending_status(pending_count)
-          return "head loop idle" unless pending_count.positive?
+        def footer_status_line(state, pending_count)
+          status_segments(state, pending_count) + question_segments(state) + [
+            ["  ·  ", Style::DIM],
+            ["enter sends · shift/alt-enter newline · ctrl-c clears/quits · tab completes slash commands · /jump nav", Style::MUTED]
+          ]
+        end
 
-          "#{pending_count} head prompt#{pending_count == 1 ? "" : "s"} in flight"
+        def status_segments(state, pending_count)
+          working_workers = active_agent_count(state, "worker")
+          working_heads = active_agent_count(state, "head")
+          if working_workers.positive? || working_heads.positive?
+            return active_status_segments(working_workers, working_heads)
+          end
+
+          return [[prompt_count_label(pending_count), Style::ACCENT]] if pending_count.positive?
+
+          [["meringue idle", Style::MUTED]]
+        end
+
+        def active_status_segments(working_workers, working_heads)
+          segments = [["● active", Style::ACCENT_BOLD]]
+          metrics = []
+          metrics << ["#{working_workers}W", Style::WORKING] if working_workers.positive?
+          metrics << ["#{working_heads}H", Style::ACCENT_BOLD] if working_heads.positive?
+          metrics.each_with_index do |metric, index|
+            segments << [index.zero? ? "  " : " ", Style::DIM]
+            segments << metric
+          end
+          segments
+        end
+
+        def question_segments(state)
+          open_questions = state.fetch("questions", []).count { |question| question["status"] == "open" }
+          return [] unless open_questions.positive?
+
+          [
+            ["  ·  ", Style::DIM],
+            ["? #{open_questions}", Style::WARNING]
+          ]
+        end
+
+        def active_agent_count(state, type)
+          state.fetch("agents", []).count do |agent|
+            agent["type"] == type && agent["status"] == "working"
+          end
+        end
+
+        def prompt_count_label(pending_count)
+          "#{pending_count} prompt#{pending_count == 1 ? "" : "s"} running"
         end
 
         def chat_state(state)

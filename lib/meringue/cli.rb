@@ -190,6 +190,7 @@ module Meringue
           Enter                     # send natural language to a head, or apply a slash command directly in the kernel
           /                         # show slash command suggestions in an otherwise empty prompt
           /help                     # list command syntax
+          /jump [agent_id]          # open an agent session in Alacritty; omit id to navigate the AgentTree
           Esc on an empty prompt or Ctrl-C # quit the TUI
       HELP
     end
