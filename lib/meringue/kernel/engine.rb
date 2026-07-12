@@ -699,13 +699,12 @@ module Meringue
       def prune_merged(command_id, command_type)
         state = normalized_state
         worker_checks = merged_pr_worker_checks(state)
-        issue_ids = worker_checks.select { |check| check.fetch("merged", false) }.map { |check| check.fetch("issue_id", nil) }.compact.uniq
+        issue_decisions = merged_pr_issue_decisions(state, worker_checks)
+        issue_ids = issue_decisions.select { |decision| decision.fetch("prunable", false) }.map { |decision| decision.fetch("issue_id") }
         now = timestamp
         prune_result = remove_issue_bundles_and_agents!(state, issue_ids: issue_ids, extra_agent_ids: [], reason: "pull_request_merged", now: now)
         checked_urls = worker_checks.flat_map { |check| check.fetch("statuses", []).map { |status| status.fetch("url", nil) } }.compact.uniq
-        skipped_urls = worker_checks.flat_map do |check|
-          check.fetch("statuses", []).reject { |status| status.fetch("state", nil) == "merged" }.map { |status| status.fetch("url", nil) }
-        end.compact.uniq
+        skipped_urls = issue_decisions.reject { |decision| decision.fetch("prunable", false) }.flat_map { |decision| decision.fetch("pr_urls", []) }.uniq
 
         log_ids = append_log(
           state,
@@ -717,13 +716,14 @@ module Meringue
             "selector" => "merged",
             "checked_pr_urls" => checked_urls,
             "skipped_pr_urls" => skipped_urls,
-            "worker_checks" => worker_checks
+            "worker_checks" => worker_checks,
+            "issue_decisions" => issue_decisions
           )
         )
         touch_state!(state, now)
         store.save(state)
 
-        accepted_result(command_id, command_type, nil, "Pruned #{prune_result.fetch("removed_issue_ids").length} merged issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"}.", prune_result.merge("checked_pr_urls" => checked_urls, "skipped_pr_urls" => skipped_urls), log_ids)
+        accepted_result(command_id, command_type, nil, "Pruned #{prune_result.fetch("removed_issue_ids").length} merged issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"}.", prune_result.merge("checked_pr_urls" => checked_urls, "skipped_pr_urls" => skipped_urls, "issue_decisions" => issue_decisions), log_ids)
       end
 
       def prune_errored(command_id, command_type)
@@ -760,6 +760,38 @@ module Meringue
             "merged" => statuses.any? { |status| status.fetch("state", nil) == "merged" }
           }
         end
+      end
+
+      def merged_pr_issue_decisions(state, worker_checks)
+        checks_by_issue = worker_checks.group_by { |check| check.fetch("issue_id", nil) }
+        checks_by_issue.filter_map do |issue_id, checks|
+          next if blank?(issue_id)
+          next unless find_issue(state, issue_id)
+
+          workers = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" && agent.fetch("issue_id", nil) == issue_id }
+          statuses = checks.flat_map { |check| check.fetch("statuses", []) }
+          active_worker_ids = workers.select { |worker| prune_blocking_worker_status?(worker.fetch("status", nil)) }.map { |worker| worker.fetch("id", nil) }.compact
+          non_merged_statuses = statuses.reject { |status| status.fetch("state", nil) == "merged" }
+          merged = statuses.any? { |status| status.fetch("state", nil) == "merged" }
+          blockers = []
+          blockers << "active_workers" if active_worker_ids.any?
+          blockers << "non_merged_pull_requests" if non_merged_statuses.any?
+          blockers << "no_merged_pull_request" unless merged
+
+          {
+            "issue_id" => issue_id,
+            "prunable" => blockers.empty?,
+            "blockers" => blockers,
+            "active_worker_ids" => active_worker_ids,
+            "non_merged_pr_urls" => non_merged_statuses.map { |status| status.fetch("url", nil) }.compact.uniq,
+            "pr_urls" => checks.flat_map { |check| check.fetch("pr_urls", []) }.uniq,
+            "worker_ids" => workers.map { |worker| worker.fetch("id", nil) }.compact
+          }
+        end
+      end
+
+      def prune_blocking_worker_status?(status)
+        %w[queued working idle blocked].include?(status.to_s)
       end
 
       def pull_request_status(url)
