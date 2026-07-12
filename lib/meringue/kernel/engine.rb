@@ -373,6 +373,8 @@ module Meringue
 
       def kernel_command_output_lines(command_results)
         Array(command_results).flat_map do |result|
+          next [] if command_result_already_logged?(result)
+
           status = result.fetch("status", "unknown")
           command_type = result.fetch("command_type", "command")
           message = result.fetch("message", "").to_s.strip
@@ -384,6 +386,10 @@ module Meringue
           end
           lines
         end.reject { |line| line.to_s.strip.empty? }
+      end
+
+      def command_result_already_logged?(result)
+        Array(result.fetch("log_entry_ids", [])).any?
       end
 
       def kernel_command_output_detail_lines(command_type, result)
