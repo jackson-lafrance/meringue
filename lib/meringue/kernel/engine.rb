@@ -299,9 +299,40 @@ module Meringue
             source_type: "user",
             source_id: nil,
             level: "info",
-            message: "User ran kernel command: #{input.to_s}",
-            details: { "input" => input.to_s, "command_types" => command_types }
+            message: "User ran command: #{input.to_s}",
+            details: {
+              "input" => input.to_s,
+              "command_types" => command_types,
+              "kind" => "kernel_command",
+              "presentation" => "cmd"
+            }
           )
+          touch_state!(state)
+          store.save(state)
+          log_ids
+        end
+      end
+
+      def record_user_kernel_command_output(input:, command_results: [])
+        lines = kernel_command_output_lines(command_results)
+        return [] if lines.empty?
+
+        synchronized_state do
+          state = normalized_state
+          log_ids = lines.flat_map do |line|
+            append_log(
+              state,
+              source_type: "kernel",
+              source_id: nil,
+              level: "info",
+              message: "Command output: #{line}",
+              details: {
+                "input" => input.to_s,
+                "kind" => "kernel_command_output",
+                "presentation" => "cmd"
+              }
+            )
+          end
           touch_state!(state)
           store.save(state)
           log_ids
@@ -339,6 +370,57 @@ module Meringue
       end
 
       private
+
+      def kernel_command_output_lines(command_results)
+        Array(command_results).flat_map do |result|
+          status = result.fetch("status", "unknown")
+          command_type = result.fetch("command_type", "command")
+          message = result.fetch("message", "").to_s.strip
+          lines = ["#{command_type}: #{status}#{message.empty? ? "" : " — #{message}"}"]
+          if status == "accepted"
+            lines.concat(kernel_command_output_detail_lines(command_type, result.fetch("result", nil)))
+          else
+            lines.concat(Array(result.fetch("errors", [])).map { |error| "  - #{error}" })
+          end
+          lines
+        end.reject { |line| line.to_s.strip.empty? }
+      end
+
+      def kernel_command_output_detail_lines(command_type, result)
+        case command_type
+        when "SetTheme"
+          theme = result.is_a?(Hash) ? result["theme"] : nil
+          config_path = result.is_a?(Hash) ? result["config_path"] : nil
+          ["  theme: #{theme}", config_path ? "  config: #{config_path}" : nil].compact
+        when "SetHarness"
+          harness = result.is_a?(Hash) ? result["active_harness"] || result["harness"] : nil
+          harness ? ["  harness: #{harness}"] : []
+        when "Help"
+          Array(result).map { |item| "  #{item.fetch("usage", "")} — #{item.fetch("description", "")}" }
+        when "ListQuestions"
+          questions = Array(result)
+          return ["  No questions."] if questions.empty?
+
+          questions.map { |question| "  #{question.fetch("id", "?")} [#{question.fetch("status", "?")}] #{question.fetch("question", "")}" }
+        when "Prune"
+          prune_result = result || {}
+          [
+            "  removed issues: #{Array(prune_result["removed_issue_ids"]).length}",
+            "  removed agents: #{Array(prune_result["removed_agent_ids"]).length}"
+          ]
+        when "ListAll", "GetState"
+          state = result || {}
+          [
+            "  projects: #{Array(state["projects"]).length}",
+            "  issues: #{Array(state["issues"]).length}",
+            "  agents: #{Array(state["agents"]).length}",
+            "  questions: #{Array(state["questions"]).length}"
+          ]
+        else
+          target_id = result.is_a?(Hash) ? result["id"] : nil
+          target_id ? ["  target: #{target_id}"] : []
+        end
+      end
 
       def prune_killed_agents
         synchronized_state do
