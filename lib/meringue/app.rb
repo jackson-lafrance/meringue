@@ -30,7 +30,9 @@ module Meringue
       state_store.compact! if state_store.respond_to?(:compact!)
       reconcile_now
       ui = tui
-      ui.remember_existing_conversation_events!(state_store.load) if ui.respond_to?(:remember_existing_conversation_events!)
+      loaded_state = state_store.load
+      ui.restore_conversation!(loaded_state) if ui.respond_to?(:restore_conversation!)
+      ui.remember_existing_conversation_events!(loaded_state) if ui.respond_to?(:remember_existing_conversation_events!)
       ui.run(state_provider: -> { current_state }, on_submit: prompt_handler)
     rescue JSON::ParserError => e
       err.puts "Could not load Meringue state from #{state_path}: #{e.message}"
@@ -67,7 +69,7 @@ module Meringue
     end
 
     def tui
-      tui_app || TUI::App.new(input: input, out: out)
+      tui_app || TUI::App.new(input: input, out: out, conversation_store: state_store)
     end
   end
 end

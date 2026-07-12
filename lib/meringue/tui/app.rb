@@ -37,12 +37,13 @@ module Meringue
       AGENT_TREE_FORWARD_KEYS = (DOWN_KEYS + RIGHT_KEYS).freeze
       AGENT_TREE_BACK_KEYS = (UP_KEYS + LEFT_KEYS).freeze
 
-      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil)
+      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, conversation_store: nil)
         @layout = layout
         @out = out
         @terminal = terminal || Terminal.new(input: input, output: out)
         @session_opener = session_opener || Harness::TerminalSessionOpener.new
         @pull_request_opener = pull_request_opener || PullRequestOpener.new
+        @conversation_store = conversation_store
         @messages = []
         @next_message_id = 0
         @pending_count = 0
@@ -60,11 +61,22 @@ module Meringue
         layout.render(state, width: width, height: height, color: color)
       end
 
+      def restore_conversation!(state)
+        conversation = state.fetch("conversation", {}) || {}
+        messages = Array(conversation.fetch("messages", []))
+        @chat_mutex.synchronize do
+          @messages = messages.map { |message| normalize_persisted_message(message) }.compact
+          @next_message_id = [conversation.fetch("next_message_id", 0).to_i, @messages.map { |message| message.fetch("id", 0).to_i }.max.to_i].max
+        end
+      end
+
       def remember_existing_conversation_events!(state)
         Array(state.fetch("agents", [])).each do |agent|
-          next unless existing_worker_completion_event?(agent)
-
-          remember_conversation_event(worker_completed_key(agent.fetch("id", nil)))
+          if existing_head_completion_event?(agent)
+            remember_conversation_event(head_completed_key(agent.fetch("id", nil)))
+          elsif existing_worker_completion_event?(agent)
+            remember_conversation_event(worker_completed_key(agent.fetch("id", nil)))
+          end
         end
       end
 
@@ -110,7 +122,7 @@ module Meringue
 
       private
 
-      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener
+      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :conversation_store
 
       def render_once(state)
         out.puts render(state, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, color: false)
@@ -1043,6 +1055,13 @@ module Meringue
         end
       end
 
+      def existing_head_completion_event?(agent)
+        return false unless agent.fetch("type", nil) == "head"
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata["head_result_applied_at"] && metadata["head_result"].is_a?(Hash)
+      end
+
       def existing_worker_completion_event?(agent)
         return false unless agent.fetch("type", nil) == "worker"
         return false unless agent.fetch("status", nil) == "completed"
@@ -1107,6 +1126,24 @@ module Meringue
         end
       end
 
+      def normalize_persisted_message(message)
+        return nil unless message.is_a?(Hash)
+
+        id = message.fetch("id", nil)
+        return nil unless id
+
+        id = id.to_i
+        return nil unless id.positive?
+
+        {
+          "id" => id,
+          "role" => message.fetch("role", "meringue").to_s,
+          "text" => message.fetch("text", "").to_s,
+          "status" => message.fetch("status", nil),
+          "visible" => message.fetch("visible", nil)
+        }.compact
+      end
+
       def chat_snapshot(input_buffer, slash_suggestion_index = 0, input_cursor = nil)
         @chat_mutex.synchronize do
           {
@@ -1132,6 +1169,7 @@ module Meringue
           "status" => status,
           "visible" => visible
         }.compact
+        persist_conversation_unlocked
         @next_message_id
       end
 
@@ -1147,6 +1185,7 @@ module Meringue
             message.delete("status")
           end
           apply_message_visibility(message, visible)
+          persist_conversation_unlocked
         end
       end
 
@@ -1162,6 +1201,7 @@ module Meringue
           end
           apply_message_status(message, status)
           apply_message_visibility(message, visible)
+          persist_conversation_unlocked
         end
       end
 
@@ -1171,6 +1211,7 @@ module Meringue
           return unless message
 
           apply_message_status(message, status)
+          persist_conversation_unlocked
         end
       end
 
@@ -1197,6 +1238,17 @@ module Meringue
         else
           message["visible"] = false
         end
+      end
+
+      def persist_conversation_unlocked
+        return unless conversation_store&.respond_to?(:save_conversation)
+
+        conversation_store.save_conversation(
+          messages: @messages,
+          next_message_id: @next_message_id
+        )
+      rescue StandardError
+        nil
       end
 
       def increment_pending_count
