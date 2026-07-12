@@ -15,7 +15,7 @@ module Meringue
       BACKSPACE_KEYS = ["\u007f", "\b"].freeze
       DELETE_KEYS = ["\e[3~"].freeze
       ENTER_KEYS = ["\r", "\n"].freeze
-      MULTILINE_ENTER_KEYS = ["\e\r", "\e\n", "\e[13;2u", "\e[27;2;13~", "\e[13;2~"].freeze
+      SHIFT_ENTER_KEYS = ["\e[13;2u", "\e[27;2;13~", "\e[13;2~"].freeze
       TAB_KEYS = ["\t"].freeze
       LEFT_KEYS = ["\e[D", "\eOD"].freeze
       RIGHT_KEYS = ["\e[C", "\eOC"].freeze
@@ -198,7 +198,7 @@ module Meringue
           return [+"", 0, 0]
         end
 
-        if MULTILINE_ENTER_KEYS.include?(key)
+        if SHIFT_ENTER_KEYS.include?(key)
           return insert_text(input_buffer, input_cursor, "\n") + [0]
         end
 
