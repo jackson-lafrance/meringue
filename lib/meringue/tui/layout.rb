@@ -109,6 +109,22 @@ module Meringue
         end&.first
       end
 
+      def scroll_limits(state, width:, height:)
+        width = [width.to_i, MIN_WIDTH].max
+        height = [height.to_i, MIN_HEIGHT].max
+        metrics = layout_metrics(width, height, state)
+        agent_tree_lines = agent_tree_pane.lines(state, width: metrics.fetch(:sidebar_width) - 4)
+        conversation_lines = chat_pane.conversation_lines(state, width: metrics.fetch(:main_width) - 4)
+        log_lines = log_pane.lines(state)
+
+        {
+          "agent_tree" => scroll_max(agent_tree_lines.length, metrics.fetch(:top_height) - 2),
+          "conversation" => tail_scroll_max(conversation_lines.length, metrics.fetch(:conversation_height) - 2),
+          "logs" => tail_scroll_max(log_lines.length, metrics.fetch(:log_height) - 2),
+          "chat" => 0
+        }
+      end
+
       private
 
       attr_reader :agent_tree_pane, :log_pane, :chat_pane
@@ -203,7 +219,7 @@ module Meringue
         content_height = content_height.to_i
         return 0 if content_height <= 0 || lines.length <= content_height
 
-        max_offset = lines.length - content_height
+        max_offset = scroll_max(lines.length, content_height)
         selected_index = selected_agent_tree_line_index(lines)
         if AgentTreeNavigation.active?(state) && selected_index
           return (selected_index - (content_height / 2)).clamp(0, max_offset)
@@ -279,7 +295,7 @@ module Meringue
       end
 
       def draw_scroll_content(canvas, x, y, content_width, content_height, lines, scroll_offset:)
-        offset = scroll_offset.to_i.clamp(0, [lines.length - content_height, 0].max)
+        offset = scroll_offset.to_i.clamp(0, scroll_max(lines.length, content_height))
         lines.drop(offset).first(content_height).each_with_index do |line, index|
           draw_line(canvas, x + 2, y + 1 + index, content_width, line)
         end
@@ -308,7 +324,7 @@ module Meringue
         end
 
         visible_capacity = [content_height - 1, 0].max
-        max_offset = [lines.length - visible_capacity, 0].max
+        max_offset = tail_scroll_max(lines.length, content_height)
         offset = scroll_offset.to_i.clamp(0, max_offset)
         finish_index = lines.length - offset
         start_index = [finish_index - visible_capacity, 0].max
@@ -319,6 +335,19 @@ module Meringue
         visible_lines.each_with_index do |line, index|
           draw_line(canvas, x + 2, y + 2 + index, content_width, line)
         end
+      end
+
+      def scroll_max(line_count, content_height)
+        [[line_count.to_i - content_height.to_i, 0].max, 0].max
+      end
+
+      def tail_scroll_max(line_count, content_height)
+        content_height = content_height.to_i
+        line_count = line_count.to_i
+        return 0 if content_height <= 0 || line_count <= content_height
+
+        visible_capacity = [content_height - 1, 0].max
+        [line_count - visible_capacity, 0].max
       end
 
       def draw_line(canvas, x, y, width, line)
