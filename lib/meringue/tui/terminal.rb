@@ -15,6 +15,8 @@ module Meringue
       ENABLE_AUTOWRAP = "\e[?7h"
       ENABLE_BRACKETED_PASTE = "\e[?2004h"
       DISABLE_BRACKETED_PASTE = "\e[?2004l"
+      ENABLE_MOUSE = "\e[?1000h\e[?1006h"
+      DISABLE_MOUSE = "\e[?1006l\e[?1000l"
       BRACKETED_PASTE_START = "\e[200~"
       BRACKETED_PASTE_END = "\e[201~"
       ESCAPE_READ_TIMEOUT = 0.01
@@ -59,6 +61,7 @@ module Meringue
         output.write(HIDE_CURSOR)
         output.write(DISABLE_AUTOWRAP)
         output.write(ENABLE_BRACKETED_PASTE)
+        output.write(ENABLE_MOUSE)
         output.write(CLEAR_SCREEN)
         output.flush
         @last_frame = nil
@@ -66,6 +69,7 @@ module Meringue
         yield
       ensure
         if interactive?
+          output.write(DISABLE_MOUSE)
           output.write(DISABLE_BRACKETED_PASTE)
           output.write(ENABLE_AUTOWRAP)
           output.write(SHOW_CURSOR)
@@ -109,9 +113,9 @@ module Meringue
           sequence << input.getch
           return read_bracketed_paste(sequence) if sequence == BRACKETED_PASTE_START
           break if complete_escape_sequence?(sequence)
-          break if sequence.length >= 16
+          break if sequence.length >= 32
         end
-        sequence
+        parse_mouse_sequence(sequence) || sequence
       end
 
       def read_bracketed_paste(sequence)
@@ -142,9 +146,33 @@ module Meringue
 
       def complete_escape_sequence?(sequence)
         return true if ["\e\r", "\e\n"].include?(sequence)
+        return true if sequence.match?(/\A\e\[<\d+;\d+;\d+[Mm]\z/)
         return false unless sequence.start_with?("\e[")
 
         sequence.length >= 3 && sequence[-1].match?(/[A-Za-z~]/)
+      end
+
+      def parse_mouse_sequence(sequence)
+        match = sequence.match(/\A\e\[<(\d+);(\d+);(\d+)([Mm])\z/)
+        return nil unless match
+
+        button = match[1].to_i
+        kind = case button
+               when 64
+                 "wheel_up"
+               when 65
+                 "wheel_down"
+               else
+                 "button"
+               end
+        {
+          "type" => "mouse",
+          "button" => button,
+          "x" => match[2].to_i,
+          "y" => match[3].to_i,
+          "pressed" => match[4] == "M",
+          "kind" => kind
+        }
       end
 
       def write_interactive_frame(frame)
