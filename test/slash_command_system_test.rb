@@ -105,6 +105,23 @@ class SlashCommandSystemTest < Minitest::Test
     assert_equal "killed", state.fetch("agents").first.fetch("status")
   end
 
+  def test_reconcile_prunes_killed_agents_from_active_state
+    project = @engine.apply("type" => "AddProject", "payload" => { "path" => @tmpdir, "name" => "Demo" }).fetch("result")
+    issue = @engine.apply("type" => "CreateIssue", "payload" => { "project_id" => project.fetch("id"), "title" => "Test" }).fetch("result")
+    worker = @engine.apply("type" => "SpawnWorker", "payload" => { "issue_id" => issue.fetch("id"), "prompt" => "Start" }).fetch("result")
+
+    kill_result = @engine.apply(@parser.parse("/kill #{worker.fetch("id")}"))
+    reconcile_result = @engine.reconcile_sessions
+    state = @store.load
+
+    assert_equal "accepted", kill_result.fetch("status")
+    assert_equal "accepted", reconcile_result.fetch("status")
+    assert_equal [worker.fetch("id")], reconcile_result.fetch("result").fetch("pruned_agent_ids")
+    assert_empty state.fetch("agents")
+    assert_empty state.fetch("issues").first.fetch("agent_ids")
+    assert state.fetch("logs").any? { |log| log.fetch("message").include?("Removed 1 killed agent") }
+  end
+
   def test_prompt_agent_rejects_head_agents
     state = Meringue::State::Models.empty_state.merge(
       "agents" => [

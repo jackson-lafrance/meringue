@@ -232,12 +232,15 @@ module Meringue
       end
 
       def reconcile_sessions(command_id: nil, command_type: "ReconcileSessions")
+        prune_result = prune_killed_agents
         agents = synchronized_state do
           normalized_state.fetch("agents").select { |agent| reconcile_candidate?(agent) }.map { |agent| deep_copy(agent) }
         end
 
         poll_results = agents.map { |agent| poll_agent_session(agent) }
         applied_results = poll_results.map { |poll_result| apply_poll_result(poll_result) }
+        changed_count = applied_results.count { |result| result.fetch("changed", false) }
+        changed_count += 1 if prune_result.fetch("changed", false)
         accepted_result(
           command_id,
           command_type,
@@ -245,16 +248,46 @@ module Meringue
           "Reconciled #{agents.length} Pi-backed agent session(s).",
           {
             "checked_count" => agents.length,
-            "changed_count" => applied_results.count { |result| result.fetch("changed", false) },
+            "changed_count" => changed_count,
+            "pruned_agent_ids" => prune_result.fetch("removed_agent_ids", []),
             "poll_results" => applied_results
           },
-          applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }.uniq
+          (prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
         )
       rescue StandardError => e
         failed_result(command_id, command_type, "Session reconciliation failed: #{e.message}", [e.class.name, e.message])
       end
 
       private
+
+      def prune_killed_agents
+        synchronized_state do
+          state = normalized_state
+          killed_agents = state.fetch("agents").select { |agent| agent.fetch("status", nil) == "killed" }
+          removed_agent_ids = killed_agents.map { |agent| agent.fetch("id") }
+          return { "changed" => false, "removed_agent_ids" => [], "log_entry_ids" => [] } if removed_agent_ids.empty?
+
+          state["agents"] = state.fetch("agents").reject { |agent| removed_agent_ids.include?(agent.fetch("id", nil)) }
+          state.fetch("issues").each do |issue|
+            next unless issue.key?("agent_ids")
+
+            issue["agent_ids"] = Array(issue["agent_ids"]) - removed_agent_ids
+          end
+
+          now = timestamp
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: nil,
+            level: "info",
+            message: "Removed #{removed_agent_ids.length} killed agent#{removed_agent_ids.length == 1 ? "" : "s"} from active state.",
+            details: { "removed_agent_ids" => removed_agent_ids }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          { "changed" => true, "removed_agent_ids" => removed_agent_ids, "log_entry_ids" => log_ids }
+        end
+      end
 
       def get_state(command_id, command_type)
         accepted_result(command_id, command_type, nil, "Loaded Meringue state.", store.load, [])
