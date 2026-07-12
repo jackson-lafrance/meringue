@@ -59,6 +59,8 @@ Agents must do implementation work on a fresh task branch, not directly on `main
 
 When multiple coding agents or subagents may work at once, each task branch should live in its own git worktree. Do not let multiple agents edit the same checkout concurrently.
 
+Always give user instructions on how they can test the feature in the response
+
 #### Standing approval for agent git workflow
 Once the user asks an agent to implement a task, edit files, or make a PR in this repo, the full task-branch/worktree/PR workflow is pre-approved. Do not stop only to ask for permission to run git or GitHub commands needed for that workflow, including fetching, creating branches/worktrees, switching into the task worktree, staging the task's intended changes, committing, pushing the task branch, or opening/updating the requested pull request.
 
