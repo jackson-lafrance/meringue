@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "projects": [
+    {
+      "id": "P1",
+      "name": "Meringue",
+      "root_path": "__MERINGUE_DEMO_PROJECT_ROOT__",
+      "status": "idle",
+      "created_at": "2026-07-12T00:00:00Z",
+      "updated_at": "2026-07-12T00:05:00Z"
+    }
+  ],
+  "issues": [
+    {
+      "id": "P1-I1",
+      "project_id": "P1",
+      "parent_issue_id": null,
+      "title": "Use Meringue to build Meringue",
+      "description": "Historical demo receipt: Meringue has already been used to improve its own TUI, kernel logs, harness selection, and worker delivery workflow.",
+      "status": "completed",
+      "agent_ids": ["P1-I1-W1"],
+      "created_at": "2026-07-12T00:01:00Z",
+      "updated_at": "2026-07-12T00:03:00Z"
+    },
+    {
+      "id": "P1-I2",
+      "project_id": "P1",
+      "parent_issue_id": null,
+      "title": "Polish parallel-agent dashboard",
+      "description": "Historical demo receipt: make the AgentTree, conversation pane, kernel logs, slash commands, jump mode, and PR navigation clear enough for a live demo.",
+      "status": "completed",
+      "agent_ids": ["P1-I2-W1"],
+      "created_at": "2026-07-12T00:02:00Z",
+      "updated_at": "2026-07-12T00:04:00Z"
+    }
+  ],
+  "agents": [
+    {
+      "id": "P1-I1-W1",
+      "type": "worker",
+      "status": "completed",
+      "project_id": "P1",
+      "issue_id": "P1-I1",
+      "workspace_path": "__MERINGUE_DEMO_PROJECT_ROOT__",
+      "workspace_strategy": "project_root",
+      "workspace_branch": null,
+      "harness": "fake",
+      "pid": null,
+      "harness_session_id": "demo-self-hosting-worker",
+      "harness_session_file": null,
+      "harness_metadata": {
+        "demo": true,
+        "title": "Ship self-hosting workflow",
+        "completed_at": "2026-07-12T00:03:00Z",
+        "last_assistant_text": "Meringue has already used worker agents to improve Meringue itself: better orchestration logs, safer worker prompts, harness abstraction, themes, and PR delivery."
+      },
+      "created_at": "2026-07-12T00:01:00Z",
+      "updated_at": "2026-07-12T00:03:00Z"
+    },
+    {
+      "id": "P1-I2-W1",
+      "type": "worker",
+      "status": "completed",
+      "project_id": "P1",
+      "issue_id": "P1-I2",
+      "workspace_path": "__MERINGUE_DEMO_PROJECT_ROOT__",
+      "workspace_strategy": "project_root",
+      "workspace_branch": null,
+      "harness": "fake",
+      "pid": null,
+      "harness_session_id": "demo-dashboard-worker",
+      "harness_session_file": null,
+      "harness_metadata": {
+        "demo": true,
+        "title": "Polish dashboard demo",
+        "completed_at": "2026-07-12T00:04:00Z",
+        "last_assistant_text": "The dashboard now frames the old tmux/multi-terminal agent workflow as a context-switching problem and shows Meringue as the control plane for parallel agents."
+      },
+      "created_at": "2026-07-12T00:02:00Z",
+      "updated_at": "2026-07-12T00:04:00Z"
+    }
+  ],
+  "questions": [],
+  "logs": [
+    {
+      "id": "L1",
+      "timestamp": "2026-07-12T00:00:00Z",
+      "source_type": "system",
+      "source_id": null,
+      "level": "info",
+      "message": "Loaded resettable Devpost demo state for a full Meringue TUI session.",
+      "details": {
+        "demo_state": true,
+        "agents_enabled": true
+      }
+    },
+    {
+      "id": "L2",
+      "timestamp": "2026-07-12T00:01:00Z",
+      "source_type": "kernel",
+      "source_id": "P1",
+      "level": "info",
+      "message": "Registered Meringue as the anchor demo project.",
+      "details": {
+        "project_id": "P1"
+      }
+    },
+    {
+      "id": "L3",
+      "timestamp": "2026-07-12T00:03:00Z",
+      "source_type": "worker",
+      "source_id": "P1-I1-W1",
+      "level": "info",
+      "message": "Prior worker completed self-hosting improvements for Meringue.",
+      "details": {
+        "demo_receipt": "I used Meringue to build Meringue."
+      }
+    },
+    {
+      "id": "L4",
+      "timestamp": "2026-07-12T00:04:00Z",
+      "source_type": "worker",
+      "source_id": "P1-I2-W1",
+      "level": "info",
+      "message": "Prior worker polished the parallel-agent dashboard demo path.",
+      "details": {
+        "pain_point": "tmux and multi-terminal context switching"
+      }
+    },
+    {
+      "id": "L5",
+      "timestamp": "2026-07-12T00:05:00Z",
+      "source_type": "system",
+      "source_id": null,
+      "level": "info",
+      "message": "Ready for live demo prompts: README self-update, theme switch, and another project worker.",
+      "details": {
+        "suggested_first_prompt": "Ask Meringue to build its own README and open a PR."
+      }
+    }
+  ],
+  "conversation": {
+    "messages": [],
+    "next_message_id": 0
+  },
+  "counters": {
+    "projects": 1,
+    "heads": 0,
+    "questions": 0,
+    "logs": 5,
+    "issues_by_project": {
+      "P1": 2
+    },
+    "workers_by_issue": {
+      "P1-I1": 1,
+      "P1-I2": 1
+    }
+  },
+  "metadata": {
+    "created_at": "2026-07-12T00:00:00Z",
+    "updated_at": "2026-07-12T00:05:00Z",
+    "active_harness": "pi",
+    "active_harness_label": "Pi",
+    "harness_generation": 0,
+    "demo_state": true,
+    "demo_state_name": "devpost",
+    "demo_project_root": "__MERINGUE_DEMO_PROJECT_ROOT__"
+  }
+}

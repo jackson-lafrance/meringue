@@ -1,9 +1,14 @@
 # frozen_string_literal: true
 
+require "json"
 require "optparse"
 
 module Meringue
   class CLI
+    FULL_DEMO_STATE_PATH = File.expand_path(ENV.fetch("MERINGUE_DEMO_STATE_PATH", "~/.meringue/devpost-demo-state.json"))
+    FULL_DEMO_STATE_FIXTURE_PATH = Meringue.root_path("fixtures", "devpost_demo_state.json")
+    DEMO_PROJECT_ROOT_PLACEHOLDER = "__MERINGUE_DEMO_PROJECT_ROOT__"
+
     def initialize(argv, input: $stdin, out: $stdout, err: $stderr)
       @argv = argv.dup
       @input = input
@@ -28,8 +33,13 @@ module Meringue
       when "demo-state"
         out.puts File.read(Meringue.root_path("fixtures", "demo_state.json"))
         0
+      when "devpost-demo-state"
+        out.puts JSON.pretty_generate(devpost_demo_state)
+        0
       when "reset-state"
         reset_state
+      when "reset-demo-state"
+        reset_demo_state
       when "head-loop"
         run_head_loop
       when "fake-head-loop"
@@ -48,6 +58,8 @@ module Meringue
     def run_tui(default_state_path:, enable_agents:)
       options = parse_runtime_options(default_state_path: default_state_path)
       return 1 unless options
+
+      prepare_demo_state!(options) if options.fetch(:demo_state, false)
 
       config = runtime_config(options)
       return 1 unless config
@@ -78,11 +90,15 @@ module Meringue
         config_path: Config::DEFAULT_PATH,
         harness: nil,
         head_harness: nil,
-        worker_harness: nil
+        worker_harness: nil,
+        demo_state: false,
+        reset_demo_state: false,
+        state_path_overridden: false
       }
       parser = OptionParser.new do |option_parser|
         option_parser.on("--state PATH", "Read Meringue state from PATH.") do |path|
           options[:state_path] = path
+          options[:state_path_overridden] = true
         end
         option_parser.on("--config PATH", "Read Meringue harness config TOML from PATH. Defaults to #{Config::DEFAULT_PATH}.") do |path|
           options[:config_path] = path
@@ -96,9 +112,17 @@ module Meringue
         option_parser.on("--worker-harness NAME", "Use a specific worker harness provider: pi, claude/claude_code, or antigravity.") do |name|
           options[:worker_harness] = name
         end
+        option_parser.on("--demo-state", "Run the full TUI against the resettable Devpost demo state at #{FULL_DEMO_STATE_PATH}.") do
+          options[:demo_state] = true
+        end
+        option_parser.on("--reset-demo-state", "Reset the Devpost demo state from its fixture before opening the full TUI. Implies --demo-state.") do
+          options[:demo_state] = true
+          options[:reset_demo_state] = true
+        end
       end
 
       parser.parse!(argv)
+      options[:state_path] = FULL_DEMO_STATE_PATH if options[:demo_state] && !options[:state_path_overridden]
       if argv.any?
         err.puts "Unexpected argument(s): #{argv.join(" ")}"
         return nil
@@ -148,6 +172,60 @@ module Meringue
       state_store.save(State::Models.empty_state, preserve_conversation: false)
       out.puts "Reset Meringue state at #{state_store.path}"
       0
+    end
+
+    def reset_demo_state
+      reset_demo_state_file!(path: FULL_DEMO_STATE_PATH)
+      out.puts "Reset Meringue Devpost demo state at #{FULL_DEMO_STATE_PATH}"
+      0
+    end
+
+    def prepare_demo_state!(options)
+      path = File.expand_path(options.fetch(:state_path))
+      return if File.exist?(path) && !options.fetch(:reset_demo_state, false)
+
+      reset_demo_state_file!(path: path)
+    end
+
+    def reset_demo_state_file!(path:)
+      State::Store.new(path: path).save(devpost_demo_state, preserve_conversation: false)
+    end
+
+    def devpost_demo_state
+      replace_demo_state_placeholders(
+        JSON.parse(File.read(FULL_DEMO_STATE_FIXTURE_PATH)),
+        demo_project_root
+      )
+    end
+
+    def replace_demo_state_placeholders(value, project_root)
+      case value
+      when Hash
+        value.transform_values { |child| replace_demo_state_placeholders(child, project_root) }
+      when Array
+        value.map { |child| replace_demo_state_placeholders(child, project_root) }
+      when String
+        value.gsub(DEMO_PROJECT_ROOT_PLACEHOLDER, project_root)
+      else
+        value
+      end
+    end
+
+    def demo_project_root
+      nearest_git_root(Dir.pwd) || File.expand_path(Dir.pwd)
+    end
+
+    def nearest_git_root(path)
+      current = File.expand_path(path.to_s)
+
+      loop do
+        return current if File.exist?(File.join(current, ".git"))
+
+        parent = File.dirname(current)
+        return nil if parent == current
+
+        current = parent
+      end
     end
 
     def state_store(path: State::Store.default_path)
@@ -208,12 +286,16 @@ module Meringue
           meringue                               # open the TUI and route chat prompts through configured head agents
           meringue tui                           # open the TUI and route chat prompts through configured head agents
           meringue tui --state PATH              # open the TUI against a specific Meringue state JSON file
+          meringue tui --demo-state              # open the full agent-enabled TUI against the resettable Devpost demo state
+          meringue tui --reset-demo-state        # reset the Devpost demo state, then open the full agent-enabled TUI
           meringue tui --config PATH             # open the TUI with a specific harness/config TOML file
           meringue tui --harness claude          # use Claude Code for both heads and workers
           meringue tui --head-harness antigravity --worker-harness claude
           meringue demo                          # display the fake demo state fixture without agent prompting
           meringue demo-state                    # print the fake demo state fixture
+          meringue devpost-demo-state            # print the full agent-enabled Devpost demo state after path templating
           meringue reset-state                   # reset ~/.meringue/state.json to an empty Meringue state
+          meringue reset-demo-state              # reset ~/.meringue/devpost-demo-state.json without opening the TUI
           meringue head-loop [--harness NAME]    # run the manual configured head -> kernel -> worker loop
           meringue fake-head-loop                # run the manual fake head -> kernel -> worker loop
           meringue --version                     # print the app version
@@ -224,6 +306,7 @@ module Meringue
           Supported harness providers: pi, claude (aliases: claude_code, claude-code, cc), antigravity
           Supported TUI colorschemes: #{TUI::Style.colorschemes.join(", ")}
           CLI flags override config.toml, and MERINGUE_HARNESS / MERINGUE_HEAD_HARNESS / MERINGUE_WORKER_HARNESS override both.
+          Full demo state path: #{FULL_DEMO_STATE_PATH} (override with MERINGUE_DEMO_STATE_PATH or --state PATH with --demo-state).
 
         TUI controls:
           Enter                     # send chat; when agent tree is focused, enter jump mode
