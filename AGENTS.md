@@ -54,6 +54,9 @@ There is currently no separate tracked MVP implementation plan. If a future mile
 
 If an implementation plan conflicts with `AGENTS.md`, follow `AGENTS.md` and call out the conflict before editing code.
 
+### Test file policy
+Agents must never write test files in this repository. Do not create, add, or regenerate any file whose purpose is to define automated tests, including files under `test/`, `tests/`, `spec/`, or `specs/`, or files named with `test` or `spec` conventions.
+
 ### Branch, worktree, and PR workflow
 Agents must do implementation work on a fresh task branch, not directly on `main`, `master`, or any shared base branch.
 
