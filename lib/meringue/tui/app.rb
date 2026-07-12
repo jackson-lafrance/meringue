@@ -34,12 +34,6 @@ module Meringue
       FOCUS_FORWARD_KEYS = CTRL_TAB_KEYS.freeze
       FOCUS_BACK_KEYS = SHIFT_TAB_KEYS.freeze
       FOCUS_ORDER = %w[chat agent_tree conversation logs].freeze
-      FOCUS_LABELS = {
-        "chat" => "chat input",
-        "agent_tree" => "agent tree",
-        "conversation" => "conversation",
-        "logs" => "kernel logs"
-      }.freeze
       AGENT_TREE_FORWARD_KEYS = (DOWN_KEYS + RIGHT_KEYS).freeze
       AGENT_TREE_BACK_KEYS = (UP_KEYS + LEFT_KEYS).freeze
 
@@ -265,7 +259,6 @@ module Meringue
         return nil unless FOCUS_FORWARD_KEYS.include?(key) || FOCUS_BACK_KEYS.include?(key) || (!slash_suggestions_active?(input_buffer) && TAB_KEYS.include?(key))
 
         cycle_focus(FOCUS_BACK_KEYS.include?(key) ? -1 : 1)
-        append_jump_response("Focused #{FOCUS_LABELS.fetch(@focused_pane)}. #{focused_scrollable? ? "Use ↑/↓, PageUp/PageDown, or mouse wheel to scroll." : "Type normally in chat."}")
         [input_buffer, input_cursor, slash_suggestion_index]
       end
 
