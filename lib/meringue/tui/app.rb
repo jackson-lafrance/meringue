@@ -37,7 +37,7 @@ module Meringue
       CTRL_TAB_KEYS = ["\e[27;5;9~", "\e[9;5u"].freeze
       FOCUS_FORWARD_KEYS = CTRL_TAB_KEYS.freeze
       FOCUS_BACK_KEYS = SHIFT_TAB_KEYS.freeze
-      FOCUS_ORDER = %w[chat agent_tree conversation logs].freeze
+      FOCUS_ORDER = %w[chat agent_tree conversation].freeze
       AGENT_TREE_FORWARD_KEYS = (DOWN_KEYS + RIGHT_KEYS).freeze
       AGENT_TREE_BACK_KEYS = (UP_KEYS + LEFT_KEYS).freeze
 
@@ -303,7 +303,7 @@ module Meringue
       end
 
       def handle_focused_action_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
-        return nil unless @focused_pane == "agent_tree" && ENTER_KEYS.include?(key)
+        return nil unless %w[agent_tree conversation].include?(@focused_pane) && ENTER_KEYS.include?(key)
 
         enter_agent_tree_navigation(state)
         [input_buffer, input_cursor, slash_suggestion_index]
@@ -346,7 +346,7 @@ module Meringue
         return [input_buffer, input_cursor, slash_suggestion_index] unless pane
 
         @focused_pane = pane
-        exit_agent_tree_navigation if @agent_tree_navigation_active && pane != "agent_tree"
+        exit_agent_tree_navigation if @agent_tree_navigation_active && !%w[agent_tree conversation].include?(pane)
         [input_buffer, input_cursor, slash_suggestion_index]
       end
 
@@ -495,8 +495,8 @@ module Meringue
           Focus: click a dashboard section to focus it; Tab/Ctrl-Tab moves focus forward; Shift-Tab moves focus backward; arrows, PageUp/PageDown, and mouse wheel scroll the focused pane.
           Chat: Enter sends or applies the selected slash completion; Shift-Enter inserts a newline; arrows move the cursor; Home/Ctrl-A and End/Ctrl-E jump within a line; Alt/Ctrl-Left and Alt/Ctrl-Right move by word; Backspace/Delete edit characters; Alt/Ctrl-Backspace, Ctrl-W, and Alt/Ctrl-Delete edit words.
           Slash commands: type / for suggestions; Tab completes; Up/Down changes the selected suggestion.
-          Agent tree: focus the agent tree and press Enter to enter jump mode.
-          Jump mode: /jump or agent-tree Enter starts agent navigation; ↑/↓ or ←/→ selects an agent; Enter opens the selected agent session; p opens the selected agent PR when one is available; Esc cancels.
+          Agent tree/conversation: focus either pane and press Enter to enter jump mode.
+          Jump mode: /jump or agent-tree/conversation Enter starts agent navigation; ↑/↓ or ←/→ selects an agent; Enter opens the selected agent session; p opens the selected agent PR when one is available; Esc cancels.
           PR navigation: /jumpr starts PR navigation; ↑/↓ or ←/→ selects an agent with an open PR; Enter or p opens the selected PR; Esc cancels.
         TEXT
       end
@@ -532,7 +532,7 @@ module Meringue
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
-        append_jump_response("Agent tree navigation active. ↑/↓ or ←/→ select agents, Enter jumps, p opens PRs, Esc cancels.")
+        append_jump_response("Agent jump navigation active. ↑/↓ or ←/→ select agents (kernel events are skipped), Enter jumps, p opens PRs, Esc cancels.")
       end
 
       def enter_pr_agent_navigation(state)
@@ -933,8 +933,9 @@ module Meringue
           remember_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
           update_message_status(message_id, "workers running")
         when "worker_completed"
-          remember_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
-          append_user_facing_line(message_id, worker_completed_line(event), status: "workers running")
+          agent_id = event.fetch("agent_id", nil)
+          remember_conversation_event(worker_completed_key(agent_id))
+          append_message("agent", worker_completed_line(event), source_id: agent_id)
         when "worker_wait_failed"
           forget_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
           append_user_facing_line(message_id, worker_wait_failed_line(event), status: "worker wait failed")
@@ -1245,8 +1246,9 @@ module Meringue
 
           append_message_once(
             worker_completed_key(agent.fetch("id", nil)),
-            "meringue",
-            worker_completed_text_from_agent(agent)
+            "agent",
+            worker_completed_text_from_agent(agent),
+            source_id: agent.fetch("id", nil)
           )
         end
       end
@@ -1311,14 +1313,14 @@ module Meringue
         @chat_mutex.synchronize { @conversation_event_keys.delete(key) }
       end
 
-      def append_message_once(key, role, text, status: nil)
+      def append_message_once(key, role, text, status: nil, source_id: nil)
         return if key.to_s.empty? || text.to_s.empty?
 
         @chat_mutex.synchronize do
           return if @conversation_event_keys[key]
 
           @conversation_event_keys[key] = true
-          append_message_unlocked(role, text, status: status)
+          append_message_unlocked(role, text, status: status, source_id: source_id)
         end
       end
 
@@ -1336,7 +1338,9 @@ module Meringue
           "role" => message.fetch("role", "meringue").to_s,
           "text" => message.fetch("text", "").to_s,
           "status" => message.fetch("status", nil),
-          "visible" => message.fetch("visible", nil)
+          "visible" => message.fetch("visible", nil),
+          "timestamp" => message.fetch("timestamp", nil),
+          "source_id" => message.fetch("source_id", nil)
         }.compact
       end
 
@@ -1352,18 +1356,20 @@ module Meringue
         end
       end
 
-      def append_message(role, text, status: nil, visible: nil)
-        @chat_mutex.synchronize { append_message_unlocked(role, text, status: status, visible: visible) }
+      def append_message(role, text, status: nil, visible: nil, source_id: nil)
+        @chat_mutex.synchronize { append_message_unlocked(role, text, status: status, visible: visible, source_id: source_id) }
       end
 
-      def append_message_unlocked(role, text, status: nil, visible: nil)
+      def append_message_unlocked(role, text, status: nil, visible: nil, source_id: nil)
         @next_message_id += 1
         @messages << {
           "id" => @next_message_id,
           "role" => role,
           "text" => text,
           "status" => status,
-          "visible" => visible
+          "visible" => visible,
+          "timestamp" => Time.now.utc.iso8601,
+          "source_id" => source_id
         }.compact
         persist_conversation_unlocked
         @next_message_id

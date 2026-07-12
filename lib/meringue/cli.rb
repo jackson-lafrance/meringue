@@ -226,7 +226,7 @@ module Meringue
           CLI flags override config.toml, and MERINGUE_HARNESS / MERINGUE_HEAD_HARNESS / MERINGUE_WORKER_HARNESS override both.
 
         TUI controls:
-          Enter                     # send chat; when agent tree is focused, enter jump mode
+          Enter                     # send chat; when agent tree/conversation is focused, enter jump mode
           /                         # show slash command suggestions in an otherwise empty prompt
           /help                     # list command syntax
           /quit                     # quit the TUI
