@@ -18,6 +18,8 @@ module Meringue
         "apply_head_result" => "ApplyHeadResult",
         "ask_question" => "AskQuestion",
         "answer_question" => "AnswerQuestion",
+        "modify_issue" => "ModifyIssue",
+        "prompt_agent" => "PromptAgent",
         "clear" => "ClearState",
         "clear_state" => "ClearState",
         "list_all" => "ListAll"
@@ -57,8 +59,12 @@ module Meringue
           add_project(command_id, command_type, payload)
         when "CreateIssue"
           create_issue(command_id, command_type, payload)
+        when "ModifyIssue"
+          modify_issue(command_id, command_type, payload)
         when "SpawnWorker"
           spawn_worker(command_id, command_type, payload)
+        when "PromptAgent"
+          prompt_agent(command_id, command_type, payload)
         when "SpawnHead"
           spawn_head(command_id, command_type, payload)
         when "ApplyHeadResult"
@@ -475,6 +481,133 @@ module Meringue
         store.save(state)
 
         accepted_result(command_id, command_type, issue_id, "Created issue #{issue_id}.", issue, log_ids)
+      end
+
+      def modify_issue(command_id, command_type, payload)
+        issue_id = value_at(payload, "issue_id", "IssueID", "issueId")
+        title = value_at(payload, "title", "Title")
+        description = value_at(payload, "description", "Description")
+        parent_issue_id = value_at(payload, "parent_issue_id", "ParentIssueID", "parentIssueId")
+        status = value_at(payload, "status", "Status")
+        errors = []
+
+        errors << "issue_id is required" if blank?(issue_id)
+        errors << "status must be one of #{State::Models::LIFECYCLE_STATUSES.join(", ")}" if present_string(status) && !State::Models::LIFECYCLE_STATUSES.include?(status.to_s)
+        return rejected_result(command_id, command_type, "Issue was not modified.", errors) unless errors.empty?
+
+        state = normalized_state
+        issue = find_issue(state, issue_id)
+        return rejected_result(command_id, command_type, "Issue #{issue_id} does not exist.", ["issue_not_found"]) unless issue
+
+        project = find_project(state, issue.fetch("project_id"))
+        return rejected_result(command_id, command_type, "Project #{issue.fetch("project_id")} does not exist.", ["project_not_found"]) unless project
+
+        if payload_has?(payload, "parent_issue_id", "ParentIssueID", "parentIssueId") && present_string(parent_issue_id)
+          parent = find_issue(state, parent_issue_id)
+          return rejected_result(command_id, command_type, "Parent issue #{parent_issue_id} does not exist in #{project.fetch("id")}.", ["parent_issue_not_found"]) unless parent && parent.fetch("project_id") == project.fetch("id")
+          return rejected_result(command_id, command_type, "Issue cannot be its own parent.", ["invalid_parent_issue"]) if parent.fetch("id") == issue.fetch("id")
+        end
+
+        now = timestamp
+        changed_fields = []
+        if payload_has?(payload, "title", "Title")
+          issue["title"] = title.to_s.strip
+          changed_fields << "title"
+        end
+        if payload_has?(payload, "description", "Description")
+          issue["description"] = description.to_s
+          changed_fields << "description"
+        end
+        if payload_has?(payload, "parent_issue_id", "ParentIssueID", "parentIssueId")
+          issue["parent_issue_id"] = present_string(parent_issue_id)
+          changed_fields << "parent_issue_id"
+        end
+        if present_string(status)
+          issue["status"] = status.to_s
+          changed_fields << "status"
+        end
+
+        issue["updated_at"] = now
+        project["updated_at"] = now
+        update_project_status_from_issues!(state, project, now)
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: issue.fetch("id"),
+          level: "info",
+          message: "Modified issue #{issue.fetch("id")}: #{changed_fields.empty? ? "no fields changed" : changed_fields.join(", ")}",
+          details: {
+            "project_id" => project.fetch("id"),
+            "changed_fields" => changed_fields
+          }
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, issue.fetch("id"), "Modified issue #{issue.fetch("id")}.", issue, log_ids)
+      end
+
+      def prompt_agent(command_id, command_type, payload)
+        agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
+        prompt = value_at(payload, "prompt", "Prompt")
+        mode = value_at(payload, "mode", "Mode") || "normal"
+        errors = []
+
+        errors << "agent_id is required" if blank?(agent_id)
+        errors << "prompt is required" if blank?(prompt)
+        return rejected_result(command_id, command_type, "Agent was not prompted.", errors) unless errors.empty?
+
+        state = normalized_state
+        agent = find_agent(state, agent_id)
+        return rejected_result(command_id, command_type, "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
+        return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
+        if blank?(agent.fetch("pid", nil)) && blank?(agent.fetch("harness_session_id", nil))
+          return rejected_result(command_id, command_type, "Agent #{agent_id} has no harness session.", ["missing_harness_session"])
+        end
+
+        session_ref = agent_session_ref(agent)
+        begin
+          session_ref = harness_client.prompt_session(session_ref, prompt.to_s, mode: mode.to_s)
+        rescue StandardError => e
+          return failed_result(
+            command_id,
+            command_type,
+            "Harness failed to prompt agent #{agent_id}: #{e.message}",
+            [e.class.name, e.message]
+          )
+        end
+
+        now = timestamp
+        session_metadata = session_ref.fetch("metadata", {}) || {}
+        agent["status"] = "working" if session_ref.fetch("is_streaming", false)
+        agent["pid"] = session_ref.fetch("pid", agent.fetch("pid", nil))
+        agent["harness_session_id"] = session_ref.fetch("session_id", agent.fetch("harness_session_id", nil))
+        agent["harness_session_file"] = session_ref.fetch("session_file", agent.fetch("harness_session_file", nil))
+        agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+          session_metadata,
+          "last_prompt_mode" => mode.to_s,
+          "is_streaming" => session_ref.fetch("is_streaming", false),
+          "last_event_at" => session_ref.fetch("last_event_at", nil)
+        ).compact
+        agent["updated_at"] = now
+
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: agent.fetch("id"),
+          level: "info",
+          message: "Prompted agent #{agent.fetch("id")} with #{mode} mode.",
+          details: {
+            "issue_id" => agent.fetch("issue_id", nil),
+            "project_id" => agent.fetch("project_id", nil),
+            "mode" => mode.to_s,
+            "is_streaming" => session_ref.fetch("is_streaming", false)
+          }
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, agent.fetch("id"), "Prompted agent #{agent.fetch("id")}.", agent, log_ids)
       end
 
       def spawn_worker(command_id, command_type, payload)
@@ -1012,6 +1145,27 @@ module Meringue
       def canonical_command_type(command_type)
         text = command_type.to_s
         COMMAND_ALIASES.fetch(text, text)
+      end
+
+      def agent_session_ref(agent)
+        {
+          "harness" => agent.fetch("harness", nil),
+          "pid" => agent.fetch("pid", nil),
+          "cwd" => agent.fetch("workspace_path", nil),
+          "session_id" => agent.fetch("harness_session_id", nil),
+          "session_file" => agent.fetch("harness_session_file", nil),
+          "is_streaming" => agent.fetch("harness_metadata", {}).fetch("is_streaming", false),
+          "last_event_at" => agent.fetch("harness_metadata", {}).fetch("last_event_at", nil),
+          "metadata" => agent.fetch("harness_metadata", {}) || {}
+        }
+      end
+
+      def payload_has?(hash, *keys)
+        return false unless hash.respond_to?(:key?)
+
+        keys.any? do |key|
+          hash.key?(key) || hash.key?(key.to_sym)
+        end
       end
 
       def value_at(hash, *keys)
