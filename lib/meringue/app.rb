@@ -27,6 +27,7 @@ module Meringue
     end
 
     def run
+      state_store.compact! if state_store.respond_to?(:compact!)
       reconcile_now
       ui = tui
       ui.remember_existing_conversation_events!(state_store.load) if ui.respond_to?(:remember_existing_conversation_events!)
