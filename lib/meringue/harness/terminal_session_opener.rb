@@ -17,11 +17,12 @@ module Meringue
         File.expand_path("~/Applications/Alacritty.app/Contents/MacOS/alacritty")
       ].freeze
 
-      def initialize(pi_command: nil, pi_session_dir: DEFAULT_PI_SESSION_DIR, alacritty_command: ENV["MERINGUE_ALACRITTY_COMMAND"], commands: {})
+      def initialize(pi_command: nil, pi_session_dir: DEFAULT_PI_SESSION_DIR, alacritty_command: ENV["MERINGUE_ALACRITTY_COMMAND"], commands: {}, gemini_resume_flag: "--resume")
         configured_commands = DEFAULT_COMMANDS.merge(stringify_keys(commands || {}))
         configured_commands["pi"] = pi_command if present?(pi_command)
         @commands = configured_commands
         @pi_session_dir = pi_session_dir
+        @gemini_resume_flag = gemini_resume_flag.to_s
         @custom_alacritty_command = present?(alacritty_command)
         @alacritty_command = @custom_alacritty_command ? alacritty_command : DEFAULT_ALACRITTY_COMMAND
       end
@@ -42,7 +43,7 @@ module Meringue
 
       private
 
-      attr_reader :commands, :pi_session_dir, :alacritty_command
+      attr_reader :commands, :pi_session_dir, :alacritty_command, :gemini_resume_flag
 
       def custom_alacritty_command?
         @custom_alacritty_command
@@ -94,7 +95,10 @@ module Meringue
         session_id = agent.fetch("harness_session_id", nil)
         return nil unless present?(session_id)
 
-        command_parts("gemini") + ["-r", session_id]
+        argv = command_parts("gemini")
+        argv << gemini_resume_flag if present?(gemini_resume_flag)
+        argv << session_id
+        argv
       end
 
       def pi_session_argument(agent)

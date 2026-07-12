@@ -50,6 +50,9 @@ module Meringue
         },
         "gemini" => {
           "command" => "gemini",
+          "output_format" => GeminiClient::DEFAULT_OUTPUT_FORMAT,
+          "prompt_flag" => GeminiClient::DEFAULT_PROMPT_FLAG,
+          "resume_flag" => GeminiClient::DEFAULT_RESUME_FLAG,
           "head_extra_args" => [],
           "worker_extra_args" => []
         }
@@ -115,6 +118,7 @@ module Meringue
         TerminalSessionOpener.new(
           commands: PROVIDERS.each_with_object({}) { |provider, result| result[provider] = provider_command(provider) },
           pi_session_dir: provider_config("pi").fetch("session_dir", DEFAULT_PI_SESSION_DIR),
+          gemini_resume_flag: provider_config("gemini").fetch("resume_flag", GeminiClient::DEFAULT_RESUME_FLAG),
           alacritty_command: config.value("terminal", "alacritty_command") || ENV["MERINGUE_ALACRITTY_COMMAND"]
         )
       end
@@ -146,7 +150,14 @@ module Meringue
             use_json_schema: boolean_option(provider_config, "use_json_schema", true)
           )
         when "gemini"
-          GeminiClient.new(command: command, env: env, extra_args: extra_args)
+          GeminiClient.new(
+            command: command,
+            env: env,
+            extra_args: extra_args,
+            output_format: string_option(provider_config, "output_format", GeminiClient::DEFAULT_OUTPUT_FORMAT),
+            prompt_flag: string_option(provider_config, "prompt_flag", GeminiClient::DEFAULT_PROMPT_FLAG),
+            resume_flag: string_option(provider_config, "resume_flag", GeminiClient::DEFAULT_RESUME_FLAG)
+          )
         else
           raise ArgumentError, "Unsupported harness provider: #{provider.inspect}"
         end
@@ -192,6 +203,12 @@ module Meringue
         Integer(value)
       rescue ArgumentError, TypeError
         nil
+      end
+
+      def string_option(hash, key, default)
+        return default unless hash.key?(key.to_s)
+
+        hash.fetch(key.to_s).to_s
       end
 
       def boolean_option(hash, key, default)

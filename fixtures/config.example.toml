@@ -20,6 +20,9 @@ worker_extra_args = ["--effort", "high", "--permission-mode", "acceptEdits"]
 
 [harness.gemini]
 command = "gemini"
+output_format = "json"
+prompt_flag = "-p"
+resume_flag = "--resume"
 head_extra_args = []
 worker_extra_args = []
 

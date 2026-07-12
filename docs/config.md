@@ -56,8 +56,13 @@ worker_extra_args = ["--effort", "high", "--permission-mode", "acceptEdits"]
 
 [harness.gemini]
 command = "gemini"
+output_format = "json"   # passed as --output-format; set to "" to omit
+prompt_flag = "-p"        # Gemini CLI prompt option
+resume_flag = "--resume" # Gemini CLI session resume option
 head_extra_args = []
 worker_extra_args = []
 ```
+
+The Gemini backend uses one non-interactive Gemini CLI process per turn. Meringue stores the generic harness session id reported by the CLI when available and uses `resume_flag` for follow-up prompts and `/jump` terminal resumes. Live steering while a Gemini process is still running is not supported yet; prompt after the current turn settles.
 
 Do not store API keys or secrets in the config file. Prefer each provider CLI's normal auth flow or environment setup.

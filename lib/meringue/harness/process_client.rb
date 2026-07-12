@@ -244,7 +244,12 @@ module Meringue
           record.dig("data", "result"),
           record.dig("data", "response"),
           record.dig("data", "text")
-        ) || text_from_record(record["message"])
+        ) ||
+          text_from_record(record["result"]) ||
+          text_from_record(record["response"]) ||
+          text_from_record(record.dig("data", "result")) ||
+          text_from_record(record.dig("data", "response")) ||
+          text_from_record(record["message"])
       end
 
       def text_from_record(value)
@@ -258,10 +263,14 @@ module Meringue
           return direct if direct
 
           text_from_record(value["content"]) ||
+            text_from_record(value["result"]) ||
+            text_from_record(value["response"]) ||
             text_from_record(value.dig("message", "content")) ||
             text_from_record(value["message"]) ||
             text_from_record(value["parts"]) ||
-            text_from_record(value.dig("data", "content"))
+            text_from_record(value.dig("data", "content")) ||
+            text_from_record(value.dig("data", "result")) ||
+            text_from_record(value.dig("data", "response"))
         end
       end
 
@@ -285,7 +294,11 @@ module Meringue
             record["sessionID"],
             record.dig("data", "session_id"),
             record.dig("data", "sessionId"),
-            record.dig("message", "session_id")
+            record.dig("message", "session_id"),
+            record.dig("session", "id"),
+            record.dig("session", "session_id"),
+            record.dig("result", "session_id"),
+            record.dig("response", "session_id")
           )
           return value if value
         end
