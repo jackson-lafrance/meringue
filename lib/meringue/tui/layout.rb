@@ -9,7 +9,8 @@ module Meringue
       GAP = 1
       SIDEBAR_MIN_WIDTH = 34
       SIDEBAR_MAX_WIDTH = 42
-      COMPOSER_HEIGHT = 5
+      COMPOSER_HEIGHT = 3
+      BOTTOM_HINT_HEIGHT = 1
       MAX_COMPOSER_HEIGHT = 12
       MIN_CHAT_HEIGHT = 5
       MIN_LOG_HEIGHT = 3
@@ -90,6 +91,13 @@ module Meringue
           active: scroll_pane_active?(state, "chat"),
           overflow: :tail
         )
+        draw_hint_line(
+          canvas,
+          metrics.fetch(:hint_x),
+          metrics.fetch(:hint_y),
+          metrics.fetch(:hint_width),
+          chat_pane.bottom_hint_line(state)
+        )
 
         canvas.render(color: color)
       end
@@ -108,10 +116,10 @@ module Meringue
         composer_width = width - (OUTER_MARGIN * 2)
         composer_content_width = composer_width - 4
         composer_content_height = chat_pane.composer_lines(state, width: composer_content_width).length
-        composer_height = composer_height_for(height, composer_content_height)
+        composer_height = composer_height_for(height - BOTTOM_HINT_HEIGHT, composer_content_height)
         suggestion_height = bounded_slash_suggestion_height(height, composer_height, state)
         vertical_gaps = GAP + (suggestion_height.positive? ? GAP : 0)
-        top_height = height - composer_height - suggestion_height - vertical_gaps
+        top_height = height - BOTTOM_HINT_HEIGHT - composer_height - suggestion_height - vertical_gaps
 
         remaining = top_height - GAP
         log_height = log_height_for(remaining)
@@ -140,7 +148,10 @@ module Meringue
           composer_y: top_y + top_height + GAP + (suggestion_height.positive? ? suggestion_height + GAP : 0),
           composer_width: composer_width,
           composer_height: composer_height,
-          composer_content_width: composer_content_width
+          composer_content_width: composer_content_width,
+          hint_x: OUTER_MARGIN + 1,
+          hint_y: height - BOTTOM_HINT_HEIGHT,
+          hint_width: width - (OUTER_MARGIN * 2) - 1
         }
       end
 
@@ -149,7 +160,7 @@ module Meringue
         return 0 unless raw_height.positive?
 
         reserved_top_height = MIN_CHAT_HEIGHT + GAP + MIN_LOG_HEIGHT
-        max_height = total_height - composer_height - GAP - reserved_top_height - GAP
+        max_height = total_height - BOTTOM_HINT_HEIGHT - composer_height - GAP - reserved_top_height - GAP
         bounded_height = [raw_height, [max_height, 0].max].min
         bounded_height >= 3 ? bounded_height : 0
       end
@@ -167,7 +178,7 @@ module Meringue
       end
 
       def composer_height_for(total_height, content_line_count)
-        base_height = [COMPOSER_HEIGHT, [total_height / 5, 3].max].min
+        base_height = COMPOSER_HEIGHT
         desired_height = [content_line_count.to_i + 2, base_height].max
         max_available_height = [total_height - (GAP * 2) - MIN_CHAT_HEIGHT - MIN_LOG_HEIGHT, base_height].max
         max_height = [[total_height / 3, base_height].max, MAX_COMPOSER_HEIGHT, max_available_height].min
@@ -214,6 +225,10 @@ module Meringue
         lines.index do |line|
           Array(line).any? { |segment| segment.is_a?(Array) && selected_styles.include?(segment[1]) }
         end
+      end
+
+      def draw_hint_line(canvas, x, y, width, line)
+        canvas.write_segments(x, y, line, max_width: width, default_style: Style::MUTED)
       end
 
       def draw_pane(canvas, x, y, width, height, title, lines, active: false, overflow: :head, scroll_offset: 0)

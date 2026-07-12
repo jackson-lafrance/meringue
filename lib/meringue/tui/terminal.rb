@@ -145,9 +145,8 @@ module Meringue
       end
 
       def complete_escape_sequence?(sequence)
-        return true if ["\e\r", "\e\n"].include?(sequence)
         return true if sequence.match?(/\A\e\[<\d+;\d+;\d+[Mm]\z/)
-        return false unless sequence.start_with?("\e[")
+        return false unless sequence.start_with?("\e[") || sequence.start_with?("\eO")
 
         sequence.length >= 3 && sequence[-1].match?(/[A-Za-z~]/)
       end

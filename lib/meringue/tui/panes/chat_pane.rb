@@ -37,13 +37,22 @@ module Meringue
           chat = chat_state(state)
           input_buffer = chat.fetch("input_buffer", "").to_s
           input_cursor = chat.fetch("input_cursor", input_buffer.chars.length).to_i
-          pending_count = chat.fetch("pending_count", 0).to_i
 
-          input_lines = wrapped_input_lines(input_buffer, input_cursor: input_cursor, width: width)
-          input_lines + [
-            [["", Style::DIM]],
-            footer_status_line(state, pending_count)
-          ]
+          wrapped_input_lines(input_buffer, input_cursor: input_cursor, width: width)
+        end
+
+        def bottom_hint_line(state)
+          chat = chat_state(state)
+          pending_count = chat.fetch("pending_count", 0).to_i
+          prefix = compact_status_segments(state, pending_count)
+          open_questions = state.fetch("questions", []).count { |question| question["status"] == "open" }
+          if open_questions.positive?
+            prefix += [["  ·  ", Style::DIM]] unless prefix.empty?
+            prefix += [["? #{open_questions}", Style::WARNING]]
+          end
+          separator = prefix.empty? ? [] : [["  ·  ", Style::DIM]]
+
+          prefix + separator + interaction_hint_segments
         end
 
         def slash_suggestions?(state)
@@ -192,23 +201,27 @@ module Meringue
           lines.first(visible_count) + ["… #{hidden_count} more line#{hidden_count == 1 ? "" : "s"}"]
         end
 
-        def footer_status_line(state, pending_count)
-          status_segments(state, pending_count) + question_segments(state) + [
-            ["  ·  ", Style::DIM],
-            ["enter sends · shift/alt-enter newline · ctrl-c clears/quits · tab completes slash commands · tab/ctrl-tab focuses panes · focused pane scrolls with ↑/↓/PageUp/PageDown or mouse", Style::MUTED]
+        def interaction_hint_segments
+          [
+            ["Enter sends", Style::MUTED],
+            [" • ", Style::DIM],
+            ["Shift+Enter newline", Style::MUTED],
+            [" • ", Style::DIM],
+            ["Ctrl-C clears/quits", Style::MUTED],
+            [" • ", Style::DIM],
+            ["Tab/⇧Tab focus", Style::MUTED],
+            [" • ", Style::DIM],
+            ["arrows/mouse scroll", Style::MUTED]
           ]
         end
 
-        def status_segments(state, pending_count)
+        def compact_status_segments(state, pending_count)
           working_workers = active_agent_count(state, "worker")
           working_heads = active_agent_count(state, "head")
-          if working_workers.positive? || working_heads.positive?
-            return active_status_segments(working_workers, working_heads)
-          end
-
+          return active_status_segments(working_workers, working_heads) if working_workers.positive? || working_heads.positive?
           return [[prompt_count_label(pending_count), Style::ACCENT]] if pending_count.positive?
 
-          [["meringue idle", Style::MUTED]]
+          []
         end
 
         def active_status_segments(working_workers, working_heads)
@@ -221,16 +234,6 @@ module Meringue
             segments << metric
           end
           segments
-        end
-
-        def question_segments(state)
-          open_questions = state.fetch("questions", []).count { |question| question["status"] == "open" }
-          return [] unless open_questions.positive?
-
-          [
-            ["  ·  ", Style::DIM],
-            ["? #{open_questions}", Style::WARNING]
-          ]
         end
 
         def active_agent_count(state, type)
