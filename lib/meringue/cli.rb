@@ -209,11 +209,13 @@ module Meringue
           CLI flags override config.toml, and MERINGUE_HARNESS / MERINGUE_HEAD_HARNESS / MERINGUE_WORKER_HARNESS override both.
 
         TUI controls:
-          Enter                     # send natural language to a head, or apply a slash command directly in the kernel
+          Enter                     # send chat; when agent tree is focused, enter jump mode
           /                         # show slash command suggestions in an otherwise empty prompt
           /help                     # list command syntax
+          /keybind                  # show all TUI keybindings
           /jump [agent_id]          # open an agent session in Alacritty; omit id to navigate the AgentTree
           /jumpr [agent_id]         # open an agent PR; omit id to navigate only agents with attached PRs
+          p in jump mode            # open selected agent PR when one is available; otherwise do nothing
           Esc on an empty prompt or Ctrl-C # quit the TUI
       HELP
     end

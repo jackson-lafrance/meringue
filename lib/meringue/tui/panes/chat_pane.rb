@@ -28,7 +28,7 @@ module Meringue
             role = message.fetch("role", "meringue")
             style = role == "you" ? Style::USER : Style::ASSISTANT
             lines = [role_line(role, style)]
-            lines.concat(wrapped_text_lines(message.fetch("text", ""), width: width, max_lines: MAX_CONVERSATION_ENTRY_LINES))
+            lines.concat(wrapped_text_lines(message.fetch("text", ""), width: width))
             lines << status_line(message.fetch("status")) if message.fetch("status", nil)
             lines << spacer_line unless index == messages.length - 1
             lines
@@ -163,13 +163,11 @@ module Meringue
           segments
         end
 
-        def wrapped_text_lines(text, width: nil, max_lines: nil)
+        def wrapped_text_lines(text, width: nil)
           content_width = width ? [width.to_i - 2, 1].max : nil
-          wrapped = text.to_s.split("\n", -1).flat_map do |line|
+          text.to_s.split("\n", -1).flat_map do |line|
             wrap_text_line(line, content_width)
-          end
-
-          limited_lines(wrapped, max_lines).map { |line| text_line(line) }
+          end.map { |line| text_line(line) }
         end
 
         def wrap_text_line(line, width)
@@ -195,14 +193,6 @@ module Meringue
           chunks
         end
 
-        def limited_lines(lines, max_lines)
-          return lines unless max_lines && lines.length > max_lines
-
-          visible_count = [max_lines - 1, 0].max
-          hidden_count = lines.length - visible_count
-          lines.first(visible_count) + ["… #{hidden_count} more line#{hidden_count == 1 ? "" : "s"}"]
-        end
-
         def interaction_hint_segments
           [
             ["Enter sends", Style::MUTED],
@@ -213,7 +203,9 @@ module Meringue
             [" • ", Style::DIM],
             ["Tab/⇧Tab focus", Style::MUTED],
             [" • ", Style::DIM],
-            ["arrows/mouse scroll", Style::MUTED]
+            ["arrows/mouse scroll", Style::MUTED],
+            [" • ", Style::DIM],
+            ["/keybind help", Style::MUTED]
           ]
         end
 
