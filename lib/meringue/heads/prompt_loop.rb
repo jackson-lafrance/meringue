@@ -5,20 +5,21 @@ module Meringue
     class PromptLoop
       attr_reader :engine, :worker_wait_timeout
 
-      def initialize(engine:, wait_for_workers: false, worker_wait_timeout: 120)
+      def initialize(engine:, wait_for_workers: false, worker_wait_timeout: 120, engine_mutex: Mutex.new)
         @engine = engine
         @wait_for_workers = wait_for_workers
         @worker_wait_timeout = worker_wait_timeout
+        @engine_mutex = engine_mutex
       end
 
-      def call(text)
-        handle_prompt(text)
+      def call(text, &on_event)
+        handle_prompt(text, on_event: on_event)
       end
 
-      def handle_prompt(text, route: nil)
+      def handle_prompt(text, route: nil, on_event: nil)
         route ||= natural_language_route(text)
         spawn_command = route.fetch("commands").first
-        spawn_result = engine.apply(spawn_command)
+        spawn_result = apply_kernel(spawn_command)
         payload = {
           "event" => "head_loop_iteration",
           "summary" => "Spawned a head, collected its HeadResult, and asked the kernel to apply the proposed commands.",
@@ -40,7 +41,9 @@ module Meringue
           return payload
         end
 
-        apply_result = engine.apply(
+        emit(on_event, "head_completed", "head_id" => spawn_result.fetch("target_id"), "head_result" => head_result)
+
+        apply_result = apply_kernel(
           "type" => "ApplyHeadResult",
           "payload" => {
             "head_id" => spawn_result.fetch("target_id"),
@@ -48,7 +51,8 @@ module Meringue
           }
         )
         payload["apply_head_result"] = apply_result
-        payload["worker_wait_results"] = wait_for_spawned_workers(apply_result)
+        emit(on_event, "head_result_applied", "head_id" => spawn_result.fetch("target_id"), "apply_result" => apply_result)
+        payload["worker_wait_results"] = wait_for_spawned_workers(apply_result, on_event: on_event)
         payload["state_mutated"] = apply_result.fetch("status", nil) == "accepted"
         payload["state_summary"] = state_summary
         payload
@@ -68,24 +72,44 @@ module Meringue
         }
       end
 
-      def wait_for_spawned_workers(apply_result)
+      def apply_kernel(command)
+        @engine_mutex.synchronize { engine.apply(command) }
+      end
+
+      def mark_worker_completed(agent_id:, harness_events:, last_assistant_text:)
+        @engine_mutex.synchronize do
+          engine.mark_worker_completed(
+            agent_id: agent_id,
+            harness_events: harness_events,
+            last_assistant_text: last_assistant_text
+          )
+        end
+      end
+
+      def emit(callback, event, payload = {})
+        callback&.call(payload.merge("event" => event))
+      end
+
+      def wait_for_spawned_workers(apply_result, on_event: nil)
         return [] unless wait_for_workers?
         return [] unless engine.harness_client.respond_to?(:wait_for_settled)
 
         worker_results_from(apply_result).map do |worker_result|
-          wait_for_worker(worker_result.fetch("result"))
+          wait_for_worker(worker_result.fetch("result"), on_event: on_event)
         end
       end
 
-      def wait_for_worker(agent)
+      def wait_for_worker(agent, on_event: nil)
         session_ref = session_ref_from_agent(agent)
+        emit(on_event, "worker_wait_started", "agent_id" => agent.fetch("id"))
         events = engine.harness_client.wait_for_settled(session_ref, timeout: worker_wait_timeout)
         assistant_text = safe_last_assistant_text(session_ref)
-        completion_result = engine.mark_worker_completed(
+        completion_result = mark_worker_completed(
           agent_id: agent.fetch("id"),
           harness_events: events,
           last_assistant_text: assistant_text
         )
+        emit(on_event, "worker_completed", "agent_id" => agent.fetch("id"), "last_assistant_text" => assistant_text)
         {
           "agent_id" => agent.fetch("id"),
           "status" => "settled",
@@ -94,11 +118,13 @@ module Meringue
           "completion_result" => completion_result
         }
       rescue StandardError => e
-        {
+        error = {
           "agent_id" => agent.fetch("id", nil),
           "status" => "error",
           "error" => error_details(e)
         }
+        emit(on_event, "worker_wait_failed", error)
+        error
       end
 
       def worker_results_from(apply_result)

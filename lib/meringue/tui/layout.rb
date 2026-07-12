@@ -45,7 +45,8 @@ module Meringue
           metrics.fetch(:conversation_height),
           "conversation",
           chat_pane.conversation_lines(state),
-          active: true
+          active: true,
+          overflow: :tail
         )
         draw_pane(
           canvas,
