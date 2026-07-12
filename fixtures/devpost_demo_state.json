@@ -8,6 +8,14 @@
       "status": "idle",
       "created_at": "2026-07-12T00:00:00Z",
       "updated_at": "2026-07-12T00:05:00Z"
+    },
+    {
+      "id": "P2",
+      "name": "config",
+      "root_path": "__MERINGUE_DEMO_CONFIG_ROOT__",
+      "status": "idle",
+      "created_at": "2026-07-12T00:06:00Z",
+      "updated_at": "2026-07-12T00:09:00Z"
     }
   ],
   "issues": [
@@ -32,6 +40,28 @@
       "agent_ids": ["P1-I2-W1"],
       "created_at": "2026-07-12T00:02:00Z",
       "updated_at": "2026-07-12T00:04:00Z"
+    },
+    {
+      "id": "P2-I1",
+      "project_id": "P2",
+      "parent_issue_id": null,
+      "title": "Tune zsh workflow helpers",
+      "description": "Historical demo receipt for recent .config work: local zsh workflow polish and terminal helper changes. Keep this high-level and safe for screen sharing; do not expose secrets, hostnames, tokens, or private machine details.",
+      "status": "completed",
+      "agent_ids": ["P2-I1-W1"],
+      "created_at": "2026-07-12T00:06:00Z",
+      "updated_at": "2026-07-12T00:08:00Z"
+    },
+    {
+      "id": "P2-I2",
+      "project_id": "P2",
+      "parent_issue_id": null,
+      "title": "Collect missing dotfiles",
+      "description": "Historical demo receipt for recent .config work: bring missing local dotfile pieces under version control and keep personal workflow helpers organized.",
+      "status": "completed",
+      "agent_ids": ["P2-I2-W1"],
+      "created_at": "2026-07-12T00:07:00Z",
+      "updated_at": "2026-07-12T00:09:00Z"
     }
   ],
   "agents": [
@@ -78,6 +108,50 @@
       },
       "created_at": "2026-07-12T00:02:00Z",
       "updated_at": "2026-07-12T00:04:00Z"
+    },
+    {
+      "id": "P2-I1-W1",
+      "type": "worker",
+      "status": "completed",
+      "project_id": "P2",
+      "issue_id": "P2-I1",
+      "workspace_path": "__MERINGUE_DEMO_CONFIG_ROOT__",
+      "workspace_strategy": "project_root",
+      "workspace_branch": null,
+      "harness": "fake",
+      "pid": null,
+      "harness_session_id": "demo-config-zsh-worker",
+      "harness_session_file": null,
+      "harness_metadata": {
+        "demo": true,
+        "title": "Update zsh helper workflow",
+        "completed_at": "2026-07-12T00:08:00Z",
+        "last_assistant_text": "Updated safe zsh workflow helpers for daily terminal use. Secret-bearing config and private machine details were intentionally left out of the demo receipt."
+      },
+      "created_at": "2026-07-12T00:06:00Z",
+      "updated_at": "2026-07-12T00:08:00Z"
+    },
+    {
+      "id": "P2-I2-W1",
+      "type": "worker",
+      "status": "completed",
+      "project_id": "P2",
+      "issue_id": "P2-I2",
+      "workspace_path": "__MERINGUE_DEMO_CONFIG_ROOT__",
+      "workspace_strategy": "project_root",
+      "workspace_branch": null,
+      "harness": "fake",
+      "pid": null,
+      "harness_session_id": "demo-config-dotfiles-worker",
+      "harness_session_file": null,
+      "harness_metadata": {
+        "demo": true,
+        "title": "Add missing dotfiles",
+        "completed_at": "2026-07-12T00:09:00Z",
+        "last_assistant_text": "Collected missing dotfile pieces and kept local workflow helpers organized for repeatable setup."
+      },
+      "created_at": "2026-07-12T00:07:00Z",
+      "updated_at": "2026-07-12T00:09:00Z"
     }
   ],
   "questions": [],
@@ -129,13 +203,38 @@
     },
     {
       "id": "L5",
-      "timestamp": "2026-07-12T00:05:00Z",
+      "timestamp": "2026-07-12T00:06:00Z",
+      "source_type": "kernel",
+      "source_id": "P2",
+      "level": "info",
+      "message": "Registered .config as a preloaded demo project.",
+      "details": {
+        "project_id": "P2",
+        "screen_share_safe": true
+      }
+    },
+    {
+      "id": "L6",
+      "timestamp": "2026-07-12T00:08:00Z",
+      "source_type": "worker",
+      "source_id": "P2-I1-W1",
+      "level": "info",
+      "message": "Prior config worker completed zsh workflow helper changes.",
+      "details": {
+        "repo": ".config",
+        "safe_summary_only": true
+      }
+    },
+    {
+      "id": "L7",
+      "timestamp": "2026-07-12T00:09:00Z",
       "source_type": "system",
       "source_id": null,
       "level": "info",
       "message": "Ready for live demo prompts: README self-update, theme switch, and another project worker.",
       "details": {
-        "suggested_first_prompt": "Ask Meringue to build its own README and open a PR."
+        "suggested_first_prompt": "Ask Meringue to build its own README and open a PR.",
+        "other_project_preloaded": false
       }
     }
   ],
@@ -144,26 +243,31 @@
     "next_message_id": 0
   },
   "counters": {
-    "projects": 1,
+    "projects": 2,
     "heads": 0,
     "questions": 0,
-    "logs": 5,
+    "logs": 7,
     "issues_by_project": {
-      "P1": 2
+      "P1": 2,
+      "P2": 2
     },
     "workers_by_issue": {
       "P1-I1": 1,
-      "P1-I2": 1
+      "P1-I2": 1,
+      "P2-I1": 1,
+      "P2-I2": 1
     }
   },
   "metadata": {
     "created_at": "2026-07-12T00:00:00Z",
-    "updated_at": "2026-07-12T00:05:00Z",
+    "updated_at": "2026-07-12T00:09:00Z",
     "active_harness": "pi",
     "active_harness_label": "Pi",
     "harness_generation": 0,
     "demo_state": true,
     "demo_state_name": "devpost",
-    "demo_project_root": "__MERINGUE_DEMO_PROJECT_ROOT__"
+    "demo_project_root": "__MERINGUE_DEMO_PROJECT_ROOT__",
+    "demo_config_root": "__MERINGUE_DEMO_CONFIG_ROOT__",
+    "other_project_preloaded": false
   }
 }

@@ -8,6 +8,7 @@ module Meringue
     FULL_DEMO_STATE_PATH = File.expand_path(ENV.fetch("MERINGUE_DEMO_STATE_PATH", "~/.meringue/devpost-demo-state.json"))
     FULL_DEMO_STATE_FIXTURE_PATH = Meringue.root_path("fixtures", "devpost_demo_state.json")
     DEMO_PROJECT_ROOT_PLACEHOLDER = "__MERINGUE_DEMO_PROJECT_ROOT__"
+    DEMO_CONFIG_ROOT_PLACEHOLDER = "__MERINGUE_DEMO_CONFIG_ROOT__"
 
     def initialize(argv, input: $stdin, out: $stdout, err: $stderr)
       @argv = argv.dup
@@ -194,18 +195,25 @@ module Meringue
     def devpost_demo_state
       replace_demo_state_placeholders(
         JSON.parse(File.read(FULL_DEMO_STATE_FIXTURE_PATH)),
-        demo_project_root
+        demo_state_replacements
       )
     end
 
-    def replace_demo_state_placeholders(value, project_root)
+    def demo_state_replacements
+      {
+        DEMO_PROJECT_ROOT_PLACEHOLDER => demo_project_root,
+        DEMO_CONFIG_ROOT_PLACEHOLDER => demo_config_root
+      }
+    end
+
+    def replace_demo_state_placeholders(value, replacements)
       case value
       when Hash
-        value.transform_values { |child| replace_demo_state_placeholders(child, project_root) }
+        value.transform_values { |child| replace_demo_state_placeholders(child, replacements) }
       when Array
-        value.map { |child| replace_demo_state_placeholders(child, project_root) }
+        value.map { |child| replace_demo_state_placeholders(child, replacements) }
       when String
-        value.gsub(DEMO_PROJECT_ROOT_PLACEHOLDER, project_root)
+        replacements.reduce(value) { |text, (placeholder, replacement)| text.gsub(placeholder, replacement) }
       else
         value
       end
@@ -213,6 +221,10 @@ module Meringue
 
     def demo_project_root
       nearest_git_root(Dir.pwd) || File.expand_path(Dir.pwd)
+    end
+
+    def demo_config_root
+      File.expand_path(ENV.fetch("MERINGUE_DEMO_CONFIG_ROOT", "~/.config"))
     end
 
     def nearest_git_root(path)
@@ -307,6 +319,7 @@ module Meringue
           Supported TUI colorschemes: #{TUI::Style.colorschemes.join(", ")}
           CLI flags override config.toml, and MERINGUE_HARNESS / MERINGUE_HEAD_HARNESS / MERINGUE_WORKER_HARNESS override both.
           Full demo state path: #{FULL_DEMO_STATE_PATH} (override with MERINGUE_DEMO_STATE_PATH or --state PATH with --demo-state).
+          Demo .config project path defaults to ~/.config (override with MERINGUE_DEMO_CONFIG_ROOT).
 
         TUI controls:
           Enter                     # send chat; when agent tree is focused, enter jump mode

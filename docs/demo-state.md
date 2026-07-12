@@ -18,6 +18,13 @@ This uses:
 
 If the file does not exist yet, Meringue seeds it from `fixtures/devpost_demo_state.json` before opening the TUI.
 
+The seeded state preloads:
+
+- `P1` Meringue, with self-hosting receipt work.
+- `P2` `.config`, with safe high-level receipt work from recent local configuration changes.
+
+It intentionally does not preload SimplyLift, so the demo can still show Meringue discovering/registering another project during the live flow.
+
 ## Reset before a new recording or live walkthrough
 
 ```bash
@@ -47,10 +54,17 @@ MERINGUE_DEMO_STATE_PATH=/tmp/meringue-devpost-demo.json bin/meringue tui --demo
 
 ## Fixture templating
 
-`fixtures/devpost_demo_state.json` contains the placeholder:
+`fixtures/devpost_demo_state.json` contains these placeholders:
 
 ```txt
 __MERINGUE_DEMO_PROJECT_ROOT__
+__MERINGUE_DEMO_CONFIG_ROOT__
 ```
 
-At seed/reset time, Meringue replaces it with the nearest git root for the directory where the command is run. For the Devpost demo, run the command from the Meringue checkout so the seeded `P1` project points at the real local Meringue repo.
+At seed/reset time, Meringue replaces `__MERINGUE_DEMO_PROJECT_ROOT__` with the nearest git root for the directory where the command is run. For the Devpost demo, run the command from the Meringue checkout so the seeded `P1` project points at the real local Meringue repo.
+
+`__MERINGUE_DEMO_CONFIG_ROOT__` defaults to `~/.config`. Override it with:
+
+```bash
+MERINGUE_DEMO_CONFIG_ROOT=/path/to/config bin/meringue tui --reset-demo-state
+```
