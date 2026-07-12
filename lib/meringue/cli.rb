@@ -159,6 +159,9 @@ module Meringue
         harness_client: registry.worker_client,
         head_runner: registry.head_runner(cwd: Dir.pwd),
         harness_client_resolver: ->(agent) { registry.client_for_agent(agent) },
+        harness_client_provider: ->(provider) { registry.worker_client_for(provider: provider) },
+        head_runner_provider: ->(provider) { registry.head_runner_for(provider: provider, cwd: Dir.pwd) },
+        default_harness_provider: registry.worker_provider,
         workspace_manager: Workspace::Manager.new,
         cwd: Dir.pwd,
         async_heads: true
@@ -212,6 +215,7 @@ module Meringue
           Enter                     # send chat; when agent tree is focused, enter jump mode
           /                         # show slash command suggestions in an otherwise empty prompt
           /help                     # list command syntax
+          /harness <pi|claude|gemini> # select the harness backend for future agents
           /keybind                  # show all TUI keybindings
           /jump [agent_id]          # open an agent session in Alacritty; omit id to navigate the AgentTree
           /jumpr [agent_id]         # open an agent PR; omit id to navigate only agents with attached PRs

@@ -8,6 +8,23 @@ module Meringue
     class Registry
       DEFAULT_PROVIDER = "pi"
       PROVIDERS = %w[pi claude gemini].freeze
+      PROVIDER_LABELS = {
+        "pi" => "Pi",
+        "claude" => "Claude Code",
+        "gemini" => "Gemini CLI"
+      }.freeze
+      PROVIDER_ALIASES = {
+        "pi" => "pi",
+        "claude" => "claude",
+        "claude-code" => "claude",
+        "claude_code" => "claude",
+        "claude code" => "claude",
+        "cc" => "claude",
+        "gemini" => "gemini",
+        "gemini-cli" => "gemini",
+        "gemini_cli" => "gemini",
+        "gemini cli" => "gemini"
+      }.freeze
       DEFAULT_PI_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
       DEFAULT_PI_HEAD_EXTRA_ARGS = [
         "--thinking", "high",
@@ -62,11 +79,40 @@ module Meringue
         @clients = {}
       end
 
+      def self.normalize_provider(provider)
+        normalized = provider.to_s.strip.downcase.gsub(/\s+/, " ")
+        normalized = DEFAULT_PROVIDER if normalized.empty?
+        PROVIDER_ALIASES.fetch(normalized, normalized)
+      end
+
+      def self.normalize_provider!(provider)
+        normalized = normalize_provider(provider)
+        return normalized if PROVIDERS.include?(normalized)
+
+        raise ArgumentError, "Unsupported harness provider #{provider.inspect}. Supported providers: #{PROVIDERS.join(", ")}"
+      end
+
+      def self.provider_label(provider)
+        PROVIDER_LABELS.fetch(normalize_provider(provider), provider.to_s)
+      end
+
+      def self.provider_choices
+        PROVIDERS.map do |provider|
+          {
+            "provider" => provider,
+            "label" => provider_label(provider),
+            "description" => "Use #{provider_label(provider)} for future heads and workers."
+          }
+        end
+      end
+
       def provider_for(kind)
-        env_provider_for(kind) ||
-          config.value("harness", "#{kind}_provider") ||
-          config.value("harness", "provider") ||
-          DEFAULT_PROVIDER
+        self.class.normalize_provider!(
+          env_provider_for(kind) ||
+            config.value("harness", "#{kind}_provider") ||
+            config.value("harness", "provider") ||
+            DEFAULT_PROVIDER
+        )
       end
 
       def head_provider
@@ -78,7 +124,11 @@ module Meringue
       end
 
       def head_runner(cwd: Dir.pwd)
-        provider = head_provider
+        head_runner_for(provider: head_provider, cwd: cwd)
+      end
+
+      def head_runner_for(provider:, cwd: Dir.pwd)
+        provider = self.class.normalize_provider!(provider)
         client = client_for(provider: provider, kind: "head")
         session_name_prefix = provider_option(provider, "head_session_name_prefix") || "Meringue Head"
 
@@ -98,7 +148,11 @@ module Meringue
       end
 
       def worker_client
-        client_for(provider: worker_provider, kind: "worker")
+        worker_client_for(provider: worker_provider)
+      end
+
+      def worker_client_for(provider:)
+        client_for(provider: provider, kind: "worker")
       end
 
       def client_for(provider:, kind:)
@@ -215,11 +269,7 @@ module Meringue
       end
 
       def normalize_provider!(provider)
-        normalized = provider.to_s.strip.downcase
-        normalized = DEFAULT_PROVIDER if normalized.empty?
-        return normalized if PROVIDERS.include?(normalized)
-
-        raise ArgumentError, "Unsupported harness provider #{provider.inspect}. Supported providers: #{PROVIDERS.join(", ")}"
+        self.class.normalize_provider!(provider)
       end
     end
   end
