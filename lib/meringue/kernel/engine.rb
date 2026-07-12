@@ -1152,18 +1152,26 @@ module Meringue
         issue_ids_to_remove = root_issue_ids.flat_map { |issue_id| issue_subtree_ids(state, issue_id) }.uniq
         issues_to_remove = state.fetch("issues").select { |issue| issue_ids_to_remove.include?(issue.fetch("id", nil)) }
         project_ids = issues_to_remove.map { |issue| issue.fetch("project_id", nil) }.compact.uniq
+        removed_project_ids = project_ids.select do |project_id|
+          state.fetch("issues").none? do |issue|
+            issue.fetch("project_id", nil) == project_id && !issue_ids_to_remove.include?(issue.fetch("id", nil))
+          end
+        end
         issue_agent_ids = issues_to_remove.flat_map { |issue| Array(issue.fetch("agent_ids", [])) }
         worker_agent_ids = state.fetch("agents").select { |agent| issue_ids_to_remove.include?(agent.fetch("issue_id", nil)) }.map { |agent| agent.fetch("id", nil) }
         originating_head_ids = issues_to_remove.map { |issue| issue.fetch("originating_head_id", nil) }.compact
-        agent_ids_to_remove = (issue_agent_ids + worker_agent_ids + originating_head_ids + Array(extra_agent_ids)).compact.uniq
-        standalone_agent_ids = Array(extra_agent_ids).compact.uniq - (issue_agent_ids + worker_agent_ids + originating_head_ids).compact.uniq
+        related_head_ids = pruned_related_head_agent_ids(state, issue_ids_to_remove, removed_project_ids)
+        bundled_agent_ids = (issue_agent_ids + worker_agent_ids + originating_head_ids + related_head_ids).compact.uniq
+        agent_ids_to_remove = (bundled_agent_ids + Array(extra_agent_ids)).compact.uniq
+        standalone_agent_ids = Array(extra_agent_ids).compact.uniq - bundled_agent_ids
 
         state["issues"] = state.fetch("issues").reject { |issue| issue_ids_to_remove.include?(issue.fetch("id", nil)) }
         state["agents"] = state.fetch("agents").reject { |agent| agent_ids_to_remove.include?(agent.fetch("id", nil)) }
+        state["projects"] = state.fetch("projects").reject { |project| removed_project_ids.include?(project.fetch("id", nil)) }
         state.fetch("issues").each do |issue|
           issue["agent_ids"] = Array(issue.fetch("agent_ids", [])) - agent_ids_to_remove if issue.key?("agent_ids")
         end
-        refresh_projects_after_prune!(state, project_ids, now)
+        updated_project_ids = refresh_projects_after_prune!(state, project_ids - removed_project_ids, now)
 
         {
           "reason" => reason,
@@ -1171,8 +1179,72 @@ module Meringue
           "removed_issue_ids" => issue_ids_to_remove,
           "removed_agent_ids" => agent_ids_to_remove,
           "removed_standalone_agent_ids" => standalone_agent_ids,
-          "updated_project_ids" => project_ids
+          "removed_project_ids" => removed_project_ids,
+          "updated_project_ids" => updated_project_ids
         }
+      end
+
+      def pruned_related_head_agent_ids(state, issue_ids_to_remove, removed_project_ids)
+        state.fetch("agents").select { |agent| agent.fetch("type", nil) == "head" }
+             .select { |agent| head_related_to_pruned_work?(state, agent, issue_ids_to_remove, removed_project_ids) }
+             .map { |agent| agent.fetch("id", nil) }
+      end
+
+      def head_related_to_pruned_work?(state, head, issue_ids_to_remove, removed_project_ids)
+        return true if issue_ids_to_remove.include?(head.fetch("issue_id", nil))
+        return true if removed_project_ids.include?(head.fetch("project_id", nil))
+
+        related = head_result_related_ids(state, head)
+        (related.fetch("issue_ids") & issue_ids_to_remove).any? ||
+          (related.fetch("project_ids") & removed_project_ids).any?
+      end
+
+      def head_result_related_ids(state, head)
+        metadata = head.fetch("harness_metadata", {}) || {}
+        head_result = metadata.fetch("head_result", nil)
+        commands = head_result.is_a?(Hash) ? Array(value_at(head_result, "commands") || []) : []
+        commands.each_with_object({ "issue_ids" => [], "project_ids" => [] }) do |command, ids|
+          next unless command.is_a?(Hash)
+
+          payload = value_at(command, "payload")
+          payload = {} unless payload.is_a?(Hash)
+          collect_head_command_related_ids!(state, ids, payload)
+        end.transform_values { |values| values.compact.uniq }
+      end
+
+      def collect_head_command_related_ids!(state, ids, payload)
+        issue_id = value_at(payload, "issue_id", "IssueID", "issueId")
+        project_id = value_at(payload, "project_id", "ProjectID", "projectId")
+        agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
+        target_id = value_at(payload, "target_id", "TargetID", "targetId", "id")
+
+        ids.fetch("issue_ids") << issue_id if present_string(issue_id)
+        ids.fetch("project_ids") << project_id if present_string(project_id)
+        collect_related_ids_for_agent_target!(state, ids, agent_id)
+        collect_related_ids_for_target!(state, ids, target_id)
+      end
+
+      def collect_related_ids_for_agent_target!(state, ids, agent_id)
+        agent = present_string(agent_id) && find_agent(state, agent_id)
+        return unless agent
+
+        ids.fetch("issue_ids") << agent.fetch("issue_id", nil)
+        ids.fetch("project_ids") << agent.fetch("project_id", nil)
+      end
+
+      def collect_related_ids_for_target!(state, ids, target_id)
+        target = present_string(target_id)
+        return unless target
+
+        if (issue = find_issue(state, target))
+          ids.fetch("issue_ids") << issue.fetch("id", nil)
+          ids.fetch("project_ids") << issue.fetch("project_id", nil)
+        elsif (project = find_project(state, target))
+          ids.fetch("project_ids") << project.fetch("id", nil)
+        elsif (agent = find_agent(state, target))
+          ids.fetch("issue_ids") << agent.fetch("issue_id", nil)
+          ids.fetch("project_ids") << agent.fetch("project_id", nil)
+        end
       end
 
       def issue_subtree_ids(state, root_issue_id)
@@ -1184,17 +1256,12 @@ module Meringue
       end
 
       def refresh_projects_after_prune!(state, project_ids, now)
-        Array(project_ids).each do |project_id|
+        Array(project_ids).filter_map do |project_id|
           project = find_project(state, project_id)
           next unless project
 
-          remaining_issues = state.fetch("issues").select { |issue| issue.fetch("project_id", nil) == project.fetch("id") }
-          if remaining_issues.empty?
-            project["status"] = "idle"
-            project["updated_at"] = now
-          else
-            update_project_status_from_issues!(state, project, now)
-          end
+          update_project_status_from_issues!(state, project, now)
+          project.fetch("id")
         end
       end
 
