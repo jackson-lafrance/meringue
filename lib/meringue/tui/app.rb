@@ -198,6 +198,9 @@ module Meringue
         scroll_result = handle_focused_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index)
         return scroll_result if scroll_result
 
+        focused_action_result = handle_focused_action_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        return focused_action_result if focused_action_result
+
         if ENTER_KEYS.include?(key)
           return [+"", 0, 0] if local_navigation_command_without_id?(input_buffer) && handle_local_navigation_command(input_buffer, state)
 
@@ -283,6 +286,13 @@ module Meringue
         @focused_pane = FOCUS_ORDER[(current_index + delta) % FOCUS_ORDER.length]
       end
 
+      def handle_focused_action_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        return nil unless @focused_pane == "agent_tree" && ENTER_KEYS.include?(key)
+
+        enter_agent_tree_navigation(state)
+        [input_buffer, input_cursor, slash_suggestion_index]
+      end
+
       def handle_focused_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index)
         return nil unless focused_scrollable?
 
@@ -341,6 +351,11 @@ module Meringue
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
+        if pr_open_key?(key)
+          open_selected_agent_pr_silently(state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
         if ENTER_KEYS.include?(key)
           open_selected_navigation_item(state)
           return [+"", 0, 0]
@@ -349,10 +364,15 @@ module Meringue
         [input_buffer, input_cursor, slash_suggestion_index]
       end
 
+      def pr_open_key?(key)
+        key == "p"
+      end
+
       def handle_local_navigation_command(input_buffer, state)
         text = input_buffer.to_s.strip
         return handle_local_jump_command(text, state) if jump_command?(text)
         return handle_local_jumpr_command(text, state) if jumpr_command?(text)
+        return handle_local_keybind_command if keybind_command?(text)
 
         false
       end
@@ -377,12 +397,34 @@ module Meringue
         true
       end
 
+      def handle_local_keybind_command
+        append_jump_response(keybinding_help_text)
+        true
+      end
+
+      def keybinding_help_text
+        <<~TEXT.strip
+          Keybindings:
+          Global: Ctrl-D quits; Ctrl-C clears input or quits when input is empty; Esc quits from an empty prompt or cancels jump mode.
+          Focus: Tab/Ctrl-Tab moves focus forward; Shift-Tab moves focus backward; arrows, PageUp/PageDown, and mouse wheel scroll the focused pane.
+          Chat: Enter sends or applies the selected slash completion; Shift-Enter inserts a newline; arrows move the cursor; Home/Ctrl-A and End/Ctrl-E jump within a line; Alt/Ctrl-Left and Alt/Ctrl-Right move by word; Backspace/Delete edit characters; Alt/Ctrl-Backspace, Ctrl-W, and Alt/Ctrl-Delete edit words.
+          Slash commands: type / for suggestions; Tab completes; Up/Down changes the selected suggestion.
+          Agent tree: focus the agent tree and press Enter to enter jump mode.
+          Jump mode: /jump or agent-tree Enter starts agent navigation; ↑/↓ or ←/→ selects an agent; Enter opens the selected agent session; p opens the selected agent PR when one is available; Esc cancels.
+          PR navigation: /jumpr starts PR navigation; ↑/↓ or ←/→ selects an agent with a PR; Enter or p opens the selected PR; Esc cancels.
+        TEXT
+      end
+
       def jump_command?(text)
         text == "/jump" || text.start_with?("/jump ")
       end
 
       def jumpr_command?(text)
         text == "/jumpr" || text.start_with?("/jumpr ")
+      end
+
+      def keybind_command?(text)
+        text == "/keybind"
       end
 
       def local_navigation_command_without_id?(input_buffer)
@@ -400,7 +442,7 @@ module Meringue
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
-        append_jump_response("Agent tree navigation active. ↑/↓ or ←/→ select agents, Enter jumps, Esc cancels.")
+        append_jump_response("Agent tree navigation active. ↑/↓ or ←/→ select agents, Enter jumps, p opens PRs, Esc cancels.")
       end
 
       def enter_pr_agent_navigation(state)
@@ -413,7 +455,7 @@ module Meringue
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :pull_request
         @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
-        append_jump_response("Pull request navigation active. ↑/↓ or ←/→ select agents with PRs, Enter opens the PR, Esc cancels.")
+        append_jump_response("Pull request navigation active. ↑/↓ or ←/→ select agents with PRs, Enter opens the PR, p also opens the PR, Esc cancels.")
       end
 
       def exit_agent_tree_navigation(message = nil)
@@ -467,6 +509,19 @@ module Meringue
         exit_agent_tree_navigation
       end
 
+      def open_selected_agent_pr_silently(state)
+        selected_id = if @agent_tree_navigation_mode == :pull_request
+                        normalized_selected_pr_agent_id(state)
+                      else
+                        normalized_selected_agent_id(state)
+                      end
+        return false unless selected_id
+
+        opened = open_pr_by_agent_id(state, selected_id, silent_fail: true)
+        exit_agent_tree_navigation if opened
+        opened
+      end
+
       def open_agent_by_id(state, agent_id)
         agent = Array(state["agents"]).find { |candidate| candidate["id"].to_s == agent_id.to_s }
         unless agent
@@ -478,21 +533,26 @@ module Meringue
         append_jump_response(result.fetch("message", "Could not open agent #{agent_id}."))
       end
 
-      def open_pr_by_agent_id(state, agent_id)
+      def open_pr_by_agent_id(state, agent_id, silent_fail: false)
         agent = Array(state["agents"]).find { |candidate| candidate["id"].to_s == agent_id.to_s }
         unless agent
-          append_jump_response("Agent #{agent_id} does not exist.")
-          return
+          append_jump_response("Agent #{agent_id} does not exist.") unless silent_fail
+          return false
         end
 
         pr_url = AgentTreeNavigation.agent_pr_url(agent)
         unless pr_url
-          append_jump_response("Agent #{agent_id} does not have an attached pull request yet.")
-          return
+          append_jump_response("Agent #{agent_id} does not have an attached pull request yet.") unless silent_fail
+          return false
         end
 
         result = pull_request_opener.open(pr_url)
-        append_jump_response(result.fetch("message", "Could not open pull request for #{agent_id}."))
+        opened = result.fetch("status", nil) == "opened" || !%w[failed rejected].include?(result.fetch("status", nil).to_s)
+        append_jump_response(result.fetch("message", "Could not open pull request for #{agent_id}.")) if opened || !silent_fail
+        opened
+      rescue StandardError => e
+        append_jump_response("Could not open pull request for #{agent_id}: #{e.message}") unless silent_fail
+        false
       end
 
       def append_jump_response(message)
