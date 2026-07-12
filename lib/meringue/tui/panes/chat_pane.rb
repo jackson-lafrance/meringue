@@ -41,9 +41,10 @@ module Meringue
           open_questions = state.fetch("questions", []).count { |question| question["status"] == "open" }
           chat = chat_state(state)
           input_buffer = chat.fetch("input_buffer", "").to_s
+          input_cursor = chat.fetch("input_cursor", input_buffer.chars.length).to_i
           pending_count = chat.fetch("pending_count", 0).to_i
 
-          input_lines = wrapped_input_lines(input_buffer, width: width)
+          input_lines = wrapped_input_lines(input_buffer, input_cursor: input_cursor, width: width)
           input_lines + [
             [["", Style::DIM]],
             [
@@ -51,7 +52,7 @@ module Meringue
               ["  ·  ", Style::DIM],
               ["open questions: #{open_questions}", Style::MUTED],
               ["  ·  ", Style::DIM],
-              ["enter sends · tab completes slash commands · esc/ctrl-c quits", Style::MUTED]
+              ["enter sends · shift-enter newline · ctrl-c clears/quits · tab completes slash commands", Style::MUTED]
             ]
           ]
         end
@@ -144,7 +145,7 @@ module Meringue
           ]
         end
 
-        def wrapped_input_lines(input_buffer, width: nil)
+        def wrapped_input_lines(input_buffer, input_cursor:, width: nil)
           if input_buffer.empty?
             return [[
               ["›", Style::ACCENT_BOLD],
@@ -152,20 +153,34 @@ module Meringue
             ]]
           end
 
-          display_text = "#{input_buffer}_"
-          available_width = width ? [width.to_i - 2, 1].max : display_text.length
-          chunks = display_text.chars.each_slice(available_width).map(&:join)
-          chunks.each_with_index.map do |chunk, index|
-            input_line_segments(chunk, first_line: index.zero?, cursor_line: index == chunks.length - 1)
+          cursor_marker = "\u0000"
+          chars = input_buffer.chars
+          cursor = input_cursor.to_i.clamp(0, chars.length)
+          chars.insert(cursor, cursor_marker)
+          available_width = width ? [width.to_i - 2, 1].max : chars.length
+
+          rows = []
+          chars.join.split("\n", -1).each do |logical_line|
+            chunks = logical_line.empty? ? [""] : logical_line.chars.each_slice(available_width).map(&:join)
+            chunks.each do |chunk|
+              rows << input_line_segments(chunk, first_line: rows.empty?, cursor_marker: cursor_marker)
+            end
           end
+          rows
         end
 
-        def input_line_segments(chunk, first_line:, cursor_line:)
+        def input_line_segments(chunk, first_line:, cursor_marker:)
           prefix = first_line ? "› " : "  "
-          return [[prefix, Style::ACCENT_BOLD], [chunk, Style::TEXT]] unless cursor_line && chunk.end_with?("_")
+          marker_index = chunk.index(cursor_marker)
+          return [[prefix, Style::ACCENT_BOLD], [chunk, Style::TEXT]] unless marker_index
 
-          text = chunk[0...-1]
-          [[prefix, Style::ACCENT_BOLD], [text, Style::TEXT], ["_", Style::ACCENT_BOLD]]
+          before = chunk[0...marker_index]
+          after = chunk[(marker_index + cursor_marker.length)..].to_s
+          segments = [[prefix, Style::ACCENT_BOLD]]
+          segments << [before, Style::TEXT] unless before.empty?
+          segments << ["_", Style::ACCENT_BOLD]
+          segments << [after, Style::TEXT] unless after.empty?
+          segments
         end
 
         def wrapped_text_lines(text)
