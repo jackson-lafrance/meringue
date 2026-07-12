@@ -102,6 +102,13 @@ module Meringue
         canvas.render(color: color)
       end
 
+      def pane_at(state, width:, height:, x:, y:)
+        metrics = layout_metrics([width.to_i, MIN_WIDTH].max, [height.to_i, MIN_HEIGHT].max, state)
+        focusable_pane_bounds(metrics).find do |_pane, bounds|
+          point_in_bounds?(x.to_i, y.to_i, bounds)
+        end&.first
+      end
+
       private
 
       attr_reader :agent_tree_pane, :log_pane, :chat_pane
@@ -209,6 +216,29 @@ module Meringue
         scroll = state.fetch("_scroll", {}) || {}
         offsets = scroll.fetch("offsets", {}) || {}
         offsets.fetch(pane, 0).to_i
+      end
+
+      def focusable_pane_bounds(metrics)
+        {
+          "agent_tree" => pane_bounds(metrics, :sidebar_x, :top_y, :sidebar_width, :top_height),
+          "conversation" => pane_bounds(metrics, :main_x, :top_y, :main_width, :conversation_height),
+          "logs" => pane_bounds(metrics, :main_x, :log_y, :main_width, :log_height),
+          "chat" => pane_bounds(metrics, :composer_x, :composer_y, :composer_width, :composer_height)
+        }
+      end
+
+      def pane_bounds(metrics, x_key, y_key, width_key, height_key)
+        {
+          x: metrics.fetch(x_key),
+          y: metrics.fetch(y_key),
+          width: metrics.fetch(width_key),
+          height: metrics.fetch(height_key)
+        }
+      end
+
+      def point_in_bounds?(x, y, bounds)
+        x >= bounds.fetch(:x) && x < bounds.fetch(:x) + bounds.fetch(:width) &&
+          y >= bounds.fetch(:y) && y < bounds.fetch(:y) + bounds.fetch(:height)
       end
 
       def scroll_pane_active?(state, pane)

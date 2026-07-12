@@ -51,6 +51,8 @@ module Meringue
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = nil
         @focused_pane = "chat"
+        @last_render_width = DEFAULT_WIDTH
+        @last_render_height = DEFAULT_HEIGHT
         @scroll_offsets = Hash.new(0)
         @conversation_event_keys = {}
         @started_at = Time.iso8601(Time.now.utc.iso8601)
@@ -93,6 +95,8 @@ module Meringue
 
             loop do
               width, height = terminal.dimensions
+              @last_render_width = width
+              @last_render_height = height
               current_state = compose_state(state_provider, input_buffer, slash_suggestion_index, input_cursor)
               frame = render(current_state, width: width, height: height, color: true)
               if frame != last_frame
@@ -132,10 +136,8 @@ module Meringue
       def quit_key?(key, input_buffer)
         return false unless key
         return true if key == CTRL_D
-        return true if key == CTRL_C && input_buffer.empty? && !@agent_tree_navigation_active
-        return false if @agent_tree_navigation_active
 
-        key == "\e" && input_buffer.empty?
+        key == CTRL_C && input_buffer.empty? && !@agent_tree_navigation_active
       end
 
       def handle_key(key, input_buffer, input_cursor_or_slash_index = 0, slash_index_or_on_submit = nil, on_submit_or_state = nil, state_arg = nil)
@@ -173,6 +175,9 @@ module Meringue
         if paste_key?(key)
           return insert_text(input_buffer, input_cursor, paste_text(key)) + [0]
         end
+
+        mouse_focus_result = handle_mouse_focus_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        return mouse_focus_result if mouse_focus_result
 
         if plain_text_paste_key?(key)
           return insert_text(input_buffer, input_cursor, key) + [0]
@@ -313,6 +318,33 @@ module Meringue
         @focused_pane != "chat"
       end
 
+      def handle_mouse_focus_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        return nil unless mouse_button_press?(key)
+
+        pane = pane_at_mouse_position(key, state)
+        return [input_buffer, input_cursor, slash_suggestion_index] unless pane
+
+        @focused_pane = pane
+        exit_agent_tree_navigation if @agent_tree_navigation_active && pane != "agent_tree"
+        [input_buffer, input_cursor, slash_suggestion_index]
+      end
+
+      def mouse_button_press?(key)
+        key.is_a?(Hash) && key.fetch("type", nil) == "mouse" &&
+          key.fetch("kind", nil) == "button" && key.fetch("pressed", false) &&
+          (key.fetch("button", 0).to_i & 3).zero?
+      end
+
+      def pane_at_mouse_position(key, state)
+        layout.pane_at(
+          state,
+          width: @last_render_width || DEFAULT_WIDTH,
+          height: @last_render_height || DEFAULT_HEIGHT,
+          x: key.fetch("x", 1).to_i - 1,
+          y: key.fetch("y", 1).to_i - 1
+        )
+      end
+
       def mouse_wheel_up?(key)
         key.is_a?(Hash) && key.fetch("type", nil) == "mouse" && key.fetch("kind", nil) == "wheel_up"
       end
@@ -405,8 +437,8 @@ module Meringue
       def keybinding_help_text
         <<~TEXT.strip
           Keybindings:
-          Global: Ctrl-D quits; Ctrl-C clears input or quits when input is empty; Esc quits from an empty prompt or cancels jump mode.
-          Focus: Tab/Ctrl-Tab moves focus forward; Shift-Tab moves focus backward; arrows, PageUp/PageDown, and mouse wheel scroll the focused pane.
+          Global: Ctrl-D quits; Ctrl-C clears input or quits when input is empty; Esc cancels jump/PR navigation mode.
+          Focus: click a dashboard section to focus it; Tab/Ctrl-Tab moves focus forward; Shift-Tab moves focus backward; arrows, PageUp/PageDown, and mouse wheel scroll the focused pane.
           Chat: Enter sends or applies the selected slash completion; Shift-Enter inserts a newline; arrows move the cursor; Home/Ctrl-A and End/Ctrl-E jump within a line; Alt/Ctrl-Left and Alt/Ctrl-Right move by word; Backspace/Delete edit characters; Alt/Ctrl-Backspace, Ctrl-W, and Alt/Ctrl-Delete edit words.
           Slash commands: type / for suggestions; Tab completes; Up/Down changes the selected suggestion.
           Agent tree: focus the agent tree and press Enter to enter jump mode.

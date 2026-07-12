@@ -52,6 +52,8 @@ module Meringue
       config = runtime_config(options)
       return 1 unless config
 
+      configure_tui_style(config)
+
       registry = Harness::Registry.new(config: config)
       store = state_store(path: options.fetch(:state_path))
       engine = enable_agents ? tui_engine(store, registry) : nil
@@ -183,6 +185,16 @@ module Meringue
       harness.empty? ? {} : { "harness" => harness }
     end
 
+    def configure_tui_style(config)
+      TUI::Style.configure!(configured_colorscheme(config))
+    end
+
+    def configured_colorscheme(config)
+      config.value("tui", "colorscheme") ||
+        config.value("tui", "color_scheme") ||
+        TUI::Style::DEFAULT_COLORSCHEME
+    end
+
     def demo_state
       State::Store.new(path: Meringue.root_path("fixtures", "demo_state.json")).load
     end
@@ -195,7 +207,7 @@ module Meringue
           meringue                               # open the TUI and route chat prompts through configured head agents
           meringue tui                           # open the TUI and route chat prompts through configured head agents
           meringue tui --state PATH              # open the TUI against a specific Meringue state JSON file
-          meringue tui --config PATH             # open the TUI with a specific harness config TOML file
+          meringue tui --config PATH             # open the TUI with a specific harness/config TOML file
           meringue tui --harness claude          # use Claude Code for both heads and workers
           meringue tui --head-harness antigravity --worker-harness claude
           meringue demo                          # display the fake demo state fixture without agent prompting
@@ -209,6 +221,7 @@ module Meringue
         Config:
           Default path: #{Config::DEFAULT_PATH}
           Supported harness providers: pi, claude, antigravity
+          Supported TUI colorschemes: #{TUI::Style.colorschemes.join(", ")}
           CLI flags override config.toml, and MERINGUE_HARNESS / MERINGUE_HEAD_HARNESS / MERINGUE_WORKER_HARNESS override both.
 
         TUI controls:
@@ -220,7 +233,7 @@ module Meringue
           /jump [agent_id]          # open an agent session in Alacritty; omit id to navigate the AgentTree
           /jumpr [agent_id]         # open an agent PR; omit id to navigate only agents with attached PRs
           p in jump mode            # open selected agent PR when one is available; otherwise do nothing
-          Esc on an empty prompt or Ctrl-C # quit the TUI
+          Ctrl-C on an empty prompt # quit the TUI; Esc cancels jump/PR navigation only
       HELP
     end
   end
