@@ -3,6 +3,10 @@
 module Meringue
   module Harness
     class FakeClient < Client
+      def harness_name
+        "fake"
+      end
+
       def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:)
         {
           "harness" => "fake",
