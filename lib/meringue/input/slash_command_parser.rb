@@ -10,7 +10,7 @@ module Meringue
         ["/project add <path> [name]", "Register a project directory."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
-        ["/prompt <agent_id> \"<message>\"", "Prompt an existing agent session."],
+        ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker session."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
@@ -22,7 +22,7 @@ module Meringue
       ARGUMENT_SUGGESTION_CONTEXTS = [
         { "prefix" => "/issue create", "source" => "projects", "append_space" => true },
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
-        { "prefix" => "/prompt", "source" => "agents", "append_space" => true },
+        { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
         { "prefix" => "/kill", "source" => "targets", "append_space" => false },
         { "prefix" => "/answer", "source" => "open_questions", "append_space" => true }
       ].freeze
@@ -108,8 +108,8 @@ module Meringue
                   Array(state["projects"])
                 when "issues"
                   Array(state["issues"])
-                when "agents"
-                  Array(state["agents"])
+                when "workers"
+                  Array(state["agents"]).select { |agent| agent["type"] == "worker" }
                 when "targets"
                   Array(state["agents"]) + Array(state["issues"]) + Array(state["projects"])
                 when "open_questions"
@@ -148,8 +148,8 @@ module Meringue
           ["project", item["name"], item["status"]].compact.join(" · ")
         when "issues"
           ["issue", item["title"], item["status"]].compact.join(" · ")
-        when "agents"
-          [item["type"] || "agent", item["status"], item["issue_id"]].compact.join(" · ")
+        when "workers"
+          ["worker", item["status"], item["issue_id"]].compact.join(" · ")
         when "targets"
           type = item["type"] || (item.key?("root_path") ? "project" : "issue")
           [type, item["title"] || item["name"], item["status"]].compact.join(" · ")
