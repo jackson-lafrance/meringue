@@ -15,6 +15,10 @@ module Meringue
       ENABLE_AUTOWRAP = "\e[?7h"
       ENABLE_BRACKETED_PASTE = "\e[?2004h"
       DISABLE_BRACKETED_PASTE = "\e[?2004l"
+      # Ask compatible terminals to report modified Enter separately from plain Enter.
+      # Kitty/CSI-u uses \e[>1u / \e[<u; xterm modifyOtherKeys uses \e[>4;2m / \e[>4;0m.
+      ENABLE_KEYBOARD_DISAMBIGUATION = "\e[>1u\e[>4;2m"
+      DISABLE_KEYBOARD_DISAMBIGUATION = "\e[<u\e[>4;0m"
       ENABLE_MOUSE = "\e[?1000h\e[?1006h"
       DISABLE_MOUSE = "\e[?1006l\e[?1003l\e[?1002l\e[?1000l"
       BRACKETED_PASTE_START = "\e[200~"
@@ -63,6 +67,7 @@ module Meringue
         output.write(HIDE_CURSOR)
         output.write(DISABLE_AUTOWRAP)
         output.write(ENABLE_BRACKETED_PASTE)
+        output.write(ENABLE_KEYBOARD_DISAMBIGUATION)
         output.write(ENABLE_MOUSE)
         output.write(CLEAR_SCREEN)
         output.flush
@@ -72,6 +77,7 @@ module Meringue
       ensure
         if interactive?
           output.write(DISABLE_MOUSE)
+          output.write(DISABLE_KEYBOARD_DISAMBIGUATION)
           output.write(DISABLE_BRACKETED_PASTE)
           output.write(ENABLE_AUTOWRAP)
           output.write(SHOW_CURSOR)

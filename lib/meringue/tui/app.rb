@@ -16,7 +16,7 @@ module Meringue
       BACKSPACE_KEYS = ["\u007f", "\b"].freeze
       DELETE_KEYS = ["\e[3~"].freeze
       ENTER_KEYS = ["\r", "\n"].freeze
-      SHIFT_ENTER_KEYS = ["\e[13;2u", "\e[27;2;13~", "\e[13;2~"].freeze
+      SHIFT_ENTER_KEYS = ["\e[13;2u", "\e[10;2u", "\e[27;2;13~", "\e[27;2;10~", "\e[13;2~", "\e[10;2~"].freeze
       TAB_KEYS = ["\t"].freeze
       LEFT_KEYS = ["\e[D", "\eOD"].freeze
       RIGHT_KEYS = ["\e[C", "\eOC"].freeze
@@ -207,6 +207,10 @@ module Meringue
         focused_action_result = handle_focused_action_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return focused_action_result if focused_action_result
 
+        if SHIFT_ENTER_KEYS.include?(key)
+          return insert_text(input_buffer, input_cursor, "\n") + [0]
+        end
+
         if ENTER_KEYS.include?(key)
           return [+"", 0, 0] if local_navigation_command_without_id?(input_buffer) && handle_local_navigation_command(input_buffer, state)
 
@@ -217,10 +221,6 @@ module Meringue
 
           submit_prompt(input_buffer, on_submit)
           return [+"", 0, 0]
-        end
-
-        if SHIFT_ENTER_KEYS.include?(key)
-          return insert_text(input_buffer, input_cursor, "\n") + [0]
         end
 
         if key == CTRL_C
