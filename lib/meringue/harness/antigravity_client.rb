@@ -2,11 +2,11 @@
 
 module Meringue
   module Harness
-    class GeminiClient < ProcessClient
+    class AntigravityClient < ProcessClient
       DEFAULT_COMMAND = "antigravity"
 
       def initialize(command: DEFAULT_COMMAND, env: {}, extra_args: [], **kwargs)
-        super(harness_name: "gemini", command: command, env: env, extra_args: extra_args, **kwargs)
+        super(harness_name: "antigravity", command: command, env: env, extra_args: extra_args, **kwargs)
       end
 
       protected
