@@ -36,6 +36,12 @@ module Meringue
       PROMPT
       PULL_REQUEST_URL_PATTERN = /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+(?:[\/?#][^\s<>"'\])}]*)?/.freeze
       ERROR_MESSAGE_MAX_BYTES = 2_000
+      HARNESS_EVENT_LOG_LIMIT = 20
+      HARNESS_EVENT_IGNORED_TYPES = %w[
+        response state session session_state ping pong heartbeat token text_delta
+        content_delta message_delta thinking_delta stream_delta stream_chunk
+      ].freeze
+      HARNESS_EVENT_LOG_PATTERN = /(agent|tool|process|error|exit|settled|start|end|complete|stop|failed)/i.freeze
 
       COMMAND_ALIASES = {
         "add_project" => "AddProject",
@@ -264,14 +270,15 @@ module Meringue
           completion_details["candidate_pr_urls"] = candidate_pr_urls unless candidate_pr_urls.empty?
           completion_details["delivery_pull_request"] = delivery_pull_request if delivery_pull_request
 
-          log_ids = append_log(
+          log_ids = append_harness_event_logs(state, agent, harness_events)
+          log_ids.concat(append_log(
             state,
             source_type: "worker",
             source_id: agent.fetch("id"),
             level: "info",
             message: "Worker #{agent.fetch("id")} completed.",
             details: completion_details
-          )
+          ))
           touch_state!(state, now)
           store.save(state)
 
@@ -2268,6 +2275,142 @@ module Meringue
         value.inspect
       end
 
+      def append_harness_event_logs(state, agent, events)
+        visible_events = Array(events).filter_map { |event| visible_harness_event(event) }
+        return [] if visible_events.empty?
+
+        log_ids = []
+        visible_events.first(HARNESS_EVENT_LOG_LIMIT).each do |event|
+          log_ids.concat(append_log(
+            state,
+            source_type: "harness",
+            source_id: agent.fetch("id", nil),
+            level: event.fetch("level"),
+            message: harness_event_log_message(agent, event),
+            details: event.fetch("details")
+          ))
+        end
+
+        overflow_count = visible_events.length - HARNESS_EVENT_LOG_LIMIT
+        if overflow_count.positive?
+          log_ids.concat(append_log(
+            state,
+            source_type: "harness",
+            source_id: agent.fetch("id", nil),
+            level: "info",
+            message: "#{agent.fetch("id", "Agent")} produced #{overflow_count} additional harness event#{overflow_count == 1 ? "" : "s"}.",
+            details: {
+              "omitted_event_count" => overflow_count,
+              "event_types" => visible_events.drop(HARNESS_EVENT_LOG_LIMIT).map { |event| event.fetch("type") }.uniq
+            }
+          ))
+        end
+
+        log_ids
+      end
+
+      def visible_harness_event(event)
+        return nil unless event.is_a?(Hash)
+
+        event = stringify_keys(event)
+        message_event = visible_harness_message_event(event)
+        return message_event if message_event
+
+        event_type = event.fetch("type", "event").to_s
+        return nil if HARNESS_EVENT_IGNORED_TYPES.include?(event_type)
+        return nil unless event_type.match?(HARNESS_EVENT_LOG_PATTERN)
+
+        details = compact_harness_event_details(event)
+        {
+          "type" => event_type,
+          "label" => harness_event_label(event),
+          "level" => harness_event_error?(event_type) ? "warning" : "info",
+          "details" => details
+        }
+      end
+
+      def visible_harness_message_event(event)
+        return nil unless event.fetch("type", nil).to_s == "message"
+
+        role = event.dig("message", "role").to_s
+        content = Array(event.dig("message", "content"))
+        tool_call = content.find { |part| part.is_a?(Hash) && part["type"].to_s == "toolCall" }
+        if tool_call
+          tool_call = stringify_keys(tool_call)
+          return {
+            "type" => "tool_call",
+            "label" => harness_event_first_present(tool_call, "name", "toolName", "tool_name", "id"),
+            "level" => "info",
+            "details" => compact_harness_event_details(event.merge("tool_call" => tool_call))
+          }
+        end
+
+        return nil unless role == "toolResult"
+
+        {
+          "type" => "tool_result",
+          "label" => event.dig("message", "toolCallId") || event.dig("message", "tool_call_id"),
+          "level" => "info",
+          "details" => compact_harness_event_details(event)
+        }
+      end
+
+      def compact_harness_event_details(event)
+        details = {
+          "event_type" => event.fetch("type", nil),
+          "event_timestamp" => event.fetch("timestamp", nil),
+          "tool_name" => harness_event_label(event),
+          "status" => harness_event_first_present(event, "status", "state", "result"),
+          "role" => event.dig("message", "role"),
+          "id" => harness_event_first_present(event, "id", "event_id", "toolCallId", "tool_call_id")
+        }.compact
+        data = event.fetch("data", nil)
+        details["data_type"] = data.fetch("type", nil) if data.is_a?(Hash)
+        details["error"] = harness_event_first_present(event, "error", "error_message", "message") if harness_event_error?(event.fetch("type", ""))
+        details
+      end
+
+      def harness_event_log_message(agent, event)
+        label = present_string(event.fetch("label", nil))
+        suffix = label ? ": #{label}" : ""
+        "#{agent.fetch("id", "Agent")} harness #{event.fetch("type")}#{suffix}."
+      end
+
+      def harness_event_error?(event_type)
+        event_type.to_s.match?(/error|failed|failure|parse_error/i)
+      end
+
+      def harness_event_label(event)
+        data = event.fetch("data", nil)
+        data = {} unless data.is_a?(Hash)
+        harness_event_first_present(
+          event,
+          "tool_name", "toolName", "tool", "name", "command", "function", "customType"
+        ) || harness_event_first_present(
+          data,
+          "tool_name", "toolName", "tool", "name", "command", "function", "customType"
+        )
+      end
+
+      def harness_event_first_present(hash, *keys)
+        return nil unless hash.is_a?(Hash)
+
+        keys.each do |key|
+          value = hash[key] || hash[key.to_sym]
+          next unless value.is_a?(String) || value.is_a?(Numeric) || value.is_a?(Symbol) || value == true || value == false
+
+          normalized = present_string(value)
+          return normalized if normalized
+        end
+        nil
+      end
+
+      def stringify_keys(hash)
+        hash.each_with_object({}) do |(key, value), result|
+          result[key.to_s] = value.is_a?(Hash) ? stringify_keys(value) : value
+        end
+      end
+
       def append_log(state, source_type:, source_id:, level:, message:, details: {})
         raise ArgumentError, "invalid log source_type: #{source_type}" unless State::Models::LOG_SOURCE_TYPES.include?(source_type)
         raise ArgumentError, "invalid log level: #{level}" unless State::Models::LOG_LEVELS.include?(level)
@@ -2437,10 +2580,11 @@ module Meringue
           agent["status"] = "working"
           agent["updated_at"] = now
           refresh_worker_parent_statuses!(state, agent, now) if agent.fetch("type", nil) == "worker"
-          log_ids = append_resume_success_log(state, agent, poll_result)
+          log_ids = append_harness_event_logs(state, agent, poll_result.fetch("events", []))
+          log_ids.concat(append_resume_success_log(state, agent, poll_result))
           touch_state!(state, now)
           store.save(state)
-          poll_result.merge("changed" => poll_result.fetch("resumed", false), "log_entry_ids" => log_ids)
+          poll_result.merge("changed" => poll_result.fetch("resumed", false) || log_ids.any?, "log_entry_ids" => log_ids)
         end
       end
 
@@ -2581,7 +2725,8 @@ module Meringue
             "head_result_apply_status" => apply_result.fetch("status", nil),
             "is_streaming" => false
           ).compact
-          log_ids = append_log(
+          log_ids = append_harness_event_logs(state, head, poll_result.fetch("events", []))
+          log_ids.concat(append_log(
             state,
             source_type: "head",
             source_id: head.fetch("id"),
@@ -2592,7 +2737,7 @@ module Meringue
               "apply_status" => apply_result.fetch("status", nil),
               "apply_message" => apply_result.fetch("message", nil)
             }
-          )
+          ))
           touch_state!(state, now)
           store.save(state)
           log_ids
