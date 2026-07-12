@@ -15,8 +15,7 @@ module Meringue
       ENABLE_AUTOWRAP = "\e[?7h"
       ENABLE_BRACKETED_PASTE = "\e[?2004h"
       DISABLE_BRACKETED_PASTE = "\e[?2004l"
-      ENABLE_MOUSE = "\e[?1000h\e[?1006h"
-      DISABLE_MOUSE = "\e[?1006l\e[?1000l"
+      DISABLE_MOUSE = "\e[?1006l\e[?1003l\e[?1002l\e[?1000l"
       BRACKETED_PASTE_START = "\e[200~"
       BRACKETED_PASTE_END = "\e[201~"
       ESCAPE_READ_TIMEOUT = 0.01
@@ -61,7 +60,7 @@ module Meringue
         output.write(HIDE_CURSOR)
         output.write(DISABLE_AUTOWRAP)
         output.write(ENABLE_BRACKETED_PASTE)
-        output.write(ENABLE_MOUSE)
+        output.write(DISABLE_MOUSE)
         output.write(CLEAR_SCREEN)
         output.flush
         @last_frame = nil
