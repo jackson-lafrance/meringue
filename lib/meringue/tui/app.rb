@@ -875,7 +875,7 @@ module Meringue
                        unavailable_prompt_handler_result
                      end
             if slash_command
-              apply_theme_command_results(result.fetch("command_results", []) || []) if result.fetch("event", nil) == "slash_command_applied"
+              apply_slash_command_results(result.fetch("command_results", []) || []) if result.fetch("event", nil) == "slash_command_applied"
             else
               final_text = conversation_text_for(result)
               update_message(assistant_message_id, text: final_text, status: nil, visible: !final_text.to_s.strip.empty?)
@@ -928,7 +928,7 @@ module Meringue
         when "head_result_applied"
           append_head_result_applied_summary(message_id, event)
         when "slash_command_applied"
-          apply_theme_command_results(event.fetch("command_results", []) || [])
+          apply_slash_command_results(event.fetch("command_results", []) || [])
         when "worker_wait_started"
           remember_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
           update_message_status(message_id, "workers running")
@@ -963,6 +963,26 @@ module Meringue
         lines.concat(worker_summary_lines(result.fetch("worker_wait_results", []) || []))
         lines.concat(failure_result_lines(spawn_result, apply_result)) if lines.empty?
         lines.reject { |line| line.to_s.empty? }.join("\n")
+      end
+
+      def apply_slash_command_results(command_results)
+        clear_conversation! if clear_state_accepted?(command_results)
+        apply_theme_command_results(command_results)
+      end
+
+      def clear_state_accepted?(command_results)
+        Array(command_results).any? do |result|
+          result.fetch("command_type", nil) == "ClearState" && result.fetch("status", nil) == "accepted"
+        end
+      end
+
+      def clear_conversation!
+        @chat_mutex.synchronize do
+          @messages = []
+          @next_message_id = 0
+          @conversation_event_keys = {}
+          persist_conversation_unlocked
+        end
       end
 
       def apply_theme_command_results(command_results)
