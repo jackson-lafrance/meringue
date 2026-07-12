@@ -11,7 +11,12 @@ module Meringue
       PROVIDER_LABELS = {
         "pi" => "Pi",
         "claude" => "Claude Code",
-        "gemini" => "Gemini CLI"
+        "gemini" => "Antigravity CLI"
+      }.freeze
+      PUBLIC_PROVIDER_NAMES = {
+        "pi" => "pi",
+        "claude" => "claude",
+        "gemini" => "antigravity"
       }.freeze
       PROVIDER_ALIASES = {
         "pi" => "pi",
@@ -20,6 +25,10 @@ module Meringue
         "claude_code" => "claude",
         "claude code" => "claude",
         "cc" => "claude",
+        "antigravity" => "gemini",
+        "antigravity-cli" => "gemini",
+        "antigravity_cli" => "gemini",
+        "antigravity cli" => "gemini",
         "gemini" => "gemini",
         "gemini-cli" => "gemini",
         "gemini_cli" => "gemini",
@@ -66,7 +75,7 @@ module Meringue
           "use_json_schema" => true
         },
         "gemini" => {
-          "command" => "gemini",
+          "command" => "antigravity",
           "head_extra_args" => [],
           "worker_extra_args" => []
         }
@@ -96,10 +105,19 @@ module Meringue
         PROVIDER_LABELS.fetch(normalize_provider(provider), provider.to_s)
       end
 
+      def self.public_provider_name(provider)
+        PUBLIC_PROVIDER_NAMES.fetch(normalize_provider(provider), normalize_provider(provider))
+      end
+
+      def self.supported_provider_names
+        PROVIDERS.map { |provider| public_provider_name(provider) }
+      end
+
       def self.provider_choices
         PROVIDERS.map do |provider|
           {
-            "provider" => provider,
+            "provider" => public_provider_name(provider),
+            "internal_provider" => provider,
             "label" => provider_label(provider),
             "description" => "Use #{provider_label(provider)} for future heads and workers."
           }
@@ -209,8 +227,9 @@ module Meringue
       def provider_config(provider)
         provider = normalize_provider!(provider)
         defaults = DEFAULT_PROVIDER_CONFIG.fetch(provider, {})
-        configured = config.section("harness", provider)
-        Config.deep_merge(defaults, configured)
+        legacy_configured = config.section("harness", provider)
+        public_configured = config.section("harness", self.class.public_provider_name(provider))
+        Config.deep_merge(Config.deep_merge(defaults, legacy_configured), public_configured)
       end
 
       def extra_args_for(provider_config, kind)

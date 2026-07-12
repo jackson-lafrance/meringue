@@ -4,7 +4,7 @@
 # provider applies to both head and worker agents unless overridden below.
 provider = "pi"
 # head_provider = "claude"
-# worker_provider = "gemini"
+# worker_provider = "antigravity"
 
 [harness.pi]
 command = "pi"
@@ -18,8 +18,8 @@ use_json_schema = true
 head_extra_args = ["--effort", "high", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan", "--disable-slash-commands"]
 worker_extra_args = ["--effort", "high", "--permission-mode", "acceptEdits"]
 
-[harness.gemini]
-command = "gemini"
+[harness.antigravity]
+command = "antigravity"
 head_extra_args = []
 worker_extra_args = []
 
