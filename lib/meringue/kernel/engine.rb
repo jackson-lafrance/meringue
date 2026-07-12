@@ -2797,6 +2797,16 @@ module Meringue
       end
 
       def timestamp
+        local_timestamp
+      rescue StandardError
+        global_timestamp
+      end
+
+      def local_timestamp
+        Time.now.getlocal.iso8601
+      end
+
+      def global_timestamp
         Time.now.utc.iso8601
       end
     end
