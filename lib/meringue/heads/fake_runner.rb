@@ -42,13 +42,13 @@ module Meringue
       end
 
       def add_project_command(context)
-        cwd = context&.cwd || Dir.pwd
+        project_root = default_project_root(context&.cwd || Dir.pwd)
 
         {
           "type" => "AddProject",
           "payload" => {
-            "path" => cwd,
-            "name" => File.basename(cwd)
+            "path" => project_root,
+            "name" => File.basename(project_root)
           }
         }
       end
@@ -85,6 +85,23 @@ module Meringue
         issue_counters = snapshot.fetch("counters", {}).fetch("issues_by_project", {})
         next_number = issue_counters.fetch(project_id, max_issue_number(snapshot, project_id)).to_i + 1
         "#{project_id}-I#{next_number}"
+      end
+
+      def default_project_root(path)
+        nearest_git_root(path) || File.expand_path(path)
+      end
+
+      def nearest_git_root(path)
+        current = File.expand_path(path.to_s)
+
+        loop do
+          return current if File.exist?(File.join(current, ".git"))
+
+          parent = File.dirname(current)
+          return nil if parent == current
+
+          current = parent
+        end
       end
 
       def max_project_number(snapshot)

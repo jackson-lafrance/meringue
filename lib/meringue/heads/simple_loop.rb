@@ -17,7 +17,9 @@ module Meringue
                      store: nil,
                      harness_client: Harness::FakeClient.new,
                      workspace_manager: Workspace::Manager.new,
-                     engine: nil)
+                     engine: nil,
+                     wait_for_workers: false,
+                     worker_wait_timeout: 120)
         @input = input
         @out = out
         @err = err
@@ -25,6 +27,8 @@ module Meringue
         @runner_name = runner_name
         @cwd = File.expand_path(cwd)
         @store = store || build_temp_store
+        @wait_for_workers = wait_for_workers
+        @worker_wait_timeout = worker_wait_timeout
         seed_store!(initial_state)
         @engine = engine || Kernel::Engine.new(
           store: @store,
@@ -78,7 +82,8 @@ module Meringue
 
       private
 
-      attr_reader :input, :out, :err, :router, :runner_name, :store, :engine, :cwd
+      attr_reader :input, :out, :err, :router, :runner_name, :store, :engine, :cwd,
+                  :worker_wait_timeout
 
       def handle_natural_language(route)
         spawn_command = route.fetch("commands").first
@@ -112,9 +117,69 @@ module Meringue
           }
         )
         payload["apply_head_result"] = apply_result
+        payload["worker_wait_results"] = wait_for_spawned_workers(apply_result)
         payload["state_mutated"] = apply_result.fetch("status", nil) == "accepted"
         payload["state_summary"] = state_summary
         payload
+      end
+
+      def wait_for_spawned_workers(apply_result)
+        return [] unless wait_for_workers?
+        return [] unless engine.harness_client.respond_to?(:wait_for_settled)
+
+        worker_results_from(apply_result).map do |worker_result|
+          wait_for_worker(worker_result.fetch("result"))
+        end
+      end
+
+      def wait_for_worker(agent)
+        session_ref = session_ref_from_agent(agent)
+        events = engine.harness_client.wait_for_settled(session_ref, timeout: worker_wait_timeout)
+        {
+          "agent_id" => agent.fetch("id"),
+          "status" => "settled",
+          "event_count" => events.length,
+          "last_assistant_text" => last_assistant_text(session_ref)
+        }
+      rescue StandardError => e
+        {
+          "agent_id" => agent.fetch("id", nil),
+          "status" => "error",
+          "error" => error_details(e)
+        }
+      end
+
+      def worker_results_from(apply_result)
+        result = apply_result.fetch("result", {}) || {}
+        result.fetch("command_results", []).select do |command_result|
+          command_result.fetch("command_type", nil) == "SpawnWorker" &&
+            command_result.fetch("status", nil) == "accepted" &&
+            command_result.fetch("result", nil).is_a?(Hash)
+        end
+      end
+
+      def session_ref_from_agent(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        {
+          "harness" => agent.fetch("harness", nil),
+          "pid" => agent.fetch("pid", nil),
+          "cwd" => metadata.fetch("cwd", agent.fetch("workspace_path", nil)),
+          "session_id" => agent.fetch("harness_session_id", nil),
+          "session_file" => agent.fetch("harness_session_file", nil),
+          "is_streaming" => metadata.fetch("is_streaming", false),
+          "last_event_at" => metadata.fetch("last_event_at", nil),
+          "metadata" => metadata
+        }
+      end
+
+      def last_assistant_text(session_ref)
+        return nil unless engine.harness_client.respond_to?(:last_assistant_text)
+
+        engine.harness_client.last_assistant_text(session_ref)
+      end
+
+      def wait_for_workers?
+        @wait_for_workers
       end
 
       def head_result_from(spawn_result)
