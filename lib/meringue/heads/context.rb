@@ -46,12 +46,9 @@ module Meringue
           "user_message" => user_message,
           "question_id" => question_id,
           "cwd" => cwd,
+          "state_access" => state_access,
           "project_discovery" => project_discovery,
-          "kernel_state" => snapshot,
-          "agent_tree" => agent_tree,
-          "active_heads" => active_heads,
-          "active_workers" => active_workers,
-          "unresolved_questions" => unresolved_questions,
+          "current_state_summary" => current_state_summary,
           "kernel_command_reference" => reference_metadata.merge(
             "appended_to_system_prompt" => true
           )
@@ -61,7 +58,9 @@ module Meringue
       def system_prompt
         <<~PROMPT
           You are a stateless Meringue head agent.
-          Read the user message, inspect the supplied Meringue snapshot, and return a HeadResult JSON object only.
+          Read the user message and return a HeadResult JSON object only.
+          The prompt includes the Meringue state file path and read-only commands you may run when state details are necessary.
+          Do not assume all state is embedded in the prompt; inspect only the parts of state you need.
           You may use tools to inspect local projects and git repositories before deciding, but discovery must be read-only.
           Do not mutate files, git state, dependencies, databases, remote services, or Meringue state directly.
           Propose kernel commands using the reference below.
@@ -86,14 +85,47 @@ module Meringue
         raise ArgumentError, "Head kernel command reference not found: #{kernel_commands_path}"
       end
 
-      def agent_tree
+      def state_access
         {
-          "projects" => snapshot.fetch("projects", []),
-          "issues" => snapshot.fetch("issues", []),
-          "agents" => snapshot.fetch("agents", []),
-          "questions" => snapshot.fetch("questions", []),
-          "status_counts" => status_counts
+          "state_path" => state_path,
+          "read_only" => true,
+          "guidance" => "The full Meringue state is intentionally not embedded. Read this file only when the user request requires current projects, issues, agents, questions, logs, counters, or prior PR URLs.",
+          "suggested_commands" => [
+            {
+              "purpose" => "Read full JSON state when necessary.",
+              "tool" => "read",
+              "path" => state_path
+            },
+            {
+              "purpose" => "Summarize projects, issues, agents, and open questions without printing full logs or harness metadata.",
+              "tool" => "bash",
+              "command" => state_summary_command
+            }
+          ]
         }
+      end
+
+      def current_state_summary
+        {
+          "project_count" => snapshot.fetch("projects", []).length,
+          "issue_count" => snapshot.fetch("issues", []).length,
+          "agent_count" => snapshot.fetch("agents", []).length,
+          "open_question_count" => unresolved_questions.length,
+          "active_head_count" => active_heads.length,
+          "active_worker_count" => active_workers.length,
+          "status_counts" => status_counts,
+          "registered_projects" => registered_projects
+        }
+      end
+
+      def state_path
+        State::Store.default_path
+      end
+
+      def state_summary_command
+        <<~COMMAND.strip
+          ruby -rjson -e 's=JSON.parse(File.read(ARGV.fetch(0))); puts JSON.pretty_generate({projects:s.fetch("projects",[]).map{|p|p.slice("id","name","root_path","status")}, issues:s.fetch("issues",[]).map{|i|i.slice("id","project_id","title","status","agent_ids")}, agents:s.fetch("agents",[]).map{|a|a.slice("id","type","status","project_id","issue_id","workspace_path","workspace_branch","harness")}, open_questions:s.fetch("questions",[]).select{|q|q["status"]=="open"}.map{|q|q.slice("id","head_id","project_id","issue_id","question","status")}, counters:s.fetch("counters",{})})' #{state_path.inspect}
+        COMMAND
       end
 
       def active_heads
@@ -118,14 +150,7 @@ module Meringue
         {
           "responsibility" => "The head discovers local projects and proposes AddProject when needed; the kernel only validates and mutates state.",
           "starting_points" => discovery_starting_points,
-          "registered_projects" => snapshot.fetch("projects", []).map do |project|
-            {
-              "id" => project.fetch("id", nil),
-              "name" => project.fetch("name", nil),
-              "root_path" => project.fetch("root_path", nil),
-              "status" => project.fetch("status", nil)
-            }
-          end,
+          "registered_projects" => registered_projects,
           "allowed_read_only_discovery" => DISCOVERY_ALLOWED_COMMANDS,
           "forbidden_discovery" => DISCOVERY_FORBIDDEN_COMMANDS,
           "current_directory" => current_directory_metadata,
@@ -137,11 +162,22 @@ module Meringue
             "Before proposing CreateIssue, inspect existing issues in the chosen project. If the prompt is a follow-up, refinement, or next step for an existing issue, reuse that issue and propose SpawnWorker only.",
             "Do not create nested/subissues for ordinary follow-up prompts; keep parent_issue_id null unless the user explicitly asks for a child issue hierarchy.",
             "Always include a short action-oriented title in SpawnWorker payloads so workers render clearly under their issue in the AgentTree.",
-            "When chaining AddProject with CreateIssue and SpawnWorker in one HeadResult, compute the future project id from kernel_state.counters.projects or the max existing P<number>.",
+            "When chaining AddProject with CreateIssue and SpawnWorker in one HeadResult, read state counters when necessary and compute the future project id from counters.projects or the max existing P<number>.",
             "If the app was launched outside the target project, use registered projects and candidate_search_roots to inspect likely local repositories by name/path before choosing.",
             "Ask a clarifying question when multiple repositories are plausible."
           ]
         }
+      end
+
+      def registered_projects
+        snapshot.fetch("projects", []).map do |project|
+          {
+            "id" => project.fetch("id", nil),
+            "name" => project.fetch("name", nil),
+            "root_path" => project.fetch("root_path", nil),
+            "status" => project.fetch("status", nil)
+          }
+        end
       end
 
       def current_directory_metadata
