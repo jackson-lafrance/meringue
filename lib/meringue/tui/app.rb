@@ -140,7 +140,7 @@ module Meringue
       def slash_suggestion_records(input_buffer, state)
         return [] unless slash_suggestions_active?(input_buffer)
 
-        Input::SlashCommandParser.command_suggestion_records(input_buffer, limit: 3, state: state)
+        Input::SlashCommandParser.command_suggestion_records(input_buffer, limit: nil, state: state)
       end
 
       def slash_completion_for(record)

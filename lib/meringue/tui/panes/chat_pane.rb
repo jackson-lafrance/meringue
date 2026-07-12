@@ -4,6 +4,8 @@ module Meringue
   module TUI
     module Panes
       class ChatPane
+        VISIBLE_SUGGESTION_LIMIT = 3
+
         def render(state)
           conversation_lines(state).map { |line| plain_text(line) }.join("\n")
         end
@@ -55,8 +57,9 @@ module Meringue
           return [[["No matching slash commands.", Style::MUTED]]] if slash_prompt?(chat_state(state).fetch("input_buffer", "")) && records.empty?
 
           selected_index = selected_slash_suggestion_index(state, records.length)
-          records.map.with_index do |record, index|
-            selected = index == selected_index
+          window_start = slash_suggestion_window_start(records.length, selected_index)
+          records.drop(window_start).first(VISIBLE_SUGGESTION_LIMIT).map.with_index do |record, offset|
+            selected = window_start + offset == selected_index
             marker = selected ? "›" : " "
             marker_style = selected ? Style::ACCENT_BOLD : Style::DIM
             usage_style = selected ? Style::ACCENT_BOLD : Style::TEXT
@@ -72,7 +75,7 @@ module Meringue
           input_buffer = chat_state(state).fetch("input_buffer", "")
           return [] unless slash_prompt?(input_buffer)
 
-          Meringue::Input::SlashCommandParser.command_suggestion_records(input_buffer, limit: 3, state: state)
+          Meringue::Input::SlashCommandParser.command_suggestion_records(input_buffer, limit: nil, state: state)
         end
 
         def slash_prompt?(input_buffer)
@@ -146,6 +149,13 @@ module Meringue
           return 0 unless count.positive?
 
           chat_state(state).fetch("slash_suggestion_index", 0).to_i.clamp(0, count - 1)
+        end
+
+        def slash_suggestion_window_start(count, selected_index)
+          return 0 if count <= VISIBLE_SUGGESTION_LIMIT
+
+          max_start = count - VISIBLE_SUGGESTION_LIMIT
+          [selected_index - VISIBLE_SUGGESTION_LIMIT + 1, 0].max.clamp(0, max_start)
         end
 
         def spacer_line
