@@ -28,7 +28,9 @@ module Meringue
 
     def run
       reconcile_now
-      tui.run(state_provider: -> { current_state }, on_submit: prompt_handler)
+      ui = tui
+      ui.remember_existing_conversation_events!(state_store.load) if ui.respond_to?(:remember_existing_conversation_events!)
+      ui.run(state_provider: -> { current_state }, on_submit: prompt_handler)
     rescue JSON::ParserError => e
       err.puts "Could not load Meringue state from #{state_path}: #{e.message}"
       1
