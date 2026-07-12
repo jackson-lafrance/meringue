@@ -69,7 +69,7 @@ module Meringue
       end
 
       def pi_argv(session)
-        argv = [pi_command, "--mode", "text"]
+        argv = [pi_command]
         argv += ["--session-dir", pi_session_dir] if present?(pi_session_dir)
         argv + ["--session", session]
       end
