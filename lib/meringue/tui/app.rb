@@ -15,14 +15,14 @@ module Meringue
       BACKSPACE_KEYS = ["\u007f", "\b"].freeze
       DELETE_KEYS = ["\e[3~"].freeze
       ENTER_KEYS = ["\r", "\n"].freeze
-      MULTILINE_ENTER_KEYS = ["\e\r", "\e\n", "\e[13;2u", "\e[27;2;13~", "\e[13;2~"].freeze
+      SHIFT_ENTER_KEYS = ["\e[13;2u", "\e[27;2;13~", "\e[13;2~"].freeze
       TAB_KEYS = ["\t"].freeze
-      LEFT_KEYS = ["\e[D"].freeze
-      RIGHT_KEYS = ["\e[C"].freeze
-      UP_KEYS = ["\e[A"].freeze
-      DOWN_KEYS = ["\e[B"].freeze
-      HOME_KEYS = ["\e[H", "\e[1~", "\u0001"].freeze
-      END_KEYS = ["\e[F", "\e[4~", "\u0005"].freeze
+      LEFT_KEYS = ["\e[D", "\eOD"].freeze
+      RIGHT_KEYS = ["\e[C", "\eOC"].freeze
+      UP_KEYS = ["\e[A", "\eOA"].freeze
+      DOWN_KEYS = ["\e[B", "\eOB"].freeze
+      HOME_KEYS = ["\e[H", "\e[1~", "\eOH", "\u0001"].freeze
+      END_KEYS = ["\e[F", "\e[4~", "\eOF", "\u0005"].freeze
       WORD_LEFT_KEYS = ["\eb", "\eB", "\e[1;3D", "\e[1;5D", "\e[1;9D"].freeze
       WORD_RIGHT_KEYS = ["\ef", "\eF", "\e[1;3C", "\e[1;5C", "\e[1;9C"].freeze
       WORD_BACKSPACE_KEYS = ["\e\u007f", "\e\b", CTRL_W].freeze
@@ -175,16 +175,16 @@ module Meringue
           return handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         end
 
+        if slash_suggestion_navigation_key?(key) && slash_suggestions_active?(input_buffer)
+          buffer, index = handle_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
+          return [buffer, buffer.chars.length, index]
+        end
+
         focus_result = handle_focus_key(key, input_buffer, input_cursor, slash_suggestion_index)
         return focus_result if focus_result
 
         scroll_result = handle_focused_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index)
         return scroll_result if scroll_result
-
-        if slash_suggestion_key?(key) && slash_suggestions_active?(input_buffer)
-          completion = safe_slash_completion(input_buffer, slash_suggestion_index, state)
-          return [completion, completion.chars.length, 0] if completion
-        end
 
         if ENTER_KEYS.include?(key)
           return [+"", 0, 0] if local_navigation_command_without_id?(input_buffer) && handle_local_navigation_command(input_buffer, state)
@@ -198,7 +198,7 @@ module Meringue
           return [+"", 0, 0]
         end
 
-        if MULTILINE_ENTER_KEYS.include?(key)
+        if SHIFT_ENTER_KEYS.include?(key)
           return insert_text(input_buffer, input_cursor, "\n") + [0]
         end
 
@@ -240,6 +240,10 @@ module Meringue
       end
 
       def handle_legacy_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
+        handle_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
+      end
+
+      def handle_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
         records = slash_suggestion_records(input_buffer, state)
         return [input_buffer, 0] if records.empty?
 
