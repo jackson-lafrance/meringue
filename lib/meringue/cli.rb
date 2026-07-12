@@ -191,6 +191,7 @@ module Meringue
           /                         # show slash command suggestions in an otherwise empty prompt
           /help                     # list command syntax
           /jump [agent_id]          # open an agent session in Alacritty; omit id to navigate the AgentTree
+          /jumpr [agent_id]         # open an agent PR; omit id to navigate only agents with attached PRs
           Esc on an empty prompt or Ctrl-C # quit the TUI
       HELP
     end
