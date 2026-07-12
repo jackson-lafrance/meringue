@@ -69,11 +69,11 @@ class SlashCommandSystemTest < Minitest::Test
     assert_equal "killed", state.fetch("agents").first.fetch("status")
   end
 
-  def test_slash_suggestions_show_top_five_and_filter_after_slash
-    all_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/", limit: 5)
-    filtered_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/p", limit: 5)
+  def test_slash_suggestions_show_top_three_and_filter_after_slash
+    all_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/", limit: 3)
+    filtered_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/p", limit: 3)
 
-    assert_equal 5, all_suggestions.length
+    assert_equal 3, all_suggestions.length
     assert_equal "/help", all_suggestions.first.fetch("usage")
     assert_equal ["/project add <path> [name]", "/prompt <agent_id> \"<message>\""], filtered_suggestions.map { |record| record.fetch("usage") }
   end

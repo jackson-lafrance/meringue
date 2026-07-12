@@ -25,7 +25,7 @@ module Meringue
         end
       end
 
-      def self.command_suggestion_records(input = nil, limit: 5)
+      def self.command_suggestion_records(input = nil, limit: 3)
         query = normalized_query(input)
         records = COMMAND_SPECS.each_with_index.map do |(usage, description), index|
           completion = completion_prefix_for(usage)
