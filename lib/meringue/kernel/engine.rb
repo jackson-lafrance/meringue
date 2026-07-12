@@ -65,7 +65,7 @@ module Meringue
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker harness session."],
-        ["/harness <pi|claude|gemini>", "Select the active harness backend for future heads and workers."],
+        ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "TUI local: open an agent harness session in Alacritty, or navigate the AgentTree when no id is provided."],
         ["/jumpr [agent_id]", "TUI local: open an agent pull request, or navigate agents with attached PRs when no id is provided."],
@@ -392,7 +392,7 @@ module Meringue
 
         provider = normalize_selectable_harness_provider(requested_provider)
         unless provider
-          supported = Meringue::Harness::Registry::PROVIDERS.join(", ")
+          supported = Meringue::Harness::Registry.supported_provider_names.join(", ")
           return rejected_result(
             command_id,
             command_type,
@@ -413,10 +413,12 @@ module Meringue
         end
 
         previous_provider = active_harness_provider(state)
+        previous_public_provider = Meringue::Harness::Registry.public_provider_name(previous_provider)
+        public_provider = Meringue::Harness::Registry.public_provider_name(provider)
         now = timestamp
         metadata = state.fetch("metadata")
         changed = previous_provider != provider
-        metadata["active_harness"] = provider
+        metadata["active_harness"] = public_provider
         metadata["active_harness_label"] = Meringue::Harness::Registry.provider_label(provider)
         metadata["harness_selected_at"] = now
         metadata["harness_generation"] = metadata.fetch("harness_generation", 0).to_i + (changed ? 1 : 0)
@@ -428,8 +430,9 @@ module Meringue
           level: "info",
           message: changed ? "Selected #{metadata.fetch("active_harness_label")} harness for future agents." : "#{metadata.fetch("active_harness_label")} harness is already selected.",
           details: {
-            "previous_harness" => previous_provider,
-            "active_harness" => provider,
+            "previous_harness" => previous_public_provider,
+            "active_harness" => public_provider,
+            "internal_active_harness" => provider,
             "harness_generation" => metadata.fetch("harness_generation")
           }
         )
@@ -439,12 +442,13 @@ module Meringue
         accepted_result(
           command_id,
           command_type,
-          provider,
+          public_provider,
           changed ? "Selected #{metadata.fetch("active_harness_label")} for future heads and workers." : "#{metadata.fetch("active_harness_label")} is already the active harness.",
           {
-            "active_harness" => provider,
+            "active_harness" => public_provider,
             "active_harness_label" => metadata.fetch("active_harness_label"),
-            "previous_harness" => previous_provider,
+            "previous_harness" => previous_public_provider,
+            "internal_active_harness" => provider,
             "harness_generation" => metadata.fetch("harness_generation")
           },
           log_ids
@@ -2040,8 +2044,9 @@ module Meringue
         state["metadata"] ||= {}
         state["metadata"]["created_at"] ||= timestamp
         state["metadata"]["updated_at"] ||= state["metadata"].fetch("created_at")
-        state["metadata"]["active_harness"] = normalize_harness_provider(state["metadata"]["active_harness"] || @default_harness_provider)
-        state["metadata"]["active_harness_label"] = Meringue::Harness::Registry.provider_label(state["metadata"].fetch("active_harness")) if selectable_harness_provider?(state["metadata"].fetch("active_harness"))
+        internal_harness = normalize_harness_provider(state["metadata"]["active_harness"] || @default_harness_provider)
+        state["metadata"]["active_harness"] = selectable_harness_provider?(internal_harness) ? Meringue::Harness::Registry.public_provider_name(internal_harness) : internal_harness
+        state["metadata"]["active_harness_label"] = Meringue::Harness::Registry.provider_label(internal_harness) if selectable_harness_provider?(internal_harness)
         state["metadata"]["harness_generation"] ||= 0
       end
 
