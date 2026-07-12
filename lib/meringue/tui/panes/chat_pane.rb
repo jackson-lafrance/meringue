@@ -14,9 +14,15 @@ module Meringue
 
         def conversation_lines(state)
           messages = chat_state(state).fetch("messages", []) || []
-          return [[["No conversation yet. Type a prompt below and press Enter.", Style::MUTED]]] if messages.empty?
+          durable_pr_lines = durable_pr_conversation_lines(state)
 
-          messages.flat_map.with_index do |message, index|
+          if messages.empty?
+            return durable_pr_lines unless durable_pr_lines.empty?
+
+            return [[["No conversation yet. Type a prompt below and press Enter.", Style::MUTED]]]
+          end
+
+          message_lines = messages.flat_map.with_index do |message, index|
             role = message.fetch("role", "meringue")
             style = role == "you" ? Style::USER : Style::ASSISTANT
             lines = [role_line(role, style)]
@@ -25,6 +31,8 @@ module Meringue
             lines << spacer_line unless index == messages.length - 1
             lines
           end
+
+          durable_pr_lines.empty? ? message_lines : durable_pr_lines + [spacer_line] + message_lines
         end
 
         def composer_lines(state, width: nil)
@@ -53,6 +61,37 @@ module Meringue
             ["✦", style],
             [" #{role}", style]
           ]
+        end
+
+        def durable_pr_conversation_lines(state)
+          entries = persisted_pr_entries(state)
+          return [] if entries.empty?
+
+          lines = [role_line("worker PRs", Style::ASSISTANT)]
+          entries.each do |entry|
+            branch = entry.fetch("workspace_branch", nil)
+            branch_text = branch.to_s.empty? ? "" : " (#{branch})"
+            lines << text_line("#{entry.fetch("source_id", "worker")}#{branch_text}: #{entry.fetch("url")}")
+          end
+          lines
+        end
+
+        def persisted_pr_entries(state)
+          seen = {}
+          state.fetch("logs", []).filter_map do |log|
+            details = log.fetch("details", {}) || {}
+            Array(details["pr_urls"]).filter_map do |url|
+              key = [log.fetch("source_id", nil), url]
+              next if seen[key]
+
+              seen[key] = true
+              {
+                "source_id" => log.fetch("source_id", nil),
+                "workspace_branch" => details["workspace_branch"],
+                "url" => url
+              }
+            end
+          end.flatten.last(5)
         end
 
         def text_line(text)

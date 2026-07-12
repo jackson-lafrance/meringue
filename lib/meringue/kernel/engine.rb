@@ -11,6 +11,7 @@ module Meringue
         You are a Meringue worker agent. Work only on the assigned issue and workspace.
         Follow the user's prompt and the repository instructions in your working directory.
       PROMPT
+      PULL_REQUEST_URL_PATTERN = /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+(?:[\/?#][^\s<>"'\])}]*)?/.freeze
 
       COMMAND_ALIASES = {
         "add_project" => "AddProject",
@@ -138,19 +139,27 @@ module Meringue
           update_issue_status_from_workers!(state, issue, now) if issue
           update_project_status_from_issues!(state, project, now) if project
 
+          pr_urls = worker_pr_urls(last_assistant_text: last_assistant_text, harness_events: harness_events)
+          agent["harness_metadata"]["reported_pr_urls"] = pr_urls unless pr_urls.empty?
+
+          completion_details = {
+            "issue_id" => agent.fetch("issue_id", nil),
+            "project_id" => agent.fetch("project_id", nil),
+            "workspace_branch" => agent.fetch("workspace_branch", nil),
+            "settled_event_count" => Array(harness_events).length,
+            "last_assistant_text" => present_string(last_assistant_text)
+          }.compact
+          completion_details["pr_urls"] = pr_urls unless pr_urls.empty?
+
           log_ids = append_log(
             state,
             source_type: "worker",
             source_id: agent.fetch("id"),
             level: "info",
             message: "Worker #{agent.fetch("id")} completed.",
-            details: {
-              "issue_id" => agent.fetch("issue_id", nil),
-              "project_id" => agent.fetch("project_id", nil),
-              "settled_event_count" => Array(harness_events).length,
-              "last_assistant_text" => present_string(last_assistant_text)
-            }.compact
+            details: completion_details
           )
+          log_ids.concat(append_worker_pr_log(state, agent, pr_urls)) unless pr_urls.empty?
           touch_state!(state, now)
           store.save(state)
 
@@ -1160,6 +1169,46 @@ module Meringue
 
       def max_worker_number(state, issue_id)
         max_numeric_suffix(state.fetch("agents").select { |agent| agent.fetch("issue_id", nil) == issue_id }, /^#{Regexp.escape(issue_id)}-W(\d+)$/)
+      end
+
+      def append_worker_pr_log(state, agent, pr_urls)
+        branch = agent.fetch("workspace_branch", nil)
+        branch_text = present_string(branch) ? " on #{branch}" : ""
+        append_log(
+          state,
+          source_type: "worker",
+          source_id: agent.fetch("id"),
+          level: "info",
+          message: "Worker #{agent.fetch("id")} reported PR#{pr_urls.length == 1 ? "" : "s"}#{branch_text}: #{pr_urls.join(", ")}",
+          details: {
+            "issue_id" => agent.fetch("issue_id", nil),
+            "project_id" => agent.fetch("project_id", nil),
+            "workspace_branch" => branch,
+            "workspace_path" => agent.fetch("workspace_path", nil),
+            "pr_urls" => pr_urls
+          }.compact
+        )
+      end
+
+      def worker_pr_urls(last_assistant_text:, harness_events:)
+        sources = [present_string(last_assistant_text)]
+        Array(harness_events).each do |event|
+          sources << serializable_text(event)
+        end
+
+        sources.compact.flat_map { |source| extract_pull_request_urls(source) }.uniq
+      end
+
+      def extract_pull_request_urls(text)
+        text.to_s.scan(PULL_REQUEST_URL_PATTERN).map do |url|
+          url.sub(/[.,;:]+\z/, "")
+        end
+      end
+
+      def serializable_text(value)
+        JSON.generate(value)
+      rescue StandardError
+        value.inspect
       end
 
       def append_log(state, source_type:, source_id:, level:, message:, details: {})
