@@ -75,7 +75,7 @@ module Meringue
             metrics.fetch(:suggestion_height),
             "slash commands",
             chat_pane.slash_suggestion_lines(state),
-            active: true
+            active: false
           )
         end
 
@@ -87,7 +87,7 @@ module Meringue
           metrics.fetch(:composer_height),
           "chat",
           chat_pane.composer_lines(state, width: metrics.fetch(:composer_content_width)),
-          active: true,
+          active: scroll_pane_active?(state, "chat"),
           overflow: :tail
         )
 
