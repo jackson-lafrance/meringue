@@ -84,9 +84,10 @@ class SlashCommandSystemTest < Minitest::Test
 
     line = pane.lines(state).first
 
-    assert_includes plain_line(line), "user  user  User ran kernel command: /help"
+    assert_includes plain_line(line), "user  User ran kernel command: /help"
+    refute_includes plain_line(line), "user  user"
     assert_equal Meringue::TUI::Style::USER, line[1].last
-    assert_equal Meringue::TUI::Style::USER, line[2].last
+    assert_equal Meringue::TUI::Style::TEXT, line[2].last
   end
 
   def test_prompt_and_kill_slash_commands_share_kernel_state_path
