@@ -10,7 +10,7 @@ module Meringue
     # before proposing AddProject/CreateIssue commands. Keep write/edit tools disabled;
     # bash is included only for read-only commands such as git rev-parse and git remote -v.
     PI_HEAD_EXTRA_ARGS = [
-      "--thinking", "minimal",
+      "--thinking", "high",
       "--tools", "read,bash,grep,find,ls",
       "--no-extensions",
       "--no-skills",
@@ -21,7 +21,7 @@ module Meringue
     # Workers are the only agents that should edit project files. Keep Pi-specific
     # tool configuration here so the kernel and TUI stay harness-agnostic.
     PI_WORKER_EXTRA_ARGS = [
-      "--thinking", "minimal",
+      "--thinking", "high",
       "--tools", "read,bash,grep,find,ls,edit,write",
       "--no-extensions",
       "--no-skills",
