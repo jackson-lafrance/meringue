@@ -7,16 +7,16 @@ module Meringue
   module Harness
     class Registry
       DEFAULT_PROVIDER = "pi"
-      PROVIDERS = %w[pi claude gemini].freeze
+      PROVIDERS = %w[pi claude antigravity].freeze
       PROVIDER_LABELS = {
         "pi" => "Pi",
         "claude" => "Claude Code",
-        "gemini" => "Antigravity CLI"
+        "antigravity" => "Antigravity CLI"
       }.freeze
       PUBLIC_PROVIDER_NAMES = {
         "pi" => "pi",
         "claude" => "claude",
-        "gemini" => "antigravity"
+        "antigravity" => "antigravity"
       }.freeze
       PROVIDER_ALIASES = {
         "pi" => "pi",
@@ -25,14 +25,10 @@ module Meringue
         "claude_code" => "claude",
         "claude code" => "claude",
         "cc" => "claude",
-        "antigravity" => "gemini",
-        "antigravity-cli" => "gemini",
-        "antigravity_cli" => "gemini",
-        "antigravity cli" => "gemini",
-        "gemini" => "gemini",
-        "gemini-cli" => "gemini",
-        "gemini_cli" => "gemini",
-        "gemini cli" => "gemini"
+        "antigravity" => "antigravity",
+        "antigravity-cli" => "antigravity",
+        "antigravity_cli" => "antigravity",
+        "antigravity cli" => "antigravity"
       }.freeze
       DEFAULT_PI_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
       DEFAULT_PI_HEAD_EXTRA_ARGS = [
@@ -74,7 +70,7 @@ module Meringue
           ],
           "use_json_schema" => true
         },
-        "gemini" => {
+        "antigravity" => {
           "command" => "antigravity",
           "head_extra_args" => [],
           "worker_extra_args" => []
@@ -98,7 +94,7 @@ module Meringue
         normalized = normalize_provider(provider)
         return normalized if PROVIDERS.include?(normalized)
 
-        raise ArgumentError, "Unsupported harness provider #{provider.inspect}. Supported providers: #{PROVIDERS.join(", ")}"
+        raise ArgumentError, "Unsupported harness provider #{provider.inspect}. Supported providers: #{supported_provider_names.join(", ")}"
       end
 
       def self.provider_label(provider)
@@ -153,7 +149,7 @@ module Meringue
         case provider
         when "pi"
           Heads::PiRunner.new(harness_client: client, cwd: cwd, session_name_prefix: session_name_prefix)
-        when "claude", "gemini"
+        when "claude", "antigravity"
           Heads::HarnessRunner.new(
             harness_client: client,
             cwd: cwd,
@@ -217,8 +213,8 @@ module Meringue
             extra_args: extra_args,
             use_json_schema: boolean_option(provider_config, "use_json_schema", true)
           )
-        when "gemini"
-          GeminiClient.new(command: command, env: env, extra_args: extra_args)
+        when "antigravity"
+          AntigravityClient.new(command: command, env: env, extra_args: extra_args)
         else
           raise ArgumentError, "Unsupported harness provider: #{provider.inspect}"
         end
