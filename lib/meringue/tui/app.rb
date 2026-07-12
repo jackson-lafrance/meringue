@@ -39,7 +39,8 @@ module Meringue
 
             loop do
               width, height = terminal.dimensions
-              frame = render(compose_state(state_provider, input_buffer, slash_suggestion_index), width: width, height: height, color: true)
+              current_state = compose_state(state_provider, input_buffer, slash_suggestion_index)
+              frame = render(current_state, width: width, height: height, color: true)
               if frame != last_frame
                 terminal.write_frame(frame)
                 last_frame = frame
@@ -48,7 +49,7 @@ module Meringue
               key = terminal.read_key(timeout: REFRESH_INTERVAL)
               break if quit_key?(key, input_buffer)
 
-              input_buffer, slash_suggestion_index = handle_key(key, input_buffer, slash_suggestion_index, on_submit)
+              input_buffer, slash_suggestion_index = handle_key(key, input_buffer, slash_suggestion_index, on_submit, current_state)
             end
           end
         end
@@ -74,15 +75,15 @@ module Meringue
         key == "\e" && input_buffer.empty?
       end
 
-      def handle_key(key, input_buffer, slash_suggestion_index, on_submit)
+      def handle_key(key, input_buffer, slash_suggestion_index, on_submit, state = State::Models.empty_state)
         return [input_buffer, slash_suggestion_index] unless key
 
         if slash_suggestion_key?(key) && slash_suggestions_active?(input_buffer)
-          return handle_slash_suggestion_key(key, input_buffer, slash_suggestion_index)
+          return handle_slash_suggestion_key(key, input_buffer, slash_suggestion_index, state)
         end
 
         if ENTER_KEYS.include?(key)
-          completion = safe_slash_completion(input_buffer, slash_suggestion_index)
+          completion = safe_slash_completion(input_buffer, slash_suggestion_index, state)
           return [completion, 0] if completion
 
           submit_prompt(input_buffer, on_submit)
@@ -101,8 +102,8 @@ module Meringue
         TAB_KEYS.include?(key) || UP_KEYS.include?(key) || DOWN_KEYS.include?(key)
       end
 
-      def handle_slash_suggestion_key(key, input_buffer, slash_suggestion_index)
-        records = slash_suggestion_records(input_buffer)
+      def handle_slash_suggestion_key(key, input_buffer, slash_suggestion_index, state)
+        records = slash_suggestion_records(input_buffer, state)
         return [input_buffer, 0] if records.empty?
 
         if UP_KEYS.include?(key)
@@ -115,19 +116,18 @@ module Meringue
         [slash_completion_for(records.fetch(slash_suggestion_index.clamp(0, records.length - 1))), 0]
       end
 
-      def safe_slash_completion(input_buffer, slash_suggestion_index)
+      def safe_slash_completion(input_buffer, slash_suggestion_index, state)
         return nil unless slash_suggestions_active?(input_buffer)
 
-        records = slash_suggestion_records(input_buffer)
+        records = slash_suggestion_records(input_buffer, state)
         return nil if records.empty?
 
         record = records.fetch(slash_suggestion_index.clamp(0, records.length - 1))
         stripped = input_buffer.to_s.strip.gsub(/\s+/, " ")
         completion = slash_completion_for(record).strip
-        usage = record.fetch("usage")
-        no_argument_command = completion == usage
+        appends_space = record.fetch("append_space", record.fetch("requires_arguments", false))
 
-        return nil if no_argument_command && stripped == completion
+        return nil if stripped.casecmp?(completion) && !appends_space
         return nil unless completion.downcase.start_with?(stripped.downcase) || stripped == "/"
 
         slash_completion_for(record)
@@ -137,15 +137,15 @@ module Meringue
         input_buffer.to_s.strip.start_with?("/")
       end
 
-      def slash_suggestion_records(input_buffer)
+      def slash_suggestion_records(input_buffer, state)
         return [] unless slash_suggestions_active?(input_buffer)
 
-        Input::SlashCommandParser.command_suggestion_records(input_buffer, limit: 3)
+        Input::SlashCommandParser.command_suggestion_records(input_buffer, limit: 3, state: state)
       end
 
       def slash_completion_for(record)
         completion = record.fetch("completion")
-        record.fetch("requires_arguments") ? "#{completion} " : completion
+        record.fetch("append_space", record.fetch("requires_arguments", false)) ? "#{completion} " : completion
       end
 
       def printable_key?(key)

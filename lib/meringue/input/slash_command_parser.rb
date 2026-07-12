@@ -19,22 +19,36 @@ module Meringue
         ["/clear", "Reset persisted Meringue state. Dev/debug helper."]
       ].freeze
 
-      def self.command_suggestions(input = nil, limit: nil)
-        command_suggestion_records(input, limit: limit).map do |record|
+      ARGUMENT_SUGGESTION_CONTEXTS = [
+        { "prefix" => "/issue create", "source" => "projects", "append_space" => true },
+        { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
+        { "prefix" => "/prompt", "source" => "agents", "append_space" => true },
+        { "prefix" => "/kill", "source" => "targets", "append_space" => false },
+        { "prefix" => "/answer", "source" => "open_questions", "append_space" => true }
+      ].freeze
+
+      def self.command_suggestions(input = nil, limit: nil, state: nil)
+        command_suggestion_records(input, limit: limit, state: state).map do |record|
           [record.fetch("usage"), record.fetch("description")]
         end
       end
 
-      def self.command_suggestion_records(input = nil, limit: 3)
+      def self.command_suggestion_records(input = nil, limit: 3, state: nil)
+        argument_records = argument_suggestion_records(input, state)
+        return argument_records.first(limit || argument_records.length) if argument_records
+
         query = normalized_query(input)
         records = COMMAND_SPECS.each_with_index.map do |(usage, description), index|
           completion = completion_prefix_for(usage)
+          requires_arguments = completion != usage
           {
             "usage" => usage,
             "description" => description,
             "completion" => completion,
-            "requires_arguments" => completion != usage,
-            "index" => index
+            "requires_arguments" => requires_arguments,
+            "append_space" => requires_arguments,
+            "index" => index,
+            "kind" => "command"
           }
         end
         records = records.select { |record| suggestion_matches?(record, query) } if query
@@ -60,6 +74,90 @@ module Meringue
 
       def self.completion_prefix_for(usage)
         usage.to_s.split.take_while { |token| token !~ /\A[<\[]/ }.join(" ")
+      end
+
+      def self.argument_suggestion_records(input, state)
+        return nil unless state && normalized_query(input)
+
+        context = argument_suggestion_context(input)
+        return nil unless context
+
+        records_for_context(context, state)
+      end
+
+      def self.argument_suggestion_context(input)
+        raw = input.to_s.lstrip
+        raw_downcase = raw.downcase
+
+        ARGUMENT_SUGGESTION_CONTEXTS.each do |context|
+          prefix = context.fetch("prefix")
+          next unless raw_downcase.start_with?("#{prefix} ")
+
+          argument_text = raw[prefix.length + 1..] || ""
+          return nil if argument_text.match?(/\s/)
+
+          return context.merge("query" => argument_text)
+        end
+
+        nil
+      end
+
+      def self.records_for_context(context, state)
+        items = case context.fetch("source")
+                when "projects"
+                  Array(state["projects"])
+                when "issues"
+                  Array(state["issues"])
+                when "agents"
+                  Array(state["agents"])
+                when "targets"
+                  Array(state["agents"]) + Array(state["issues"]) + Array(state["projects"])
+                when "open_questions"
+                  Array(state["questions"]).select { |question| question["status"] == "open" }
+                else
+                  []
+                end
+
+        id_suggestion_records(items, context)
+      end
+
+      def self.id_suggestion_records(items, context)
+        query = context.fetch("query", "").to_s.downcase
+        prefix = context.fetch("prefix")
+        source = context.fetch("source")
+        Array(items).filter_map.with_index do |item, index|
+          id = item["id"].to_s
+          next if id.empty?
+          next unless query.empty? || id.downcase.start_with?(query) || id.downcase.include?(query)
+
+          {
+            "usage" => id,
+            "description" => description_for_suggestion(item, source),
+            "completion" => "#{prefix} #{id}",
+            "requires_arguments" => context.fetch("append_space"),
+            "append_space" => context.fetch("append_space"),
+            "index" => index,
+            "kind" => source
+          }
+        end
+      end
+
+      def self.description_for_suggestion(item, source)
+        case source
+        when "projects"
+          ["project", item["name"], item["status"]].compact.join(" · ")
+        when "issues"
+          ["issue", item["title"], item["status"]].compact.join(" · ")
+        when "agents"
+          [item["type"] || "agent", item["status"], item["issue_id"]].compact.join(" · ")
+        when "targets"
+          type = item["type"] || (item.key?("root_path") ? "project" : "issue")
+          [type, item["title"] || item["name"], item["status"]].compact.join(" · ")
+        when "open_questions"
+          ["question", item["question"].to_s[0, 60]].reject(&:empty?).join(" · ")
+        else
+          ""
+        end
       end
 
       def parse(input)
