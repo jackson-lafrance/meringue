@@ -45,7 +45,7 @@ module Meringue
           metrics.fetch(:main_width),
           metrics.fetch(:conversation_height),
           "conversation",
-          chat_pane.conversation_lines(state),
+          chat_pane.conversation_lines(state, width: metrics.fetch(:main_width) - 4),
           active: true,
           overflow: :tail
         )

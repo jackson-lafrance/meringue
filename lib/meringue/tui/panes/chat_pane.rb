@@ -5,18 +5,19 @@ module Meringue
     module Panes
       class ChatPane
         VISIBLE_SUGGESTION_LIMIT = 3
+        MAX_CONVERSATION_ENTRY_LINES = 10
 
         def render(state)
           conversation_lines(state).map { |line| plain_text(line) }.join("\n")
         end
 
-        def lines(state)
-          conversation_lines(state)
+        def lines(state, width: nil)
+          conversation_lines(state, width: width)
         end
 
-        def conversation_lines(state)
+        def conversation_lines(state, width: nil)
           messages = chat_state(state).fetch("messages", []) || []
-          durable_pr_lines = durable_pr_conversation_lines(state)
+          durable_pr_lines = durable_pr_conversation_lines(state, width: width)
 
           if messages.empty?
             return durable_pr_lines unless durable_pr_lines.empty?
@@ -28,7 +29,7 @@ module Meringue
             role = message.fetch("role", "meringue")
             style = role == "you" ? Style::USER : Style::ASSISTANT
             lines = [role_line(role, style)]
-            lines.concat(wrapped_text_lines(message.fetch("text", "")))
+            lines.concat(wrapped_text_lines(message.fetch("text", ""), width: width, max_lines: MAX_CONVERSATION_ENTRY_LINES))
             lines << status_line(message.fetch("status")) if message.fetch("status", nil)
             lines << spacer_line unless index == messages.length - 1
             lines
@@ -100,7 +101,7 @@ module Meringue
           ]
         end
 
-        def durable_pr_conversation_lines(state)
+        def durable_pr_conversation_lines(state, width: nil)
           entries = persisted_pr_entries(state)
           return [] if entries.empty?
 
@@ -108,7 +109,13 @@ module Meringue
           entries.each do |entry|
             branch = entry.fetch("workspace_branch", nil)
             branch_text = branch.to_s.empty? ? "" : " (#{branch})"
-            lines << text_line("#{entry.fetch("source_id", "worker")}#{branch_text}: #{entry.fetch("url")}")
+            lines.concat(
+              wrapped_text_lines(
+                "#{entry.fetch("source_id", "worker")}#{branch_text}: #{entry.fetch("url")}",
+                width: width,
+                max_lines: MAX_CONVERSATION_ENTRY_LINES
+              )
+            )
           end
           lines
         end
@@ -183,10 +190,44 @@ module Meringue
           segments
         end
 
-        def wrapped_text_lines(text)
-          text.to_s.split("\n", -1).map do |line|
-            text_line(line)
+        def wrapped_text_lines(text, width: nil, max_lines: nil)
+          content_width = width ? [width.to_i - 2, 1].max : nil
+          wrapped = text.to_s.split("\n", -1).flat_map do |line|
+            wrap_text_line(line, content_width)
           end
+
+          limited_lines(wrapped, max_lines).map { |line| text_line(line) }
+        end
+
+        def wrap_text_line(line, width)
+          return [line] unless width && line.length > width
+
+          chunks = []
+          remaining = line.dup
+          until remaining.empty?
+            if remaining.length <= width
+              chunks << remaining
+              break
+            end
+
+            break_at = remaining.rindex(/\s/, width)
+            if break_at&.positive?
+              chunks << remaining[0...break_at]
+              remaining = remaining[(break_at + 1)..].to_s.lstrip
+            else
+              chunks << remaining[0...width]
+              remaining = remaining[width..].to_s.lstrip
+            end
+          end
+          chunks
+        end
+
+        def limited_lines(lines, max_lines)
+          return lines unless max_lines && lines.length > max_lines
+
+          visible_count = [max_lines - 1, 0].max
+          hidden_count = lines.length - visible_count
+          lines.first(visible_count) + ["… #{hidden_count} more line#{hidden_count == 1 ? "" : "s"}"]
         end
 
         def pending_status(pending_count)
