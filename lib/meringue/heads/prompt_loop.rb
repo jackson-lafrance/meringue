@@ -68,6 +68,7 @@ module Meringue
       attr_reader :router
 
       def handle_slash_command(route, on_event: nil)
+        record_user_kernel_command(route)
         command_results = route.fetch("commands", []).map { |command| apply_kernel(command) }
         worker_wait_results = wait_for_spawned_command_workers(command_results, on_event: on_event)
         payload = {
@@ -82,6 +83,17 @@ module Meringue
         }
         emit(on_event, "slash_command_applied", "command_results" => command_results, "worker_wait_results" => worker_wait_results)
         payload
+      end
+
+      def record_user_kernel_command(route)
+        return unless engine.respond_to?(:record_user_kernel_command)
+
+        @engine_mutex.synchronize do
+          engine.record_user_kernel_command(
+            input: route.fetch("input", ""),
+            commands: route.fetch("commands", [])
+          )
+        end
       end
 
       def slash_summary(command_results)

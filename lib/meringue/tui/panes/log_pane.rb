@@ -30,7 +30,7 @@ module Meringue
             [
               [timestamp(entry), Style::DIM],
               ["  #{level(entry)}", level_style(entry)],
-              ["  #{source(entry)}", Style::MUTED],
+              ["  #{source(entry)}", source_style(entry)],
               ["  #{entry.fetch("message", "")}", Style::TEXT]
             ]
           end
@@ -45,11 +45,19 @@ module Meringue
         end
 
         def level(entry)
+          return "user" if entry["source_type"] == "user"
+
           LEVEL_LABELS.fetch(entry["level"], "????")
         end
 
         def level_style(entry)
+          return Style::USER if entry["source_type"] == "user"
+
           LEVEL_STYLES.fetch(entry["level"], Style::MUTED)
+        end
+
+        def source_style(entry)
+          entry["source_type"] == "user" ? Style::USER : Style::MUTED
         end
 
         def source(entry)

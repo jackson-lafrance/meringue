@@ -185,6 +185,28 @@ module Meringue
         end
       end
 
+      def record_user_kernel_command(input:, commands: [])
+        synchronized_state do
+          state = normalized_state
+          command_types = Array(commands).filter_map do |command|
+            next unless command.respond_to?(:[])
+
+            command["type"] || command[:type] || command["command_type"] || command[:command_type]
+          end
+          log_ids = append_log(
+            state,
+            source_type: "user",
+            source_id: nil,
+            level: "info",
+            message: "User ran kernel command: #{input.to_s}",
+            details: { "input" => input.to_s, "command_types" => command_types }
+          )
+          touch_state!(state)
+          store.save(state)
+          log_ids
+        end
+      end
+
       private
 
       def get_state(command_id, command_type)

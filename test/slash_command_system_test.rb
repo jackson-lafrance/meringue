@@ -54,6 +54,41 @@ class SlashCommandSystemTest < Minitest::Test
     assert_equal "P1", @store.load.fetch("projects").first.fetch("id")
   end
 
+  def test_slash_commands_append_user_kernel_log_entries
+    loop = Meringue::Heads::PromptLoop.new(engine: @engine)
+
+    loop.call("/project add #{@tmpdir} Demo")
+
+    user_log = @store.load.fetch("logs").find { |log| log.fetch("source_type") == "user" }
+    refute_nil user_log
+    assert_equal "info", user_log.fetch("level")
+    assert_equal "User ran kernel command: /project add #{@tmpdir} Demo", user_log.fetch("message")
+    assert_equal ["AddProject"], user_log.fetch("details").fetch("command_types")
+  end
+
+  def test_log_pane_renders_user_logs_with_user_label_and_style
+    pane = Meringue::TUI::Panes::LogPane.new
+    state = Meringue::State::Models.empty_state.merge(
+      "logs" => [
+        {
+          "id" => "L1",
+          "timestamp" => Time.now.utc.iso8601,
+          "source_type" => "user",
+          "source_id" => nil,
+          "level" => "info",
+          "message" => "User ran kernel command: /help",
+          "details" => {}
+        }
+      ]
+    )
+
+    line = pane.lines(state).first
+
+    assert_includes plain_line(line), "user  user  User ran kernel command: /help"
+    assert_equal Meringue::TUI::Style::USER, line[1].last
+    assert_equal Meringue::TUI::Style::USER, line[2].last
+  end
+
   def test_prompt_and_kill_slash_commands_share_kernel_state_path
     project = @engine.apply("type" => "AddProject", "payload" => { "path" => @tmpdir, "name" => "Demo" }).fetch("result")
     issue = @engine.apply("type" => "CreateIssue", "payload" => { "project_id" => project.fetch("id"), "title" => "Test" }).fetch("result")

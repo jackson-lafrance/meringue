@@ -15,6 +15,7 @@ module Meringue
           command = slash_command_parser.parse(stripped)
           return {
             "kind" => "slash_command",
+            "input" => stripped,
             "commands" => [command.to_h]
           }
         end
