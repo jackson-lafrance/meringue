@@ -47,14 +47,10 @@ module Meringue
         end
 
         def level(entry)
-          return "user" if entry["source_type"] == "user"
-
           LEVEL_LABELS.fetch(entry["level"], "????")
         end
 
         def level_style(entry)
-          return Style::USER if entry["source_type"] == "user"
-
           LEVEL_STYLES.fetch(entry["level"], Style::MUTED)
         end
 
@@ -65,8 +61,6 @@ module Meringue
         def source(entry)
           source_type = entry.fetch("source_type", "system")
           source_id = entry["source_id"]
-          return nil if source_type == "user" && !source_id
-
           source_id ? "#{source_type}:#{source_id}" : source_type
         end
 
