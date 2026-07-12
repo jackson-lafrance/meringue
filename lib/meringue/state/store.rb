@@ -3,6 +3,8 @@
 require "fileutils"
 require "json"
 
+require_relative "compactor"
+
 module Meringue
   module State
     class Store
@@ -21,12 +23,24 @@ module Meringue
       def load
         return Models.empty_state unless File.exist?(path)
 
-        JSON.parse(File.read(path))
+        state = JSON.parse(File.read(path))
+        Compactor.compact!(state)
+        state
+      end
+
+      def compact!
+        return false unless File.exist?(path)
+
+        state = JSON.parse(File.read(path))
+        changed = Compactor.compact!(state)
+        save(state) if changed
+        changed
       end
 
       def save(state)
         FileUtils.mkdir_p(File.dirname(path))
         temp_path = "#{path}.tmp.#{$$}"
+        Compactor.compact!(state)
 
         File.write(temp_path, JSON.pretty_generate(state) + "\n")
         File.rename(temp_path, path)
