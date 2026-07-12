@@ -41,7 +41,8 @@ module Meringue
 
         head_result = head_result_from(spawn_result)
         unless head_result
-          payload["summary"] = "Head completed but did not return a stored HeadResult; proposed commands were not applied."
+          payload["summary"] = "Head is running; session polling will apply its HeadResult when it completes."
+          payload["state_mutated"] = true
           payload["state_summary"] = state_summary
           return payload
         end
@@ -167,12 +168,20 @@ module Meringue
           harness_events: events,
           last_assistant_text: assistant_text
         )
-        emit(on_event, "worker_completed", "agent_id" => agent.fetch("id"), "last_assistant_text" => assistant_text)
+        pr_urls = worker_pr_urls_from_completion(completion_result)
+        emit(
+          on_event,
+          "worker_completed",
+          "agent_id" => agent.fetch("id"),
+          "last_assistant_text" => assistant_text,
+          "pr_urls" => pr_urls
+        )
         {
           "agent_id" => agent.fetch("id"),
           "status" => "settled",
           "event_count" => events.length,
           "last_assistant_text" => assistant_text,
+          "pr_urls" => pr_urls,
           "completion_result" => completion_result
         }
       rescue StandardError => e
@@ -218,6 +227,12 @@ module Meringue
         engine.harness_client.last_assistant_text(session_ref)
       rescue StandardError
         nil
+      end
+
+      def worker_pr_urls_from_completion(completion_result)
+        result = completion_result.fetch("result", {}) || {}
+        metadata = result.fetch("harness_metadata", {}) || {}
+        Array(metadata.fetch("reported_pr_urls", [])).compact.uniq
       end
 
       def wait_for_workers?

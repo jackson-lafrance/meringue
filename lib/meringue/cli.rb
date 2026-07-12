@@ -76,13 +76,15 @@ module Meringue
       return 1 unless options
 
       store = state_store(path: options.fetch(:state_path))
+      engine = enable_agents ? tui_engine(store) : nil
       App.new(
         input: input,
         out: out,
         err: err,
         state_path: options.fetch(:state_path),
         state_store: store,
-        prompt_handler: enable_agents ? tui_prompt_handler(store) : nil
+        prompt_handler: engine ? Heads::PromptLoop.new(engine: engine, wait_for_workers: false) : nil,
+        reconciler: engine ? -> { engine.reconcile_sessions } : nil
       ).run
     end
 
@@ -151,17 +153,17 @@ module Meringue
       @state_stores[File.expand_path(path)] ||= State::Store.new(path: path)
     end
 
-    def tui_prompt_handler(store)
+    def tui_engine(store)
       head_client = pi_harness_client(extra_args: PI_HEAD_EXTRA_ARGS)
       worker_client = pi_harness_client(extra_args: PI_WORKER_EXTRA_ARGS)
-      engine = Kernel::Engine.new(
+      Kernel::Engine.new(
         store: store,
         harness_client: worker_client,
         head_runner: Heads::PiRunner.new(harness_client: head_client, cwd: Dir.pwd),
         workspace_manager: Workspace::Manager.new,
-        cwd: Dir.pwd
+        cwd: Dir.pwd,
+        async_heads: true
       )
-      Heads::PromptLoop.new(engine: engine, wait_for_workers: true)
     end
 
     def demo_state
