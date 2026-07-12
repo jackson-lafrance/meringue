@@ -17,6 +17,11 @@ module Meringue
 
         Report true blockers instead of asking for routine approval: missing credentials, authentication or authorization failures, missing or invalid remotes, branch/worktree collisions, unrelated uncommitted work that would be overwritten, or unsafe/destructive operations.
       PROMPT
+      WORKER_RESUME_PROMPT = <<~PROMPT.freeze
+        Continue this Meringue worker session from the existing conversation and workspace state.
+        First inspect the current repository state, then continue the assigned issue from the last incomplete step.
+        If the issue is already complete, summarize the final status and include any pull request link.
+      PROMPT
       PULL_REQUEST_URL_PATTERN = /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+(?:[\/?#][^\s<>"'\])}]*)?/.freeze
 
       COMMAND_ALIASES = {
@@ -53,7 +58,10 @@ module Meringue
       ].freeze
       TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
+      WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
       RECONCILE_STATE_HEALTHY = "healthy"
+      RECONCILE_STATE_RESUMING = "resuming"
+      RECONCILE_STATE_RESUME_FAILED = "resume_failed"
       RECONCILE_STATE_TRANSIENT_ERROR = "transient_error"
       RECONCILE_STATE_TERMINAL_ERROR = "terminal_error"
 
@@ -166,7 +174,7 @@ module Meringue
           unless agent.fetch("type", nil) == "worker"
             return rejected_result(nil, "MarkWorkerCompleted", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"])
           end
-          if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+          if %w[completed killed].include?(agent.fetch("status", nil))
             return accepted_result(nil, "MarkWorkerCompleted", agent.fetch("id"), "Worker #{agent.fetch("id")} is already #{agent.fetch("status")}.", agent, [])
           end
 
@@ -1631,11 +1639,22 @@ module Meringue
       end
 
       def reconcile_candidate?(agent)
-        agent.fetch("harness", nil) == "pi" &&
-          !TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil)) &&
-          (present_string(agent.fetch("pid", nil)) ||
-            present_string(agent.fetch("harness_session_id", nil)) ||
-            present_string(agent.fetch("harness_session_file", nil)))
+        return false unless agent.fetch("harness", nil) == "pi"
+        return false unless agent_has_session_reference?(agent)
+        return false if %w[completed killed].include?(agent.fetch("status", nil))
+        return true unless agent.fetch("status", nil) == "errored"
+
+        resumable_worker_reconcile_candidate?(agent)
+      end
+
+      def agent_has_session_reference?(agent)
+        present_string(agent.fetch("pid", nil)) ||
+          present_string(agent.fetch("harness_session_id", nil)) ||
+          present_string(agent.fetch("harness_session_file", nil))
+      end
+
+      def resumable_worker_reconcile_candidate?(agent)
+        agent.fetch("type", nil) == "worker" && worker_resume_attempt_count(agent) < WORKER_RECONCILE_RESUME_MAX_ATTEMPTS
       end
 
       def poll_agent_session(agent)
@@ -1654,6 +1673,8 @@ module Meringue
           "last_assistant_text" => assistant_text
         }
       rescue StandardError => e
+        return resume_worker_session_from_poll_error(agent, client, session_ref, e) if worker_reconcile_resume_eligible?(agent, client)
+
         {
           "agent_id" => agent.fetch("id", nil),
           "agent_type" => agent.fetch("type", nil),
@@ -1691,14 +1712,17 @@ module Meringue
           state = normalized_state
           agent = find_agent(state, poll_result.fetch("agent_id"))
           return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless agent
-          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if %w[completed killed].include?(agent.fetch("status", nil))
 
+          now = timestamp
           merge_session_ref_into_agent!(agent, poll_result.fetch("session_ref", {}))
           agent["status"] = "working"
-          agent["updated_at"] = timestamp
-          touch_state!(state)
+          agent["updated_at"] = now
+          refresh_worker_parent_statuses!(state, agent, now) if agent.fetch("type", nil) == "worker"
+          log_ids = append_resume_success_log(state, agent, poll_result)
+          touch_state!(state, now)
           store.save(state)
-          poll_result.merge("changed" => false, "log_entry_ids" => [])
+          poll_result.merge("changed" => poll_result.fetch("resumed", false), "log_entry_ids" => log_ids)
         end
       end
 
@@ -1771,6 +1795,8 @@ module Meringue
       def apply_reconcile_error_from_poll(poll_result)
         if transient_head_reconcile_error?(poll_result)
           defer_head_reconcile_error_from_poll(poll_result)
+        elsif worker_resume_failed_reconcile_error?(poll_result)
+          defer_worker_reconcile_error_from_poll(poll_result)
         else
           mark_agent_errored_from_poll(poll_result)
         end
@@ -1781,6 +1807,11 @@ module Meringue
           poll_result.dig("reconcile", "state") == RECONCILE_STATE_TRANSIENT_ERROR
       end
 
+      def worker_resume_failed_reconcile_error?(poll_result)
+        poll_result.fetch("agent_type", nil) == "worker" &&
+          poll_result.dig("reconcile", "state") == RECONCILE_STATE_RESUME_FAILED
+      end
+
       def reconcile_error_model(agent, error)
         state = agent.fetch("type", nil) == "head" ? RECONCILE_STATE_TRANSIENT_ERROR : RECONCILE_STATE_TERMINAL_ERROR
         {
@@ -1789,6 +1820,69 @@ module Meringue
           "error_class" => error.class.name,
           "error_message" => error.message
         }
+      end
+
+      def worker_reconcile_resume_eligible?(agent, client)
+        agent.fetch("type", nil) == "worker" &&
+          client.respond_to?(:attach_session) &&
+          agent_has_session_reference?(agent) &&
+          worker_resume_attempt_count(agent) < WORKER_RECONCILE_RESUME_MAX_ATTEMPTS
+      end
+
+      def resume_worker_session_from_poll_error(agent, client, session_ref, original_error)
+        attempt = worker_resume_attempt_count(agent) + 1
+        resumed_ref = client.attach_session(session_ref)
+        resumed_ref = prompt_resumed_worker_session(client, resumed_ref)
+        {
+          "agent_id" => agent.fetch("id"),
+          "agent_type" => "worker",
+          "state" => "working",
+          "session_ref" => resumed_ref,
+          "events" => client.respond_to?(:read_events) ? client.read_events(resumed_ref) : [],
+          "last_assistant_text" => nil,
+          "resumed" => true,
+          "reconcile" => {
+            "state" => RECONCILE_STATE_RESUMING,
+            "resume_attempt_count" => attempt,
+            "resume_attempted_at" => timestamp,
+            "original_error_class" => original_error.class.name,
+            "original_error_message" => original_error.message
+          }
+        }
+      rescue StandardError => resume_error
+        {
+          "agent_id" => agent.fetch("id", nil),
+          "agent_type" => "worker",
+          "state" => "errored",
+          "error" => { "class" => resume_error.class.name, "message" => resume_error.message },
+          "reconcile" => worker_resume_failed_reconcile_model(agent, original_error, resume_error, attempt)
+        }
+      end
+
+      def prompt_resumed_worker_session(client, session_ref)
+        return session_ref unless client.respond_to?(:prompt_session)
+        return session_ref if session_ref.fetch("is_streaming", false)
+
+        client.prompt_session(session_ref, WORKER_RESUME_PROMPT, mode: "normal")
+      end
+
+      def worker_resume_failed_reconcile_model(agent, original_error, resume_error, attempt)
+        {
+          "state" => RECONCILE_STATE_RESUME_FAILED,
+          "resume_attempt_count" => attempt,
+          "resume_attempts_remaining" => [WORKER_RECONCILE_RESUME_MAX_ATTEMPTS - attempt, 0].max,
+          "resume_attempted_at" => timestamp,
+          "original_error_class" => original_error.class.name,
+          "original_error_message" => original_error.message,
+          "error_class" => resume_error.class.name,
+          "error_message" => resume_error.message
+        }
+      end
+
+      def worker_resume_attempt_count(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        reconcile = metadata.fetch("reconcile", {}) || {}
+        reconcile.fetch("resume_attempt_count", reconcile.fetch("error_count", 0)).to_i
       end
 
       def defer_head_reconcile_error_from_poll(poll_result)
@@ -1840,12 +1934,46 @@ module Meringue
         end
       end
 
+      def defer_worker_reconcile_error_from_poll(poll_result)
+        return mark_agent_errored_from_poll(poll_result) if poll_result.dig("reconcile", "resume_attempt_count").to_i >= WORKER_RECONCILE_RESUME_MAX_ATTEMPTS
+
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, poll_result.fetch("agent_id"))
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless agent
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if %w[completed killed].include?(agent.fetch("status", nil))
+          return mark_agent_errored_from_poll(poll_result) unless agent.fetch("type", nil) == "worker"
+
+          now = timestamp
+          reconcile = poll_result.fetch("reconcile", {}).merge("state" => RECONCILE_STATE_RESUME_FAILED).compact
+          agent["status"] = "blocked"
+          agent["updated_at"] = now
+          agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+            "is_streaming" => false,
+            "reconcile_state" => RECONCILE_STATE_RESUME_FAILED,
+            "reconcile" => reconcile
+          ).compact
+          refresh_worker_parent_statuses!(state, agent, now)
+          log_ids = append_log(
+            state,
+            source_type: "worker",
+            source_id: agent.fetch("id"),
+            level: "warning",
+            message: "Worker #{agent.fetch("id")} could not resume its Pi session; will retry reconciliation.",
+            details: reconcile
+          )
+          touch_state!(state, now)
+          store.save(state)
+          poll_result.merge("changed" => true, "blocked" => true, "reconcile" => reconcile, "log_entry_ids" => log_ids)
+        end
+      end
+
       def mark_agent_errored_from_poll(poll_result)
         synchronized_state do
           state = normalized_state
           agent = find_agent(state, poll_result.fetch("agent_id"))
           return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless agent
-          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if %w[completed killed].include?(agent.fetch("status", nil))
 
           now = timestamp
           agent["status"] = "errored"
@@ -1895,6 +2023,26 @@ module Meringue
         (Time.iso8601(now) - Time.iso8601(first_error_at.to_s)) < HEAD_RECONCILE_ERROR_GRACE_SECONDS
       rescue ArgumentError, TypeError
         false
+      end
+
+      def refresh_worker_parent_statuses!(state, agent, now)
+        issue = find_issue(state, agent.fetch("issue_id", nil))
+        project = issue && find_project(state, issue.fetch("project_id", nil))
+        update_issue_status_from_workers!(state, issue, now) if issue
+        update_project_status_from_issues!(state, project, now) if project
+      end
+
+      def append_resume_success_log(state, agent, poll_result)
+        return [] unless poll_result.fetch("resumed", false)
+
+        append_log(
+          state,
+          source_type: "worker",
+          source_id: agent.fetch("id"),
+          level: "info",
+          message: "Resumed worker #{agent.fetch("id")} from its Pi session and prompted it to continue.",
+          details: poll_result.fetch("reconcile", {})
+        )
       end
 
       def completed_session?(session_ref)

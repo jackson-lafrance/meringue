@@ -153,13 +153,34 @@ module Meringue
         process = process_for(session_ref, required: false)
         return get_state(session_ref) if process
 
-        session_ref.merge(
+        expanded_cwd = validate_cwd!(session_ref["cwd"] || session_ref[:cwd])
+        session = resume_session_argument(session_ref)
+        session_name = metadata_value(session_ref, "session_name")
+        argv = build_argv(session_name: session_name, system_prompt: nil, session: session)
+        process = start_rpc_process(argv: argv, cwd: expanded_cwd)
+        register_process(process)
+
+        state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
+        set_session_name(process, session_name) if present?(session_name)
+        state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
+        resumed_ref = build_session_ref(process, state, kind: metadata_value(session_ref, "kind"), cwd: expanded_cwd,
+                                                        session_name: session_name)
+        resumed_ref.merge(
           "metadata" => metadata_with(
             session_ref,
-            "attach_supported" => false,
-            "attach_note" => "Pi RPC process reattachment is deferred for a later reconciliation slice"
+            resumed_ref.fetch("metadata", {}).merge(
+              "attach_supported" => true,
+              "resumed_from_session" => true,
+              "resume_session" => session
+            )
           )
         )
+      rescue StandardError
+        if process
+          unregister_process(process)
+          process.terminate(timeout: shutdown_timeout)
+        end
+        raise
       end
 
       def wait_for_event(session_ref, type:, timeout: event_timeout)
@@ -193,9 +214,10 @@ module Meringue
 
       private
 
-      def build_argv(session_name:, system_prompt:)
+      def build_argv(session_name:, system_prompt:, session: nil)
         argv = Array(command).map(&:to_s) + ["--mode", "rpc"]
         argv += ["--session-dir", File.expand_path(session_dir)] if present?(session_dir)
+        argv += ["--session", session.to_s] if present?(session)
         argv += ["--name", session_name.to_s] if present?(session_name)
         argv += ["--append-system-prompt", system_prompt.to_s] if present?(system_prompt)
         argv + extra_args
@@ -324,6 +346,16 @@ module Meringue
                           end
 
         discovered_path || expanded_path
+      end
+
+      def resume_session_argument(session_ref)
+        path = session_file_path(session_ref)
+        return path if present?(path) && File.file?(path)
+
+        session_id = session_ref["session_id"] || session_ref[:session_id]
+        return session_id if present?(session_id)
+
+        raise ProcessNotFoundError, "Pi session cannot be resumed without a session file or session id: #{session_ref.inspect}"
       end
 
       def assistant_text_from_message(record)
