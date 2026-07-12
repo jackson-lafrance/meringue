@@ -41,9 +41,10 @@ module Meringue
 
         head_result = head_result_from(spawn_result)
         unless head_result
-          payload["summary"] = "Head is running; session polling will apply its HeadResult when it completes."
+          summary = state_summary
+          payload["summary"] = pending_head_activity_summary(spawn_result, route, summary)
           payload["state_mutated"] = true
-          payload["state_summary"] = state_summary
+          payload["state_summary"] = summary
           return payload
         end
 
@@ -245,12 +246,66 @@ module Meringue
         metadata["head_result"]
       end
 
+      def pending_head_activity_summary(spawn_result, route, summary)
+        head_id = spawn_result.fetch("target_id", nil).to_s
+        head_label = head_id.empty? ? "Head" : head_id
+        prompt = user_message_from_route(route)
+        activity = contextual_head_activity(head_label, prompt, summary)
+
+        "#{activity} Its HeadResult will be applied as soon as the session settles."
+      end
+
+      def contextual_head_activity(head_label, prompt, summary)
+        working_workers = summary.fetch("working_worker_count", 0).to_i
+        active_heads = summary.fetch("active_head_count", 0).to_i
+        project_count = summary.fetch("project_count", 0).to_i
+        open_questions = summary.fetch("open_question_count", 0).to_i
+
+        if working_workers.positive?
+          return "#{head_label}: checking #{count_label(working_workers, "active worker")} before proposing next steps."
+        end
+
+        if open_questions.positive?
+          return "#{head_label}: comparing this prompt with #{count_label(open_questions, "open question")} and current state."
+        end
+
+        if project_count.zero?
+          return "#{head_label}: orienting on the prompt and looking for the right project context."
+        end
+
+        choices = [
+          "#{head_label}: reading the prompt against current Meringue state.",
+          "#{head_label}: choosing whether to ask a question, prompt a worker, or update an issue.",
+          "#{head_label}: shaping the request into kernel-safe next steps.",
+          "#{head_label}: keeping the request in flight while the head session finishes."
+        ]
+        choices[stable_activity_index(head_label, prompt, active_heads, choices.length)]
+      end
+
+      def count_label(count, singular)
+        count == 1 ? "1 #{singular}" : "#{count} #{singular}s"
+      end
+
+      def stable_activity_index(head_label, prompt, active_heads, length)
+        seed = "#{head_label}:#{prompt}:#{active_heads}".bytes.sum
+        seed % length
+      end
+
+      def user_message_from_route(route)
+        command = route.fetch("commands", []).first || {}
+        payload = command.fetch("payload", {}) || {}
+        payload.fetch("user_message", "").to_s
+      end
+
       def state_summary
         state = engine.store.load
+        agents = state.fetch("agents", [])
         {
           "project_count" => state.fetch("projects", []).length,
           "issue_count" => state.fetch("issues", []).length,
-          "agent_count" => state.fetch("agents", []).length,
+          "agent_count" => agents.length,
+          "active_head_count" => agents.count { |agent| agent.fetch("type", nil) == "head" && agent.fetch("status", nil) == "working" },
+          "working_worker_count" => agents.count { |agent| agent.fetch("type", nil) == "worker" && agent.fetch("status", nil) == "working" },
           "open_question_count" => state.fetch("questions", []).count { |question| question.fetch("status", nil) == "open" },
           "recent_projects" => state.fetch("projects", []).last(3).map { |project| project.slice("id", "name", "status", "root_path") },
           "recent_issues" => state.fetch("issues", []).last(5).map { |issue| issue.slice("id", "project_id", "title", "status", "agent_ids") },
