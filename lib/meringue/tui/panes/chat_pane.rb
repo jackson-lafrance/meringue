@@ -27,25 +27,23 @@ module Meringue
           end
         end
 
-        def composer_lines(state)
+        def composer_lines(state, width: nil)
           open_questions = state.fetch("questions", []).count { |question| question["status"] == "open" }
           chat = chat_state(state)
           input_buffer = chat.fetch("input_buffer", "").to_s
           pending_count = chat.fetch("pending_count", 0).to_i
-          placeholder = input_buffer.empty? ? "enter a prompt" : input_buffer
-          input_line = [
-            ["›", Style::ACCENT_BOLD],
-            [" #{placeholder}", input_buffer.empty? ? Style::MUTED : Style::TEXT]
-          ]
-          input_line << ["_", Style::ACCENT_BOLD] unless input_buffer.empty?
 
-          [input_line, [["", Style::DIM]], [
-            [pending_status(pending_count), pending_count.positive? ? Style::WARNING : Style::SUCCESS],
-            ["  ·  ", Style::DIM],
-            ["open questions: #{open_questions}", Style::MUTED],
-            ["  ·  ", Style::DIM],
-            ["enter sends · tab completes slash commands · esc/ctrl-c quits", Style::MUTED]
-          ]]
+          input_lines = wrapped_input_lines(input_buffer, width: width)
+          input_lines + [
+            [["", Style::DIM]],
+            [
+              [pending_status(pending_count), pending_count.positive? ? Style::WARNING : Style::SUCCESS],
+              ["  ·  ", Style::DIM],
+              ["open questions: #{open_questions}", Style::MUTED],
+              ["  ·  ", Style::DIM],
+              ["enter sends · tab completes slash commands · esc/ctrl-c quits", Style::MUTED]
+            ]
+          ]
         end
 
         def slash_suggestions?(state)
@@ -102,6 +100,30 @@ module Meringue
             ["  ", Style::DIM],
             [status.to_s, Style::MUTED]
           ]
+        end
+
+        def wrapped_input_lines(input_buffer, width: nil)
+          if input_buffer.empty?
+            return [[
+              ["›", Style::ACCENT_BOLD],
+              [" enter a prompt", Style::MUTED]
+            ]]
+          end
+
+          display_text = "#{input_buffer}_"
+          available_width = width ? [width.to_i - 2, 1].max : display_text.length
+          chunks = display_text.chars.each_slice(available_width).map(&:join)
+          chunks.each_with_index.map do |chunk, index|
+            input_line_segments(chunk, first_line: index.zero?, cursor_line: index == chunks.length - 1)
+          end
+        end
+
+        def input_line_segments(chunk, first_line:, cursor_line:)
+          prefix = first_line ? "› " : "  "
+          return [[prefix, Style::ACCENT_BOLD], [chunk, Style::TEXT]] unless cursor_line && chunk.end_with?("_")
+
+          text = chunk[0...-1]
+          [[prefix, Style::ACCENT_BOLD], [text, Style::TEXT], ["_", Style::ACCENT_BOLD]]
         end
 
         def wrapped_text_lines(text)

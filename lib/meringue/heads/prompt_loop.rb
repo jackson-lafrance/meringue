@@ -69,15 +69,18 @@ module Meringue
 
       def handle_slash_command(route, on_event: nil)
         command_results = route.fetch("commands", []).map { |command| apply_kernel(command) }
+        worker_wait_results = wait_for_spawned_command_workers(command_results, on_event: on_event)
         payload = {
           "event" => "slash_command_applied",
           "summary" => slash_summary(command_results),
-          "state_mutated" => command_results.any? { |result| result.fetch("status", nil) == "accepted" },
+          "state_mutated" => command_results.any? { |result| result.fetch("status", nil) == "accepted" } ||
+            worker_wait_results.any? { |result| result.fetch("status", nil) == "settled" },
           "route" => route,
           "command_results" => command_results,
+          "worker_wait_results" => worker_wait_results,
           "state_summary" => state_summary
         }
-        emit(on_event, "slash_command_applied", "command_results" => command_results)
+        emit(on_event, "slash_command_applied", "command_results" => command_results, "worker_wait_results" => worker_wait_results)
         payload
       end
 
@@ -101,7 +104,14 @@ module Meringue
       end
 
       def apply_kernel(command)
+        return engine.apply(command) if spawn_head_command?(command)
+
         @engine_mutex.synchronize { engine.apply(command) }
+      end
+
+      def spawn_head_command?(command)
+        type = command.respond_to?(:[]) && (command["type"] || command[:type] || command["command_type"] || command[:command_type])
+        type.to_s == "SpawnHead" || type.to_s == "spawn_head"
       end
 
       def mark_worker_completed(agent_id:, harness_events:, last_assistant_text:)
@@ -119,10 +129,18 @@ module Meringue
       end
 
       def wait_for_spawned_workers(apply_result, on_event: nil)
+        wait_for_worker_results(worker_results_from(apply_result), on_event: on_event)
+      end
+
+      def wait_for_spawned_command_workers(command_results, on_event: nil)
+        wait_for_worker_results(worker_results_from_command_results(command_results), on_event: on_event)
+      end
+
+      def wait_for_worker_results(worker_results, on_event: nil)
         return [] unless wait_for_workers?
         return [] unless engine.harness_client.respond_to?(:wait_for_settled)
 
-        worker_results_from(apply_result).map do |worker_result|
+        worker_results.map do |worker_result|
           wait_for_worker(worker_result.fetch("result"), on_event: on_event)
         end
       end
@@ -157,7 +175,11 @@ module Meringue
 
       def worker_results_from(apply_result)
         result = apply_result.fetch("result", {}) || {}
-        result.fetch("command_results", []).select do |command_result|
+        worker_results_from_command_results(result.fetch("command_results", []))
+      end
+
+      def worker_results_from_command_results(command_results)
+        command_results.select do |command_result|
           command_result.fetch("command_type", nil) == "SpawnWorker" &&
             command_result.fetch("status", nil) == "accepted" &&
             command_result.fetch("result", nil).is_a?(Hash)
