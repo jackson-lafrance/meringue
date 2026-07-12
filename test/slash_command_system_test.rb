@@ -2,6 +2,7 @@
 
 require "fileutils"
 require "minitest/autorun"
+require "timeout"
 require "tmpdir"
 require_relative "../lib/meringue"
 
@@ -68,19 +69,65 @@ class SlashCommandSystemTest < Minitest::Test
     assert_equal "killed", state.fetch("agents").first.fetch("status")
   end
 
-  def test_chat_pane_shows_helper_only_for_empty_slash_prompt
+  def test_slash_suggestions_show_top_five_and_filter_after_slash
+    all_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/", limit: 5)
+    filtered_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/p", limit: 5)
+
+    assert_equal 5, all_suggestions.length
+    assert_equal "/help", all_suggestions.first.fetch("usage")
+    assert_equal ["/project add <path> [name]", "/prompt <agent_id> \"<message>\""], filtered_suggestions.map { |record| record.fetch("usage") }
+  end
+
+  def test_chat_pane_renders_cursor_style_suggestions_separately_from_input
     pane = Meringue::TUI::Panes::ChatPane.new
     base_state = Meringue::State::Models.empty_state
+    state = base_state.merge("_chat" => { "input_buffer" => "/p", "slash_suggestion_index" => 1 })
 
-    helper_text = pane.composer_lines(base_state.merge("_chat" => { "input_buffer" => "/" })).map do |line|
-      line.map { |segment| segment.first }.join
-    end.join("\n")
-    normal_text = pane.composer_lines(base_state.merge("_chat" => { "input_buffer" => "/help" })).map do |line|
-      line.map { |segment| segment.first }.join
-    end.join("\n")
+    suggestion_text = pane.slash_suggestion_lines(state).map { |line| plain_line(line) }.join("\n")
+    composer_text = pane.composer_lines(state).map { |line| plain_line(line) }.join("\n")
 
-    assert_includes helper_text, "slash commands"
-    refute_includes normal_text, "slash commands"
+    assert_includes suggestion_text, "/project add"
+    assert_includes suggestion_text, "› /prompt"
+    refute_includes suggestion_text, "/help"
+    refute_includes composer_text, "/project add"
+  end
+
+  def test_layout_places_suggestions_above_chat_input
+    layout = Meringue::TUI::Layout.new
+    state = Meringue::State::Models.empty_state.merge("_chat" => { "input_buffer" => "/p", "slash_suggestion_index" => 0 })
+
+    frame_lines = layout.render(state, width: 100, height: 32, color: false).split("\n")
+    suggestions_y = frame_lines.index { |line| line.include?("slash commands") }
+    chat_y = frame_lines.rindex { |line| line.include?(" chat ") }
+    input_y = frame_lines.index { |line| line.include?("› /p_") }
+
+    refute_nil suggestions_y
+    refute_nil chat_y
+    refute_nil input_y
+    assert_operator suggestions_y, :<, chat_y
+    assert_operator suggestions_y, :<, input_y
+  end
+
+  def test_tui_tab_and_enter_complete_slash_suggestions_without_executing_partial_commands
+    app = Meringue::TUI::App.new
+    submitted_prompts = Queue.new
+    submitter = lambda do |text|
+      submitted_prompts << text
+      { "summary" => "ok" }
+    end
+
+    buffer, index = app.send(:handle_key, "\t", "/p", 0, submitter)
+    assert_equal "/project add ", buffer
+    assert_equal 0, index
+    assert submitted_prompts.empty?
+
+    buffer, = app.send(:handle_key, "\r", "/h", 0, submitter)
+    assert_equal "/help", buffer
+    assert submitted_prompts.empty?
+
+    buffer, = app.send(:handle_key, "\r", "/help", 0, submitter)
+    assert_equal "", buffer
+    assert_equal "/help", Timeout.timeout(1) { submitted_prompts.pop }
   end
 
   private
@@ -89,5 +136,9 @@ class SlashCommandSystemTest < Minitest::Test
     command = @parser.parse(input).to_h
     assert_equal type, command.fetch("type")
     assert_equal payload, command.fetch("payload")
+  end
+
+  def plain_line(line)
+    line.map { |segment| segment.first }.join
   end
 end

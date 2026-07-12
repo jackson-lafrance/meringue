@@ -9,6 +9,9 @@ module Meringue
       QUIT_KEYS = ["\u0003", "\u0004"].freeze
       BACKSPACE_KEYS = ["\u007f", "\b"].freeze
       ENTER_KEYS = ["\r", "\n"].freeze
+      TAB_KEYS = ["\t"].freeze
+      UP_KEYS = ["\e[A"].freeze
+      DOWN_KEYS = ["\e[B"].freeze
 
       def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil)
         @layout = layout
@@ -29,13 +32,14 @@ module Meringue
         return render_once(compose_state(state_provider, "")) unless terminal.interactive?
 
         input_buffer = +""
+        slash_suggestion_index = 0
         terminal.with_screen do
           terminal.raw do
             last_frame = nil
 
             loop do
               width, height = terminal.dimensions
-              frame = render(compose_state(state_provider, input_buffer), width: width, height: height, color: true)
+              frame = render(compose_state(state_provider, input_buffer, slash_suggestion_index), width: width, height: height, color: true)
               if frame != last_frame
                 terminal.write_frame(frame)
                 last_frame = frame
@@ -44,7 +48,7 @@ module Meringue
               key = terminal.read_key(timeout: REFRESH_INTERVAL)
               break if quit_key?(key, input_buffer)
 
-              input_buffer = handle_key(key, input_buffer, on_submit)
+              input_buffer, slash_suggestion_index = handle_key(key, input_buffer, slash_suggestion_index, on_submit)
             end
           end
         end
@@ -70,18 +74,78 @@ module Meringue
         key == "\e" && input_buffer.empty?
       end
 
-      def handle_key(key, input_buffer, on_submit)
-        return input_buffer unless key
+      def handle_key(key, input_buffer, slash_suggestion_index, on_submit)
+        return [input_buffer, slash_suggestion_index] unless key
 
-        if ENTER_KEYS.include?(key)
-          submit_prompt(input_buffer, on_submit)
-          return +""
+        if slash_suggestion_key?(key) && slash_suggestions_active?(input_buffer)
+          return handle_slash_suggestion_key(key, input_buffer, slash_suggestion_index)
         end
 
-        return input_buffer[0...-1] if BACKSPACE_KEYS.include?(key)
-        return input_buffer unless printable_key?(key)
+        if ENTER_KEYS.include?(key)
+          completion = safe_slash_completion(input_buffer, slash_suggestion_index)
+          return [completion, 0] if completion
 
-        input_buffer + key
+          submit_prompt(input_buffer, on_submit)
+          return [+"", 0]
+        end
+
+        if BACKSPACE_KEYS.include?(key)
+          return [input_buffer[0...-1], 0]
+        end
+        return [input_buffer, slash_suggestion_index] unless printable_key?(key)
+
+        [input_buffer + key, 0]
+      end
+
+      def slash_suggestion_key?(key)
+        TAB_KEYS.include?(key) || UP_KEYS.include?(key) || DOWN_KEYS.include?(key)
+      end
+
+      def handle_slash_suggestion_key(key, input_buffer, slash_suggestion_index)
+        records = slash_suggestion_records(input_buffer)
+        return [input_buffer, 0] if records.empty?
+
+        if UP_KEYS.include?(key)
+          return [input_buffer, (slash_suggestion_index - 1) % records.length]
+        end
+        if DOWN_KEYS.include?(key)
+          return [input_buffer, (slash_suggestion_index + 1) % records.length]
+        end
+
+        [slash_completion_for(records.fetch(slash_suggestion_index.clamp(0, records.length - 1))), 0]
+      end
+
+      def safe_slash_completion(input_buffer, slash_suggestion_index)
+        return nil unless slash_suggestions_active?(input_buffer)
+
+        records = slash_suggestion_records(input_buffer)
+        return nil if records.empty?
+
+        record = records.fetch(slash_suggestion_index.clamp(0, records.length - 1))
+        stripped = input_buffer.to_s.strip.gsub(/\s+/, " ")
+        completion = slash_completion_for(record).strip
+        usage = record.fetch("usage")
+        no_argument_command = completion == usage
+
+        return nil if no_argument_command && stripped == completion
+        return nil unless completion.downcase.start_with?(stripped.downcase) || stripped == "/"
+
+        slash_completion_for(record)
+      end
+
+      def slash_suggestions_active?(input_buffer)
+        input_buffer.to_s.strip.start_with?("/")
+      end
+
+      def slash_suggestion_records(input_buffer)
+        return [] unless slash_suggestions_active?(input_buffer)
+
+        Input::SlashCommandParser.command_suggestion_records(input_buffer, limit: 5)
+      end
+
+      def slash_completion_for(record)
+        completion = record.fetch("completion")
+        record.fetch("requires_arguments") ? "#{completion} " : completion
       end
 
       def printable_key?(key)
@@ -258,16 +322,17 @@ module Meringue
         has_workers ? "workers running" : nil
       end
 
-      def compose_state(state_provider, input_buffer)
+      def compose_state(state_provider, input_buffer, slash_suggestion_index = 0)
         state = state_provider.call || State::Models.empty_state
-        state.merge("_chat" => chat_snapshot(input_buffer))
+        state.merge("_chat" => chat_snapshot(input_buffer, slash_suggestion_index))
       end
 
-      def chat_snapshot(input_buffer)
+      def chat_snapshot(input_buffer, slash_suggestion_index = 0)
         @chat_mutex.synchronize do
           {
             "messages" => @messages.map(&:dup),
             "input_buffer" => input_buffer,
+            "slash_suggestion_index" => slash_suggestion_index,
             "pending_count" => @pending_count
           }
         end

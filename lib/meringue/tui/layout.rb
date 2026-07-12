@@ -27,7 +27,7 @@ module Meringue
         height = [height.to_i, MIN_HEIGHT].max
         canvas = Canvas.new(width: width, height: height)
 
-        metrics = layout_metrics(width, height)
+        metrics = layout_metrics(width, height, state)
         draw_pane(
           canvas,
           metrics.fetch(:sidebar_x),
@@ -58,6 +58,19 @@ module Meringue
           log_pane.lines(state),
           overflow: :tail
         )
+        if metrics.fetch(:suggestion_height).positive?
+          draw_pane(
+            canvas,
+            metrics.fetch(:suggestion_x),
+            metrics.fetch(:suggestion_y),
+            metrics.fetch(:suggestion_width),
+            metrics.fetch(:suggestion_height),
+            "slash commands",
+            chat_pane.slash_suggestion_lines(state),
+            active: true
+          )
+        end
+
         draw_pane(
           canvas,
           metrics.fetch(:composer_x),
@@ -76,10 +89,12 @@ module Meringue
 
       attr_reader :agent_tree_pane, :log_pane, :chat_pane
 
-      def layout_metrics(width, height)
+      def layout_metrics(width, height, state)
         top_y = 0
         composer_height = composer_height_for(height)
-        top_height = height - composer_height - GAP
+        suggestion_height = bounded_slash_suggestion_height(height, composer_height, state)
+        vertical_gaps = GAP + (suggestion_height.positive? ? GAP : 0)
+        top_height = height - composer_height - suggestion_height - vertical_gaps
         sidebar_x = OUTER_MARGIN
         sidebar_width = sidebar_width_for(width)
         main_x = sidebar_x + sidebar_width + GAP
@@ -106,11 +121,31 @@ module Meringue
           conversation_height: conversation_height,
           log_y: top_y + conversation_height + GAP,
           log_height: log_height,
+          suggestion_x: composer_x,
+          suggestion_y: top_y + top_height + GAP,
+          suggestion_width: composer_width,
+          suggestion_height: suggestion_height,
           composer_x: composer_x,
-          composer_y: top_y + top_height + GAP,
+          composer_y: top_y + top_height + GAP + (suggestion_height.positive? ? suggestion_height + GAP : 0),
           composer_width: composer_width,
           composer_height: composer_height
         }
+      end
+
+      def bounded_slash_suggestion_height(total_height, composer_height, state)
+        raw_height = slash_suggestion_height(state)
+        return 0 unless raw_height.positive?
+
+        reserved_top_height = MIN_CHAT_HEIGHT + GAP + MIN_LOG_HEIGHT
+        max_height = total_height - composer_height - GAP - reserved_top_height - GAP
+        bounded_height = [raw_height, [max_height, 0].max].min
+        bounded_height >= 3 ? bounded_height : 0
+      end
+
+      def slash_suggestion_height(state)
+        return 0 unless chat_pane.slash_suggestions?(state)
+
+        [chat_pane.slash_suggestion_lines(state).length + 2, 7].min
       end
 
       def sidebar_width_for(total_width)

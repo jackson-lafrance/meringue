@@ -19,8 +19,47 @@ module Meringue
         ["/clear", "Reset persisted Meringue state. Dev/debug helper."]
       ].freeze
 
-      def self.command_suggestions
-        COMMAND_SPECS
+      def self.command_suggestions(input = nil, limit: nil)
+        command_suggestion_records(input, limit: limit).map do |record|
+          [record.fetch("usage"), record.fetch("description")]
+        end
+      end
+
+      def self.command_suggestion_records(input = nil, limit: 5)
+        query = normalized_query(input)
+        records = COMMAND_SPECS.each_with_index.map do |(usage, description), index|
+          completion = completion_prefix_for(usage)
+          {
+            "usage" => usage,
+            "description" => description,
+            "completion" => completion,
+            "requires_arguments" => completion != usage,
+            "index" => index
+          }
+        end
+        records = records.select { |record| suggestion_matches?(record, query) } if query
+        records.first(limit || records.length)
+      end
+
+      def self.normalized_query(input)
+        return nil if input.nil?
+
+        stripped = input.to_s.strip.downcase.gsub(/\s+/, " ")
+        return nil unless stripped.start_with?("/")
+
+        stripped
+      end
+
+      def self.suggestion_matches?(record, query)
+        return true if query == "/"
+
+        usage = record.fetch("usage").downcase
+        completion = record.fetch("completion").downcase
+        usage.start_with?(query) || completion.start_with?(query) || usage.include?(query)
+      end
+
+      def self.completion_prefix_for(usage)
+        usage.to_s.split.take_while { |token| token !~ /\A[<\[]/ }.join(" ")
       end
 
       def parse(input)
