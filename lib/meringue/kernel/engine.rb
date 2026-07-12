@@ -523,8 +523,9 @@ module Meringue
         return rejected_result(command_id, command_type, "Agent #{agent_id} has no harness session.", ["agent_has_no_harness_session"]) if blank?(agent.fetch("harness", nil))
         return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"]) if agent.fetch("status", nil) == "killed"
 
+        client = harness_client_for_agent(agent)
         session_ref = session_ref_from_agent(agent)
-        updated_ref = harness_client.prompt_session(session_ref, prompt.to_s, mode: mode.to_s)
+        updated_ref = client.prompt_session(session_ref, prompt.to_s, mode: mode.to_s)
         now = timestamp
         apply_session_ref_to_agent!(agent, updated_ref)
         agent["status"] = "working" if agent.fetch("status", nil) == "idle"
@@ -1505,9 +1506,10 @@ module Meringue
           return rejected_result(command_id, command_type, "Agent #{agent_id} has no harness session.", ["missing_harness_session"])
         end
 
+        client = harness_client_for_agent(agent)
         session_ref = agent_session_ref(agent)
         begin
-          session_ref = harness_client_for_agent(agent).prompt_session(session_ref, prompt.to_s, mode: mode.to_s)
+          session_ref = client.prompt_session(session_ref, prompt.to_s, mode: mode.to_s)
         rescue StandardError => e
           return failed_result(
             command_id,
