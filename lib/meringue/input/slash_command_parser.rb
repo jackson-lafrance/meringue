@@ -17,7 +17,7 @@ module Meringue
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent harness session in Alacritty, or navigate the AgentTree when no id is provided."],
-        ["/jumpr [agent_id]", "Open an agent pull request, or navigate agents with attached PRs when no id is provided."],
+        ["/jumpr [agent_id]", "Open an agent pull request, or navigate agents with open PRs when no id is provided."],
         ["/keybind", "Show all TUI keybindings."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
@@ -187,9 +187,13 @@ module Meringue
 
       def self.pr_agents(state)
         Array(state["agents"]).filter_map do |agent|
-          pr_url = first_pr_url_for_agent(agent)
+          pr_url = first_active_pr_url_for_agent(agent)
           pr_url ? agent.merge("_pr_url" => pr_url) : nil
         end
+      end
+
+      def self.first_active_pr_url_for_agent(agent)
+        agent["_pr_url"] || active_pr_urls_from_record(agent).find { |url| pull_request_url?(url) }
       end
 
       def self.first_pr_url_for_agent(agent)
@@ -197,14 +201,32 @@ module Meringue
       end
 
       def self.pr_urls_from_record(record)
+        pull_request_records_from_record(record).map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
+      end
+
+      def self.active_pr_urls_from_record(record)
+        pull_request_records_from_record(record).filter_map do |pull_request|
+          next unless active_pull_request?(pull_request)
+
+          pull_request["url"]
+        end
+      end
+
+      def self.pull_request_records_from_record(record)
         metadata = record.fetch("harness_metadata", {}) || {}
-        delivery_pull_requests = [
+        [
           record["delivery_pull_request"],
           metadata["delivery_pull_request"],
           *Array(record["delivery_pull_requests"]),
           *Array(metadata["delivery_pull_requests"])
         ].compact
-        delivery_pull_requests.map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
+      end
+
+      def self.active_pull_request?(pull_request)
+        return false unless pull_request.is_a?(Hash)
+
+        state = pull_request["state"] || pull_request["status"] || pull_request["raw_state"]
+        state.to_s.downcase == "open"
       end
 
       def self.pull_request_url?(url)
@@ -239,7 +261,7 @@ module Meringue
           [item["type"] || "agent", item["status"], metadata["title"] || item["issue_id"]].compact.join(" · ")
         when "pr_agents"
           metadata = item.fetch("harness_metadata", {}) || {}
-          ["agent PR", item["type"], metadata["title"] || item["issue_id"], first_pr_url_for_agent(item)].compact.join(" · ")
+          ["open agent PR", item["type"], metadata["title"] || item["issue_id"], first_active_pr_url_for_agent(item)].compact.join(" · ")
         when "open_questions"
           ["question", item["question"].to_s[0, 60]].reject(&:empty?).join(" · ")
         else
