@@ -13,6 +13,12 @@ module Meringue
       SHOW_CURSOR = "\e[?25h"
       DISABLE_AUTOWRAP = "\e[?7l"
       ENABLE_AUTOWRAP = "\e[?7h"
+      ENABLE_BRACKETED_PASTE = "\e[?2004h"
+      DISABLE_BRACKETED_PASTE = "\e[?2004l"
+      BRACKETED_PASTE_START = "\e[200~"
+      BRACKETED_PASTE_END = "\e[201~"
+      ESCAPE_READ_TIMEOUT = 0.01
+      PASTE_READ_TIMEOUT = 0.05
       CLEAR_SCREEN = "\e[2J\e[H"
       HOME = "\e[H"
       CLEAR_LINE = "\e[K"
@@ -52,6 +58,7 @@ module Meringue
         output.write(ENTER_ALT_SCREEN)
         output.write(HIDE_CURSOR)
         output.write(DISABLE_AUTOWRAP)
+        output.write(ENABLE_BRACKETED_PASTE)
         output.write(CLEAR_SCREEN)
         output.flush
         @last_frame = nil
@@ -59,6 +66,7 @@ module Meringue
         yield
       ensure
         if interactive?
+          output.write(DISABLE_BRACKETED_PASTE)
           output.write(ENABLE_AUTOWRAP)
           output.write(SHOW_CURSOR)
           output.write(EXIT_ALT_SCREEN)
@@ -88,18 +96,49 @@ module Meringue
         return nil unless ready
 
         key = input.getch
-        return key unless key == "\e"
+        return read_escape_sequence(key) if key == "\e"
 
-        sequence = key.dup
-        while IO.select([input], nil, nil, 0.001)
+        read_pending_plain_text(key)
+      end
+
+      private
+
+      def read_escape_sequence(prefix)
+        sequence = prefix.dup
+        while IO.select([input], nil, nil, ESCAPE_READ_TIMEOUT)
           sequence << input.getch
+          return read_bracketed_paste(sequence) if sequence == BRACKETED_PASTE_START
           break if complete_escape_sequence?(sequence)
           break if sequence.length >= 16
         end
         sequence
       end
 
-      private
+      def read_bracketed_paste(sequence)
+        until sequence.end_with?(BRACKETED_PASTE_END)
+          ready = IO.select([input], nil, nil, PASTE_READ_TIMEOUT)
+          break unless ready
+
+          sequence << input.getch
+        end
+
+        if sequence.end_with?(BRACKETED_PASTE_END)
+          text = sequence[BRACKETED_PASTE_START.length...-BRACKETED_PASTE_END.length]
+          { "type" => "paste", "text" => text.to_s }
+        else
+          sequence
+        end
+      end
+
+      def read_pending_plain_text(prefix)
+        text = prefix.dup
+        while IO.select([input], nil, nil, 0)
+          break if text.end_with?("\e")
+
+          text << input.getch
+        end
+        text
+      end
 
       def complete_escape_sequence?(sequence)
         return true if ["\e\r", "\e\n"].include?(sequence)

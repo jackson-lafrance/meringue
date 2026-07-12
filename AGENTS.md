@@ -364,7 +364,7 @@ Heads should not directly edit Meringue JSON state or project files. They propos
 Worker isolation is a kernel-owned responsibility.
 
 The kernel should allocate worker workspaces before spawning harness sessions, then pass the resolved workspace path to the harness client as `cwd`.
-For git-backed projects, the preferred allocation strategy is one git worktree per worker using a Meringue-owned branch name, such as `meringue/P1-I2-W1`.
+For git-backed projects, the preferred allocation strategy is one git worktree per worker using a Meringue-owned, human-facing branch name derived from the issue/task title, such as `meringue/fix-signup-validation-a1b2c3d4`. Do not expose Meringue agent ids, worker ids, Pi ids, or subagent implementation details in workspace branch names.
 Workspace metadata should be persisted on the agent record so sessions can be reconciled, resumed, killed, or cleaned up later.
 The TUI, heads, and harness clients should not directly create, prune, or mutate worktrees.
 
@@ -404,7 +404,7 @@ The Ruby Pi harness client should communicate with Pi over JSONL stdin/stdout.
 Parse stdout as newline-delimited JSON and never rely on human-formatted text when structured events are available.
 
 After spawning a Pi process, call `get_state` and store Pi's `sessionId` and `sessionFile` in the generic harness session fields.
-Use `set_session_name` to label Pi sessions with their Meringue id, such as `P1-I2-W1 Fix signup`.
+Use `set_session_name` to label Pi worker sessions with a concise human-facing task title, such as `Fix signup validation`; avoid embedding Meringue agent ids, worker ids, Pi ids, or subagent implementation details in worker session names.
 
 When prompting an active worker, use Pi RPC `steer`, `follow_up`, or `prompt` with `streamingBehavior` instead of sending a normal prompt blindly.
 
