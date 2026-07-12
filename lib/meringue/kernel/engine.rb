@@ -22,6 +22,11 @@ module Meringue
         First inspect the current repository state, then continue the assigned issue from the last incomplete step.
         If the issue is already complete, summarize the final status and include any pull request link.
       PROMPT
+      HEAD_RESULT_REPAIR_PROMPT = <<~PROMPT.freeze
+        Your previous response was not valid Meringue HeadResult JSON.
+        Return exactly one JSON object with string fields "title" and "summary", an array field "commands", and an array field "questions".
+        Do not include markdown, prose, code fences, or tool calls.
+      PROMPT
       PULL_REQUEST_URL_PATTERN = /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+(?:[\/?#][^\s<>"'\])}]*)?/.freeze
 
       COMMAND_ALIASES = {
@@ -58,6 +63,8 @@ module Meringue
       ].freeze
       TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
+      HEAD_RECONCILE_WARNING_DELAY_SECONDS = 5
+      HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
       RECONCILE_STATE_HEALTHY = "healthy"
       RECONCILE_STATE_RESUMING = "resuming"
@@ -1728,6 +1735,8 @@ module Meringue
           "apply_result" => apply_result,
           "log_entry_ids" => (apply_result.fetch("log_entry_ids", []) + log_ids).uniq
         )
+      rescue Heads::PiRunner::InvalidHeadResultError => e
+        repair_invalid_head_result(poll_result, e)
       rescue StandardError => e
         mark_agent_errored_from_poll(
           poll_result.merge(
@@ -1735,6 +1744,93 @@ module Meringue
             "error" => { "class" => e.class.name, "message" => e.message }
           )
         )
+      end
+
+      def repair_invalid_head_result(poll_result, error)
+        agent = synchronized_state { find_agent(normalized_state, poll_result.fetch("agent_id")) }
+        return mark_agent_errored_from_poll(invalid_head_result_poll_error(poll_result, error)) unless head_result_repair_eligible?(agent)
+
+        session_ref = poll_result.fetch("session_ref", {})
+        client = harness_client_for_agent(agent)
+        repaired_ref = prompt_head_result_repair(client, session_ref, error)
+        record_head_result_repair_requested(poll_result, error, repaired_ref)
+      rescue StandardError => repair_error
+        mark_agent_errored_from_poll(
+          poll_result.merge(
+            "state" => "errored",
+            "error" => { "class" => repair_error.class.name, "message" => repair_error.message },
+            "reconcile" => {
+              "state" => RECONCILE_STATE_TERMINAL_ERROR,
+              "error_class" => error.class.name,
+              "error_message" => error.message,
+              "repair_error_class" => repair_error.class.name,
+              "repair_error_message" => repair_error.message
+            }
+          )
+        )
+      end
+
+      def invalid_head_result_poll_error(poll_result, error)
+        poll_result.merge(
+          "state" => "errored",
+          "error" => { "class" => error.class.name, "message" => error.message }
+        )
+      end
+
+      def head_result_repair_eligible?(agent)
+        return false unless agent
+        return false unless agent.fetch("type", nil) == "head"
+        return false if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata.fetch("head_result_repair_count", 0).to_i < HEAD_RESULT_REPAIR_MAX_ATTEMPTS
+      end
+
+      def prompt_head_result_repair(client, session_ref, error)
+        mode = session_ref.fetch("is_streaming", false) ? "follow_up" : "normal"
+        prompt = <<~PROMPT
+          #{HEAD_RESULT_REPAIR_PROMPT}
+
+          Validation error: #{error.message}
+        PROMPT
+        client.prompt_session(session_ref, prompt, mode: mode)
+      end
+
+      def record_head_result_repair_requested(poll_result, error, repaired_ref)
+        synchronized_state do
+          state = normalized_state
+          head = find_agent(state, poll_result.fetch("agent_id"))
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless head
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if TERMINAL_AGENT_STATUSES.include?(head.fetch("status", nil))
+
+          now = timestamp
+          metadata = head.fetch("harness_metadata", {}) || {}
+          repair_count = metadata.fetch("head_result_repair_count", 0).to_i + 1
+          merge_session_ref_into_agent!(head, repaired_ref)
+          head["status"] = "working"
+          head["updated_at"] = now
+          head["harness_metadata"] = (head.fetch("harness_metadata", {}) || {}).merge(
+            "head_result_repair_count" => repair_count,
+            "head_result_repair_requested_at" => now,
+            "head_result_repair_error_class" => error.class.name,
+            "head_result_repair_error_message" => error.message
+          ).compact
+          log_ids = append_log(
+            state,
+            source_type: "head",
+            source_id: head.fetch("id"),
+            level: "warning",
+            message: "Head #{head.fetch("id")} returned invalid HeadResult JSON; requested one repair response.",
+            details: {
+              "repair_count" => repair_count,
+              "error_class" => error.class.name,
+              "error_message" => error.message
+            }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          poll_result.merge("state" => "working", "changed" => true, "repaired" => true, "session_ref" => repaired_ref, "log_entry_ids" => log_ids)
+        end
       end
 
       def record_polled_head_completion(poll_result, head_result, apply_result)
@@ -1878,26 +1974,23 @@ module Meringue
           previous_reconcile = metadata.fetch("reconcile", {}) || {}
           first_error_at = previous_reconcile.fetch("first_error_at", nil) || now
           error_count = previous_reconcile.fetch("error_count", 0).to_i + 1
+          warning_logged_at = previous_reconcile.fetch("warning_logged_at", nil)
 
           reconcile = poll_result.fetch("reconcile", {}).merge(
             "state" => RECONCILE_STATE_TRANSIENT_ERROR,
             "first_error_at" => first_error_at,
             "last_error_at" => now,
             "error_count" => error_count,
-            "grace_seconds" => HEAD_RECONCILE_ERROR_GRACE_SECONDS
+            "grace_seconds" => HEAD_RECONCILE_ERROR_GRACE_SECONDS,
+            "warning_delay_seconds" => HEAD_RECONCILE_WARNING_DELAY_SECONDS,
+            "warning_logged_at" => warning_logged_at
           ).compact
 
           return mark_agent_errored_from_poll(poll_result.merge("reconcile" => reconcile)) unless head_reconcile_grace_active?(first_error_at, now)
 
-          agent["status"] = "working"
-          agent["updated_at"] = now
-          agent["harness_metadata"] = metadata.merge(
-            "reconcile_state" => RECONCILE_STATE_TRANSIENT_ERROR,
-            "reconcile" => reconcile
-          ).compact
-
           log_ids = []
-          if error_count == 1
+          if warning_logged_at.nil? && head_reconcile_warning_due?(agent, first_error_at, now)
+            reconcile["warning_logged_at"] = now
             log_ids = append_log(
               state,
               source_type: "head",
@@ -1907,6 +2000,13 @@ module Meringue
               details: reconcile
             )
           end
+
+          agent["status"] = "working"
+          agent["updated_at"] = now
+          agent["harness_metadata"] = metadata.merge(
+            "reconcile_state" => RECONCILE_STATE_TRANSIENT_ERROR,
+            "reconcile" => reconcile
+          ).compact
 
           touch_state!(state, now)
           store.save(state)
@@ -2003,6 +2103,22 @@ module Meringue
         (Time.iso8601(now) - Time.iso8601(first_error_at.to_s)) < HEAD_RECONCILE_ERROR_GRACE_SECONDS
       rescue ArgumentError, TypeError
         false
+      end
+
+      def head_reconcile_warning_due?(agent, first_error_at, now)
+        started_at = agent.fetch("created_at", nil) || first_error_at
+        reference_time = [parse_time_or_nil(started_at), parse_time_or_nil(first_error_at)].compact.min
+        return true unless reference_time
+
+        (Time.iso8601(now) - reference_time) >= HEAD_RECONCILE_WARNING_DELAY_SECONDS
+      rescue ArgumentError, TypeError
+        true
+      end
+
+      def parse_time_or_nil(value)
+        Time.iso8601(value.to_s)
+      rescue ArgumentError, TypeError
+        nil
       end
 
       def refresh_worker_parent_statuses!(state, agent, now)
