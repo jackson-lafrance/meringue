@@ -428,7 +428,7 @@ Supported selectors:
 merged, errored
 ```
 
-- `merged` checks tracked GitHub PR URLs reported by workers and prunes issue bundles whose PR is confirmed merged.
+- `merged` checks tracked GitHub PR URLs reported by workers and prunes only issue bundles with at least one confirmed merged PR, no active workers, and no tracked PRs that are still open, closed without merge, or unknown.
 - `errored` prunes errored issue bundles that have no active workers, plus standalone errored heads.
 
 Example:
