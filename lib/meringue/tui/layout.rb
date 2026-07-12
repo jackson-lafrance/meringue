@@ -34,7 +34,7 @@ module Meringue
           metrics.fetch(:top_y),
           metrics.fetch(:sidebar_width),
           metrics.fetch(:top_height),
-          "agents",
+          "agent tree",
           agent_tree_pane.lines(state)
         )
         draw_pane(
@@ -53,8 +53,9 @@ module Meringue
           metrics.fetch(:log_y),
           metrics.fetch(:main_width),
           metrics.fetch(:log_height),
-          "activity",
-          log_pane.lines(state)
+          "kernel logs",
+          log_pane.lines(state),
+          overflow: :tail
         )
         draw_pane(
           canvas,
@@ -127,13 +128,21 @@ module Meringue
         [desired, max_log_height].min
       end
 
-      def draw_pane(canvas, x, y, width, height, title, lines, active: false)
+      def draw_pane(canvas, x, y, width, height, title, lines, active: false, overflow: :head)
         border_style = active ? Style::BORDER_ACTIVE : Style::BORDER
         canvas.draw_box(x, y, width, height, title: title, style: border_style, title_style: Style::PANEL_TITLE)
         content_width = width - 4
         content_height = height - 2
         return if content_width <= 0 || content_height <= 0
 
+        if overflow == :tail
+          draw_tail_content(canvas, x, y, content_width, content_height, lines)
+        else
+          draw_head_content(canvas, x, y, height, content_width, content_height, lines)
+        end
+      end
+
+      def draw_head_content(canvas, x, y, height, content_width, content_height, lines)
         has_overflow = lines.length > content_height
         visible_capacity = has_overflow ? [content_height - 1, 0].max : content_height
         lines.first(visible_capacity).each_with_index do |line, index|
@@ -144,6 +153,23 @@ module Meringue
 
         overflow = "… #{lines.length - visible_capacity} more"
         canvas.write(x + 2, y + height - 2, overflow.ljust(content_width), max_width: content_width, style: Style::DIM)
+      end
+
+      def draw_tail_content(canvas, x, y, content_width, content_height, lines)
+        has_overflow = lines.length > content_height
+        unless has_overflow
+          lines.each_with_index do |line, index|
+            draw_line(canvas, x + 2, y + 1 + index, content_width, line)
+          end
+          return
+        end
+
+        visible_capacity = [content_height - 1, 0].max
+        hidden_count = lines.length - visible_capacity
+        canvas.write(x + 2, y + 1, "… #{hidden_count} earlier".ljust(content_width), max_width: content_width, style: Style::DIM)
+        lines.last(visible_capacity).each_with_index do |line, index|
+          draw_line(canvas, x + 2, y + 2 + index, content_width, line)
+        end
       end
 
       def draw_line(canvas, x, y, width, line)

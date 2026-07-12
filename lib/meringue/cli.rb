@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "optparse"
 
 module Meringue
   class CLI
@@ -37,9 +38,13 @@ module Meringue
     end
 
     def run
-      case argv.first
-      when nil, "tui", "demo"
-        App.new(input: input, out: out, err: err).run
+      command = argv.shift
+
+      case command
+      when nil, "tui"
+        run_tui(default_state_path: State::Store::DEFAULT_PATH)
+      when "demo"
+        run_tui(default_state_path: App::DEMO_STATE_PATH)
       when "-v", "--version", "version"
         out.puts VERSION
         0
@@ -56,7 +61,7 @@ module Meringue
       when "fake-head-loop"
         run_fake_head_loop
       else
-        err.puts "Unknown command: #{argv.first}"
+        err.puts "Unknown command: #{command}"
         print_help
         1
       end
@@ -65,6 +70,33 @@ module Meringue
     private
 
     attr_reader :argv, :input, :out, :err
+
+    def run_tui(default_state_path:)
+      options = parse_tui_options(default_state_path: default_state_path)
+      return 1 unless options
+
+      App.new(input: input, out: out, err: err, state_path: options.fetch(:state_path)).run
+    end
+
+    def parse_tui_options(default_state_path:)
+      options = { state_path: default_state_path }
+      parser = OptionParser.new do |option_parser|
+        option_parser.on("--state PATH", "Read Meringue state from PATH.") do |path|
+          options[:state_path] = path
+        end
+      end
+
+      parser.parse!(argv)
+      if argv.any?
+        err.puts "Unexpected argument(s): #{argv.join(" ")}"
+        return nil
+      end
+
+      options
+    rescue OptionParser::ParseError => e
+      err.puts e.message
+      nil
+    end
 
     def run_pi_head_loop
       head_client = pi_harness_client(extra_args: PI_HEAD_EXTRA_ARGS)
@@ -119,9 +151,10 @@ module Meringue
         Meringue #{VERSION}
 
         Usage:
-          meringue                  # run the fake-state TUI demo
-          meringue tui              # run the fake-state TUI demo
-          meringue demo             # run the fake-state TUI demo
+          meringue                  # display ~/.meringue/state.json in the read-only TUI
+          meringue tui              # display ~/.meringue/state.json in the read-only TUI
+          meringue tui --state PATH # display a specific Meringue state JSON file
+          meringue demo             # display the fake demo state fixture
           meringue demo-state       # print the fake demo state fixture
           meringue reset-state      # reset ~/.meringue/state.json to an empty Meringue state
           meringue head-loop        # run the manual real Pi head -> kernel -> worker loop
@@ -130,7 +163,7 @@ module Meringue
           meringue --help           # print this help
 
         TUI controls:
-          q, Esc, or Ctrl-C         # quit the rendering demo
+          q, Esc, or Ctrl-C         # quit the read-only TUI
       HELP
     end
   end

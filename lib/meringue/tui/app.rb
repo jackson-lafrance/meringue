@@ -18,8 +18,9 @@ module Meringue
         layout.render(state, width: width, height: height, color: color)
       end
 
-      def run(state: State::Models.empty_state)
-        return render_once(state) unless terminal.interactive?
+      def run(state: nil, state_provider: nil)
+        state_provider ||= -> { state || State::Models.empty_state }
+        return render_once(state_provider.call) unless terminal.interactive?
 
         terminal.with_screen do
           terminal.raw do
@@ -27,7 +28,7 @@ module Meringue
 
             loop do
               width, height = terminal.dimensions
-              frame = render(state, width: width, height: height, color: true)
+              frame = render(state_provider.call, width: width, height: height, color: true)
               if frame != last_frame
                 terminal.write_frame(frame)
                 last_frame = frame

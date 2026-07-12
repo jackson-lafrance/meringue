@@ -38,7 +38,7 @@ module Meringue
           append_heads(output, agents)
           append_projects(output, projects, issues, agents)
           append_questions(output, questions)
-          output.empty? ? [["No AgentTree data yet.", Style::MUTED]] : output
+          output.empty? ? [[["No AgentTree data yet.", Style::MUTED]]] : output
         end
 
         private

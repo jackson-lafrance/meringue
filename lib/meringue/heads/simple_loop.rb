@@ -135,11 +135,18 @@ module Meringue
       def wait_for_worker(agent)
         session_ref = session_ref_from_agent(agent)
         events = engine.harness_client.wait_for_settled(session_ref, timeout: worker_wait_timeout)
+        assistant_text = safe_last_assistant_text(session_ref)
+        completion_result = engine.mark_worker_completed(
+          agent_id: agent.fetch("id"),
+          harness_events: events,
+          last_assistant_text: assistant_text
+        )
         {
           "agent_id" => agent.fetch("id"),
           "status" => "settled",
           "event_count" => events.length,
-          "last_assistant_text" => last_assistant_text(session_ref)
+          "last_assistant_text" => assistant_text,
+          "completion_result" => completion_result
         }
       rescue StandardError => e
         {
@@ -172,10 +179,12 @@ module Meringue
         }
       end
 
-      def last_assistant_text(session_ref)
+      def safe_last_assistant_text(session_ref)
         return nil unless engine.harness_client.respond_to?(:last_assistant_text)
 
         engine.harness_client.last_assistant_text(session_ref)
+      rescue StandardError
+        nil
       end
 
       def wait_for_workers?
