@@ -37,6 +37,11 @@ module Meringue
           workspace_manager: workspace_manager,
           cwd: @cwd
         )
+        @prompt_loop = PromptLoop.new(
+          engine: @engine,
+          wait_for_workers: wait_for_workers,
+          worker_wait_timeout: worker_wait_timeout
+        )
       end
 
       def run
@@ -83,44 +88,10 @@ module Meringue
       private
 
       attr_reader :input, :out, :err, :router, :runner_name, :store, :engine, :cwd,
-                  :worker_wait_timeout
+                  :worker_wait_timeout, :prompt_loop
 
       def handle_natural_language(route)
-        spawn_command = route.fetch("commands").first
-        spawn_result = engine.apply(spawn_command)
-        payload = {
-          "event" => "head_loop_iteration",
-          "summary" => "Spawned a head, collected its HeadResult, and asked the kernel to apply the proposed commands.",
-          "state_mutated" => false,
-          "route" => route,
-          "spawn_head_result" => spawn_result
-        }
-
-        unless spawn_result.fetch("status", nil) == "accepted"
-          payload["summary"] = "Head spawn failed or was rejected; proposed commands were not applied."
-          payload["state_summary"] = state_summary
-          return payload
-        end
-
-        head_result = head_result_from(spawn_result)
-        unless head_result
-          payload["summary"] = "Head completed but did not return a stored HeadResult; proposed commands were not applied."
-          payload["state_summary"] = state_summary
-          return payload
-        end
-
-        apply_result = engine.apply(
-          "type" => "ApplyHeadResult",
-          "payload" => {
-            "head_id" => spawn_result.fetch("target_id"),
-            "head_result" => head_result
-          }
-        )
-        payload["apply_head_result"] = apply_result
-        payload["worker_wait_results"] = wait_for_spawned_workers(apply_result)
-        payload["state_mutated"] = apply_result.fetch("status", nil) == "accepted"
-        payload["state_summary"] = state_summary
-        payload
+        prompt_loop.handle_prompt(route.fetch("commands").first.dig("payload", "user_message"), route: route)
       end
 
       def wait_for_spawned_workers(apply_result)
