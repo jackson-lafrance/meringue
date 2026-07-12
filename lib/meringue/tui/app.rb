@@ -32,6 +32,7 @@ module Meringue
         @messages = []
         @next_message_id = 0
         @pending_count = 0
+        @conversation_event_keys = {}
         @chat_mutex = Mutex.new
       end
 
@@ -425,22 +426,30 @@ module Meringue
       def update_message_from_event(message_id, event)
         case event.fetch("event", nil)
         when "head_completed"
+          remember_conversation_event(head_completed_key(event.fetch("head_id", nil)))
           update_message(message_id, text: head_completed_text(event), status: "applying commands")
         when "head_result_applied"
           append_head_result_applied_summary(message_id, event)
         when "slash_command_applied"
           append_to_message(message_id, slash_command_text(event.fetch("command_results", []) || []), status: nil)
         when "worker_wait_started"
+          remember_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
           append_to_message(message_id, "Waiting for #{event.fetch("agent_id", "worker")}…", status: "workers running")
         when "worker_completed"
+          remember_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
           append_to_message(message_id, worker_completed_line(event), status: "workers running")
         when "worker_wait_failed"
+          forget_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
           append_to_message(message_id, "#{event.fetch("agent_id", "worker")} wait failed.", status: "worker wait failed")
         end
       end
 
       def conversation_text_for(result)
-        return slash_command_text(result.fetch("command_results", []) || []) if result.fetch("event", nil) == "slash_command_applied"
+        if result.fetch("event", nil) == "slash_command_applied"
+          lines = [slash_command_text(result.fetch("command_results", []) || [])]
+          lines.concat(worker_summary_lines(result.fetch("worker_wait_results", []) || []))
+          return lines.reject { |line| line.to_s.empty? }.join("\n")
+        end
 
         spawn_result = result.fetch("spawn_head_result", {}) || {}
         apply_result = result.fetch("apply_head_result", {}) || {}
@@ -564,7 +573,89 @@ module Meringue
 
       def compose_state(state_provider, input_buffer, slash_suggestion_index = 0, input_cursor = nil)
         state = state_provider.call || State::Models.empty_state
+        sync_state_conversation!(state)
         state.merge("_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor))
+      end
+
+      def sync_state_conversation!(state)
+        sync_polled_head_updates!(state)
+        sync_worker_completion_updates!(state)
+      end
+
+      def sync_polled_head_updates!(state)
+        Array(state.fetch("agents", [])).each do |agent|
+          next unless agent.fetch("type", nil) == "head"
+
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          head_result = metadata["head_result"]
+          next unless metadata["head_result_applied_at"] && head_result.is_a?(Hash)
+
+          append_message_once(
+            head_completed_key(agent.fetch("id", nil)),
+            "meringue",
+            format_head_result(agent.fetch("id", "head"), head_result)
+          )
+        end
+      end
+
+      def sync_worker_completion_updates!(state)
+        Array(state.fetch("agents", [])).each do |agent|
+          next unless agent.fetch("type", nil) == "worker"
+          next unless agent.fetch("status", nil) == "completed"
+
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          next unless metadata["completed_at"] || Array(metadata["reported_pr_urls"]).any?
+
+          append_message_once(
+            worker_completed_key(agent.fetch("id", nil)),
+            "meringue",
+            worker_completed_text_from_agent(agent)
+          )
+        end
+      end
+
+      def worker_completed_text_from_agent(agent)
+        agent_id = agent.fetch("id", "worker")
+        branch = agent.fetch("workspace_branch", nil)
+        branch_text = branch.to_s.empty? ? "" : " on #{branch}"
+        pr_urls = Array((agent.fetch("harness_metadata", {}) || {})["reported_pr_urls"]).compact
+        return "#{agent_id} completed#{branch_text}." if pr_urls.empty?
+
+        [
+          "#{agent_id} completed#{branch_text} and reported PR#{pr_urls.length == 1 ? "" : "s"}:",
+          *pr_urls.map { |url| "PR: #{url}" }
+        ].join("\n")
+      end
+
+      def head_completed_key(head_id)
+        "head_completed:#{head_id}"
+      end
+
+      def worker_completed_key(agent_id)
+        "worker_completed:#{agent_id}"
+      end
+
+      def remember_conversation_event(key)
+        return if key.to_s.empty?
+
+        @chat_mutex.synchronize { @conversation_event_keys[key] = true }
+      end
+
+      def forget_conversation_event(key)
+        return if key.to_s.empty?
+
+        @chat_mutex.synchronize { @conversation_event_keys.delete(key) }
+      end
+
+      def append_message_once(key, role, text, status: nil)
+        return if key.to_s.empty? || text.to_s.empty?
+
+        @chat_mutex.synchronize do
+          return if @conversation_event_keys[key]
+
+          @conversation_event_keys[key] = true
+          append_message_unlocked(role, text, status: status)
+        end
       end
 
       def chat_snapshot(input_buffer, slash_suggestion_index = 0, input_cursor = nil)
@@ -580,16 +671,18 @@ module Meringue
       end
 
       def append_message(role, text, status: nil)
-        @chat_mutex.synchronize do
-          @next_message_id += 1
-          @messages << {
-            "id" => @next_message_id,
-            "role" => role,
-            "text" => text,
-            "status" => status
-          }.compact
-          @next_message_id
-        end
+        @chat_mutex.synchronize { append_message_unlocked(role, text, status: status) }
+      end
+
+      def append_message_unlocked(role, text, status: nil)
+        @next_message_id += 1
+        @messages << {
+          "id" => @next_message_id,
+          "role" => role,
+          "text" => text,
+          "status" => status
+        }.compact
+        @next_message_id
       end
 
       def update_message(id, text:, status: nil)
