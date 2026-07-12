@@ -34,6 +34,28 @@ module Meringue
           cwd: cwd
         )
 
+        session_ref = spawn_head_session(
+          user_message: user_message,
+          snapshot: snapshot,
+          context: context,
+          question_id: question_id
+        )
+
+        harness_client.wait_for_settled(session_ref, timeout: timeout)
+        parse_head_result_text(harness_client.last_assistant_text(session_ref).to_s)
+      ensure
+        harness_client.kill_session(session_ref) if session_ref
+      end
+
+      def spawn_head_session(user_message:, snapshot:, context: nil, question_id: nil)
+        context ||= Context.new(
+          head_id: "H?",
+          user_message: user_message,
+          snapshot: snapshot,
+          question_id: question_id,
+          cwd: cwd
+        )
+
         session_ref = harness_client.spawn_session(
           kind: "head",
           cwd: cwd,
@@ -42,14 +64,13 @@ module Meringue
           session_name: session_name(context)
         )
 
-        session_ref = harness_client.prompt_session(session_ref, head_prompt(context), mode: "normal")
-        harness_client.wait_for_settled(session_ref, timeout: timeout)
-        raw_output = harness_client.last_assistant_text(session_ref).to_s
+        harness_client.prompt_session(session_ref, head_prompt(context), mode: "normal")
+      end
+
+      def parse_head_result_text(raw_output)
         result = parse_head_result(raw_output)
         validate_head_result!(result, raw_output)
         result
-      ensure
-        harness_client.kill_session(session_ref) if session_ref
       end
 
       private

@@ -206,7 +206,7 @@ module Meringue
         when "worker_wait_started"
           append_to_message(message_id, "Waiting for #{event.fetch("agent_id", "worker")}…", status: "workers running")
         when "worker_completed"
-          append_to_message(message_id, "#{event.fetch("agent_id", "worker")} completed.", status: "workers running")
+          append_to_message(message_id, worker_completed_line(event), status: "workers running")
         when "worker_wait_failed"
           append_to_message(message_id, "#{event.fetch("agent_id", "worker")} wait failed.", status: "worker wait failed")
         end
@@ -310,7 +310,20 @@ module Meringue
         completed_workers = worker_wait_results.select { |worker| worker.fetch("status", nil) == "settled" }
         return [] if completed_workers.empty?
 
-        ["Completed workers: #{completed_workers.map { |worker| worker.fetch("agent_id", nil) }.compact.join(", ")}"]
+        lines = ["Completed workers: #{completed_workers.map { |worker| worker.fetch("agent_id", nil) }.compact.join(", ")}"]
+        pr_lines = completed_workers.flat_map do |worker|
+          Array(worker.fetch("pr_urls", [])).map do |url|
+            "#{worker.fetch("agent_id", "worker")} PR: #{url}"
+          end
+        end
+        lines.concat(pr_lines)
+      end
+
+      def worker_completed_line(event)
+        pr_urls = Array(event.fetch("pr_urls", [])).compact
+        return "#{event.fetch("agent_id", "worker")} completed." if pr_urls.empty?
+
+        "#{event.fetch("agent_id", "worker")} completed and reported PR#{pr_urls.length == 1 ? "" : "s"}: #{pr_urls.join(", ")}"
       end
 
       def worker_wait_status(event)

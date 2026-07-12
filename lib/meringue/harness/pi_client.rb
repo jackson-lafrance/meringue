@@ -127,19 +127,26 @@ module Meringue
       end
 
       def get_state(session_ref)
-        process = process_for(session_ref)
-        state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
-        build_session_ref(
-          process,
-          state,
-          kind: metadata_value(session_ref, "kind"),
-          cwd: session_ref.fetch("cwd", process.cwd),
-          session_name: metadata_value(session_ref, "session_name") || state["sessionName"]
-        )
+        process = process_for(session_ref, required: false)
+        if process
+          state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
+          return build_session_ref(
+            process,
+            state,
+            kind: metadata_value(session_ref, "kind"),
+            cwd: session_ref.fetch("cwd", process.cwd),
+            session_name: metadata_value(session_ref, "session_name") || state["sessionName"]
+          )
+        end
+
+        build_session_ref_from_file(session_ref)
       end
 
       def read_events(session_ref)
-        process_for(session_ref).drain_events
+        process = process_for(session_ref, required: false)
+        return [] unless process
+
+        process.drain_events
       end
 
       def attach_session(session_ref)
@@ -175,9 +182,13 @@ module Meringue
       end
 
       def last_assistant_text(session_ref)
-        process = process_for(session_ref)
-        data = rpc_data(process.request({ "type" => "get_last_assistant_text" }, timeout: command_timeout))
-        data["text"]
+        process = process_for(session_ref, required: false)
+        if process
+          data = rpc_data(process.request({ "type" => "get_last_assistant_text" }, timeout: command_timeout))
+          return data["text"]
+        end
+
+        session_file_summary(session_ref).fetch("last_assistant_text", nil)
       end
 
       private
@@ -224,6 +235,121 @@ module Meringue
             "stderr_tail" => process.stderr_tail
           }
         }
+      end
+
+      def build_session_ref_from_file(session_ref)
+        summary = session_file_summary(session_ref)
+        if !summary.fetch("completed", false) && !summary.fetch("process_alive", false)
+          raise ProcessExitedError,
+                "Pi session #{summary.fetch("session_file", nil) || summary.fetch("session_id", nil)} has no live process and no completed assistant response"
+        end
+
+        pi_state = {
+          "sessionId" => summary.fetch("session_id", nil),
+          "sessionFile" => summary.fetch("session_file", nil),
+          "sessionName" => summary.fetch("session_name", nil),
+          "isStreaming" => !summary.fetch("completed", false),
+          "cwd" => summary.fetch("cwd", nil),
+          "fromSessionFile" => true,
+          "processAlive" => summary.fetch("process_alive", false),
+          "completed" => summary.fetch("completed", false),
+          "lastStopReason" => summary.fetch("last_stop_reason", nil)
+        }
+
+        session_ref.merge(
+          "harness" => "pi",
+          "pid" => session_ref["pid"] || session_ref[:pid],
+          "cwd" => summary.fetch("cwd", nil) || session_ref["cwd"] || session_ref[:cwd],
+          "session_id" => summary.fetch("session_id", nil) || session_ref["session_id"] || session_ref[:session_id],
+          "session_file" => summary.fetch("session_file", nil),
+          "is_streaming" => !summary.fetch("completed", false),
+          "last_event_at" => summary.fetch("last_event_at", nil),
+          "metadata" => metadata_with(
+            session_ref,
+            "session_name" => summary.fetch("session_name", nil) || metadata_value(session_ref, "session_name"),
+            "pi_state" => pi_state,
+            "session_file_summary" => summary,
+            "reconnected_from_session_file" => true
+          )
+        )
+      end
+
+      def session_file_summary(session_ref)
+        path = session_file_path(session_ref)
+        raise ProcessNotFoundError, "Pi session file is missing for #{session_ref.inspect}" unless path && File.file?(path)
+
+        summary = {
+          "session_file" => path,
+          "session_id" => session_ref["session_id"] || session_ref[:session_id],
+          "process_alive" => process_alive?(session_ref["pid"] || session_ref[:pid]),
+          "completed" => false,
+          "last_assistant_text" => nil,
+          "last_stop_reason" => nil,
+          "last_event_at" => nil,
+          "cwd" => session_ref["cwd"] || session_ref[:cwd],
+          "session_name" => metadata_value(session_ref, "session_name")
+        }
+        last_assistant = nil
+
+        File.foreach(path) do |line|
+          record = JSON.parse(line)
+          summary["last_event_at"] = record["timestamp"] if record["timestamp"]
+          if record["type"] == "session"
+            summary["session_id"] ||= record["id"]
+            summary["cwd"] ||= record["cwd"]
+          elsif record["type"] == "session_info"
+            summary["session_name"] = record["name"] if record["name"]
+          elsif record["type"] == "message" && record.dig("message", "role") == "assistant"
+            last_assistant = record
+            text = assistant_text_from_message(record)
+            summary["last_assistant_text"] = text if present?(text)
+            summary["last_stop_reason"] = record["stopReason"] if record.key?("stopReason")
+          end
+        rescue JSON::ParserError
+          next
+        end
+
+        summary["completed"] = assistant_message_completed?(last_assistant)
+        summary
+      end
+
+      def session_file_path(session_ref)
+        path = session_ref["session_file"] || session_ref[:session_file]
+        return File.expand_path(path) if present?(path)
+
+        session_id = session_ref["session_id"] || session_ref[:session_id]
+        return nil unless present?(session_id) && session_dir
+
+        Dir[File.join(File.expand_path(session_dir), "*#{session_id}*.jsonl")].max_by { |candidate| File.mtime(candidate) }
+      end
+
+      def assistant_text_from_message(record)
+        Array(record.dig("message", "content")).filter_map do |part|
+          part["text"] if part.is_a?(Hash) && part["type"] == "text"
+        end.join("\n").strip
+      end
+
+      def assistant_message_completed?(record)
+        return false unless record
+
+        stop_reason = record["stopReason"]
+        return false if stop_reason.to_s == "toolUse"
+        return true if present?(stop_reason)
+
+        Array(record.dig("message", "content")).any? do |part|
+          part.is_a?(Hash) && part["type"] == "text" && present?(part["text"])
+        end
+      end
+
+      def process_alive?(pid)
+        return false unless present?(pid)
+
+        Process.kill(0, pid.to_i)
+        true
+      rescue Errno::ESRCH, TypeError, ArgumentError
+        false
+      rescue Errno::EPERM
+        true
       end
 
       def rpc_data(response, allow_nil_data: false)

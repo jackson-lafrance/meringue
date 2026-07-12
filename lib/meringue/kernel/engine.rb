@@ -10,7 +10,14 @@ module Meringue
       WORKER_SYSTEM_PROMPT = <<~PROMPT.freeze
         You are a Meringue worker agent. Work only on the assigned issue and workspace.
         Follow the user's prompt and the repository instructions in your working directory.
+
+        You do not directly interface with the user, so do not ask for permission before taking normal implementation or delivery actions requested by the assigned issue. You may edit files, create or switch to a suitable task branch or worktree, commit, push, and open or update pull requests when the assigned issue asks for those actions.
+
+        Before editing, inspect the repository status and active instructions. Avoid overwriting unrelated active work. Prefer a separate task branch for git-backed projects, commit only the assigned issue's changes, and open a pull request when requested and the environment allows.
+
+        Report true blockers instead of asking for routine approval: missing credentials, authentication or authorization failures, missing or invalid remotes, branch/worktree collisions, unrelated uncommitted work that would be overwritten, or unsafe/destructive operations.
       PROMPT
+      PULL_REQUEST_URL_PATTERN = /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+(?:[\/?#][^\s<>"'\])}]*)?/.freeze
 
       COMMAND_ALIASES = {
         "add_project" => "AddProject",
@@ -26,6 +33,7 @@ module Meringue
         "help" => "Help",
         "get_state" => "GetState",
         "list_questions" => "ListQuestions",
+        "reconcile_sessions" => "ReconcileSessions",
         "clear" => "ClearState",
         "clear_state" => "ClearState",
         "list_all" => "ListAll"
@@ -43,18 +51,21 @@ module Meringue
         ["/questions", "List questions and their statuses."],
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."]
       ].freeze
+      TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
 
       attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
                      head_runner: Heads::FakeRunner.new,
                      workspace_manager: Workspace::Manager.new,
-                     cwd: Dir.pwd)
+                     cwd: Dir.pwd,
+                     async_heads: false)
         @store = store
         @harness_client = harness_client
         @head_runner = head_runner
         @workspace_manager = workspace_manager
         @cwd = File.expand_path(cwd)
+        @async_heads = async_heads
         @state_mutex = Monitor.new
         @head_result_mutex = Mutex.new
       end
@@ -123,6 +134,8 @@ module Meringue
           ask_question(command_id, command_type, payload)
         when "AnswerQuestion"
           answer_question(command_id, command_type, payload)
+        when "ReconcileSessions"
+          reconcile_sessions(command_id: command_id, command_type: command_type)
         when "ClearState"
           clear_state(command_id, command_type)
         else
@@ -149,6 +162,9 @@ module Meringue
           unless agent.fetch("type", nil) == "worker"
             return rejected_result(nil, "MarkWorkerCompleted", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"])
           end
+          if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+            return accepted_result(nil, "MarkWorkerCompleted", agent.fetch("id"), "Worker #{agent.fetch("id")} is already #{agent.fetch("status")}.", agent, [])
+          end
 
           now = timestamp
           agent["status"] = "completed"
@@ -165,19 +181,27 @@ module Meringue
           update_issue_status_from_workers!(state, issue, now) if issue
           update_project_status_from_issues!(state, project, now) if project
 
+          pr_urls = worker_pr_urls(last_assistant_text: last_assistant_text, harness_events: harness_events)
+          agent["harness_metadata"]["reported_pr_urls"] = pr_urls unless pr_urls.empty?
+
+          completion_details = {
+            "issue_id" => agent.fetch("issue_id", nil),
+            "project_id" => agent.fetch("project_id", nil),
+            "workspace_branch" => agent.fetch("workspace_branch", nil),
+            "settled_event_count" => Array(harness_events).length,
+            "last_assistant_text" => present_string(last_assistant_text)
+          }.compact
+          completion_details["pr_urls"] = pr_urls unless pr_urls.empty?
+
           log_ids = append_log(
             state,
             source_type: "worker",
             source_id: agent.fetch("id"),
             level: "info",
             message: "Worker #{agent.fetch("id")} completed.",
-            details: {
-              "issue_id" => agent.fetch("issue_id", nil),
-              "project_id" => agent.fetch("project_id", nil),
-              "settled_event_count" => Array(harness_events).length,
-              "last_assistant_text" => present_string(last_assistant_text)
-            }.compact
+            details: completion_details
           )
+          log_ids.concat(append_worker_pr_log(state, agent, pr_urls)) unless pr_urls.empty?
           touch_state!(state, now)
           store.save(state)
 
@@ -205,6 +229,29 @@ module Meringue
           store.save(state)
           log_ids
         end
+      end
+
+      def reconcile_sessions(command_id: nil, command_type: "ReconcileSessions")
+        agents = synchronized_state do
+          normalized_state.fetch("agents").select { |agent| reconcile_candidate?(agent) }.map { |agent| deep_copy(agent) }
+        end
+
+        poll_results = agents.map { |agent| poll_agent_session(agent) }
+        applied_results = poll_results.map { |poll_result| apply_poll_result(poll_result) }
+        accepted_result(
+          command_id,
+          command_type,
+          nil,
+          "Reconciled #{agents.length} Pi-backed agent session(s).",
+          {
+            "checked_count" => agents.length,
+            "changed_count" => applied_results.count { |result| result.fetch("changed", false) },
+            "poll_results" => applied_results
+          },
+          applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }.uniq
+        )
+      rescue StandardError => e
+        failed_result(command_id, command_type, "Session reconciliation failed: #{e.message}", [e.class.name, e.message])
       end
 
       private
@@ -372,6 +419,43 @@ module Meringue
             "log_ids" => log_ids,
             "snapshot" => snapshot
           }
+        end
+
+        if async_heads? && head_runner.respond_to?(:spawn_head_session)
+          session_ref = head_runner.spawn_head_session(
+            user_message: user_message.to_s,
+            snapshot: started.fetch("snapshot"),
+            question_id: present_string(question_id),
+            context: started.fetch("context")
+          )
+
+          return synchronized_state do
+            state = normalized_state
+            agent = find_agent(state, head_id)
+            raise "Head #{head_id} disappeared before its session could be recorded." unless agent
+
+            merge_session_ref_into_agent!(agent, session_ref)
+            agent["status"] = "working"
+            agent["updated_at"] = timestamp
+            log_ids = started.fetch("log_ids")
+            log_ids.concat(append_log(
+              state,
+              source_type: "harness",
+              source_id: head_id,
+              level: "info",
+              message: "Started #{agent.fetch("harness")} head session for #{head_id}; polling will apply its HeadResult when it settles.",
+              details: {
+                "pid" => agent.fetch("pid", nil),
+                "harness_session_id" => agent.fetch("harness_session_id", nil),
+                "harness_session_file" => agent.fetch("harness_session_file", nil),
+                "is_streaming" => agent.fetch("harness_metadata", {}).fetch("is_streaming", nil)
+              }
+            ))
+            touch_state!(state)
+            store.save(state)
+
+            accepted_result(command_id, command_type, head_id, "Spawned head #{head_id}; polling will apply its HeadResult when complete.", agent, log_ids)
+          end
         end
 
         head_result = head_runner.run(
@@ -1294,6 +1378,10 @@ module Meringue
         nil
       end
 
+      def async_heads?
+        @async_heads
+      end
+
       def synchronized_state(&block)
         @state_mutex.synchronize(&block)
       end
@@ -1384,6 +1472,46 @@ module Meringue
         max_numeric_suffix(state.fetch("agents").select { |agent| agent.fetch("issue_id", nil) == issue_id }, /^#{Regexp.escape(issue_id)}-W(\d+)$/)
       end
 
+      def append_worker_pr_log(state, agent, pr_urls)
+        branch = agent.fetch("workspace_branch", nil)
+        branch_text = present_string(branch) ? " on #{branch}" : ""
+        append_log(
+          state,
+          source_type: "worker",
+          source_id: agent.fetch("id"),
+          level: "info",
+          message: "Worker #{agent.fetch("id")} reported PR#{pr_urls.length == 1 ? "" : "s"}#{branch_text}: #{pr_urls.join(", ")}",
+          details: {
+            "issue_id" => agent.fetch("issue_id", nil),
+            "project_id" => agent.fetch("project_id", nil),
+            "workspace_branch" => branch,
+            "workspace_path" => agent.fetch("workspace_path", nil),
+            "pr_urls" => pr_urls
+          }.compact
+        )
+      end
+
+      def worker_pr_urls(last_assistant_text:, harness_events:)
+        sources = [present_string(last_assistant_text)]
+        Array(harness_events).each do |event|
+          sources << serializable_text(event)
+        end
+
+        sources.compact.flat_map { |source| extract_pull_request_urls(source) }.uniq
+      end
+
+      def extract_pull_request_urls(text)
+        text.to_s.scan(PULL_REQUEST_URL_PATTERN).map do |url|
+          url.sub(/[.,;:]+\z/, "")
+        end
+      end
+
+      def serializable_text(value)
+        JSON.generate(value)
+      rescue StandardError
+        value.inspect
+      end
+
       def append_log(state, source_type:, source_id:, level:, message:, details: {})
         raise ArgumentError, "invalid log source_type: #{source_type}" unless State::Models::LOG_SOURCE_TYPES.include?(source_type)
         raise ArgumentError, "invalid log level: #{level}" unless State::Models::LOG_LEVELS.include?(level)
@@ -1452,16 +1580,236 @@ module Meringue
       end
 
       def agent_session_ref(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
         {
           "harness" => agent.fetch("harness", nil),
           "pid" => agent.fetch("pid", nil),
-          "cwd" => agent.fetch("workspace_path", nil),
+          "cwd" => metadata.fetch("cwd", agent.fetch("workspace_path", nil)),
           "session_id" => agent.fetch("harness_session_id", nil),
           "session_file" => agent.fetch("harness_session_file", nil),
-          "is_streaming" => agent.fetch("harness_metadata", {}).fetch("is_streaming", false),
-          "last_event_at" => agent.fetch("harness_metadata", {}).fetch("last_event_at", nil),
-          "metadata" => agent.fetch("harness_metadata", {}) || {}
+          "is_streaming" => metadata.fetch("is_streaming", false),
+          "last_event_at" => metadata.fetch("last_event_at", nil),
+          "metadata" => metadata
         }
+      end
+
+      def reconcile_candidate?(agent)
+        agent.fetch("harness", nil) == "pi" &&
+          !TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil)) &&
+          (present_string(agent.fetch("pid", nil)) ||
+            present_string(agent.fetch("harness_session_id", nil)) ||
+            present_string(agent.fetch("harness_session_file", nil)))
+      end
+
+      def poll_agent_session(agent)
+        client = harness_client_for_agent(agent)
+        session_ref = agent_session_ref(agent)
+        state_ref = client.get_state(session_ref)
+        events = client.respond_to?(:read_events) ? client.read_events(state_ref) : []
+        assistant_text = completed_session?(state_ref) ? safe_last_assistant_text(client, state_ref) : nil
+
+        {
+          "agent_id" => agent.fetch("id"),
+          "agent_type" => agent.fetch("type", nil),
+          "state" => completed_session?(state_ref) ? "completed" : "working",
+          "session_ref" => state_ref,
+          "events" => events,
+          "last_assistant_text" => assistant_text
+        }
+      rescue StandardError => e
+        {
+          "agent_id" => agent.fetch("id", nil),
+          "agent_type" => agent.fetch("type", nil),
+          "state" => "errored",
+          "error" => { "class" => e.class.name, "message" => e.message }
+        }
+      end
+
+      def apply_poll_result(poll_result)
+        case poll_result.fetch("state", nil)
+        when "working"
+          refresh_agent_session_state(poll_result)
+        when "completed"
+          if poll_result.fetch("agent_type", nil) == "head"
+            complete_polled_head(poll_result)
+          else
+            result = mark_worker_completed(
+              agent_id: poll_result.fetch("agent_id"),
+              harness_events: poll_result.fetch("events", []),
+              last_assistant_text: poll_result.fetch("last_assistant_text", nil)
+            )
+            poll_result.merge("changed" => result.fetch("status", nil) == "accepted", "completion_result" => result,
+                              "log_entry_ids" => result.fetch("log_entry_ids", []))
+          end
+        when "errored"
+          mark_agent_errored_from_poll(poll_result)
+        else
+          poll_result.merge("changed" => false, "log_entry_ids" => [])
+        end
+      end
+
+      def refresh_agent_session_state(poll_result)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, poll_result.fetch("agent_id"))
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless agent
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+
+          merge_session_ref_into_agent!(agent, poll_result.fetch("session_ref", {}))
+          agent["status"] = "working"
+          agent["updated_at"] = timestamp
+          touch_state!(state)
+          store.save(state)
+          poll_result.merge("changed" => false, "log_entry_ids" => [])
+        end
+      end
+
+      def complete_polled_head(poll_result)
+        head_result = if head_runner.respond_to?(:parse_head_result_text)
+                        head_runner.parse_head_result_text(poll_result.fetch("last_assistant_text", nil).to_s)
+                      else
+                        JSON.parse(poll_result.fetch("last_assistant_text", nil).to_s)
+                      end
+        apply_result = @head_result_mutex.synchronize do
+          apply_head_result(
+            nil,
+            "ApplyHeadResult",
+            "head_id" => poll_result.fetch("agent_id"),
+            "head_result" => head_result
+          )
+        end
+        log_ids = record_polled_head_completion(poll_result, head_result, apply_result)
+        kill_completed_head_session(poll_result.fetch("session_ref", {}))
+        poll_result.merge(
+          "changed" => apply_result.fetch("status", nil) == "accepted",
+          "head_result" => head_result,
+          "apply_result" => apply_result,
+          "log_entry_ids" => (apply_result.fetch("log_entry_ids", []) + log_ids).uniq
+        )
+      rescue StandardError => e
+        mark_agent_errored_from_poll(
+          poll_result.merge(
+            "state" => "errored",
+            "error" => { "class" => e.class.name, "message" => e.message }
+          )
+        )
+      end
+
+      def record_polled_head_completion(poll_result, head_result, apply_result)
+        synchronized_state do
+          state = normalized_state
+          head = find_agent(state, poll_result.fetch("agent_id"))
+          return [] unless head
+
+          now = timestamp
+          merge_session_ref_into_agent!(head, poll_result.fetch("session_ref", {}))
+          head["status"] = apply_result.fetch("status", nil) == "accepted" ? "completed" : "errored"
+          head["updated_at"] = now
+          head["harness_metadata"] = (head.fetch("harness_metadata", {}) || {}).merge(
+            "completed_at" => now,
+            "head_result" => head_result,
+            "head_result_applied_at" => apply_result.fetch("status", nil) == "accepted" ? now : nil,
+            "head_result_apply_status" => apply_result.fetch("status", nil),
+            "is_streaming" => false
+          ).compact
+          log_ids = append_log(
+            state,
+            source_type: "head",
+            source_id: head.fetch("id"),
+            level: apply_result.fetch("status", nil) == "accepted" ? "info" : "error",
+            message: apply_result.fetch("status", nil) == "accepted" ? "Polled head #{head.fetch("id")} completed and applied its HeadResult." : "Polled head #{head.fetch("id")} completed but its HeadResult was not applied.",
+            details: {
+              "head_result" => head_result,
+              "apply_status" => apply_result.fetch("status", nil),
+              "apply_message" => apply_result.fetch("message", nil)
+            }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          log_ids
+        end
+      end
+
+      def mark_agent_errored_from_poll(poll_result)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, poll_result.fetch("agent_id"))
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless agent
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+
+          now = timestamp
+          agent["status"] = "errored"
+          agent["updated_at"] = now
+          agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+            "is_streaming" => false,
+            "error_class" => poll_result.dig("error", "class"),
+            "error_message" => poll_result.dig("error", "message"),
+            "errored_at" => now
+          ).compact
+
+          if agent.fetch("type", nil) == "worker"
+            issue = find_issue(state, agent.fetch("issue_id", nil))
+            project = issue && find_project(state, issue.fetch("project_id", nil))
+            update_issue_status_from_workers!(state, issue, now) if issue
+            update_project_status_from_issues!(state, project, now) if project
+          end
+
+          log_ids = append_log(
+            state,
+            source_type: agent.fetch("type", nil) == "head" ? "head" : "worker",
+            source_id: agent.fetch("id"),
+            level: "error",
+            message: "#{agent.fetch("type", "Agent").capitalize} #{agent.fetch("id")} errored while reconciling its Pi session.",
+            details: poll_result.fetch("error", {})
+          )
+          touch_state!(state, now)
+          store.save(state)
+          poll_result.merge("changed" => true, "log_entry_ids" => log_ids)
+        end
+      end
+
+      def completed_session?(session_ref)
+        metadata = session_ref.fetch("metadata", {}) || {}
+        pi_state = metadata.fetch("pi_state", {}) || {}
+        return true if pi_state["completed"]
+
+        !session_ref.fetch("is_streaming", false)
+      end
+
+      def safe_last_assistant_text(client, session_ref)
+        return nil unless client.respond_to?(:last_assistant_text)
+
+        client.last_assistant_text(session_ref)
+      rescue StandardError
+        nil
+      end
+
+      def harness_client_for_agent(agent)
+        return head_runner.harness_client if agent.fetch("type", nil) == "head" && head_runner.respond_to?(:harness_client)
+
+        harness_client
+      end
+
+      def merge_session_ref_into_agent!(agent, session_ref)
+        metadata = session_ref.fetch("metadata", {}) || {}
+        agent["harness"] = session_ref.fetch("harness", agent.fetch("harness", nil))
+        agent["pid"] = session_ref.fetch("pid", agent.fetch("pid", nil))
+        agent["harness_session_id"] = session_ref.fetch("session_id", agent.fetch("harness_session_id", nil))
+        agent["harness_session_file"] = session_ref.fetch("session_file", agent.fetch("harness_session_file", nil))
+        agent["workspace_path"] ||= session_ref.fetch("cwd", nil)
+        agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+          metadata,
+          "cwd" => session_ref.fetch("cwd", metadata.fetch("cwd", nil)),
+          "is_streaming" => session_ref.fetch("is_streaming", false),
+          "last_event_at" => session_ref.fetch("last_event_at", nil)
+        ).compact
+      end
+
+      def kill_completed_head_session(session_ref)
+        client = head_runner.respond_to?(:harness_client) ? head_runner.harness_client : harness_client
+        client.kill_session(session_ref) if client.respond_to?(:kill_session)
+      rescue StandardError
+        nil
       end
 
       def payload_has?(hash, *keys)
