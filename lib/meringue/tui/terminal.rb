@@ -108,6 +108,8 @@ module Meringue
         while IO.select([input], nil, nil, ESCAPE_READ_TIMEOUT)
           sequence << input.getch
           return read_bracketed_paste(sequence) if sequence == BRACKETED_PASTE_START
+          break if complete_escape_sequence?(sequence)
+          break if sequence.length >= 16
         end
         sequence
       end
@@ -136,6 +138,13 @@ module Meringue
           text << input.getch
         end
         text
+      end
+
+      def complete_escape_sequence?(sequence)
+        return true if ["\e\r", "\e\n"].include?(sequence)
+        return false unless sequence.start_with?("\e[")
+
+        sequence.length >= 3 && sequence[-1].match?(/[A-Za-z~]/)
       end
 
       def write_interactive_frame(frame)

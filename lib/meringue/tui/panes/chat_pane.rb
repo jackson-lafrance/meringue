@@ -115,7 +115,7 @@ module Meringue
           chars = input_buffer.chars
           cursor = input_cursor.to_i.clamp(0, chars.length)
           chars.insert(cursor, cursor_marker)
-          available_width = width ? [width.to_i - 2, 1].max : chars.length
+          available_width = width ? [width.to_i - 2, 1].max : [chars.length, 1].max
 
           rows = []
           chars.join.split("\n", -1).each do |logical_line|
@@ -129,12 +129,13 @@ module Meringue
 
         def input_line_segments(chunk, first_line:, cursor_marker:)
           prefix = first_line ? "› " : "  "
+          prefix_style = first_line ? Style::ACCENT_BOLD : Style::DIM
           marker_index = chunk.index(cursor_marker)
-          return [[prefix, Style::ACCENT_BOLD], [chunk, Style::TEXT]] unless marker_index
+          return [[prefix, prefix_style], [chunk, Style::TEXT]] unless marker_index
 
           before = chunk[0...marker_index]
           after = chunk[(marker_index + cursor_marker.length)..].to_s
-          segments = [[prefix, Style::ACCENT_BOLD]]
+          segments = [[prefix, prefix_style]]
           segments << [before, Style::TEXT] unless before.empty?
           segments << ["_", Style::ACCENT_BOLD]
           segments << [after, Style::TEXT] unless after.empty?
@@ -184,7 +185,7 @@ module Meringue
         def footer_status_line(state, pending_count)
           status_segments(state, pending_count) + question_segments(state) + [
             ["  ·  ", Style::DIM],
-            ["enter sends · shift-enter newline · ctrl-c clears/quits · tab completes slash commands · /jump nav", Style::MUTED]
+            ["enter sends · shift/alt-enter newline · ctrl-c clears/quits · tab completes slash commands · /jump nav", Style::MUTED]
           ]
         end
 
