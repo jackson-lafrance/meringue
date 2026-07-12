@@ -744,6 +744,9 @@ module Meringue
         errors << "head_id is required" if blank?(head_id)
         return synchronized_state { rejected_result(command_id, command_type, "Head result was not applied.", errors) } unless errors.empty?
 
+        cleanup_head = value_at(payload, "_cleanup_head", "cleanup_head")
+        cleanup_head = true if cleanup_head.nil?
+
         log_ids = []
         question_ids = synchronized_state do
           state = normalized_state
@@ -799,10 +802,15 @@ module Meringue
               "command_results" => command_results
             }
           )
-          touch_state!(state)
-          store.save(state)
           log_ids.concat(command_results.flat_map { |result| result.fetch("log_entry_ids", []) })
           log_ids.concat(summary_log_ids)
+          cleanup = if cleanup_head
+                      cleanup_applied_head!(state, head_id.to_s, log_ids, now: timestamp)
+                    else
+                      { "changed" => false, "reason" => "deferred" }
+                    end
+          touch_state!(state)
+          store.save(state)
 
           accepted_result(
             command_id,
@@ -814,7 +822,8 @@ module Meringue
               "title" => head_result.fetch("title"),
               "summary" => head_result.fetch("summary"),
               "question_ids" => question_ids,
-              "command_results" => command_results
+              "command_results" => command_results,
+              "head_cleanup" => cleanup
             },
             log_ids.uniq
           )
@@ -2594,15 +2603,18 @@ module Meringue
             nil,
             "ApplyHeadResult",
             "head_id" => poll_result.fetch("agent_id"),
-            "head_result" => head_result
+            "head_result" => head_result,
+            "_cleanup_head" => false
           )
         end
         log_ids = record_polled_head_completion(poll_result, head_result, apply_result)
-        kill_completed_head_session(poll_result.fetch("session_ref", {}))
+        cleanup_result = cleanup_polled_head_after_apply(poll_result, apply_result)
+        log_ids.concat(cleanup_result.fetch("log_entry_ids", []))
         poll_result.merge(
-          "changed" => apply_result.fetch("status", nil) == "accepted",
+          "changed" => apply_result.fetch("status", nil) == "accepted" || cleanup_result.fetch("changed", false),
           "head_result" => head_result,
           "apply_result" => apply_result,
+          "head_cleanup" => cleanup_result.fetch("cleanup", nil),
           "log_entry_ids" => (apply_result.fetch("log_entry_ids", []) + log_ids).uniq
         )
       rescue Heads::InvalidHeadResultError => e
@@ -2736,6 +2748,19 @@ module Meringue
           touch_state!(state, now)
           store.save(state)
           log_ids
+        end
+      end
+
+      def cleanup_polled_head_after_apply(poll_result, apply_result)
+        return { "changed" => false, "cleanup" => { "changed" => false, "reason" => "head_result_not_applied" }, "log_entry_ids" => [] } unless apply_result.fetch("status", nil) == "accepted"
+
+        synchronized_state do
+          state = normalized_state
+          log_ids = []
+          cleanup = cleanup_applied_head!(state, poll_result.fetch("agent_id"), log_ids, now: timestamp)
+          touch_state!(state)
+          store.save(state)
+          { "changed" => cleanup.fetch("changed", false), "cleanup" => cleanup, "log_entry_ids" => log_ids }
         end
       end
 
@@ -3101,12 +3126,60 @@ module Meringue
         ).compact
       end
 
-      def kill_completed_head_session(session_ref)
-        agent_like = { "type" => "head", "harness" => session_ref.fetch("harness", nil) }
-        client = harness_client_for_agent(agent_like)
-        client.kill_session(session_ref) if client.respond_to?(:kill_session)
-      rescue StandardError
-        nil
+      def cleanup_applied_head!(state, head_id, log_ids, now: timestamp)
+        head = find_agent(state, head_id)
+        return { "changed" => false, "reason" => "head_not_found" } unless head
+        return { "changed" => false, "reason" => "agent_is_not_head" } unless head.fetch("type", nil) == "head"
+
+        session_ref = session_ref_from_agent(head)
+        kill_session_safely(session_ref, agent: head) if present_string(head.fetch("harness", nil))
+
+        metadata = head.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        head["status"] = "killed"
+        head["updated_at"] = now
+        head["harness_metadata"] = metadata.merge(
+          "completed_at" => metadata.fetch("completed_at", nil) || now,
+          "head_result_applied_at" => metadata.fetch("head_result_applied_at", nil) || now,
+          "killed_at" => now,
+          "cleanup_reason" => "head_result_applied",
+          "is_streaming" => false
+        ).compact
+
+        log_ids.concat(append_log(
+          state,
+          source_type: "head",
+          source_id: head_id,
+          level: "info",
+          message: "Killed completed head #{head_id} after applying its HeadResult.",
+          details: {
+            "head_id" => head_id,
+            "harness" => head.fetch("harness", nil),
+            "pid" => session_ref.fetch("pid", nil),
+            "harness_session_id" => session_ref.fetch("session_id", nil)
+          }.compact
+        ))
+
+        remove_agent_from_active_state!(state, head_id)
+        log_ids.concat(append_log(
+          state,
+          source_type: "kernel",
+          source_id: head_id,
+          level: "info",
+          message: "Removed completed head #{head_id} from active state.",
+          details: { "head_id" => head_id, "reason" => "head_result_applied" }
+        ))
+
+        { "changed" => true, "removed_agent_id" => head_id, "reason" => "head_result_applied" }
+      end
+
+      def remove_agent_from_active_state!(state, agent_id)
+        state["agents"] = state.fetch("agents").reject { |agent| agent.fetch("id", nil) == agent_id }
+        state.fetch("issues").each do |issue|
+          next unless issue.key?("agent_ids")
+
+          issue["agent_ids"] = Array(issue["agent_ids"]) - [agent_id]
+        end
       end
 
       def payload_has?(hash, *keys)
