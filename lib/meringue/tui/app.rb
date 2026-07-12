@@ -191,6 +191,7 @@ module Meringue
 
       def exit_agent_tree_navigation(message = nil)
         @agent_tree_navigation_active = false
+        @selected_agent_id = nil
         append_jump_response(message) if message
       end
 
@@ -207,7 +208,7 @@ module Meringue
         return exit_agent_tree_navigation("No agents are available to jump into yet.") unless selected_id
 
         open_agent_by_id(state, selected_id)
-        @agent_tree_navigation_active = false
+        exit_agent_tree_navigation
       end
 
       def open_agent_by_id(state, agent_id)
@@ -471,7 +472,7 @@ module Meringue
       def agent_tree_navigation_snapshot
         {
           "active" => @agent_tree_navigation_active,
-          "selected_agent_id" => @selected_agent_id
+          "selected_agent_id" => @agent_tree_navigation_active ? @selected_agent_id : nil
         }
       end
 
