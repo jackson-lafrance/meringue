@@ -143,7 +143,7 @@ module Meringue
     end
 
     def reset_state
-      state_store.save(State::Models.empty_state)
+      state_store.save(State::Models.empty_state, preserve_conversation: false)
       out.puts "Reset Meringue state at #{state_store.path}"
       0
     end

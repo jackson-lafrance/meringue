@@ -1007,7 +1007,7 @@ module Meringue
       def clear_state(command_id, command_type)
         now = timestamp
         state = State::Models.empty_state(now: now)
-        store.save(state)
+        store.save(state, preserve_conversation: false)
 
         accepted_result(command_id, command_type, nil, "Cleared Meringue state.", state, [])
       end
