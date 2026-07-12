@@ -410,6 +410,33 @@ Example:
 { "type": "Kill", "payload": { "target_id": "P1-I1" } }
 ```
 
+### Prune
+
+Removes resolved records from active Meringue state without deleting worker workspaces. This is a user slash-command cleanup tool; head agents should not propose it.
+
+Payload:
+
+```json
+{
+  "selector": "merged"
+}
+```
+
+Supported selectors:
+
+```txt
+merged, errored
+```
+
+- `merged` checks tracked GitHub PR URLs reported by workers and prunes issue bundles whose PR is confirmed merged.
+- `errored` prunes errored issue bundles that have no active workers, plus standalone errored heads.
+
+Example:
+
+```json
+{ "type": "Prune", "payload": { "selector": "merged" } }
+```
+
 ### ClearState
 
 Clears all persisted Meringue projects, issues, agents, questions, logs, and counters. This is a user slash-command recovery tool; head agents should not propose it.

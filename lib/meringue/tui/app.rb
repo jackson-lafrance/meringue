@@ -651,6 +651,12 @@ module Meringue
           return ["  No questions."] if questions.empty?
 
           questions.map { |question| "  #{question.fetch("id", "?")} [#{question.fetch("status", "?")}] #{question.fetch("question", "")}" }
+        when "Prune"
+          prune_result = result || {}
+          [
+            "  removed issues: #{Array(prune_result["removed_issue_ids"]).length}",
+            "  removed agents: #{Array(prune_result["removed_agent_ids"]).length}"
+          ]
         when "ListAll", "GetState"
           state = result || {}
           [
