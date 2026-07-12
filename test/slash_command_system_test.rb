@@ -78,6 +78,26 @@ class SlashCommandSystemTest < Minitest::Test
     assert_equal ["/project add <path> [name]", "/prompt <agent_id> \"<message>\""], filtered_suggestions.map { |record| record.fetch("usage") }
   end
 
+  def test_slash_suggestions_autocomplete_state_ids_for_command_arguments
+    state = suggestion_state
+
+    prompt_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/prompt P1-I1-W", state: state)
+    project_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/issue create P", state: state)
+    worker_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/worker spawn P1-I", state: state)
+    answer_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/answer Q", state: state)
+    kill_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/kill P1", state: state)
+
+    assert_equal ["P1-I1-W1"], prompt_suggestions.map { |record| record.fetch("usage") }
+    assert_equal "/prompt P1-I1-W1", prompt_suggestions.first.fetch("completion")
+    assert prompt_suggestions.first.fetch("append_space")
+    assert_equal ["P1"], project_suggestions.map { |record| record.fetch("usage") }
+    assert_equal ["P1-I1"], worker_suggestions.map { |record| record.fetch("usage") }
+    assert_equal ["Q1"], answer_suggestions.map { |record| record.fetch("usage") }
+    refute_includes answer_suggestions.map { |record| record.fetch("usage") }, "Q2"
+    assert_includes kill_suggestions.map { |record| record.fetch("usage") }, "P1-I1-W1"
+    refute kill_suggestions.first.fetch("append_space")
+  end
+
   def test_chat_pane_renders_cursor_style_suggestions_separately_from_input
     pane = Meringue::TUI::Panes::ChatPane.new
     base_state = Meringue::State::Models.empty_state
@@ -90,6 +110,17 @@ class SlashCommandSystemTest < Minitest::Test
     assert_includes suggestion_text, "› /prompt"
     refute_includes suggestion_text, "/help"
     refute_includes composer_text, "/project add"
+  end
+
+  def test_chat_pane_renders_state_id_suggestions_for_command_arguments
+    pane = Meringue::TUI::Panes::ChatPane.new
+    state = suggestion_state.merge("_chat" => { "input_buffer" => "/prompt P1-", "slash_suggestion_index" => 0 })
+
+    suggestion_text = pane.slash_suggestion_lines(state).map { |line| plain_line(line) }.join("\n")
+
+    assert_includes suggestion_text, "› P1-I1-W1"
+    assert_includes suggestion_text, "worker · idle · P1-I1"
+    refute_includes suggestion_text, "/prompt <agent_id>"
   end
 
   def test_layout_places_suggestions_above_chat_input
@@ -130,6 +161,21 @@ class SlashCommandSystemTest < Minitest::Test
     assert_equal "/help", Timeout.timeout(1) { submitted_prompts.pop }
   end
 
+  def test_tui_tab_completes_state_id_suggestions
+    app = Meringue::TUI::App.new
+    submitted_prompts = Queue.new
+    submitter = lambda do |text|
+      submitted_prompts << text
+      { "summary" => "ok" }
+    end
+
+    buffer, index = app.send(:handle_key, "\t", "/prompt P1-I", 0, submitter, suggestion_state)
+
+    assert_equal "/prompt P1-I1-W1 ", buffer
+    assert_equal 0, index
+    assert submitted_prompts.empty?
+  end
+
   private
 
   def assert_command(input, type, payload)
@@ -140,5 +186,23 @@ class SlashCommandSystemTest < Minitest::Test
 
   def plain_line(line)
     line.map { |segment| segment.first }.join
+  end
+
+  def suggestion_state
+    Meringue::State::Models.empty_state.merge(
+      "projects" => [
+        { "id" => "P1", "name" => "Demo", "status" => "idle", "root_path" => @tmpdir }
+      ],
+      "issues" => [
+        { "id" => "P1-I1", "project_id" => "P1", "title" => "Signup", "status" => "working" }
+      ],
+      "agents" => [
+        { "id" => "P1-I1-W1", "type" => "worker", "issue_id" => "P1-I1", "status" => "idle" }
+      ],
+      "questions" => [
+        { "id" => "Q1", "question" => "Which project?", "status" => "open" },
+        { "id" => "Q2", "question" => "Already answered", "status" => "answered" }
+      ]
+    )
   end
 end
