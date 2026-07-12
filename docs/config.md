@@ -8,6 +8,8 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
+The interactive TUI can update this file for theme changes with `/theme <name>`.
+
 ## Selecting a TUI colorscheme
 
 ```toml
@@ -24,7 +26,7 @@ Supported colorschemes:
 - `catppuccin`
 - `kanagawa`
 
-`color_scheme` is accepted as a compatibility alias for `colorscheme`.
+`color_scheme` is accepted as a compatibility alias for `colorscheme`. Running `/theme <name>` writes a single `colorscheme` value and removes the older `color_scheme` alias from the `[tui]` section.
 
 ## Selecting harnesses
 

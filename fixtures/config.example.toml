@@ -3,6 +3,7 @@
 [tui]
 # Default yellow/white Meringue palette. Other options:
 # rose-pine, tokyonight, gruvbox, catppuccin, kanagawa
+# You can also run /theme <name> in the TUI to save this setting.
 colorscheme = "meringue"
 
 [harness]
