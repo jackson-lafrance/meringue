@@ -54,14 +54,22 @@ Each command in `commands` must use this shape:
 
 Use only the command names documented below unless the kernel command model is updated.
 
-When proposing a simple worker flow for an already registered project, return commands in this order:
+Issue selection rules for the MVP:
 
-1. `CreateIssue`
-2. `SpawnWorker` for that issue
+- Treat an issue as the durable user goal, and treat each worker as one execution attempt or follow-up step for that goal.
+- Before creating an issue, inspect existing issues in the chosen project. If the new user prompt is a follow-up, refinement, or next step for an existing issue, do **not** create another issue. Spawn a new worker on the existing issue instead.
+- Use `CreateIssue` only when the prompt describes a genuinely new top-level goal with no suitable existing issue.
+- Do not create nested/subissues for ordinary follow-up prompts. Set `parent_issue_id` to `null` unless the user explicitly asks for a child issue hierarchy.
+- Give each `SpawnWorker` a short action-oriented `title`; this is what appears under the issue in the AgentTree.
 
-If no matching project is registered and the discovered local repository/directory is the right target, propose `AddProject` first, then `CreateIssue`, then `SpawnWorker`.
+When proposing a worker flow for an already registered project:
 
-If `CreateIssue` targets a project created earlier in the same HeadResult, compute the new project id from `kernel_state.counters.projects` or the max existing `P<number>` and use that id in `CreateIssue.project_id`. If the worker targets an issue created earlier in the same HeadResult, compute the next issue id from `kernel_state.counters.issues_by_project[project_id]` or the max existing `I<number>` for that project, then use that id in the `SpawnWorker.issue_id` payload. The kernel validates each command in order and rejects any command whose predicted id is wrong.
+1. Reuse an existing issue and return `SpawnWorker` for that issue when the prompt continues that work.
+2. Otherwise return `CreateIssue`, then `SpawnWorker` for the new issue.
+
+If no matching project is registered and the discovered local repository/directory is the right target, propose `AddProject` first, then `CreateIssue`, then `SpawnWorker` for the first top-level goal in that newly registered project.
+
+If `CreateIssue` targets a project created earlier in the same HeadResult, compute the new project id from `kernel_state.counters.projects` or the max existing `P<number>` and use that id in `CreateIssue.project_id`. If the worker targets an issue created earlier in the same HeadResult, compute the next issue id from `kernel_state.counters.issues_by_project[project_id]` or the max existing `I<number>` for that project, then use that id in the `SpawnWorker.issue_id` payload. The kernel validates each command in order and rejects any command whose predicted id is wrong. When reusing an existing issue, use the existing `issue_id` directly in `SpawnWorker` and do not predict or create a new issue id.
 
 ## Status and level constants
 
@@ -264,13 +272,14 @@ Example:
 
 ### SpawnWorker
 
-Spawns a real worker harness session for an issue. The kernel owns workspace allocation before calling the harness.
+Spawns a real worker harness session for an issue. The kernel owns workspace allocation before calling the harness. Use this directly on an existing issue for follow-up prompts instead of creating nested issues.
 
 Payload:
 
 ```json
 {
   "issue_id": "P1-I1",
+  "title": "Short worker title",
   "prompt": "Worker instructions",
   "workspace_path": "Optional preselected workspace path"
 }
@@ -283,6 +292,7 @@ Example:
   "type": "SpawnWorker",
   "payload": {
     "issue_id": "P1-I1",
+    "title": "Fix signup validation",
     "prompt": "Investigate the signup validation bug, make the smallest safe fix, and summarize verification.",
     "workspace_path": null
   }

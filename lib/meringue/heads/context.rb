@@ -134,6 +134,9 @@ module Meringue
             "Prefer a registered project when the id, name, root_path, git root, or remote clearly matches the request.",
             "For phrases like this project, current project, here, or this repo, prefer the current_directory.git_root when present; otherwise use cwd.",
             "If the preferred local repository is not registered, propose AddProject with its absolute root before CreateIssue or SpawnWorker.",
+            "Before proposing CreateIssue, inspect existing issues in the chosen project. If the prompt is a follow-up, refinement, or next step for an existing issue, reuse that issue and propose SpawnWorker only.",
+            "Do not create nested/subissues for ordinary follow-up prompts; keep parent_issue_id null unless the user explicitly asks for a child issue hierarchy.",
+            "Always include a short action-oriented title in SpawnWorker payloads so workers render clearly under their issue in the AgentTree.",
             "When chaining AddProject with CreateIssue and SpawnWorker in one HeadResult, compute the future project id from kernel_state.counters.projects or the max existing P<number>.",
             "If the app was launched outside the target project, use registered projects and candidate_search_roots to inspect likely local repositories by name/path before choosing.",
             "Ask a clarifying question when multiple repositories are plausible."

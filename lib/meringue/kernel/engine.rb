@@ -430,6 +430,7 @@ module Meringue
       def spawn_worker(command_id, command_type, payload)
         issue_id = value_at(payload, "issue_id", "IssueID", "issueId")
         prompt = value_at(payload, "prompt", "Prompt")
+        worker_title = value_at(payload, "title", "Title", "worker_title", "workerTitle")
         requested_workspace_path = value_at(payload, "workspace_path", "WorkspacePath", "workspacePath")
         errors = []
 
@@ -468,7 +469,7 @@ module Meringue
             cwd: workspace.fetch("workspace_path"),
             prompt: prompt.to_s,
             system_prompt: worker_system_prompt(issue),
-            session_name: worker_session_name(agent_id, issue)
+            session_name: worker_session_name(agent_id, issue, worker_title: worker_title)
           )
         rescue StandardError => e
           decrement_worker_counter!(state, issue.fetch("id"))
@@ -486,7 +487,8 @@ module Meringue
           project: project,
           workspace: workspace,
           session_ref: session_ref,
-          now: now
+          now: now,
+          title: worker_title
         )
 
         state.fetch("agents") << agent
@@ -507,7 +509,8 @@ module Meringue
             "issue_id" => issue.fetch("id"),
             "project_id" => project.fetch("id"),
             "workspace_path" => agent.fetch("workspace_path"),
-            "workspace_strategy" => agent.fetch("workspace_strategy")
+            "workspace_strategy" => agent.fetch("workspace_strategy"),
+            "title" => agent.fetch("harness_metadata", {}).fetch("title", nil)
           }
         ))
         log_ids.concat(append_log(
@@ -555,8 +558,9 @@ module Meringue
         }
       end
 
-      def build_worker_agent(agent_id:, issue:, project:, workspace:, session_ref:, now:)
+      def build_worker_agent(agent_id:, issue:, project:, workspace:, session_ref:, now:, title: nil)
         session_metadata = session_ref.fetch("metadata", {}) || {}
+        display_title = worker_display_title(title, issue)
         {
           "id" => agent_id,
           "type" => "worker",
@@ -571,6 +575,7 @@ module Meringue
           "harness_session_id" => session_ref.fetch("session_id", nil),
           "harness_session_file" => session_ref.fetch("session_file", nil),
           "harness_metadata" => session_metadata.merge(
+            "title" => display_title,
             "cwd" => session_ref.fetch("cwd", workspace.fetch("workspace_path")),
             "is_streaming" => session_ref.fetch("is_streaming", false),
             "last_event_at" => session_ref.fetch("last_event_at", nil),
@@ -638,10 +643,15 @@ module Meringue
         PROMPT
       end
 
-      def worker_session_name(agent_id, issue)
-        title = issue.fetch("title").to_s.strip.gsub(/\s+/, " ")
+      def worker_session_name(agent_id, issue, worker_title: nil)
+        title = worker_display_title(worker_title, issue).to_s.strip.gsub(/\s+/, " ")
         title = "worker" if title.empty?
         "#{agent_id} #{title}"[0, 96]
+      end
+
+      def worker_display_title(worker_title, issue)
+        title = present_string(worker_title)
+        title || issue.fetch("title").to_s.strip
       end
 
       def validate_head_result_shape(head_result)
