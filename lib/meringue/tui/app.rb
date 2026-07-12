@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "time"
+
 module Meringue
   module TUI
     class App
@@ -33,6 +35,7 @@ module Meringue
         @next_message_id = 0
         @pending_count = 0
         @conversation_event_keys = {}
+        @started_at = Time.iso8601(Time.now.utc.iso8601)
         @chat_mutex = Mutex.new
       end
 
@@ -605,6 +608,7 @@ module Meringue
 
           metadata = agent.fetch("harness_metadata", {}) || {}
           next unless metadata["completed_at"] || Array(metadata["reported_pr_urls"]).any?
+          next unless conversation_sync_after_start?(metadata["completed_at"])
 
           append_message_once(
             worker_completed_key(agent.fetch("id", nil)),
@@ -612,6 +616,14 @@ module Meringue
             worker_completed_text_from_agent(agent)
           )
         end
+      end
+
+      def conversation_sync_after_start?(timestamp)
+        return false if timestamp.to_s.empty?
+
+        Time.iso8601(timestamp.to_s) >= @started_at
+      rescue ArgumentError, TypeError
+        false
       end
 
       def worker_completed_text_from_agent(agent)
