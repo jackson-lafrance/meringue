@@ -17,6 +17,7 @@ module Meringue
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
+        ["/prune <merged|errored>", "Remove merged PR issue bundles or errored records from active state."],
         ["/clear", "Reset persisted Meringue state. Dev/debug helper."]
       ].freeze
 
@@ -70,6 +71,8 @@ module Meringue
         return true if query == "/"
 
         usage = record.fetch("usage").downcase
+        return false if usage.start_with?("/prune") && query.length < "/pr".length
+
         completion = record.fetch("completion").downcase
         usage.start_with?(query) || completion.start_with?(query) || usage.include?(query)
       end
