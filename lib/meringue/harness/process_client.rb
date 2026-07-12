@@ -254,6 +254,9 @@ module Meringue
         when Array
           value.filter_map { |child| text_from_record(child) }.join
         when Hash
+          structured_output = structured_output_text(value)
+          return structured_output if structured_output
+
           direct = first_present_string(value["text"], value["content"], value["result"], value["response"])
           return direct if direct
 
@@ -263,6 +266,15 @@ module Meringue
             text_from_record(value["parts"]) ||
             text_from_record(value.dig("data", "content"))
         end
+      end
+
+      def structured_output_text(value)
+        return nil unless value.is_a?(Hash)
+        return nil unless value["type"].to_s == "tool_use"
+        return nil unless value["name"].to_s == "StructuredOutput"
+        return nil unless value["input"].is_a?(Hash)
+
+        JSON.generate(value.fetch("input"))
       end
 
       def first_present_string(*values)
