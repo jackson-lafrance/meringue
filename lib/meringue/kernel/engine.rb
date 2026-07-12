@@ -83,6 +83,47 @@ module Meringue
         Array(commands).map { |command| apply(command) }
       end
 
+      def mark_worker_completed(agent_id:, harness_events: [], last_assistant_text: nil)
+        state = normalized_state
+        agent = find_agent(state, agent_id)
+        return rejected_result(nil, "MarkWorkerCompleted", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
+        unless agent.fetch("type", nil) == "worker"
+          return rejected_result(nil, "MarkWorkerCompleted", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"])
+        end
+
+        now = timestamp
+        agent["status"] = "completed"
+        agent["updated_at"] = now
+        agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+          "completed_at" => now,
+          "settled_event_count" => Array(harness_events).length,
+          "last_assistant_text" => present_string(last_assistant_text)
+        ).compact
+
+        issue = find_issue(state, agent.fetch("issue_id", nil))
+        project = issue && find_project(state, issue.fetch("project_id", nil))
+        update_issue_status_from_workers!(state, issue, now) if issue
+        update_project_status_from_issues!(state, project, now) if project
+
+        log_ids = append_log(
+          state,
+          source_type: "worker",
+          source_id: agent.fetch("id"),
+          level: "info",
+          message: "Worker #{agent.fetch("id")} completed.",
+          details: {
+            "issue_id" => agent.fetch("issue_id", nil),
+            "project_id" => agent.fetch("project_id", nil),
+            "settled_event_count" => Array(harness_events).length,
+            "last_assistant_text" => present_string(last_assistant_text)
+          }.compact
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(nil, "MarkWorkerCompleted", agent.fetch("id"), "Marked worker #{agent.fetch("id")} completed.", agent, log_ids)
+      end
+
       private
 
       def spawn_head(command_id, command_type, payload)
@@ -698,6 +739,44 @@ module Meringue
           "created_at" => now,
           "updated_at" => now
         }
+      end
+
+      def update_issue_status_from_workers!(state, issue, now)
+        workers = state.fetch("agents").select do |candidate|
+          candidate.fetch("type", nil) == "worker" && candidate.fetch("issue_id", nil) == issue.fetch("id")
+        end
+        return if workers.empty?
+
+        issue["status"] = if workers.all? { |worker| worker.fetch("status", nil) == "completed" }
+                            "completed"
+                          elsif workers.any? { |worker| worker.fetch("status", nil) == "errored" }
+                            "errored"
+                          elsif workers.any? { |worker| worker.fetch("status", nil) == "blocked" }
+                            "blocked"
+                          elsif workers.any? { |worker| worker.fetch("status", nil) == "working" }
+                            "working"
+                          else
+                            issue.fetch("status", "idle")
+                          end
+        issue["updated_at"] = now
+      end
+
+      def update_project_status_from_issues!(state, project, now)
+        issues = state.fetch("issues").select { |issue| issue.fetch("project_id", nil) == project.fetch("id") }
+        return if issues.empty?
+
+        project["status"] = if issues.all? { |issue| issue.fetch("status", nil) == "completed" }
+                              "completed"
+                            elsif issues.any? { |issue| issue.fetch("status", nil) == "errored" }
+                              "errored"
+                            elsif issues.any? { |issue| issue.fetch("status", nil) == "blocked" }
+                              "blocked"
+                            elsif issues.any? { |issue| issue.fetch("status", nil) == "working" }
+                              "working"
+                            else
+                              project.fetch("status", "idle")
+                            end
+        project["updated_at"] = now
       end
 
       def mark_head_errored(head_id, error)
