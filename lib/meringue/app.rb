@@ -6,11 +6,14 @@ module Meringue
   class App
     DEMO_STATE_PATH = Meringue.root_path("fixtures", "demo_state.json")
 
+    RECONCILE_INTERVAL = 2.0
+
     def initialize(input: $stdin, out: $stdout, err: $stderr,
                    state_path: State::Store::DEFAULT_PATH,
                    state_store: nil,
                    tui_app: nil,
-                   prompt_handler: nil)
+                   prompt_handler: nil,
+                   reconciler: nil)
       @input = input
       @out = out
       @err = err
@@ -18,9 +21,13 @@ module Meringue
       @state_store = state_store || State::Store.new(path: state_path)
       @tui_app = tui_app
       @prompt_handler = prompt_handler
+      @reconciler = reconciler
+      @last_reconcile_at = nil
+      @reconcile_mutex = Mutex.new
     end
 
     def run
+      reconcile_now
       tui.run(state_provider: -> { current_state }, on_submit: prompt_handler)
     rescue JSON::ParserError => e
       err.puts "Could not load Meringue state from #{state_path}: #{e.message}"
@@ -29,10 +36,31 @@ module Meringue
 
     private
 
-    attr_reader :input, :out, :err, :state_path, :state_store, :tui_app, :prompt_handler
+    attr_reader :input, :out, :err, :state_path, :state_store, :tui_app, :prompt_handler, :reconciler
 
     def current_state
+      reconcile_if_due
       state_store.load
+    end
+
+    def reconcile_if_due
+      return unless reconciler
+      return if @last_reconcile_at && (Time.now - @last_reconcile_at) < RECONCILE_INTERVAL
+
+      reconcile_now
+    end
+
+    def reconcile_now
+      return unless reconciler
+
+      @reconcile_mutex.synchronize do
+        return if @last_reconcile_at && (Time.now - @last_reconcile_at) < RECONCILE_INTERVAL
+
+        @last_reconcile_at = Time.now
+        reconciler.call
+      end
+    rescue StandardError
+      nil
     end
 
     def tui
