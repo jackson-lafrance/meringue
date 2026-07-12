@@ -10,6 +10,7 @@ module Meringue
       SIDEBAR_MIN_WIDTH = 34
       SIDEBAR_MAX_WIDTH = 42
       COMPOSER_HEIGHT = 5
+      MAX_COMPOSER_HEIGHT = 12
       MIN_CHAT_HEIGHT = 5
       MIN_LOG_HEIGHT = 3
       MAX_LOG_HEIGHT = 9
@@ -78,8 +79,9 @@ module Meringue
           metrics.fetch(:composer_width),
           metrics.fetch(:composer_height),
           "chat",
-          chat_pane.composer_lines(state),
-          active: true
+          chat_pane.composer_lines(state, width: metrics.fetch(:composer_content_width)),
+          active: true,
+          overflow: :tail
         )
 
         canvas.render(color: color)
@@ -91,16 +93,18 @@ module Meringue
 
       def layout_metrics(width, height, state)
         top_y = 0
-        composer_height = composer_height_for(height)
-        suggestion_height = bounded_slash_suggestion_height(height, composer_height, state)
-        vertical_gaps = GAP + (suggestion_height.positive? ? GAP : 0)
-        top_height = height - composer_height - suggestion_height - vertical_gaps
         sidebar_x = OUTER_MARGIN
         sidebar_width = sidebar_width_for(width)
         main_x = sidebar_x + sidebar_width + GAP
         main_width = width - main_x - OUTER_MARGIN
         composer_x = OUTER_MARGIN
         composer_width = width - (OUTER_MARGIN * 2)
+        composer_content_width = composer_width - 4
+        composer_content_height = chat_pane.composer_lines(state, width: composer_content_width).length
+        composer_height = composer_height_for(height, composer_content_height)
+        suggestion_height = bounded_slash_suggestion_height(height, composer_height, state)
+        vertical_gaps = GAP + (suggestion_height.positive? ? GAP : 0)
+        top_height = height - composer_height - suggestion_height - vertical_gaps
 
         remaining = top_height - GAP
         log_height = log_height_for(remaining)
@@ -128,7 +132,8 @@ module Meringue
           composer_x: composer_x,
           composer_y: top_y + top_height + GAP + (suggestion_height.positive? ? suggestion_height + GAP : 0),
           composer_width: composer_width,
-          composer_height: composer_height
+          composer_height: composer_height,
+          composer_content_width: composer_content_width
         }
       end
 
@@ -154,8 +159,13 @@ module Meringue
         [[ideal_width, SIDEBAR_MIN_WIDTH].max, SIDEBAR_MAX_WIDTH, max_for_main].min
       end
 
-      def composer_height_for(total_height)
-        [COMPOSER_HEIGHT, [total_height / 5, 3].max].min
+      def composer_height_for(total_height, content_line_count)
+        base_height = [COMPOSER_HEIGHT, [total_height / 5, 3].max].min
+        desired_height = [content_line_count.to_i + 2, base_height].max
+        max_available_height = [total_height - (GAP * 2) - MIN_CHAT_HEIGHT - MIN_LOG_HEIGHT, base_height].max
+        max_height = [[total_height / 3, base_height].max, MAX_COMPOSER_HEIGHT, max_available_height].min
+
+        [desired_height, max_height].min
       end
 
       def log_height_for(remaining_height)

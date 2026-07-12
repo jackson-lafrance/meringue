@@ -68,21 +68,7 @@ module Meringue
       end
 
       def handle_input(text)
-        route = router.route(text)
-
-        if route.fetch("kind") == "natural_language"
-          return handle_natural_language(route)
-        end
-
-        command_results = engine.apply_all(route.fetch("commands", []))
-        {
-          "event" => "slash_command_applied",
-          "summary" => "Slash command bypassed the head runner and was sent to kernel validation.",
-          "state_mutated" => command_results.any? { |result| result.fetch("status", nil) == "accepted" },
-          "route" => route,
-          "command_results" => command_results,
-          "state_summary" => state_summary
-        }
+        prompt_loop.call(text)
       end
 
       private
