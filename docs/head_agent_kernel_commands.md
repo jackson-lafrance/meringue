@@ -451,7 +451,7 @@ Supported selectors:
 merged, errored
 ```
 
-- `merged` checks tracked GitHub PR URLs reported by workers and prunes only issue bundles with at least one confirmed merged PR, no active workers, and no tracked PRs that are still open, closed without merge, or unknown.
+- `merged` checks verified worker delivery PRs and prunes only issue bundles with at least one confirmed merged PR, no active workers, and no tracked delivery PRs that are still open, closed without merge, or unknown. Worker output URLs are candidates only; Meringue tracks a delivery PR only when its GitHub base repo matches the project remote and its head branch matches the worker delivery branch.
 - `errored` prunes errored issue bundles that have no active workers, plus standalone errored heads.
 
 Example:

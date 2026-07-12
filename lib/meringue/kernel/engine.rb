@@ -2,6 +2,7 @@
 
 require "json"
 require "monitor"
+require "open3"
 require "time"
 
 module Meringue
@@ -216,8 +217,16 @@ module Meringue
           update_issue_status_from_workers!(state, issue, now) if issue
           update_project_status_from_issues!(state, project, now) if project
 
-          pr_urls = worker_pr_urls(last_assistant_text: last_assistant_text, harness_events: harness_events)
-          agent["harness_metadata"]["reported_pr_urls"] = pr_urls unless pr_urls.empty?
+          candidate_pr_urls = worker_pr_urls(last_assistant_text: last_assistant_text, harness_events: harness_events)
+          agent["harness_metadata"].delete("delivery_pull_request")
+          agent["harness_metadata"].delete("reported_pr_urls")
+          agent["harness_metadata"].delete("candidate_pr_urls")
+          agent["harness_metadata"]["candidate_pr_urls"] = candidate_pr_urls unless candidate_pr_urls.empty?
+          delivery_pull_request = verified_worker_pull_request(agent: agent, project: project, candidate_urls: candidate_pr_urls)
+          if delivery_pull_request
+            agent["harness_metadata"]["delivery_pull_request"] = delivery_pull_request
+            agent["harness_metadata"]["reported_pr_urls"] = [delivery_pull_request.fetch("url")]
+          end
 
           completion_details = {
             "issue_id" => agent.fetch("issue_id", nil),
@@ -226,7 +235,8 @@ module Meringue
             "settled_event_count" => Array(harness_events).length,
             "last_assistant_text" => present_string(last_assistant_text)
           }.compact
-          completion_details["pr_urls"] = pr_urls unless pr_urls.empty?
+          completion_details["candidate_pr_urls"] = candidate_pr_urls unless candidate_pr_urls.empty?
+          completion_details["delivery_pull_request"] = delivery_pull_request if delivery_pull_request
 
           log_ids = append_log(
             state,
@@ -840,6 +850,75 @@ module Meringue
         %w[queued working idle blocked].include?(status.to_s)
       end
 
+      def verified_worker_pull_request(agent:, project:, candidate_urls:)
+        branch = worker_delivery_branch(agent)
+        project_repository = project && project_github_repository(project)
+        return nil if blank?(branch) || blank?(project_repository)
+
+        Array(candidate_urls).filter_map do |url|
+          status = pull_request_status(url)
+          next unless verified_worker_pull_request?(status, branch: branch, project_repository: project_repository)
+
+          status.merge(
+            "matched_by" => "workspace_branch",
+            "matched_branch" => branch,
+            "verified_at" => timestamp
+          )
+        end.first
+      end
+
+      def verified_worker_pull_request?(status, branch:, project_repository:)
+        status.fetch("provider", nil) == "github" &&
+          status.fetch("base_repository", nil).to_s.downcase == project_repository.to_s.downcase &&
+          normalized_branch_name(status.fetch("head_branch", nil)) == normalized_branch_name(branch)
+      end
+
+      def worker_delivery_branch(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        normalized_branch_name(
+          present_string(metadata.fetch("delivery_branch", nil)) ||
+            current_workspace_branch(agent) ||
+            present_string(agent.fetch("workspace_branch", nil))
+        )
+      end
+
+      def current_workspace_branch(agent)
+        workspace_path = agent.fetch("workspace_path", nil)
+        return nil if blank?(workspace_path) || !Dir.exist?(workspace_path.to_s)
+
+        stdout, _stderr, status = Open3.capture3("git", "-C", workspace_path.to_s, "branch", "--show-current")
+        return nil unless status.success?
+
+        present_string(stdout)
+      rescue StandardError
+        nil
+      end
+
+      def normalized_branch_name(branch)
+        value = present_string(branch)
+        return nil unless value
+
+        value.sub(/\Arefs\/heads\//, "").sub(/\Aorigin\//, "")
+      end
+
+      def project_github_repository(project)
+        root_path = project.fetch("root_path", nil)
+        return nil if blank?(root_path) || !Dir.exist?(root_path.to_s)
+
+        stdout, _stderr, status = Open3.capture3("git", "-C", root_path.to_s, "remote", "get-url", "origin")
+        return nil unless status.success?
+
+        github_repository_from_remote(stdout)
+      rescue StandardError
+        nil
+      end
+
+      def github_repository_from_remote(remote)
+        text = remote.to_s.strip.sub(/\.git\z/, "")
+        match = text.match(%r{github\.com[:/]([^/]+/[^/]+)\z})
+        match && match[1]
+      end
+
       def pull_request_status(url)
         forge_client.pull_request_status(url)
       rescue StandardError => e
@@ -854,13 +933,17 @@ module Meringue
 
       def agent_pr_urls(agent)
         metadata = agent.fetch("harness_metadata", {}) || {}
-        values = []
-        values.concat(Array(agent.fetch("pull_request_url", nil)))
-        values.concat(Array(agent.fetch("pull_request_urls", nil)))
-        values.concat(Array(metadata.fetch("pull_request_url", nil)))
-        values.concat(Array(metadata.fetch("pull_request_urls", nil)))
-        values.concat(Array(metadata.fetch("reported_pr_urls", nil)))
-        values.compact.map(&:to_s).map(&:strip).reject(&:empty?).uniq
+        delivery_pull_requests = [
+          agent.fetch("delivery_pull_request", nil),
+          metadata.fetch("delivery_pull_request", nil),
+          *Array(agent.fetch("delivery_pull_requests", nil)),
+          *Array(metadata.fetch("delivery_pull_requests", nil))
+        ].compact
+        delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
+                              .map(&:to_s)
+                              .map(&:strip)
+                              .reject(&:empty?)
+                              .uniq
       end
 
       def errored_issue_prune_candidate?(state, issue)

@@ -8,7 +8,7 @@ module Meringue
       DEFAULT_WIDTH = 100
       DEFAULT_HEIGHT = 32
       REFRESH_INTERVAL = 0.2
-      AGENT_TREE_SCROLL_INTERVAL = 0.75
+      SCROLL_STEP = 4
       CTRL_C = "\u0003"
       CTRL_D = "\u0004"
       CTRL_W = "\u0017"
@@ -27,6 +27,19 @@ module Meringue
       WORD_RIGHT_KEYS = ["\ef", "\eF", "\e[1;3C", "\e[1;5C", "\e[1;9C"].freeze
       WORD_BACKSPACE_KEYS = ["\e\u007f", "\e\b", CTRL_W].freeze
       WORD_DELETE_KEYS = ["\ed", "\eD", "\e[3;3~", "\e[3;5~"].freeze
+      PAGE_UP_KEYS = ["\e[5~"].freeze
+      PAGE_DOWN_KEYS = ["\e[6~"].freeze
+      SHIFT_TAB_KEYS = ["\e[Z"].freeze
+      CTRL_TAB_KEYS = ["\e[27;5;9~", "\e[9;5u"].freeze
+      FOCUS_FORWARD_KEYS = CTRL_TAB_KEYS.freeze
+      FOCUS_BACK_KEYS = SHIFT_TAB_KEYS.freeze
+      FOCUS_ORDER = %w[chat agent_tree conversation logs].freeze
+      FOCUS_LABELS = {
+        "chat" => "chat input",
+        "agent_tree" => "agent tree",
+        "conversation" => "conversation",
+        "logs" => "kernel logs"
+      }.freeze
       AGENT_TREE_FORWARD_KEYS = (DOWN_KEYS + RIGHT_KEYS).freeze
       AGENT_TREE_BACK_KEYS = (UP_KEYS + LEFT_KEYS).freeze
 
@@ -42,6 +55,8 @@ module Meringue
         @agent_tree_navigation_active = false
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = nil
+        @focused_pane = "chat"
+        @scroll_offsets = Hash.new(0)
         @conversation_event_keys = {}
         @started_at = Time.iso8601(Time.now.utc.iso8601)
         @chat_mutex = Mutex.new
@@ -166,6 +181,12 @@ module Meringue
           return handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         end
 
+        focus_result = handle_focus_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        return focus_result if focus_result
+
+        scroll_result = handle_focused_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        return scroll_result if scroll_result
+
         if slash_suggestion_key?(key) && slash_suggestions_active?(input_buffer)
           completion = safe_slash_completion(input_buffer, slash_suggestion_index, state)
           return [completion, completion.chars.length, 0] if completion
@@ -212,6 +233,7 @@ module Meringue
 
         return [input_buffer, input_cursor, slash_suggestion_index] unless printable_key?(key)
 
+        @focused_pane = "chat"
         insert_text(input_buffer, input_cursor, key) + [0]
       end
 
@@ -237,6 +259,62 @@ module Meringue
         [slash_completion_for(records.fetch(slash_suggestion_index.clamp(0, records.length - 1))), 0]
       end
 
+
+      def handle_focus_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        return nil if slash_suggestions_active?(input_buffer) && slash_suggestion_key?(key)
+        return nil unless FOCUS_FORWARD_KEYS.include?(key) || FOCUS_BACK_KEYS.include?(key) || (!slash_suggestions_active?(input_buffer) && TAB_KEYS.include?(key))
+
+        cycle_focus(FOCUS_BACK_KEYS.include?(key) ? -1 : 1)
+        append_jump_response("Focused #{FOCUS_LABELS.fetch(@focused_pane)}. #{focused_scrollable? ? "Use ↑/↓, PageUp/PageDown, or mouse wheel to scroll." : "Type normally in chat."}")
+        [input_buffer, input_cursor, slash_suggestion_index]
+      end
+
+      def cycle_focus(delta = 1)
+        current_index = FOCUS_ORDER.index(@focused_pane) || 0
+        @focused_pane = FOCUS_ORDER[(current_index + delta) % FOCUS_ORDER.length]
+      end
+
+      def handle_focused_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        return nil unless focused_scrollable?
+
+        if mouse_wheel_up?(key) || UP_KEYS.include?(key) || PAGE_UP_KEYS.include?(key)
+          scroll_focused_pane(:up, page: PAGE_UP_KEYS.include?(key))
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if mouse_wheel_down?(key) || DOWN_KEYS.include?(key) || PAGE_DOWN_KEYS.include?(key)
+          scroll_focused_pane(:down, page: PAGE_DOWN_KEYS.include?(key))
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        nil
+      end
+
+      def focused_scrollable?
+        @focused_pane != "chat"
+      end
+
+      def mouse_wheel_up?(key)
+        key.is_a?(Hash) && key.fetch("type", nil) == "mouse" && key.fetch("kind", nil) == "wheel_up"
+      end
+
+      def mouse_wheel_down?(key)
+        key.is_a?(Hash) && key.fetch("type", nil) == "mouse" && key.fetch("kind", nil) == "wheel_down"
+      end
+
+      def scroll_focused_pane(direction, page: false)
+        step = page ? SCROLL_STEP : 1
+        delta = scroll_delta_for(@focused_pane, direction, step)
+        @scroll_offsets[@focused_pane] = [@scroll_offsets[@focused_pane].to_i + delta, 0].max
+      end
+
+      def scroll_delta_for(pane, direction, step)
+        if pane == "agent_tree"
+          direction == :down ? step : -step
+        else
+          direction == :up ? step : -step
+        end
+      end
 
       def handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         if key == "\e"
@@ -840,7 +918,7 @@ module Meringue
         state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
-          "_agent_tree_scroll" => agent_tree_scroll_snapshot
+          "_scroll" => scroll_snapshot
         )
       end
 
@@ -852,8 +930,11 @@ module Meringue
         }
       end
 
-      def agent_tree_scroll_snapshot
-        { "tick" => (Time.now.to_f / AGENT_TREE_SCROLL_INTERVAL).floor }
+      def scroll_snapshot
+        {
+          "active_pane" => @focused_pane,
+          "offsets" => @scroll_offsets.to_h
+        }
       end
 
       def sync_state_conversation!(state)
@@ -912,13 +993,22 @@ module Meringue
         agent_id = agent.fetch("id", "worker")
         branch = agent.fetch("workspace_branch", nil)
         branch_text = branch.to_s.empty? ? "" : " on #{branch}"
-        pr_urls = Array((agent.fetch("harness_metadata", {}) || {})["reported_pr_urls"]).compact
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        pr_urls = verified_agent_pr_urls(metadata)
         return "#{agent_id} completed#{branch_text}." if pr_urls.empty?
 
         [
           "#{agent_id} completed#{branch_text} and reported PR#{pr_urls.length == 1 ? "" : "s"}:",
           *pr_urls.map { |url| "PR: #{url}" }
         ].join("\n")
+      end
+
+      def verified_agent_pr_urls(metadata)
+        delivery_pull_requests = [
+          metadata["delivery_pull_request"],
+          *Array(metadata["delivery_pull_requests"])
+        ].compact
+        delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
       end
 
       def head_completed_key(head_id)
