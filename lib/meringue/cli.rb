@@ -216,7 +216,7 @@ module Meringue
           /jump [agent_id]          # open an agent session in Alacritty; omit id to navigate the AgentTree
           /jumpr [agent_id]         # open an agent PR; omit id to navigate only agents with attached PRs
           p in jump mode            # open selected agent PR when one is available; otherwise do nothing
-          Esc on an empty prompt or Ctrl-C # quit the TUI
+          Ctrl-C on an empty prompt # quit the TUI; Esc cancels jump/PR navigation only
       HELP
     end
   end

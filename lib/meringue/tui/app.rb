@@ -136,10 +136,8 @@ module Meringue
       def quit_key?(key, input_buffer)
         return false unless key
         return true if key == CTRL_D
-        return true if key == CTRL_C && input_buffer.empty? && !@agent_tree_navigation_active
-        return false if @agent_tree_navigation_active
 
-        key == "\e" && input_buffer.empty?
+        key == CTRL_C && input_buffer.empty? && !@agent_tree_navigation_active
       end
 
       def handle_key(key, input_buffer, input_cursor_or_slash_index = 0, slash_index_or_on_submit = nil, on_submit_or_state = nil, state_arg = nil)
@@ -439,7 +437,7 @@ module Meringue
       def keybinding_help_text
         <<~TEXT.strip
           Keybindings:
-          Global: Ctrl-D quits; Ctrl-C clears input or quits when input is empty; Esc quits from an empty prompt or cancels jump mode.
+          Global: Ctrl-D quits; Ctrl-C clears input or quits when input is empty; Esc cancels jump/PR navigation mode.
           Focus: click a dashboard section to focus it; Tab/Ctrl-Tab moves focus forward; Shift-Tab moves focus backward; arrows, PageUp/PageDown, and mouse wheel scroll the focused pane.
           Chat: Enter sends or applies the selected slash completion; Shift-Enter inserts a newline; arrows move the cursor; Home/Ctrl-A and End/Ctrl-E jump within a line; Alt/Ctrl-Left and Alt/Ctrl-Right move by word; Backspace/Delete edit characters; Alt/Ctrl-Backspace, Ctrl-W, and Alt/Ctrl-Delete edit words.
           Slash commands: type / for suggestions; Tab completes; Up/Down changes the selected suggestion.
