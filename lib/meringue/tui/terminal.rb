@@ -21,6 +21,7 @@ module Meringue
       BRACKETED_PASTE_END = "\e[201~"
       ESCAPE_READ_TIMEOUT = 0.01
       PASTE_READ_TIMEOUT = 0.05
+      MAX_COALESCED_MOUSE_WHEEL_EVENTS = 200
       CLEAR_SCREEN = "\e[2J\e[H"
       HOME = "\e[H"
       CLEAR_LINE = "\e[K"
@@ -30,6 +31,7 @@ module Meringue
       def initialize(input: $stdin, output: $stdout)
         @input = input
         @output = output
+        @pending_keys = []
       end
 
       def interactive?
@@ -96,6 +98,19 @@ module Meringue
       def read_key(timeout:)
         return nil unless interactive?
 
+        key = if @pending_keys.empty?
+                read_next_key(timeout: timeout)
+              else
+                @pending_keys.shift
+              end
+        return nil unless key
+
+        mouse_wheel_event?(key) ? coalesce_mouse_wheel_events(key) : key
+      end
+
+      private
+
+      def read_next_key(timeout:)
         ready = IO.select([input], nil, nil, timeout)
         return nil unless ready
 
@@ -104,8 +119,6 @@ module Meringue
 
         read_pending_plain_text(key)
       end
-
-      private
 
       def read_escape_sequence(prefix)
         sequence = prefix.dup
@@ -172,6 +185,31 @@ module Meringue
           "pressed" => match[4] == "M",
           "kind" => kind
         }
+      end
+
+      def mouse_wheel_event?(key)
+        key.is_a?(Hash) && key.fetch("type", nil) == "mouse" && %w[wheel_up wheel_down].include?(key.fetch("kind", nil))
+      end
+
+      def coalesce_mouse_wheel_events(first_key)
+        count = [first_key.fetch("count", 1).to_i, 1].max
+        while count < MAX_COALESCED_MOUSE_WHEEL_EVENTS
+          next_key = read_next_key(timeout: 0)
+          break unless next_key
+
+          unless matching_mouse_wheel_event?(first_key, next_key)
+            @pending_keys << next_key
+            break
+          end
+
+          count += [next_key.fetch("count", 1).to_i, 1].max
+        end
+
+        first_key.merge("count" => count)
+      end
+
+      def matching_mouse_wheel_event?(first_key, next_key)
+        mouse_wheel_event?(next_key) && next_key.fetch("kind", nil) == first_key.fetch("kind", nil)
       end
 
       def write_interactive_frame(frame)
