@@ -392,6 +392,29 @@ Example:
 }
 ```
 
+### DismissQuestion
+
+Marks an open question as dismissed without storing an answer. This backs the user-facing `/dismiss <question_id>` slash command for clearing questions that no longer need a response.
+
+Payload:
+
+```json
+{
+  "question_id": "Q1"
+}
+```
+
+Example:
+
+```json
+{
+  "type": "DismissQuestion",
+  "payload": {
+    "question_id": "Q1"
+  }
+}
+```
+
 ### Kill
 
 Kills an agent, issue, or project subtree.
