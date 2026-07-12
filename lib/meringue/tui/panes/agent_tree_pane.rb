@@ -134,11 +134,17 @@ module Meringue
         end
 
         def item_lines(prefix:, record:, id:, title:, suffix: "", selected: false, width: nil)
-          content = [title, suffix.to_s.empty? ? nil : suffix].compact.join("  ")
-          selected ? selected_item_lines(prefix: prefix, record: record, id: id, content: content, width: width) : normal_item_lines(prefix: prefix, record: record, id: id, content: content, width: width)
+          suffix_text = suffix.to_s
+          content = [title, suffix_text.empty? ? nil : suffix_text].compact.join("  ")
+          suffix_style = suffix_text.empty? ? nil : (selected ? Style::PR_MARKER_SELECTED : Style::PR_MARKER)
+          if selected
+            selected_item_lines(prefix: prefix, record: record, id: id, content: content, suffix_text: suffix_text, suffix_style: suffix_style, width: width)
+          else
+            normal_item_lines(prefix: prefix, record: record, id: id, content: content, suffix_text: suffix_text, suffix_style: suffix_style, width: width)
+          end
         end
 
-        def normal_item_lines(prefix:, record:, id:, content:, width: nil)
+        def normal_item_lines(prefix:, record:, id:, content:, suffix_text: "", suffix_style: nil, width: nil)
           leader_segments = [
             ["#{prefix} ", Style::DIM],
             [status_dot(record), status_style(record)],
@@ -151,11 +157,13 @@ module Meringue
             title_style: title_style(record),
             continuation_style: title_style(record),
             width: width,
-            continuation_segments: normal_continuation_segments(prefix, record, id)
+            continuation_segments: normal_continuation_segments(prefix, record, id),
+            suffix_text: suffix_text,
+            suffix_style: suffix_style
           )
         end
 
-        def selected_item_lines(prefix:, record:, id:, content:, width: nil)
+        def selected_item_lines(prefix:, record:, id:, content:, suffix_text: "", suffix_style: nil, width: nil)
           leader_segments = [
             ["▸", Style::AGENT_TREE_SELECTED_STATUS],
             [" #{prefix} ", Style::AGENT_TREE_SELECTED_DIM],
@@ -170,11 +178,14 @@ module Meringue
             continuation_style: Style::AGENT_TREE_SELECTED,
             width: width,
             selected: true,
-            continuation_segments: selected_continuation_segments(prefix, record, id)
+            continuation_segments: selected_continuation_segments(prefix, record, id),
+            suffix_text: suffix_text,
+            suffix_style: suffix_style
           )
         end
 
-        def wrapped_lines(leader_segments, content, title_style:, continuation_style:, width:, selected: false, continuation_segments: nil)
+        def wrapped_lines(leader_segments, content, title_style:, continuation_style:, width:, selected: false,
+                          continuation_segments: nil, suffix_text: "", suffix_style: nil)
           leader_text = plain_text(leader_segments)
           continuation_segments ||= [[" " * leader_text.length, selected ? Style::AGENT_TREE_SELECTED_DIM : Style::DIM]]
           content_width = wrapped_content_width(width, leader_text.length)
@@ -187,6 +198,7 @@ module Meringue
                        else
                          continuation_segments + [[chunk, continuation_style]]
                        end
+            segments = style_suffix_marker(segments, suffix_text, suffix_style)
             lines << (selected ? pad_selected_line(segments, width) : segments)
           end
           lines
@@ -196,6 +208,25 @@ module Meringue
           return nil unless width
 
           [width.to_i - leader_length, 1].max
+        end
+
+        def style_suffix_marker(segments, suffix_text, suffix_style)
+          return segments if suffix_text.to_s.empty? || suffix_style.nil?
+
+          segments.each_with_index.reverse_each do |segment, index|
+            next unless segment.is_a?(Array)
+
+            text = segment.fetch(0, "").to_s
+            next unless text.end_with?(suffix_text)
+
+            base_text = text[0...-suffix_text.length]
+            styled_suffix = []
+            styled_suffix << [base_text, segment.fetch(1, nil)] unless base_text.empty?
+            styled_suffix << [suffix_text, suffix_style]
+            return segments[0...index] + styled_suffix + segments[(index + 1)..]
+          end
+
+          segments
         end
 
         def normal_continuation_segments(prefix, record, id)
@@ -306,7 +337,7 @@ module Meringue
         end
 
         def active_pr_marker(record)
-          AgentTreeNavigation.active_agent_pr_url(record) ? "↗ PR" : ""
+          AgentTreeNavigation.active_agent_pr_url(record) ? "↗" : ""
         end
 
         def short_id(id)
