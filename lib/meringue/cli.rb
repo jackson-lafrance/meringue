@@ -186,6 +186,7 @@ module Meringue
 
         TUI controls:
           Enter                     # send the chat prompt to a head agent
+          /clear                    # reset the persisted Meringue state
           Esc on an empty prompt or Ctrl-C # quit the TUI
       HELP
     end

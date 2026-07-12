@@ -46,7 +46,7 @@ module Meringue
               ["  ·  ", Style::DIM],
               ["open questions: #{open_questions}", Style::MUTED],
               ["  ·  ", Style::DIM],
-              ["enter sends · esc/ctrl-c quits", Style::MUTED]
+              ["enter sends · /clear resets · esc/ctrl-c quits", Style::MUTED]
             ]
           ]
         end

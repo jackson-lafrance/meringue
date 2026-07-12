@@ -17,6 +17,9 @@ module Meringue
         "spawn_head" => "SpawnHead",
         "apply_head_result" => "ApplyHeadResult",
         "ask_question" => "AskQuestion",
+        "answer_question" => "AnswerQuestion",
+        "clear" => "ClearState",
+        "clear_state" => "ClearState",
         "list_all" => "ListAll"
       }.freeze
 
@@ -62,6 +65,10 @@ module Meringue
           apply_head_result(command_id, command_type, payload)
         when "AskQuestion"
           ask_question(command_id, command_type, payload)
+        when "AnswerQuestion"
+          answer_question(command_id, command_type, payload)
+        when "ClearState"
+          clear_state(command_id, command_type)
         else
           rejected_result(
             command_id,
@@ -289,6 +296,49 @@ module Meringue
           },
           log_ids.uniq
         )
+      end
+
+      def answer_question(command_id, command_type, payload)
+        question_id = value_at(payload, "question_id", "QuestionID", "questionId")
+        answer = value_at(payload, "answer", "Answer")
+        errors = []
+
+        errors << "question_id is required" if blank?(question_id)
+        errors << "answer is required" if blank?(answer)
+        return rejected_result(command_id, command_type, "Question was not answered.", errors) unless errors.empty?
+
+        state = normalized_state
+        question = find_question(state, question_id)
+        return rejected_result(command_id, command_type, "Question #{question_id} does not exist.", ["question_not_found"]) unless question
+
+        now = timestamp
+        question["status"] = "answered"
+        question["answer"] = answer.to_s
+        question["updated_at"] = now
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: question.fetch("id"),
+          level: "info",
+          message: "Answered question #{question.fetch("id")}.",
+          details: {
+            "head_id" => question.fetch("head_id", nil),
+            "project_id" => question.fetch("project_id", nil),
+            "issue_id" => question.fetch("issue_id", nil)
+          }
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, question.fetch("id"), "Answered question #{question.fetch("id")}.", question, log_ids)
+      end
+
+      def clear_state(command_id, command_type)
+        now = timestamp
+        state = State::Models.empty_state(now: now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, nil, "Cleared Meringue state.", state, [])
       end
 
       def ask_question(command_id, command_type, payload)

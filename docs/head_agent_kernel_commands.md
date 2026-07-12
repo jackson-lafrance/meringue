@@ -406,6 +406,22 @@ Example:
 { "type": "Kill", "payload": { "target_id": "P1-I1" } }
 ```
 
+### ClearState
+
+Clears all persisted Meringue projects, issues, agents, questions, logs, and counters. This is a user slash-command recovery tool; head agents should not propose it.
+
+Payload:
+
+```json
+{}
+```
+
+Example:
+
+```json
+{ "type": "ClearState", "payload": {} }
+```
+
 ### ReconcileSessions
 
 Inspects tracked harness sessions and reconciles stored state. This is usually run by the kernel at startup or periodically, not proposed by heads.
