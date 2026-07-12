@@ -414,6 +414,29 @@ module Meringue
         apply_tui_theme(theme)
 
         state = normalized_state
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: nil,
+          level: "info",
+          message: "Set TUI theme to #{theme}.",
+          details: { "theme" => theme, "config_path" => config_path }
+        )
+        touch_state!(state)
+        store.save(state)
+
+        accepted_result(
+          command_id,
+          command_type,
+          theme,
+          "Set TUI theme to #{theme} and saved it to #{config_path}.",
+          { "theme" => theme, "config_path" => config_path, "available_themes" => theme_names },
+          log_ids
+        )
+      rescue Config::ParseError => e
+        rejected_result(command_id, command_type, "Theme was not changed because config could not be read.", [e.message])
+      end
+
       def set_harness(command_id, command_type, payload)
         requested_provider = value_at(payload, "provider", "Provider", "harness", "Harness")
         return rejected_result(command_id, command_type, "Harness was not changed.", ["provider is required"]) if blank?(requested_provider)
@@ -456,10 +479,6 @@ module Meringue
           source_type: "kernel",
           source_id: nil,
           level: "info",
-          message: "Set TUI theme to #{theme}.",
-          details: { "theme" => theme, "config_path" => config_path }
-        )
-        touch_state!(state)
           message: changed ? "Selected #{metadata.fetch("active_harness_label")} harness for future agents." : "#{metadata.fetch("active_harness_label")} harness is already selected.",
           details: {
             "previous_harness" => previous_public_provider,
@@ -474,13 +493,6 @@ module Meringue
         accepted_result(
           command_id,
           command_type,
-          theme,
-          "Set TUI theme to #{theme} and saved it to #{config_path}.",
-          { "theme" => theme, "config_path" => config_path, "available_themes" => theme_names },
-          log_ids
-        )
-      rescue Config::ParseError => e
-        rejected_result(command_id, command_type, "Theme was not changed because config could not be read.", [e.message])
           public_provider,
           changed ? "Selected #{metadata.fetch("active_harness_label")} for future heads and workers." : "#{metadata.fetch("active_harness_label")} is already the active harness.",
           {

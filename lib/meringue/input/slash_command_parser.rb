@@ -306,6 +306,8 @@ module Meringue
         return invalid("Usage: /theme <name>") unless tokens.length == 1
 
         kernel_command("SetTheme", "theme" => tokens[0])
+      end
+
       def parse_harness(arguments)
         tokens = split_arguments(arguments)
         return invalid("Usage: /harness <pi|claude|antigravity>") unless tokens.length == 1
