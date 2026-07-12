@@ -14,6 +14,7 @@ module Meringue
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent harness session in Alacritty, or navigate the AgentTree when no id is provided."],
         ["/jumpr [agent_id]", "Open an agent pull request, or navigate agents with attached PRs when no id is provided."],
+        ["/keybind", "Show all TUI keybindings."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
@@ -230,6 +231,8 @@ module Meringue
           invalid("/jump is a local TUI command. Run it in the interactive TUI to open an agent session.", usage: "/jump [agent_id]")
         when "jumpr"
           invalid("/jumpr is a local TUI command. Run it in the interactive TUI to open an agent pull request.", usage: "/jumpr [agent_id]")
+        when "keybind"
+          invalid("/keybind is a local TUI command. Run it in the interactive TUI to show keybindings.", usage: "/keybind")
         when "tree"
           kernel_command("ListAll", "view" => "tree")
         when "state"
