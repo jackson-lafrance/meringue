@@ -8,7 +8,8 @@ module Meringue
       DEFAULT_WIDTH = 100
       DEFAULT_HEIGHT = 32
       REFRESH_INTERVAL = 0.2
-      SCROLL_STEP = 4
+      MOUSE_SCROLL_STEP = 3
+      PAGE_SCROLL_STEP = 8
       CTRL_C = "\u0003"
       CTRL_D = "\u0004"
       CTRL_W = "\u0017"
@@ -200,7 +201,7 @@ module Meringue
         focus_result = handle_focus_key(key, input_buffer, input_cursor, slash_suggestion_index)
         return focus_result if focus_result
 
-        scroll_result = handle_focused_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        scroll_result = handle_focused_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return scroll_result if scroll_result
 
         focused_action_result = handle_focused_action_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
@@ -298,16 +299,26 @@ module Meringue
         [input_buffer, input_cursor, slash_suggestion_index]
       end
 
-      def handle_focused_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index)
+      def handle_focused_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return nil unless focused_scrollable?
 
-        if mouse_wheel_up?(key) || UP_KEYS.include?(key) || PAGE_UP_KEYS.include?(key)
-          scroll_focused_pane(:up, page: PAGE_UP_KEYS.include?(key))
+        if mouse_wheel_up?(key)
+          scroll_focused_pane(:up, steps: MOUSE_SCROLL_STEP * mouse_wheel_count(key), state: state)
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
-        if mouse_wheel_down?(key) || DOWN_KEYS.include?(key) || PAGE_DOWN_KEYS.include?(key)
-          scroll_focused_pane(:down, page: PAGE_DOWN_KEYS.include?(key))
+        if mouse_wheel_down?(key)
+          scroll_focused_pane(:down, steps: MOUSE_SCROLL_STEP * mouse_wheel_count(key), state: state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if UP_KEYS.include?(key) || PAGE_UP_KEYS.include?(key)
+          scroll_focused_pane(:up, steps: scroll_key_step(page: PAGE_UP_KEYS.include?(key)), state: state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if DOWN_KEYS.include?(key) || PAGE_DOWN_KEYS.include?(key)
+          scroll_focused_pane(:down, steps: scroll_key_step(page: PAGE_DOWN_KEYS.include?(key)), state: state)
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
@@ -353,10 +364,11 @@ module Meringue
         key.is_a?(Hash) && key.fetch("type", nil) == "mouse" && key.fetch("kind", nil) == "wheel_down"
       end
 
-      def scroll_focused_pane(direction, page: false)
-        step = page ? SCROLL_STEP : 1
-        delta = scroll_delta_for(@focused_pane, direction, step)
-        @scroll_offsets[@focused_pane] = [@scroll_offsets[@focused_pane].to_i + delta, 0].max
+      def scroll_focused_pane(direction, steps:, state:)
+        pane = @focused_pane.to_s
+        delta = scroll_delta_for(pane, direction, steps)
+        max_offset = scroll_max_for(pane, state)
+        @scroll_offsets[pane] = (@scroll_offsets[pane].to_i + delta).clamp(0, max_offset)
       end
 
       def scroll_delta_for(pane, direction, step)
@@ -364,6 +376,32 @@ module Meringue
           direction == :down ? step : -step
         else
           direction == :up ? step : -step
+        end
+      end
+
+      def scroll_key_step(page: false)
+        page ? PAGE_SCROLL_STEP : 1
+      end
+
+      def mouse_wheel_count(key)
+        [key.fetch("count", 1).to_i, 1].max
+      end
+
+      def scroll_max_for(pane, state)
+        layout.scroll_limits(
+          state,
+          width: @last_render_width || DEFAULT_WIDTH,
+          height: @last_render_height || DEFAULT_HEIGHT
+        ).fetch(pane.to_s, 0).to_i
+      end
+
+      def clamp_scroll_offsets!(state)
+        layout.scroll_limits(
+          state,
+          width: @last_render_width || DEFAULT_WIDTH,
+          height: @last_render_height || DEFAULT_HEIGHT
+        ).each do |pane, max_offset|
+          @scroll_offsets[pane] = @scroll_offsets[pane].to_i.clamp(0, max_offset.to_i)
         end
       end
 
@@ -1107,11 +1145,13 @@ module Meringue
           @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
           @agent_tree_navigation_active = false if ids.empty?
         end
-        state.merge(
+        composed_state = state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
           "_scroll" => scroll_snapshot
         )
+        clamp_scroll_offsets!(composed_state)
+        composed_state.merge("_scroll" => scroll_snapshot)
       end
 
       def agent_tree_navigation_snapshot
