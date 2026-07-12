@@ -18,6 +18,7 @@ module Meringue
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
+        ["/dismiss <question_id>", "Dismiss an open question without answering it."],
         ["/prune <merged|errored>", "Remove merged PR issue bundles or errored records from active state."],
         ["/clear", "Reset persisted Meringue state. Dev/debug helper."]
       ].freeze
@@ -29,7 +30,8 @@ module Meringue
         { "prefix" => "/kill", "source" => "targets", "append_space" => false },
         { "prefix" => "/jump", "source" => "agents", "append_space" => false },
         { "prefix" => "/jumpr", "source" => "pr_agents", "append_space" => false },
-        { "prefix" => "/answer", "source" => "open_questions", "append_space" => true }
+        { "prefix" => "/answer", "source" => "open_questions", "append_space" => true },
+        { "prefix" => "/dismiss", "source" => "open_questions", "append_space" => false }
       ].freeze
 
       def self.command_suggestions(input = nil, limit: nil, state: nil)
@@ -250,6 +252,8 @@ module Meringue
           kernel_command("ListQuestions")
         when "answer"
           parse_answer(arguments)
+        when "dismiss"
+          parse_dismiss(arguments)
         when "prune"
           parse_prune(arguments)
         when "clear"
@@ -318,6 +322,13 @@ module Meringue
           "question_id" => tokens[0],
           "answer" => tokens[1..]&.join(" ")
         )
+      end
+
+      def parse_dismiss(arguments)
+        tokens = split_arguments(arguments)
+        return invalid("Usage: /dismiss <question_id>") unless tokens.length == 1
+
+        kernel_command("DismissQuestion", "question_id" => tokens[0])
       end
 
       def parse_prune(arguments)
