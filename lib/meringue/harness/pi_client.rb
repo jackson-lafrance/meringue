@@ -315,12 +315,15 @@ module Meringue
 
       def session_file_path(session_ref)
         path = session_ref["session_file"] || session_ref[:session_file]
-        return File.expand_path(path) if present?(path)
+        expanded_path = File.expand_path(path) if present?(path)
+        return expanded_path if expanded_path && File.file?(expanded_path)
 
         session_id = session_ref["session_id"] || session_ref[:session_id]
-        return nil unless present?(session_id) && session_dir
+        discovered_path = if present?(session_id) && session_dir
+                            Dir[File.join(File.expand_path(session_dir), "*#{session_id}*.jsonl")].max_by { |candidate| File.mtime(candidate) }
+                          end
 
-        Dir[File.join(File.expand_path(session_dir), "*#{session_id}*.jsonl")].max_by { |candidate| File.mtime(candidate) }
+        discovered_path || expanded_path
       end
 
       def assistant_text_from_message(record)
