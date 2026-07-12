@@ -29,12 +29,13 @@ module Meringue
       WORD_DELETE_KEYS = ["\ed", "\eD", "\e[3;3~", "\e[3;5~"].freeze
       PAGE_UP_KEYS = ["\e[5~"].freeze
       PAGE_DOWN_KEYS = ["\e[6~"].freeze
-      SCROLL_PANE_KEYS = {
-        "\e1" => "agent_tree",
-        "\e2" => "conversation",
-        "\e3" => "logs"
-      }.freeze
-      SCROLL_PANE_LABELS = {
+      SHIFT_TAB_KEYS = ["\e[Z"].freeze
+      CTRL_TAB_KEYS = ["\e[27;5;9~", "\e[9;5u"].freeze
+      FOCUS_FORWARD_KEYS = CTRL_TAB_KEYS.freeze
+      FOCUS_BACK_KEYS = SHIFT_TAB_KEYS.freeze
+      FOCUS_ORDER = %w[chat agent_tree conversation logs].freeze
+      FOCUS_LABELS = {
+        "chat" => "chat input",
         "agent_tree" => "agent tree",
         "conversation" => "conversation",
         "logs" => "kernel logs"
@@ -54,7 +55,7 @@ module Meringue
         @agent_tree_navigation_active = false
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = nil
-        @active_scroll_pane = "agent_tree"
+        @focused_pane = "chat"
         @scroll_offsets = Hash.new(0)
         @conversation_event_keys = {}
         @started_at = Time.iso8601(Time.now.utc.iso8601)
@@ -176,12 +177,15 @@ module Meringue
           return [buffer, buffer.chars.length, index]
         end
 
-        scroll_result = handle_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index)
-        return scroll_result if scroll_result
-
         if @agent_tree_navigation_active
           return handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         end
+
+        focus_result = handle_focus_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        return focus_result if focus_result
+
+        scroll_result = handle_focused_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        return scroll_result if scroll_result
 
         if slash_suggestion_key?(key) && slash_suggestions_active?(input_buffer)
           completion = safe_slash_completion(input_buffer, slash_suggestion_index, state)
@@ -229,6 +233,7 @@ module Meringue
 
         return [input_buffer, input_cursor, slash_suggestion_index] unless printable_key?(key)
 
+        @focused_pane = "chat"
         insert_text(input_buffer, input_cursor, key) + [0]
       end
 
@@ -255,28 +260,60 @@ module Meringue
       end
 
 
-      def handle_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index)
-        if SCROLL_PANE_KEYS.key?(key)
-          @active_scroll_pane = SCROLL_PANE_KEYS.fetch(key)
-          append_jump_response("Scroll target: #{SCROLL_PANE_LABELS.fetch(@active_scroll_pane)}. PageUp/PageDown scrolls it.")
+      def handle_focus_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        return nil if slash_suggestions_active?(input_buffer) && slash_suggestion_key?(key)
+        return nil unless FOCUS_FORWARD_KEYS.include?(key) || FOCUS_BACK_KEYS.include?(key) || (!slash_suggestions_active?(input_buffer) && TAB_KEYS.include?(key))
+
+        cycle_focus(FOCUS_BACK_KEYS.include?(key) ? -1 : 1)
+        append_jump_response("Focused #{FOCUS_LABELS.fetch(@focused_pane)}. #{focused_scrollable? ? "Use ↑/↓, PageUp/PageDown, or mouse wheel to scroll." : "Type normally in chat."}")
+        [input_buffer, input_cursor, slash_suggestion_index]
+      end
+
+      def cycle_focus(delta = 1)
+        current_index = FOCUS_ORDER.index(@focused_pane) || 0
+        @focused_pane = FOCUS_ORDER[(current_index + delta) % FOCUS_ORDER.length]
+      end
+
+      def handle_focused_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        return nil unless focused_scrollable?
+
+        if mouse_wheel_up?(key) || UP_KEYS.include?(key) || PAGE_UP_KEYS.include?(key)
+          scroll_focused_pane(:up, page: PAGE_UP_KEYS.include?(key))
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
-        if PAGE_UP_KEYS.include?(key)
-          scroll_active_pane(SCROLL_STEP)
-          return [input_buffer, input_cursor, slash_suggestion_index]
-        end
-
-        if PAGE_DOWN_KEYS.include?(key)
-          scroll_active_pane(-SCROLL_STEP)
+        if mouse_wheel_down?(key) || DOWN_KEYS.include?(key) || PAGE_DOWN_KEYS.include?(key)
+          scroll_focused_pane(:down, page: PAGE_DOWN_KEYS.include?(key))
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
         nil
       end
 
-      def scroll_active_pane(delta)
-        @scroll_offsets[@active_scroll_pane] = [@scroll_offsets[@active_scroll_pane].to_i + delta.to_i, 0].max
+      def focused_scrollable?
+        @focused_pane != "chat"
+      end
+
+      def mouse_wheel_up?(key)
+        key.is_a?(Hash) && key.fetch("type", nil) == "mouse" && key.fetch("kind", nil) == "wheel_up"
+      end
+
+      def mouse_wheel_down?(key)
+        key.is_a?(Hash) && key.fetch("type", nil) == "mouse" && key.fetch("kind", nil) == "wheel_down"
+      end
+
+      def scroll_focused_pane(direction, page: false)
+        step = page ? SCROLL_STEP : 1
+        delta = scroll_delta_for(@focused_pane, direction, step)
+        @scroll_offsets[@focused_pane] = [@scroll_offsets[@focused_pane].to_i + delta, 0].max
+      end
+
+      def scroll_delta_for(pane, direction, step)
+        if pane == "agent_tree"
+          direction == :down ? step : -step
+        else
+          direction == :up ? step : -step
+        end
       end
 
       def handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
@@ -307,7 +344,6 @@ module Meringue
         text = input_buffer.to_s.strip
         return handle_local_jump_command(text, state) if jump_command?(text)
         return handle_local_jumpr_command(text, state) if jumpr_command?(text)
-        return handle_local_scroll_command(text) if scroll_command?(text)
 
         false
       end
@@ -332,53 +368,12 @@ module Meringue
         true
       end
 
-      def handle_local_scroll_command(text)
-        _command, pane, direction = text.split(/\s+/, 3)
-        pane = normalize_scroll_pane(pane)
-        unless pane
-          append_jump_response("Usage: /scroll <tree|chat|logs> <up|down|top|bottom>")
-          return true
-        end
-
-        @active_scroll_pane = pane
-        case direction.to_s.downcase
-        when "up"
-          scroll_active_pane(SCROLL_STEP)
-        when "down"
-          scroll_active_pane(-SCROLL_STEP)
-        when "top"
-          @scroll_offsets[pane] = 10_000
-        when "bottom", "reset", ""
-          @scroll_offsets[pane] = 0
-        else
-          append_jump_response("Usage: /scroll <tree|chat|logs> <up|down|top|bottom>")
-          return true
-        end
-        append_jump_response("Scrolled #{SCROLL_PANE_LABELS.fetch(pane)} #{direction.to_s.empty? ? "bottom" : direction}.")
-        true
-      end
-
-      def normalize_scroll_pane(value)
-        case value.to_s.downcase
-        when "tree", "agent", "agents", "agent_tree", "agent-tree"
-          "agent_tree"
-        when "chat", "conversation"
-          "conversation"
-        when "log", "logs", "kernel", "kernel_logs", "kernel-logs"
-          "logs"
-        end
-      end
-
       def jump_command?(text)
         text == "/jump" || text.start_with?("/jump ")
       end
 
       def jumpr_command?(text)
         text == "/jumpr" || text.start_with?("/jumpr ")
-      end
-
-      def scroll_command?(text)
-        text == "/scroll" || text.start_with?("/scroll ")
       end
 
       def local_navigation_command_without_id?(input_buffer)
@@ -937,7 +932,7 @@ module Meringue
 
       def scroll_snapshot
         {
-          "active_pane" => @active_scroll_pane,
+          "active_pane" => @focused_pane,
           "offsets" => @scroll_offsets.to_h
         }
       end
