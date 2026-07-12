@@ -32,14 +32,15 @@ module Meringue
           chat = chat_state(state)
           input_buffer = chat.fetch("input_buffer", "").to_s
           pending_count = chat.fetch("pending_count", 0).to_i
-          placeholder = input_buffer.empty? ? "type a prompt for a head agent" : input_buffer
+          placeholder = input_buffer.empty? ? "enter a prompt" : input_buffer
+          input_line = [
+            ["›", Style::ACCENT_BOLD],
+            [" #{placeholder}", input_buffer.empty? ? Style::MUTED : Style::TEXT]
+          ]
+          input_line << ["_", Style::ACCENT_BOLD] unless input_buffer.empty?
 
           [
-            [
-              ["›", Style::ACCENT_BOLD],
-              [" #{placeholder}", input_buffer.empty? ? Style::MUTED : Style::TEXT],
-              ["_", Style::ACCENT_BOLD]
-            ],
+            input_line,
             [["", Style::DIM]],
             [
               [pending_status(pending_count), pending_count.positive? ? Style::WARNING : Style::SUCCESS],
