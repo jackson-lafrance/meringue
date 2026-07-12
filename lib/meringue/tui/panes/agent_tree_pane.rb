@@ -143,7 +143,14 @@ module Meringue
             [" #{id}", Style::MUTED],
             ["  ", Style::DIM]
           ]
-          wrapped_lines(leader_segments, content, title_style: title_style(record), continuation_style: title_style(record), width: width)
+          wrapped_lines(
+            leader_segments,
+            content,
+            title_style: title_style(record),
+            continuation_style: title_style(record),
+            width: width,
+            continuation_segments: normal_continuation_segments(prefix, record, id)
+          )
         end
 
         def selected_item_lines(prefix:, record:, id:, content:, width: nil)
@@ -160,13 +167,14 @@ module Meringue
             title_style: Style::AGENT_TREE_SELECTED,
             continuation_style: Style::AGENT_TREE_SELECTED,
             width: width,
-            selected: true
+            selected: true,
+            continuation_segments: selected_continuation_segments(prefix, record, id)
           )
         end
 
-        def wrapped_lines(leader_segments, content, title_style:, continuation_style:, width:, selected: false)
+        def wrapped_lines(leader_segments, content, title_style:, continuation_style:, width:, selected: false, continuation_segments: nil)
           leader_text = plain_text(leader_segments)
-          continuation_segments = [[" " * leader_text.length, selected ? Style::AGENT_TREE_SELECTED_DIM : Style::DIM]]
+          continuation_segments ||= [[" " * leader_text.length, selected ? Style::AGENT_TREE_SELECTED_DIM : Style::DIM]]
           content_width = wrapped_content_width(width, leader_text.length)
           chunks = wrap_content(content, content_width)
 
@@ -186,6 +194,36 @@ module Meringue
           return nil unless width
 
           [width.to_i - leader_length, 1].max
+        end
+
+        def normal_continuation_segments(prefix, record, id)
+          [
+            ["#{continuation_prefix(prefix)} ", Style::DIM],
+            [" " * status_dot(record).length, Style::DIM],
+            [" " * (id.to_s.length + 1), Style::DIM],
+            ["  ", Style::DIM]
+          ]
+        end
+
+        def selected_continuation_segments(prefix, record, id)
+          [
+            [" ", Style::AGENT_TREE_SELECTED_DIM],
+            [" #{continuation_prefix(prefix)} ", Style::AGENT_TREE_SELECTED_DIM],
+            [" " * status_dot(record).length, Style::AGENT_TREE_SELECTED_DIM],
+            [" " * (id.to_s.length + 1), Style::AGENT_TREE_SELECTED_DIM],
+            ["  ", Style::AGENT_TREE_SELECTED_DIM]
+          ]
+        end
+
+        def continuation_prefix(prefix)
+          case prefix
+          when /├─\z/
+            "#{prefix[0...-2]}│ "
+          when /└─\z/
+            "#{prefix[0...-2]}  "
+          else
+            " " * prefix.length
+          end
         end
 
         def wrap_content(content, width)
