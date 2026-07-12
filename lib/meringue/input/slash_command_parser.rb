@@ -26,7 +26,7 @@ module Meringue
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
         ["/prune <merged|errored>", "Remove merged PR issue bundles or errored records from active state."],
-        ["/clear", "Reset persisted Meringue state. Dev/debug helper."]
+        ["/clear", "Reset persisted Meringue state and clear the chat conversation. Dev/debug helper."]
       ].freeze
 
       ARGUMENT_SUGGESTION_CONTEXTS = [

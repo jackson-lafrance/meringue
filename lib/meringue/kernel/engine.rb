@@ -86,7 +86,8 @@ module Meringue
         ["/questions", "List questions and their statuses."],
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
-        ["/prune <merged|errored>", "Remove merged PR issue bundles or errored records from active state."]
+        ["/prune <merged|errored>", "Remove merged PR issue bundles or errored records from active state."],
+        ["/clear", "Reset persisted Meringue state and clear the chat conversation."]
       ].freeze
       TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
