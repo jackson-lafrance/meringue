@@ -12,7 +12,7 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker session."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
-        ["/jump", "Open an agent harness session, or navigate the AgentTree when no id is provided."],
+        ["/jump", "Open an agent harness session in Alacritty, or navigate the AgentTree when no id is provided."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
