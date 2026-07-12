@@ -28,7 +28,8 @@ module Meringue
         "antigravity" => "antigravity",
         "antigravity-cli" => "antigravity",
         "antigravity_cli" => "antigravity",
-        "antigravity cli" => "antigravity"
+        "antigravity cli" => "antigravity",
+        "agy" => "antigravity"
       }.freeze
       DEFAULT_PI_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
       DEFAULT_PI_HEAD_EXTRA_ARGS = [
@@ -71,7 +72,7 @@ module Meringue
           "use_json_schema" => true
         },
         "antigravity" => {
-          "command" => "antigravity",
+          "command" => "agy",
           "head_extra_args" => [],
           "worker_extra_args" => []
         }

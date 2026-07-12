@@ -8,7 +8,7 @@ module Meringue
       DEFAULT_COMMANDS = {
         "pi" => "pi",
         "claude" => "claude",
-        "antigravity" => "antigravity"
+        "antigravity" => "agy"
       }.freeze
       DEFAULT_ALACRITTY_COMMAND = "alacritty"
       DEFAULT_PI_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
@@ -91,10 +91,7 @@ module Meringue
       end
 
       def antigravity_argv(agent)
-        session_id = agent.fetch("harness_session_id", nil)
-        return nil unless present?(session_id)
-
-        command_parts("antigravity") + ["-r", session_id]
+        command_parts("antigravity") + ["--continue"]
       end
 
       def pi_session_argument(agent)

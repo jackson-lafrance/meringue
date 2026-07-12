@@ -25,7 +25,7 @@ head_extra_args = ["--effort", "high", "--tools", "Read,Glob,Grep,Bash", "--perm
 worker_extra_args = ["--effort", "high", "--permission-mode", "acceptEdits"]
 
 [harness.antigravity]
-command = "antigravity"
+command = "agy"
 head_extra_args = []
 worker_extra_args = []
 

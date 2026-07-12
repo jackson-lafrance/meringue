@@ -76,11 +76,11 @@ head_extra_args = ["--effort", "high", "--permission-mode", "plan"]
 worker_extra_args = ["--effort", "high", "--permission-mode", "acceptEdits"]
 
 [harness.antigravity]
-command = "antigravity"
+command = "agy"
 head_extra_args = []
 worker_extra_args = []
 ```
 
-Claude Code runs through `claude --print --output-format stream-json --verbose`; Meringue stores the returned session id and resumes completed turns with `claude --resume`. Live steer/follow-up prompting is currently Pi-only.
+Claude Code runs through `claude --print --output-format stream-json --verbose`; Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace. Live steer/follow-up prompting is currently Pi-only.
 
 Do not store API keys or secrets in the config file. Prefer each provider CLI's normal auth flow or environment setup.
