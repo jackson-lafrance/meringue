@@ -39,32 +39,46 @@ module Meringue
           ]
           input_line << ["_", Style::ACCENT_BOLD] unless input_buffer.empty?
 
-          lines = [input_line]
-          lines.concat(slash_helper_lines) if slash_helper?(input_buffer)
-          lines.concat([
-            [["", Style::DIM]],
+          [input_line, [["", Style::DIM]], [
+            [pending_status(pending_count), pending_count.positive? ? Style::WARNING : Style::SUCCESS],
+            ["  ·  ", Style::DIM],
+            ["open questions: #{open_questions}", Style::MUTED],
+            ["  ·  ", Style::DIM],
+            ["enter sends · tab completes slash commands · esc/ctrl-c quits", Style::MUTED]
+          ]]
+        end
+
+        def slash_suggestions?(state)
+          slash_suggestion_records(state).any?
+        end
+
+        def slash_suggestion_lines(state)
+          records = slash_suggestion_records(state)
+          return [[["No matching slash commands.", Style::MUTED]]] if slash_prompt?(chat_state(state).fetch("input_buffer", "")) && records.empty?
+
+          selected_index = selected_slash_suggestion_index(state, records.length)
+          records.map.with_index do |record, index|
+            selected = index == selected_index
+            marker = selected ? "›" : " "
+            marker_style = selected ? Style::ACCENT_BOLD : Style::DIM
+            usage_style = selected ? Style::ACCENT_BOLD : Style::TEXT
             [
-              [pending_status(pending_count), pending_count.positive? ? Style::WARNING : Style::SUCCESS],
-              ["  ·  ", Style::DIM],
-              ["open questions: #{open_questions}", Style::MUTED],
-              ["  ·  ", Style::DIM],
-              ["enter sends · /help commands · esc/ctrl-c quits", Style::MUTED]
+              ["#{marker} ", marker_style],
+              [record.fetch("usage"), usage_style],
+              [" — #{record.fetch("description")}", Style::MUTED]
             ]
-          ])
-          lines
-        end
-
-        def slash_helper?(input_buffer)
-          input_buffer.to_s.match?(/\A\s*\/\z/)
-        end
-
-        def slash_helper_lines
-          header = [["╭ slash commands", Style::ACCENT_BOLD]]
-          command_lines = Meringue::Input::SlashCommandParser.command_suggestions.first(10).map do |usage, description|
-            [["│ ", Style::DIM], [usage, Style::ACCENT_BOLD], [" — #{description}", Style::MUTED]]
           end
-          footer = [["╰ use quotes for multi-word titles, prompts, and answers", Style::DIM]]
-          [[["", Style::DIM]], header] + command_lines + [footer]
+        end
+
+        def slash_suggestion_records(state)
+          input_buffer = chat_state(state).fetch("input_buffer", "")
+          return [] unless slash_prompt?(input_buffer)
+
+          Meringue::Input::SlashCommandParser.command_suggestion_records(input_buffer, limit: 5)
+        end
+
+        def slash_prompt?(input_buffer)
+          input_buffer.to_s.strip.start_with?("/")
         end
 
         private
@@ -104,6 +118,12 @@ module Meringue
 
         def chat_state(state)
           state.fetch("_chat", {}) || {}
+        end
+
+        def selected_slash_suggestion_index(state, count)
+          return 0 unless count.positive?
+
+          chat_state(state).fetch("slash_suggestion_index", 0).to_i.clamp(0, count - 1)
         end
 
         def spacer_line
