@@ -10,6 +10,7 @@ Use `/keybind` inside the interactive TUI to show the complete keybinding list i
 
 ## Focus and scrolling
 
+- Click a dashboard section: move focus to that section (the purple outline follows the focused section).
 - `Tab` / `Ctrl-Tab`: move focus forward.
 - `Shift-Tab`: move focus backward.
 - Arrow keys, `PageUp` / `PageDown`, and mouse wheel: scroll the focused non-chat pane.
