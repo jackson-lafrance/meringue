@@ -39,6 +39,7 @@ module Meringue
         "apply_head_result" => "ApplyHeadResult",
         "ask_question" => "AskQuestion",
         "answer_question" => "AnswerQuestion",
+        "dismiss_question" => "DismissQuestion",
         "modify_issue" => "ModifyIssue",
         "prompt_agent" => "PromptAgent",
         "kill" => "Kill",
@@ -65,6 +66,7 @@ module Meringue
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
+        ["/dismiss <question_id>", "Dismiss an open question without answering it."],
         ["/prune <merged|errored>", "Remove merged PR issue bundles or errored records from active state."]
       ].freeze
       TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
@@ -161,6 +163,8 @@ module Meringue
           ask_question(command_id, command_type, payload)
         when "AnswerQuestion"
           answer_question(command_id, command_type, payload)
+        when "DismissQuestion"
+          dismiss_question(command_id, command_type, payload)
         when "ReconcileSessions"
           reconcile_sessions(command_id: command_id, command_type: command_type)
         when "Prune"
@@ -681,6 +685,44 @@ module Meringue
         store.save(state)
 
         accepted_result(command_id, command_type, question.fetch("id"), "Answered question #{question.fetch("id")}.", question, log_ids)
+      end
+
+      def dismiss_question(command_id, command_type, payload)
+        question_id = value_at(payload, "question_id", "QuestionID", "questionId")
+        errors = []
+
+        errors << "question_id is required" if blank?(question_id)
+        return rejected_result(command_id, command_type, "Question was not dismissed.", errors) unless errors.empty?
+
+        state = normalized_state
+        question = find_question(state, question_id)
+        return rejected_result(command_id, command_type, "Question #{question_id} does not exist.", ["question_not_found"]) unless question
+
+        current_status = question.fetch("status", nil)
+        return accepted_result(command_id, command_type, question.fetch("id"), "Question #{question.fetch("id")} is already dismissed.", question, []) if current_status == "dismissed"
+        unless current_status == "open"
+          return rejected_result(command_id, command_type, "Question #{question.fetch("id")} is #{current_status}, not open.", ["question_not_open"])
+        end
+
+        now = timestamp
+        question["status"] = "dismissed"
+        question["updated_at"] = now
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: question.fetch("id"),
+          level: "info",
+          message: "Dismissed question #{question.fetch("id")}.",
+          details: {
+            "head_id" => question.fetch("head_id", nil),
+            "project_id" => question.fetch("project_id", nil),
+            "issue_id" => question.fetch("issue_id", nil)
+          }
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, question.fetch("id"), "Dismissed question #{question.fetch("id")}.", question, log_ids)
       end
 
       def prune(command_id, command_type, payload)
