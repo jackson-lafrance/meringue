@@ -16,7 +16,7 @@ module Meringue
         end
 
         def conversation_lines(state, width: nil)
-          messages = chat_state(state).fetch("messages", []) || []
+          messages = visible_messages(chat_state(state).fetch("messages", []) || [])
 
           if messages.empty?
             return [[["No conversation yet. Type a prompt below and press Enter.", Style::MUTED]]]
@@ -81,6 +81,16 @@ module Meringue
         end
 
         private
+
+        def visible_messages(messages)
+          messages.select { |message| visible_message?(message) }
+        end
+
+        def visible_message?(message)
+          return false if message.fetch("visible", true) == false
+
+          !message.fetch("text", "").to_s.strip.empty?
+        end
 
         def role_line(role, style)
           [

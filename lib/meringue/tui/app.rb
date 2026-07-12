@@ -691,8 +691,9 @@ module Meringue
         append_message("you", text)
         assistant_message_id = append_message(
           "meringue",
-          slash_command ? "Queued slash command…" : head_activity_text(text, phase: :queued),
-          status: "queued"
+          "",
+          status: "queued",
+          visible: false
         )
         increment_pending_count
 
@@ -700,8 +701,9 @@ module Meringue
           begin
             update_message(
               assistant_message_id,
-              text: slash_command ? "Applying slash command…" : head_activity_text(text, phase: :working),
-              status: slash_command ? "working" : "head working"
+              text: "",
+              status: slash_command ? "working" : "head working",
+              visible: false
             )
             result = if on_submit
                        on_submit.call(text) do |event|
@@ -710,9 +712,10 @@ module Meringue
                      else
                        unavailable_prompt_handler_result
                      end
-            update_message(assistant_message_id, text: conversation_text_for(result), status: nil)
+            final_text = conversation_text_for(result)
+            update_message(assistant_message_id, text: final_text, status: nil, visible: !final_text.to_s.strip.empty?)
           rescue StandardError => e
-            update_message(assistant_message_id, text: "Head loop failed: #{e.class}: #{e.message}", status: "errored")
+            update_message(assistant_message_id, text: "Head loop failed: #{e.class}: #{e.message}", status: "errored", visible: true)
           ensure
             decrement_pending_count
           end
@@ -753,20 +756,20 @@ module Meringue
         case event.fetch("event", nil)
         when "head_completed"
           remember_conversation_event(head_completed_key(event.fetch("head_id", nil)))
-          update_message(message_id, text: head_completed_text(event), status: "applying commands")
+          update_message_status(message_id, "applying commands")
         when "head_result_applied"
           append_head_result_applied_summary(message_id, event)
         when "slash_command_applied"
-          append_to_message(message_id, slash_command_text(event.fetch("command_results", []) || []), status: nil)
+          append_user_facing_line(message_id, slash_command_text(event.fetch("command_results", []) || []), status: nil)
         when "worker_wait_started"
           remember_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
-          append_to_message(message_id, "Waiting for #{event.fetch("agent_id", "worker")}…", status: "workers running")
+          update_message_status(message_id, "workers running")
         when "worker_completed"
           remember_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
-          append_to_message(message_id, worker_completed_line(event), status: "workers running")
+          append_user_facing_line(message_id, worker_completed_line(event), status: "workers running")
         when "worker_wait_failed"
           forget_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
-          append_to_message(message_id, "#{event.fetch("agent_id", "worker")} wait failed.", status: "worker wait failed")
+          append_user_facing_line(message_id, worker_wait_failed_line(event), status: "worker wait failed")
         end
       end
 
@@ -785,13 +788,13 @@ module Meringue
 
         lines = []
         if head_result.any?
-          lines << format_head_result(spawn_result.fetch("target_id", "head"), head_result)
+          lines.concat(head_result_user_lines(head_result, question_ids: question_ids_from_apply_result(apply_result)))
         else
-          lines << result.fetch("summary", spawn_result.fetch("message", "Head loop completed."))
+          lines.concat(failure_result_lines(spawn_result, apply_result, fallback: result.fetch("summary", nil)))
         end
 
-        lines.concat(command_summary_lines(apply_result))
         lines.concat(worker_summary_lines(result.fetch("worker_wait_results", []) || []))
+        lines.concat(failure_result_lines(spawn_result, apply_result)) if lines.empty?
         lines.reject { |line| line.to_s.empty? }.join("\n")
       end
 
@@ -843,25 +846,41 @@ module Meringue
         end
       end
 
-      def head_completed_text(event)
-        format_head_result(event.fetch("head_id", "head"), event.fetch("head_result", {}) || {})
-      end
-
       def append_head_result_applied_summary(message_id, event)
-        lines = command_summary_lines(event.fetch("apply_result", {}) || {})
+        lines = head_result_user_lines(
+          event.fetch("head_result", {}) || {},
+          question_ids: question_ids_from_apply_result(event.fetch("apply_result", {}) || {})
+        )
         status = worker_wait_status(event)
         if lines.empty?
           update_message_status(message_id, status)
         else
-          append_to_message(message_id, lines.join("\n"), status: status)
+          append_user_facing_line(message_id, lines.join("\n"), status: status)
         end
       end
 
-      def format_head_result(head_id, head_result)
-        [
-          "#{head_id}: #{head_result.fetch("title", "Head completed")}".strip,
-          head_result.fetch("summary", "")
-        ].reject { |line| line.to_s.empty? }.join("\n")
+      def head_result_user_lines(head_result, question_ids: [])
+        commands = Array(head_result.fetch("commands", []))
+        questions = Array(head_result.fetch("questions", []))
+        question_lines = question_user_lines(questions, question_ids: question_ids)
+        return question_lines unless question_lines.empty?
+
+        summary = head_result.fetch("summary", "").to_s.strip
+        return [summary] if commands.empty? && !summary.empty?
+
+        []
+      end
+
+      def question_user_lines(questions, question_ids: [])
+        questions.each_with_index.filter_map do |question, index|
+          question_text = question.fetch("question", "").to_s.strip
+          next if question_text.empty?
+
+          question_id = question_ids[index].to_s
+          label = question_id.empty? ? "Question" : "Question #{question_id}"
+          context = question.fetch("context", "").to_s.strip
+          ["#{label}: #{question_text}", context.empty? ? nil : "Context: #{context}"].compact.join("\n")
+        end
       end
 
       def command_summary_lines(apply_result)
@@ -875,23 +894,77 @@ module Meringue
       end
 
       def worker_summary_lines(worker_wait_results)
-        completed_workers = worker_wait_results.select { |worker| worker.fetch("status", nil) == "settled" }
-        return [] if completed_workers.empty?
+        worker_wait_results.filter_map do |worker|
+          next unless worker.fetch("status", nil) == "settled"
 
-        lines = ["Completed workers: #{completed_workers.map { |worker| worker.fetch("agent_id", nil) }.compact.join(", ")}"]
-        pr_lines = completed_workers.flat_map do |worker|
-          Array(worker.fetch("pr_urls", [])).map do |url|
-            "#{worker.fetch("agent_id", "worker")} PR: #{url}"
-          end
+          worker_completed_line(worker)
         end
-        lines.concat(pr_lines)
       end
 
       def worker_completed_line(event)
-        pr_urls = Array(event.fetch("pr_urls", [])).compact
-        return "#{event.fetch("agent_id", "worker")} completed." if pr_urls.empty?
+        user_facing_worker_lines(
+          agent_id: event.fetch("agent_id", "worker"),
+          pr_urls: Array(event.fetch("pr_urls", [])).compact,
+          last_assistant_text: event.fetch("last_assistant_text", nil)
+        ).join("\n")
+      end
 
-        "#{event.fetch("agent_id", "worker")} completed and reported PR#{pr_urls.length == 1 ? "" : "s"}: #{pr_urls.join(", ")}"
+      def worker_wait_failed_line(event)
+        agent_id = event.fetch("agent_id", "worker")
+        error = event.fetch("error", {}) || {}
+        message = error.fetch("message", "worker result could not be read").to_s.strip
+        "Could not read #{agent_id}'s result#{message.empty? ? "." : ": #{message}"}"
+      end
+
+      def user_facing_worker_lines(agent_id:, pr_urls:, last_assistant_text:)
+        lines = []
+        unless pr_urls.empty?
+          label = pr_urls.length == 1 ? "Pull request" : "Pull requests"
+          lines << "#{label} from #{agent_id}:"
+          lines.concat(pr_urls.map { |url| "PR: #{url}" })
+        end
+
+        output = user_facing_agent_output(last_assistant_text, pr_urls: pr_urls)
+        unless output.empty?
+          lines << ["#{agent_id} output:", output].join("\n")
+        end
+
+        lines
+      end
+
+      def user_facing_agent_output(text, pr_urls: [])
+        output = text.to_s.strip
+        return "" if output.empty?
+
+        Array(pr_urls).compact.each do |url|
+          output = output.gsub(url.to_s, "").strip
+        end
+        output.gsub(/\n{3,}/, "\n\n").strip
+      end
+
+      def append_user_facing_line(message_id, line, status: nil)
+        return if line.to_s.strip.empty?
+
+        append_to_message(message_id, line, status: status, visible: true)
+      end
+
+      def question_ids_from_apply_result(apply_result)
+        result = apply_result.fetch("result", {}) || {}
+        Array(result.fetch("question_ids", []))
+      end
+
+      def failure_result_lines(spawn_result, apply_result, fallback: nil)
+        failed_result = [apply_result, spawn_result].compact.find do |result|
+          status = result.fetch("status", nil)
+          !status.to_s.empty? && status != "accepted"
+        end
+        message = failed_result&.fetch("message", nil).to_s.strip
+        errors = Array(failed_result&.fetch("errors", [])).map(&:to_s).reject(&:empty?)
+        lines = []
+        lines << message unless message.empty?
+        lines.concat(errors.map { |error| "- #{error}" })
+        lines << fallback.to_s.strip if lines.empty? && !fallback.to_s.strip.empty?
+        lines
       end
 
       def worker_wait_status(event)
@@ -953,7 +1026,7 @@ module Meringue
           append_message_once(
             head_completed_key(agent.fetch("id", nil)),
             "meringue",
-            format_head_result(agent.fetch("id", "head"), head_result)
+            head_result_user_lines(head_result).join("\n")
           )
         end
       end
@@ -990,17 +1063,12 @@ module Meringue
       end
 
       def worker_completed_text_from_agent(agent)
-        agent_id = agent.fetch("id", "worker")
-        branch = agent.fetch("workspace_branch", nil)
-        branch_text = branch.to_s.empty? ? "" : " on #{branch}"
         metadata = agent.fetch("harness_metadata", {}) || {}
-        pr_urls = verified_agent_pr_urls(metadata)
-        return "#{agent_id} completed#{branch_text}." if pr_urls.empty?
-
-        [
-          "#{agent_id} completed#{branch_text} and reported PR#{pr_urls.length == 1 ? "" : "s"}:",
-          *pr_urls.map { |url| "PR: #{url}" }
-        ].join("\n")
+        user_facing_worker_lines(
+          agent_id: agent.fetch("id", "worker"),
+          pr_urls: verified_agent_pr_urls(metadata),
+          last_assistant_text: metadata["last_assistant_text"]
+        ).join("\n")
       end
 
       def verified_agent_pr_urls(metadata)
@@ -1054,22 +1122,23 @@ module Meringue
         end
       end
 
-      def append_message(role, text, status: nil)
-        @chat_mutex.synchronize { append_message_unlocked(role, text, status: status) }
+      def append_message(role, text, status: nil, visible: nil)
+        @chat_mutex.synchronize { append_message_unlocked(role, text, status: status, visible: visible) }
       end
 
-      def append_message_unlocked(role, text, status: nil)
+      def append_message_unlocked(role, text, status: nil, visible: nil)
         @next_message_id += 1
         @messages << {
           "id" => @next_message_id,
           "role" => role,
           "text" => text,
-          "status" => status
+          "status" => status,
+          "visible" => visible
         }.compact
         @next_message_id
       end
 
-      def update_message(id, text:, status: nil)
+      def update_message(id, text:, status: nil, visible: nil)
         @chat_mutex.synchronize do
           message = @messages.find { |candidate| candidate.fetch("id") == id }
           return unless message
@@ -1080,10 +1149,11 @@ module Meringue
           else
             message.delete("status")
           end
+          apply_message_visibility(message, visible)
         end
       end
 
-      def append_to_message(id, line, status: nil)
+      def append_to_message(id, line, status: nil, visible: nil)
         @chat_mutex.synchronize do
           message = @messages.find { |candidate| candidate.fetch("id") == id }
           return unless message
@@ -1094,6 +1164,7 @@ module Meringue
             message["text"] = [existing, addition].reject { |part| part.to_s.empty? }.join("\n")
           end
           apply_message_status(message, status)
+          apply_message_visibility(message, visible)
         end
       end
 
@@ -1118,6 +1189,16 @@ module Meringue
           message["status"] = status
         else
           message.delete("status")
+        end
+      end
+
+      def apply_message_visibility(message, visible)
+        return if visible.nil?
+
+        if visible
+          message.delete("visible")
+        else
+          message["visible"] = false
         end
       end
 
