@@ -69,13 +69,34 @@ class SlashCommandSystemTest < Minitest::Test
     assert_equal "killed", state.fetch("agents").first.fetch("status")
   end
 
+  def test_prompt_agent_rejects_head_agents
+    state = Meringue::State::Models.empty_state.merge(
+      "agents" => [
+        {
+          "id" => "H1",
+          "type" => "head",
+          "status" => "completed",
+          "harness" => "pi",
+          "pid" => 123,
+          "harness_session_id" => "head-session"
+        }
+      ]
+    )
+    @store.save(state)
+
+    result = @engine.apply(@parser.parse("/prompt H1 \"Continue\""))
+
+    assert_equal "rejected", result.fetch("status")
+    assert_equal ["agent_is_not_worker"], result.fetch("errors")
+  end
+
   def test_slash_suggestions_show_top_three_and_filter_after_slash
     all_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/", limit: 3)
     filtered_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/p", limit: 3)
 
     assert_equal 3, all_suggestions.length
     assert_equal "/help", all_suggestions.first.fetch("usage")
-    assert_equal ["/project add <path> [name]", "/prompt <agent_id> \"<message>\""], filtered_suggestions.map { |record| record.fetch("usage") }
+    assert_equal ["/project add <path> [name]", "/prompt <worker_id> \"<message>\""], filtered_suggestions.map { |record| record.fetch("usage") }
   end
 
   def test_slash_suggestions_autocomplete_state_ids_for_command_arguments
@@ -90,6 +111,7 @@ class SlashCommandSystemTest < Minitest::Test
     assert_equal ["P1-I1-W1"], prompt_suggestions.map { |record| record.fetch("usage") }
     assert_equal "/prompt P1-I1-W1", prompt_suggestions.first.fetch("completion")
     assert prompt_suggestions.first.fetch("append_space")
+    refute_includes Meringue::Input::SlashCommandParser.command_suggestion_records("/prompt H", state: state).map { |record| record.fetch("usage") }, "H1"
     assert_equal ["P1"], project_suggestions.map { |record| record.fetch("usage") }
     assert_equal ["P1-I1"], worker_suggestions.map { |record| record.fetch("usage") }
     assert_equal ["Q1"], answer_suggestions.map { |record| record.fetch("usage") }
@@ -120,7 +142,7 @@ class SlashCommandSystemTest < Minitest::Test
 
     assert_includes suggestion_text, "› P1-I1-W1"
     assert_includes suggestion_text, "worker · idle · P1-I1"
-    refute_includes suggestion_text, "/prompt <agent_id>"
+    refute_includes suggestion_text, "/prompt <worker_id>"
   end
 
   def test_layout_places_suggestions_above_chat_input
@@ -197,7 +219,8 @@ class SlashCommandSystemTest < Minitest::Test
         { "id" => "P1-I1", "project_id" => "P1", "title" => "Signup", "status" => "working" }
       ],
       "agents" => [
-        { "id" => "P1-I1-W1", "type" => "worker", "issue_id" => "P1-I1", "status" => "idle" }
+        { "id" => "P1-I1-W1", "type" => "worker", "issue_id" => "P1-I1", "status" => "idle" },
+        { "id" => "H1", "type" => "head", "status" => "completed" }
       ],
       "questions" => [
         { "id" => "Q1", "question" => "Which project?", "status" => "open" },

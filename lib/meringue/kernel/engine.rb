@@ -36,7 +36,7 @@ module Meringue
         ["/project add <path> [name]", "Register a project directory."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
-        ["/prompt <agent_id> \"<message>\"", "Prompt an existing worker/head harness session."],
+        ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker harness session."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
@@ -236,6 +236,7 @@ module Meringue
         state = normalized_state
         agent = find_agent(state, agent_id)
         return rejected_result(command_id, command_type, "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
+        return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
         return rejected_result(command_id, command_type, "Agent #{agent_id} has no harness session.", ["agent_has_no_harness_session"]) if blank?(agent.fetch("harness", nil))
         return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"]) if agent.fetch("status", nil) == "killed"
 
@@ -248,7 +249,7 @@ module Meringue
 
         log_ids = append_log(
           state,
-          source_type: agent.fetch("type", nil) == "worker" ? "worker" : "head",
+          source_type: "worker",
           source_id: agent.fetch("id"),
           level: "info",
           message: "Prompted agent #{agent.fetch("id")}.",
