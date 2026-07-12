@@ -1,0 +1,27 @@
+# Copy to ~/.meringue/config.toml and adjust for your machine.
+
+[harness]
+# provider applies to both head and worker agents unless overridden below.
+provider = "pi"
+# head_provider = "claude"
+# worker_provider = "gemini"
+
+[harness.pi]
+command = "pi"
+session_dir = "~/.meringue/pi-sessions"
+head_extra_args = ["--thinking", "high", "--tools", "read,bash,grep,find,ls", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
+worker_extra_args = ["--thinking", "high", "--tools", "read,bash,grep,find,ls,edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
+
+[harness.claude]
+command = "claude"
+use_json_schema = true
+head_extra_args = ["--effort", "high", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan", "--disable-slash-commands"]
+worker_extra_args = ["--effort", "high", "--permission-mode", "acceptEdits"]
+
+[harness.gemini]
+command = "gemini"
+head_extra_args = []
+worker_extra_args = []
+
+[terminal]
+# alacritty_command = "/Applications/Alacritty.app/Contents/MacOS/alacritty"

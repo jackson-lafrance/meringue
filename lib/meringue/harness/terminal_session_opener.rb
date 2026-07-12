@@ -5,7 +5,11 @@ require "shellwords"
 module Meringue
   module Harness
     class TerminalSessionOpener
-      DEFAULT_PI_COMMAND = "pi"
+      DEFAULT_COMMANDS = {
+        "pi" => "pi",
+        "claude" => "claude",
+        "gemini" => "gemini"
+      }.freeze
       DEFAULT_ALACRITTY_COMMAND = "alacritty"
       DEFAULT_PI_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
       MACOS_ALACRITTY_PATHS = [
@@ -13,8 +17,10 @@ module Meringue
         File.expand_path("~/Applications/Alacritty.app/Contents/MacOS/alacritty")
       ].freeze
 
-      def initialize(pi_command: DEFAULT_PI_COMMAND, pi_session_dir: DEFAULT_PI_SESSION_DIR, alacritty_command: ENV["MERINGUE_ALACRITTY_COMMAND"])
-        @pi_command = pi_command
+      def initialize(pi_command: nil, pi_session_dir: DEFAULT_PI_SESSION_DIR, alacritty_command: ENV["MERINGUE_ALACRITTY_COMMAND"], commands: {})
+        configured_commands = DEFAULT_COMMANDS.merge(stringify_keys(commands || {}))
+        configured_commands["pi"] = pi_command if present?(pi_command)
+        @commands = configured_commands
         @pi_session_dir = pi_session_dir
         @custom_alacritty_command = present?(alacritty_command)
         @alacritty_command = @custom_alacritty_command ? alacritty_command : DEFAULT_ALACRITTY_COMMAND
@@ -25,25 +31,24 @@ module Meringue
 
         harness = agent.fetch("harness", nil).to_s
         return rejected("Agent #{agent_id(agent)} has no harness to open.") if harness.empty?
-        return rejected("Opening #{harness.inspect} sessions is not supported yet.") unless harness == "pi"
 
-        open_pi_agent(agent)
+        command_argv = harness_argv(harness, agent)
+        return rejected("Opening #{harness.inspect} sessions is not supported yet.") unless command_argv
+
+        open_agent_terminal(agent, command_argv)
       rescue StandardError => e
         failed("Could not open agent #{agent_id(agent)}: #{e.class}: #{e.message}")
       end
 
       private
 
-      attr_reader :pi_command, :pi_session_dir, :alacritty_command
+      attr_reader :commands, :pi_session_dir, :alacritty_command
 
       def custom_alacritty_command?
         @custom_alacritty_command
       end
 
-      def open_pi_agent(agent)
-        session = pi_session_argument(agent)
-        return rejected("Agent #{agent_id(agent)} has no Pi session id or session file.") unless present?(session)
-
+      def open_agent_terminal(agent, command_argv)
         cwd = agent_cwd(agent)
         return rejected("Agent #{agent_id(agent)} workspace is missing: #{cwd}") unless Dir.exist?(cwd)
 
@@ -52,10 +57,44 @@ module Meringue
           return failed("Could not open #{agent_id(agent)} in Alacritty because the alacritty executable was not found or is not executable. Install Alacritty or set MERINGUE_ALACRITTY_COMMAND to its executable path.")
         end
 
-        result = open_alacritty(alacritty, cwd, pi_argv(session))
+        result = open_alacritty(alacritty, cwd, command_argv)
         return opened("Opened #{agent_id(agent)} in Alacritty.") if result.fetch("opened")
 
         failed("Could not open #{agent_id(agent)} in Alacritty: #{result.fetch("error")}")
+      end
+
+      def harness_argv(harness, agent)
+        case harness
+        when "pi"
+          pi_argv(agent)
+        when "claude"
+          claude_argv(agent)
+        when "gemini"
+          gemini_argv(agent)
+        end
+      end
+
+      def pi_argv(agent)
+        session = pi_session_argument(agent)
+        return nil unless present?(session)
+
+        argv = command_parts("pi")
+        argv += ["--session-dir", pi_session_dir] if present?(pi_session_dir)
+        argv + ["--session", session]
+      end
+
+      def claude_argv(agent)
+        session_id = agent.fetch("harness_session_id", nil)
+        return nil unless present?(session_id)
+
+        command_parts("claude") + ["--resume", session_id]
+      end
+
+      def gemini_argv(agent)
+        session_id = agent.fetch("harness_session_id", nil)
+        return nil unless present?(session_id)
+
+        command_parts("gemini") + ["-r", session_id]
       end
 
       def pi_session_argument(agent)
@@ -66,12 +105,6 @@ module Meringue
         return session_id if present?(session_id)
 
         nil
-      end
-
-      def pi_argv(session)
-        argv = [pi_command]
-        argv += ["--session-dir", pi_session_dir] if present?(pi_session_dir)
-        argv + ["--session", session]
       end
 
       def open_alacritty(alacritty, cwd, command_argv)
@@ -122,6 +155,12 @@ module Meringue
         [alacritty_command.to_s]
       end
 
+      def command_parts(harness)
+        Shellwords.split(commands.fetch(harness).to_s)
+      rescue ArgumentError
+        [commands.fetch(harness).to_s]
+      end
+
       def executable?(name)
         return false unless present?(name)
         return File.file?(name) && File.executable?(name) if name.include?(File::SEPARATOR)
@@ -135,6 +174,10 @@ module Meringue
       def agent_cwd(agent)
         metadata = agent.fetch("harness_metadata", {}) || {}
         File.expand_path(metadata["cwd"] || agent["workspace_path"] || Dir.pwd)
+      end
+
+      def stringify_keys(hash)
+        hash.each_with_object({}) { |(key, value), result| result[key.to_s] = value }
       end
 
       def agent_id(agent)
