@@ -128,17 +128,76 @@ module Meringue
           end,
           "allowed_read_only_discovery" => DISCOVERY_ALLOWED_COMMANDS,
           "forbidden_discovery" => DISCOVERY_FORBIDDEN_COMMANDS,
+          "current_directory" => current_directory_metadata,
+          "candidate_search_roots" => candidate_search_roots,
           "decision_rules" => [
             "Prefer a registered project when the id, name, root_path, git root, or remote clearly matches the request.",
-            "If an unregistered local repository clearly matches, propose AddProject with the absolute repository root.",
-            "If AddProject is needed and you cannot know the future P# id, return only AddProject or ask a question instead of fabricating ids.",
+            "For phrases like this project, current project, here, or this repo, prefer the current_directory.git_root when present; otherwise use cwd.",
+            "If the preferred local repository is not registered, propose AddProject with its absolute root before CreateIssue or SpawnWorker.",
+            "When chaining AddProject with CreateIssue and SpawnWorker in one HeadResult, compute the future project id from kernel_state.counters.projects or the max existing P<number>.",
+            "If the app was launched outside the target project, use registered projects and candidate_search_roots to inspect likely local repositories by name/path before choosing.",
             "Ask a clarifying question when multiple repositories are plausible."
           ]
         }
       end
 
+      def current_directory_metadata
+        git_root = nearest_git_root(cwd)
+        default_root = git_root || cwd
+        {
+          "cwd" => cwd,
+          "git_root" => git_root,
+          "default_project_root" => default_root,
+          "default_project_name" => File.basename(default_root),
+          "registered_project_id" => registered_project_id_for(default_root),
+          "should_propose_add_project_for_current_directory" => registered_project_id_for(default_root).nil?
+        }
+      end
+
+      def candidate_search_roots
+        env_roots = ENV.fetch("MERINGUE_PROJECT_ROOTS", "").split(File::PATH_SEPARATOR)
+        common_roots = [
+          "~/slaade/Projects",
+          "~/Projects",
+          "~/Developer",
+          "~/code",
+          "~/src"
+        ]
+
+        (discovery_starting_points + env_roots + common_roots)
+          .compact
+          .map(&:to_s)
+          .reject(&:empty?)
+          .map { |path| File.expand_path(path) }
+          .select { |path| Dir.exist?(path) }
+          .uniq
+      end
+
+      def registered_project_id_for(path)
+        expanded_path = File.expand_path(path.to_s)
+        snapshot.fetch("projects", []).find do |project|
+          root_path = project.fetch("root_path", nil).to_s
+          next false if root_path.empty?
+
+          File.expand_path(root_path) == expanded_path
+        end&.fetch("id", nil)
+      end
+
+      def nearest_git_root(path)
+        current = File.expand_path(path.to_s)
+
+        loop do
+          return current if File.exist?(File.join(current, ".git"))
+
+          parent = File.dirname(current)
+          return nil if parent == current
+
+          current = parent
+        end
+      end
+
       def discovery_starting_points
-        ([cwd] + snapshot.fetch("projects", []).map { |project| project.fetch("root_path", nil) })
+        ([cwd, nearest_git_root(cwd)] + snapshot.fetch("projects", []).map { |project| project.fetch("root_path", nil) })
           .compact
           .map(&:to_s)
           .reject(&:empty?)
