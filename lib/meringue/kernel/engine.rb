@@ -51,6 +51,7 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker harness session."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
+        ["/jump [agent_id]", "TUI local: open an agent harness session, or navigate the AgentTree when no id is provided."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],

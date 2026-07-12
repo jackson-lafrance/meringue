@@ -12,6 +12,7 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker session."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
+        ["/jump", "Open an agent harness session, or navigate the AgentTree when no id is provided."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
@@ -24,6 +25,7 @@ module Meringue
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
         { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
         { "prefix" => "/kill", "source" => "targets", "append_space" => false },
+        { "prefix" => "/jump", "source" => "agents", "append_space" => false },
         { "prefix" => "/answer", "source" => "open_questions", "append_space" => true }
       ].freeze
 
@@ -112,6 +114,8 @@ module Meringue
                   Array(state["agents"]).select { |agent| agent["type"] == "worker" }
                 when "targets"
                   Array(state["agents"]) + Array(state["issues"]) + Array(state["projects"])
+                when "agents"
+                  Array(state["agents"])
                 when "open_questions"
                   Array(state["questions"]).select { |question| question["status"] == "open" }
                 else
@@ -153,6 +157,9 @@ module Meringue
         when "targets"
           type = item["type"] || (item.key?("root_path") ? "project" : "issue")
           [type, item["title"] || item["name"], item["status"]].compact.join(" · ")
+        when "agents"
+          metadata = item.fetch("harness_metadata", {}) || {}
+          [item["type"] || "agent", item["status"], metadata["title"] || item["issue_id"]].compact.join(" · ")
         when "open_questions"
           ["question", item["question"].to_s[0, 60]].reject(&:empty?).join(" · ")
         else
@@ -181,6 +188,8 @@ module Meringue
           parse_prompt(arguments)
         when "kill"
           parse_kill(arguments)
+        when "jump"
+          invalid("/jump is a local TUI command. Run it in the interactive TUI to open an agent session.", usage: "/jump [agent_id]")
         when "tree"
           kernel_command("ListAll", "view" => "tree")
         when "state"

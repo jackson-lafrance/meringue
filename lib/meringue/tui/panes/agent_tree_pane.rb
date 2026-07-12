@@ -34,9 +34,11 @@ module Meringue
           agents = records(state, "agents")
           questions = records(state, "questions")
 
+          selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
+
           output = []
-          append_heads(output, agents)
-          append_projects(output, projects, issues, agents)
+          append_heads(output, agents, selected_agent_id)
+          append_projects(output, projects, issues, agents, selected_agent_id)
           append_questions(output, questions)
           output.empty? ? [[["No AgentTree data yet.", Style::MUTED]]] : output
         end
@@ -47,7 +49,7 @@ module Meringue
           state.fetch(key, []) || []
         end
 
-        def append_heads(output, agents)
+        def append_heads(output, agents, selected_agent_id)
           heads = agents.select { |agent| agent["type"] == "head" }.sort_by { |agent| sort_key(agent["id"]) }
           return if heads.empty?
 
@@ -57,25 +59,26 @@ module Meringue
               prefix: index == heads.length - 1 ? "└─" : "├─",
               record: head,
               id: head.fetch("id"),
-              title: record_title(head)
+              title: record_title(head),
+              selected: AgentTreeNavigation.selected_agent?(head, selected_agent_id)
             )
           end
           output << spacer_line
         end
 
-        def append_projects(output, projects, issues, agents)
+        def append_projects(output, projects, issues, agents, selected_agent_id)
           sorted_projects = projects.sort_by { |project| sort_key(project["id"]) }
           sorted_projects.each_with_index do |project, index|
             output << project_line(project)
 
             project_issues = issues.select { |issue| issue["project_id"] == project["id"] }
             issues_by_parent = project_issues.group_by { |issue| issue["parent_issue_id"] }
-            render_issues(output, issues_by_parent, agents, parent_id: nil, prefix: "")
+            render_issues(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: nil, prefix: "")
             output << spacer_line unless index == sorted_projects.length - 1
           end
         end
 
-        def render_issues(output, issues_by_parent, agents, parent_id:, prefix:)
+        def render_issues(output, issues_by_parent, agents, selected_agent_id:, parent_id:, prefix:)
           child_issues = issues_by_parent.fetch(parent_id, []).sort_by { |issue| sort_key(issue["id"]) }
 
           child_issues.each_with_index do |issue, issue_index|
@@ -98,11 +101,12 @@ module Meringue
                 prefix: "#{next_prefix}#{worker_last ? "└─" : "├─"}",
                 record: worker,
                 id: short_id(worker["id"]),
-                title: record_title(worker)
+                title: record_title(worker),
+                selected: AgentTreeNavigation.selected_agent?(worker, selected_agent_id)
               )
             end
 
-            render_issues(output, issues_by_parent, agents, parent_id: issue["id"], prefix: next_prefix)
+            render_issues(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: issue["id"], prefix: next_prefix)
           end
         end
 
@@ -139,13 +143,27 @@ module Meringue
           ]
         end
 
-        def item_line(prefix:, record:, id:, title:, suffix: "")
+        def item_line(prefix:, record:, id:, title:, suffix: "", selected: false)
+          return selected_item_line(prefix: prefix, record: record, id: id, title: title, suffix: suffix) if selected
+
           [
             ["#{prefix} ", Style::DIM],
             [status_dot(record), status_style(record)],
             [" #{id}", Style::MUTED],
             ["  #{title}", title_style(record)],
             [suffix.to_s.empty? ? "" : "  #{suffix}", Style::DIM]
+          ]
+        end
+
+        def selected_item_line(prefix:, record:, id:, title:, suffix: "")
+          [
+            ["▸", Style::AGENT_TREE_SELECTED_STATUS],
+            [" #{prefix} ", Style::AGENT_TREE_SELECTED_DIM],
+            [status_dot(record), Style::AGENT_TREE_SELECTED_STATUS],
+            [" #{id}", Style::AGENT_TREE_SELECTED_DIM],
+            ["  #{title}", Style::AGENT_TREE_SELECTED],
+            [suffix.to_s.empty? ? "" : "  #{suffix}", Style::AGENT_TREE_SELECTED_DIM],
+            [" ", Style::AGENT_TREE_SELECTED_DIM]
           ]
         end
 
