@@ -41,7 +41,8 @@ module Meringue
 
         head_result = head_result_from(spawn_result)
         unless head_result
-          payload["summary"] = "Head completed but did not return a stored HeadResult; proposed commands were not applied."
+          payload["summary"] = "Head is running; session polling will apply its HeadResult when it completes."
+          payload["state_mutated"] = true
           payload["state_summary"] = state_summary
           return payload
         end
