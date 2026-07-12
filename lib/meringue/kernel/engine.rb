@@ -218,14 +218,17 @@ module Meringue
           update_project_status_from_issues!(state, project, now) if project
 
           candidate_pr_urls = worker_pr_urls(last_assistant_text: last_assistant_text, harness_events: harness_events)
+          worker_summary = worker_completion_summary(last_assistant_text: last_assistant_text, pr_urls: candidate_pr_urls)
           agent["harness_metadata"].delete("delivery_pull_request")
           agent["harness_metadata"].delete("reported_pr_urls")
           agent["harness_metadata"].delete("candidate_pr_urls")
+          agent["harness_metadata"].delete("worker_summary")
           agent["harness_metadata"]["candidate_pr_urls"] = candidate_pr_urls unless candidate_pr_urls.empty?
+          agent["harness_metadata"]["reported_pr_urls"] = candidate_pr_urls unless candidate_pr_urls.empty?
+          agent["harness_metadata"]["worker_summary"] = worker_summary if worker_summary
           delivery_pull_request = verified_worker_pull_request(agent: agent, project: project, candidate_urls: candidate_pr_urls)
           if delivery_pull_request
             agent["harness_metadata"]["delivery_pull_request"] = delivery_pull_request
-            agent["harness_metadata"]["reported_pr_urls"] = [delivery_pull_request.fetch("url")]
           end
 
           completion_details = {
@@ -233,9 +236,11 @@ module Meringue
             "project_id" => agent.fetch("project_id", nil),
             "workspace_branch" => agent.fetch("workspace_branch", nil),
             "settled_event_count" => Array(harness_events).length,
-            "last_assistant_text" => present_string(last_assistant_text)
+            "last_assistant_text" => present_string(last_assistant_text),
+            "worker_summary" => worker_summary
           }.compact
           completion_details["candidate_pr_urls"] = candidate_pr_urls unless candidate_pr_urls.empty?
+          completion_details["reported_pr_urls"] = candidate_pr_urls unless candidate_pr_urls.empty?
           completion_details["delivery_pull_request"] = delivery_pull_request if delivery_pull_request
 
           log_ids = append_log(
@@ -1888,6 +1893,60 @@ module Meringue
         text.to_s.scan(PULL_REQUEST_URL_PATTERN).map do |url|
           url.sub(/[.,;:]+\z/, "")
         end
+      end
+
+      def worker_completion_summary(last_assistant_text:, pr_urls: [])
+        summary = user_facing_worker_output(last_assistant_text, pr_urls: pr_urls)
+        summary.empty? ? nil : summary
+      end
+
+      def user_facing_worker_output(text, pr_urls: [])
+        lines = sanitize_worker_output_lines(text, pr_urls: pr_urls)
+        return "" if lines.empty?
+
+        selected = preferred_worker_summary_lines(lines)
+        selected = lines unless selected.any?
+        selected = selected.reject { |line| low_level_worker_output_line?(line) }
+        concise_worker_summary(selected)
+      end
+
+      def sanitize_worker_output_lines(text, pr_urls: [])
+        output = text.to_s.gsub(/\e\[[0-9;]*[A-Za-z]/, "")
+        Array(pr_urls).compact.each do |url|
+          output = output.gsub(url.to_s, "")
+        end
+        output.lines.map { |line| line.strip.gsub(/\A[-*]\s+/, "- ") }
+              .reject { |line| line.empty? || line.match?(/\A`{3}/) }
+      end
+
+      def preferred_worker_summary_lines(lines)
+        summary_start = lines.index { |line| worker_summary_heading?(line) }
+        return [] unless summary_start
+
+        lines.drop(summary_start + 1).take_while { |line| !worker_stop_heading?(line) }
+      end
+
+      def worker_summary_heading?(line)
+        line.match?(/\A(?:#+\s*)?(?:\*\*)?(?:summary|what changed|changes made|implementation|done)(?:\*\*)?:?\z/i)
+      end
+
+      def worker_stop_heading?(line)
+        line.match?(/\A(?:#+\s*)?(?:\*\*)?(?:tests?|verification|how to test|pull requests?|prs?|next steps?|notes?|status)(?:\*\*)?:?\z/i)
+      end
+
+      def low_level_worker_output_line?(line)
+        line.match?(/\A(?:tests?|verification|how to test|pull requests?|prs?|status):/i) ||
+          line.match?(/\A(?:\$\s*)?(?:git|ruby|bundle|bin\/|scripts\/|npm|yarn|pnpm)\b/) ||
+          line.match?(/\A(?:P\d+-I\d+-W\d+|worker) completed\.?\z/i)
+      end
+
+      def concise_worker_summary(lines)
+        meaningful = lines.map(&:strip).reject(&:empty?).first(4)
+        text = meaningful.join("\n").gsub(/\n{3,}/, "\n\n").strip
+        return "" if text.empty?
+        return text if text.length <= 600
+
+        "#{text[0, 597].rstrip}..."
       end
 
       def serializable_text(value)

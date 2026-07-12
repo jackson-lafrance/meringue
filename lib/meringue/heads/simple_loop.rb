@@ -104,6 +104,7 @@ module Meringue
           "event_count" => events.length,
           "last_assistant_text" => assistant_text,
           "pr_urls" => worker_pr_urls_from_completion(completion_result),
+          "worker_summary" => worker_summary_from_completion(completion_result),
           "completion_result" => completion_result
         }
       rescue StandardError => e
@@ -152,7 +153,14 @@ module Meringue
           metadata["delivery_pull_request"],
           *Array(metadata["delivery_pull_requests"])
         ].compact
-        delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }.uniq
+        delivery_urls = delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
+        (delivery_urls + Array(metadata["reported_pr_urls"]) + Array(metadata["candidate_pr_urls"])).map(&:to_s).map(&:strip).reject(&:empty?).uniq
+      end
+
+      def worker_summary_from_completion(completion_result)
+        result = completion_result.fetch("result", {}) || {}
+        metadata = result.fetch("harness_metadata", {}) || {}
+        metadata["worker_summary"].to_s.strip
       end
 
       def wait_for_workers?

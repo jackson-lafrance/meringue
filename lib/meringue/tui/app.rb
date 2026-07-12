@@ -905,6 +905,7 @@ module Meringue
         user_facing_worker_lines(
           agent_id: event.fetch("agent_id", "worker"),
           pr_urls: Array(event.fetch("pr_urls", [])).compact,
+          worker_summary: event.fetch("worker_summary", nil),
           last_assistant_text: event.fetch("last_assistant_text", nil)
         ).join("\n")
       end
@@ -916,7 +917,7 @@ module Meringue
         "Could not read #{agent_id}'s result#{message.empty? ? "." : ": #{message}"}"
       end
 
-      def user_facing_worker_lines(agent_id:, pr_urls:, last_assistant_text:)
+      def user_facing_worker_lines(agent_id:, pr_urls:, worker_summary: nil, last_assistant_text:)
         lines = []
         unless pr_urls.empty?
           label = pr_urls.length == 1 ? "Pull request" : "Pull requests"
@@ -924,22 +925,61 @@ module Meringue
           lines.concat(pr_urls.map { |url| "PR: #{url}" })
         end
 
-        output = user_facing_agent_output(last_assistant_text, pr_urls: pr_urls)
-        unless output.empty?
-          lines << ["#{agent_id} output:", output].join("\n")
-        end
+        summary = worker_summary.to_s.strip
+        summary = user_facing_agent_summary(last_assistant_text, pr_urls: pr_urls) if summary.empty?
+        lines << ["#{agent_id} summary:", summary].join("\n") unless summary.empty?
+        lines << "#{agent_id} completed." if lines.empty?
 
         lines
       end
 
-      def user_facing_agent_output(text, pr_urls: [])
-        output = text.to_s.strip
-        return "" if output.empty?
+      def user_facing_agent_summary(text, pr_urls: [])
+        lines = sanitized_worker_output_lines(text, pr_urls: pr_urls)
+        return "" if lines.empty?
 
+        selected = preferred_worker_summary_lines(lines)
+        selected = lines unless selected.any?
+        selected = selected.reject { |line| low_level_worker_output_line?(line) }
+        concise_worker_summary(selected)
+      end
+
+      def sanitized_worker_output_lines(text, pr_urls: [])
+        output = text.to_s.gsub(/\e\[[0-9;]*[A-Za-z]/, "")
         Array(pr_urls).compact.each do |url|
-          output = output.gsub(url.to_s, "").strip
+          output = output.gsub(url.to_s, "")
         end
-        output.gsub(/\n{3,}/, "\n\n").strip
+        output.lines.map { |line| line.strip.gsub(/\A[-*]\s+/, "- ") }
+              .reject { |line| line.empty? || line.match?(/\A`{3}/) }
+      end
+
+      def preferred_worker_summary_lines(lines)
+        summary_start = lines.index { |line| worker_summary_heading?(line) }
+        return [] unless summary_start
+
+        lines.drop(summary_start + 1).take_while { |line| !worker_stop_heading?(line) }
+      end
+
+      def worker_summary_heading?(line)
+        line.match?(/\A(?:#+\s*)?(?:\*\*)?(?:summary|what changed|changes made|implementation|done)(?:\*\*)?:?\z/i)
+      end
+
+      def worker_stop_heading?(line)
+        line.match?(/\A(?:#+\s*)?(?:\*\*)?(?:tests?|verification|how to test|pull requests?|prs?|next steps?|notes?|status)(?:\*\*)?:?\z/i)
+      end
+
+      def low_level_worker_output_line?(line)
+        line.match?(/\A(?:tests?|verification|how to test|pull requests?|prs?|status):/i) ||
+          line.match?(/\A(?:\$\s*)?(?:git|ruby|bundle|bin\/|scripts\/|npm|yarn|pnpm)\b/) ||
+          line.match?(/\A(?:P\d+-I\d+-W\d+|worker) completed\.?\z/i)
+      end
+
+      def concise_worker_summary(lines)
+        meaningful = lines.map(&:strip).reject(&:empty?).first(4)
+        text = meaningful.join("\n").gsub(/\n{3,}/, "\n\n").strip
+        return "" if text.empty?
+        return text if text.length <= 600
+
+        "#{text[0, 597].rstrip}..."
       end
 
       def append_user_facing_line(message_id, line, status: nil)
@@ -1066,17 +1106,19 @@ module Meringue
         metadata = agent.fetch("harness_metadata", {}) || {}
         user_facing_worker_lines(
           agent_id: agent.fetch("id", "worker"),
-          pr_urls: verified_agent_pr_urls(metadata),
+          pr_urls: visible_agent_pr_urls(metadata),
+          worker_summary: metadata["worker_summary"],
           last_assistant_text: metadata["last_assistant_text"]
         ).join("\n")
       end
 
-      def verified_agent_pr_urls(metadata)
+      def visible_agent_pr_urls(metadata)
         delivery_pull_requests = [
           metadata["delivery_pull_request"],
           *Array(metadata["delivery_pull_requests"])
         ].compact
-        delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
+        delivery_urls = delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
+        (delivery_urls + Array(metadata["reported_pr_urls"]) + Array(metadata["candidate_pr_urls"])).map(&:to_s).map(&:strip).reject(&:empty?).uniq
       end
 
       def head_completed_key(head_id)
