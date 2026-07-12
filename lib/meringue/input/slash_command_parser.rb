@@ -9,6 +9,7 @@ module Meringue
     class SlashCommandParser
       COMMAND_SPECS = [
         ["/help", "Show slash command help."],
+        ["/quit", "Quit the interactive TUI."],
         ["/theme <name>", "Set and persist the TUI theme."],
         ["/project add <path> [name]", "Register a project directory."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
@@ -38,7 +39,8 @@ module Meringue
         { "prefix" => "/jump", "source" => "agents", "append_space" => false },
         { "prefix" => "/jumpr", "source" => "pr_agents", "append_space" => false },
         { "prefix" => "/answer", "source" => "open_questions", "append_space" => true },
-        { "prefix" => "/dismiss", "source" => "open_questions", "append_space" => false }
+        { "prefix" => "/dismiss", "source" => "open_questions", "append_space" => false },
+        { "prefix" => "/prune", "source" => "prune_selectors", "append_space" => false }
       ].freeze
 
       def self.command_suggestions(input = nil, limit: nil, state: nil)
@@ -120,6 +122,7 @@ module Meringue
 
       def self.records_for_context(context, state)
         return harness_provider_suggestion_records(context) if context.fetch("source") == "harness_providers"
+        return prune_selector_suggestion_records(context) if context.fetch("source") == "prune_selectors"
 
         items = case context.fetch("source")
                 when "projects"
@@ -160,6 +163,26 @@ module Meringue
             "append_space" => false,
             "index" => index,
             "kind" => "harness_providers"
+          }
+        end
+      end
+
+      def self.prune_selector_suggestion_records(context)
+        query = context.fetch("query", "").to_s.downcase
+        [
+          ["merged", "Remove issue bundles whose delivery PRs are merged."],
+          ["errored", "Remove errored issue bundles and standalone errored agents."]
+        ].filter_map.with_index do |(selector, description), index|
+          next unless query.empty? || selector.start_with?(query)
+
+          {
+            "usage" => selector,
+            "description" => description,
+            "completion" => "#{context.fetch("prefix")} #{selector}",
+            "requires_arguments" => false,
+            "append_space" => false,
+            "index" => index,
+            "kind" => "prune_selectors"
           }
         end
       end
@@ -280,6 +303,8 @@ module Meringue
         case command_text
         when "help"
           kernel_command("Help")
+        when "quit"
+          invalid("/quit is a local TUI command. Run it in the interactive TUI to exit.", usage: "/quit")
         when "theme"
           parse_theme(arguments)
         when "harness"

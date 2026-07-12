@@ -229,6 +229,7 @@ module Meringue
           Enter                     # send chat; when agent tree is focused, enter jump mode
           /                         # show slash command suggestions in an otherwise empty prompt
           /help                     # list command syntax
+          /quit                     # quit the TUI
           /theme <name>             # set and persist the TUI theme
           /harness <pi|claude|antigravity> # select the harness backend for future agents
           /keybind                  # show all TUI keybindings
