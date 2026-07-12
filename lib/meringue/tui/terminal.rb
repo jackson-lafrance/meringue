@@ -15,6 +15,7 @@ module Meringue
       ENABLE_AUTOWRAP = "\e[?7h"
       CLEAR_SCREEN = "\e[2J\e[H"
       HOME = "\e[H"
+      CLEAR_LINE = "\e[K"
 
       attr_reader :input, :output
 
@@ -53,6 +54,7 @@ module Meringue
         output.write(DISABLE_AUTOWRAP)
         output.write(CLEAR_SCREEN)
         output.flush
+        @last_frame = nil
 
         yield
       ensure
@@ -72,8 +74,7 @@ module Meringue
 
       def write_frame(frame)
         if interactive?
-          output.write(CLEAR_SCREEN)
-          output.write(frame.gsub("\n", "\r\n"))
+          write_interactive_frame(frame)
         else
           output.write(frame)
         end
@@ -87,6 +88,31 @@ module Meringue
         return nil unless ready
 
         input.getch
+      end
+
+      private
+
+      def write_interactive_frame(frame)
+        if @last_frame.nil? || frame.lines.length != @last_frame.lines.length
+          output.write(CLEAR_SCREEN)
+          output.write(frame.gsub("\n", "\r\n"))
+        else
+          write_frame_diff(@last_frame, frame)
+        end
+        @last_frame = frame.dup
+      end
+
+      def write_frame_diff(previous_frame, frame)
+        previous_lines = previous_frame.lines(chomp: true)
+        lines = frame.lines(chomp: true)
+
+        lines.each_with_index do |line, index|
+          next if line == previous_lines[index]
+
+          output.write("\e[#{index + 1};1H")
+          output.write(line)
+          output.write(CLEAR_LINE)
+        end
       end
     end
   end
