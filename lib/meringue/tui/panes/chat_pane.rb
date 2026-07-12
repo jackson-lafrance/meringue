@@ -12,36 +12,41 @@ module Meringue
           conversation_lines(state)
         end
 
-        def conversation_lines(_state)
-          [
-            role_line("you", Style::USER),
-            text_line("Okay now that we have an empty project structure, build out the TUI demo."),
-            text_line("Rendering only: fake chat box, demo AgentTree, and demo logs."),
-            spacer_line,
-            role_line("meringue", Style::ASSISTANT),
-            text_line("Built a fake-state rendering pass from fixtures/demo_state.json."),
-            text_line("No Pi process, worker prompt, or real state mutation is happening here."),
-            action_line("AgentTree", "shows projects, issues, heads, workers, and questions"),
-            action_line("Activity", "shows durable logs from user, kernel, head, worker, and harness sources")
-          ]
+        def conversation_lines(state)
+          messages = chat_state(state).fetch("messages", []) || []
+          return [[["No conversation yet. Type a prompt below and press Enter.", Style::MUTED]]] if messages.empty?
+
+          messages.flat_map.with_index do |message, index|
+            role = message.fetch("role", "meringue")
+            style = role == "you" ? Style::USER : Style::ASSISTANT
+            lines = [role_line(role, style)]
+            lines.concat(wrapped_text_lines(message.fetch("text", "")))
+            lines << status_line(message.fetch("status")) if message.fetch("status", nil)
+            lines << spacer_line unless index == messages.length - 1
+            lines
+          end
         end
 
         def composer_lines(state)
           open_questions = state.fetch("questions", []).count { |question| question["status"] == "open" }
+          chat = chat_state(state)
+          input_buffer = chat.fetch("input_buffer", "").to_s
+          pending_count = chat.fetch("pending_count", 0).to_i
+          placeholder = input_buffer.empty? ? "type a prompt for a head agent" : input_buffer
 
           [
             [
               ["›", Style::ACCENT_BOLD],
-              [" ask meringue to split signup work across two workers", Style::TEXT],
+              [" #{placeholder}", input_buffer.empty? ? Style::MUTED : Style::TEXT],
               ["_", Style::ACCENT_BOLD]
             ],
             [["", Style::DIM]],
             [
-              ["fake input only", Style::WARNING],
+              [pending_status(pending_count), pending_count.positive? ? Style::WARNING : Style::SUCCESS],
               ["  ·  ", Style::DIM],
               ["open questions: #{open_questions}", Style::MUTED],
               ["  ·  ", Style::DIM],
-              ["q / esc / ctrl-c quits", Style::MUTED]
+              ["enter sends · esc/ctrl-c quits", Style::MUTED]
             ]
           ]
         end
@@ -62,12 +67,27 @@ module Meringue
           ]
         end
 
-        def action_line(label, detail)
+        def status_line(status)
           [
-            ["  • ", Style::ACCENT],
-            [label, Style::TITLE],
-            [" — #{detail}", Style::MUTED]
+            ["  ", Style::DIM],
+            [status.to_s, Style::MUTED]
           ]
+        end
+
+        def wrapped_text_lines(text)
+          text.to_s.split("\n", -1).map do |line|
+            text_line(line)
+          end
+        end
+
+        def pending_status(pending_count)
+          return "head loop idle" unless pending_count.positive?
+
+          "#{pending_count} prompt#{pending_count == 1 ? "" : "s"} running"
+        end
+
+        def chat_state(state)
+          state.fetch("_chat", {}) || {}
         end
 
         def spacer_line
