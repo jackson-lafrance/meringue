@@ -46,7 +46,7 @@ module Meringue
           metrics.fetch(:top_y),
           metrics.fetch(:main_width),
           metrics.fetch(:conversation_height),
-          "conversation + kernel",
+          "logs",
           chat_pane.conversation_lines(state, width: metrics.fetch(:main_width) - 4),
           active: scroll_pane_active?(state, "conversation"),
           overflow: :tail,
