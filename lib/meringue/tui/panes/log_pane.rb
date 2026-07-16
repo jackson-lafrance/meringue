@@ -23,8 +23,8 @@ module Meringue
         end
 
         def lines(state)
-          logs = state.fetch("logs", []) || []
-          return [[["No logs yet.", Style::MUTED]]] if logs.empty?
+          logs = visible_logs(state.fetch("logs", []) || [])
+          return [[["No user-visible logs yet.", Style::MUTED]]] if logs.empty?
 
           logs.sort_by { |entry| [entry["timestamp"].to_s, entry["id"].to_s] }.map do |entry|
             line = [
@@ -59,8 +59,11 @@ module Meringue
         end
 
         def command_log?(entry)
-          details = entry.fetch("details", {}) || {}
-          details["presentation"] == "cmd" || details["kind"].to_s.start_with?("kernel_command")
+          LogVisibility.command_log?(entry)
+        end
+
+        def visible_logs(logs)
+          Array(logs).select { |entry| LogVisibility.visible?(entry) }
         end
 
         def source(entry)

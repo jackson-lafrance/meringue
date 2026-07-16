@@ -23,7 +23,7 @@ module Meringue
           entries = combined_entries(state)
 
           if entries.empty?
-            return [[["No conversation or kernel logs yet. Type a prompt below and press Enter.", Style::MUTED]]]
+            return [[["No logs yet. Type a prompt below and press Enter.", Style::MUTED]]]
           end
 
           selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
@@ -104,12 +104,16 @@ module Meringue
         def combined_entries(state)
           entries = []
           entries.concat(visible_messages(chat_state(state).fetch("messages", []) || []).map.with_index { |message, index| message_entry(message, index) })
-          entries.concat(Array(state.fetch("logs", [])).map.with_index { |entry, index| log_entry(entry, index, state) }.compact)
+          entries.concat(visible_logs(state.fetch("logs", [])).map.with_index { |entry, index| log_entry(entry, index, state) }.compact)
           entries.sort_by { |entry| entry_sort_key(entry) }
         end
 
         def visible_messages(messages)
           messages.select { |message| visible_message?(message) }
+        end
+
+        def visible_logs(logs)
+          Array(logs).select { |entry| LogVisibility.visible?(entry) }
         end
 
         def visible_message?(message)
@@ -182,6 +186,7 @@ module Meringue
 
         def log_level(entry)
           details = entry.fetch("details", {}) || {}
+          details = {} unless details.is_a?(Hash)
           return "cmd" if details["presentation"] == "cmd" || details["kind"].to_s.start_with?("kernel_command")
 
           {
