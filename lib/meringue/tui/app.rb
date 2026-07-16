@@ -29,7 +29,9 @@ module Meringue
       END_KEYS = ["\e[F", "\e[4~", "\eOF", "\u0005"].freeze
       WORD_LEFT_KEYS = ["\eb", "\eB", "\e[1;3D", "\e[1;5D", "\e[1;9D"].freeze
       WORD_RIGHT_KEYS = ["\ef", "\eF", "\e[1;3C", "\e[1;5C", "\e[1;9C"].freeze
-      WORD_BACKSPACE_KEYS = ["\e\u007f", "\e\b", CTRL_W].freeze
+      # Alt/Option-Backspace is reported as ESC+Backspace by some terminals,
+      # and as CSI-u / modifyOtherKeys once keyboard disambiguation is enabled.
+      WORD_BACKSPACE_KEYS = ["\e\u007f", "\e\b", "\e[127;3u", "\e[8;3u", "\e[27;3;127~", "\e[27;3;8~", CTRL_W].freeze
       WORD_DELETE_KEYS = ["\ed", "\eD", "\e[3;3~", "\e[3;5~"].freeze
       PAGE_UP_KEYS = ["\e[5~"].freeze
       PAGE_DOWN_KEYS = ["\e[6~"].freeze
