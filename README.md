@@ -56,6 +56,8 @@ This repository also uses that workflow while developing Meringue itself, but se
 ## Repository layout
 
 ```txt
+Gemfile                            # Bundler setup for running the executable from a clone
+meringue.gemspec                   # local gem metadata that exposes the meringue executable
 bin/meringue                       # executable CLI entrypoint
 lib/meringue/cli.rb                # command parsing and runtime setup
 lib/meringue/app.rb                # TUI application lifecycle
@@ -73,11 +75,26 @@ fixtures/demo_state.json           # demo state for the TUI
 
 ## Setup
 
-Meringue is a Ruby application. The current repository does not require a package install step for the checked-in code.
+Meringue is a Ruby application with a checked-in executable and a Bundler setup for local development.
+
+Requirements:
+
+- Ruby 3.1 or newer.
+- Bundler, which is included with most Ruby installs.
+- At least one supported harness CLI installed and authenticated when you want to spawn real agents. You can use `demo` first without any harness.
+
+Clone and install:
 
 ```bash
 git clone https://github.com/jackson-lafrance/meringue.git
 cd meringue
+bundle install
+bundle exec meringue --help
+```
+
+You can also run the repository executable directly without installing anything beyond Ruby:
+
+```bash
 bin/meringue --help
 ```
 
@@ -95,37 +112,39 @@ Do not store API keys or secrets in this file. Use each harness CLI's normal aut
 Open the interactive TUI:
 
 ```bash
-bin/meringue
+bundle exec meringue
 # or
-bin/meringue tui
+bundle exec meringue tui
 ```
 
 Open a safe demo state without spawning real agents:
 
 ```bash
-bin/meringue demo
+bundle exec meringue demo
 ```
 
 Print the CLI help:
 
 ```bash
-bin/meringue --help
+bundle exec meringue --help
 ```
 
 Choose a harness at runtime:
 
 ```bash
-bin/meringue tui --harness pi
-bin/meringue tui --harness claude
-bin/meringue tui --head-harness antigravity --worker-harness claude
+bundle exec meringue tui --harness pi
+bundle exec meringue tui --harness claude
+bundle exec meringue tui --head-harness antigravity --worker-harness claude
 ```
 
 Use a custom state or config file:
 
 ```bash
-bin/meringue tui --state /tmp/meringue-state.json
-bin/meringue tui --config ./fixtures/config.example.toml
+bundle exec meringue tui --state /tmp/meringue-state.json
+bundle exec meringue tui --config ./fixtures/config.example.toml
 ```
+
+If you skip Bundler, replace `bundle exec meringue` with `bin/meringue` in the commands above.
 
 Useful slash commands inside the TUI include:
 
