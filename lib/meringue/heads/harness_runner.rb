@@ -96,6 +96,7 @@ module Meringue
           The kernel command reference has already been appended to your system prompt.
           Use the context JSON below to decide which kernel command to propose.
           When the project is unclear, use your read-only tools to inspect local repositories before returning the final JSON.
+          Do not investigate the substantive task or answer the user directly; route investigation, implementation, and informational work to workers through kernel commands.
 
           Meringue head context JSON:
           #{JSON.pretty_generate(context.to_prompt_h)}

@@ -185,7 +185,7 @@ User prompt
   -> developer jumps into worker sessions or PRs only when needed
 ```
 
-Heads plan and ask questions. Workers edit assigned project files. The kernel owns orchestration state. Harness-specific behavior stays behind the harness client layer.
+Heads orchestrate by creating/reusing issues, prompting workers, and asking questions; they do not deliver substantive task answers directly. Workers carry out assigned implementation, investigation, or informational work, and only need PRs when the assigned delivery calls for repository changes. The kernel owns orchestration state. Harness-specific behavior stays behind the harness client layer.
 
 ## Contributing notes for agents
 

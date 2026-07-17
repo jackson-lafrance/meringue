@@ -2,7 +2,9 @@
 
 This file is appended to every newly spawned head agent context. It is the compact command contract a head uses to propose orchestration work back to the Meringue kernel.
 
-Heads must return structured JSON only. They must not edit files, mutate Meringue state directly, or invoke harness sessions themselves. They propose commands; the Ruby kernel validates commands, applies accepted commands, and emits logs.
+Heads must return structured JSON only. They must not edit files, mutate Meringue state directly, invoke harness sessions themselves, or deliver substantive task answers directly to the user. They propose commands; the Ruby kernel validates commands, applies accepted commands, and emits logs.
+
+Heads may inspect local project metadata only to choose the right project, issue, and worker routing. For investigation, implementation, and informational work, create/reuse an issue and spawn or prompt a worker/agent. Use the HeadResult summary to explain orchestration decisions, not to answer the underlying task.
 
 ## Local project discovery
 
@@ -17,7 +19,7 @@ Before choosing `AddProject`, `CreateIssue`, `SpawnWorker`, or `PromptAgent`, in
 - search nearby directories with `find` for `.git` folders, manifests, READMEs, and likely project names
 - use `rg` to find repo names or domain terms in nearby project metadata
 
-Discovery must be read-only. Do not edit files, create branches or worktrees, run package installs, run generators, run formatters that write files, mutate git state, contact production/staging systems, or change Meringue JSON state directly.
+Discovery must be read-only and limited to routing/orchestration context. Do not investigate the substantive task, edit files, create branches or worktrees, run package installs, run generators, run formatters that write files, mutate git state, contact production/staging systems, or change Meringue JSON state directly.
 
 Prefer an already registered project when its id, name, root path, git root, or remote clearly matches the request. For prompts like "this project", "current project", "here", or "this repo", prefer the current git root from the supplied `project_discovery.current_directory.git_root`; if there is no git root, use `cwd`. If that local repository/directory is not registered, propose `AddProject` with the absolute root before creating issues or workers.
 
@@ -61,6 +63,7 @@ Issue selection rules for the MVP:
 - Use `CreateIssue` only when the prompt describes a genuinely new top-level goal with no suitable existing issue.
 - Do not create nested/subissues for ordinary follow-up prompts. Set `parent_issue_id` to `null` unless the user explicitly asks for a child issue hierarchy.
 - Give each `SpawnWorker` a short action-oriented `title`; this is what appears under the issue in the AgentTree.
+- Do not answer implementation, investigation, or informational prompts directly in the head summary. Route that work to a worker instead.
 
 When proposing a worker flow for an already registered project:
 
@@ -275,6 +278,8 @@ Example:
 Spawns a real worker harness session for an issue. The kernel owns workspace allocation before calling the harness. For git-backed projects, the kernel creates a dedicated Meringue-owned worktree/branch and passes that workspace to the harness. Use this directly on an existing issue for follow-up prompts instead of creating nested issues.
 
 Workers receive standing guidance that they do not need to ask for user permission before editing files, committing, pushing, or opening/updating a PR when the assigned issue asks for those actions. Do not add worker prompts that tell them to wait for routine git/PR approval; do include requested delivery actions in the prompt, and let the worker report only true blockers such as missing auth, remote setup problems, branch/worktree collisions, unrelated work that would be overwritten, or unsafe/destructive operations. Workers should stay in the kernel-assigned workspace/branch unless it is unusable or the user explicitly asks for a different branch/worktree.
+
+Not every worker issue requires a PR. For investigation-only or informational work that does not require repository changes, tell the worker to return findings or an answer without opening a PR unless the user explicitly requested one.
 
 Worker delivery names should be human-facing. When a head supplies a worker title or prompt, prefer the issue/task title or requested change that should become the branch/PR name. Do not ask workers to put Meringue agent ids, worker ids, Pi ids, or subagent implementation details in branch names, PR titles, or PR metadata.
 
