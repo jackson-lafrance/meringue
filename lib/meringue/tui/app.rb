@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "time"
+require_relative "keybindings"
 
 module Meringue
   module TUI
@@ -43,13 +44,14 @@ module Meringue
       AGENT_TREE_FORWARD_KEYS = (DOWN_KEYS + RIGHT_KEYS).freeze
       AGENT_TREE_BACK_KEYS = (UP_KEYS + LEFT_KEYS).freeze
 
-      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, conversation_store: nil)
+      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, conversation_store: nil, keybindings: Keybindings.default)
         @layout = layout
         @out = out
         @terminal = terminal || Terminal.new(input: input, output: out)
         @session_opener = session_opener || Harness::TerminalSessionOpener.new
         @pull_request_opener = pull_request_opener || PullRequestOpener.new
         @conversation_store = conversation_store
+        @keybindings = keybindings || Keybindings.default
         @messages = []
         @next_message_id = 0
         @pending_count = 0
@@ -135,7 +137,7 @@ module Meringue
 
       private
 
-      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :conversation_store
+      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :conversation_store, :keybindings
 
       def render_once(state)
         out.puts render(state, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, color: false)
@@ -144,7 +146,7 @@ module Meringue
 
       def quit_key?(key, input_buffer)
         return false unless key
-        return true if key == CTRL_D
+        return true if keybinding?("quit", key)
 
         ctrl_c_key?(key) && input_buffer.empty? && !@agent_tree_navigation_active
       end
@@ -215,11 +217,11 @@ module Meringue
         focused_action_result = handle_focused_action_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return focused_action_result if focused_action_result
 
-        if SHIFT_ENTER_KEYS.include?(key)
+        if keybinding?("newline", key)
           return insert_text(input_buffer, input_cursor, "\n") + [0]
         end
 
-        if ENTER_KEYS.include?(key)
+        if keybinding?("submit", key)
           return [+"", 0, 0] if local_navigation_command_without_id?(input_buffer) && handle_local_navigation_command(input_buffer, state)
 
           completion = safe_slash_completion(input_buffer, slash_suggestion_index, state)
@@ -235,19 +237,19 @@ module Meringue
           return [+"", 0, 0]
         end
 
-        if BACKSPACE_KEYS.include?(key)
+        if keybinding?("delete_backward", key)
           return delete_backward(input_buffer, input_cursor) + [0]
         end
 
-        if DELETE_KEYS.include?(key)
+        if keybinding?("delete_forward", key)
           return delete_forward(input_buffer, input_cursor) + [0]
         end
 
-        if WORD_BACKSPACE_KEYS.include?(key)
+        if keybinding?("delete_word_backward", key)
           return delete_backward_word(input_buffer, input_cursor) + [0]
         end
 
-        if WORD_DELETE_KEYS.include?(key)
+        if keybinding?("delete_word_forward", key)
           return delete_forward_word(input_buffer, input_cursor) + [0]
         end
 
@@ -260,16 +262,20 @@ module Meringue
         insert_text(input_buffer, input_cursor, key) + [0]
       end
 
+      def keybinding?(action, key)
+        keybindings.match?(action, key)
+      end
+
       def ctrl_c_key?(key)
-        CTRL_C_KEYS.include?(key)
+        keybinding?("clear_or_quit", key)
       end
 
       def slash_suggestion_key?(key)
-        TAB_KEYS.include?(key)
+        keybinding?("complete_suggestion", key)
       end
 
       def slash_suggestion_navigation_key?(key)
-        TAB_KEYS.include?(key) || UP_KEYS.include?(key) || DOWN_KEYS.include?(key)
+        keybinding?("complete_suggestion", key) || keybinding?("suggestion_previous", key) || keybinding?("suggestion_next", key)
       end
 
       def handle_legacy_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
@@ -280,10 +286,10 @@ module Meringue
         records = slash_suggestion_records(input_buffer, state)
         return [input_buffer, 0] if records.empty?
 
-        if UP_KEYS.include?(key)
+        if keybinding?("suggestion_previous", key)
           return [input_buffer, (slash_suggestion_index - 1) % records.length]
         end
-        if DOWN_KEYS.include?(key)
+        if keybinding?("suggestion_next", key)
           return [input_buffer, (slash_suggestion_index + 1) % records.length]
         end
 
@@ -293,10 +299,18 @@ module Meringue
 
       def handle_focus_key(key, input_buffer, input_cursor, slash_suggestion_index)
         return nil if slash_suggestions_active?(input_buffer) && slash_suggestion_key?(key)
-        return nil unless FOCUS_FORWARD_KEYS.include?(key) || FOCUS_BACK_KEYS.include?(key) || (!slash_suggestions_active?(input_buffer) && TAB_KEYS.include?(key))
 
-        cycle_focus(FOCUS_BACK_KEYS.include?(key) ? -1 : 1)
-        [input_buffer, input_cursor, slash_suggestion_index]
+        if keybinding?("focus_previous", key)
+          cycle_focus(-1)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if keybinding?("focus_next", key)
+          cycle_focus(1)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        nil
       end
 
       def cycle_focus(delta = 1)
@@ -305,7 +319,7 @@ module Meringue
       end
 
       def handle_focused_action_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
-        return nil unless %w[agent_tree conversation].include?(@focused_pane) && ENTER_KEYS.include?(key)
+        return nil unless %w[agent_tree conversation].include?(@focused_pane) && keybinding?("submit", key)
 
         enter_agent_tree_navigation(state)
         [input_buffer, input_cursor, slash_suggestion_index]
@@ -324,13 +338,13 @@ module Meringue
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
-        if UP_KEYS.include?(key) || PAGE_UP_KEYS.include?(key)
-          scroll_focused_pane(:up, steps: scroll_key_step(page: PAGE_UP_KEYS.include?(key)), state: state)
+        if keybinding?("scroll_up", key) || keybinding?("scroll_page_up", key)
+          scroll_focused_pane(:up, steps: scroll_key_step(page: keybinding?("scroll_page_up", key)), state: state)
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
-        if DOWN_KEYS.include?(key) || PAGE_DOWN_KEYS.include?(key)
-          scroll_focused_pane(:down, steps: scroll_key_step(page: PAGE_DOWN_KEYS.include?(key)), state: state)
+        if keybinding?("scroll_down", key) || keybinding?("scroll_page_down", key)
+          scroll_focused_pane(:down, steps: scroll_key_step(page: keybinding?("scroll_page_down", key)), state: state)
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
@@ -418,17 +432,17 @@ module Meringue
       end
 
       def handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
-        if key == "\e"
+        if keybinding?("cancel_navigation", key)
           exit_agent_tree_navigation("Agent tree navigation cancelled.")
           return [+"", 0, 0]
         end
 
-        if AGENT_TREE_BACK_KEYS.include?(key)
+        if keybinding?("agent_select_previous", key)
           move_agent_tree_selection(state, -1)
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
-        if AGENT_TREE_FORWARD_KEYS.include?(key)
+        if keybinding?("agent_select_next", key)
           move_agent_tree_selection(state, 1)
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
@@ -438,7 +452,7 @@ module Meringue
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
-        if ENTER_KEYS.include?(key)
+        if keybinding?("submit", key)
           open_selected_navigation_item(state)
           return [+"", 0, 0]
         end
@@ -447,7 +461,7 @@ module Meringue
       end
 
       def pr_open_key?(key)
-        key == "p"
+        keybinding?("open_pr", key)
       end
 
       def handle_local_navigation_command(input_buffer, state)
@@ -492,15 +506,20 @@ module Meringue
 
       def keybinding_help_text
         <<~TEXT.strip
-          Keybindings:
-          Global: /quit or Ctrl-D quits; Ctrl-C clears input or quits when input is empty; Esc cancels jump/PR navigation mode.
-          Focus: click a dashboard section to focus it; Tab/Ctrl-Tab moves focus forward; Shift-Tab moves focus backward; arrows, PageUp/PageDown, and mouse wheel scroll the focused pane.
-          Chat: Enter sends or applies the selected slash completion; Shift-Enter inserts a newline; arrows move the cursor; Home/Ctrl-A and End/Ctrl-E jump within a line; Alt/Ctrl-Left and Alt/Ctrl-Right move by word; Backspace/Delete edit characters; Alt/Ctrl-Backspace, Ctrl-W, and Alt/Ctrl-Delete edit words.
-          Slash commands: type / for suggestions; Tab completes; Up/Down changes the selected suggestion.
-          Agent tree/conversation: focus either pane and press Enter to enter jump mode.
-          Jump mode: /jump or agent-tree/conversation Enter starts agent navigation; ↑/↓ or ←/→ selects an agent; Enter opens the selected agent session; p opens the selected agent PR when one is available; Esc cancels.
-          PR navigation: /jumpr starts PR navigation; ↑/↓ or ←/→ selects an agent with an open PR; Enter or p opens the selected PR; Esc cancels.
+          Keybindings (from [tui.keybindings], with defaults for omitted actions):
+          Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels jump/PR navigation mode.
+          Focus: click a dashboard section to focus it; #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
+          Chat: #{keys_for("submit")} sends or applies the selected slash completion; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
+          Slash commands: type / for suggestions; #{keys_for("complete_suggestion")} completes; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} changes the selected suggestion.
+          Agent tree/conversation: focus either pane and press #{keys_for("submit")} to enter jump mode.
+          Jump mode: /jump starts agent navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent; #{keys_for("submit")} opens the selected agent session; #{keys_for("open_pr")} opens the selected agent PR when one is available; #{keys_for("cancel_navigation")} cancels.
+          PR navigation: /jumpr starts PR navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent with an open PR; #{keys_for("submit")} or #{keys_for("open_pr")} opens the selected PR; #{keys_for("cancel_navigation")} cancels.
         TEXT
+      end
+
+      def keys_for(action)
+        names = keybindings.names_for(action)
+        names.empty? ? "(unbound)" : names.join("/")
       end
 
       def jump_command?(text)
@@ -534,7 +553,7 @@ module Meringue
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
-        append_jump_response("Agent jump navigation active. ↑/↓ or ←/→ select agents (kernel events are skipped), Enter jumps, p opens PRs, Esc cancels.")
+        append_jump_response("Agent jump navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} select agents (kernel events are skipped), #{keys_for("submit")} jumps, #{keys_for("open_pr")} opens PRs, #{keys_for("cancel_navigation")} cancels.")
       end
 
       def enter_pr_agent_navigation(state)
@@ -547,7 +566,7 @@ module Meringue
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :pull_request
         @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
-        append_jump_response("Pull request navigation active. ↑/↓ or ←/→ select agents with PRs, Enter opens the PR, p also opens the PR, Esc cancels.")
+        append_jump_response("Pull request navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} select agents with PRs, #{keys_for("submit")} or #{keys_for("open_pr")} opens the PR, #{keys_for("cancel_navigation")} cancels.")
       end
 
       def exit_agent_tree_navigation(message = nil)
@@ -735,14 +754,14 @@ module Meringue
         cursor = clamp_cursor(input_buffer, input_cursor)
         chars = input_buffer.chars
 
-        return [cursor - 1, 0].max if LEFT_KEYS.include?(key)
-        return [cursor + 1, chars.length].min if RIGHT_KEYS.include?(key)
-        return cursor_up(chars, cursor) if UP_KEYS.include?(key)
-        return cursor_down(chars, cursor) if DOWN_KEYS.include?(key)
-        return current_line_start(chars, cursor) if HOME_KEYS.include?(key)
-        return current_line_end(chars, cursor) if END_KEYS.include?(key)
-        return previous_word_boundary(chars, cursor) if WORD_LEFT_KEYS.include?(key)
-        return next_word_start(chars, cursor) if WORD_RIGHT_KEYS.include?(key)
+        return [cursor - 1, 0].max if keybinding?("cursor_left", key)
+        return [cursor + 1, chars.length].min if keybinding?("cursor_right", key)
+        return cursor_up(chars, cursor) if keybinding?("cursor_up", key)
+        return cursor_down(chars, cursor) if keybinding?("cursor_down", key)
+        return current_line_start(chars, cursor) if keybinding?("cursor_home", key)
+        return current_line_end(chars, cursor) if keybinding?("cursor_end", key)
+        return previous_word_boundary(chars, cursor) if keybinding?("cursor_word_left", key)
+        return next_word_start(chars, cursor) if keybinding?("cursor_word_right", key)
 
         cursor
       end

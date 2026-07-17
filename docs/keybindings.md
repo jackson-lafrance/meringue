@@ -1,12 +1,23 @@
 # TUI Keybindings
 
-Use `/keybind` inside the interactive TUI to show the complete keybinding list in the conversation pane.
+Use `/keybind` inside the interactive TUI to show the active keybinding list in the conversation pane. Defaults can be customized in `~/.meringue/config.toml` under `[tui.keybindings]`; see `docs/config.md` for the full schema.
+
+## Customizing
+
+Add overrides under `[tui.keybindings]` in your Meringue config. Omitted actions keep defaults.
+
+```toml
+[tui.keybindings]
+agent_select_previous = ["k", "up", "left"]
+agent_select_next = ["j", "down", "right"]
+open_pr = ["o"]
+```
 
 ## Global
 
 - `Ctrl-D`: quit.
 - `Ctrl-C`: clear input; quit when input is empty.
-- `Esc`: quit from an empty prompt; cancel jump mode when jump mode is active.
+- `Esc`: cancel jump/PR navigation mode when navigation is active.
 
 ## Focus and scrolling
 
