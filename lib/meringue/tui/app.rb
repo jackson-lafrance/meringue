@@ -41,17 +41,17 @@ module Meringue
       CTRL_TAB_KEYS = ["\e[27;5;9~", "\e[9;5u"].freeze
       FOCUS_FORWARD_KEYS = CTRL_TAB_KEYS.freeze
       FOCUS_BACK_KEYS = SHIFT_TAB_KEYS.freeze
-      FOCUS_ORDER = %w[chat agent_tree conversation].freeze
+      FOCUS_ORDER = %w[chat agent_tree logs].freeze
       AGENT_TREE_FORWARD_KEYS = (DOWN_KEYS + RIGHT_KEYS).freeze
       AGENT_TREE_BACK_KEYS = (UP_KEYS + LEFT_KEYS).freeze
 
-      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, conversation_store: nil, keybindings: Keybindings.default)
+      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default)
         @layout = layout
         @out = out
         @terminal = terminal || Terminal.new(input: input, output: out)
         @session_opener = session_opener || Harness::TerminalSessionOpener.new
         @pull_request_opener = pull_request_opener || PullRequestOpener.new
-        @conversation_store = conversation_store
+        @log_store = log_store || conversation_store
         @keybindings = keybindings || Keybindings.default
         @messages = []
         @next_message_id = 0
@@ -65,7 +65,7 @@ module Meringue
         @last_render_width = DEFAULT_WIDTH
         @last_render_height = DEFAULT_HEIGHT
         @scroll_offsets = Hash.new(0)
-        @conversation_event_keys = {}
+        @log_event_keys = {}
         @started_at = Time.iso8601(Time.now.utc.iso8601)
         @chat_mutex = Mutex.new
       end
@@ -74,21 +74,21 @@ module Meringue
         layout.render(state, width: width, height: height, color: color)
       end
 
-      def restore_conversation!(state)
-        conversation = state.fetch("conversation", {}) || {}
-        messages = Array(conversation.fetch("messages", []))
+      def restore_logs!(state)
+        legacy_log_buffer = state.fetch("conversation", {}) || {}
+        messages = Array(legacy_log_buffer.fetch("messages", []))
         @chat_mutex.synchronize do
           @messages = messages.map { |message| normalize_persisted_message(message) }.compact
-          @next_message_id = [conversation.fetch("next_message_id", 0).to_i, @messages.map { |message| message.fetch("id", 0).to_i }.max.to_i].max
+          @next_message_id = [legacy_log_buffer.fetch("next_message_id", 0).to_i, @messages.map { |message| message.fetch("id", 0).to_i }.max.to_i].max
         end
       end
 
-      def remember_existing_conversation_events!(state)
+      def remember_existing_log_events!(state)
         Array(state.fetch("agents", [])).each do |agent|
           if existing_head_completion_event?(agent)
-            remember_conversation_event(head_completed_key(agent.fetch("id", nil)))
+            remember_log_event(head_completed_key(agent.fetch("id", nil)))
           elsif existing_worker_completion_event?(agent)
-            remember_conversation_event(worker_completed_key(agent.fetch("id", nil)))
+            remember_log_event(worker_completed_key(agent.fetch("id", nil)))
           end
         end
       end
@@ -139,7 +139,7 @@ module Meringue
 
       private
 
-      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :conversation_store, :keybindings
+      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :log_store, :keybindings
 
       def render_once(state)
         out.puts render(state, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, color: false)
@@ -321,7 +321,7 @@ module Meringue
       end
 
       def handle_focused_action_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
-        return nil unless %w[agent_tree conversation].include?(@focused_pane) && keybinding?("submit", key)
+        return nil unless %w[agent_tree logs].include?(@focused_pane) && keybinding?("submit", key)
 
         enter_agent_tree_navigation(state)
         [input_buffer, input_cursor, slash_suggestion_index]
@@ -369,7 +369,7 @@ module Meringue
           handle_agent_tree_worker_click(worker_id, key, state) if worker_id
         else
           @last_worker_click = nil
-          exit_agent_tree_navigation if @agent_tree_navigation_active && !%w[agent_tree conversation].include?(pane)
+          exit_agent_tree_navigation if @agent_tree_navigation_active && !%w[agent_tree logs].include?(pane)
         end
         [input_buffer, input_cursor, slash_suggestion_index]
       end
@@ -559,8 +559,9 @@ module Meringue
           Focus: click a dashboard section to focus it; clicking a worker in the agent tree selects it, and double-clicking a worker opens its PR. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
           Chat: #{keys_for("submit")} sends or applies the selected slash completion; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; #{keys_for("complete_suggestion")} completes; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} changes the selected suggestion.
-          Agent tree/conversation: focus either pane and press #{keys_for("submit")} to enter jump mode.
-          Jump mode: /jump starts agent navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent; Enter opens the selected agent PR when one is available; a opens the selected agent session; #{keys_for("cancel_navigation")} cancels.
+          Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode.
+          Jump mode: /jump starts agent navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent; #{keys_for("submit")} opens the selected agent session; #{keys_for("open_pr")} opens the selected agent PR when one is available; #{keys_for("cancel_navigation")} cancels.
+          PR navigation: /jumpr starts PR navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent with an open PR; #{keys_for("submit")} or #{keys_for("open_pr")} opens the selected PR; #{keys_for("cancel_navigation")} cancels.
         TEXT
       end
 
@@ -855,7 +856,6 @@ module Meringue
         slash_command = text.start_with?("/")
         assistant_message_id = nil
         unless slash_command
-          append_message("you", text)
           assistant_message_id = append_message(
             "meringue",
             "",
@@ -883,7 +883,7 @@ module Meringue
             if slash_command
               apply_slash_command_results(result.fetch("command_results", []) || []) if result.fetch("event", nil) == "slash_command_applied"
             else
-              final_text = conversation_text_for(result)
+              final_text = log_text_for(result)
               update_message(assistant_message_id, text: final_text, status: nil, visible: !final_text.to_s.strip.empty?)
             end
           rescue StandardError => e
@@ -903,52 +903,29 @@ module Meringue
         }
       end
 
-      def head_activity_text(text, phase:)
-        prompt = text.to_s.strip
-        options = if phase == :queued
-                    [
-                      "Handing this to a fresh head agent…",
-                      "Starting a head to read the prompt and current state…",
-                      "Queueing a head to plan the next kernel-safe step…"
-                    ]
-                  else
-                    [
-                      "A head is reading the prompt against current Meringue state…",
-                      "A head is deciding whether to ask, route, or spawn work…",
-                      "A head is shaping this into validated kernel commands…",
-                      "A head is keeping the request moving without blocking chat…"
-                    ]
-                  end
-        options[stable_activity_index(prompt, phase, options.length)]
-      end
-
-      def stable_activity_index(prompt, phase, length)
-        "#{phase}:#{prompt}".bytes.sum % length
-      end
-
       def update_message_from_event(message_id, event)
         case event.fetch("event", nil)
         when "head_completed"
-          remember_conversation_event(head_completed_key(event.fetch("head_id", nil)))
+          remember_log_event(head_completed_key(event.fetch("head_id", nil)))
           update_message_status(message_id, "applying commands")
         when "head_result_applied"
           append_head_result_applied_summary(message_id, event)
         when "slash_command_applied"
           apply_slash_command_results(event.fetch("command_results", []) || [])
         when "worker_wait_started"
-          remember_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
+          remember_log_event(worker_completed_key(event.fetch("agent_id", nil)))
           update_message_status(message_id, "workers running")
         when "worker_completed"
           agent_id = event.fetch("agent_id", nil)
-          remember_conversation_event(worker_completed_key(agent_id))
+          remember_log_event(worker_completed_key(agent_id))
           append_message("agent", worker_completed_line(event), source_id: agent_id)
         when "worker_wait_failed"
-          forget_conversation_event(worker_completed_key(event.fetch("agent_id", nil)))
+          forget_log_event(worker_completed_key(event.fetch("agent_id", nil)))
           append_user_facing_line(message_id, worker_wait_failed_line(event), status: "worker wait failed")
         end
       end
 
-      def conversation_text_for(result)
+      def log_text_for(result)
         if result.fetch("event", nil) == "slash_command_applied"
           apply_theme_command_results(result.fetch("command_results", []) || [])
           return ""
@@ -973,7 +950,7 @@ module Meringue
       end
 
       def apply_slash_command_results(command_results)
-        clear_conversation! if clear_state_accepted?(command_results)
+        clear_logs! if clear_state_accepted?(command_results)
         apply_theme_command_results(command_results)
       end
 
@@ -983,12 +960,12 @@ module Meringue
         end
       end
 
-      def clear_conversation!
+      def clear_logs!
         @chat_mutex.synchronize do
           @messages = []
           @next_message_id = 0
-          @conversation_event_keys = {}
-          persist_conversation_unlocked
+          @log_event_keys = {}
+          persist_logs_unlocked
         end
       end
 
@@ -1002,58 +979,6 @@ module Meringue
         end
       rescue StandardError
         nil
-      end
-
-      def slash_command_text(command_results)
-        return "Slash command did not produce a kernel result." if command_results.empty?
-
-        command_results.flat_map { |result| slash_result_lines(result) }.reject { |line| line.to_s.empty? }.join("\n")
-      end
-
-      def slash_result_lines(result)
-        status = result.fetch("status", "unknown")
-        command_type = result.fetch("command_type", "command")
-        lines = ["#{command_type}: #{status} — #{result.fetch("message", "")}".strip]
-        if status == "accepted"
-          lines.concat(slash_result_detail_lines(command_type, result.fetch("result", nil)))
-        else
-          errors = result.fetch("errors", []) || []
-          lines.concat(errors.map { |error| "  - #{error}" })
-        end
-        lines
-      end
-
-      def slash_result_detail_lines(command_type, result)
-        case command_type
-        when "SetTheme"
-          theme = result.is_a?(Hash) ? result["theme"] : nil
-          config_path = result.is_a?(Hash) ? result["config_path"] : nil
-          ["  theme: #{theme}", config_path ? "  config: #{config_path}" : nil].compact
-        when "Help"
-          Array(result).map { |item| "  #{item.fetch("usage", "")} — #{item.fetch("description", "")}" }
-        when "ListQuestions"
-          questions = Array(result)
-          return ["  No questions."] if questions.empty?
-
-          questions.map { |question| "  #{question.fetch("id", "?")} [#{question.fetch("status", "?")}] #{question.fetch("question", "")}" }
-        when "Prune"
-          prune_result = result || {}
-          [
-            "  removed issues: #{Array(prune_result["removed_issue_ids"]).length}",
-            "  removed agents: #{Array(prune_result["removed_agent_ids"]).length}"
-          ]
-        when "ListAll", "GetState"
-          state = result || {}
-          [
-            "  projects: #{Array(state["projects"]).length}",
-            "  issues: #{Array(state["issues"]).length}",
-            "  agents: #{Array(state["agents"]).length}",
-            "  questions: #{Array(state["questions"]).length}"
-          ]
-        else
-          target_id = result.is_a?(Hash) ? result["id"] : nil
-          target_id ? ["  target: #{target_id}"] : []
-        end
       end
 
       def append_head_result_applied_summary(message_id, event)
@@ -1091,16 +1016,6 @@ module Meringue
           context = question.fetch("context", "").to_s.strip
           ["#{label}: #{question_text}", context.empty? ? nil : "Context: #{context}"].compact.join("\n")
         end
-      end
-
-      def command_summary_lines(apply_result)
-        command_results = (apply_result.fetch("result", {}) || {}).fetch("command_results", [])
-        spawned_workers = command_results.select do |command_result|
-          command_result.fetch("command_type", nil) == "SpawnWorker" && command_result.fetch("status", nil) == "accepted"
-        end
-        return [] if spawned_workers.empty?
-
-        ["Spawned workers: #{spawned_workers.map { |worker| worker.fetch("target_id", nil) }.compact.join(", ")}"]
       end
 
       def worker_summary_lines(worker_wait_results)
@@ -1188,7 +1103,7 @@ module Meringue
 
       def compose_state(state_provider, input_buffer, slash_suggestion_index = 0, input_cursor = nil)
         state = state_provider.call || State::Models.empty_state
-        sync_state_conversation!(state)
+        sync_state_logs!(state)
         if @agent_tree_navigation_active
           ids = agent_tree_selectable_agent_ids(state)
           @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
@@ -1218,7 +1133,7 @@ module Meringue
         }
       end
 
-      def sync_state_conversation!(state)
+      def sync_state_logs!(state)
         sync_polled_head_updates!(state)
         sync_worker_completion_updates!(state)
       end
@@ -1244,7 +1159,7 @@ module Meringue
           next unless existing_worker_completion_event?(agent)
 
           metadata = agent.fetch("harness_metadata", {}) || {}
-          next unless conversation_sync_after_start?(metadata["completed_at"])
+          next unless log_sync_after_start?(metadata["completed_at"])
 
           append_message_once(
             worker_completed_key(agent.fetch("id", nil)),
@@ -1270,7 +1185,7 @@ module Meringue
         metadata["completed_at"] || Array(metadata["reported_pr_urls"]).any?
       end
 
-      def conversation_sync_after_start?(timestamp)
+      def log_sync_after_start?(timestamp)
         return false if timestamp.to_s.empty?
 
         Time.iso8601(timestamp.to_s) >= @started_at
@@ -1303,25 +1218,25 @@ module Meringue
         "worker_completed:#{agent_id}"
       end
 
-      def remember_conversation_event(key)
+      def remember_log_event(key)
         return if key.to_s.empty?
 
-        @chat_mutex.synchronize { @conversation_event_keys[key] = true }
+        @chat_mutex.synchronize { @log_event_keys[key] = true }
       end
 
-      def forget_conversation_event(key)
+      def forget_log_event(key)
         return if key.to_s.empty?
 
-        @chat_mutex.synchronize { @conversation_event_keys.delete(key) }
+        @chat_mutex.synchronize { @log_event_keys.delete(key) }
       end
 
       def append_message_once(key, role, text, status: nil, source_id: nil)
         return if key.to_s.empty? || text.to_s.empty?
 
         @chat_mutex.synchronize do
-          return if @conversation_event_keys[key]
+          return if @log_event_keys[key]
 
-          @conversation_event_keys[key] = true
+          @log_event_keys[key] = true
           append_message_unlocked(role, text, status: status, source_id: source_id)
         end
       end
@@ -1373,7 +1288,7 @@ module Meringue
           "timestamp" => Time.now.utc.iso8601,
           "source_id" => source_id
         }.compact
-        persist_conversation_unlocked
+        persist_logs_unlocked
         @next_message_id
       end
 
@@ -1389,7 +1304,7 @@ module Meringue
             message.delete("status")
           end
           apply_message_visibility(message, visible)
-          persist_conversation_unlocked
+          persist_logs_unlocked
         end
       end
 
@@ -1405,7 +1320,7 @@ module Meringue
           end
           apply_message_status(message, status)
           apply_message_visibility(message, visible)
-          persist_conversation_unlocked
+          persist_logs_unlocked
         end
       end
 
@@ -1415,7 +1330,7 @@ module Meringue
           return unless message
 
           apply_message_status(message, status)
-          persist_conversation_unlocked
+          persist_logs_unlocked
         end
       end
 
@@ -1444,10 +1359,10 @@ module Meringue
         end
       end
 
-      def persist_conversation_unlocked
-        return unless conversation_store&.respond_to?(:save_conversation)
+      def persist_logs_unlocked
+        return unless log_store&.respond_to?(:save_log_buffer)
 
-        conversation_store.save_conversation(
+        log_store.save_log_buffer(
           messages: @messages,
           next_message_id: @next_message_id
         )
