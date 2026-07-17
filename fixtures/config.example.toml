@@ -6,6 +6,12 @@
 # You can also run /theme <name> in the TUI to save this setting.
 colorscheme = "meringue"
 
+[tui.keybindings]
+# Omitted actions keep defaults. Use /keybind in the TUI to see active bindings.
+# agent_select_previous = ["k", "up", "left"]
+# agent_select_next = ["j", "down", "right"]
+# open_pr = ["o"]
+
 [harness]
 # provider applies to both head and worker agents unless overridden below.
 provider = "pi"
