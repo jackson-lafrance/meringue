@@ -10,18 +10,19 @@ Add overrides under `[tui.keybindings]` in your Meringue config. Omitted actions
 [tui.keybindings]
 agent_select_previous = ["k", "up", "left"]
 agent_select_next = ["j", "down", "right"]
-open_pr = ["o"]
 ```
 
 ## Global
 
 - `Ctrl-D`: quit.
 - `Ctrl-C`: clear input; quit when input is empty.
-- `Esc`: cancel jump/PR navigation mode when navigation is active.
+- `Esc`: cancel jump mode when navigation is active.
 
 ## Focus and scrolling
 
-- Click a dashboard section: move focus to that section (the active outline follows the focused section). Conversation now includes timestamped kernel log events alongside chat-style entries.
+- Click a dashboard section: move focus to that section (the active outline follows the focused section). Conversation includes timestamped kernel log events alongside chat-style entries.
+- Click a worker in the agent tree: select/highlight that worker, matching jump mode selection.
+- Double-click a worker in the agent tree: open that worker's pull request when one is available.
 - `Tab` / `Ctrl-Tab`: move focus forward.
 - `Shift-Tab`: move focus backward.
 - Arrow keys, `PageUp` / `PageDown`, and mouse wheel: scroll the focused non-chat pane.
@@ -51,16 +52,8 @@ open_pr = ["o"]
 Start jump mode with `/jump` or by focusing the agent tree or combined conversation/kernel pane and pressing `Enter`.
 
 - `Up` / `Down` / `Left` / `Right`: select an agent. In the combined conversation/kernel pane, only the selected agent title is highlighted; kernel events are not selected.
-- `Enter`: open the selected agent session.
-- `p`: open the selected agent's pull request when a PR is available. If the agent has no PR or the opener fails, Meringue silently does nothing.
+- `Enter`: open the selected agent's pull request when a PR is available.
+- `a`: open the selected agent session.
 - `Esc`: cancel jump mode.
 
-## PR navigation
-
-Agents with an open pull request are marked `↗ PR` in the AgentTree.
-Start PR navigation with `/jumpr`.
-
-- `Up` / `Down` / `Left` / `Right`: select an agent with an open PR.
-- `Enter`: open the selected PR.
-- `p`: also opens the selected PR.
-- `Esc`: cancel PR navigation.
+Agents with an open pull request are marked `↗` in the AgentTree.

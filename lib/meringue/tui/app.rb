@@ -11,6 +11,7 @@ module Meringue
       REFRESH_INTERVAL = 0.2
       MOUSE_SCROLL_STEP = 3
       PAGE_SCROLL_STEP = 8
+      DOUBLE_CLICK_INTERVAL_SECONDS = 0.5
       CTRL_C = "\u0003"
       # Keyboard-disambiguation modes used for Shift+Enter can encode Ctrl-C as
       # CSI-u or xterm modifyOtherKeys instead of the raw ETX byte.
@@ -60,6 +61,7 @@ module Meringue
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = nil
         @focused_pane = "chat"
+        @last_worker_click = nil
         @last_render_width = DEFAULT_WIDTH
         @last_render_height = DEFAULT_HEIGHT
         @scroll_offsets = Hash.new(0)
@@ -362,7 +364,13 @@ module Meringue
         return [input_buffer, input_cursor, slash_suggestion_index] unless pane
 
         @focused_pane = pane
-        exit_agent_tree_navigation if @agent_tree_navigation_active && !%w[agent_tree conversation].include?(pane)
+        if pane == "agent_tree"
+          worker_id = worker_at_mouse_position(key, state)
+          handle_agent_tree_worker_click(worker_id, key, state) if worker_id
+        else
+          @last_worker_click = nil
+          exit_agent_tree_navigation if @agent_tree_navigation_active && !%w[agent_tree conversation].include?(pane)
+        end
         [input_buffer, input_cursor, slash_suggestion_index]
       end
 
@@ -380,6 +388,57 @@ module Meringue
           x: key.fetch("x", 1).to_i - 1,
           y: key.fetch("y", 1).to_i - 1
         )
+      end
+
+      def worker_at_mouse_position(key, state)
+        layout.agent_tree_worker_at(
+          state,
+          width: @last_render_width || DEFAULT_WIDTH,
+          height: @last_render_height || DEFAULT_HEIGHT,
+          x: key.fetch("x", 1).to_i - 1,
+          y: key.fetch("y", 1).to_i - 1
+        )
+      end
+
+      def handle_agent_tree_worker_click(worker_id, key, state)
+        double_click = worker_double_click?(worker_id, key)
+        select_agent_tree_worker(state, worker_id)
+        open_pr_by_agent_id(state, worker_id) if double_click
+      end
+
+      def select_agent_tree_worker(state, worker_id)
+        return false unless agent_tree_selectable_agent_ids(state).include?(worker_id)
+
+        @agent_tree_navigation_active = true
+        @agent_tree_navigation_mode = :agent
+        @selected_agent_id = worker_id
+        true
+      end
+
+      def worker_double_click?(worker_id, key)
+        now = monotonic_time
+        click = {
+          agent_id: worker_id,
+          x: key.fetch("x", nil).to_i,
+          y: key.fetch("y", nil).to_i,
+          at: now
+        }
+        previous = @last_worker_click
+        @last_worker_click = click
+        return false unless previous
+        return false unless previous.fetch(:agent_id, nil) == worker_id
+        return false unless previous.fetch(:x, nil) == click.fetch(:x) && previous.fetch(:y, nil) == click.fetch(:y)
+
+        if now - previous.fetch(:at, 0.0) <= DOUBLE_CLICK_INTERVAL_SECONDS
+          @last_worker_click = nil
+          true
+        else
+          false
+        end
+      end
+
+      def monotonic_time
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
 
       def mouse_wheel_up?(key)
@@ -447,27 +506,26 @@ module Meringue
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
-        if pr_open_key?(key)
-          open_selected_agent_pr_silently(state)
-          return [input_buffer, input_cursor, slash_suggestion_index]
+        if agent_session_open_key?(key)
+          open_selected_agent(state)
+          return [+"", 0, 0]
         end
 
-        if keybinding?("submit", key)
-          open_selected_navigation_item(state)
+        if ENTER_KEYS.include?(key)
+          open_selected_agent_pr(state)
           return [+"", 0, 0]
         end
 
         [input_buffer, input_cursor, slash_suggestion_index]
       end
 
-      def pr_open_key?(key)
-        keybinding?("open_pr", key)
+      def agent_session_open_key?(key)
+        key == "a"
       end
 
       def handle_local_navigation_command(input_buffer, state)
         text = input_buffer.to_s.strip
         return handle_local_jump_command(text, state) if jump_command?(text)
-        return handle_local_jumpr_command(text, state) if jumpr_command?(text)
         return handle_local_keybind_command if keybind_command?(text)
         return handle_local_quit_command if quit_command?(text)
 
@@ -480,16 +538,6 @@ module Meringue
           enter_agent_tree_navigation(state)
         else
           open_agent_by_id(state, agent_id)
-        end
-        true
-      end
-
-      def handle_local_jumpr_command(text, state)
-        agent_id = text.split(/\s+/, 2)[1].to_s.strip
-        if agent_id.empty?
-          enter_pr_agent_navigation(state)
-        else
-          open_pr_by_agent_id(state, agent_id)
         end
         true
       end
@@ -507,13 +555,12 @@ module Meringue
       def keybinding_help_text
         <<~TEXT.strip
           Keybindings (from [tui.keybindings], with defaults for omitted actions):
-          Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels jump/PR navigation mode.
-          Focus: click a dashboard section to focus it; #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
+          Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels jump mode.
+          Focus: click a dashboard section to focus it; clicking a worker in the agent tree selects it, and double-clicking a worker opens its PR. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
           Chat: #{keys_for("submit")} sends or applies the selected slash completion; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; #{keys_for("complete_suggestion")} completes; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} changes the selected suggestion.
           Agent tree/conversation: focus either pane and press #{keys_for("submit")} to enter jump mode.
-          Jump mode: /jump starts agent navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent; #{keys_for("submit")} opens the selected agent session; #{keys_for("open_pr")} opens the selected agent PR when one is available; #{keys_for("cancel_navigation")} cancels.
-          PR navigation: /jumpr starts PR navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent with an open PR; #{keys_for("submit")} or #{keys_for("open_pr")} opens the selected PR; #{keys_for("cancel_navigation")} cancels.
+          Jump mode: /jump starts agent navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent; Enter opens the selected agent PR when one is available; a opens the selected agent session; #{keys_for("cancel_navigation")} cancels.
         TEXT
       end
 
@@ -526,10 +573,6 @@ module Meringue
         text == "/jump" || text.start_with?("/jump ")
       end
 
-      def jumpr_command?(text)
-        text == "/jumpr" || text.start_with?("/jumpr ")
-      end
-
       def keybind_command?(text)
         text == "/keybind"
       end
@@ -539,8 +582,7 @@ module Meringue
       end
 
       def local_navigation_command_without_id?(input_buffer)
-        text = input_buffer.to_s.strip
-        text == "/jump" || text == "/jumpr"
+        input_buffer.to_s.strip == "/jump"
       end
 
       def enter_agent_tree_navigation(state)
@@ -553,20 +595,7 @@ module Meringue
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
-        append_jump_response("Agent jump navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} select agents (kernel events are skipped), #{keys_for("submit")} jumps, #{keys_for("open_pr")} opens PRs, #{keys_for("cancel_navigation")} cancels.")
-      end
-
-      def enter_pr_agent_navigation(state)
-        ids = pr_agent_selectable_ids(state)
-        if ids.empty?
-          append_jump_response("No agents with open pull requests are available yet.")
-          return
-        end
-
-        @agent_tree_navigation_active = true
-        @agent_tree_navigation_mode = :pull_request
-        @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
-        append_jump_response("Pull request navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} select agents with PRs, #{keys_for("submit")} or #{keys_for("open_pr")} opens the PR, #{keys_for("cancel_navigation")} cancels.")
+        append_jump_response("Agent jump navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} select agents (kernel events are skipped), Enter opens PRs, a opens sessions, #{keys_for("cancel_navigation")} cancels.")
       end
 
       def exit_agent_tree_navigation(message = nil)
@@ -577,31 +606,11 @@ module Meringue
       end
 
       def move_agent_tree_selection(state, delta)
-        if @agent_tree_navigation_mode == :pull_request
-          return move_pr_agent_selection(state, delta)
-        end
-
         ids = agent_tree_selectable_agent_ids(state)
         return exit_agent_tree_navigation("No agents are available to jump into yet.") if ids.empty?
 
         current_index = ids.index(@selected_agent_id) || 0
         @selected_agent_id = ids[(current_index + delta) % ids.length]
-      end
-
-      def move_pr_agent_selection(state, delta)
-        ids = pr_agent_selectable_ids(state)
-        return exit_agent_tree_navigation("No agents with open pull requests are available yet.") if ids.empty?
-
-        current_index = ids.index(@selected_agent_id) || 0
-        @selected_agent_id = ids[(current_index + delta) % ids.length]
-      end
-
-      def open_selected_navigation_item(state)
-        if @agent_tree_navigation_mode == :pull_request
-          return open_selected_pr_agent(state)
-        end
-
-        open_selected_agent(state)
       end
 
       def open_selected_agent(state)
@@ -612,25 +621,12 @@ module Meringue
         exit_agent_tree_navigation
       end
 
-      def open_selected_pr_agent(state)
-        selected_id = normalized_selected_pr_agent_id(state)
-        return exit_agent_tree_navigation("No agents with open pull requests are available yet.") unless selected_id
+      def open_selected_agent_pr(state)
+        selected_id = normalized_selected_agent_id(state)
+        return exit_agent_tree_navigation("No agents are available to jump into yet.") unless selected_id
 
         open_pr_by_agent_id(state, selected_id)
         exit_agent_tree_navigation
-      end
-
-      def open_selected_agent_pr_silently(state)
-        selected_id = if @agent_tree_navigation_mode == :pull_request
-                        normalized_selected_pr_agent_id(state)
-                      else
-                        normalized_selected_agent_id(state)
-                      end
-        return false unless selected_id
-
-        opened = open_pr_by_agent_id(state, selected_id, silent_fail: true)
-        exit_agent_tree_navigation if opened
-        opened
       end
 
       def open_agent_by_id(state, agent_id)
@@ -677,19 +673,8 @@ module Meringue
         @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
       end
 
-      def normalized_selected_pr_agent_id(state)
-        ids = pr_agent_selectable_ids(state)
-        return nil if ids.empty?
-
-        @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
-      end
-
       def agent_tree_selectable_agent_ids(state)
         AgentTreeNavigation.selectable_agent_ids(state)
-      end
-
-      def pr_agent_selectable_ids(state)
-        AgentTreeNavigation.selectable_pr_agent_ids(state)
       end
 
       def paste_key?(key)
@@ -1205,11 +1190,7 @@ module Meringue
         state = state_provider.call || State::Models.empty_state
         sync_state_conversation!(state)
         if @agent_tree_navigation_active
-          ids = if @agent_tree_navigation_mode == :pull_request
-                  pr_agent_selectable_ids(state)
-                else
-                  agent_tree_selectable_agent_ids(state)
-                end
+          ids = agent_tree_selectable_agent_ids(state)
           @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
           @agent_tree_navigation_active = false if ids.empty?
         end
