@@ -556,11 +556,11 @@ module Meringue
         <<~TEXT.strip
           Keybindings (from [tui.keybindings], with defaults for omitted actions):
           Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels jump mode.
-          Focus: click a dashboard section to focus it; clicking a worker in the agent tree selects it, and double-clicking a worker opens its PR. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
+          Focus: click a dashboard section to focus it; clicking an issue or worker in the agent tree selects it, and double-clicking opens its PR when available. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
           Chat: #{keys_for("submit")} sends or applies the selected slash completion; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; #{keys_for("complete_suggestion")} completes; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} changes the selected suggestion.
           Agent tree/conversation: focus either pane and press #{keys_for("submit")} to enter jump mode.
-          Jump mode: /jump starts agent navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent; Enter opens the selected agent PR when one is available; a opens the selected agent session; #{keys_for("cancel_navigation")} cancels.
+          Jump mode: /jump starts agent tree navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an issue or agent; Enter opens the selected issue/agent PR when one is available; a opens the selected agent session; #{keys_for("cancel_navigation")} cancels.
         TEXT
       end
 
@@ -595,7 +595,7 @@ module Meringue
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
-        append_jump_response("Agent jump navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} select agents (kernel events are skipped), Enter opens PRs, a opens sessions, #{keys_for("cancel_navigation")} cancels.")
+        append_jump_response("Agent tree navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects issues and agents (kernel events are skipped), Enter opens PRs, a opens agent sessions, #{keys_for("cancel_navigation")} cancels.")
       end
 
       def exit_agent_tree_navigation(message = nil)
@@ -632,7 +632,7 @@ module Meringue
       def open_agent_by_id(state, agent_id)
         agent = Array(state["agents"]).find { |candidate| candidate["id"].to_s == agent_id.to_s }
         unless agent
-          append_jump_response("Agent #{agent_id} does not exist.")
+          append_jump_response("Agent #{agent_id} does not exist or is not a session-backed record.")
           return
         end
 
@@ -641,15 +641,15 @@ module Meringue
       end
 
       def open_pr_by_agent_id(state, agent_id, silent_fail: false)
-        agent = Array(state["agents"]).find { |candidate| candidate["id"].to_s == agent_id.to_s }
-        unless agent
-          append_jump_response("Agent #{agent_id} does not exist.") unless silent_fail
+        record = pr_record_for_id(state, agent_id)
+        unless record
+          append_jump_response("Agent tree item #{agent_id} does not exist.") unless silent_fail
           return false
         end
 
-        pr_url = AgentTreeNavigation.agent_pr_url(agent)
+        pr_url = AgentTreeNavigation.agent_pr_url(record)
         unless pr_url
-          append_jump_response("Agent #{agent_id} does not have an attached pull request yet.") unless silent_fail
+          append_jump_response("Agent tree item #{agent_id} does not have an attached pull request yet.") unless silent_fail
           return false
         end
 
@@ -660,6 +660,18 @@ module Meringue
       rescue StandardError => e
         append_jump_response("Could not open pull request for #{agent_id}: #{e.message}") unless silent_fail
         false
+      end
+
+      def pr_record_for_id(state, id)
+        issue = Array(state["issues"]).find { |candidate| candidate["id"].to_s == id.to_s }
+        return issue if issue
+
+        agent = Array(state["agents"]).find { |candidate| candidate["id"].to_s == id.to_s }
+        return nil unless agent
+        return agent unless agent.fetch("type", nil) == "worker"
+
+        worker_issue = Array(state["issues"]).find { |candidate| candidate["id"].to_s == agent.fetch("issue_id", nil).to_s }
+        AgentTreeNavigation.agent_pr_url(worker_issue || {}) ? worker_issue : agent
       end
 
       def append_jump_response(message)
@@ -1241,7 +1253,8 @@ module Meringue
 
       def sync_worker_completion_updates!(state)
         Array(state.fetch("agents", [])).each do |agent|
-          next unless existing_worker_completion_event?(agent)
+          issue = Array(state.fetch("issues", [])).find { |candidate| candidate.fetch("id", nil) == agent.fetch("issue_id", nil) }
+          next unless existing_worker_completion_event?(agent, issue)
 
           metadata = agent.fetch("harness_metadata", {}) || {}
           next unless conversation_sync_after_start?(metadata["completed_at"])
@@ -1249,7 +1262,7 @@ module Meringue
           append_message_once(
             worker_completed_key(agent.fetch("id", nil)),
             "agent",
-            worker_completed_text_from_agent(agent),
+            worker_completed_text_from_agent(agent, issue),
             source_id: agent.fetch("id", nil)
           )
         end
@@ -1262,12 +1275,12 @@ module Meringue
         metadata["head_result_applied_at"] && metadata["head_result"].is_a?(Hash)
       end
 
-      def existing_worker_completion_event?(agent)
+      def existing_worker_completion_event?(agent, issue = nil)
         return false unless agent.fetch("type", nil) == "worker"
         return false unless agent.fetch("status", nil) == "completed"
 
         metadata = agent.fetch("harness_metadata", {}) || {}
-        metadata["completed_at"] || Array(metadata["reported_pr_urls"]).any?
+        metadata["completed_at"] || Array(metadata["reported_pr_urls"]).any? || AgentTreeNavigation.agent_pr_url(issue || {})
       end
 
       def conversation_sync_after_start?(timestamp)
@@ -1278,21 +1291,23 @@ module Meringue
         false
       end
 
-      def worker_completed_text_from_agent(agent)
+      def worker_completed_text_from_agent(agent, issue = nil)
         metadata = agent.fetch("harness_metadata", {}) || {}
         user_facing_worker_lines(
           agent_id: agent.fetch("id", "worker"),
-          pr_urls: verified_agent_pr_urls(metadata),
+          pr_urls: verified_agent_pr_urls(metadata, issue),
           last_assistant_text: metadata["last_assistant_text"]
         ).join("\n")
       end
 
-      def verified_agent_pr_urls(metadata)
+      def verified_agent_pr_urls(metadata, issue = nil)
         delivery_pull_requests = [
+          issue&.fetch("delivery_pull_request", nil),
+          *Array(issue&.fetch("delivery_pull_requests", nil)),
           metadata["delivery_pull_request"],
           *Array(metadata["delivery_pull_requests"])
         ].compact
-        delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
+        delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }.uniq
       end
 
       def head_completed_key(head_id)

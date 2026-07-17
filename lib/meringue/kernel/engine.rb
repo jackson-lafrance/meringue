@@ -252,15 +252,9 @@ module Meringue
           update_project_status_from_issues!(state, project, now) if project
 
           candidate_pr_urls = worker_pr_urls(last_assistant_text: last_assistant_text, harness_events: harness_events)
-          agent["harness_metadata"].delete("delivery_pull_request")
-          agent["harness_metadata"].delete("reported_pr_urls")
-          agent["harness_metadata"].delete("candidate_pr_urls")
-          agent["harness_metadata"]["candidate_pr_urls"] = candidate_pr_urls unless candidate_pr_urls.empty?
+          State::Models.scrub_worker_pull_request_keys!(agent["harness_metadata"])
           delivery_pull_request = verified_worker_pull_request(agent: agent, project: project, candidate_urls: candidate_pr_urls)
-          if delivery_pull_request
-            agent["harness_metadata"]["delivery_pull_request"] = delivery_pull_request
-            agent["harness_metadata"]["reported_pr_urls"] = [delivery_pull_request.fetch("url")]
-          end
+          attach_issue_pull_requests!(issue, delivery_pull_request, candidate_pr_urls) if issue
 
           completion_details = {
             "issue_id" => agent.fetch("issue_id", nil),
@@ -284,7 +278,7 @@ module Meringue
           touch_state!(state, now)
           store.save(state)
 
-          accepted_result(nil, "MarkWorkerCompleted", agent.fetch("id"), "Marked worker #{agent.fetch("id")} completed.", agent, log_ids)
+          accepted_result(nil, "MarkWorkerCompleted", agent.fetch("id"), "Marked worker #{agent.fetch("id")} completed.", worker_completion_result(agent, issue), log_ids)
         end
       end
 
@@ -1079,27 +1073,33 @@ module Meringue
       end
 
       def refresh_worker_delivery_pull_requests!(state)
-        state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }.filter_map do |worker|
-          metadata = worker.fetch("harness_metadata", {}) || {}
-          candidate_urls = Array(metadata.fetch("candidate_pr_urls", nil)).map(&:to_s).map(&:strip).reject(&:empty?).uniq
+        workers_by_issue = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }.group_by { |worker| worker.fetch("issue_id", nil) }
+        state.fetch("issues").filter_map do |issue|
+          workers = workers_by_issue.fetch(issue.fetch("id", nil), [])
+          candidate_urls = (Array(issue.fetch("candidate_pr_urls", nil)) + workers.flat_map { |worker| worker_legacy_candidate_pr_urls(worker) }).map(&:to_s).map(&:strip).reject(&:empty?).uniq
           next if candidate_urls.empty?
 
-          issue = find_issue(state, worker.fetch("issue_id", nil))
-          project = issue && find_project(state, issue.fetch("project_id", nil))
+          project = find_project(state, issue.fetch("project_id", nil))
           next unless project
 
-          delivery_pull_request = verified_worker_pull_request(agent: worker, project: project, candidate_urls: candidate_urls) ||
-                                  merged_same_repo_candidate_pull_request(agent: worker, project: project, candidate_urls: candidate_urls)
+          matched_worker = nil
+          delivery_pull_request = workers.filter_map do |worker|
+            verified_worker_pull_request(agent: worker, project: project, candidate_urls: candidate_urls).tap do |pull_request|
+              matched_worker = worker if pull_request
+            end
+          end.first
+          delivery_pull_request ||= workers.filter_map do |worker|
+            merged_same_repo_candidate_pull_request(agent: worker, project: project, candidate_urls: candidate_urls).tap do |pull_request|
+              matched_worker = worker if pull_request
+            end
+          end.first
           next unless delivery_pull_request
 
-          worker["harness_metadata"] = metadata.merge(
-            "delivery_pull_request" => delivery_pull_request,
-            "reported_pr_urls" => [delivery_pull_request.fetch("url")]
-          )
+          attach_issue_pull_requests!(issue, delivery_pull_request, candidate_urls)
 
           {
-            "agent_id" => worker.fetch("id", nil),
-            "issue_id" => worker.fetch("issue_id", nil),
+            "agent_id" => matched_worker&.fetch("id", nil),
+            "issue_id" => issue.fetch("id", nil),
             "url" => delivery_pull_request.fetch("url", nil),
             "matched_by" => delivery_pull_request.fetch("matched_by", nil)
           }.compact
@@ -1107,14 +1107,14 @@ module Meringue
       end
 
       def merged_pr_worker_checks(state)
-        state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }.filter_map do |worker|
-          urls = agent_pr_urls(worker)
+        workers_by_issue = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }.group_by { |worker| worker.fetch("issue_id", nil) }
+        state.fetch("issues").filter_map do |issue|
+          urls = (issue_pr_urls(issue) + workers_by_issue.fetch(issue.fetch("id", nil), []).flat_map { |worker| worker_legacy_pr_urls(worker) }).uniq
           next if urls.empty?
 
           statuses = urls.map { |url| pull_request_status(url) }
           {
-            "agent_id" => worker.fetch("id", nil),
-            "issue_id" => worker.fetch("issue_id", nil),
+            "issue_id" => issue.fetch("id", nil),
             "pr_urls" => urls,
             "statuses" => statuses,
             "merged" => statuses.any? { |status| status.fetch("state", nil) == "merged" }
@@ -1265,19 +1265,62 @@ module Meringue
         }
       end
 
-      def agent_pr_urls(agent)
+      def attach_issue_pull_requests!(issue, delivery_pull_request, candidate_pr_urls)
+        return unless issue
+
+        State::Models.attach_pull_requests_to_issue!(
+          issue,
+          delivery_pull_requests: [delivery_pull_request].compact,
+          candidate_urls: candidate_pr_urls,
+          reported_urls: delivery_pull_request ? [delivery_pull_request.fetch("url", nil)] : []
+        )
+      end
+
+      def worker_completion_result(agent, issue)
+        result = deep_copy(agent)
+        if issue
+          result["issue"] = issue_pull_request_summary(issue)
+          result["issue_id"] = issue.fetch("id", nil)
+        end
+        result
+      end
+
+      def issue_pull_request_summary(issue)
+        {
+          "id" => issue.fetch("id", nil),
+          "delivery_pull_request" => issue.fetch("delivery_pull_request", nil),
+          "delivery_pull_requests" => Array(issue.fetch("delivery_pull_requests", [])),
+          "reported_pr_urls" => Array(issue.fetch("reported_pr_urls", [])),
+          "candidate_pr_urls" => Array(issue.fetch("candidate_pr_urls", []))
+        }.compact
+      end
+
+      def issue_pr_urls(issue)
+        State::Models.pull_request_urls_from([
+          issue.fetch("delivery_pull_request", nil),
+          *Array(issue.fetch("delivery_pull_requests", nil)),
+          *Array(issue.fetch("reported_pr_urls", nil))
+        ])
+      end
+
+      def worker_legacy_pr_urls(agent)
         metadata = agent.fetch("harness_metadata", {}) || {}
-        delivery_pull_requests = [
+        State::Models.pull_request_urls_from([
           agent.fetch("delivery_pull_request", nil),
           metadata.fetch("delivery_pull_request", nil),
           *Array(agent.fetch("delivery_pull_requests", nil)),
-          *Array(metadata.fetch("delivery_pull_requests", nil))
-        ].compact
-        delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
-                              .map(&:to_s)
-                              .map(&:strip)
-                              .reject(&:empty?)
-                              .uniq
+          *Array(metadata.fetch("delivery_pull_requests", nil)),
+          *Array(agent.fetch("reported_pr_urls", nil)),
+          *Array(metadata.fetch("reported_pr_urls", nil))
+        ])
+      end
+
+      def worker_legacy_candidate_pr_urls(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        State::Models.pull_request_urls_from([
+          *Array(agent.fetch("candidate_pr_urls", nil)),
+          *Array(metadata.fetch("candidate_pr_urls", nil))
+        ])
       end
 
       def errored_issue_prune_candidate?(state, issue)
@@ -2310,6 +2353,7 @@ module Meringue
       end
 
       def ensure_state_shape!(state)
+        State::Models.ensure_state_shape!(state)
         state["schema_version"] ||= State::Models::SCHEMA_VERSION
         state["projects"] ||= []
         state["issues"] ||= []
