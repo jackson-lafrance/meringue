@@ -52,8 +52,8 @@ agent_select_next = ["j", "down", "right"]
 Start jump mode with `/jump` or by focusing the agent tree or logs pane and pressing `Enter`.
 
 - `Up` / `Down` / `Left` / `Right`: select an agent. In the logs pane, only the selected agent title is highlighted; non-agent events are not selected.
-- `Enter`: open the selected agent session.
-- `p`: open the selected agent's pull request when a PR is available. If the agent has no PR or the opener fails, Meringue silently does nothing.
+- `Enter`: open the selected agent's pull request when a PR is available.
+- `a`: open the selected agent session.
 - `Esc`: cancel jump mode.
 
 Agents with an open pull request are marked `↗` in the AgentTree.
