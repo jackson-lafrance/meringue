@@ -240,9 +240,10 @@ module Meringue
           /harness <pi|claude|antigravity> # select the harness backend for future agents
           /keybind                  # show all TUI keybindings
           /jump [agent_id]          # open an agent session in Alacritty; omit id to navigate the AgentTree
-          /jumpr [agent_id]         # open an agent PR; omit id to navigate only agents with open PRs
-          p in jump mode            # open selected agent PR when one is available; otherwise do nothing
-          Ctrl-C on an empty prompt # quit the TUI; Esc cancels jump/PR navigation only
+          Enter in jump mode        # open selected agent PR when one is available
+          a in jump mode            # open selected agent session
+          worker double-click       # open that worker PR when one is available
+          Ctrl-C on an empty prompt # quit the TUI; Esc cancels jump mode
       HELP
     end
   end

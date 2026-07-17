@@ -95,6 +95,24 @@ module Meringue
         end&.first
       end
 
+      def agent_tree_worker_at(state, width:, height:, x:, y:)
+        metrics = layout_metrics([width.to_i, MIN_WIDTH].max, [height.to_i, MIN_HEIGHT].max, state)
+        return nil unless point_in_bounds?(x.to_i, y.to_i, pane_bounds(metrics, :sidebar_x, :top_y, :sidebar_width, :top_height))
+
+        content_x = metrics.fetch(:sidebar_x) + 2
+        content_y = metrics.fetch(:top_y) + 1
+        content_width = metrics.fetch(:sidebar_width) - 4
+        content_height = metrics.fetch(:top_height) - 2
+        return nil if content_width <= 0 || content_height <= 0
+        return nil unless x.to_i >= content_x && x.to_i < content_x + content_width
+        return nil unless y.to_i >= content_y && y.to_i < content_y + content_height
+
+        lines = agent_tree_pane.lines(state, width: content_width)
+        worker_ids = agent_tree_pane.line_worker_ids(state, width: content_width)
+        offset = agent_tree_scroll_offset(state, lines, content_height)
+        worker_ids[y.to_i - content_y + offset]
+      end
+
       def scroll_limits(state, width:, height:)
         width = [width.to_i, MIN_WIDTH].max
         height = [height.to_i, MIN_HEIGHT].max

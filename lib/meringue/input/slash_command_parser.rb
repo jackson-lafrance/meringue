@@ -18,7 +18,6 @@ module Meringue
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent harness session in Alacritty, or navigate the AgentTree when no id is provided."],
-        ["/jumpr [agent_id]", "Open an agent pull request, or navigate agents with open PRs when no id is provided."],
         ["/keybind", "Show all TUI keybindings."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
@@ -37,7 +36,6 @@ module Meringue
         { "prefix" => "/kill", "source" => "targets", "append_space" => false },
         { "prefix" => "/theme", "source" => "themes", "append_space" => false },
         { "prefix" => "/jump", "source" => "agents", "append_space" => false },
-        { "prefix" => "/jumpr", "source" => "pr_agents", "append_space" => false },
         { "prefix" => "/answer", "source" => "open_questions", "append_space" => true },
         { "prefix" => "/dismiss", "source" => "open_questions", "append_space" => false },
         { "prefix" => "/prune", "source" => "prune_selectors", "append_space" => false }
@@ -137,8 +135,6 @@ module Meringue
                   Array(state["agents"]) + Array(state["issues"]) + Array(state["projects"])
                 when "agents"
                   Array(state["agents"])
-                when "pr_agents"
-                  pr_agents(state)
                 when "open_questions"
                   Array(state["questions"]).select { |question| question["status"] == "open" }
                 else
@@ -208,54 +204,6 @@ module Meringue
         end
       end
 
-      def self.pr_agents(state)
-        Array(state["agents"]).filter_map do |agent|
-          pr_url = first_active_pr_url_for_agent(agent)
-          pr_url ? agent.merge("_pr_url" => pr_url) : nil
-        end
-      end
-
-      def self.first_active_pr_url_for_agent(agent)
-        agent["_pr_url"] || active_pr_urls_from_record(agent).find { |url| pull_request_url?(url) }
-      end
-
-      def self.first_pr_url_for_agent(agent)
-        agent["_pr_url"] || pr_urls_from_record(agent).find { |url| pull_request_url?(url) }
-      end
-
-      def self.pr_urls_from_record(record)
-        pull_request_records_from_record(record).map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }
-      end
-
-      def self.active_pr_urls_from_record(record)
-        pull_request_records_from_record(record).filter_map do |pull_request|
-          next unless active_pull_request?(pull_request)
-
-          pull_request["url"]
-        end
-      end
-
-      def self.pull_request_records_from_record(record)
-        metadata = record.fetch("harness_metadata", {}) || {}
-        [
-          record["delivery_pull_request"],
-          metadata["delivery_pull_request"],
-          *Array(record["delivery_pull_requests"]),
-          *Array(metadata["delivery_pull_requests"])
-        ].compact
-      end
-
-      def self.active_pull_request?(pull_request)
-        return false unless pull_request.is_a?(Hash)
-
-        state = pull_request["state"] || pull_request["status"] || pull_request["raw_state"]
-        state.to_s.downcase == "open"
-      end
-
-      def self.pull_request_url?(url)
-        url.to_s.match?(%r{\Ahttps?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+(?:[/?#].*)?\z})
-      end
-
       def self.available_theme_names
         if defined?(Meringue::TUI::Style)
           Meringue::TUI::Style.colorschemes
@@ -282,9 +230,6 @@ module Meringue
         when "agents"
           metadata = item.fetch("harness_metadata", {}) || {}
           [item["type"] || "agent", item["status"], metadata["title"] || item["issue_id"]].compact.join(" · ")
-        when "pr_agents"
-          metadata = item.fetch("harness_metadata", {}) || {}
-          ["open agent PR", item["type"], metadata["title"] || item["issue_id"], first_active_pr_url_for_agent(item)].compact.join(" · ")
         when "open_questions"
           ["question", item["question"].to_s[0, 60]].reject(&:empty?).join(" · ")
         else
@@ -321,8 +266,6 @@ module Meringue
           parse_kill(arguments)
         when "jump"
           invalid("/jump is a local TUI command. Run it in the interactive TUI to open an agent session.", usage: "/jump [agent_id]")
-        when "jumpr"
-          invalid("/jumpr is a local TUI command. Run it in the interactive TUI to open an agent pull request.", usage: "/jumpr [agent_id]")
         when "keybind"
           invalid("/keybind is a local TUI command. Run it in the interactive TUI to show keybindings.", usage: "/keybind")
         when "tree"
