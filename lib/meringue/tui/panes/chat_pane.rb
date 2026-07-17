@@ -358,13 +358,9 @@ module Meringue
           [
             ["Enter sends", Style::MUTED],
             [" • ", Style::DIM],
-            ["Shift+Enter newline", Style::MUTED],
-            [" • ", Style::DIM],
             ["Ctrl-C clears/quits", Style::MUTED],
             [" • ", Style::DIM],
-            ["Tab/⇧Tab focus", Style::MUTED],
-            [" • ", Style::DIM],
-            ["arrows/mouse scroll", Style::MUTED],
+            ["Tab focus", Style::MUTED],
             [" • ", Style::DIM],
             ["/keybind help", Style::MUTED]
           ]
