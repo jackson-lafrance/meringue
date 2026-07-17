@@ -103,6 +103,8 @@ module Meringue
         def log_entries(state)
           message_entries = visible_messages(chat_state(state).fetch("messages", []) || []).map.with_index { |message, index| message_entry(message, index) }
           durable_log_entries = Array(state.fetch("logs", [])).map.with_index { |entry, index| log_entry(entry, index, state) }.compact
+          message_topics = topic_index(message_entries)
+          durable_log_entries = durable_log_entries.reject { |entry| redundant_lifecycle_log?(entry, message_topics) }
           duplicate_log_texts = duplicate_text_index(durable_log_entries)
           entries = message_entries.filter_map { |entry| deduplicate_message_entry(entry, duplicate_log_texts) } + durable_log_entries
           entries.each_with_index { |entry, sequence| entry["sequence"] = sequence }
@@ -117,6 +119,31 @@ module Meringue
           return false if message.fetch("visible", true) == false
 
           !message.fetch("text", "").to_s.strip.empty?
+        end
+
+        def topic_index(entries)
+          entries.each_with_object({}) do |entry, topics|
+            key = event_topic_key(entry)
+            topics[key] = true if key
+          end
+        end
+
+        def event_topic_key(entry)
+          return nil unless entry.fetch("kind", nil) == "message"
+          return nil unless entry.fetch("role", nil) == "agent"
+
+          source_id = entry.fetch("source_id", nil).to_s
+          return nil if source_id.empty?
+
+          "worker_completed:#{source_id}"
+        end
+
+        def redundant_lifecycle_log?(entry, message_topics)
+          source_id = entry.fetch("source_id", nil).to_s
+          return false unless message_topics["worker_completed:#{source_id}"]
+
+          message = entry.fetch("message", entry.fetch("text", "")).to_s
+          entry.fetch("source_type", nil) == "worker" && message == "Worker #{source_id} completed."
         end
 
         def duplicate_text_index(entries)
@@ -168,12 +195,53 @@ module Meringue
             "role" => role,
             "source_type" => source_type,
             "source_id" => source_id,
-            "text" => entry.fetch("message", "").to_s,
+            "text" => log_display_text(entry),
+            "message" => entry.fetch("message", "").to_s,
             "status" => log_status(entry),
             "level" => entry.fetch("level", "info"),
             "agent" => agent_by_id(state, source_id),
             "ordinal" => index
           }
+        end
+
+        def log_display_text(entry)
+          worker_completion_text(entry) || entry.fetch("message", "").to_s
+        end
+
+        def worker_completion_text(entry)
+          source_id = entry.fetch("source_id", nil).to_s
+          return nil if source_id.empty?
+          return nil unless entry.fetch("source_type", nil).to_s == "worker"
+          return nil unless entry.fetch("message", "").to_s == "Worker #{source_id} completed."
+
+          details = entry.fetch("details", {}) || {}
+          details = {} unless details.is_a?(Hash)
+          pr_urls = worker_completion_pr_urls(details)
+          output = user_facing_worker_output(details["last_assistant_text"], pr_urls: pr_urls)
+          lines = []
+          unless pr_urls.empty?
+            label = pr_urls.length == 1 ? "Pull request" : "Pull requests"
+            lines << "#{label} from #{source_id}:"
+            lines.concat(pr_urls.map { |url| "PR: #{url}" })
+          end
+          lines << ["#{source_id} output:", output].join("\n") unless output.empty?
+          lines.empty? ? nil : lines.join("\n")
+        end
+
+        def worker_completion_pr_urls(details)
+          delivery_pull_requests = [
+            details["delivery_pull_request"],
+            *Array(details["delivery_pull_requests"])
+          ].compact
+          delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }.compact.map(&:to_s).reject(&:empty?).uniq
+        end
+
+        def user_facing_worker_output(text, pr_urls: [])
+          output = text.to_s.strip
+          return "" if output.empty?
+
+          pr_urls.each { |url| output = output.gsub(url.to_s, "").strip }
+          output.lines.map(&:rstrip).reject { |line| line.strip == "PR:" }.join("\n").gsub(/\n{3,}/, "\n\n").strip
         end
 
         def entry_sort_key(entry)
