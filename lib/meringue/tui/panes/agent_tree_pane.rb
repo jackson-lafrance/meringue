@@ -43,6 +43,18 @@ module Meringue
           output.empty? ? [[['No AgentTree data yet.', Style::MUTED]]] : output
         end
 
+        def line_worker_ids(state, width: nil)
+          projects = records(state, "projects")
+          issues = records(state, "issues")
+          agents = records(state, "agents")
+          selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
+
+          output = []
+          append_head_worker_ids(output, agents, selected_agent_id, width)
+          append_project_worker_ids(output, projects, issues, agents, selected_agent_id, width)
+          output.empty? ? [nil] : output
+        end
+
         private
 
         def records(state, key)
@@ -66,6 +78,25 @@ module Meringue
             ))
           end
           output << spacer_line
+        end
+
+        def append_head_worker_ids(output, agents, selected_agent_id, width)
+          heads = agents.select { |agent| agent["type"] == "head" }.sort_by { |agent| sort_key(agent["id"]) }
+          return if heads.empty?
+
+          output << nil
+          heads.each_with_index do |head, index|
+            output.concat(Array.new(item_line_count(
+              prefix: index == heads.length - 1 ? "└─" : "├─",
+              record: head,
+              id: head.fetch("id"),
+              title: record_title(head),
+              suffix: active_pr_marker(head),
+              selected: AgentTreeNavigation.selected_agent?(head, selected_agent_id),
+              width: width
+            )))
+          end
+          output << nil
         end
 
         def append_projects(output, projects, issues, agents, selected_agent_id, width)
@@ -113,6 +144,58 @@ module Meringue
 
             render_issues(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: issue["id"], prefix: next_prefix, width: width)
           end
+        end
+
+        def append_project_worker_ids(output, projects, issues, agents, selected_agent_id, width)
+          sorted_projects = projects.sort_by { |project| sort_key(project["id"]) }
+          sorted_projects.each_with_index do |project, index|
+            output.concat(Array.new(project_lines(project, width: width).length))
+
+            project_issues = issues.select { |issue| issue["project_id"] == project["id"] }
+            issues_by_parent = project_issues.group_by { |issue| issue["parent_issue_id"] }
+            append_issue_worker_ids(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: nil, prefix: "", width: width)
+            output << nil unless index == sorted_projects.length - 1
+          end
+        end
+
+        def append_issue_worker_ids(output, issues_by_parent, agents, selected_agent_id:, parent_id:, prefix:, width:)
+          child_issues = issues_by_parent.fetch(parent_id, []).sort_by { |issue| sort_key(issue["id"]) }
+
+          child_issues.each_with_index do |issue, issue_index|
+            issue_last = issue_index == child_issues.length - 1
+            connector = issue_last ? "└─" : "├─"
+            next_prefix = "#{prefix}#{issue_last ? "  " : "│ "}"
+            workers = agents.select { |agent| agent["type"] == "worker" && agent["issue_id"] == issue["id"] }
+
+            output.concat(Array.new(item_line_count(
+              prefix: "#{prefix}#{connector}",
+              record: issue,
+              id: short_id(issue["id"]),
+              title: issue.fetch("title", "Untitled issue"),
+              suffix: progress(workers),
+              width: width
+            )))
+
+            workers.sort_by { |worker| sort_key(worker["id"]) }.each_with_index do |worker, worker_index|
+              worker_last = worker_index == workers.length - 1 && issues_by_parent.fetch(issue["id"], []).empty?
+              line_count = item_line_count(
+                prefix: "#{next_prefix}#{worker_last ? "└─" : "├─"}",
+                record: worker,
+                id: short_id(worker["id"]),
+                title: record_title(worker),
+                suffix: active_pr_marker(worker),
+                selected: AgentTreeNavigation.selected_agent?(worker, selected_agent_id),
+                width: width
+              )
+              output.concat(Array.new(line_count, worker.fetch("id")))
+            end
+
+            append_issue_worker_ids(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: issue["id"], prefix: next_prefix, width: width)
+          end
+        end
+
+        def item_line_count(prefix:, record:, id:, title:, suffix: "", selected: false, width: nil)
+          item_lines(prefix: prefix, record: record, id: id, title: title, suffix: suffix, selected: selected, width: width).length
         end
 
         def section_line(title)
