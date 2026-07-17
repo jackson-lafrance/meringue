@@ -41,7 +41,7 @@ module Meringue
       CTRL_TAB_KEYS = ["\e[27;5;9~", "\e[9;5u"].freeze
       FOCUS_FORWARD_KEYS = CTRL_TAB_KEYS.freeze
       FOCUS_BACK_KEYS = SHIFT_TAB_KEYS.freeze
-      FOCUS_ORDER = %w[chat agent_tree conversation].freeze
+      FOCUS_ORDER = %w[chat agent_tree conversation logs].freeze
       AGENT_TREE_FORWARD_KEYS = (DOWN_KEYS + RIGHT_KEYS).freeze
       AGENT_TREE_BACK_KEYS = (UP_KEYS + LEFT_KEYS).freeze
 
@@ -559,7 +559,7 @@ module Meringue
           Focus: click a dashboard section to focus it; clicking a worker in the agent tree selects it, and double-clicking a worker opens its PR. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
           Chat: #{keys_for("submit")} sends or applies the selected slash completion; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; #{keys_for("complete_suggestion")} completes; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} changes the selected suggestion.
-          Agent tree/conversation: focus either pane and press #{keys_for("submit")} to enter jump mode.
+          Agent tree/conversation: focus either pane and press #{keys_for("submit")} to enter jump mode. Logs are scroll-only lifecycle events.
           Jump mode: /jump starts agent navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent; Enter opens the selected agent PR when one is available; a opens the selected agent session; #{keys_for("cancel_navigation")} cancels.
         TEXT
       end

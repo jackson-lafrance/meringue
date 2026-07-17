@@ -20,10 +20,10 @@ module Meringue
         end
 
         def conversation_lines(state, width: nil)
-          entries = combined_entries(state)
+          entries = conversation_entries(state)
 
           if entries.empty?
-            return [[["No conversation or kernel logs yet. Type a prompt below and press Enter.", Style::MUTED]]]
+            return [[["No conversation yet. Type a prompt below and press Enter.", Style::MUTED]]]
           end
 
           selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
@@ -101,11 +101,8 @@ module Meringue
 
         private
 
-        def combined_entries(state)
-          entries = []
-          entries.concat(visible_messages(chat_state(state).fetch("messages", []) || []).map.with_index { |message, index| message_entry(message, index) })
-          entries.concat(Array(state.fetch("logs", [])).map.with_index { |entry, index| log_entry(entry, index, state) }.compact)
-          entries.sort_by { |entry| entry_sort_key(entry) }
+        def conversation_entries(state)
+          visible_messages(chat_state(state).fetch("messages", []) || []).map.with_index { |message, index| message_entry(message, index, state) }
         end
 
         def visible_messages(messages)
@@ -118,43 +115,19 @@ module Meringue
           !message.fetch("text", "").to_s.strip.empty?
         end
 
-        def message_entry(message, index)
+        def message_entry(message, index, state)
           role = normalized_message_role(message.fetch("role", "meringue"))
+          source_id = message.fetch("source_id", nil)
           {
             "kind" => "message",
             "timestamp" => message.fetch("timestamp", nil),
             "role" => role,
-            "source_id" => message.fetch("source_id", nil),
+            "source_id" => source_id,
             "text" => message.fetch("text", "").to_s,
             "status" => message.fetch("status", nil),
-            "ordinal" => index
-          }
-        end
-
-        def log_entry(entry, index, state)
-          source_type = entry.fetch("source_type", "system").to_s
-          source_id = entry.fetch("source_id", nil)
-          role = log_role(source_type, source_id)
-          {
-            "kind" => "log",
-            "timestamp" => entry.fetch("timestamp", nil),
-            "role" => role,
-            "source_type" => source_type,
-            "source_id" => source_id,
-            "text" => entry.fetch("message", "").to_s,
-            "status" => log_status(entry),
-            "level" => entry.fetch("level", "info"),
             "agent" => agent_by_id(state, source_id),
             "ordinal" => index
           }
-        end
-
-        def entry_sort_key(entry)
-          [sortable_timestamp(entry.fetch("timestamp", nil)), entry.fetch("kind") == "log" ? 0 : 1, entry.fetch("ordinal", 0).to_i]
-        end
-
-        def sortable_timestamp(timestamp)
-          timestamp.to_s.empty? ? "9999-12-31T23:59:59Z" : timestamp.to_s
         end
 
         def normalized_message_role(role)
@@ -163,32 +136,6 @@ module Meringue
           when "agent" then "agent"
           else "meringue"
           end
-        end
-
-        def log_role(source_type, source_id)
-          return "you" if source_type == "user"
-          return "agent" if %w[head worker].include?(source_type)
-          return "agent" if source_type == "harness" && !source_id.to_s.empty?
-
-          "meringue"
-        end
-
-        def log_status(entry)
-          label = log_level(entry)
-          return nil if label == "info"
-
-          label
-        end
-
-        def log_level(entry)
-          details = entry.fetch("details", {}) || {}
-          return "cmd" if details["presentation"] == "cmd" || details["kind"].to_s.start_with?("kernel_command")
-
-          {
-            "info" => "info",
-            "warning" => "warn",
-            "error" => "err"
-          }.fetch(entry.fetch("level", nil), "log")
         end
 
         def agent_by_id(state, source_id)
@@ -205,7 +152,6 @@ module Meringue
             [role == "you" ? USER_ICON : AGENT_ICON, style],
             [" #{participant_label(entry)}", style]
           ]
-          segments.concat(log_level_segments(entry))
           segments.concat(agent_title_segments(entry, selected_agent_id: selected_agent_id))
           segments
         end
@@ -244,23 +190,6 @@ module Meringue
 
           metadata = agent.fetch("harness_metadata", {}) || {}
           metadata.fetch("title", "#{agent.fetch("type", "agent")} session").to_s
-        end
-
-        def log_level_segments(entry)
-          return [] unless entry.fetch("kind", nil) == "log"
-
-          status = entry.fetch("status", nil).to_s
-          return [] if status.empty?
-
-          [[" · ", Style::DIM], [status, log_level_style(entry)]]
-        end
-
-        def log_level_style(entry)
-          case entry.fetch("level", nil)
-          when "warning" then Style::LOG_WARNING
-          when "error" then Style::LOG_ERROR
-          else entry.fetch("status", nil) == "cmd" ? Style::LOG_COMMAND : Style::LOG_INFO
-          end
         end
 
         def timestamp(entry)

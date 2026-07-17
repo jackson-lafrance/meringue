@@ -43,15 +43,29 @@ module Meringue
         draw_pane(
           canvas,
           metrics.fetch(:main_x),
-          metrics.fetch(:top_y),
+          metrics.fetch(:conversation_y),
           metrics.fetch(:main_width),
           metrics.fetch(:conversation_height),
-          "conversation + kernel",
+          "conversation",
           chat_pane.conversation_lines(state, width: metrics.fetch(:main_width) - 4),
           active: scroll_pane_active?(state, "conversation"),
           overflow: :tail,
           scroll_offset: pane_scroll_offset(state, "conversation")
         )
+        if metrics.fetch(:logs_height).positive?
+          draw_pane(
+            canvas,
+            metrics.fetch(:main_x),
+            metrics.fetch(:logs_y),
+            metrics.fetch(:main_width),
+            metrics.fetch(:logs_height),
+            "logs",
+            log_pane.lines(state),
+            active: scroll_pane_active?(state, "logs"),
+            overflow: :tail,
+            scroll_offset: pane_scroll_offset(state, "logs")
+          )
+        end
         if metrics.fetch(:suggestion_height).positive?
           draw_pane(
             canvas,
@@ -119,10 +133,11 @@ module Meringue
         metrics = layout_metrics(width, height, state)
         agent_tree_lines = agent_tree_pane.lines(state, width: metrics.fetch(:sidebar_width) - 4)
         conversation_lines = chat_pane.conversation_lines(state, width: metrics.fetch(:main_width) - 4)
+        log_lines = log_pane.lines(state)
         {
           "agent_tree" => scroll_max(agent_tree_lines.length, metrics.fetch(:top_height) - 2),
           "conversation" => tail_scroll_max(conversation_lines.length, metrics.fetch(:conversation_height) - 2),
-          "logs" => 0,
+          "logs" => tail_scroll_max(log_lines.length, metrics.fetch(:logs_height) - 2),
           "chat" => 0
         }
       end
@@ -146,7 +161,10 @@ module Meringue
         vertical_gaps = GAP + (suggestion_height.positive? ? GAP : 0)
         top_height = height - BOTTOM_HINT_HEIGHT - composer_height - suggestion_height - vertical_gaps
 
-        conversation_height = top_height
+        main_split = main_split_metrics(top_height)
+        conversation_height = main_split.fetch(:conversation_height)
+        logs_height = main_split.fetch(:logs_height)
+        main_vertical_gap = main_split.fetch(:main_vertical_gap)
 
         {
           top_y: top_y,
@@ -155,7 +173,10 @@ module Meringue
           sidebar_width: sidebar_width,
           main_x: main_x,
           main_width: main_width,
+          conversation_y: top_y,
           conversation_height: conversation_height,
+          logs_y: top_y + conversation_height + main_vertical_gap,
+          logs_height: logs_height,
           suggestion_x: composer_x,
           suggestion_y: top_y + top_height + GAP,
           suggestion_width: composer_width,
@@ -169,6 +190,15 @@ module Meringue
           hint_y: height - BOTTOM_HINT_HEIGHT,
           hint_width: width - (OUTER_MARGIN * 2) - 1
         }
+      end
+
+      def main_split_metrics(top_height)
+        top_height = top_height.to_i
+        return { conversation_height: top_height, logs_height: 0, main_vertical_gap: 0 } if top_height < 8
+
+        conversation_height = [[(top_height * 0.38).floor, MIN_CHAT_HEIGHT].max, top_height - GAP - 3].min
+        logs_height = top_height - conversation_height - GAP
+        { conversation_height: conversation_height, logs_height: logs_height, main_vertical_gap: GAP }
       end
 
       def bounded_slash_suggestion_height(total_height, composer_height, state)
@@ -224,7 +254,8 @@ module Meringue
       def focusable_pane_bounds(metrics)
         {
           "agent_tree" => pane_bounds(metrics, :sidebar_x, :top_y, :sidebar_width, :top_height),
-          "conversation" => pane_bounds(metrics, :main_x, :top_y, :main_width, :conversation_height),
+          "conversation" => pane_bounds(metrics, :main_x, :conversation_y, :main_width, :conversation_height),
+          "logs" => pane_bounds(metrics, :main_x, :logs_y, :main_width, :logs_height),
           "chat" => pane_bounds(metrics, :composer_x, :composer_y, :composer_width, :composer_height)
         }
       end
