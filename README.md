@@ -153,7 +153,7 @@ Useful slash commands inside the TUI include:
 - `/issue create <project_id> "<title>" ["description"]` — create an issue manually.
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
 - `/prompt <agent_id> "<message>"` — follow up with an existing agent.
-- `/jump [agent_id]` — open a worker harness session; omit the id to navigate workers and open PRs from jump mode.
+- `/jump [agent_id]` — open a worker harness session; omit the id to navigate issues/workers and open PRs from jump mode.
 - `/theme <name>` — persist a TUI colorscheme.
 - `/harness <pi|claude|antigravity>` — select the harness for future agents.
 - `/keybind` — show active TUI keybindings.
