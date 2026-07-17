@@ -171,7 +171,7 @@ Write state atomically where practical.
 We will be following a similar pattern to the node.js event loop
 Where users should never be blocked from sending a prompt.
 Heads should be stateless, spawning a new one for each user message and killing them after each completion
-They should not modify files themselves, only read/research and return structured KERNEL commands.
+They should not modify files themselves, investigate substantive tasks, or return substantive answers directly to the user. They may do limited read-only project/routing discovery and must return structured KERNEL commands that create/reuse issues, spawn/prompt workers for investigation, implementation, and informational work, or ask clarifying questions.
 
 If a head is unsure of a users request, they can ask a question to them, but they will still be killed.  
 Instead this question and its prior prompt/thought process will be stored in json for a future head agent whenever the user so chooses to answer that question.
@@ -202,7 +202,7 @@ Head agents main purpose is to decide, what project to spawn the agent in, if we
 ### Head project discovery
 Project discovery is a head responsibility, not a kernel responsibility.
 
-Heads may inspect the local machine with read-only tools before returning their JSON result. This is how they should understand local projects, git repositories, remotes, and working directories well enough to choose an existing project or propose `AddProject`.
+Heads may inspect the local machine with read-only tools before returning their JSON result. This is how they should understand local projects, git repositories, remotes, and working directories well enough to choose an existing project or propose `AddProject`; it is not permission to perform the user's requested investigation or deliver the answer directly.
 
 Allowed head discovery examples:
 - `pwd`
@@ -240,7 +240,7 @@ The `questions` array should contain clarifying questions only when ambiguity wo
 Workers are real harness sessions. For the MVP, that means real Pi sessions.
 They run in a specific workspace decided by the kernel from the head agent's proposed issue/project context.
 The preferred worker workspace is a dedicated git worktree so multiple workers/subagents can edit concurrently without trampling the same checkout.
-Workers do not directly interface with the user, so normal implementation and delivery privileges are pre-approved by the assigned issue: when requested they should edit files, use a separate branch/worktree, commit, push, and open or update a PR without asking for additional permission. They should still inspect git status and repository instructions before editing, avoid overwriting unrelated active work, and report true blockers such as missing credentials/auth, remote setup problems, branch/worktree collisions, unrelated work that would be overwritten, or unsafe/destructive operations.
+Workers do not directly interface with the user, so normal implementation and delivery privileges are pre-approved by the assigned issue: when requested they should edit files, use a separate branch/worktree, commit, push, and open or update a PR without asking for additional permission. They should still inspect git status and repository instructions before editing, avoid overwriting unrelated active work, and report true blockers such as missing credentials/auth, remote setup problems, branch/worktree collisions, unrelated work that would be overwritten, or unsafe/destructive operations. Not every worker issue requires a PR; for investigation-only or informational assigned work that does not require repository changes, workers may return findings or an answer without opening a PR unless the issue explicitly requests one.
 They are attached to one specific issue, but multiple agents can be attached to one issue.
 They may follow up, but should not be used many times.
 They should automatically be pruned if they complete over 50% context full.
