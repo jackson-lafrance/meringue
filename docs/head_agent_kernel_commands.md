@@ -38,8 +38,10 @@ Every head result must match this shape:
 
 - `title`: short label for the head while it appears in the AgentTree.
 - `summary`: concise explanation of what the head decided.
-- `commands`: array of kernel command envelopes.
+- `commands`: array of kernel command envelopes. Use an empty array when the user only wants information, investigation, or status and no project change is needed.
 - `questions`: array of clarifying question objects when ambiguity would likely cause bad work.
+
+Informational or investigative prompts do not always need an issue, worker, branch, or pull request. If read-only inspection is enough, put the requested answer in `summary` and return no commands.
 
 ## Kernel command envelope
 
@@ -274,7 +276,7 @@ Example:
 
 Spawns a real worker harness session for an issue. The kernel owns workspace allocation before calling the harness. For git-backed projects, the kernel creates a dedicated Meringue-owned worktree/branch and passes that workspace to the harness. Use this directly on an existing issue for follow-up prompts instead of creating nested issues.
 
-Workers receive standing guidance that they do not need to ask for user permission before editing files, committing, pushing, or opening/updating a PR when the assigned issue asks for those actions. Do not add worker prompts that tell them to wait for routine git/PR approval; do include requested delivery actions in the prompt, and let the worker report only true blockers such as missing auth, remote setup problems, branch/worktree collisions, unrelated work that would be overwritten, or unsafe/destructive operations. Workers should stay in the kernel-assigned workspace/branch unless it is unusable or the user explicitly asks for a different branch/worktree.
+Workers receive standing guidance that they do not need to ask for user permission before editing files, committing, pushing, or opening/updating a PR when the assigned issue asks for those actions. Do not add worker prompts that tell them to wait for routine git/PR approval; do include requested delivery actions in the prompt, and let the worker report only true blockers such as missing auth, remote setup problems, branch/worktree collisions, unrelated work that would be overwritten, or unsafe/destructive operations. Workers should stay in the kernel-assigned workspace/branch unless it is unusable or the user explicitly asks for a different branch/worktree. If a worker only needs to investigate or report information and no code or documentation change is needed, it should return the information instead of creating a pull request.
 
 Worker delivery names should be human-facing. When a head supplies a worker title or prompt, prefer the issue/task title or requested change that should become the branch/PR name. Do not ask workers to put Meringue agent ids, worker ids, Pi ids, or subagent implementation details in branch names, PR titles, or PR metadata.
 

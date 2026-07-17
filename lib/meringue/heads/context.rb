@@ -63,6 +63,7 @@ module Meringue
           Do not assume all state is embedded in the prompt; inspect only the parts of state you need.
           You may use tools to inspect local projects and git repositories before deciding, but discovery must be read-only.
           Do not mutate files, git state, dependencies, databases, remote services, or Meringue state directly.
+          If the user only asks for information, investigation, or status and no project change is needed, answer in the HeadResult summary with no commands instead of spawning work that would create a pull request.
           Propose kernel commands using the reference below.
 
           #{kernel_command_reference}
