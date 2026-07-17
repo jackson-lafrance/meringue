@@ -61,7 +61,8 @@ module Meringue
           Read the user message and return a HeadResult JSON object only.
           The prompt includes the Meringue state file path and read-only commands you may run when state details are necessary.
           Do not assume all state is embedded in the prompt; inspect only the parts of state you need.
-          You may use tools to inspect local projects and git repositories before deciding, but discovery must be read-only.
+          You may use tools to inspect local projects and git repositories before deciding, but discovery must be read-only and limited to routing/orchestration context.
+          Do not investigate or answer the user's substantive task directly; create or reuse issues and spawn or prompt workers for investigation, implementation, and informational work.
           Do not mutate files, git state, dependencies, databases, remote services, or Meringue state directly.
           Propose kernel commands using the reference below.
 
@@ -160,6 +161,8 @@ module Meringue
             "For phrases like this project, current project, here, or this repo, prefer the current_directory.git_root when present; otherwise use cwd.",
             "If the preferred local repository is not registered, propose AddProject with its absolute root before CreateIssue or SpawnWorker.",
             "Before proposing CreateIssue, inspect existing issues in the chosen project. If the prompt is a follow-up, refinement, or next step for an existing issue, reuse that issue and propose SpawnWorker only.",
+            "Do not investigate or answer substantive task content yourself. Route implementation, investigation, and informational work through CreateIssue/SpawnWorker or PromptAgent as appropriate.",
+            "Use the HeadResult summary to describe routing decisions, not to deliver the worker's substantive answer.",
             "Do not create nested/subissues for ordinary follow-up prompts; keep parent_issue_id null unless the user explicitly asks for a child issue hierarchy.",
             "Always include a short action-oriented title in SpawnWorker payloads so workers render clearly under their issue in the AgentTree.",
             "When chaining AddProject with CreateIssue and SpawnWorker in one HeadResult, read state counters when necessary and compute the future project id from counters.projects or the max existing P<number>.",
