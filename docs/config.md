@@ -37,7 +37,6 @@ Keybindings live alongside the theme under `[tui.keybindings]`. Each key is an a
 # Vim-style jump navigation while keeping all other defaults.
 agent_select_previous = ["k", "up", "left"]
 agent_select_next = ["j", "down", "right"]
-open_pr = ["o"]
 
 # Example: submit with Ctrl-X and insert newlines with Ctrl-N.
 # submit = ["ctrl-x"]
@@ -55,7 +54,7 @@ Supported action names:
 - `complete_suggestion`, `suggestion_previous`, `suggestion_next`
 - `cursor_left`, `cursor_right`, `cursor_up`, `cursor_down`, `cursor_home`, `cursor_end`, `cursor_word_left`, `cursor_word_right`
 - `delete_backward`, `delete_forward`, `delete_word_backward`, `delete_word_forward`
-- `agent_select_previous`, `agent_select_next`, `open_pr`
+- `agent_select_previous`, `agent_select_next`
 
 Common key names include `enter`, `shift-enter`, `tab`, `shift-tab`, `ctrl-tab`, `escape`, arrow keys (`up`, `down`, `left`, `right`), `home`, `end`, `page-up`, `page-down`, `backspace`, `delete`, `ctrl-a` through `ctrl-z`, `alt-left`, `alt-right`, `ctrl-left`, `ctrl-right`, `alt-backspace`, `ctrl-backspace`, `alt-delete`, `ctrl-delete`, `space`, and single printable characters like `j` or `p`. Advanced users can bind a raw terminal sequence with `raw:<sequence>`; literal `\\e` inside that string is converted to Escape.
 

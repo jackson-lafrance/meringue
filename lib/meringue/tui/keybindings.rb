@@ -31,8 +31,7 @@ module Meringue
         "delete_word_backward" => ["alt-backspace", "ctrl-backspace", "ctrl-w"],
         "delete_word_forward" => ["alt-delete", "ctrl-delete"],
         "agent_select_previous" => ["up", "left"],
-        "agent_select_next" => ["down", "right"],
-        "open_pr" => ["p"]
+        "agent_select_next" => ["down", "right"]
       }.freeze
 
       ACTION_LABELS = {
@@ -63,8 +62,7 @@ module Meringue
         "delete_word_backward" => "Delete previous word",
         "delete_word_forward" => "Delete next word",
         "agent_select_previous" => "Select previous agent",
-        "agent_select_next" => "Select next agent",
-        "open_pr" => "Open selected PR"
+        "agent_select_next" => "Select next agent"
       }.freeze
 
       KEY_ALIASES = {
