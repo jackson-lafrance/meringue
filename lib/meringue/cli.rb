@@ -53,6 +53,7 @@ module Meringue
       return 1 unless config
 
       configure_tui_style(config)
+      keybindings = configured_keybindings(config)
 
       registry = Harness::Registry.new(config: config)
       store = state_store(path: options.fetch(:state_path))
@@ -63,7 +64,7 @@ module Meringue
         err: err,
         state_path: options.fetch(:state_path),
         state_store: store,
-        tui_app: TUI::App.new(input: input, out: out, session_opener: registry.terminal_session_opener),
+        tui_app: TUI::App.new(input: input, out: out, session_opener: registry.terminal_session_opener, keybindings: keybindings),
         prompt_handler: engine ? Heads::PromptLoop.new(engine: engine, wait_for_workers: false) : nil,
         reconciler: engine ? -> { engine.reconcile_sessions } : nil
       ).run
@@ -196,6 +197,10 @@ module Meringue
         TUI::Style::DEFAULT_COLORSCHEME
     end
 
+    def configured_keybindings(config)
+      TUI::Keybindings.from_config(config.section("tui", "keybindings"))
+    end
+
     def demo_state
       State::Store.new(path: Meringue.root_path("fixtures", "demo_state.json")).load
     end
@@ -223,6 +228,7 @@ module Meringue
           Default path: #{Config::DEFAULT_PATH}
           Supported harness providers: pi, claude (aliases: claude_code, claude-code, cc), antigravity
           Supported TUI colorschemes: #{TUI::Style.colorschemes.join(", ")}
+          TUI keybindings can be customized under [tui.keybindings]; omitted actions keep defaults.
           CLI flags override config.toml, and MERINGUE_HARNESS / MERINGUE_HEAD_HARNESS / MERINGUE_WORKER_HARNESS override both.
 
         TUI controls:

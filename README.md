@@ -157,8 +157,9 @@ Useful slash commands inside the TUI include:
 - `/jumpr [agent_id]` — open a worker pull request when available.
 - `/theme <name>` — persist a TUI colorscheme.
 - `/harness <pi|claude|antigravity>` — select the harness for future agents.
+- `/keybind` — show active TUI keybindings.
 
-See `docs/keybindings.md` for keyboard navigation and jump-mode details.
+See `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
 
 ## Configuration and state
 
@@ -169,7 +170,7 @@ Default paths:
 ~/.meringue/state.json    # persisted Meringue state
 ```
 
-The config supports TUI colorschemes, default harness selection, role-specific head/worker harnesses, and provider command overrides. See `docs/config.md` for the full reference.
+The config supports TUI colorschemes, TUI keybinding overrides, default harness selection, role-specific head/worker harnesses, and provider command overrides. See `docs/config.md` for the full reference.
 
 The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state.
 
