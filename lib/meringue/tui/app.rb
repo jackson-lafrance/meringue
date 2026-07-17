@@ -959,6 +959,7 @@ module Meringue
         lines = []
         if head_result.any?
           lines.concat(head_result_user_lines(head_result, question_ids: question_ids_from_apply_result(apply_result)))
+          lines.concat(command_user_lines_from_apply_result(apply_result)) if lines.empty?
         else
           lines.concat(failure_result_lines(spawn_result, apply_result, fallback: result.fetch("summary", nil)))
         end
@@ -1053,10 +1054,12 @@ module Meringue
       end
 
       def append_head_result_applied_summary(message_id, event)
+        apply_result = event.fetch("apply_result", {}) || {}
         lines = head_result_user_lines(
           event.fetch("head_result", {}) || {},
-          question_ids: question_ids_from_apply_result(event.fetch("apply_result", {}) || {})
+          question_ids: question_ids_from_apply_result(apply_result)
         )
+        lines.concat(command_user_lines_from_apply_result(apply_result)) if lines.empty?
         status = worker_wait_status(event)
         if lines.empty?
           update_message_status(message_id, status)
@@ -1089,14 +1092,25 @@ module Meringue
         end
       end
 
-      def command_summary_lines(apply_result)
-        command_results = (apply_result.fetch("result", {}) || {}).fetch("command_results", [])
-        spawned_workers = command_results.select do |command_result|
-          command_result.fetch("command_type", nil) == "SpawnWorker" && command_result.fetch("status", nil) == "accepted"
-        end
-        return [] if spawned_workers.empty?
+      def command_user_lines_from_apply_result(apply_result)
+        return [] unless apply_result.is_a?(Hash)
 
-        ["Spawned workers: #{spawned_workers.map { |worker| worker.fetch("target_id", nil) }.compact.join(", ")}"]
+        result = apply_result.fetch("result", {}) || {}
+        return [] unless result.is_a?(Hash)
+
+        command_user_lines_from_command_results(result.fetch("command_results", []))
+      end
+
+      def command_user_lines_from_command_results(command_results)
+        Array(command_results).filter_map do |command_result|
+          next unless command_result.is_a?(Hash)
+
+          message = command_result.fetch("message", "").to_s.strip
+          next if message.empty?
+
+          status = command_result.fetch("status", nil).to_s
+          status == "accepted" ? message : "#{status}: #{message}"
+        end
       end
 
       def worker_summary_lines(worker_wait_results)
@@ -1224,6 +1238,11 @@ module Meringue
       end
 
       def sync_polled_head_updates!(state)
+        sync_polled_head_updates_from_agents!(state)
+        sync_polled_head_updates_from_logs!(state)
+      end
+
+      def sync_polled_head_updates_from_agents!(state)
         Array(state.fetch("agents", [])).each do |agent|
           next unless agent.fetch("type", nil) == "head"
 
@@ -1237,6 +1256,36 @@ module Meringue
             head_result_user_lines(head_result).join("\n")
           )
         end
+      end
+
+      def sync_polled_head_updates_from_logs!(state)
+        Array(state.fetch("logs", [])).each do |log|
+          next unless applied_head_result_log?(log)
+          next unless conversation_sync_after_start?(log.fetch("timestamp", nil))
+
+          head_id = log.fetch("source_id", nil)
+          append_message_once(
+            head_completed_key(head_id),
+            "meringue",
+            applied_head_result_log_text(log),
+            source_id: head_id
+          )
+        end
+      end
+
+      def applied_head_result_log?(log)
+        log.fetch("source_type", nil) == "kernel" &&
+          log.fetch("source_id", "").to_s.start_with?("H") &&
+          log.fetch("message", "").to_s.start_with?("Applied head result for ") &&
+          log.fetch("details", {}).is_a?(Hash)
+      end
+
+      def applied_head_result_log_text(log)
+        details = log.fetch("details", {}) || {}
+        lines = command_user_lines_from_command_results(details.fetch("command_results", []))
+        return lines.join("\n") unless lines.empty?
+
+        log.fetch("message", "").to_s
       end
 
       def sync_worker_completion_updates!(state)
