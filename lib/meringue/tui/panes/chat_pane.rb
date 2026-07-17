@@ -101,9 +101,11 @@ module Meringue
         private
 
         def log_entries(state)
-          entries = []
-          entries.concat(visible_messages(chat_state(state).fetch("messages", []) || []).map.with_index { |message, index| message_entry(message, index) })
-          entries.concat(Array(state.fetch("logs", [])).map.with_index { |entry, index| log_entry(entry, index, state) }.compact)
+          message_entries = visible_messages(chat_state(state).fetch("messages", []) || []).map.with_index { |message, index| message_entry(message, index) }
+          durable_log_entries = Array(state.fetch("logs", [])).map.with_index { |entry, index| log_entry(entry, index, state) }.compact
+          duplicate_log_texts = duplicate_text_index(durable_log_entries)
+          entries = message_entries.filter_map { |entry| deduplicate_message_entry(entry, duplicate_log_texts) } + durable_log_entries
+          entries.each_with_index { |entry, sequence| entry["sequence"] = sequence }
           entries.sort_by { |entry| entry_sort_key(entry) }
         end
 
@@ -115,6 +117,30 @@ module Meringue
           return false if message.fetch("visible", true) == false
 
           !message.fetch("text", "").to_s.strip.empty?
+        end
+
+        def duplicate_text_index(entries)
+          entries.each_with_object({}) do |entry, index|
+            text = normalized_duplicate_text(entry.fetch("text", ""))
+            index[text] = true unless text.empty?
+          end
+        end
+
+        def deduplicate_message_entry(entry, duplicate_texts)
+          text = entry.fetch("text", "").to_s
+          return nil if duplicate_texts[normalized_duplicate_text(text)]
+
+          lines = text.lines.map(&:chomp)
+          return entry unless lines.length > 1 && duplicate_texts[normalized_duplicate_text(lines.first)]
+
+          trimmed_text = lines.drop(1).join("\n").strip
+          return nil if trimmed_text.empty?
+
+          entry.merge("text" => trimmed_text)
+        end
+
+        def normalized_duplicate_text(text)
+          text.to_s.gsub(/[[:space:]]+/, " ").strip
         end
 
         def message_entry(message, index)
@@ -151,7 +177,7 @@ module Meringue
         end
 
         def entry_sort_key(entry)
-          [sortable_timestamp(entry.fetch("timestamp", nil)), entry.fetch("kind") == "log" ? 0 : 1, entry.fetch("ordinal", 0).to_i]
+          [sortable_timestamp(entry.fetch("timestamp", nil)), entry.fetch("sequence", entry.fetch("ordinal", 0)).to_i]
         end
 
         def sortable_timestamp(timestamp)
