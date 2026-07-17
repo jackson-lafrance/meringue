@@ -7,20 +7,19 @@ module Meringue
     module Panes
       class ChatPane
         VISIBLE_SUGGESTION_LIMIT = 3
-        MAX_CONVERSATION_ENTRY_LINES = 10
         AGENT_ICON = "✦"
         USER_ICON = "●"
 
         def render(state)
-          conversation_lines(state).map { |line| plain_text(line) }.join("\n")
+          log_lines(state).map { |line| plain_text(line) }.join("\n")
         end
 
         def lines(state, width: nil)
-          conversation_lines(state, width: width)
+          log_lines(state, width: width)
         end
 
-        def conversation_lines(state, width: nil)
-          entries = combined_entries(state)
+        def log_lines(state, width: nil)
+          entries = log_entries(state)
 
           if entries.empty?
             return [[["No logs yet. Type a prompt below and press Enter.", Style::MUTED]]]
@@ -101,19 +100,15 @@ module Meringue
 
         private
 
-        def combined_entries(state)
+        def log_entries(state)
           entries = []
           entries.concat(visible_messages(chat_state(state).fetch("messages", []) || []).map.with_index { |message, index| message_entry(message, index) })
-          entries.concat(visible_logs(state.fetch("logs", [])).map.with_index { |entry, index| log_entry(entry, index, state) }.compact)
+          entries.concat(Array(state.fetch("logs", [])).map.with_index { |entry, index| log_entry(entry, index, state) }.compact)
           entries.sort_by { |entry| entry_sort_key(entry) }
         end
 
         def visible_messages(messages)
           messages.select { |message| visible_message?(message) }
-        end
-
-        def visible_logs(logs)
-          Array(logs).select { |entry| LogVisibility.visible?(entry) }
         end
 
         def visible_message?(message)
@@ -136,6 +131,8 @@ module Meringue
         end
 
         def log_entry(entry, index, state)
+          return nil unless entry.is_a?(Hash)
+
           source_type = entry.fetch("source_type", "system").to_s
           source_id = entry.fetch("source_id", nil)
           role = log_role(source_type, source_id)

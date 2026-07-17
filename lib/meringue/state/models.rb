@@ -27,7 +27,7 @@ module Meringue
         state["logs"] ||= []
         state["conversation"] ||= {}
         state["conversation"]["messages"] ||= []
-        state["conversation"]["next_message_id"] ||= max_conversation_message_id(state)
+        state["conversation"]["next_message_id"] ||= max_log_message_id(state)
         state["counters"] ||= {}
         state["counters"]["projects"] ||= max_numeric_suffix(state.fetch("projects"), /^P(\d+)$/)
         state["counters"]["heads"] ||= max_numeric_suffix(state.fetch("agents").select { |agent| agent["type"] == "head" }, /^H(\d+)$/)
@@ -41,7 +41,7 @@ module Meringue
         state
       end
 
-      def max_conversation_message_id(state)
+      def max_log_message_id(state)
         Array(state.dig("conversation", "messages")).filter_map do |message|
           next unless message.is_a?(Hash)
 

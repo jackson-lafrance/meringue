@@ -467,7 +467,7 @@ Example:
 
 ### ClearState
 
-Clears all persisted Meringue projects, issues, agents, questions, logs, counters, and chat conversation messages. This is a user slash-command recovery tool; head agents should not propose it.
+Clears all persisted Meringue projects, issues, agents, questions, logs, counters, and visible log buffer messages. This is a user slash-command recovery tool; head agents should not propose it.
 
 Payload:
 
