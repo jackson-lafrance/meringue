@@ -830,6 +830,7 @@ module Meringue
             "head_result" => head_result
           )
           ids = create_head_questions!(state, head_id, head_result.fetch("questions"), log_ids)
+          log_ids.concat(append_head_summary_log(state, head_id, head_result))
           touch_state!(state)
           store.save(state)
           ids
@@ -2051,6 +2052,23 @@ module Meringue
 
           errors << "head_result.questions[#{index}].question must be a string" unless question["question"].is_a?(String)
         end
+      end
+
+      def append_head_summary_log(state, head_id, head_result)
+        return [] unless Array(head_result.fetch("commands", [])).empty?
+        return [] unless Array(head_result.fetch("questions", [])).empty?
+
+        summary = head_result.fetch("summary", "").to_s.strip
+        return [] if summary.empty?
+
+        append_log(
+          state,
+          source_type: "head",
+          source_id: head_id.to_s,
+          level: "info",
+          message: summary,
+          details: { "kind" => "head_summary" }
+        )
       end
 
       def create_head_questions!(state, head_id, questions, log_ids)

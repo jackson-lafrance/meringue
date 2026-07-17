@@ -883,7 +883,7 @@ module Meringue
             if slash_command
               apply_slash_command_results(result.fetch("command_results", []) || []) if result.fetch("event", nil) == "slash_command_applied"
             else
-              final_text = log_text_for(result)
+              final_text = result_logged_to_kernel?(result) ? "" : log_text_for(result)
               update_message(assistant_message_id, text: final_text, status: nil, visible: !final_text.to_s.strip.empty?)
             end
           rescue StandardError => e
@@ -909,20 +909,25 @@ module Meringue
           remember_log_event(head_completed_key(event.fetch("head_id", nil)))
           update_message_status(message_id, "applying commands")
         when "head_result_applied"
-          append_head_result_applied_summary(message_id, event)
+          update_message_status(message_id, worker_wait_status(event))
         when "slash_command_applied"
           apply_slash_command_results(event.fetch("command_results", []) || [])
         when "worker_wait_started"
-          remember_log_event(worker_completed_key(event.fetch("agent_id", nil)))
           update_message_status(message_id, "workers running")
         when "worker_completed"
-          agent_id = event.fetch("agent_id", nil)
-          remember_log_event(worker_completed_key(agent_id))
-          append_message("agent", worker_completed_line(event), source_id: agent_id)
+          update_message_status(message_id, nil)
         when "worker_wait_failed"
-          forget_log_event(worker_completed_key(event.fetch("agent_id", nil)))
           append_user_facing_line(message_id, worker_wait_failed_line(event), status: "worker wait failed")
         end
+      end
+
+      def result_logged_to_kernel?(result)
+        kernel_results = [
+          result.fetch("spawn_head_result", nil),
+          result.fetch("apply_head_result", nil),
+          *Array(result.fetch("worker_wait_results", [])).map { |worker| worker.fetch("completion_result", nil) }
+        ].compact
+        kernel_results.any? { |kernel_result| Array(kernel_result.fetch("log_entry_ids", [])).any? }
       end
 
       def log_text_for(result)
@@ -1133,9 +1138,10 @@ module Meringue
         }
       end
 
-      def sync_state_logs!(state)
-        sync_polled_head_updates!(state)
-        sync_worker_completion_updates!(state)
+      def sync_state_logs!(_state)
+        # Durable kernel logs are the visible event stream. Conversation messages
+        # are kept only for transient in-flight status and legacy persisted rows,
+        # so do not synthesize second copies of completed head/worker events here.
       end
 
       def sync_polled_head_updates!(state)
