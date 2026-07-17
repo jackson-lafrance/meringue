@@ -342,7 +342,7 @@ module Meringue
 
       def reconcile_sessions(command_id: nil, command_type: "ReconcileSessions")
         normalized_state_changed = persist_normalized_state_if_changed
-        prune_result = prune_killed_agents
+        prune_result = prune_killed_records
         agents = synchronized_state do
           normalized_state.fetch("agents").select { |agent| reconcile_candidate?(agent) }.map { |agent| deep_copy(agent) }
         end
@@ -360,7 +360,9 @@ module Meringue
           {
             "checked_count" => agents.length,
             "changed_count" => changed_count,
+            "pruned_issue_ids" => prune_result.fetch("removed_issue_ids", []),
             "pruned_agent_ids" => prune_result.fetch("removed_agent_ids", []),
+            "pruned_project_ids" => prune_result.fetch("removed_project_ids", []),
             "poll_results" => applied_results
           },
           (prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
@@ -429,32 +431,49 @@ module Meringue
         end
       end
 
-      def prune_killed_agents
+      def prune_killed_records
         synchronized_state do
           state = normalized_state
-          killed_agents = state.fetch("agents").select { |agent| agent.fetch("status", nil) == "killed" }
-          removed_agent_ids = killed_agents.map { |agent| agent.fetch("id") }
-          return { "changed" => false, "removed_agent_ids" => [], "log_entry_ids" => [] } if removed_agent_ids.empty?
-
-          state["agents"] = state.fetch("agents").reject { |agent| removed_agent_ids.include?(agent.fetch("id", nil)) }
-          state.fetch("issues").each do |issue|
-            next unless issue.key?("agent_ids")
-
-            issue["agent_ids"] = Array(issue["agent_ids"]) - removed_agent_ids
+          killed_issue_ids = state.fetch("issues").select { |issue| issue.fetch("status", nil) == "killed" }.map { |issue| issue.fetch("id") }
+          killed_agent_ids = state.fetch("agents").select { |agent| agent.fetch("status", nil) == "killed" }.map { |agent| agent.fetch("id") }
+          if killed_issue_ids.empty? && killed_agent_ids.empty?
+            return {
+              "changed" => false,
+              "removed_issue_ids" => [],
+              "removed_agent_ids" => [],
+              "removed_standalone_agent_ids" => [],
+              "removed_project_ids" => [],
+              "log_entry_ids" => []
+            }
           end
 
           now = timestamp
+          prune_result = remove_issue_bundles_and_agents!(
+            state,
+            issue_ids: killed_issue_ids,
+            extra_agent_ids: killed_agent_ids,
+            reason: "killed",
+            now: now,
+            remove_empty_projects: false
+          )
+          removed_issue_ids = prune_result.fetch("removed_issue_ids", [])
+          removed_agent_ids = prune_result.fetch("removed_agent_ids", [])
+          removed_project_ids = prune_result.fetch("removed_project_ids", [])
           log_ids = append_log(
             state,
             source_type: "kernel",
             source_id: nil,
             level: "info",
-            message: "Removed #{removed_agent_ids.length} killed agent#{removed_agent_ids.length == 1 ? "" : "s"} from active state.",
-            details: { "removed_agent_ids" => removed_agent_ids }
+            message: "Removed #{removed_issue_ids.length} killed issue#{removed_issue_ids.length == 1 ? "" : "s"} and #{removed_agent_ids.length} killed agent#{removed_agent_ids.length == 1 ? "" : "s"} from active state.",
+            details: prune_result
           )
           touch_state!(state, now)
           store.save(state)
-          { "changed" => true, "removed_agent_ids" => removed_agent_ids, "log_entry_ids" => log_ids }
+          prune_result.merge(
+            "changed" => true,
+            "removed_project_ids" => removed_project_ids,
+            "log_entry_ids" => log_ids
+          )
         end
       end
 
@@ -1267,16 +1286,20 @@ module Meringue
         workers.none? { |worker| %w[queued working idle blocked].include?(worker.fetch("status", nil)) }
       end
 
-      def remove_issue_bundles_and_agents!(state, issue_ids:, extra_agent_ids:, reason:, now:)
+      def remove_issue_bundles_and_agents!(state, issue_ids:, extra_agent_ids:, reason:, now:, remove_empty_projects: true)
         root_issue_ids = Array(issue_ids).compact.uniq
         issue_ids_to_remove = root_issue_ids.flat_map { |issue_id| issue_subtree_ids(state, issue_id) }.uniq
         issues_to_remove = state.fetch("issues").select { |issue| issue_ids_to_remove.include?(issue.fetch("id", nil)) }
         project_ids = issues_to_remove.map { |issue| issue.fetch("project_id", nil) }.compact.uniq
-        removed_project_ids = project_ids.select do |project_id|
-          state.fetch("issues").none? do |issue|
-            issue.fetch("project_id", nil) == project_id && !issue_ids_to_remove.include?(issue.fetch("id", nil))
-          end
-        end
+        removed_project_ids = if remove_empty_projects
+                                project_ids.select do |project_id|
+                                  state.fetch("issues").none? do |issue|
+                                    issue.fetch("project_id", nil) == project_id && !issue_ids_to_remove.include?(issue.fetch("id", nil))
+                                  end
+                                end
+                              else
+                                []
+                              end
         issue_agent_ids = issues_to_remove.flat_map { |issue| Array(issue.fetch("agent_ids", [])) }
         worker_agent_ids = state.fetch("agents").select { |agent| issue_ids_to_remove.include?(agent.fetch("issue_id", nil)) }.map { |agent| agent.fetch("id", nil) }
         originating_head_ids = issues_to_remove.map { |issue| issue.fetch("originating_head_id", nil) }.compact
