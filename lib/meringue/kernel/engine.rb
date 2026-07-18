@@ -27,7 +27,7 @@ module Meringue
         Report true blockers instead of asking for routine approval: missing credentials, authentication or authorization failures, missing or invalid remotes, branch/worktree collisions, unrelated uncommitted work that would be overwritten, or unsafe/destructive operations.
       PROMPT
       WORKER_RESUME_PROMPT = <<~PROMPT.freeze
-        Continue this Meringue worker session from the existing conversation and workspace state.
+        Continue this Meringue worker session from the existing session history and workspace state.
         First inspect the current repository state, then continue the assigned issue from the last incomplete step.
         If the issue is already complete, summarize the final status and include any pull request link.
       PROMPT
@@ -88,7 +88,7 @@ module Meringue
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
         ["/prune <merged|errored>", "Remove merged PR issue bundles or errored records from active state."],
-        ["/clear", "Reset persisted Meringue state and clear the chat conversation."]
+        ["/clear", "Reset persisted Meringue state and clear the visible logs."]
       ].freeze
       TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
@@ -102,7 +102,6 @@ module Meringue
       RECONCILE_STATE_TERMINAL_ERROR = "terminal_error"
 
       attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path
-      attr_reader :store, :workspace_manager, :cwd, :forge_client
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
                      head_runner: Heads::FakeRunner.new,
@@ -457,23 +456,13 @@ module Meringue
             now: now,
             remove_empty_projects: false
           )
-          removed_issue_ids = prune_result.fetch("removed_issue_ids", [])
-          removed_agent_ids = prune_result.fetch("removed_agent_ids", [])
           removed_project_ids = prune_result.fetch("removed_project_ids", [])
-          log_ids = append_log(
-            state,
-            source_type: "kernel",
-            source_id: nil,
-            level: "info",
-            message: "Removed #{removed_issue_ids.length} killed issue#{removed_issue_ids.length == 1 ? "" : "s"} and #{removed_agent_ids.length} killed agent#{removed_agent_ids.length == 1 ? "" : "s"} from active state.",
-            details: prune_result
-          )
           touch_state!(state, now)
           store.save(state)
           prune_result.merge(
             "changed" => true,
             "removed_project_ids" => removed_project_ids,
-            "log_entry_ids" => log_ids
+            "log_entry_ids" => []
           )
         end
       end
@@ -723,26 +712,17 @@ module Meringue
           )
           state.fetch("agents") << agent
 
-          log_ids = []
-          log_ids.concat(append_log(
+          log_ids = append_log(
             state,
             source_type: "user",
-            source_id: head_id,
+            source_id: nil,
             level: "info",
-            message: "User prompt routed to head #{head_id}.",
+            message: user_message.to_s.strip,
             details: {
-              "user_message" => user_message.to_s,
+              "head_id" => head_id,
               "question_id" => present_string(question_id)
-            }
-          ))
-          log_ids.concat(append_log(
-            state,
-            source_type: "head",
-            source_id: head_id,
-            level: "info",
-            message: "Spawned head #{head_id}.",
-            details: { "runner" => active_runner.class.name, "cwd" => cwd, "harness" => active_provider }
-          ))
+            }.compact
+          )
           touch_state!(state, now)
           store.save(state)
 
@@ -781,19 +761,6 @@ module Meringue
             agent["status"] = "working"
             agent["updated_at"] = timestamp
             log_ids = started.fetch("log_ids")
-            log_ids.concat(append_log(
-              state,
-              source_type: "harness",
-              source_id: head_id,
-              level: "info",
-              message: "Started #{agent.fetch("harness")} head session for #{head_id}; polling will apply its HeadResult when it settles.",
-              details: {
-                "pid" => agent.fetch("pid", nil),
-                "harness_session_id" => agent.fetch("harness_session_id", nil),
-                "harness_session_file" => agent.fetch("harness_session_file", nil),
-                "is_streaming" => agent.fetch("harness_metadata", {}).fetch("is_streaming", nil)
-              }
-            ))
             touch_state!(state)
             store.save(state)
 
@@ -821,14 +788,6 @@ module Meringue
             "head_result" => head_result
           ).compact
           log_ids = started.fetch("log_ids")
-          log_ids.concat(append_log(
-            state,
-            source_type: "head",
-            source_id: head_id,
-            level: "info",
-            message: "Head #{head_id} completed with #{Array(head_result.is_a?(Hash) ? head_result["commands"] : []).length} proposed command(s).",
-            details: { "head_result" => head_result }
-          ))
           touch_state!(state)
           store.save(state)
 
@@ -870,21 +829,8 @@ module Meringue
             "summary" => head_result.fetch("summary"),
             "head_result" => head_result
           )
-          log_ids.concat(append_log(
-            state,
-            source_type: "kernel",
-            source_id: head_id.to_s,
-            level: "info",
-            message: "Applying head result for #{head_id}.",
-            details: {
-              "title" => head_result.fetch("title"),
-              "summary" => head_result.fetch("summary"),
-              "command_count" => head_result.fetch("commands").length,
-              "question_count" => head_result.fetch("questions").length
-            }
-          ))
-
           ids = create_head_questions!(state, head_id, head_result.fetch("questions"), log_ids)
+          log_ids.concat(append_head_summary_log(state, head_id, head_result))
           touch_state!(state)
           store.save(state)
           ids
@@ -899,22 +845,26 @@ module Meringue
           accepted_count = command_results.count { |result| result.fetch("status", nil) == "accepted" }
           rejected_count = command_results.count { |result| result.fetch("status", nil) == "rejected" }
           failed_count = command_results.count { |result| result.fetch("status", nil) == "failed" }
-          summary_log_ids = append_log(
-            state,
-            source_type: "kernel",
-            source_id: head_id.to_s,
-            level: failed_count.positive? ? "error" : "info",
-            message: "Applied head result for #{head_id}: #{accepted_count} accepted, #{rejected_count} rejected, #{failed_count} failed.",
-            details: {
-              "head_id" => head_id.to_s,
-              "question_ids" => question_ids,
-              "command_results" => command_results
-            }
-          )
+          summary_log_ids = if rejected_count.positive? || failed_count.positive?
+                              append_log(
+                                state,
+                                source_type: "kernel",
+                                source_id: head_id.to_s,
+                                level: failed_count.positive? ? "error" : "warning",
+                                message: "Head result for #{head_id}: #{accepted_count} accepted, #{rejected_count} rejected, #{failed_count} failed.",
+                                details: {
+                                  "head_id" => head_id.to_s,
+                                  "question_ids" => question_ids,
+                                  "command_results" => command_results
+                                }
+                              )
+                            else
+                              []
+                            end
           log_ids.concat(command_results.flat_map { |result| result.fetch("log_entry_ids", []) })
           log_ids.concat(summary_log_ids)
           cleanup = if cleanup_head
-                      cleanup_applied_head!(state, head_id.to_s, log_ids, now: timestamp)
+                      cleanup_applied_head!(state, head_id.to_s, now: timestamp)
                     else
                       { "changed" => false, "reason" => "deferred" }
                     end
@@ -1412,7 +1362,7 @@ module Meringue
       def clear_state(command_id, command_type)
         now = timestamp
         state = State::Models.empty_state(now: now)
-        store.save(state, preserve_conversation: false)
+        store.save(state, preserve_log_buffer: false)
 
         accepted_result(command_id, command_type, nil, "Cleared Meringue state.", state, [])
       end
@@ -1449,7 +1399,7 @@ module Meringue
           source_type: "kernel",
           source_id: question.fetch("id"),
           level: "info",
-          message: "Stored question #{question.fetch("id")} from #{head_id}.",
+          message: "Question #{question.fetch("id")}: #{question.fetch("question")}",
           details: { "head_id" => head_id.to_s }
         ))
         touch_state!(state)
@@ -1807,19 +1757,6 @@ module Meringue
               "title" => agent.fetch("harness_metadata", {}).fetch("title", nil)
             }
           ))
-          log_ids.concat(append_log(
-            state,
-            source_type: "harness",
-            source_id: reservation.fetch("agent_id"),
-            level: "info",
-            message: "Started #{agent.fetch("harness")} session for #{reservation.fetch("agent_id")}",
-            details: {
-              "pid" => agent.fetch("pid"),
-              "harness_session_id" => agent.fetch("harness_session_id"),
-              "harness_session_file" => agent.fetch("harness_session_file"),
-              "is_streaming" => agent.fetch("harness_metadata").fetch("is_streaming", nil)
-            }
-          ))
           touch_state!(state, reservation.fetch("now"))
           store.save(state)
 
@@ -2117,6 +2054,23 @@ module Meringue
         end
       end
 
+      def append_head_summary_log(state, head_id, head_result)
+        return [] unless Array(head_result.fetch("commands", [])).empty?
+        return [] unless Array(head_result.fetch("questions", [])).empty?
+
+        summary = head_result.fetch("summary", "").to_s.strip
+        return [] if summary.empty?
+
+        append_log(
+          state,
+          source_type: "head",
+          source_id: head_id.to_s,
+          level: "info",
+          message: summary,
+          details: { "kind" => "head_summary" }
+        )
+      end
+
       def create_head_questions!(state, head_id, questions, log_ids)
         questions.map do |question_payload|
           question = build_question(
@@ -2133,7 +2087,7 @@ module Meringue
             source_type: "kernel",
             source_id: question.fetch("id"),
             level: "info",
-            message: "Stored question #{question.fetch("id")} from #{head_id}.",
+            message: "Question #{question.fetch("id")}: #{question.fetch("question")}",
             details: {
               "head_id" => head_id.to_s,
               "project_id" => question.fetch("project_id"),
@@ -2846,18 +2800,20 @@ module Meringue
             "is_streaming" => false
           ).compact
           log_ids = append_harness_event_logs(state, head, poll_result.fetch("events", []))
-          log_ids.concat(append_log(
-            state,
-            source_type: "head",
-            source_id: head.fetch("id"),
-            level: apply_result.fetch("status", nil) == "accepted" ? "info" : "error",
-            message: apply_result.fetch("status", nil) == "accepted" ? "Polled head #{head.fetch("id")} completed and applied its HeadResult." : "Polled head #{head.fetch("id")} completed but its HeadResult was not applied.",
-            details: {
-              "head_result" => head_result,
-              "apply_status" => apply_result.fetch("status", nil),
-              "apply_message" => apply_result.fetch("message", nil)
-            }
-          ))
+          unless apply_result.fetch("status", nil) == "accepted"
+            log_ids.concat(append_log(
+              state,
+              source_type: "head",
+              source_id: head.fetch("id"),
+              level: "error",
+              message: "Polled head #{head.fetch("id")} completed but its HeadResult was not applied.",
+              details: {
+                "head_result" => head_result,
+                "apply_status" => apply_result.fetch("status", nil),
+                "apply_message" => apply_result.fetch("message", nil)
+              }
+            ))
+          end
           touch_state!(state, now)
           store.save(state)
           log_ids
@@ -2870,7 +2826,7 @@ module Meringue
         synchronized_state do
           state = normalized_state
           log_ids = []
-          cleanup = cleanup_applied_head!(state, poll_result.fetch("agent_id"), log_ids, now: timestamp)
+          cleanup = cleanup_applied_head!(state, poll_result.fetch("agent_id"), now: timestamp)
           touch_state!(state)
           store.save(state)
           { "changed" => cleanup.fetch("changed", false), "cleanup" => cleanup, "log_entry_ids" => log_ids }
@@ -3239,7 +3195,7 @@ module Meringue
         ).compact
       end
 
-      def cleanup_applied_head!(state, head_id, log_ids, now: timestamp)
+      def cleanup_applied_head!(state, head_id, now: timestamp)
         head = find_agent(state, head_id)
         return { "changed" => false, "reason" => "head_not_found" } unless head
         return { "changed" => false, "reason" => "agent_is_not_head" } unless head.fetch("type", nil) == "head"
@@ -3259,29 +3215,7 @@ module Meringue
           "is_streaming" => false
         ).compact
 
-        log_ids.concat(append_log(
-          state,
-          source_type: "head",
-          source_id: head_id,
-          level: "info",
-          message: "Killed completed head #{head_id} after applying its HeadResult.",
-          details: {
-            "head_id" => head_id,
-            "harness" => head.fetch("harness", nil),
-            "pid" => session_ref.fetch("pid", nil),
-            "harness_session_id" => session_ref.fetch("session_id", nil)
-          }.compact
-        ))
-
         remove_agent_from_active_state!(state, head_id)
-        log_ids.concat(append_log(
-          state,
-          source_type: "kernel",
-          source_id: head_id,
-          level: "info",
-          message: "Removed completed head #{head_id} from active state.",
-          details: { "head_id" => head_id, "reason" => "head_result_applied" }
-        ))
 
         { "changed" => true, "removed_agent_id" => head_id, "reason" => "head_result_applied" }
       end
