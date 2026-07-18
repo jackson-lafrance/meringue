@@ -146,7 +146,7 @@ module Meringue
     end
 
     def reset_state
-      state_store.save(State::Models.empty_state, preserve_conversation: false)
+      state_store.save(State::Models.empty_state, preserve_log_buffer: false)
       out.puts "Reset Meringue state at #{state_store.path}"
       0
     end
@@ -232,7 +232,7 @@ module Meringue
           CLI flags override config.toml, and MERINGUE_HARNESS / MERINGUE_HEAD_HARNESS / MERINGUE_WORKER_HARNESS override both.
 
         TUI controls:
-          Enter                     # send chat; when agent tree/conversation is focused, enter jump mode
+          Enter                     # send chat; when agent tree/logs is focused, enter jump mode
           /                         # show slash command suggestions in an otherwise empty prompt
           /help                     # list command syntax
           /quit                     # quit the TUI

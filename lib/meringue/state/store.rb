@@ -33,29 +33,31 @@ module Meringue
 
           state = read_state_unlocked
           changed = Compactor.compact!(state)
-          save_unlocked(state, preserve_conversation: false) if changed
+          save_unlocked(state, preserve_log_buffer: false) if changed
           changed
         end
       end
 
-      def save(state, preserve_conversation: true)
+      def save(state, preserve_log_buffer: true, preserve_conversation: nil)
+        preserve_log_buffer = preserve_conversation unless preserve_conversation.nil?
         @mutex.synchronize do
-          save_unlocked(state, preserve_conversation: preserve_conversation)
+          save_unlocked(state, preserve_log_buffer: preserve_log_buffer)
         end
       end
 
-      def save_conversation(messages:, next_message_id: nil)
+      def save_log_buffer(messages:, next_message_id: nil)
         @mutex.synchronize do
           state = load_unlocked
           state["conversation"] = {
             "messages" => Array(messages).map { |message| deep_copy(message) },
             "next_message_id" => next_message_id ? next_message_id.to_i : 0
           }
-          state["conversation"]["next_message_id"] = Models.max_conversation_message_id(state) if state["conversation"]["next_message_id"].zero?
+          state["conversation"]["next_message_id"] = Models.max_log_message_id(state) if state["conversation"]["next_message_id"].zero?
           state.fetch("metadata")["updated_at"] = Time.now.utc.iso8601
-          save_unlocked(state, preserve_conversation: false)
+          save_unlocked(state, preserve_log_buffer: false)
         end
       end
+      alias save_conversation save_log_buffer
 
       private
 
@@ -72,12 +74,12 @@ module Meringue
         state
       end
 
-      def save_unlocked(state, preserve_conversation: true)
+      def save_unlocked(state, preserve_log_buffer: true)
         FileUtils.mkdir_p(File.dirname(path))
         temp_path = "#{path}.tmp.#{$$}"
         Compactor.compact!(state)
         Models.ensure_state_shape!(state)
-        merge_persisted_conversation!(state) if preserve_conversation
+        merge_persisted_log_buffer!(state) if preserve_log_buffer
 
         File.write(temp_path, JSON.pretty_generate(state) + "\n")
         File.rename(temp_path, path)
@@ -86,12 +88,12 @@ module Meringue
         File.delete(temp_path) if temp_path && File.exist?(temp_path)
       end
 
-      def merge_persisted_conversation!(state)
+      def merge_persisted_log_buffer!(state)
         return unless File.exist?(path)
 
         persisted = JSON.parse(File.read(path))
         Models.ensure_state_shape!(persisted)
-        state["conversation"] = merge_conversation(
+        state["conversation"] = merge_log_buffer(
           state.fetch("conversation", {}),
           persisted.fetch("conversation", {})
         )
@@ -99,7 +101,7 @@ module Meringue
         nil
       end
 
-      def merge_conversation(incoming, persisted)
+      def merge_log_buffer(incoming, persisted)
         incoming_messages = Array(incoming["messages"])
         persisted_messages = Array(persisted["messages"])
         messages_by_id = {}
