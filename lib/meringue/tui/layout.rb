@@ -14,10 +14,8 @@ module Meringue
       MAX_COMPOSER_HEIGHT = 12
       MIN_CHAT_HEIGHT = 5
       def initialize(agent_tree_pane: Panes::AgentTreePane.new,
-                     log_pane: Panes::LogPane.new,
                      chat_pane: Panes::ChatPane.new)
         @agent_tree_pane = agent_tree_pane
-        @log_pane = log_pane
         @chat_pane = chat_pane
       end
 
@@ -45,12 +43,12 @@ module Meringue
           metrics.fetch(:main_x),
           metrics.fetch(:top_y),
           metrics.fetch(:main_width),
-          metrics.fetch(:conversation_height),
-          "conversation + kernel",
-          chat_pane.conversation_lines(state, width: metrics.fetch(:main_width) - 4),
-          active: scroll_pane_active?(state, "conversation"),
+          metrics.fetch(:logs_height),
+          "logs",
+          chat_pane.log_lines(state, width: metrics.fetch(:main_width) - 4),
+          active: scroll_pane_active?(state, "logs"),
           overflow: :tail,
-          scroll_offset: pane_scroll_offset(state, "conversation")
+          scroll_offset: pane_scroll_offset(state, "logs")
         )
         if metrics.fetch(:suggestion_height).positive?
           draw_pane(
@@ -118,18 +116,17 @@ module Meringue
         height = [height.to_i, MIN_HEIGHT].max
         metrics = layout_metrics(width, height, state)
         agent_tree_lines = agent_tree_pane.lines(state, width: metrics.fetch(:sidebar_width) - 4)
-        conversation_lines = chat_pane.conversation_lines(state, width: metrics.fetch(:main_width) - 4)
+        log_lines = chat_pane.log_lines(state, width: metrics.fetch(:main_width) - 4)
         {
           "agent_tree" => scroll_max(agent_tree_lines.length, metrics.fetch(:top_height) - 2),
-          "conversation" => tail_scroll_max(conversation_lines.length, metrics.fetch(:conversation_height) - 2),
-          "logs" => 0,
+          "logs" => tail_scroll_max(log_lines.length, metrics.fetch(:logs_height) - 2),
           "chat" => 0
         }
       end
 
       private
 
-      attr_reader :agent_tree_pane, :log_pane, :chat_pane
+      attr_reader :agent_tree_pane, :chat_pane
 
       def layout_metrics(width, height, state)
         top_y = 0
@@ -146,7 +143,7 @@ module Meringue
         vertical_gaps = GAP + (suggestion_height.positive? ? GAP : 0)
         top_height = height - BOTTOM_HINT_HEIGHT - composer_height - suggestion_height - vertical_gaps
 
-        conversation_height = top_height
+        logs_height = top_height
 
         {
           top_y: top_y,
@@ -155,7 +152,7 @@ module Meringue
           sidebar_width: sidebar_width,
           main_x: main_x,
           main_width: main_width,
-          conversation_height: conversation_height,
+          logs_height: logs_height,
           suggestion_x: composer_x,
           suggestion_y: top_y + top_height + GAP,
           suggestion_width: composer_width,
@@ -224,7 +221,7 @@ module Meringue
       def focusable_pane_bounds(metrics)
         {
           "agent_tree" => pane_bounds(metrics, :sidebar_x, :top_y, :sidebar_width, :top_height),
-          "conversation" => pane_bounds(metrics, :main_x, :top_y, :main_width, :conversation_height),
+          "logs" => pane_bounds(metrics, :main_x, :top_y, :main_width, :logs_height),
           "chat" => pane_bounds(metrics, :composer_x, :composer_y, :composer_width, :composer_height)
         }
       end

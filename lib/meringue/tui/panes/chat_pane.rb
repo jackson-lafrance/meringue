@@ -7,23 +7,22 @@ module Meringue
     module Panes
       class ChatPane
         VISIBLE_SUGGESTION_LIMIT = 3
-        MAX_CONVERSATION_ENTRY_LINES = 10
         AGENT_ICON = "✦"
         USER_ICON = "●"
 
         def render(state)
-          conversation_lines(state).map { |line| plain_text(line) }.join("\n")
+          log_lines(state).map { |line| plain_text(line) }.join("\n")
         end
 
         def lines(state, width: nil)
-          conversation_lines(state, width: width)
+          log_lines(state, width: width)
         end
 
-        def conversation_lines(state, width: nil)
-          entries = combined_entries(state)
+        def log_lines(state, width: nil)
+          entries = log_entries(state)
 
           if entries.empty?
-            return [[["No conversation or kernel logs yet. Type a prompt below and press Enter.", Style::MUTED]]]
+            return [[["No logs yet. Type a prompt below and press Enter.", Style::MUTED]]]
           end
 
           selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
@@ -101,10 +100,14 @@ module Meringue
 
         private
 
-        def combined_entries(state)
-          entries = []
-          entries.concat(visible_messages(chat_state(state).fetch("messages", []) || []).map.with_index { |message, index| message_entry(message, index) })
-          entries.concat(Array(state.fetch("logs", [])).map.with_index { |entry, index| log_entry(entry, index, state) }.compact)
+        def log_entries(state)
+          message_entries = visible_messages(chat_state(state).fetch("messages", []) || []).map.with_index { |message, index| message_entry(message, index) }
+          durable_log_entries = Array(state.fetch("logs", [])).map.with_index { |entry, index| log_entry(entry, index, state) }.compact
+          message_topics = topic_index(message_entries)
+          durable_log_entries = durable_log_entries.reject { |entry| redundant_lifecycle_log?(entry, message_topics) }
+          duplicate_log_texts = duplicate_text_index(durable_log_entries)
+          entries = message_entries.filter_map { |entry| deduplicate_message_entry(entry, duplicate_log_texts) } + durable_log_entries
+          entries.each_with_index { |entry, sequence| entry["sequence"] = sequence }
           entries.sort_by { |entry| entry_sort_key(entry) }
         end
 
@@ -116,6 +119,55 @@ module Meringue
           return false if message.fetch("visible", true) == false
 
           !message.fetch("text", "").to_s.strip.empty?
+        end
+
+        def topic_index(entries)
+          entries.each_with_object({}) do |entry, topics|
+            key = event_topic_key(entry)
+            topics[key] = true if key
+          end
+        end
+
+        def event_topic_key(entry)
+          return nil unless entry.fetch("kind", nil) == "message"
+          return nil unless entry.fetch("role", nil) == "agent"
+
+          source_id = entry.fetch("source_id", nil).to_s
+          return nil if source_id.empty?
+
+          "worker_completed:#{source_id}"
+        end
+
+        def redundant_lifecycle_log?(entry, message_topics)
+          source_id = entry.fetch("source_id", nil).to_s
+          return false unless message_topics["worker_completed:#{source_id}"]
+
+          message = entry.fetch("message", entry.fetch("text", "")).to_s
+          entry.fetch("source_type", nil) == "worker" && message == "Worker #{source_id} completed."
+        end
+
+        def duplicate_text_index(entries)
+          entries.each_with_object({}) do |entry, index|
+            text = normalized_duplicate_text(entry.fetch("text", ""))
+            index[text] = true unless text.empty?
+          end
+        end
+
+        def deduplicate_message_entry(entry, duplicate_texts)
+          text = entry.fetch("text", "").to_s
+          return nil if duplicate_texts[normalized_duplicate_text(text)]
+
+          lines = text.lines.map(&:chomp)
+          return entry unless lines.length > 1 && duplicate_texts[normalized_duplicate_text(lines.first)]
+
+          trimmed_text = lines.drop(1).join("\n").strip
+          return nil if trimmed_text.empty?
+
+          entry.merge("text" => trimmed_text)
+        end
+
+        def normalized_duplicate_text(text)
+          text.to_s.gsub(/[[:space:]]+/, " ").strip
         end
 
         def message_entry(message, index)
@@ -132,6 +184,8 @@ module Meringue
         end
 
         def log_entry(entry, index, state)
+          return nil unless entry.is_a?(Hash)
+
           source_type = entry.fetch("source_type", "system").to_s
           source_id = entry.fetch("source_id", nil)
           role = log_role(source_type, source_id)
@@ -141,7 +195,8 @@ module Meringue
             "role" => role,
             "source_type" => source_type,
             "source_id" => source_id,
-            "text" => entry.fetch("message", "").to_s,
+            "text" => log_display_text(entry),
+            "message" => entry.fetch("message", "").to_s,
             "status" => log_status(entry),
             "level" => entry.fetch("level", "info"),
             "agent" => agent_by_id(state, source_id),
@@ -149,8 +204,48 @@ module Meringue
           }
         end
 
+        def log_display_text(entry)
+          worker_completion_text(entry) || entry.fetch("message", "").to_s
+        end
+
+        def worker_completion_text(entry)
+          source_id = entry.fetch("source_id", nil).to_s
+          return nil if source_id.empty?
+          return nil unless entry.fetch("source_type", nil).to_s == "worker"
+          return nil unless entry.fetch("message", "").to_s == "Worker #{source_id} completed."
+
+          details = entry.fetch("details", {}) || {}
+          details = {} unless details.is_a?(Hash)
+          pr_urls = worker_completion_pr_urls(details)
+          output = user_facing_worker_output(details["last_assistant_text"], pr_urls: pr_urls)
+          lines = []
+          unless pr_urls.empty?
+            label = pr_urls.length == 1 ? "Pull request" : "Pull requests"
+            lines << "#{label} from #{source_id}:"
+            lines.concat(pr_urls.map { |url| "PR: #{url}" })
+          end
+          lines << ["#{source_id} output:", output].join("\n") unless output.empty?
+          lines.empty? ? nil : lines.join("\n")
+        end
+
+        def worker_completion_pr_urls(details)
+          delivery_pull_requests = [
+            details["delivery_pull_request"],
+            *Array(details["delivery_pull_requests"])
+          ].compact
+          delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }.compact.map(&:to_s).reject(&:empty?).uniq
+        end
+
+        def user_facing_worker_output(text, pr_urls: [])
+          output = text.to_s.strip
+          return "" if output.empty?
+
+          pr_urls.each { |url| output = output.gsub(url.to_s, "").strip }
+          output.lines.map(&:rstrip).reject { |line| line.strip == "PR:" }.join("\n").gsub(/\n{3,}/, "\n\n").strip
+        end
+
         def entry_sort_key(entry)
-          [sortable_timestamp(entry.fetch("timestamp", nil)), entry.fetch("kind") == "log" ? 0 : 1, entry.fetch("ordinal", 0).to_i]
+          [sortable_timestamp(entry.fetch("timestamp", nil)), entry.fetch("sequence", entry.fetch("ordinal", 0)).to_i]
         end
 
         def sortable_timestamp(timestamp)
@@ -182,6 +277,7 @@ module Meringue
 
         def log_level(entry)
           details = entry.fetch("details", {}) || {}
+          details = {} unless details.is_a?(Hash)
           return "cmd" if details["presentation"] == "cmd" || details["kind"].to_s.start_with?("kernel_command")
 
           {
@@ -356,13 +452,9 @@ module Meringue
           [
             ["Enter sends", Style::MUTED],
             [" • ", Style::DIM],
-            ["Shift+Enter newline", Style::MUTED],
-            [" • ", Style::DIM],
             ["Ctrl-C clears/quits", Style::MUTED],
             [" • ", Style::DIM],
-            ["Tab/⇧Tab focus", Style::MUTED],
-            [" • ", Style::DIM],
-            ["arrows/mouse scroll", Style::MUTED],
+            ["Tab focus", Style::MUTED],
             [" • ", Style::DIM],
             ["/keybind help", Style::MUTED]
           ]
