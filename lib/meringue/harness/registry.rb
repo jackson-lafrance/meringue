@@ -7,19 +7,25 @@ module Meringue
   module Harness
     class Registry
       DEFAULT_PROVIDER = "pi"
-      PROVIDERS = %w[pi claude antigravity].freeze
+      PROVIDERS = %w[pi river claude antigravity].freeze
       PROVIDER_LABELS = {
         "pi" => "Pi",
+        "river" => "River",
         "claude" => "Claude Code",
         "antigravity" => "Antigravity CLI"
       }.freeze
       PUBLIC_PROVIDER_NAMES = {
         "pi" => "pi",
+        "river" => "river",
         "claude" => "claude",
         "antigravity" => "antigravity"
       }.freeze
       PROVIDER_ALIASES = {
         "pi" => "pi",
+        "river" => "river",
+        "river-agent" => "river",
+        "river_agent" => "river",
+        "river agent" => "river",
         "claude" => "claude",
         "claude-code" => "claude",
         "claude_code" => "claude",
@@ -32,6 +38,7 @@ module Meringue
         "agy" => "antigravity"
       }.freeze
       DEFAULT_PI_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
+      DEFAULT_RIVER_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_RIVER_SESSION_DIR", "~/.meringue/river-sessions"))
       DEFAULT_PI_HEAD_EXTRA_ARGS = [
         "--thinking", "high",
         "--tools", "read,bash,grep,find,ls",
@@ -50,12 +57,23 @@ module Meringue
         "--no-context-files",
         "--no-approve"
       ].freeze
+      DEFAULT_RIVER_HEAD_EXTRA_ARGS = [
+        "--tools", "read,bash,grep,find,ls",
+        "--no-context-files"
+      ].freeze
+      DEFAULT_RIVER_WORKER_EXTRA_ARGS = ["--no-context-files"].freeze
       DEFAULT_PROVIDER_CONFIG = {
         "pi" => {
           "command" => "pi",
           "session_dir" => DEFAULT_PI_SESSION_DIR,
           "head_extra_args" => DEFAULT_PI_HEAD_EXTRA_ARGS,
           "worker_extra_args" => DEFAULT_PI_WORKER_EXTRA_ARGS
+        },
+        "river" => {
+          "command" => "river-agent",
+          "session_dir" => DEFAULT_RIVER_SESSION_DIR,
+          "head_extra_args" => DEFAULT_RIVER_HEAD_EXTRA_ARGS,
+          "worker_extra_args" => DEFAULT_RIVER_WORKER_EXTRA_ARGS
         },
         "claude" => {
           "command" => "claude",
@@ -148,7 +166,7 @@ module Meringue
         session_name_prefix = provider_option(provider, "head_session_name_prefix") || "Meringue Head"
 
         case provider
-        when "pi"
+        when "pi", "river"
           Heads::PiRunner.new(harness_client: client, cwd: cwd, session_name_prefix: session_name_prefix)
         when "claude", "antigravity"
           Heads::HarnessRunner.new(
@@ -184,6 +202,7 @@ module Meringue
         TerminalSessionOpener.new(
           commands: PROVIDERS.each_with_object({}) { |provider, result| result[provider] = provider_command(provider) },
           pi_session_dir: provider_config("pi").fetch("session_dir", DEFAULT_PI_SESSION_DIR),
+          river_session_dir: provider_config("river").fetch("session_dir", DEFAULT_RIVER_SESSION_DIR),
           alacritty_command: config.value("terminal", "alacritty_command") || ENV["MERINGUE_ALACRITTY_COMMAND"]
         )
       end
@@ -207,6 +226,10 @@ module Meringue
           session_dir = File.expand_path(provider_config.fetch("session_dir", DEFAULT_PI_SESSION_DIR).to_s)
           FileUtils.mkdir_p(session_dir)
           PiClient.new(command: command, session_dir: session_dir, env: env, extra_args: extra_args)
+        when "river"
+          session_dir = File.expand_path(provider_config.fetch("session_dir", DEFAULT_RIVER_SESSION_DIR).to_s)
+          FileUtils.mkdir_p(session_dir)
+          RiverClient.new(command: command, session_dir: session_dir, env: env, extra_args: extra_args)
         when "claude"
           ClaudeCodeClient.new(
             command: command,

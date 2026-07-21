@@ -85,7 +85,7 @@ module Meringue
                   when "normal"
                     if current_ref.fetch("is_streaming", false)
                       raise InvalidModeError,
-                            "Pi session is streaming; use mode: \"steer\" or \"follow_up\""
+                            "#{harness_label} session is streaming; use mode: \"steer\" or \"follow_up\""
                     end
 
                     { "type" => "prompt", "message" => message }
@@ -110,7 +110,7 @@ module Meringue
         unless process
           return session_ref.merge(
             "is_streaming" => false,
-            "metadata" => metadata_with(session_ref, "killed" => true, "kill_note" => "no live Pi process found")
+            "metadata" => metadata_with(session_ref, "killed" => true, "kill_note" => "no live #{harness_label} process found")
           )
         end
 
@@ -118,6 +118,7 @@ module Meringue
         unregister_process(process)
 
         session_ref.merge(
+          "harness" => harness_name,
           "pid" => process.pid,
           "is_streaming" => false,
           "last_event_at" => process.last_event_at,
@@ -194,7 +195,7 @@ module Meringue
 
         loop do
           remaining = deadline - Time.now
-          raise RpcTimeoutError, "Timed out waiting for Pi event #{type.inspect}" if remaining <= 0
+          raise RpcTimeoutError, "Timed out waiting for #{harness_label} event #{type.inspect}" if remaining <= 0
 
           event = process.next_event(timeout: remaining)
           events << event
@@ -222,17 +223,21 @@ module Meringue
         argv = Array(command).map(&:to_s) + ["--mode", "rpc"]
         argv += ["--session-dir", File.expand_path(session_dir)] if present?(session_dir)
         argv += ["--session", session.to_s] if present?(session)
-        argv += ["--name", session_name.to_s] if present?(session_name)
+        argv += session_name_argv(session_name)
         argv += ["--append-system-prompt", system_prompt.to_s] if present?(system_prompt)
         argv + extra_args
+      end
+
+      def session_name_argv(session_name)
+        present?(session_name) ? ["--name", session_name.to_s] : []
       end
 
       def start_rpc_process(argv:, cwd:)
         stdin, stdout, stderr, wait_thread = Open3.popen3(env, *argv, chdir: cwd)
         RpcProcess.new(stdin: stdin, stdout: stdout, stderr: stderr, wait_thread: wait_thread,
-                       argv: argv, cwd: cwd)
+                       argv: argv, cwd: cwd, harness_label: harness_label)
       rescue Errno::ENOENT => e
-        raise Error, "Unable to start Pi RPC process with #{argv.first.inspect}: #{e.message}"
+        raise Error, "Unable to start #{harness_label} RPC process with #{argv.first.inspect}: #{e.message}"
       end
 
       def set_session_name(process, session_name)
@@ -245,7 +250,7 @@ module Meringue
 
       def build_session_ref(process, pi_state, kind:, cwd:, session_name:)
         {
-          "harness" => "pi",
+          "harness" => harness_name,
           "pid" => process.pid,
           "cwd" => cwd,
           "session_id" => pi_state["sessionId"],
@@ -267,7 +272,7 @@ module Meringue
         summary = session_file_summary(session_ref)
         if !summary.fetch("completed", false) && !summary.fetch("process_alive", false)
           raise ProcessExitedError,
-                "Pi session #{summary.fetch("session_file", nil) || summary.fetch("session_id", nil)} has no live process and no completed assistant response"
+                "#{harness_label} session #{summary.fetch("session_file", nil) || summary.fetch("session_id", nil)} has no live process and no completed assistant response"
         end
 
         pi_state = {
@@ -283,7 +288,7 @@ module Meringue
         }
 
         session_ref.merge(
-          "harness" => "pi",
+          "harness" => harness_name,
           "pid" => session_ref["pid"] || session_ref[:pid],
           "cwd" => summary.fetch("cwd", nil) || session_ref["cwd"] || session_ref[:cwd],
           "session_id" => summary.fetch("session_id", nil) || session_ref["session_id"] || session_ref[:session_id],
@@ -302,7 +307,7 @@ module Meringue
 
       def session_file_summary(session_ref)
         path = session_file_path(session_ref)
-        raise ProcessNotFoundError, "Pi session file is missing for #{session_ref_summary(session_ref)}" unless path && File.file?(path)
+        raise ProcessNotFoundError, "#{harness_label} session file is missing for #{session_ref_summary(session_ref)}" unless path && File.file?(path)
 
         summary = {
           "session_file" => path,
@@ -359,7 +364,7 @@ module Meringue
         session_id = session_ref["session_id"] || session_ref[:session_id]
         return session_id if present?(session_id)
 
-        raise ProcessNotFoundError, "Pi session cannot be resumed without a session file or session id: #{session_ref_summary(session_ref)}"
+        raise ProcessNotFoundError, "#{harness_label} session cannot be resumed without a session file or session id: #{session_ref_summary(session_ref)}"
       end
 
       def session_ref_summary(session_ref)
@@ -405,17 +410,17 @@ module Meringue
 
       def rpc_data(response, allow_nil_data: false)
         unless response.is_a?(Hash) && response["type"] == "response"
-          raise RpcError, "Expected Pi RPC response, got: #{response.inspect}"
+          raise RpcError, "Expected #{harness_label} RPC response, got: #{response.inspect}"
         end
 
         unless response["success"]
-          raise RpcError, response["error"].to_s.empty? ? "Pi RPC command failed" : response["error"].to_s
+          raise RpcError, response["error"].to_s.empty? ? "#{harness_label} RPC command failed" : response["error"].to_s
         end
 
         data = response["data"]
         return data if data || allow_nil_data
 
-        raise RpcError, "Pi RPC response for #{response["command"].inspect} did not include data"
+        raise RpcError, "#{harness_label} RPC response for #{response["command"].inspect} did not include data"
       end
 
       def validate_cwd!(cwd)
@@ -429,7 +434,7 @@ module Meringue
         normalized = MODE_ALIASES[mode.to_s]
         return normalized if normalized
 
-        raise InvalidModeError, "Unknown Pi prompt mode: #{mode.inspect}"
+        raise InvalidModeError, "Unknown #{harness_label} prompt mode: #{mode.inspect}"
       end
 
       def register_process(process)
@@ -451,7 +456,7 @@ module Meringue
         return process if process && process.alive?
         return nil unless required
 
-        raise ProcessNotFoundError, "No live Pi RPC process for pid #{pid.inspect}"
+        raise ProcessNotFoundError, "No live #{harness_label} RPC process for pid #{pid.inspect}"
       end
 
       def metadata_value(session_ref, key)
@@ -468,17 +473,22 @@ module Meringue
         !value.nil? && !value.to_s.empty?
       end
 
+      def harness_label
+        harness_name == "pi" ? "Pi" : harness_name.split("_").map(&:capitalize).join(" ")
+      end
+
       class RpcProcess
         attr_reader :stdin, :stdout, :stderr, :wait_thread, :argv, :cwd, :pid, :started_at,
-                    :last_event_at, :exit_status
+                    :last_event_at, :exit_status, :harness_label
 
-        def initialize(stdin:, stdout:, stderr:, wait_thread:, argv:, cwd:)
+        def initialize(stdin:, stdout:, stderr:, wait_thread:, argv:, cwd:, harness_label: "Pi")
           @stdin = stdin
           @stdout = stdout
           @stderr = stderr
           @wait_thread = wait_thread
           @argv = argv
           @cwd = cwd
+          @harness_label = harness_label
           @pid = wait_thread.pid
           @started_at = Time.now.utc.iso8601
           @last_event_at = nil
@@ -512,10 +522,10 @@ module Meringue
           result
         rescue Timeout::Error
           @pending_mutex.synchronize { @pending.delete(id) } if id
-          raise RpcTimeoutError, "Timed out waiting for Pi RPC response to #{command["type"].inspect}"
+          raise RpcTimeoutError, "Timed out waiting for #{harness_label} RPC response to #{command["type"].inspect}"
         rescue IOError, Errno::EPIPE => e
           @pending_mutex.synchronize { @pending.delete(id) } if id
-          raise ProcessExitedError, "Pi RPC stdin is closed: #{e.message}"
+          raise ProcessExitedError, "#{harness_label} RPC stdin is closed: #{e.message}"
         end
 
         def drain_events
@@ -531,7 +541,7 @@ module Meringue
         def next_event(timeout:)
           Timeout.timeout(timeout) { @event_queue.pop }
         rescue Timeout::Error
-          raise RpcTimeoutError, "Timed out waiting for next Pi RPC event"
+          raise RpcTimeoutError, "Timed out waiting for next #{harness_label} RPC event"
         end
 
         def stderr_tail
@@ -555,7 +565,7 @@ module Meringue
         def ensure_alive!
           return if alive?
 
-          raise ProcessExitedError, "Pi RPC process #{pid} is not running. Stderr: #{stderr_tail}"
+          raise ProcessExitedError, "#{harness_label} RPC process #{pid} is not running. Stderr: #{stderr_tail}"
         end
 
         def write_json(payload)
@@ -647,7 +657,11 @@ module Meringue
               "success" => status.success?
             }
             enqueue_event("type" => "process_exit", "pid" => pid, "status" => @exit_status)
-            fail_pending(ProcessExitedError.new("Pi RPC process #{pid} exited with #{@exit_status.inspect}"))
+            fail_pending(
+              ProcessExitedError.new(
+                "#{harness_label} RPC process #{pid} exited with #{@exit_status.inspect}. Stderr: #{stderr_tail}"
+              )
+            )
           end
         end
 

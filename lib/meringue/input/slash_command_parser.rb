@@ -15,7 +15,7 @@ module Meringue
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker session."],
-        ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
+        ["/harness <pi|river|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent harness session in Alacritty, or navigate the AgentTree when no id is provided."],
         ["/keybind", "Show all TUI keybindings."],
@@ -300,7 +300,7 @@ module Meringue
 
       def parse_harness(arguments)
         tokens = split_arguments(arguments)
-        return invalid("Usage: /harness <pi|claude|antigravity>") unless tokens.length == 1
+        return invalid("Usage: /harness <pi|river|claude|antigravity>") unless tokens.length == 1
 
         kernel_command("SetHarness", "provider" => tokens[0])
       end

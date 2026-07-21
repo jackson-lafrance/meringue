@@ -7,21 +7,26 @@ module Meringue
     class TerminalSessionOpener
       DEFAULT_COMMANDS = {
         "pi" => "pi",
+        "river" => "river-agent",
         "claude" => "claude",
         "antigravity" => "agy"
       }.freeze
       DEFAULT_ALACRITTY_COMMAND = "alacritty"
       DEFAULT_PI_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
+      DEFAULT_RIVER_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_RIVER_SESSION_DIR", "~/.meringue/river-sessions"))
       MACOS_ALACRITTY_PATHS = [
         "/Applications/Alacritty.app/Contents/MacOS/alacritty",
         File.expand_path("~/Applications/Alacritty.app/Contents/MacOS/alacritty")
       ].freeze
 
-      def initialize(pi_command: nil, pi_session_dir: DEFAULT_PI_SESSION_DIR, alacritty_command: ENV["MERINGUE_ALACRITTY_COMMAND"], commands: {})
+      def initialize(pi_command: nil, pi_session_dir: DEFAULT_PI_SESSION_DIR,
+                     river_session_dir: DEFAULT_RIVER_SESSION_DIR,
+                     alacritty_command: ENV["MERINGUE_ALACRITTY_COMMAND"], commands: {})
         configured_commands = DEFAULT_COMMANDS.merge(stringify_keys(commands || {}))
         configured_commands["pi"] = pi_command if present?(pi_command)
         @commands = configured_commands
         @pi_session_dir = pi_session_dir
+        @river_session_dir = river_session_dir
         @custom_alacritty_command = present?(alacritty_command)
         @alacritty_command = @custom_alacritty_command ? alacritty_command : DEFAULT_ALACRITTY_COMMAND
       end
@@ -42,7 +47,7 @@ module Meringue
 
       private
 
-      attr_reader :commands, :pi_session_dir, :alacritty_command
+      attr_reader :commands, :pi_session_dir, :river_session_dir, :alacritty_command
 
       def custom_alacritty_command?
         @custom_alacritty_command
@@ -67,6 +72,8 @@ module Meringue
         case harness
         when "pi"
           pi_argv(agent)
+        when "river"
+          river_argv(agent)
         when "claude"
           claude_argv(agent)
         when "antigravity"
@@ -75,11 +82,19 @@ module Meringue
       end
 
       def pi_argv(agent)
-        session = pi_session_argument(agent)
+        rpc_session_argv("pi", agent, pi_session_dir)
+      end
+
+      def river_argv(agent)
+        rpc_session_argv("river", agent, river_session_dir)
+      end
+
+      def rpc_session_argv(harness, agent, session_dir)
+        session = session_argument(agent)
         return nil unless present?(session)
 
-        argv = command_parts("pi")
-        argv += ["--session-dir", pi_session_dir] if present?(pi_session_dir)
+        argv = command_parts(harness)
+        argv += ["--session-dir", session_dir] if present?(session_dir)
         argv + ["--session", session]
       end
 
@@ -94,7 +109,7 @@ module Meringue
         command_parts("antigravity") + ["--continue"]
       end
 
-      def pi_session_argument(agent)
+      def session_argument(agent)
         session_file = agent.fetch("harness_session_file", nil)
         return File.expand_path(session_file) if present?(session_file) && File.file?(File.expand_path(session_file))
 

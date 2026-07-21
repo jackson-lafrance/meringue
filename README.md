@@ -25,6 +25,7 @@ The MVP backend is Pi because it is the fastest path for this project today. The
 Supported provider names in the current config surface include:
 
 - `pi`
+- `river` / `river-agent`
 - `claude` / `claude_code` / `claude-code` / `cc`
 - `antigravity`
 
@@ -81,7 +82,7 @@ Requirements:
 
 - Ruby 3.1 or newer.
 - Bundler, which is included with most Ruby installs.
-- At least one supported harness CLI installed and authenticated when you want to spawn real agents. You can use `demo` first without any harness.
+- At least one supported harness CLI installed and authenticated when you want to spawn real agents. River users need the official `river-agent` launcher available on `PATH` (or configured by absolute command). You can use `demo` first without any harness.
 
 Clone and install:
 
@@ -133,8 +134,9 @@ Choose a harness at runtime:
 
 ```bash
 bundle exec meringue tui --harness pi
+bundle exec meringue tui --harness river
 bundle exec meringue tui --harness claude
-bundle exec meringue tui --head-harness antigravity --worker-harness claude
+bundle exec meringue tui --head-harness river --worker-harness claude
 ```
 
 Use a custom state or config file:
@@ -155,7 +157,7 @@ Useful slash commands inside the TUI include:
 - `/prompt <agent_id> "<message>"` — follow up with an existing agent.
 - `/jump [agent_id]` — open a worker harness session; omit the id to navigate issues/workers and open PRs from jump mode.
 - `/theme <name>` — persist a TUI colorscheme.
-- `/harness <pi|claude|antigravity>` — select the harness for future agents.
+- `/harness <pi|river|claude|antigravity>` — select the harness for future agents.
 - `/keybind` — show active TUI keybindings.
 
 See `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.

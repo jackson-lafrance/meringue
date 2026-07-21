@@ -14,14 +14,22 @@ colorscheme = "meringue"
 [harness]
 # provider applies to both head and worker agents unless overridden below.
 provider = "pi"
-# head_provider = "claude"
-# worker_provider = "antigravity"
+# head_provider = "river"
+# worker_provider = "claude"
 
 [harness.pi]
 command = "pi"
 session_dir = "~/.meringue/pi-sessions"
 head_extra_args = ["--thinking", "high", "--tools", "read,bash,grep,find,ls", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 worker_extra_args = ["--thinking", "high", "--tools", "read,bash,grep,find,ls,edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
+
+[harness.river]
+# Put the official launcher on PATH. Shopify users can verify it with:
+# tec run //system/river/agent -- --version
+command = "river-agent"
+session_dir = "~/.meringue/river-sessions"
+head_extra_args = ["--tools", "read,bash,grep,find,ls", "--no-context-files"]
+worker_extra_args = ["--no-context-files"]
 
 [harness.claude]
 command = "claude"

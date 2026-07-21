@@ -88,13 +88,13 @@ module Meringue
         option_parser.on("--config PATH", "Read Meringue harness config TOML from PATH. Defaults to #{Config::DEFAULT_PATH}.") do |path|
           options[:config_path] = path
         end
-        option_parser.on("--harness NAME", "Use one harness provider for heads and workers: pi, claude/claude_code, or antigravity.") do |name|
+        option_parser.on("--harness NAME", "Use one harness provider for heads and workers: pi, river, claude/claude_code, or antigravity.") do |name|
           options[:harness] = name
         end
-        option_parser.on("--head-harness NAME", "Use a specific head harness provider: pi, claude/claude_code, or antigravity.") do |name|
+        option_parser.on("--head-harness NAME", "Use a specific head harness provider: pi, river, claude/claude_code, or antigravity.") do |name|
           options[:head_harness] = name
         end
-        option_parser.on("--worker-harness NAME", "Use a specific worker harness provider: pi, claude/claude_code, or antigravity.") do |name|
+        option_parser.on("--worker-harness NAME", "Use a specific worker harness provider: pi, river, claude/claude_code, or antigravity.") do |name|
           options[:worker_harness] = name
         end
       end
@@ -215,7 +215,8 @@ module Meringue
           meringue tui --state PATH              # open the TUI against a specific Meringue state JSON file
           meringue tui --config PATH             # open the TUI with a specific harness/config TOML file
           meringue tui --harness claude          # use Claude Code for both heads and workers
-          meringue tui --head-harness antigravity --worker-harness claude
+          meringue tui --harness river           # use River for both heads and workers
+          meringue tui --head-harness river --worker-harness claude
           meringue demo                          # display the fake demo state fixture without agent prompting
           meringue demo-state                    # print the fake demo state fixture
           meringue reset-state                   # reset ~/.meringue/state.json to an empty Meringue state
@@ -226,7 +227,7 @@ module Meringue
 
         Config:
           Default path: #{Config::DEFAULT_PATH}
-          Supported harness providers: pi, claude (aliases: claude_code, claude-code, cc), antigravity
+          Supported harness providers: pi, river (alias: river-agent), claude (aliases: claude_code, claude-code, cc), antigravity
           Supported TUI colorschemes: #{TUI::Style.colorschemes.join(", ")}
           TUI keybindings can be customized under [tui.keybindings]; omitted actions keep defaults.
           CLI flags override config.toml, and MERINGUE_HARNESS / MERINGUE_HEAD_HARNESS / MERINGUE_WORKER_HARNESS override both.
@@ -237,7 +238,7 @@ module Meringue
           /help                     # list command syntax
           /quit                     # quit the TUI
           /theme <name>             # set and persist the TUI theme
-          /harness <pi|claude|antigravity> # select the harness backend for future agents
+          /harness <pi|river|claude|antigravity> # select the harness backend for future agents
           /keybind                  # show all TUI keybindings
           /jump [agent_id]          # open an agent session in Alacritty; omit id to navigate the AgentTree
           Enter in jump mode        # open selected issue/agent PR when one is available
