@@ -428,9 +428,10 @@ module Meringue
       def prune_killed_records
         synchronized_state do
           state = normalized_state
+          killed_project_ids = state.fetch("projects").select { |project| project.fetch("status", nil) == "killed" }.map { |project| project.fetch("id") }
           killed_issue_ids = state.fetch("issues").select { |issue| issue.fetch("status", nil) == "killed" }.map { |issue| issue.fetch("id") }
           killed_agent_ids = state.fetch("agents").select { |agent| agent.fetch("status", nil) == "killed" }.map { |agent| agent.fetch("id") }
-          if killed_issue_ids.empty? && killed_agent_ids.empty?
+          if killed_project_ids.empty? && killed_issue_ids.empty? && killed_agent_ids.empty?
             return {
               "changed" => false,
               "removed_issue_ids" => [],
@@ -445,6 +446,7 @@ module Meringue
           prune_result = remove_issue_bundles_and_agents!(
             state,
             issue_ids: killed_issue_ids,
+            project_ids: killed_project_ids,
             extra_agent_ids: killed_agent_ids,
             reason: "killed",
             now: now,
@@ -1280,20 +1282,25 @@ module Meringue
         workers.none? { |worker| %w[queued working idle blocked].include?(worker.fetch("status", nil)) }
       end
 
-      def remove_issue_bundles_and_agents!(state, issue_ids:, extra_agent_ids:, reason:, now:, remove_empty_projects: true)
-        root_issue_ids = Array(issue_ids).compact.uniq
+      def remove_issue_bundles_and_agents!(state, issue_ids:, extra_agent_ids:, reason:, now:, remove_empty_projects: true, project_ids: [])
+        requested_project_ids = Array(project_ids).compact.uniq
+        project_issue_ids = state.fetch("issues").select do |issue|
+          requested_project_ids.include?(issue.fetch("project_id", nil))
+        end.map { |issue| issue.fetch("id") }
+        root_issue_ids = (Array(issue_ids) + project_issue_ids).compact.uniq
         issue_ids_to_remove = root_issue_ids.flat_map { |issue_id| issue_subtree_ids(state, issue_id) }.uniq
         issues_to_remove = state.fetch("issues").select { |issue| issue_ids_to_remove.include?(issue.fetch("id", nil)) }
-        project_ids = issues_to_remove.map { |issue| issue.fetch("project_id", nil) }.compact.uniq
-        removed_project_ids = if remove_empty_projects
-                                project_ids.select do |project_id|
-                                  state.fetch("issues").none? do |issue|
-                                    issue.fetch("project_id", nil) == project_id && !issue_ids_to_remove.include?(issue.fetch("id", nil))
-                                  end
+        affected_project_ids = (issues_to_remove.map { |issue| issue.fetch("project_id", nil) } + requested_project_ids).compact.uniq
+        empty_project_ids = if remove_empty_projects
+                              affected_project_ids.select do |project_id|
+                                state.fetch("issues").none? do |issue|
+                                  issue.fetch("project_id", nil) == project_id && !issue_ids_to_remove.include?(issue.fetch("id", nil))
                                 end
-                              else
-                                []
                               end
+                            else
+                              []
+                            end
+        removed_project_ids = (requested_project_ids + empty_project_ids).uniq
         issue_agent_ids = issues_to_remove.flat_map { |issue| Array(issue.fetch("agent_ids", [])) }
         worker_agent_ids = state.fetch("agents").select { |agent| issue_ids_to_remove.include?(agent.fetch("issue_id", nil)) }.map { |agent| agent.fetch("id", nil) }
         originating_head_ids = issues_to_remove.map { |issue| issue.fetch("originating_head_id", nil) }.compact
@@ -1308,7 +1315,7 @@ module Meringue
         state.fetch("issues").each do |issue|
           issue["agent_ids"] = Array(issue.fetch("agent_ids", [])) - agent_ids_to_remove if issue.key?("agent_ids")
         end
-        updated_project_ids = refresh_projects_after_prune!(state, project_ids - removed_project_ids, now)
+        updated_project_ids = refresh_projects_after_prune!(state, affected_project_ids - removed_project_ids, now)
 
         {
           "reason" => reason,
