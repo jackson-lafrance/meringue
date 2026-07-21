@@ -96,10 +96,11 @@ module Meringue
         completion_result = engine.mark_worker_completed(
           agent_id: agent.fetch("id"),
           harness_events: events,
-          last_assistant_text: assistant_text
+          last_assistant_text: assistant_text,
+          session_ref: session_ref
         )
         {
-          "agent_id" => agent.fetch("id"),
+          "agent_id" => completion_result.fetch("target_id", nil) || agent.fetch("id"),
           "status" => "settled",
           "event_count" => events.length,
           "last_assistant_text" => assistant_text,

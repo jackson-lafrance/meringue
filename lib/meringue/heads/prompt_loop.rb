@@ -145,12 +145,13 @@ module Meringue
         type.to_s == "SpawnHead" || type.to_s == "spawn_head"
       end
 
-      def mark_worker_completed(agent_id:, harness_events:, last_assistant_text:)
+      def mark_worker_completed(agent_id:, harness_events:, last_assistant_text:, session_ref: nil)
         @engine_mutex.synchronize do
           engine.mark_worker_completed(
             agent_id: agent_id,
             harness_events: harness_events,
-            last_assistant_text: last_assistant_text
+            last_assistant_text: last_assistant_text,
+            session_ref: session_ref
           )
         end
       end
@@ -184,18 +185,20 @@ module Meringue
         completion_result = mark_worker_completed(
           agent_id: agent.fetch("id"),
           harness_events: events,
-          last_assistant_text: assistant_text
+          last_assistant_text: assistant_text,
+          session_ref: session_ref
         )
+        completed_agent_id = completion_result.fetch("target_id", nil) || agent.fetch("id")
         pr_urls = worker_pr_urls_from_completion(completion_result)
         emit(
           on_event,
           "worker_completed",
-          "agent_id" => agent.fetch("id"),
+          "agent_id" => completed_agent_id,
           "last_assistant_text" => assistant_text,
           "pr_urls" => pr_urls
         )
         {
-          "agent_id" => agent.fetch("id"),
+          "agent_id" => completed_agent_id,
           "status" => "settled",
           "event_count" => events.length,
           "last_assistant_text" => assistant_text,
