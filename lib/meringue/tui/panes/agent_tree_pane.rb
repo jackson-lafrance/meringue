@@ -125,7 +125,8 @@ module Meringue
               record: issue,
               id: short_id(issue["id"]),
               title: issue.fetch("title", "Untitled issue"),
-              suffix: progress(workers),
+              suffix: issue_suffix(issue, workers),
+              selected: AgentTreeNavigation.selected_agent?(issue, selected_agent_id),
               width: width
             ))
 
@@ -172,9 +173,10 @@ module Meringue
               record: issue,
               id: short_id(issue["id"]),
               title: issue.fetch("title", "Untitled issue"),
-              suffix: progress(workers),
+              suffix: issue_suffix(issue, workers),
+              selected: AgentTreeNavigation.selected_agent?(issue, selected_agent_id),
               width: width
-            )))
+            ), issue.fetch("id")))
 
             workers.sort_by { |worker| sort_key(worker["id"]) }.each_with_index do |worker, worker_index|
               worker_last = worker_index == workers.length - 1 && issues_by_parent.fetch(issue["id"], []).empty?
@@ -410,6 +412,10 @@ module Meringue
         def record_title(record)
           metadata = record.fetch("harness_metadata", {}) || {}
           metadata.fetch("title", "#{record.fetch("type", "item")} session")
+        end
+
+        def issue_suffix(issue, workers)
+          [progress(workers), active_pr_marker(issue)].reject(&:empty?).join(" ")
         end
 
         def progress(workers)

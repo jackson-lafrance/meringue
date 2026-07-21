@@ -14,7 +14,7 @@ module Meringue
                     .sort_by { |agent| sort_key(agent["id"]) }
                     .map { |agent| agent.fetch("id") }
 
-        ids.concat(project_worker_ids(projects, issues, agents))
+        ids.concat(project_tree_ids(projects, issues, agents))
         ids
       end
 
@@ -27,16 +27,16 @@ module Meringue
                     .sort_by { |agent| sort_key(agent["id"]) }
                     .map { |agent| agent.fetch("id") }
 
-        ids.concat(project_pr_worker_ids(projects, issues, agents))
+        ids.concat(project_pr_tree_ids(projects, issues, agents))
         ids
       end
 
-      def agent_pr_url(agent)
-        pr_urls_from_record(agent).compact.map(&:to_s).find { |url| pull_request_url?(url) }
+      def agent_pr_url(record)
+        pr_urls_from_record(record).compact.map(&:to_s).find { |url| pull_request_url?(url) }
       end
 
-      def active_agent_pr_url(agent)
-        active_pr_urls_from_record(agent).compact.map(&:to_s).find { |url| pull_request_url?(url) }
+      def active_agent_pr_url(record)
+        active_pr_urls_from_record(record).compact.map(&:to_s).find { |url| pull_request_url?(url) }
       end
 
       def sort_key(id)
@@ -55,7 +55,7 @@ module Meringue
       end
 
       def selectable_agent?(record)
-        %w[head worker].include?(record["type"])
+        %w[head worker].include?(record["type"]) || issue_record?(record)
       end
 
       def selected_agent?(record, selected_agent_id)
@@ -66,37 +66,39 @@ module Meringue
         state.fetch(key, []) || []
       end
 
-      def project_worker_ids(projects, issues, agents)
+      def project_tree_ids(projects, issues, agents)
         projects.sort_by { |project| sort_key(project["id"]) }.flat_map do |project|
           project_issues = issues.select { |issue| issue["project_id"] == project["id"] }
           issues_by_parent = project_issues.group_by { |issue| issue["parent_issue_id"] }
-          issue_worker_ids(issues_by_parent, agents, nil)
+          issue_tree_ids(issues_by_parent, agents, nil)
         end
       end
 
-      def issue_worker_ids(issues_by_parent, agents, parent_id)
+      def issue_tree_ids(issues_by_parent, agents, parent_id)
         issues_by_parent.fetch(parent_id, []).sort_by { |issue| sort_key(issue["id"]) }.flat_map do |issue|
           workers = agents.select { |agent| agent["type"] == "worker" && agent["issue_id"] == issue["id"] }
                           .sort_by { |worker| sort_key(worker["id"]) }
                           .map { |worker| worker.fetch("id") }
-          workers + issue_worker_ids(issues_by_parent, agents, issue["id"])
+          [issue.fetch("id")] + workers + issue_tree_ids(issues_by_parent, agents, issue["id"])
         end
       end
 
-      def project_pr_worker_ids(projects, issues, agents)
+      def project_pr_tree_ids(projects, issues, agents)
         projects.sort_by { |project| sort_key(project["id"]) }.flat_map do |project|
           project_issues = issues.select { |issue| issue["project_id"] == project["id"] }
           issues_by_parent = project_issues.group_by { |issue| issue["parent_issue_id"] }
-          pr_worker_ids(issues_by_parent, agents, nil)
+          pr_tree_ids(issues_by_parent, agents, nil)
         end
       end
 
-      def pr_worker_ids(issues_by_parent, agents, parent_id)
+      def pr_tree_ids(issues_by_parent, agents, parent_id)
         issues_by_parent.fetch(parent_id, []).sort_by { |issue| sort_key(issue["id"]) }.flat_map do |issue|
           workers = agents.select { |agent| agent["type"] == "worker" && agent["issue_id"] == issue["id"] && active_agent_pr_url(agent) }
                           .sort_by { |worker| sort_key(worker["id"]) }
                           .map { |worker| worker.fetch("id") }
-          workers + pr_worker_ids(issues_by_parent, agents, issue["id"])
+          ids = []
+          ids << issue.fetch("id") if active_agent_pr_url(issue)
+          ids + workers + pr_tree_ids(issues_by_parent, agents, issue["id"])
         end
       end
 
@@ -118,8 +120,14 @@ module Meringue
           record["delivery_pull_request"],
           metadata["delivery_pull_request"],
           *Array(record["delivery_pull_requests"]),
-          *Array(metadata["delivery_pull_requests"])
+          *Array(metadata["delivery_pull_requests"]),
+          *Array(record["reported_pr_urls"]),
+          *Array(metadata["reported_pr_urls"])
         ].compact
+      end
+
+      def issue_record?(record)
+        record.is_a?(Hash) && record.key?("project_id") && record.key?("agent_ids")
       end
 
       def active_pull_request?(pull_request)
