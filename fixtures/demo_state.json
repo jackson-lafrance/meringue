@@ -223,55 +223,15 @@
   "logs": [
     {
       "id": "L1",
-      "timestamp": "2026-07-11T00:00:00Z",
-      "source_type": "system",
-      "source_id": null,
-      "level": "info",
-      "message": "Loaded fake demo state from fixtures/demo_state.json.",
-      "details": {
-        "fixture": true
-      }
-    },
-    {
-      "id": "L2",
       "timestamp": "2026-07-11T00:01:00Z",
       "source_type": "user",
       "source_id": null,
       "level": "info",
-      "message": "User asked Meringue to update vim config.",
+      "message": "Update vim config to use oil instead of mini.",
       "details": {}
     },
     {
-      "id": "L3",
-      "timestamp": "2026-07-11T00:02:00Z",
-      "source_type": "head",
-      "source_id": "H1",
-      "level": "info",
-      "message": "Fake head proposed a TUI rendering issue.",
-      "details": {}
-    },
-    {
-      "id": "L4",
-      "timestamp": "2026-07-11T00:03:00Z",
-      "source_type": "kernel",
-      "source_id": "P1-I1",
-      "level": "info",
-      "message": "Kernel accepted CreateIssue for fake TUI demo.",
-      "details": {
-        "command": "CreateIssue"
-      }
-    },
-    {
-      "id": "L5",
-      "timestamp": "2026-07-11T00:04:00Z",
-      "source_type": "worker",
-      "source_id": "P1-I1-W1",
-      "level": "info",
-      "message": "Fake worker started drawing a three-pane layout.",
-      "details": {}
-    },
-    {
-      "id": "L6",
+      "id": "L2",
       "timestamp": "2026-07-11T00:05:00Z",
       "source_type": "worker",
       "source_id": "P2-I1-W1",
@@ -280,7 +240,7 @@
       "details": {}
     },
     {
-      "id": "L7",
+      "id": "L3",
       "timestamp": "2026-07-11T00:06:00Z",
       "source_type": "harness",
       "source_id": "P1-I3-W1",
@@ -291,31 +251,20 @@
       }
     },
     {
-      "id": "L8",
+      "id": "L4",
       "timestamp": "2026-07-11T00:07:00Z",
       "source_type": "kernel",
       "source_id": "Q1",
       "level": "info",
-      "message": "Kernel stored an open clarifying question.",
+      "message": "Question Q1: Which project should receive the signup fix?",
       "details": {}
-    },
-    {
-      "id": "L9",
-      "timestamp": "2026-07-11T00:08:00Z",
-      "source_type": "system",
-      "source_id": null,
-      "level": "info",
-      "message": "Rendered demo panes without mutating ~/.meringue/state.json.",
-      "details": {
-        "state_mutated": false
-      }
     }
   ],
   "counters": {
     "projects": 2,
     "heads": 2,
     "questions": 1,
-    "logs": 9,
+    "logs": 4,
     "issues_by_project": {
       "P1": 3,
       "P2": 1
