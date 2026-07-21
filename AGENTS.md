@@ -274,6 +274,7 @@ Do the same thing as coding harnesses for these aswell we want it to be familiar
 /questions
 /answer <question_id> "<answer>"
 /dismiss <question_id>
+/recount
 
 ### User input routing
 If input starts with `/`, parse it as a slash command and bypass the head agent.

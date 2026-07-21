@@ -66,6 +66,7 @@ module Meringue
         "list_questions" => "ListQuestions",
         "reconcile_sessions" => "ReconcileSessions",
         "prune" => "Prune",
+        "recount" => "Recount",
         "clear" => "ClearState",
         "clear_state" => "ClearState",
         "list_all" => "ListAll"
@@ -88,6 +89,7 @@ module Meringue
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
         ["/prune <merged|errored>", "Remove merged PR issue bundles or errored records from active state."],
+        ["/recount", "Compact project, issue, worker, and question IDs after records are removed."],
         ["/clear", "Reset persisted Meringue state and clear the visible logs."]
       ].freeze
       TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
@@ -155,6 +157,8 @@ module Meringue
           @head_result_mutex.synchronize { apply_head_result(command_id, command_type, payload) }
         elsif command_type == "ReconcileSessions"
           reconcile_sessions(command_id: command_id, command_type: command_type)
+        elsif command_type == "Recount"
+          @worker_spawn_mutex.synchronize { synchronized_state { dispatch_command(command_id, command_type, payload) } }
         else
           synchronized_state { dispatch_command(command_id, command_type, payload) }
         end
@@ -210,6 +214,8 @@ module Meringue
           reconcile_sessions(command_id: command_id, command_type: command_type)
         when "Prune"
           prune(command_id, command_type, payload)
+        when "Recount"
+          recount(command_id, command_type)
         when "ClearState"
           clear_state(command_id, command_type)
         else
@@ -228,10 +234,10 @@ module Meringue
         Array(commands).map { |command| apply(command) }
       end
 
-      def mark_worker_completed(agent_id:, harness_events: [], last_assistant_text: nil)
+      def mark_worker_completed(agent_id:, harness_events: [], last_assistant_text: nil, session_ref: nil)
         synchronized_state do
           state = normalized_state
-          agent = find_agent(state, agent_id)
+          agent = find_session_agent(state, agent_id: agent_id, session_ref: session_ref)
           return rejected_result(nil, "MarkWorkerCompleted", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
           unless agent.fetch("type", nil) == "worker"
             return rejected_result(nil, "MarkWorkerCompleted", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"])
@@ -487,6 +493,9 @@ module Meringue
             "  removed issues: #{Array(prune_result["removed_issue_ids"]).length}",
             "  removed agents: #{Array(prune_result["removed_agent_ids"]).length}"
           ]
+        when "Recount"
+          mappings = result.is_a?(Hash) ? result.fetch("mappings", {}) : {}
+          ["  renamed IDs: #{mappings.values.sum { |mapping| mapping.length }}"]
         when "ListAll", "GetState"
           state = result || {}
           [
@@ -1091,6 +1100,54 @@ module Meringue
         else
           rejected_result(command_id, command_type, "Unknown prune selector: #{selector}", ["supported selectors: merged, errored"])
         end
+      end
+
+      def recount(command_id, command_type)
+        state = normalized_state
+        active_head_ids = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "head" }.map { |agent| agent.fetch("id") }
+        if active_head_ids.any?
+          return rejected_result(
+            command_id,
+            command_type,
+            "AgentTree IDs were not recounted because a head result is still in flight.",
+            ["active_heads", *active_head_ids]
+          )
+        end
+        now = timestamp
+        mappings = State::Recounter.recount!(state)
+        changed_count = mappings.values.sum(&:length)
+        state.fetch("metadata")["last_recount"] = {
+          "recounted_at" => now,
+          "changed_id_count" => changed_count,
+          "mappings" => mappings
+        }
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: nil,
+          level: "info",
+          message: "Recounted AgentTree IDs; renamed #{changed_count} record#{changed_count == 1 ? "" : "s"}.",
+          details: {
+            "changed_id_count" => changed_count,
+            "mappings" => mappings,
+            "unchanged_id_types" => %w[head log conversation_message harness_session workspace]
+          }
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(
+          command_id,
+          command_type,
+          nil,
+          "Recounted AgentTree IDs; renamed #{changed_count} record#{changed_count == 1 ? "" : "s"}.",
+          {
+            "changed_id_count" => changed_count,
+            "mappings" => mappings,
+            "counters" => deep_copy(state.fetch("counters"))
+          },
+          log_ids
+        )
       end
 
       def prune_merged(command_id, command_type)
@@ -3155,6 +3212,21 @@ module Meringue
         state.fetch("agents").find { |agent| agent.fetch("id", nil) == agent_id.to_s }
       end
 
+      def find_session_agent(state, agent_id:, session_ref: nil)
+        ref = session_ref.is_a?(Hash) ? session_ref : {}
+        identities = [
+          ["harness_session_id", value_at(ref, "session_id", "harness_session_id")],
+          ["harness_session_file", value_at(ref, "session_file", "harness_session_file")],
+          ["pid", value_at(ref, "pid")]
+        ].select { |_key, value| present_string(value) }
+        identities.each do |key, value|
+          match = state.fetch("agents").find { |agent| agent.fetch(key, nil).to_s == value.to_s }
+          return match if match
+        end
+
+        identities.empty? ? find_agent(state, agent_id) : nil
+      end
+
       def find_question(state, question_id)
         state.fetch("questions").find { |question| question.fetch("id", nil) == question_id.to_s }
       end
@@ -3251,12 +3323,14 @@ module Meringue
           "agent_id" => agent.fetch("id", nil),
           "agent_type" => agent.fetch("type", nil),
           "state" => "errored",
+          "session_ref" => session_ref,
           "error" => error_payload(e),
           "reconcile" => reconcile_error_model(agent, e)
         }
       end
 
       def apply_poll_result(poll_result)
+        poll_result = poll_result_with_current_agent_id(poll_result)
         case poll_result.fetch("state", nil)
         when "working"
           refresh_agent_session_state(poll_result)
@@ -3267,7 +3341,8 @@ module Meringue
             result = mark_worker_completed(
               agent_id: poll_result.fetch("agent_id"),
               harness_events: poll_result.fetch("events", []),
-              last_assistant_text: poll_result.fetch("last_assistant_text", nil)
+              last_assistant_text: poll_result.fetch("last_assistant_text", nil),
+              session_ref: poll_result.fetch("session_ref", nil)
             )
             poll_result.merge("changed" => result.fetch("status", nil) == "accepted", "completion_result" => result,
                               "log_entry_ids" => result.fetch("log_entry_ids", []))
@@ -3276,6 +3351,18 @@ module Meringue
           apply_reconcile_error_from_poll(poll_result)
         else
           poll_result.merge("changed" => false, "log_entry_ids" => [])
+        end
+      end
+
+      def poll_result_with_current_agent_id(poll_result)
+        synchronized_state do
+          state = normalized_state
+          agent = find_session_agent(
+            state,
+            agent_id: poll_result.fetch("agent_id", nil),
+            session_ref: poll_result.fetch("session_ref", nil)
+          )
+          agent ? poll_result.merge("agent_id" => agent.fetch("id")) : poll_result
         end
       end
 
@@ -3544,6 +3631,7 @@ module Meringue
           "agent_id" => agent.fetch("id", nil),
           "agent_type" => "worker",
           "state" => "errored",
+          "session_ref" => session_ref,
           "error" => error_payload(resume_error),
           "reconcile" => worker_resume_failed_reconcile_model(agent, original_error, resume_error, attempt)
         }
