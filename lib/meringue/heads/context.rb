@@ -23,17 +23,23 @@ module Meringue
         "production/staging, credential, database, or destructive commands"
       ].freeze
 
+      ROUTING_ACTIVITY_LIMIT = 16
+      ROUTING_CANDIDATE_LIMIT = 40
+      ROUTING_TEXT_LIMIT = 2_000
+
       attr_reader :head_id, :user_message, :snapshot, :question_id,
-                  :kernel_commands_path, :cwd
+                  :kernel_commands_path, :cwd, :state_path
 
       def initialize(head_id:, user_message:, snapshot:, question_id: nil,
-                     kernel_commands_path: DEFAULT_KERNEL_COMMANDS_PATH, cwd: Dir.pwd)
+                     kernel_commands_path: DEFAULT_KERNEL_COMMANDS_PATH, cwd: Dir.pwd,
+                     state_path: State::Store.default_path)
         @head_id = head_id
         @user_message = user_message
         @snapshot = snapshot
         @question_id = question_id
         @kernel_commands_path = kernel_commands_path
         @cwd = File.expand_path(cwd)
+        @state_path = File.expand_path(state_path)
       end
 
       def to_h
@@ -49,6 +55,7 @@ module Meringue
           "state_access" => state_access,
           "project_discovery" => project_discovery,
           "current_state_summary" => current_state_summary,
+          "routing_context" => routing_context,
           "kernel_command_reference" => reference_metadata.merge(
             "appended_to_system_prompt" => true
           )
@@ -63,6 +70,8 @@ module Meringue
           Do not assume all state is embedded in the prompt; inspect only the parts of state you need.
           You may use tools to inspect local projects and git repositories before deciding, but discovery must be read-only and limited to routing/orchestration context.
           Do not investigate or answer the user's substantive task directly; create or reuse issues and spawn or prompt workers for investigation, implementation, and informational work.
+          Treat the supplied routing context as candidate evidence, not a conversation database. Classify whether this message starts a new goal or follows an existing issue, then deliberately choose whether to prompt, follow up, or replace an existing worker.
+          Prefer a healthy existing worker session when its Pi or other harness history contains the context needed for the follow-up. Do not duplicate that harness history in Meringue state.
           Do not mutate files, git state, dependencies, databases, remote services, or Meringue state directly.
           Propose kernel commands using the reference below.
 
@@ -119,8 +128,194 @@ module Meringue
         }
       end
 
-      def state_path
-        State::Store.default_path
+      def routing_context
+        {
+          "purpose" => "Stateless routing hints assembled from existing issues, logs, and inspectable harness session metadata. These are not a separate conversation history.",
+          "explicit_references" => explicit_references,
+          "question_being_answered" => question_being_answered,
+          "issue_candidates" => routing_issue_candidates,
+          "worker_candidates" => routing_worker_candidates,
+          "recent_activity" => recent_routing_activity,
+          "decision_rules" => [
+            "Explicit project, issue, worker, or question ids in the user message take precedence when they exist and are compatible.",
+            "A refinement, correction, question about findings, or next step for an existing durable goal should reuse that issue.",
+            "Prefer PromptAgent when a healthy worker on that issue has useful persisted harness context; do not spawn a new worker merely because this is a new user message.",
+            "Use steer for an urgent correction to active work, follow_up for related work that should run after the active turn, and normal for a settled resumable session.",
+            "Spawn a follow-up worker on the same issue only when no suitable session is resumable, work should be independent or parallel, context is known to be over 50%, or a delivered workspace should remain immutable.",
+            "Use replace_agent_id only when the old worker is stale, unhealthy, pursuing the wrong approach, or must stop before a successor continues. Replacement starts the successor before killing the old session.",
+            "Create a new issue only for a genuinely distinct durable goal. Ask a clarifying question instead of guessing between plausible issues or workers."
+          ]
+        }
+      end
+
+      def explicit_references
+        mentioned_ids = user_message.to_s.scan(/\b(?:P\d+(?:-I\d+(?:-W\d+)?)?|H\d+|Q\d+)\b/i).map(&:upcase).uniq
+        resolved_ids = mentioned_ids.flat_map { |id| [id, *parent_ids_for(id)] }.uniq
+        known_state_ids = (
+          snapshot.fetch("projects", []).map { |record| record["id"] } +
+          snapshot.fetch("issues", []).map { |record| record["id"] } +
+          snapshot.fetch("agents", []).map { |record| record["id"] } +
+          snapshot.fetch("questions", []).map { |record| record["id"] }
+        ).compact
+        {
+          "mentioned_ids" => mentioned_ids,
+          "known_ids" => resolved_ids.select { |id| known_state_ids.include?(id) },
+          "unknown_ids" => mentioned_ids.reject { |id| known_state_ids.include?(id) }
+        }
+      end
+
+      def parent_ids_for(id)
+        worker_match = id.match(/\A(P\d+)-(I\d+)-W\d+\z/)
+        return [worker_match[1], "#{worker_match[1]}-#{worker_match[2]}"] if worker_match
+
+        issue_match = id.match(/\A(P\d+)-I\d+\z/)
+        issue_match ? [issue_match[1]] : []
+      end
+
+      def question_being_answered
+        return nil unless question_id
+
+        question = snapshot.fetch("questions", []).find { |candidate| candidate["id"] == question_id }
+        question&.slice("id", "head_id", "project_id", "issue_id", "question", "context", "status", "answer", "created_at", "updated_at")
+      end
+
+      def routing_issue_candidates
+        routing_candidates(snapshot.fetch("issues", [])).map do |issue|
+          workers = workers_for_issue(issue.fetch("id", nil))
+          {
+            "id" => issue.fetch("id", nil),
+            "project_id" => issue.fetch("project_id", nil),
+            "parent_issue_id" => issue.fetch("parent_issue_id", nil),
+            "title" => issue.fetch("title", nil),
+            "description" => bounded_text(issue.fetch("description", nil)),
+            "status" => issue.fetch("status", nil),
+            "agent_ids" => workers.map { |worker| worker.fetch("id", nil) },
+            "latest_agent_id" => workers.max_by { |worker| routing_sort_key(worker) }&.fetch("id", nil),
+            "has_delivery_pull_request" => issue_delivery?(issue),
+            "updated_at" => issue.fetch("updated_at", nil)
+          }.compact
+        end
+      end
+
+      def routing_worker_candidates
+        workers = snapshot.fetch("agents", []).select { |agent| agent.fetch("type", nil) == "worker" }
+        routing_candidates(workers).map do |agent|
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          streaming = !!metadata.fetch("is_streaming", false)
+          session_available = present_value?(agent.fetch("harness_session_id", nil)) ||
+            present_value?(agent.fetch("harness_session_file", nil)) || present_value?(agent.fetch("pid", nil))
+          {
+            "id" => agent.fetch("id", nil),
+            "project_id" => agent.fetch("project_id", nil),
+            "issue_id" => agent.fetch("issue_id", nil),
+            "title" => metadata.fetch("title", nil),
+            "status" => agent.fetch("status", nil),
+            "harness" => agent.fetch("harness", nil),
+            "harness_session_id" => agent.fetch("harness_session_id", nil),
+            "harness_session_file" => agent.fetch("harness_session_file", nil),
+            "is_streaming" => streaming,
+            "session_available" => session_available,
+            "resumable" => session_available && !%w[killed errored].include?(agent.fetch("status", nil)),
+            "supported_prompt_modes_now" => supported_prompt_modes(agent, streaming: streaming, session_available: session_available),
+            "recommended_prompt_mode" => recommended_prompt_mode(agent, streaming: streaming, session_available: session_available),
+            "prompt_count" => metadata.fetch("prompt_count", 0).to_i,
+            "last_prompt_mode" => metadata.fetch("last_prompt_mode", nil),
+            "context_utilization" => context_utilization(metadata),
+            "last_result" => bounded_text(metadata.fetch("last_assistant_text", nil)),
+            "workspace_branch" => agent.fetch("workspace_branch", nil),
+            "has_delivery_pull_request" => issue_delivery?(issue_for_agent(agent)),
+            "follow_up_of_agent_id" => agent.fetch("follow_up_of_agent_id", nil),
+            "replaces_agent_id" => agent.fetch("replaces_agent_id", nil),
+            "replaced_by_agent_id" => agent.fetch("replaced_by_agent_id", nil),
+            "created_at" => agent.fetch("created_at", nil),
+            "updated_at" => agent.fetch("updated_at", nil)
+          }.compact
+        end
+      end
+
+      def routing_candidates(records)
+        sorted = records.sort_by { |record| routing_sort_key(record) }.reverse
+        referenced = explicit_references.fetch("known_ids")
+        explicit_records = sorted.select { |record| referenced.include?(record.fetch("id", nil)) }
+        (explicit_records + sorted.first(ROUTING_CANDIDATE_LIMIT)).uniq { |record| record.fetch("id", nil) }
+      end
+
+      def recent_routing_activity
+        snapshot.fetch("logs", []).last(ROUTING_ACTIVITY_LIMIT).map do |log|
+          {
+            "id" => log.fetch("id", nil),
+            "timestamp" => log.fetch("timestamp", nil),
+            "source_type" => log.fetch("source_type", nil),
+            "source_id" => log.fetch("source_id", nil),
+            "level" => log.fetch("level", nil),
+            "message" => bounded_text(log.fetch("message", nil)),
+            "routing" => routing_log_details(log.fetch("details", nil))
+          }.compact
+        end
+      end
+
+      def routing_log_details(details)
+        return nil unless details.is_a?(Hash)
+
+        details.slice(
+          "head_id", "question_id", "project_id", "issue_id", "agent_id", "target_id",
+          "mode", "routing_action", "follow_up_of_agent_id", "replaces_agent_id", "replaced_by_agent_id"
+        ).compact
+      end
+
+      def workers_for_issue(issue_id)
+        snapshot.fetch("agents", []).select do |agent|
+          agent.fetch("type", nil) == "worker" && agent.fetch("issue_id", nil) == issue_id
+        end
+      end
+
+      def issue_for_agent(agent)
+        snapshot.fetch("issues", []).find { |issue| issue.fetch("id", nil) == agent.fetch("issue_id", nil) }
+      end
+
+      def issue_delivery?(issue)
+        return false unless issue.is_a?(Hash)
+
+        present_value?(issue.fetch("delivery_pull_request", nil)) || Array(issue.fetch("delivery_pull_requests", [])).any?
+      end
+
+      def supported_prompt_modes(agent, streaming:, session_available:)
+        return [] unless session_available
+        return [] if %w[killed errored].include?(agent.fetch("status", nil))
+
+        if streaming
+          agent.fetch("harness", nil) == "pi" ? %w[steer follow_up] : []
+        else
+          ["normal"]
+        end
+      end
+
+      def recommended_prompt_mode(agent, streaming:, session_available:)
+        modes = supported_prompt_modes(agent, streaming: streaming, session_available: session_available)
+        return nil if modes.empty?
+
+        streaming ? "follow_up" : "normal"
+      end
+
+      def context_utilization(metadata)
+        value = metadata.fetch("context_utilization", nil) || metadata.dig("pi_state", "contextUtilization")
+        value&.to_f
+      end
+
+      def routing_sort_key(record)
+        [record.fetch("updated_at", "").to_s, record.fetch("created_at", "").to_s, record.fetch("id", "").to_s]
+      end
+
+      def bounded_text(value)
+        text = value.to_s.strip
+        return nil if text.empty?
+        return text if text.length <= ROUTING_TEXT_LIMIT
+
+        "#{text[0, ROUTING_TEXT_LIMIT]}…"
+      end
+
+      def present_value?(value)
+        !value.nil? && !value.to_s.strip.empty?
       end
 
       def state_summary_command
