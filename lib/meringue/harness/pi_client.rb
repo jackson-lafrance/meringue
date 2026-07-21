@@ -76,10 +76,20 @@ module Meringue
       end
 
       def prompt_session(session_ref, prompt, mode: "normal")
-        process = process_for(session_ref)
         normalized_mode = normalize_mode!(mode)
         message = prompt.to_s
-        current_ref = get_state(session_ref)
+        current_ref = session_ref
+        process = process_for(current_ref, required: false)
+        unless process
+          if normalized_mode != "normal"
+            raise InvalidModeError,
+                  "Pi session is not active; resume it with mode: \"normal\" before using #{normalized_mode.inspect}"
+          end
+
+          current_ref = attach_session(current_ref)
+          process = process_for(current_ref)
+        end
+        current_ref = get_state(current_ref)
 
         command = case normalized_mode
                   when "normal"

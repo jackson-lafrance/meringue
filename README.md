@@ -47,9 +47,10 @@ A typical flow looks like this:
 
 1. A developer describes a goal in the Meringue chat.
 2. A stateless head agent reads lightweight project context and proposes structured kernel commands.
-3. The kernel validates those commands, creates or reuses issues, and spawns worker agents.
-4. Each worker receives an assigned workspace and runs through the configured harness.
-5. The TUI keeps the AgentTree, logs, questions, and delivery state visible so the developer can intervene only when needed.
+3. The kernel validates those commands, creates or reuses issues, and prompts or spawns worker agents.
+4. Follow-up messages normally continue the best existing worker session so its persisted harness context remains available; the head can instead queue active work, spawn a related worker, or replace an unhealthy worker.
+5. Each new worker receives an assigned workspace and runs through the configured harness.
+6. The TUI keeps the AgentTree, logs, follow-up/replacement relationships, questions, and delivery state visible so the developer can intervene only when needed.
 
 This repository also uses that workflow while developing Meringue itself, but self-hosting is a proof point rather than the product boundary. The product is a general open orchestration layer for any project and any supported harness.
 
@@ -185,7 +186,9 @@ User prompt
   -> developer jumps into worker sessions or PRs only when needed
 ```
 
-Heads orchestrate by creating/reusing issues, prompting workers, and asking questions; they do not deliver substantive task answers directly. Workers carry out assigned implementation, investigation, or informational work, and only need PRs when the assigned delivery calls for repository changes. The kernel owns orchestration state. Harness-specific behavior stays behind the harness client layer.
+Heads orchestrate by creating/reusing issues, prompting workers, and asking questions; they do not deliver substantive task answers directly. Every natural-language message still gets a fresh stateless head. Its routing context is assembled from existing issues, recent lifecycle logs, and generic harness/session metadata rather than a second conversation-state model.
+
+For a follow-up, the head chooses among continuing a settled session (`normal`), correcting active work (`steer`), queuing a next step (`follow_up`), spawning a related worker on the same issue, or replacing an unhealthy/stale worker. Pi's persisted session retains the detailed conversation context. AgentTree worker rows label successors with `after W…` or `replaces W…`, while lifecycle logs state the full relationship. Workers carry out assigned implementation, investigation, or informational work, and only need PRs when the assigned delivery calls for repository changes. The kernel owns orchestration state. Harness-specific behavior stays behind the harness client layer.
 
 ## Contributing notes for agents
 

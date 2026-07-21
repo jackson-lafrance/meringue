@@ -137,7 +137,7 @@ module Meringue
                 record: worker,
                 id: short_id(worker["id"]),
                 title: record_title(worker),
-                suffix: active_pr_marker(worker),
+                suffix: worker_suffix(worker),
                 selected: AgentTreeNavigation.selected_agent?(worker, selected_agent_id),
                 width: width
               ))
@@ -185,7 +185,7 @@ module Meringue
                 record: worker,
                 id: short_id(worker["id"]),
                 title: record_title(worker),
-                suffix: active_pr_marker(worker),
+                suffix: worker_suffix(worker),
                 selected: AgentTreeNavigation.selected_agent?(worker, selected_agent_id),
                 width: width
               )
@@ -419,10 +419,23 @@ module Meringue
         end
 
         def progress(workers)
-          return "" if workers.empty?
+          visible_workers = workers.reject { |worker| worker["status"] == "killed" && worker["replaced_by_agent_id"] }
+          return "" if visible_workers.empty?
 
-          completed = workers.count { |worker| worker["status"] == "completed" }
-          "#{completed}/#{workers.length}"
+          completed = visible_workers.count { |worker| worker["status"] == "completed" }
+          "#{completed}/#{visible_workers.length}"
+        end
+
+        def worker_suffix(worker)
+          [worker_relationship_marker(worker), active_pr_marker(worker)].reject(&:empty?).join(" ")
+        end
+
+        def worker_relationship_marker(worker)
+          return "replaces #{short_id(worker.fetch("replaces_agent_id"))}" if worker["replaces_agent_id"]
+          return "after #{short_id(worker.fetch("follow_up_of_agent_id"))}" if worker["follow_up_of_agent_id"]
+          return "replaced by #{short_id(worker.fetch("replaced_by_agent_id"))}" if worker["replaced_by_agent_id"]
+
+          ""
         end
 
         def active_pr_marker(record)
