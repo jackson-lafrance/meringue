@@ -56,19 +56,25 @@ Each command in `commands` must use this shape:
 
 Use only the command names documented below unless the kernel command model is updated.
 
-Issue selection rules for the MVP:
+Issue and worker selection rules for the MVP:
 
-- Treat an issue as the durable user goal, and treat each worker as one execution attempt or follow-up step for that goal.
-- Before creating an issue, inspect existing issues in the chosen project. If the new user prompt is a follow-up, refinement, or next step for an existing issue, do **not** create another issue. Spawn a new worker on the existing issue instead.
-- Use `CreateIssue` only when the prompt describes a genuinely new top-level goal with no suitable existing issue.
+- Treat an issue as the durable user goal and each worker as a stateful harness session for an execution or investigation step. Pi's persisted session is the preferred source of detailed follow-up context; do not duplicate its transcript in Meringue state.
+- First classify the message as a genuinely new goal or a follow-up. Explicit project/issue/worker ids win. Otherwise compare the prompt with issue titles/descriptions, recent routing activity, latest worker results, and active session metadata in `routing_context`.
+- A refinement, correction, question about findings, or next step for an existing goal should reuse that issue. Use `CreateIssue` only when no existing issue represents the durable goal.
+- On a reused issue, prefer `PromptAgent` when one healthy worker session has the relevant context. Do not spawn another worker merely because the user sent another message.
+- Use `PromptAgent` mode `steer` for an urgent correction that should affect active work, `follow_up` for related work that should wait until the active turn settles, and `normal` for a settled resumable session.
+- Spawn a new worker on the same issue only when the previous session is unavailable/unhealthy, its context is known to be over 50%, its delivered workspace should remain immutable, the next step is independent, or parallel work is intentional. Set `follow_up_of_agent_id` so that relationship is visible.
+- Replace a worker only when it is stale, unhealthy, pursuing the wrong approach, or must be stopped. Set `replace_agent_id` on `SpawnWorker`; the kernel starts the successor before killing the old session and records both sides of the relationship. Do not separately propose `Kill` for the same replacement.
+- Never prompt a worker from a different issue. If multiple issues or workers are plausible, ask a clarifying question instead of guessing.
 - Do not create nested/subissues for ordinary follow-up prompts. Set `parent_issue_id` to `null` unless the user explicitly asks for a child issue hierarchy.
 - Give each `SpawnWorker` a short action-oriented `title`; this is what appears under the issue in the AgentTree.
 - Do not answer implementation, investigation, or informational prompts directly in the head summary. Route that work to a worker instead.
 
 When proposing a worker flow for an already registered project:
 
-1. Reuse an existing issue and return `SpawnWorker` for that issue when the prompt continues that work.
-2. Otherwise return `CreateIssue`, then `SpawnWorker` for the new issue.
+1. Reuse an existing issue and prompt its best healthy worker when the session context should continue.
+2. Otherwise spawn a related follow-up/replacement worker on that existing issue with the relationship field set.
+3. Only for a new durable goal, return `CreateIssue`, then `SpawnWorker` for the new issue.
 
 If no matching project is registered and the discovered local repository/directory is the right target, propose `AddProject` first, then `CreateIssue`, then `SpawnWorker` for the first top-level goal in that newly registered project.
 
@@ -290,7 +296,9 @@ Payload:
   "issue_id": "P1-I1",
   "title": "Short worker title",
   "prompt": "Worker instructions",
-  "workspace_path": "Optional preselected workspace path"
+  "workspace_path": "Optional preselected workspace path",
+  "follow_up_of_agent_id": "Optional prior worker on this issue",
+  "replace_agent_id": "Optional worker on this issue to replace after spawn"
 }
 ```
 
@@ -303,7 +311,9 @@ Example:
     "issue_id": "P1-I1",
     "title": "Fix signup validation",
     "prompt": "Investigate the signup validation bug, make the smallest safe fix, and summarize verification.",
-    "workspace_path": null
+    "workspace_path": null,
+    "follow_up_of_agent_id": null,
+    "replace_agent_id": null
   }
 }
 ```
@@ -327,6 +337,14 @@ Supported `mode` values:
 ```txt
 normal, steer, follow_up
 ```
+
+Choose the mode deliberately:
+
+- `normal`: continue a settled, resumable worker session. Pi reattaches from its persisted session id/file when its RPC process is no longer live.
+- `steer`: inject an urgent correction into active work before its next model call.
+- `follow_up`: queue a related next step until active work settles.
+
+Killed and errored workers are not resumable through this command. Spawn a related or replacement worker on the same issue instead.
 
 Example:
 
