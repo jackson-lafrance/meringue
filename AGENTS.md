@@ -197,7 +197,16 @@ user message
    -> TUI updates
    -> head agent is killed
 
-Head agents main purpose is to decide, what project to spawn the agent in, if we already have an issue for it, if a previously used agent should be used or if a new one should be spawned.
+Head agents main purpose is to decide what project the work belongs in, whether an existing issue already represents the durable goal, and whether to prompt, follow up, or replace a previously used worker instead of spawning unnecessary sessions.
+
+For natural-language follow-ups, keep the head stateless and use existing Meringue records plus persisted harness session context:
+- Prefer `PromptAgent` on the best healthy worker for the issue when its session history is relevant.
+- Use `normal` for a settled resumable session, `steer` for an urgent correction to active work, and `follow_up` for a related next step that should wait.
+- Spawn another worker on the same issue only when continuation is unavailable or inappropriate, and record `follow_up_of_agent_id`.
+- Replace a stale, unhealthy, or wrong-direction worker by spawning with `replace_agent_id`; the kernel should start the successor before killing the old session and preserve the visible relationship.
+- Create a new issue only for a genuinely distinct durable goal, and ask a question rather than guessing between plausible targets.
+
+Do not introduce a parallel conversation-history model merely to route follow-ups. Pi or another harness owns detailed session history; Meringue should expose compact, generic routing metadata and lifecycle logs.
 
 ### Head project discovery
 Project discovery is a head responsibility, not a kernel responsibility.
@@ -457,6 +466,9 @@ Fields should include:
 - `harness_session_id`: Pi `sessionId` for the MVP
 - `harness_session_file`: Pi `sessionFile` for the MVP
 - `harness_metadata`: optional harness-specific details
+- `follow_up_of_agent_id`: optional prior worker on the same issue
+- `replaces_agent_id`: optional worker this agent replaced
+- `replaced_by_agent_id`: optional successor worker
 - `created_at`
 - `updated_at`
 
@@ -544,7 +556,7 @@ If `WorkspacePath` is omitted, the kernel should allocate a worker-specific work
 Prefer a dedicated git worktree for git-backed projects so concurrent workers/subagents can edit safely.
 The harness should receive the allocated workspace as its `cwd`; harness clients should not create or mutate worktrees directly.
 The returned agent should include a Meringue id like `P1-I1-W1`, workspace metadata, pid, harness session id,
-and harness session file when available.
+and harness session file when available. `FollowUpOfAgentID` may identify a prior worker on the same issue when a new session continues its work. `ReplaceAgentID` may identify a stale/unhealthy worker on the same issue; the kernel should spawn the successor successfully before killing the replaced worker, link both records, and emit a clear replacement log.
 
 ### `PromptAgent(AgentID, Prompt, Mode?) -> Agent`
 Sends a prompt to an existing harness session.

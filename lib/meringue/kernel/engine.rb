@@ -91,6 +91,7 @@ module Meringue
         ["/clear", "Reset persisted Meringue state and clear the visible logs."]
       ].freeze
       TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
+      PROMPT_MODES = %w[normal steer follow_up].freeze
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
       HEAD_RECONCILE_WARNING_DELAY_SECONDS = 5
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
@@ -728,7 +729,8 @@ module Meringue
             user_message: user_message.to_s,
             snapshot: snapshot,
             question_id: present_string(question_id),
-            cwd: cwd
+            cwd: cwd,
+            state_path: store.path
           )
 
           {
@@ -1622,25 +1624,27 @@ module Meringue
       def prompt_agent(command_id, command_type, payload)
         agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
         prompt = value_at(payload, "prompt", "Prompt")
-        mode = value_at(payload, "mode", "Mode") || "normal"
+        mode = (value_at(payload, "mode", "Mode") || "normal").to_s
         errors = []
 
         errors << "agent_id is required" if blank?(agent_id)
         errors << "prompt is required" if blank?(prompt)
+        errors << "mode must be one of #{PROMPT_MODES.join(", ")}" unless PROMPT_MODES.include?(mode)
         return rejected_result(command_id, command_type, "Agent was not prompted.", errors) unless errors.empty?
 
         state = normalized_state
         agent = find_agent(state, agent_id)
         return rejected_result(command_id, command_type, "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
         return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
-        if blank?(agent.fetch("pid", nil)) && blank?(agent.fetch("harness_session_id", nil))
+        return rejected_result(command_id, command_type, "Agent #{agent_id} cannot be continued because it is #{agent.fetch("status")}.", ["agent_not_resumable"]) if %w[killed errored].include?(agent.fetch("status", nil))
+        if blank?(agent.fetch("pid", nil)) && blank?(agent.fetch("harness_session_id", nil)) && blank?(agent.fetch("harness_session_file", nil))
           return rejected_result(command_id, command_type, "Agent #{agent_id} has no harness session.", ["missing_harness_session"])
         end
 
         client = harness_client_for_agent(agent)
         session_ref = agent_session_ref(agent)
         begin
-          session_ref = client.prompt_session(session_ref, prompt.to_s, mode: mode.to_s)
+          session_ref = client.prompt_session(session_ref, prompt.to_s, mode: mode)
         rescue StandardError => e
           return failed_result(
             command_id,
@@ -1652,46 +1656,71 @@ module Meringue
 
         now = timestamp
         session_metadata = session_ref.fetch("metadata", {}) || {}
-        agent["status"] = "working" if session_ref.fetch("is_streaming", false)
+        previous_metadata = agent.fetch("harness_metadata", {}) || {}
+        agent["status"] = "working"
         agent["pid"] = session_ref.fetch("pid", agent.fetch("pid", nil))
         agent["harness_session_id"] = session_ref.fetch("session_id", agent.fetch("harness_session_id", nil))
         agent["harness_session_file"] = session_ref.fetch("session_file", agent.fetch("harness_session_file", nil))
-        agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+        agent["harness_metadata"] = previous_metadata.merge(
           session_metadata,
-          "last_prompt_mode" => mode.to_s,
+          "prompt_count" => previous_metadata.fetch("prompt_count", 0).to_i + 1,
+          "last_prompt_mode" => mode,
+          "last_prompted_at" => now,
           "is_streaming" => session_ref.fetch("is_streaming", false),
-          "last_event_at" => session_ref.fetch("last_event_at", nil)
+          "last_event_at" => session_ref.fetch("last_event_at", nil),
+          "routing_action" => prompt_routing_action(mode)
         ).compact
         agent["updated_at"] = now
+
+        issue = find_issue(state, agent.fetch("issue_id", nil))
+        project = issue && find_project(state, issue.fetch("project_id", nil))
+        if issue
+          issue["status"] = "working"
+          issue["last_agent_id"] = agent.fetch("id")
+          issue["last_routing_action"] = prompt_routing_action(mode)
+          issue["last_routed_at"] = now
+          issue["updated_at"] = now
+        end
+        if project
+          project["status"] = "working"
+          project["updated_at"] = now
+        end
 
         log_ids = append_log(
           state,
           source_type: "kernel",
           source_id: agent.fetch("id"),
           level: "info",
-          message: "Prompted agent #{agent.fetch("id")} with #{mode} mode.",
+          message: prompt_log_message(agent, mode),
           details: {
             "issue_id" => agent.fetch("issue_id", nil),
             "project_id" => agent.fetch("project_id", nil),
-            "mode" => mode.to_s,
+            "agent_id" => agent.fetch("id"),
+            "mode" => mode,
+            "routing_action" => prompt_routing_action(mode),
             "is_streaming" => session_ref.fetch("is_streaming", false)
           }
         )
         touch_state!(state, now)
         store.save(state)
 
-        accepted_result(command_id, command_type, agent.fetch("id"), "Prompted agent #{agent.fetch("id")}.", agent, log_ids)
+        accepted_result(command_id, command_type, agent.fetch("id"), prompt_log_message(agent, mode), agent, log_ids)
       end
 
       def spawn_worker(command_id, command_type, payload)
         issue_id = value_at(payload, "issue_id", "IssueID", "issueId")
         prompt = value_at(payload, "prompt", "Prompt")
         worker_title = value_at(payload, "title", "Title", "worker_title", "workerTitle")
+        follow_up_of_agent_id = value_at(payload, "follow_up_of_agent_id", "followUpOfAgentID", "followUpOfAgentId")
+        replace_agent_id = value_at(payload, "replace_agent_id", "replaceAgentID", "replaceAgentId")
         requested_workspace_path = value_at(payload, "workspace_path", "WorkspacePath", "workspacePath")
         errors = []
 
         errors << "issue_id is required" if blank?(issue_id)
         errors << "prompt is required" if blank?(prompt)
+        if present_string(follow_up_of_agent_id) && present_string(replace_agent_id)
+          errors << "follow_up_of_agent_id and replace_agent_id are mutually exclusive"
+        end
         return synchronized_state { rejected_result(command_id, command_type, "Worker was not spawned.", errors) } unless errors.empty?
 
         reservation = synchronized_state do
@@ -1701,6 +1730,18 @@ module Meringue
 
           project = find_project(state, issue.fetch("project_id"))
           return rejected_result(command_id, command_type, "Project #{issue.fetch("project_id")} does not exist.", ["project_not_found"]) unless project
+
+          related_agent_id = present_string(replace_agent_id) || present_string(follow_up_of_agent_id)
+          related_agent = find_agent(state, related_agent_id) if related_agent_id
+          if related_agent_id && (!related_agent || related_agent.fetch("type", nil) != "worker")
+            return rejected_result(command_id, command_type, "Related worker #{related_agent_id} does not exist.", ["related_agent_not_found"])
+          end
+          if related_agent && related_agent.fetch("issue_id", nil) != issue.fetch("id")
+            return rejected_result(command_id, command_type, "Related worker #{related_agent_id} belongs to another issue.", ["related_agent_issue_mismatch"])
+          end
+          if present_string(replace_agent_id) && !replaceable_worker?(related_agent)
+            return rejected_result(command_id, command_type, "Worker #{related_agent_id} has already been killed or replaced.", ["agent_not_replaceable"])
+          end
 
           workspace = resolve_worker_workspace(
             project: project,
@@ -1733,7 +1774,9 @@ module Meringue
             "workspace" => workspace,
             "now" => now,
             "harness" => active_provider,
-            "harness_generation" => state.fetch("metadata").fetch("harness_generation", 0).to_i
+            "harness_generation" => state.fetch("metadata").fetch("harness_generation", 0).to_i,
+            "follow_up_of_agent_id" => present_string(follow_up_of_agent_id),
+            "replace_agent_id" => present_string(replace_agent_id)
           }
         end
 
@@ -1773,6 +1816,23 @@ module Meringue
             )
           end
 
+          follow_up_of_id = reservation.fetch("follow_up_of_agent_id", nil)
+          replaces_id = reservation.fetch("replace_agent_id", nil)
+          related_agent_id = replaces_id || follow_up_of_id
+          related_agent = find_agent(state, related_agent_id) if related_agent_id
+          relation_invalid = related_agent_id && (!related_agent || related_agent.fetch("issue_id", nil) != issue.fetch("id"))
+          replacement_invalid = replaces_id && !replaceable_worker?(related_agent)
+          if relation_invalid || replacement_invalid
+            kill_session_safely(session_ref)
+            cleanup_worker_workspace_safely(reservation.fetch("workspace"))
+            return failed_result(
+              command_id,
+              command_type,
+              "Worker #{reservation.fetch("agent_id")} could not be related because the prior worker is no longer available on this issue.",
+              ["related_agent_unavailable"]
+            )
+          end
+
           agent = build_worker_agent(
             agent_id: reservation.fetch("agent_id"),
             issue: issue,
@@ -1781,36 +1841,55 @@ module Meringue
             session_ref: session_ref,
             now: reservation.fetch("now"),
             title: worker_title,
-            harness_generation: reservation.fetch("harness_generation")
+            harness_generation: reservation.fetch("harness_generation"),
+            follow_up_of_agent_id: follow_up_of_id,
+            replaces_agent_id: replaces_id
           )
 
           state.fetch("agents") << agent
           issue.fetch("agent_ids") << reservation.fetch("agent_id")
+          if related_agent && follow_up_of_id
+            related_agent["follow_up_agent_ids"] = (Array(related_agent["follow_up_agent_ids"]) + [agent.fetch("id")]).uniq
+            related_agent["updated_at"] = reservation.fetch("now")
+          end
+          if related_agent && replaces_id
+            mark_agent_killed!(related_agent, reservation.fetch("now"))
+            related_agent["replaced_by_agent_id"] = agent.fetch("id")
+            kill_session_safely(session_ref_from_agent(related_agent), agent: related_agent) if present_string(related_agent.fetch("harness", nil))
+          end
           issue["status"] = "working"
+          issue["last_agent_id"] = agent.fetch("id")
+          issue["last_routing_action"] = spawn_routing_action(follow_up_of_id, replaces_id)
+          issue["last_routed_at"] = reservation.fetch("now")
           issue["updated_at"] = reservation.fetch("now")
           project["status"] = "working"
           project["updated_at"] = reservation.fetch("now")
 
+          log_message = spawn_worker_log_message(agent, issue)
           log_ids = []
           log_ids.concat(append_log(
             state,
             source_type: "kernel",
             source_id: reservation.fetch("agent_id"),
             level: "info",
-            message: "Spawned worker #{reservation.fetch("agent_id")} for #{issue.fetch("id")}",
+            message: log_message,
             details: {
               "issue_id" => issue.fetch("id"),
               "project_id" => project.fetch("id"),
+              "agent_id" => agent.fetch("id"),
+              "routing_action" => spawn_routing_action(follow_up_of_id, replaces_id),
+              "follow_up_of_agent_id" => follow_up_of_id,
+              "replaces_agent_id" => replaces_id,
               "workspace_path" => agent.fetch("workspace_path"),
               "workspace_strategy" => agent.fetch("workspace_strategy"),
               "workspace_branch" => agent.fetch("workspace_branch"),
               "title" => agent.fetch("harness_metadata", {}).fetch("title", nil)
-            }
+            }.compact
           ))
           touch_state!(state, reservation.fetch("now"))
           store.save(state)
 
-          accepted_result(command_id, command_type, reservation.fetch("agent_id"), "Spawned worker #{reservation.fetch("agent_id")}.", agent, log_ids)
+          accepted_result(command_id, command_type, reservation.fetch("agent_id"), log_message, agent, log_ids)
         end
       rescue StandardError => e
         kill_session_safely(session_ref) if session_ref
@@ -1842,7 +1921,8 @@ module Meringue
         }
       end
 
-      def build_worker_agent(agent_id:, issue:, project:, workspace:, session_ref:, now:, title: nil, harness_generation: 0)
+      def build_worker_agent(agent_id:, issue:, project:, workspace:, session_ref:, now:, title: nil, harness_generation: 0,
+                             follow_up_of_agent_id: nil, replaces_agent_id: nil)
         session_metadata = session_ref.fetch("metadata", {}) || {}
         display_title = worker_display_title(title, issue)
         {
@@ -1851,6 +1931,8 @@ module Meringue
           "status" => "working",
           "project_id" => project.fetch("id"),
           "issue_id" => issue.fetch("id"),
+          "follow_up_of_agent_id" => follow_up_of_agent_id,
+          "replaces_agent_id" => replaces_agent_id,
           "workspace_path" => workspace.fetch("workspace_path"),
           "workspace_strategy" => workspace.fetch("workspace_strategy"),
           "workspace_branch" => workspace.fetch("workspace_branch"),
@@ -1866,7 +1948,8 @@ module Meringue
             "harness_generation" => harness_generation,
             "workspace_note" => workspace.fetch("note", nil),
             "workspace_plan" => workspace.fetch("plan", nil),
-            "delivery_branch" => workspace.fetch("workspace_branch", nil)
+            "delivery_branch" => workspace.fetch("workspace_branch", nil),
+            "routing_action" => spawn_routing_action(follow_up_of_agent_id, replaces_agent_id)
           ).compact,
           "created_at" => now,
           "updated_at" => now
@@ -2057,6 +2140,46 @@ module Meringue
         title || issue.fetch("title").to_s.strip
       end
 
+      def prompt_routing_action(mode)
+        {
+          "normal" => "resume_session",
+          "steer" => "steer_active_session",
+          "follow_up" => "queue_follow_up"
+        }.fetch(mode.to_s)
+      end
+
+      def prompt_log_message(agent, mode)
+        case mode.to_s
+        when "steer"
+          "Steered active worker #{agent.fetch("id")} on #{agent.fetch("issue_id")} with the user's correction."
+        when "follow_up"
+          "Queued a follow-up for worker #{agent.fetch("id")} on #{agent.fetch("issue_id")}."
+        else
+          "Continued worker #{agent.fetch("id")} on #{agent.fetch("issue_id")} using its existing session."
+        end
+      end
+
+      def replaceable_worker?(agent)
+        agent && agent.fetch("status", nil) != "killed" && blank?(agent.fetch("replaced_by_agent_id", nil))
+      end
+
+      def spawn_routing_action(follow_up_of_agent_id, replaces_agent_id)
+        return "replace_worker" if present_string(replaces_agent_id)
+        return "spawn_follow_up_worker" if present_string(follow_up_of_agent_id)
+
+        "spawn_worker"
+      end
+
+      def spawn_worker_log_message(agent, issue)
+        if present_string(agent.fetch("replaces_agent_id", nil))
+          "Replaced worker #{agent.fetch("replaces_agent_id")} with #{agent.fetch("id")} on #{issue.fetch("id")}."
+        elsif present_string(agent.fetch("follow_up_of_agent_id", nil))
+          "Spawned follow-up worker #{agent.fetch("id")} after #{agent.fetch("follow_up_of_agent_id")} on #{issue.fetch("id")}."
+        else
+          "Spawned worker #{agent.fetch("id")} for #{issue.fetch("id")}."
+        end
+      end
+
       def validate_head_result_shape(head_result)
         errors = []
         unless head_result.is_a?(Hash)
@@ -2181,7 +2304,8 @@ module Meringue
 
       def update_issue_status_from_workers!(state, issue, now)
         workers = state.fetch("agents").select do |candidate|
-          candidate.fetch("type", nil) == "worker" && candidate.fetch("issue_id", nil) == issue.fetch("id")
+          candidate.fetch("type", nil) == "worker" && candidate.fetch("issue_id", nil) == issue.fetch("id") &&
+            candidate.fetch("status", nil) != "killed"
         end
         return if workers.empty?
 
