@@ -148,7 +148,10 @@ module Meringue
       def worker_pr_urls_from_completion(completion_result)
         result = completion_result.fetch("result", {}) || {}
         metadata = result.fetch("harness_metadata", {}) || {}
+        issue = result.fetch("issue", {}) || {}
         delivery_pull_requests = [
+          issue["delivery_pull_request"],
+          *Array(issue["delivery_pull_requests"]),
           metadata["delivery_pull_request"],
           *Array(metadata["delivery_pull_requests"])
         ].compact
