@@ -442,7 +442,7 @@ Example:
 
 Kills an agent, issue, or project subtree.
 
-Killing cascades lifecycle state downward and stops attached harness sessions. It does not remove records from active state; `/prune` remains the separate cleanup operation.
+Killing is an immediate stop-and-remove operation. It cascades lifecycle state downward, stops attached harness sessions, and removes the worker or target subtree from active state in the same command, so killed records do not linger in the AgentTree. `/prune` remains a separate command for cleaning up eligible completed records.
 
 Payload:
 

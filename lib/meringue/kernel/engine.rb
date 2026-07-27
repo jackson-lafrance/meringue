@@ -358,6 +358,7 @@ module Meringue
         normalized_state_changed = persist_normalized_state_if_changed
         recovered_worker_results = recover_worker_reservations
         recovered_results = recover_unapplied_head_results
+        prune_result = prune_killed_records
         agents = synchronized_state do
           normalized_state.fetch("agents").select { |agent| reconcile_candidate?(agent) }.map { |agent| deep_copy(agent) }
         end
@@ -368,6 +369,7 @@ module Meringue
         changed_count += recovered_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += recovered_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += 1 if normalized_state_changed
+        changed_count += 1 if prune_result.fetch("changed", false)
         accepted_result(
           command_id,
           command_type,
@@ -376,14 +378,14 @@ module Meringue
           {
             "checked_count" => agents.length,
             "changed_count" => changed_count,
-            "pruned_issue_ids" => [],
-            "pruned_agent_ids" => [],
-            "pruned_project_ids" => [],
+            "pruned_issue_ids" => prune_result.fetch("removed_issue_ids", []),
+            "pruned_agent_ids" => prune_result.fetch("removed_agent_ids", []),
+            "pruned_project_ids" => prune_result.fetch("removed_project_ids", []),
             "recovered_worker_results" => recovered_worker_results,
             "recovered_head_results" => recovered_results,
             "poll_results" => applied_results
           },
-          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
+          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
         )
       rescue StandardError => e
         error = error_payload(e)
@@ -508,6 +510,44 @@ module Meringue
         else
           target_id = result.is_a?(Hash) ? result["id"] : nil
           target_id ? ["  target: #{target_id}"] : []
+        end
+      end
+
+      def prune_killed_records
+        synchronized_state do
+          state = normalized_state
+          killed_project_ids = state.fetch("projects").select { |project| project.fetch("status", nil) == "killed" }.map { |project| project.fetch("id") }
+          killed_issue_ids = state.fetch("issues").select { |issue| issue.fetch("status", nil) == "killed" }.map { |issue| issue.fetch("id") }
+          killed_agent_ids = state.fetch("agents").select { |agent| agent.fetch("status", nil) == "killed" }.map { |agent| agent.fetch("id") }
+          if killed_project_ids.empty? && killed_issue_ids.empty? && killed_agent_ids.empty?
+            return {
+              "changed" => false,
+              "removed_issue_ids" => [],
+              "removed_agent_ids" => [],
+              "removed_standalone_agent_ids" => [],
+              "removed_project_ids" => [],
+              "log_entry_ids" => []
+            }
+          end
+
+          now = timestamp
+          prune_result = remove_issue_bundles_and_agents!(
+            state,
+            issue_ids: killed_issue_ids,
+            project_ids: killed_project_ids,
+            extra_agent_ids: killed_agent_ids,
+            reason: "killed",
+            now: now,
+            remove_empty_projects: false
+          )
+          removed_project_ids = prune_result.fetch("removed_project_ids", [])
+          touch_state!(state, now)
+          store.save(state)
+          prune_result.merge(
+            "changed" => true,
+            "removed_project_ids" => removed_project_ids,
+            "log_entry_ids" => []
+          )
         end
       end
 
@@ -714,6 +754,7 @@ module Meringue
         end
 
         result = deep_copy(target)
+        removal = remove_killed_target_records!(state, target_id.to_s, killed_agent_ids, now)
 
         log_ids = append_log(
           state,
@@ -723,13 +764,40 @@ module Meringue
           message: "Killed #{target_id}.",
           details: {
             "target_id" => target_id.to_s,
-            "killed_agent_ids" => killed_agent_ids
+            "killed_agent_ids" => killed_agent_ids,
+            "removed_issue_ids" => removal.fetch("removed_issue_ids", []),
+            "removed_agent_ids" => removal.fetch("removed_agent_ids", []),
+            "removed_project_ids" => removal.fetch("removed_project_ids", [])
           }
         )
         touch_state!(state, now)
         store.save(state)
 
         accepted_result(command_id, command_type, target_id.to_s, "Killed #{target_id}.", result, log_ids)
+      end
+
+      # Kill is an immediate stop-and-remove operation: lifecycle state is marked first so
+      # attached sessions are stopped consistently, then the target bundle leaves active state.
+      def remove_killed_target_records!(state, target_id, killed_agent_ids, now)
+        issue_ids = []
+        project_ids = []
+        if find_agent(state, target_id).nil?
+          if (issue = find_issue(state, target_id))
+            issue_ids << issue.fetch("id")
+          elsif (project = find_project(state, target_id))
+            project_ids << project.fetch("id")
+          end
+        end
+
+        remove_issue_bundles_and_agents!(
+          state,
+          issue_ids: issue_ids,
+          project_ids: project_ids,
+          extra_agent_ids: killed_agent_ids,
+          reason: "killed",
+          now: now,
+          remove_empty_projects: false
+        )
       end
 
       def spawn_head(command_id, command_type, payload)
