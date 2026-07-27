@@ -32,8 +32,14 @@ module Meringue
         "agy" => "antigravity"
       }.freeze
       DEFAULT_PI_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
+      # Canonical "provider/model" reference so Pi never has to disambiguate the
+      # bare model id across providers that all expose Claude Opus 5.
+      DEFAULT_PI_MODEL = "anthropic/claude-opus-5"
+      # Highest thinking level Pi exposes; Claude Opus 5 only supports xhigh/max.
+      DEFAULT_PI_THINKING_LEVEL = "max"
       DEFAULT_PI_HEAD_EXTRA_ARGS = [
-        "--thinking", "high",
+        "--model", DEFAULT_PI_MODEL,
+        "--thinking", DEFAULT_PI_THINKING_LEVEL,
         "--tools", "read,bash,grep,find,ls",
         "--no-extensions",
         "--no-skills",
@@ -42,7 +48,8 @@ module Meringue
         "--no-approve"
       ].freeze
       DEFAULT_PI_WORKER_EXTRA_ARGS = [
-        "--thinking", "high",
+        "--model", DEFAULT_PI_MODEL,
+        "--thinking", DEFAULT_PI_THINKING_LEVEL,
         "--tools", "read,bash,grep,find,ls,edit,write",
         "--no-extensions",
         "--no-skills",
