@@ -231,6 +231,17 @@
       "details": {}
     },
     {
+      "id": "L5",
+      "timestamp": "2026-07-11T00:04:00Z",
+      "source_type": "head",
+      "source_id": "H2",
+      "level": "info",
+      "message": "## Routed work\n\nCreated the **dotfiles** task:\n\n1. Update plugin config\n2. Verify startup",
+      "details": {
+        "kind": "head_summary"
+      }
+    },
+    {
       "id": "L2",
       "timestamp": "2026-07-11T00:05:00Z",
       "source_type": "worker",
@@ -238,7 +249,7 @@
       "level": "info",
       "message": "Worker P2-I1-W1 completed.",
       "details": {
-        "last_assistant_text": "\u001b[33m[00:05:00] ✦ agent P2-I1-W1 — Update vim plugin config\u001b[0m\nP2-I1-W1 output:\n╭──────── progress ────────╮\n│                          │\n│ Now updating the shared  │\n│ vim plugin configuration.│\n│                          │\n│ Replaced mini with oil.  │\n╰──────────────────────────╯"
+        "last_assistant_text": "\u001b[33m[00:05:00] ✦ agent P2-I1-W1 — Update vim plugin config\u001b[0m\nP2-I1-W1 output:\n╭────────────────────────────── progress ──────────────────────────────╮\n│ # Vim explorer delivered                                             │\n│                                                                      │\n│ Replaced **mini** with `oil.nvim` while keeping the shared defaults. │\n│                                                                      │\n│ - Preserved existing keybindings                                     │\n│ - Added [setup notes](https://example.com/oil-setup)                  │\n│                                                                      │\n│ > Restart Neovim to load the plugin.                                 │\n│                                                                      │\n│ ```lua                                                              │\n│ require(\"oil\").setup({ default_file_explorer = true })             │\n│ ```                                                                  │\n╰──────────────────────────────────────────────────────────────────────╯"
       }
     },
     {
@@ -266,7 +277,7 @@
     "projects": 2,
     "heads": 2,
     "questions": 1,
-    "logs": 4,
+    "logs": 5,
     "issues_by_project": {
       "P1": 3,
       "P2": 1
