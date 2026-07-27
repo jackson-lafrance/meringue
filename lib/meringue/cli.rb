@@ -240,6 +240,7 @@ module Meringue
           /harness <pi|claude|antigravity> # select the harness backend for future agents
           /keybind                  # show all TUI keybindings
           /jump [agent_id]          # open an agent session in Alacritty; omit id to navigate the AgentTree
+          /recount                  # compact AgentTree numbering after records are removed
           Enter in jump mode        # open selected issue/agent PR when one is available
           a in jump mode            # open selected agent session
           issue/worker double-click # open that item's PR when one is available
