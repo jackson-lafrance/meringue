@@ -37,6 +37,9 @@ module Meringue
         Do not include markdown, prose, code fences, or tool calls.
       PROMPT
       PULL_REQUEST_URL_PATTERN = /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+(?:[\/?#][^\s<>"'\])}]*)?/.freeze
+      PRUNE_ELIGIBLE_STATUSES = %w[completed killed].freeze
+      PRUNE_BLOCKING_WORKER_STATUSES = %w[working blocked errored].freeze
+      PRUNE_SETTLED_PULL_REQUEST_STATES = %w[merged closed].freeze
       ERROR_MESSAGE_MAX_BYTES = 2_000
       HARNESS_EVENT_LOG_LIMIT = 20
       HARNESS_EVENT_IGNORED_TYPES = %w[
@@ -88,7 +91,7 @@ module Meringue
         ["/questions", "List questions and their statuses."],
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
-        ["/prune <merged|errored>", "Remove merged PR issue bundles or errored records from active state."],
+        ["/prune [resolved|errored]", "Remove completed or killed records unless unresolved work requires retention."],
         ["/recount", "Compact project, issue, worker, and question IDs after records are removed."],
         ["/clear", "Reset persisted Meringue state and clear the visible logs."]
       ].freeze
@@ -355,7 +358,6 @@ module Meringue
         normalized_state_changed = persist_normalized_state_if_changed
         recovered_worker_results = recover_worker_reservations
         recovered_results = recover_unapplied_head_results
-        prune_result = prune_killed_records
         agents = synchronized_state do
           normalized_state.fetch("agents").select { |agent| reconcile_candidate?(agent) }.map { |agent| deep_copy(agent) }
         end
@@ -366,7 +368,6 @@ module Meringue
         changed_count += recovered_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += recovered_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += 1 if normalized_state_changed
-        changed_count += 1 if prune_result.fetch("changed", false)
         accepted_result(
           command_id,
           command_type,
@@ -375,14 +376,14 @@ module Meringue
           {
             "checked_count" => agents.length,
             "changed_count" => changed_count,
-            "pruned_issue_ids" => prune_result.fetch("removed_issue_ids", []),
-            "pruned_agent_ids" => prune_result.fetch("removed_agent_ids", []),
-            "pruned_project_ids" => prune_result.fetch("removed_project_ids", []),
+            "pruned_issue_ids" => [],
+            "pruned_agent_ids" => [],
+            "pruned_project_ids" => [],
             "recovered_worker_results" => recovered_worker_results,
             "recovered_head_results" => recovered_results,
             "poll_results" => applied_results
           },
-          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
+          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
         )
       rescue StandardError => e
         error = error_payload(e)
@@ -507,44 +508,6 @@ module Meringue
         else
           target_id = result.is_a?(Hash) ? result["id"] : nil
           target_id ? ["  target: #{target_id}"] : []
-        end
-      end
-
-      def prune_killed_records
-        synchronized_state do
-          state = normalized_state
-          killed_project_ids = state.fetch("projects").select { |project| project.fetch("status", nil) == "killed" }.map { |project| project.fetch("id") }
-          killed_issue_ids = state.fetch("issues").select { |issue| issue.fetch("status", nil) == "killed" }.map { |issue| issue.fetch("id") }
-          killed_agent_ids = state.fetch("agents").select { |agent| agent.fetch("status", nil) == "killed" }.map { |agent| agent.fetch("id") }
-          if killed_project_ids.empty? && killed_issue_ids.empty? && killed_agent_ids.empty?
-            return {
-              "changed" => false,
-              "removed_issue_ids" => [],
-              "removed_agent_ids" => [],
-              "removed_standalone_agent_ids" => [],
-              "removed_project_ids" => [],
-              "log_entry_ids" => []
-            }
-          end
-
-          now = timestamp
-          prune_result = remove_issue_bundles_and_agents!(
-            state,
-            issue_ids: killed_issue_ids,
-            project_ids: killed_project_ids,
-            extra_agent_ids: killed_agent_ids,
-            reason: "killed",
-            now: now,
-            remove_empty_projects: false
-          )
-          removed_project_ids = prune_result.fetch("removed_project_ids", [])
-          touch_state!(state, now)
-          store.save(state)
-          prune_result.merge(
-            "changed" => true,
-            "removed_project_ids" => removed_project_ids,
-            "log_entry_ids" => []
-          )
         end
       end
 
@@ -751,7 +714,6 @@ module Meringue
         end
 
         result = deep_copy(target)
-        removal = remove_killed_target_records!(state, target_id.to_s, killed_agent_ids, now)
 
         log_ids = append_log(
           state,
@@ -761,41 +723,13 @@ module Meringue
           message: "Killed #{target_id}.",
           details: {
             "target_id" => target_id.to_s,
-            "killed_agent_ids" => killed_agent_ids,
-            "removed_issue_ids" => removal.fetch("removed_issue_ids", []),
-            "removed_agent_ids" => removal.fetch("removed_agent_ids", []),
-            "removed_project_ids" => removal.fetch("removed_project_ids", [])
+            "killed_agent_ids" => killed_agent_ids
           }
         )
         touch_state!(state, now)
         store.save(state)
 
         accepted_result(command_id, command_type, target_id.to_s, "Killed #{target_id}.", result, log_ids)
-      end
-
-      # Killed records are removed from state right away so projects, issues, and agents all
-      # vanish from the AgentTree the same way instead of lingering with a `killed` status until
-      # the next reconciliation pass prunes them.
-      def remove_killed_target_records!(state, target_id, killed_agent_ids, now)
-        issue_ids = []
-        project_ids = []
-        if find_agent(state, target_id).nil?
-          if (issue = find_issue(state, target_id))
-            issue_ids << issue.fetch("id")
-          elsif (project = find_project(state, target_id))
-            project_ids << project.fetch("id")
-          end
-        end
-
-        remove_issue_bundles_and_agents!(
-          state,
-          issue_ids: issue_ids,
-          project_ids: project_ids,
-          extra_agent_ids: killed_agent_ids,
-          reason: "killed",
-          now: now,
-          remove_empty_projects: false
-        )
       end
 
       def spawn_head(command_id, command_type, payload)
@@ -1122,16 +1056,16 @@ module Meringue
       end
 
       def prune(command_id, command_type, payload)
-        selector = value_at(payload, "selector", "Selector", "kind", "status")
-        return rejected_result(command_id, command_type, "Prune selector is required.", ["selector is required: merged or errored"]) if blank?(selector)
+        selector = value_at(payload, "selector", "Selector", "kind", "status").to_s.downcase
+        selector = "resolved" if blank?(selector)
 
-        case selector.to_s.downcase
-        when "merged"
-          prune_merged(command_id, command_type)
+        case selector
+        when "resolved", "completed", "merged"
+          prune_resolved(command_id, command_type, requested_selector: selector)
         when "errored"
           prune_errored(command_id, command_type)
         else
-          rejected_result(command_id, command_type, "Unknown prune selector: #{selector}", ["supported selectors: merged, errored"])
+          rejected_result(command_id, command_type, "Unknown prune selector: #{selector}", ["supported selectors: resolved, errored"])
         end
       end
 
@@ -1183,36 +1117,51 @@ module Meringue
         )
       end
 
-      def prune_merged(command_id, command_type)
+      def prune_resolved(command_id, command_type, requested_selector: "resolved")
         state = normalized_state
         delivery_refreshes = refresh_worker_delivery_pull_requests!(state)
-        worker_checks = merged_pr_worker_checks(state)
-        issue_decisions = merged_pr_issue_decisions(state, worker_checks)
-        issue_ids = issue_decisions.select { |decision| decision.fetch("prunable", false) }.map { |decision| decision.fetch("issue_id") }
+        pull_request_checks = prune_pull_request_checks(state)
+        issue_decisions = resolved_issue_prune_decisions(state, pull_request_checks)
+        project_decisions = resolved_project_prune_decisions(state, issue_decisions)
+        removable_project_ids = project_decisions.select { |decision| decision.fetch("prunable", false) }.map { |decision| decision.fetch("project_id") }
+        removable_issue_ids = resolved_issue_prune_roots(issue_decisions, removable_project_ids)
         now = timestamp
-        prune_result = remove_issue_bundles_and_agents!(state, issue_ids: issue_ids, extra_agent_ids: [], reason: "pull_request_merged", now: now)
-        checked_urls = worker_checks.flat_map { |check| check.fetch("statuses", []).map { |status| status.fetch("url", nil) } }.compact.uniq
-        skipped_urls = issue_decisions.reject { |decision| decision.fetch("prunable", false) }.flat_map { |decision| decision.fetch("pr_urls", []) }.uniq
-
+        prune_result = remove_issue_bundles_and_agents!(
+          state,
+          issue_ids: removable_issue_ids,
+          project_ids: removable_project_ids,
+          extra_agent_ids: [],
+          reason: "resolved",
+          now: now,
+          remove_empty_projects: false
+        )
+        checked_urls = pull_request_checks.flat_map { |check| check.fetch("statuses", []).map { |status| status.fetch("url", nil) } }.compact.uniq
+        blocked_urls = issue_decisions.flat_map do |decision|
+          decision.fetch("pull_request_blockers", []).map { |status| status.fetch("url", nil) }
+        end.compact.uniq
+        message = "Pruned #{prune_result.fetch("removed_issue_ids").length} resolved issue#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"} and #{prune_result.fetch("removed_project_ids").length} project#{prune_result.fetch("removed_project_ids").length == 1 ? "" : "s"}."
+        details = prune_result.merge(
+          "selector" => "resolved",
+          "requested_selector" => requested_selector,
+          "checked_pr_urls" => checked_urls,
+          "blocked_pr_urls" => blocked_urls,
+          "pull_request_checks" => pull_request_checks,
+          "issue_decisions" => issue_decisions,
+          "project_decisions" => project_decisions,
+          "delivery_pull_request_refreshes" => delivery_refreshes
+        )
         log_ids = append_log(
           state,
           source_type: "kernel",
           source_id: nil,
           level: "info",
-          message: "Pruned #{prune_result.fetch("removed_issue_ids").length} merged issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"}.",
-          details: prune_result.merge(
-            "selector" => "merged",
-            "checked_pr_urls" => checked_urls,
-            "skipped_pr_urls" => skipped_urls,
-            "worker_checks" => worker_checks,
-            "issue_decisions" => issue_decisions,
-            "delivery_pull_request_refreshes" => delivery_refreshes
-          )
+          message: message,
+          details: details
         )
         touch_state!(state, now)
         store.save(state)
 
-        accepted_result(command_id, command_type, nil, "Pruned #{prune_result.fetch("removed_issue_ids").length} merged issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"}.", prune_result.merge("checked_pr_urls" => checked_urls, "skipped_pr_urls" => skipped_urls, "issue_decisions" => issue_decisions, "delivery_pull_request_refreshes" => delivery_refreshes), log_ids)
+        accepted_result(command_id, command_type, nil, message, details, log_ids)
       end
 
       def prune_errored(command_id, command_type)
@@ -1276,52 +1225,101 @@ module Meringue
         end
       end
 
-      def merged_pr_worker_checks(state)
+      def prune_pull_request_checks(state)
         workers_by_issue = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }.group_by { |worker| worker.fetch("issue_id", nil) }
         state.fetch("issues").filter_map do |issue|
           urls = (issue_pr_urls(issue) + workers_by_issue.fetch(issue.fetch("id", nil), []).flat_map { |worker| worker_legacy_pr_urls(worker) }).uniq
           next if urls.empty?
 
-          statuses = urls.map { |url| pull_request_status(url) }
           {
             "issue_id" => issue.fetch("id", nil),
             "pr_urls" => urls,
-            "statuses" => statuses,
-            "merged" => statuses.any? { |status| status.fetch("state", nil) == "merged" }
+            "statuses" => urls.map { |url| pull_request_status(url) }
           }
         end
       end
 
-      def merged_pr_issue_decisions(state, worker_checks)
-        checks_by_issue = worker_checks.group_by { |check| check.fetch("issue_id", nil) }
-        checks_by_issue.filter_map do |issue_id, checks|
-          next if blank?(issue_id)
-          next unless find_issue(state, issue_id)
-
-          workers = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" && agent.fetch("issue_id", nil) == issue_id }
-          statuses = checks.flat_map { |check| check.fetch("statuses", []) }
-          active_worker_ids = workers.select { |worker| prune_blocking_worker_status?(worker.fetch("status", nil)) }.map { |worker| worker.fetch("id", nil) }.compact
-          non_merged_statuses = statuses.reject { |status| %w[merged closed].include?(status.fetch("state", nil).to_s) }
-          merged = statuses.any? { |status| status.fetch("state", nil) == "merged" }
+      def resolved_issue_prune_decisions(state, pull_request_checks)
+        checks_by_issue = pull_request_checks.to_h { |check| [check.fetch("issue_id", nil), check] }
+        state.fetch("issues").map do |issue|
+          subtree_ids = issue_subtree_ids(state, issue.fetch("id"))
+          subtree_issues = state.fetch("issues").select { |candidate| subtree_ids.include?(candidate.fetch("id", nil)) }
+          workers = state.fetch("agents").select do |agent|
+            agent.fetch("type", nil) == "worker" && subtree_ids.include?(agent.fetch("issue_id", nil))
+          end
+          blocking_workers = workers.select { |worker| PRUNE_BLOCKING_WORKER_STATUSES.include?(worker.fetch("status", nil).to_s) }
+          open_questions = state.fetch("questions").select do |question|
+            question.fetch("status", nil) == "open" && subtree_ids.include?(question.fetch("issue_id", nil))
+          end
+          statuses = subtree_ids.flat_map { |issue_id| Array(checks_by_issue.dig(issue_id, "statuses")) }
+          pull_request_blockers = statuses.reject do |status|
+            PRUNE_SETTLED_PULL_REQUEST_STATES.include?(status.fetch("state", nil).to_s)
+          end
+          nonterminal_issue_ids = subtree_issues.reject do |candidate|
+            PRUNE_ELIGIBLE_STATUSES.include?(candidate.fetch("status", nil).to_s)
+          end.map { |candidate| candidate.fetch("id") }
           blockers = []
-          blockers << "active_workers" if active_worker_ids.any?
-          blockers << "non_merged_pull_requests" if non_merged_statuses.any?
-          blockers << "no_merged_pull_request" unless merged
+          blockers << "nonterminal_issues" if nonterminal_issue_ids.any?
+          blockers << "unresolved_workers" if blocking_workers.any?
+          blockers << "open_questions" if open_questions.any?
+          blockers << "unsettled_pull_requests" if pull_request_blockers.any?
 
           {
-            "issue_id" => issue_id,
+            "issue_id" => issue.fetch("id"),
+            "project_id" => issue.fetch("project_id", nil),
+            "parent_issue_id" => issue.fetch("parent_issue_id", nil),
+            "subtree_issue_ids" => subtree_ids,
             "prunable" => blockers.empty?,
             "blockers" => blockers,
-            "active_worker_ids" => active_worker_ids,
-            "non_merged_pr_urls" => non_merged_statuses.map { |status| status.fetch("url", nil) }.compact.uniq,
-            "pr_urls" => checks.flat_map { |check| check.fetch("pr_urls", []) }.uniq,
-            "worker_ids" => workers.map { |worker| worker.fetch("id", nil) }.compact
+            "nonterminal_issue_ids" => nonterminal_issue_ids,
+            "blocking_worker_ids" => blocking_workers.map { |worker| worker.fetch("id", nil) }.compact,
+            "open_question_ids" => open_questions.map { |question| question.fetch("id", nil) }.compact,
+            "pull_request_blockers" => pull_request_blockers,
+            "pr_urls" => subtree_ids.flat_map { |issue_id| Array(checks_by_issue.dig(issue_id, "pr_urls")) }.uniq
           }
         end
       end
 
-      def prune_blocking_worker_status?(status)
-        %w[queued working idle blocked].include?(status.to_s)
+      def resolved_project_prune_decisions(state, issue_decisions)
+        decisions_by_issue = issue_decisions.to_h { |decision| [decision.fetch("issue_id"), decision] }
+        state.fetch("projects").map do |project|
+          issue_ids = state.fetch("issues").select { |issue| issue.fetch("project_id", nil) == project.fetch("id") }.map { |issue| issue.fetch("id") }
+          blocking_workers = state.fetch("agents").select do |agent|
+            agent.fetch("type", nil) == "worker" &&
+              agent.fetch("project_id", nil) == project.fetch("id") &&
+              PRUNE_BLOCKING_WORKER_STATUSES.include?(agent.fetch("status", nil).to_s)
+          end
+          open_questions = state.fetch("questions").select do |question|
+            question.fetch("status", nil) == "open" && question.fetch("project_id", nil) == project.fetch("id")
+          end
+          ineligible_issue_ids = issue_ids.reject { |issue_id| decisions_by_issue.fetch(issue_id).fetch("prunable", false) }
+          blockers = []
+          blockers << "project_not_completed_or_killed" unless PRUNE_ELIGIBLE_STATUSES.include?(project.fetch("status", nil).to_s)
+          blockers << "ineligible_issues" if ineligible_issue_ids.any?
+          blockers << "unresolved_workers" if blocking_workers.any?
+          blockers << "open_questions" if open_questions.any?
+
+          {
+            "project_id" => project.fetch("id"),
+            "issue_ids" => issue_ids,
+            "prunable" => blockers.empty?,
+            "blockers" => blockers,
+            "ineligible_issue_ids" => ineligible_issue_ids,
+            "blocking_worker_ids" => blocking_workers.map { |worker| worker.fetch("id", nil) }.compact,
+            "open_question_ids" => open_questions.map { |question| question.fetch("id", nil) }.compact
+          }
+        end
+      end
+
+      def resolved_issue_prune_roots(issue_decisions, removable_project_ids)
+        eligible_issue_ids = issue_decisions.select { |decision| decision.fetch("prunable", false) }.map { |decision| decision.fetch("issue_id") }
+        issue_decisions.filter_map do |decision|
+          next unless decision.fetch("prunable", false)
+          next if removable_project_ids.include?(decision.fetch("project_id", nil))
+          next if eligible_issue_ids.include?(decision.fetch("parent_issue_id", nil))
+
+          decision.fetch("issue_id")
+        end
       end
 
       def verified_worker_pull_request(agent:, project:, candidate_urls:)
