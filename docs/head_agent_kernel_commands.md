@@ -442,6 +442,8 @@ Example:
 
 Kills an agent, issue, or project subtree.
 
+Killing cascades downward and removes the killed records from active state, so agents, issues, and projects all disappear from the AgentTree the same way instead of lingering with a `killed` status.
+
 Payload:
 
 ```json
