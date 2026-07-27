@@ -44,6 +44,9 @@ module Meringue
       FOCUS_ORDER = %w[chat agent_tree logs].freeze
       AGENT_TREE_FORWARD_KEYS = (DOWN_KEYS + RIGHT_KEYS).freeze
       AGENT_TREE_BACK_KEYS = (UP_KEYS + LEFT_KEYS).freeze
+      # No slash suggestion is selected until the user navigates the list, so an untouched
+      # completion popup never steals Enter from the typed prompt.
+      NO_SLASH_SELECTION = -1
 
       def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default)
         @layout = layout
@@ -100,7 +103,7 @@ module Meringue
         @quit_requested = false
         input_buffer = +""
         input_cursor = 0
-        slash_suggestion_index = 0
+        slash_suggestion_index = NO_SLASH_SELECTION
         terminal.with_screen do
           terminal.raw do
             last_frame = nil
@@ -186,14 +189,14 @@ module Meringue
         return [input_buffer, input_cursor, slash_suggestion_index] unless key
 
         if paste_key?(key)
-          return insert_text(input_buffer, input_cursor, paste_text(key)) + [0]
+          return insert_text(input_buffer, input_cursor, paste_text(key)) + [NO_SLASH_SELECTION]
         end
 
         mouse_focus_result = handle_mouse_focus_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return mouse_focus_result if mouse_focus_result
 
         if plain_text_paste_key?(key)
-          return insert_text(input_buffer, input_cursor, key) + [0]
+          return insert_text(input_buffer, input_cursor, key) + [NO_SLASH_SELECTION]
         end
 
         if legacy_slash_navigation && slash_suggestion_navigation_key?(key) && slash_suggestions_active?(input_buffer)
@@ -220,39 +223,39 @@ module Meringue
         return focused_action_result if focused_action_result
 
         if keybinding?("newline", key)
-          return insert_text(input_buffer, input_cursor, "\n") + [0]
+          return insert_text(input_buffer, input_cursor, "\n") + [NO_SLASH_SELECTION]
         end
 
         if keybinding?("submit", key)
-          return [+"", 0, 0] if local_navigation_command_without_id?(input_buffer) && handle_local_navigation_command(input_buffer, state)
+          return [+"", 0, NO_SLASH_SELECTION] if local_navigation_command_without_id?(input_buffer) && handle_local_navigation_command(input_buffer, state)
 
           completion = safe_slash_completion(input_buffer, slash_suggestion_index, state)
-          return [completion, completion.chars.length, 0] if completion
+          return [completion, completion.chars.length, NO_SLASH_SELECTION] if completion
 
-          return [+"", 0, 0] if handle_local_navigation_command(input_buffer, state)
+          return [+"", 0, NO_SLASH_SELECTION] if handle_local_navigation_command(input_buffer, state)
 
           submit_prompt(input_buffer, on_submit)
-          return [+"", 0, 0]
+          return [+"", 0, NO_SLASH_SELECTION]
         end
 
         if ctrl_c_key?(key)
-          return [+"", 0, 0]
+          return [+"", 0, NO_SLASH_SELECTION]
         end
 
         if keybinding?("delete_backward", key)
-          return delete_backward(input_buffer, input_cursor) + [0]
+          return delete_backward(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
         end
 
         if keybinding?("delete_forward", key)
-          return delete_forward(input_buffer, input_cursor) + [0]
+          return delete_forward(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
         end
 
         if keybinding?("delete_word_backward", key)
-          return delete_backward_word(input_buffer, input_cursor) + [0]
+          return delete_backward_word(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
         end
 
         if keybinding?("delete_word_forward", key)
-          return delete_forward_word(input_buffer, input_cursor) + [0]
+          return delete_forward_word(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
         end
 
         new_cursor = cursor_after_navigation(key, input_buffer, input_cursor)
@@ -261,7 +264,7 @@ module Meringue
         return [input_buffer, input_cursor, slash_suggestion_index] unless printable_key?(key)
 
         @focused_pane = "chat"
-        insert_text(input_buffer, input_cursor, key) + [0]
+        insert_text(input_buffer, input_cursor, key) + [NO_SLASH_SELECTION]
       end
 
       def keybinding?(action, key)
@@ -286,16 +289,21 @@ module Meringue
 
       def handle_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
         records = slash_suggestion_records(input_buffer, state)
-        return [input_buffer, 0] if records.empty?
+        return [input_buffer, NO_SLASH_SELECTION] if records.empty?
 
         if keybinding?("suggestion_previous", key)
-          return [input_buffer, (slash_suggestion_index - 1) % records.length]
+          return [input_buffer, slash_selection?(slash_suggestion_index) ? (slash_suggestion_index - 1) % records.length : records.length - 1]
         end
         if keybinding?("suggestion_next", key)
-          return [input_buffer, (slash_suggestion_index + 1) % records.length]
+          return [input_buffer, slash_selection?(slash_suggestion_index) ? (slash_suggestion_index + 1) % records.length : 0]
         end
 
-        [slash_completion_for(records.fetch(slash_suggestion_index.clamp(0, records.length - 1))), 0]
+        selected_index = slash_selection?(slash_suggestion_index) ? slash_suggestion_index.clamp(0, records.length - 1) : 0
+        [slash_completion_for(records.fetch(selected_index)), NO_SLASH_SELECTION]
+      end
+
+      def slash_selection?(slash_suggestion_index)
+        slash_suggestion_index.to_i >= 0
       end
 
 
@@ -493,7 +501,7 @@ module Meringue
       def handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         if keybinding?("cancel_navigation", key)
           exit_agent_tree_navigation("Agent tree navigation cancelled.")
-          return [+"", 0, 0]
+          return [+"", 0, NO_SLASH_SELECTION]
         end
 
         if keybinding?("agent_select_previous", key)
@@ -508,12 +516,12 @@ module Meringue
 
         if agent_session_open_key?(key)
           open_selected_agent(state)
-          return [+"", 0, 0]
+          return [+"", 0, NO_SLASH_SELECTION]
         end
 
         if ENTER_KEYS.include?(key)
           open_selected_agent_pr(state)
-          return [+"", 0, 0]
+          return [+"", 0, NO_SLASH_SELECTION]
         end
 
         [input_buffer, input_cursor, slash_suggestion_index]
@@ -557,8 +565,8 @@ module Meringue
           Keybindings (from [tui.keybindings], with defaults for omitted actions):
           Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels jump mode.
           Focus: click a dashboard section to focus it; clicking an issue or worker in the agent tree selects it, and double-clicking opens its PR when available. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
-          Chat: #{keys_for("submit")} sends or applies the selected slash completion; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
-          Slash commands: type / for suggestions; #{keys_for("complete_suggestion")} completes; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} changes the selected suggestion.
+          Chat: #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
+          Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode.
           Jump mode: /jump starts agent navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent; Enter opens the selected agent PR when one is available; a opens the selected agent session; #{keys_for("cancel_navigation")} cancels.
         TEXT
@@ -826,6 +834,9 @@ module Meringue
 
       def safe_slash_completion(input_buffer, slash_suggestion_index, state)
         return nil unless slash_suggestions_active?(input_buffer)
+        # Nothing is highlighted until the user navigates the list, so Enter submits the prompt
+        # exactly as typed instead of applying the first suggestion.
+        return nil unless slash_selection?(slash_suggestion_index)
 
         records = slash_suggestion_records(input_buffer, state)
         return nil if records.empty?
@@ -836,9 +847,18 @@ module Meringue
         appends_space = record.fetch("append_space", record.fetch("requires_arguments", false))
 
         return nil if stripped.casecmp?(completion) && !appends_space
-        return nil unless completion.downcase.start_with?(stripped.downcase) || stripped == "/"
+        unless argument_suggestion_record?(record)
+          return nil unless completion.downcase.start_with?(stripped.downcase) || stripped == "/"
+        end
 
         slash_completion_for(record)
+      end
+
+      # Argument suggestions (ids for /kill, /prompt, /jump, and friends) are selected from a
+      # list, so the highlighted entry should always be inserted into the input buffer even when
+      # the typed query only matches the middle of the id.
+      def argument_suggestion_record?(record)
+        record.fetch("kind", "command") != "command"
       end
 
       def slash_suggestions_active?(input_buffer)
@@ -1117,7 +1137,7 @@ module Meringue
         has_workers ? "workers running" : nil
       end
 
-      def compose_state(state_provider, input_buffer, slash_suggestion_index = 0, input_cursor = nil)
+      def compose_state(state_provider, input_buffer, slash_suggestion_index = NO_SLASH_SELECTION, input_cursor = nil)
         state = state_provider.call || State::Models.empty_state
         sync_state_logs!(state)
         if @agent_tree_navigation_active
@@ -1281,7 +1301,7 @@ module Meringue
         }.compact
       end
 
-      def chat_snapshot(input_buffer, slash_suggestion_index = 0, input_cursor = nil)
+      def chat_snapshot(input_buffer, slash_suggestion_index = NO_SLASH_SELECTION, input_cursor = nil)
         @chat_mutex.synchronize do
           {
             "messages" => @messages.map(&:dup),

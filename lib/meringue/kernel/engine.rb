@@ -750,19 +750,52 @@ module Meringue
           kill_session_safely(session_ref_from_agent(agent), agent: agent) if present_string(agent.fetch("harness", nil))
         end
 
+        result = deep_copy(target)
+        removal = remove_killed_target_records!(state, target_id.to_s, killed_agent_ids, now)
+
         log_ids = append_log(
           state,
           source_type: "kernel",
           source_id: target_id.to_s,
           level: "info",
           message: "Killed #{target_id}.",
-          details: { "target_id" => target_id.to_s, "killed_agent_ids" => killed_agent_ids }
+          details: {
+            "target_id" => target_id.to_s,
+            "killed_agent_ids" => killed_agent_ids,
+            "removed_issue_ids" => removal.fetch("removed_issue_ids", []),
+            "removed_agent_ids" => removal.fetch("removed_agent_ids", []),
+            "removed_project_ids" => removal.fetch("removed_project_ids", [])
+          }
         )
         touch_state!(state, now)
         store.save(state)
 
-        result = find_agent(state, target_id) || find_issue(state, target_id) || find_project(state, target_id)
         accepted_result(command_id, command_type, target_id.to_s, "Killed #{target_id}.", result, log_ids)
+      end
+
+      # Killed records are removed from state right away so projects, issues, and agents all
+      # vanish from the AgentTree the same way instead of lingering with a `killed` status until
+      # the next reconciliation pass prunes them.
+      def remove_killed_target_records!(state, target_id, killed_agent_ids, now)
+        issue_ids = []
+        project_ids = []
+        if find_agent(state, target_id).nil?
+          if (issue = find_issue(state, target_id))
+            issue_ids << issue.fetch("id")
+          elsif (project = find_project(state, target_id))
+            project_ids << project.fetch("id")
+          end
+        end
+
+        remove_issue_bundles_and_agents!(
+          state,
+          issue_ids: issue_ids,
+          project_ids: project_ids,
+          extra_agent_ids: killed_agent_ids,
+          reason: "killed",
+          now: now,
+          remove_empty_projects: false
+        )
       end
 
       def spawn_head(command_id, command_type, payload)
