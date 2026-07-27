@@ -139,6 +139,72 @@ module Meringue
         synchronized_state { store.load }
       end
 
+      # Opens a read-only harness-neutral transcript handle. The handle cannot
+      # attach, detach, signal, or kill the managed process.
+      def open_agent_session_view(agent_id)
+        agent = synchronized_state do
+          candidate = find_agent(normalized_state, agent_id.to_s)
+          raise ArgumentError, "Agent #{agent_id} does not exist." unless candidate
+          raise ArgumentError, "Agent #{agent_id} is not a worker." unless candidate.fetch("type", nil) == "worker"
+
+          deep_copy(candidate)
+        end
+        client = harness_client_for_agent(agent)
+        client.open_session_view(agent_session_ref(agent))
+      end
+
+      # Abort is a turn-level operation, unlike Kill. It preserves the harness
+      # process/session and lets reconciliation observe the resulting settled
+      # state. This is intentionally not a general process-control API.
+      def cancel_agent_turn(agent_id)
+        agent = synchronized_state do
+          state = normalized_state
+          candidate = find_agent(state, agent_id.to_s)
+          return rejected_result(nil, "CancelAgentTurn", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless candidate
+          return rejected_result(nil, "CancelAgentTurn", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless candidate.fetch("type", nil) == "worker"
+          return rejected_result(nil, "CancelAgentTurn", "Agent #{agent_id} is not currently working.", ["agent_not_working"]) unless candidate.fetch("status", nil) == "working"
+
+          deep_copy(candidate)
+        end
+
+        client = harness_client_for_agent(agent)
+        session_ref = client.abort_session(agent_session_ref(agent))
+
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, agent.fetch("id"))
+          return rejected_result(nil, "CancelAgentTurn", "Agent #{agent.fetch("id")} no longer exists.", ["agent_not_found"]) unless current
+
+          now = timestamp
+          merge_session_ref_into_agent!(current, session_ref)
+          unless TERMINAL_AGENT_STATUSES.include?(current.fetch("status", nil))
+            current["status"] = session_ref.fetch("is_streaming", false) ? "working" : "idle"
+            current["updated_at"] = now
+            current["harness_metadata"] = (current.fetch("harness_metadata", {}) || {}).merge(
+              "turn_cancelled_at" => now,
+              "is_streaming" => session_ref.fetch("is_streaming", false)
+            )
+            refresh_worker_parent_statuses!(state, current, now)
+          end
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: current.fetch("id"),
+            level: "warning",
+            message: "Cancelled the current turn for worker #{current.fetch("id")} without terminating its harness session.",
+            details: { "agent_id" => current.fetch("id"), "session_preserved" => true }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(nil, "CancelAgentTurn", current.fetch("id"), "Cancelled the current turn for worker #{current.fetch("id")}.", current, log_ids)
+        end
+      rescue StandardError => e
+        synchronized_state do
+          error = error_payload(e)
+          failed_result(nil, "CancelAgentTurn", "Harness failed to cancel agent #{agent_id}: #{error.fetch("message")}", [error.fetch("class"), error.fetch("message")])
+        end
+      end
+
       def apply(command)
         normalized = normalize_command(command)
         command_type = normalized.fetch("type", nil)
