@@ -442,7 +442,7 @@ Example:
 
 Kills an agent, issue, or project subtree.
 
-Killing cascades downward and removes the killed records from active state, so agents, issues, and projects all disappear from the AgentTree the same way instead of lingering with a `killed` status.
+Killing is an immediate stop-and-remove operation. It cascades lifecycle state downward, stops attached harness sessions, and removes the worker or target subtree from active state in the same command, so killed records do not linger in the AgentTree. `/prune` remains a separate command for cleaning up eligible completed records.
 
 Payload:
 
@@ -466,23 +466,24 @@ Payload:
 
 ```json
 {
-  "selector": "merged"
+  "selector": "resolved"
 }
 ```
 
-Supported selectors:
+The selector is optional and defaults to `resolved`. Supported selectors:
 
 ```txt
-merged, errored
+resolved, errored
 ```
 
-- `merged` checks verified worker delivery PRs and prunes only issue bundles with at least one confirmed merged PR, no active workers, and no tracked delivery PRs that are still open or unknown. Closed-without-merge PRs are ignored as terminal non-deliveries, but do not satisfy the required merged PR. Worker output URLs are candidates only; Meringue normally tracks a delivery PR only when its GitHub base repo matches the project remote and its head branch matches the worker delivery branch. As a legacy repair path for older records that predate real worker worktrees, prune may promote a single merged same-repository candidate PR from a completed worker when no delivery branch was persisted.
-- `errored` prunes errored issue bundles that have no active workers, plus standalone errored heads.
+- `resolved` prunes completed or killed issues by default; no merged PR is required. An issue is retained when its subtree contains a nonterminal issue, a `working`, `blocked`, or `errored` worker, an open question, or an attached PR that is open (including a draft) or whose status cannot be resolved. Merged and closed-without-merge PRs are settled and do not block pruning. A completed or killed project is removed only when all of its contained issues are eligible and no project-level unresolved worker or question remains.
+- `errored` preserves the explicit legacy cleanup for errored issue bundles that have no active workers, plus standalone errored heads.
+- `completed` and the former `merged` selector remain accepted as compatibility aliases for `resolved`.
 
 Example:
 
 ```json
-{ "type": "Prune", "payload": { "selector": "merged" } }
+{ "type": "Prune", "payload": {} }
 ```
 
 ### ClearState

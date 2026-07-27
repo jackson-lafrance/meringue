@@ -24,7 +24,7 @@ module Meringue
         ["/questions", "List questions and their statuses."],
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
-        ["/prune <merged|errored>", "Remove merged PR issue bundles or errored records from active state."],
+        ["/prune [resolved|errored]", "Remove completed or killed records unless unresolved work requires retention."],
         ["/recount", "Compact project, issue, worker, and question IDs after records are removed."],
         ["/clear", "Reset persisted Meringue state and clear the visible logs. Dev/debug helper."]
       ].freeze
@@ -167,7 +167,7 @@ module Meringue
       def self.prune_selector_suggestion_records(context)
         query = context.fetch("query", "").to_s.downcase
         [
-          ["merged", "Remove issue bundles whose delivery PRs are merged."],
+          ["resolved", "Remove eligible completed or killed issue and project records."],
           ["errored", "Remove errored issue bundles and standalone errored agents."]
         ].filter_map.with_index do |(selector, description), index|
           next unless query.empty? || selector.start_with?(query)
@@ -374,10 +374,12 @@ module Meringue
 
       def parse_prune(arguments)
         tokens = split_arguments(arguments)
-        selector = tokens[0]
-        return invalid("Usage: /prune <merged|errored>") unless %w[merged errored].include?(selector.to_s.downcase)
+        return invalid("Usage: /prune [resolved|errored]") if tokens.length > 1
 
-        kernel_command("Prune", "selector" => selector.to_s.downcase)
+        selector = tokens[0]
+        return invalid("Usage: /prune [resolved|errored]") unless selector.nil? || %w[resolved completed merged errored].include?(selector.downcase)
+
+        kernel_command("Prune", "selector" => selector&.downcase)
       end
 
       def parse_recount(arguments)
