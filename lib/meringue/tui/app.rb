@@ -113,7 +113,7 @@ module Meringue
               @last_render_width = width
               @last_render_height = height
               current_state = compose_state(state_provider, input_buffer, slash_suggestion_index, input_cursor)
-              frame = render(current_state, width: width, height: height, color: true)
+              frame = render(current_state, width: width, height: height, color: color_output?)
               if frame != last_frame
                 terminal.write_frame(frame)
                 last_frame = frame
@@ -147,6 +147,12 @@ module Meringue
       def render_once(state)
         out.puts render(state, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, color: false)
         0
+      end
+
+      # Honor the NO_COLOR convention. Icons, agent id badges, and the agent
+      # gutter marker keep log lines separable without any color.
+      def color_output?
+        ENV.fetch("NO_COLOR", "").to_s.empty?
       end
 
       def quit_key?(key, input_buffer)

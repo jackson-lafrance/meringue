@@ -162,6 +162,17 @@ Useful slash commands inside the TUI include:
 
 See `docs/recount.md` for the renumbering, cross-reference, and active-session rules. See `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
 
+### Reading the logs pane
+
+Log rows are color coded so agent output is easy to separate from kernel and command logs:
+
+- `◆ head H1` — a head agent, bold, in a color derived from its id.
+- `✦ worker P1-I1-W1` — a worker, in a color derived from its id.
+- `▪ meringue` — kernel, command, and system logs, in the theme accent color.
+- `● you` — your own prompts.
+
+Agent body lines are marked with a colored `▌` gutter in that agent's color; kernel and user lines stay indented with no gutter. Log levels still render separately as `· warn` / `· err` / `· cmd` next to the row header, so level and identity never share a color. Agent colors come from the active colorscheme's agent palette, so `/theme <name>` restyles them too. Set `NO_COLOR=1` to disable color; the icons, `head`/`worker` badges, agent ids, and gutter marker keep the rows distinguishable.
+
 ## Configuration and state
 
 Default paths:
