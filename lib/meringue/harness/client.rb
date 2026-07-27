@@ -30,6 +30,25 @@ module Meringue
       def attach_session(session_ref)
         raise NotImplementedError, "harness clients must implement #attach_session"
       end
+
+      # Returns a read-only, harness-neutral view. Managed prompting and
+      # cancellation intentionally remain outside this handle so callers cannot
+      # gain process attach/detach/kill controls through the UI integration.
+      def open_session_view(session_ref)
+        harness = if respond_to?(:harness_name)
+                    harness_name
+                  else
+                    session_ref["harness"] || session_ref[:harness] || "unknown"
+                  end
+        SessionView::Handle.new(
+          snapshot_loader: lambda {
+            SessionView.unavailable_snapshot(
+              harness: harness,
+              message: "#{harness} does not provide a native managed session view."
+            )
+          }
+        )
+      end
     end
   end
 end
