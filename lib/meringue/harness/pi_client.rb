@@ -158,6 +158,18 @@ module Meringue
           )
         end
 
+        if unmanaged_process_alive?(session_ref)
+          return session_ref.merge(
+            "harness" => "pi",
+            "is_streaming" => true,
+            "metadata" => metadata_with(
+              session_ref,
+              "transport_available" => false,
+              "transport_note" => "The saved Pi process is alive, but this Meringue instance does not own its RPC pipes."
+            )
+          )
+        end
+
         build_session_ref_from_file(session_ref)
       end
 
@@ -170,11 +182,7 @@ module Meringue
 
       def open_session_view(session_ref)
         process = process_for(session_ref, required: false)
-        unless process
-          return SessionView::Handle.new(
-            snapshot_loader: -> { PiSessionView.history_snapshot(session_ref: session_ref, process_alive: unmanaged_process_alive?(session_ref)) }
-          )
-        end
+        return history_session_view(session_ref) unless process
 
         initial_cursor = process.event_cursor
         SessionView::Handle.new(
@@ -430,6 +438,33 @@ module Meringue
         Array(record.dig("message", "content")).any? do |part|
           part.is_a?(Hash) && part["type"] == "text" && present?(part["text"])
         end
+      end
+
+      def history_session_view(session_ref)
+        cache_mutex = Mutex.new
+        cached_signature = nil
+        cached_snapshot = nil
+        SessionView::Handle.new(
+          snapshot_loader: lambda {
+            path = session_ref["session_file"] || session_ref[:session_file]
+            signature = begin
+              stat = path && File.stat(File.expand_path(path.to_s))
+              [stat.size, stat.mtime.to_f]
+            rescue SystemCallError
+              [:missing]
+            end
+            process_alive = unmanaged_process_alive?(session_ref)
+            signature << process_alive
+            cache_mutex.synchronize do
+              if cached_snapshot && cached_signature == signature
+                next cached_snapshot
+              end
+
+              cached_signature = signature
+              cached_snapshot = PiSessionView.history_snapshot(session_ref: session_ref, process_alive: process_alive)
+            end
+          }
+        )
       end
 
       def unmanaged_process_alive?(session_ref)

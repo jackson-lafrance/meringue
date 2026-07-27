@@ -26,6 +26,8 @@ module Meringue
       attr_reader :engine
 
       class Session
+        SNAPSHOT_REFRESH_INTERVAL = 0.35
+
         attr_reader :agent_id
 
         def initialize(engine:, agent_id:, handle:)
@@ -33,11 +35,22 @@ module Meringue
           @agent_id = agent_id
           @handle = handle
           @mutex = Mutex.new
+          @condition = ConditionVariable.new
           @closed = false
+          @handle_generation = 0
+          @cached_snapshot = Harness::SessionView.unavailable_snapshot(
+            harness: "unknown",
+            availability: "unavailable",
+            message: "Connecting to the managed worker session…"
+          )
+          start_snapshot_refresher
         end
 
+        # Rendering must never wait on an RPC command or a large history file.
+        # A background refresher owns those reads and this method returns the
+        # most recent immutable-style copy immediately.
         def snapshot
-          current_handle.snapshot
+          @mutex.synchronize { deep_copy(@cached_snapshot) }
         end
 
         def poll_events(limit: nil)
@@ -50,12 +63,13 @@ module Meringue
           text = prompt.to_s
           return invalid_result("Prompt cannot be empty.", "prompt_required") if text.strip.empty?
 
-          selected_mode = mode.to_s == "auto" ? automatic_prompt_mode : mode.to_s
+          pre_prompt_snapshot = fresh_snapshot
+          selected_mode = mode.to_s == "auto" ? automatic_prompt_mode(pre_prompt_snapshot) : mode.to_s
           result = @engine.apply(
             "type" => "PromptAgent",
             "payload" => { "agent_id" => agent_id, "prompt" => text, "mode" => selected_mode }
           )
-          rebind_view if result.fetch("status", nil) == "accepted"
+          rebind_view if result.fetch("status", nil) == "accepted" && pre_prompt_snapshot.fetch("availability", nil) != "live"
           result.merge("session_prompt_mode" => selected_mode)
         rescue StandardError => e
           failed_result("Prompting agent #{agent_id} failed: #{e.message}", e)
@@ -70,13 +84,15 @@ module Meringue
         end
 
         def close
-          handle = @mutex.synchronize do
+          handle, refresher = @mutex.synchronize do
             return false if @closed
 
             @closed = true
-            @handle
+            @condition.broadcast
+            [@handle, @snapshot_refresher]
           end
           handle.close
+          refresher&.join(0.5)
           true
         end
 
@@ -94,10 +110,16 @@ module Meringue
           end
         end
 
-        def automatic_prompt_mode
-          current_handle.snapshot.fetch("session_state", "unknown") == "streaming" ? "steer" : "normal"
+        def fresh_snapshot
+          # Submission already runs off the render thread, so use a fresh state
+          # here instead of a potentially stale display snapshot.
+          current_handle.snapshot
         rescue StandardError
-          "normal"
+          {}
+        end
+
+        def automatic_prompt_mode(snapshot)
+          snapshot.fetch("session_state", "unknown") == "streaming" ? "steer" : "normal"
         end
 
         def rebind_view
@@ -110,9 +132,68 @@ module Meringue
 
             old = @handle
             @handle = replacement
+            @handle_generation += 1
+            @cached_snapshot = Harness::SessionView.unavailable_snapshot(
+              harness: "unknown",
+              availability: "unavailable",
+              message: "Refreshing the continued worker session…"
+            )
+            @condition.broadcast
             old
           end
           previous.close
+        end
+
+        def start_snapshot_refresher
+          @snapshot_refresher = Thread.new do
+            Thread.current.name = "meringue-worker-session-view" if Thread.current.respond_to?(:name=)
+            refresh_snapshots
+          end
+        end
+
+        def refresh_snapshots
+          loop do
+            handle, generation = @mutex.synchronize do
+              break if @closed
+
+              [@handle, @handle_generation]
+            end
+            begin
+              fresh = handle.snapshot
+              @mutex.synchronize do
+                @cached_snapshot = deep_copy(fresh) if !@closed && generation == @handle_generation
+              end
+            rescue StandardError => e
+              @mutex.synchronize do
+                if !@closed && generation == @handle_generation
+                  @cached_snapshot = Harness::SessionView.unavailable_snapshot(
+                    harness: @cached_snapshot.fetch("harness", "unknown"),
+                    availability: "unavailable",
+                    message: "Worker transcript refresh failed: #{e.message}"
+                  )
+                end
+              end
+            end
+
+            @mutex.synchronize do
+              break if @closed
+
+              @condition.wait(@mutex, SNAPSHOT_REFRESH_INTERVAL)
+            end
+          end
+        end
+
+        def deep_copy(value)
+          case value
+          when Hash
+            value.each_with_object({}) { |(key, child), copy| copy[key.to_s] = deep_copy(child) }
+          when Array
+            value.map { |child| deep_copy(child) }
+          when String
+            value.dup
+          else
+            value
+          end
         end
 
         def invalid_result(message, error)

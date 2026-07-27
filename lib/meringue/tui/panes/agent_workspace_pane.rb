@@ -284,7 +284,18 @@ module Meringue
           output.concat(wrapped_notice(notice, Style::MUTED, width)) unless notice.empty?
           output.concat(wrapped_notice(error, Style::ERROR, width)) unless error.empty?
           output << [["", Style::DIM]] unless output.empty? || lines.empty?
-          output.concat(lines.map { |line| [[line.to_s, Style::TEXT]] })
+          cursor = Array(terminal.fetch("cursor", []))
+          output.concat(lines.map.with_index do |line, index|
+            text = line.to_s
+            if index == cursor[0].to_i && cursor.length >= 2
+              column = cursor[1].to_i.clamp(0, text.length)
+              before = text[0...column]
+              after = text[column..].to_s
+              [[before, Style::TEXT], ["▏", Style::ACCENT_BOLD], [after, Style::TEXT]]
+            else
+              [[text, Style::TEXT]]
+            end
+          end)
           output.empty? ? [[["Terminal is starting…", Style::MUTED]]] : output
         end
 

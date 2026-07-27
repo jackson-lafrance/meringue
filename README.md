@@ -192,7 +192,7 @@ The config supports TUI colorschemes, TUI keybinding overrides, default harness 
 
 The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state.
 
-From the AgentTree, press `a` or double-click an agent to replace the dashboard with one focused workspace. `Ctrl-T` switches that workspace between the live agent and terminal; `Ctrl-E` opens its editor, `Ctrl-B` opens its PR, and `Esc` returns to the same AgentTree selection without stopping the worker. See `docs/keybindings.md` for the full interaction model.
+The dashboard chat remains the primary workflow: describe new goals naturally and let head agents route the work. When one issue needs sustained direction, iterative plan discussion, research, investigation, or closer transparency, press `a` or double-click its worker to open the optional focused workspace. It continues that worker's existing context and shows responses and tool activity directly. `Ctrl-T` switches between the live worker and its worktree terminal; `Ctrl-E` launches the configured external editor, `Ctrl-B` opens the verified delivery PR, and `Esc` returns to the same AgentTree selection without stopping the worker. See `docs/keybindings.md` for the full interaction model.
 
 ## Current architecture in one flow
 

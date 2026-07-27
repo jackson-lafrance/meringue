@@ -29,15 +29,6 @@ agent_select_next = ["j", "down", "right"]
 - Arrow keys, `PageUp` / `PageDown`, and mouse wheel: scroll the focused non-chat pane.
 - When the agent tree or logs pane is focused, `Enter` enters jump mode. Non-agent log entries are skipped during jump navigation.
 
-## Focused worker workspace
-
-- `Ctrl-T`: switch the focused workspace between the agent view and its terminal. The terminal fills the workspace instead of permanently sharing space with the agent view.
-- `Ctrl-E`: open the focused worker's assigned worktree with the configured external editor CLI.
-- While the terminal view is active, normal key input is sent to its PTY. The configured switch/editor actions remain reserved so focus can always return to Meringue.
-- Switching views keeps the shell alive; resizing Meringue resizes the PTY. Closing Meringue stops workspace shells without signaling managed agent processes.
-
-These actions are configured as `workspace_switch_view` and `workspace_open_editor`. Shell/editor commands and defaults are documented in `docs/config.md`.
-
 ## Chat input
 
 - `Enter`: send the prompt as typed, or apply the slash suggestion once one is selected.
@@ -62,10 +53,10 @@ These actions are configured as `workspace_switch_view` and `workspace_open_edit
 
 Start jump mode with `/jump` or by focusing the agent tree or logs pane and pressing `Enter`.
 
-- `Up` / `Down` / `Left` / `Right`: select an agent. In the logs pane, only the selected agent title is highlighted; non-agent events are not selected.
+- `Up` / `Down` / `Left` / `Right`: select an issue or agent. In the logs pane, only agent titles are selectable; non-agent events are skipped.
 - `Ctrl-B`: open the selected worker's verified delivery pull request. The PR remains easy to open when status refresh is temporarily unavailable.
 - `Enter`: open the selected agent's pull request when a PR is available.
-- `a`: open the selected agent's focused workspace. Selecting an issue opens its newest non-killed worker.
+- `a`: open the selected worker's focused workspace. Selecting an issue opens its newest non-killed worker; heads without a durable worker context stay on the dashboard.
 - `Esc`: cancel jump mode.
 
 ## Focused worker workspace
@@ -81,7 +72,7 @@ The workspace replaces the dashboard while open, so the live worker and terminal
 - `Ctrl-B`: open the verified delivery pull request when one exists.
 - `Esc`: return to the selected AgentTree item. This only changes TUI navigation; it never aborts, kills, detaches, or replaces the worker session.
 
-In terminal view, all other keys—including `Ctrl-C` and `Ctrl-D`—are sent to the isolated workspace terminal instead of the managed worker. Completed or unavailable sessions remain inspectable in worker view, and failures are shown in place without mutating the saved worker record.
+In terminal view, all keys except the reserved `Ctrl-T`, `Ctrl-E`, and `Ctrl-B` actions—including `Esc`, `Ctrl-C`, and `Ctrl-D`—are sent to the isolated workspace terminal instead of the managed worker. Switch back with `Ctrl-T` before using `Esc` to return to the AgentTree. The shell stays alive between views, follows terminal resizes, and is cleaned up without signaling the managed worker. Completed or unavailable sessions remain inspectable in worker view, and failures are shown in place without mutating the saved worker record.
 
 Agents with an open pull request are marked `↗` in the AgentTree. Worker selection and focused-workspace view state are restored from the state file after restart; selections for pruned workers are cleared safely.
 

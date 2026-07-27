@@ -180,6 +180,7 @@ module Meringue
       attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :workspace_controller, :agent_session_service, :log_store, :keybindings
 
       def shutdown_workspace_resources
+        persist_agent_workspace if @agent_workspace_active
         close_agent_workspace_session
         if workspace_controller&.respond_to?(:shutdown)
           workspace_controller.shutdown
@@ -436,7 +437,11 @@ module Meringue
         @focused_pane = pane
         if pane == "agent_tree"
           item_id = agent_tree_item_at_mouse_position(key, state)
-          handle_agent_tree_item_click(item_id, key, state) if item_id
+          opened = handle_agent_tree_item_click(item_id, key, state) if item_id
+          if opened
+            draft = @workspace_draft.to_s.dup
+            return [draft, draft.chars.length, NO_SLASH_SELECTION]
+          end
         else
           @last_worker_click = nil
           exit_agent_tree_navigation if @agent_tree_navigation_active && !%w[agent_tree logs].include?(pane)
@@ -473,7 +478,7 @@ module Meringue
       def handle_agent_tree_item_click(item_id, key, state)
         double_click = worker_double_click?(item_id, key)
         select_agent_tree_item(state, item_id)
-        open_agent_workspace_by_id(state, item_id) if double_click
+        double_click && open_agent_workspace_by_id(state, item_id)
       end
 
       def select_agent_tree_item(state, item_id)
@@ -593,6 +598,7 @@ module Meringue
         end
 
         if keybinding?("cancel_navigation", key)
+          @workspace_draft = input_buffer.to_s
           close_agent_workspace
           return [+"", 0, NO_SLASH_SELECTION]
         end
@@ -784,8 +790,9 @@ module Meringue
         end
 
         if agent_session_open_key?(key)
-          open_selected_agent(state)
-          return [+"", 0, NO_SLASH_SELECTION]
+          opened = open_selected_agent(state)
+          draft = opened ? @workspace_draft.to_s.dup : ""
+          return [draft, draft.chars.length, NO_SLASH_SELECTION]
         end
 
         if ENTER_KEYS.include?(key)
@@ -915,9 +922,10 @@ module Meringue
           return false
         end
 
+        restored_view = @agent_workspace_agent_id.to_s == agent.fetch("id").to_s ? @agent_workspace_view : "agent"
         @agent_workspace_active = true
         @agent_workspace_agent_id = agent.fetch("id")
-        @agent_workspace_view = "agent"
+        @agent_workspace_view = restored_view
         @agent_workspace_terminal_size = nil
         @agent_workspace_notice = nil
         @agent_workspace_error = nil
@@ -929,6 +937,7 @@ module Meringue
           apply_workspace_controller_result(workspace_controller.open_workspace(agent: agent, state: state))
         end
         open_agent_workspace_session(agent)
+        prepare_workspace_terminal(state) if @agent_workspace_view == "terminal"
         persist_agent_workspace
         true
       rescue StandardError => e
@@ -945,7 +954,7 @@ module Meringue
         @agent_workspace_session = agent_session_service.open(agent.fetch("id"))
       rescue StandardError => e
         @agent_workspace_session = nil
-        @agent_workspace_error = "Could not open live agent session: #{e.message}"
+        @agent_workspace_error = "Could not open the live worker session: #{e.message}"
       end
 
       def close_agent_workspace_session
@@ -1490,6 +1499,7 @@ module Meringue
       end
 
       def compose_state(state_provider, input_buffer, slash_suggestion_index = NO_SLASH_SELECTION, input_cursor = nil)
+        @workspace_draft = input_buffer.to_s if @agent_workspace_active
         state = state_provider.call || State::Models.empty_state
         sync_state_logs!(state)
         if @agent_tree_navigation_active
@@ -1548,6 +1558,8 @@ module Meringue
         return true if @agent_workspace_agent_id.to_s == worker.fetch("id").to_s
 
         @agent_workspace_agent_id = worker.fetch("id")
+        @agent_workspace_view = "agent"
+        @workspace_draft = ""
         persist_agent_workspace
         true
       end
@@ -1585,8 +1597,9 @@ module Meringue
                    reduce_agent_workspace_events(agent.fetch("id"), Array(polled["events"]))
                    snapshot.merge(
                      "events" => @chat_mutex.synchronize { @agent_workspace_events[agent.fetch("id")].map(&:dup) },
-                     "event_gap" => !!polled["gap"]
-                   )
+                     "event_gap" => !!polled["gap"],
+                     "warning" => polled["gap"] ? "Some transient live events expired; the transcript was refreshed from the managed session." : snapshot["warning"]
+                   ).compact
                  elsif workspace_controller&.respond_to?(:agent_snapshot)
                    workspace_controller.agent_snapshot(agent: agent, state: state)
                  elsif workspace_controller&.respond_to?(:snapshot)

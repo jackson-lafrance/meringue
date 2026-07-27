@@ -254,9 +254,9 @@ module Meringue
           Ctrl-B                    # open the selected worker's verified delivery PR
           Enter in jump mode        # open selected issue/agent PR when one is available
           a in jump mode            # open the selected agent's focused workspace
-          issue/agent double-click  # open that agent's focused workspace
-          Ctrl-T in workspace       # switch between the live agent and terminal
-          Esc in workspace          # return to AgentTree without stopping the worker
+          issue/worker double-click # open that worker's optional focused workspace
+          Ctrl-T in workspace       # switch between the live worker and worktree terminal
+          Esc in worker view        # return to AgentTree without stopping the worker
           Ctrl-C on an empty prompt # quit the TUI; Esc cancels jump mode
       HELP
     end

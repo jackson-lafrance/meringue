@@ -10,8 +10,6 @@ module Meringue
         "open_delivery_pr" => ["ctrl-b"],
         "focus_next" => ["tab", "ctrl-tab"],
         "focus_previous" => ["shift-tab"],
-        "workspace_switch_view" => ["ctrl-t"],
-        "workspace_open_editor" => ["ctrl-e"],
         "scroll_up" => ["up"],
         "scroll_down" => ["down"],
         "scroll_page_up" => ["page-up"],
@@ -48,8 +46,6 @@ module Meringue
         "open_delivery_pr" => "Open selected worker delivery PR",
         "focus_next" => "Focus next pane",
         "focus_previous" => "Focus previous pane",
-        "workspace_switch_view" => "Switch agent / terminal view",
-        "workspace_open_editor" => "Open worker workspace in editor",
         "scroll_up" => "Scroll up",
         "scroll_down" => "Scroll down",
         "scroll_page_up" => "Page up",
@@ -73,8 +69,8 @@ module Meringue
         "delete_word_forward" => "Delete next word",
         "agent_select_previous" => "Select previous agent",
         "agent_select_next" => "Select next agent",
-        "open_agent_workspace" => "Open focused agent workspace",
-        "workspace_switch_view" => "Switch agent / terminal view",
+        "open_agent_workspace" => "Open optional focused worker workspace",
+        "workspace_switch_view" => "Switch worker / worktree terminal view",
         "workspace_open_editor" => "Open workspace in configured editor",
         "workspace_open_pull_request" => "Open delivery pull request"
       }.freeze
