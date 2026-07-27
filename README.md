@@ -164,14 +164,18 @@ See `docs/recount.md` for the renumbering, cross-reference, and active-session r
 
 ### Reading the logs pane
 
-Log rows are color coded so agent output is easy to separate from kernel and command logs:
+Log rows use compact, color-coded headers so agent output is easy to separate from kernel and command logs:
 
-- `◆ head H1` — a head agent, bold, in a color derived from its id.
-- `✦ worker P1-I1-W1` — a worker, in a color derived from its id.
+- `◆ H1` — head-agent progress, bold, in a color derived from its id.
+- `✦ P1-I1-W1` — worker progress in that worker's stable color.
+- `✓ P1-I1-W1 · done` — a completed worker result.
+- `! P1-I1-W1 · warn/err` — an actionable warning or error.
 - `▪ meringue` — kernel, command, and system logs, in the theme accent color.
 - `● you` — your own prompts.
 
-Agent body lines are marked with a colored `▌` gutter in that agent's color; kernel and user lines stay indented with no gutter. Log levels still render separately as `· warn` / `· err` / `· cmd` next to the row header, so level and identity never share a color. Agent colors come from the active colorscheme's agent palette, so `/theme <name>` restyles them too. Set `NO_COLOR=1` to disable color; the icons, `head`/`worker` badges, agent ids, and gutter marker keep the rows distinguishable.
+The header owns the agent id and title; the body does not repeat an `<id> output:` label. Agent body lines use a colored `▌` gutter, while kernel and user lines keep a plain indent. ANSI sequences, common pasted terminal boxes, duplicate transcript headers, excess whitespace, and duplicate PR URLs are removed at render time without changing the original text stored in state. Agent colors come from the active colorscheme's agent palette, so `/theme <name>` restyles them too. Set `NO_COLOR=1` to disable color; icons, ids, status text, and the gutter keep rows distinguishable.
+
+See [`docs/agent-output.md`](docs/agent-output.md) for the Pi RPC-to-TUI rendering path and before/after examples.
 
 ## Configuration and state
 

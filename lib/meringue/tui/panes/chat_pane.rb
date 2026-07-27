@@ -9,10 +9,11 @@ module Meringue
         VISIBLE_SUGGESTION_LIMIT = 3
         HEAD_ICON = "◆"
         WORKER_ICON = "✦"
+        RESULT_ICON = "✓"
+        ERROR_ICON = "!"
         KERNEL_ICON = "▪"
         # Matches TUI::App::NO_SLASH_SELECTION: no suggestion is highlighted until the user navigates.
         NO_SLASH_SELECTION = -1
-        AGENT_ICON = "✦"
         USER_ICON = "●"
         AGENT_GUTTER = "▌ "
         PLAIN_GUTTER = "  "
@@ -33,12 +34,18 @@ module Meringue
           end
 
           selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
-          entries.flat_map.with_index do |entry, index|
+          entries.flat_map do |entry|
             gutter = gutter_segment(entry)
             lines = [role_line(entry, selected_agent_id: selected_agent_id)]
-            lines.concat(wrapped_text_lines(entry.fetch("text", ""), width: width, gutter: gutter))
+            lines.concat(
+              wrapped_text_lines(
+                entry.fetch("text", ""),
+                width: width,
+                gutter: gutter,
+                style: body_text_style(entry)
+              )
+            )
             lines << status_line(entry.fetch("status"), gutter) if entry.fetch("kind", nil) == "message" && entry.fetch("status", nil)
-            lines << spacer_line unless index == entries.length - 1
             lines
           end
         end
@@ -209,6 +216,7 @@ module Meringue
             "message" => entry.fetch("message", "").to_s,
             "status" => log_status(entry),
             "level" => entry.fetch("level", "info"),
+            "presentation" => log_presentation(entry),
             "agent" => agent_by_id(state, source_id),
             "ordinal" => index
           }
@@ -219,23 +227,23 @@ module Meringue
         end
 
         def worker_completion_text(entry)
-          source_id = entry.fetch("source_id", nil).to_s
-          return nil if source_id.empty?
-          return nil unless entry.fetch("source_type", nil).to_s == "worker"
-          return nil unless entry.fetch("message", "").to_s == "Worker #{source_id} completed."
+          return nil unless worker_completion_entry?(entry)
 
+          source_id = entry.fetch("source_id").to_s
           details = entry.fetch("details", {}) || {}
           details = {} unless details.is_a?(Hash)
           pr_urls = worker_completion_pr_urls(details)
-          output = user_facing_worker_output(details["last_assistant_text"], pr_urls: pr_urls)
-          lines = []
-          unless pr_urls.empty?
-            label = pr_urls.length == 1 ? "Pull request" : "Pull requests"
-            lines << "#{label} from #{source_id}:"
-            lines.concat(pr_urls.map { |url| "PR: #{url}" })
-          end
-          lines << ["#{source_id} output:", output].join("\n") unless output.empty?
-          lines.empty? ? nil : lines.join("\n")
+          output = AgentOutput.normalize(details["last_assistant_text"], source_id: source_id, pr_urls: pr_urls)
+          lines = pr_urls.map { |url| "PR  #{url}" }
+          lines << output unless output.empty?
+          lines.empty? ? "Completed." : lines.join("\n")
+        end
+
+        def worker_completion_entry?(entry)
+          source_id = entry.fetch("source_id", nil).to_s
+          !source_id.empty? &&
+            entry.fetch("source_type", nil).to_s == "worker" &&
+            entry.fetch("message", "").to_s == "Worker #{source_id} completed."
         end
 
         def worker_completion_pr_urls(details)
@@ -246,12 +254,12 @@ module Meringue
           delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }.compact.map(&:to_s).reject(&:empty?).uniq
         end
 
-        def user_facing_worker_output(text, pr_urls: [])
-          output = text.to_s.strip
-          return "" if output.empty?
+        def log_presentation(entry)
+          return "result" if worker_completion_entry?(entry)
+          return "error" if entry.fetch("level", nil).to_s == "error"
+          return "warning" if entry.fetch("level", nil).to_s == "warning"
 
-          pr_urls.each { |url| output = output.gsub(url.to_s, "").strip }
-          output.lines.map(&:rstrip).reject { |line| line.strip == "PR:" }.join("\n").gsub(/\n{3,}/, "\n\n").strip
+          "progress"
         end
 
         def entry_sort_key(entry)
@@ -279,6 +287,8 @@ module Meringue
         end
 
         def log_status(entry)
+          return "done" if worker_completion_entry?(entry)
+
           label = log_level(entry)
           return nil if label == "info"
 
@@ -310,8 +320,8 @@ module Meringue
             [entry_icon(entry), style],
             [" #{participant_label(entry)}", style]
           ]
-          segments.concat(log_level_segments(entry))
           segments.concat(agent_title_segments(entry, selected_agent_id: selected_agent_id))
+          segments.concat(log_level_segments(entry))
           segments
         end
 
@@ -352,6 +362,9 @@ module Meringue
         end
 
         def entry_icon(entry)
+          return ERROR_ICON if %w[error warning].include?(entry.fetch("presentation", nil))
+          return RESULT_ICON if entry.fetch("presentation", nil) == "result"
+
           case entry.fetch("role", "meringue")
           when "you" then USER_ICON
           when "agent" then agent_kind(entry) == "head" ? HEAD_ICON : WORKER_ICON
@@ -372,9 +385,7 @@ module Meringue
           agent_id = entry.fetch("source_id", nil).to_s
           return "agent" if agent_id.empty?
 
-          kind = agent_kind(entry)
-          label = kind.empty? ? "agent" : kind
-          "#{label} #{agent_id}"
+          agent_id
         end
 
         def agent_title_segments(entry, selected_agent_id: nil)
@@ -387,7 +398,7 @@ module Meringue
           return [] if text.strip.empty?
 
           selected = !selected_agent_id.to_s.empty? && entry.fetch("source_id", nil).to_s == selected_agent_id.to_s
-          [[" — ", Style::DIM], [text, selected ? Style::AGENT_TREE_SELECTED : Style::TITLE]]
+          [[" · ", Style::DIM], [text, selected ? Style::AGENT_TREE_SELECTED : Style::TITLE]]
         end
 
         def agent_title(agent)
@@ -407,6 +418,8 @@ module Meringue
         end
 
         def log_level_style(entry)
+          return Style::SUCCESS if entry.fetch("presentation", nil) == "result"
+
           case entry.fetch("level", nil)
           when "warning" then Style::LOG_WARNING
           when "error" then Style::LOG_ERROR
@@ -414,17 +427,18 @@ module Meringue
           end
         end
 
-        def timestamp(entry)
-          Time.iso8601(entry.fetch("timestamp")).strftime("%H:%M:%S")
-        rescue ArgumentError, KeyError, TypeError
-          "--:--:--"
+        def body_text_style(entry)
+          case entry.fetch("level", nil)
+          when "warning" then Style::WARNING
+          when "error" then Style::ERROR
+          else Style::TEXT
+          end
         end
 
-        def text_line(text, gutter = [PLAIN_GUTTER, Style::DIM])
-          [
-            gutter,
-            [text, Style::TEXT]
-          ]
+        def timestamp(entry)
+          Time.iso8601(entry.fetch("timestamp")).strftime("%H:%M")
+        rescue ArgumentError, KeyError, TypeError
+          "--:--:--"
         end
 
         def status_line(status, gutter = [PLAIN_GUTTER, Style::DIM])
@@ -473,11 +487,13 @@ module Meringue
           segments
         end
 
-        def wrapped_text_lines(text, width: nil, gutter: [PLAIN_GUTTER, Style::DIM])
+        def wrapped_text_lines(text, width: nil, gutter: [PLAIN_GUTTER, Style::DIM], style: Style::TEXT)
           content_width = width ? [width.to_i - 2, 1].max : nil
           text.to_s.split("\n", -1).flat_map do |line|
             wrap_text_line(line, content_width)
-          end.map { |line| text_line(line, gutter) }
+          end.map do |line|
+            line.empty? ? [["", style]] : [gutter, [line, style]]
+          end
         end
 
         def wrap_text_line(line, width)
@@ -574,10 +590,6 @@ module Meringue
 
           max_start = count - VISIBLE_SUGGESTION_LIMIT
           [selected_index - VISIBLE_SUGGESTION_LIMIT + 1, 0].max.clamp(0, max_start)
-        end
-
-        def spacer_line
-          [["", Style::DIM]]
         end
 
         def plain_text(line)

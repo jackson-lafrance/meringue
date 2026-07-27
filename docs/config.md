@@ -26,7 +26,7 @@ Supported colorschemes:
 - `catppuccin`
 - `kanagawa`
 
-Every colorscheme also defines an eight-color agent palette used to color agent rows in the logs pane. Each agent id is hashed to one palette slot, so the same head or worker always renders in the same color for a given theme. Heads render bold with a `◆` icon, workers render regular with `✦`, and kernel/command logs keep the theme accent with `▪`. Set `NO_COLOR=1` to render the TUI without color; icons, `head`/`worker` badges, and the `▌` gutter marker still separate agent output from kernel logs.
+Every colorscheme also defines an eight-color agent palette used to color agent rows in the logs pane. Each agent id is hashed to one palette slot, so the same head or worker always renders in the same color for a given theme. Heads use a bold `◆`, workers use `✦`, completed results use `✓`, actionable warnings/errors use `!`, and kernel/command logs keep the theme accent with `▪`. Set `NO_COLOR=1` to render the TUI without color; icons, explicit ids, status text, and the `▌` gutter still separate agent output from kernel logs.
 
 `color_scheme` is accepted as a compatibility alias for `colorscheme`. Running `/theme <name>` writes a single `colorscheme` value and removes the older `color_scheme` alias from the `[tui]` section.
 

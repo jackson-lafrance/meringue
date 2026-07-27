@@ -149,8 +149,8 @@ module Meringue
         0
       end
 
-      # Honor the NO_COLOR convention. Icons, agent id badges, and the agent
-      # gutter marker keep log lines separable without any color.
+      # Honor the NO_COLOR convention. Icons, explicit agent ids, statuses,
+      # and the gutter marker keep log lines separable without any color.
       def color_output?
         ENV.fetch("NO_COLOR", "").to_s.empty?
       end
@@ -1084,29 +1084,10 @@ module Meringue
       end
 
       def user_facing_worker_lines(agent_id:, pr_urls:, last_assistant_text:)
-        lines = []
-        unless pr_urls.empty?
-          label = pr_urls.length == 1 ? "Pull request" : "Pull requests"
-          lines << "#{label} from #{agent_id}:"
-          lines.concat(pr_urls.map { |url| "PR: #{url}" })
-        end
-
-        output = user_facing_agent_output(last_assistant_text, pr_urls: pr_urls)
-        unless output.empty?
-          lines << ["#{agent_id} output:", output].join("\n")
-        end
-
+        lines = Array(pr_urls).compact.map { |url| "PR  #{url}" }
+        output = AgentOutput.normalize(last_assistant_text, source_id: agent_id, pr_urls: pr_urls)
+        lines << output unless output.empty?
         lines
-      end
-
-      def user_facing_agent_output(text, pr_urls: [])
-        output = text.to_s.strip
-        return "" if output.empty?
-
-        Array(pr_urls).compact.each do |url|
-          output = output.gsub(url.to_s, "").strip
-        end
-        output.gsub(/\n{3,}/, "\n\n").strip
       end
 
       def append_user_facing_line(message_id, line, status: nil)
