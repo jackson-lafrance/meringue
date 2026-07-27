@@ -23,8 +23,13 @@ module Meringue
         @mutex = Mutex.new
       end
 
+      # Saves publish a complete snapshot with an atomic rename, so readers can
+      # safely observe either the previous or next snapshot without waiting for
+      # serialization and disk I/O to finish. Keeping TUI reads off the writer
+      # mutex is important because worker provisioning checkpoints state several
+      # times while a completed head result is being applied.
       def load
-        @mutex.synchronize { load_unlocked }
+        load_unlocked
       end
 
       def compact!
