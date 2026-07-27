@@ -53,8 +53,8 @@ module Meringue
         "\e[#{codes.flatten.join(";")}m"
       end
 
-      # Deterministic FNV-1a hash so an agent keeps the same color across
-      # renders, restarts, and recounts without storing palette assignments.
+      # Deterministic FNV-1a hash so an unchanged agent id keeps the same color
+      # across renders and restarts without storing palette assignments.
       def agent_palette_index(agent_id)
         hash = 2166136261
         agent_id.to_s.each_byte do |byte|

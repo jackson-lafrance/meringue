@@ -236,8 +236,10 @@
       "source_type": "worker",
       "source_id": "P2-I1-W1",
       "level": "info",
-      "message": "Fake dotfiles worker completed successfully.",
-      "details": {}
+      "message": "Worker P2-I1-W1 completed.",
+      "details": {
+        "last_assistant_text": "\u001b[33m[00:05:00] ✦ agent P2-I1-W1 — Update vim plugin config\u001b[0m\nP2-I1-W1 output:\n╭──────── progress ────────╮\n│                          │\n│ Now updating the shared  │\n│ vim plugin configuration.│\n│                          │\n│ Replaced mini with oil.  │\n╰──────────────────────────╯"
+      }
     },
     {
       "id": "L3",
