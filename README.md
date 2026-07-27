@@ -190,7 +190,7 @@ Default paths:
 
 The config supports TUI colorschemes, TUI keybinding overrides, default harness selection, role-specific head/worker harnesses, and provider command overrides. See `docs/config.md` for the full reference.
 
-The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state.
+The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state. Durable logs retain the newest 500 entries so lifecycle history cannot grow without bound; see [`docs/log-retention.md`](docs/log-retention.md) for the measured rationale, compatibility behavior, and benchmark.
 
 The dashboard chat remains the primary workflow: describe new goals naturally and let head agents route the work. When one issue needs sustained direction, iterative plan discussion, research, investigation, or closer transparency, press `a` or double-click its worker to open the optional focused workspace. It continues that worker's existing context and shows responses and tool activity directly. `Ctrl-T` switches between the live worker and its worktree terminal; `Ctrl-E` launches the configured external editor, `Ctrl-B` opens the verified delivery PR, and `Esc` returns to the same AgentTree selection without stopping the worker. See `docs/keybindings.md` for the full interaction model.
 

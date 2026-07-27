@@ -36,8 +36,11 @@ module Meringue
         @mutex.synchronize do
           return false unless File.exist?(path)
 
-          state = read_state_unlocked
-          changed = Compactor.compact!(state)
+          state = JSON.parse(File.read(path))
+          previous_log_count = Array(state["logs"]).length
+          Models.ensure_state_shape!(state)
+          changed = state.fetch("logs").length != previous_log_count
+          changed = Compactor.compact!(state) || changed
           save_unlocked(state, preserve_log_buffer: false) if changed
           changed
         end
@@ -88,16 +91,18 @@ module Meringue
 
       def read_state_unlocked
         state = JSON.parse(File.read(path))
-        Compactor.compact!(state)
+        # Normalize first so legacy oversized histories are pruned before the
+        # deep string compactor visits entries that will not be retained.
         Models.ensure_state_shape!(state)
+        Compactor.compact!(state)
         state
       end
 
       def save_unlocked(state, preserve_log_buffer: true)
         FileUtils.mkdir_p(File.dirname(path))
         temp_path = "#{path}.tmp.#{$$}"
-        Compactor.compact!(state)
         Models.ensure_state_shape!(state)
+        Compactor.compact!(state)
         merge_persisted_log_buffer!(state) if preserve_log_buffer
 
         File.write(temp_path, JSON.pretty_generate(state) + "\n")
