@@ -36,7 +36,7 @@ module Meringue
           "view",
           url.to_s,
           "--json",
-          "state,mergedAt,url,headRefName,headRepository,headRepositoryOwner,isCrossRepository"
+          "state,mergedAt,url,isDraft,headRefName,headRepository,headRepositoryOwner,isCrossRepository"
         )
         return unknown_status(url, stderr, status.exitstatus) unless status.success?
 
@@ -48,6 +48,7 @@ module Meringue
           "state" => normalized_state,
           "merged_at" => data["mergedAt"],
           "raw_state" => data["state"],
+          "is_draft" => data["isDraft"],
           "head_branch" => data["headRefName"],
           "head_repository" => data.dig("headRepository", "nameWithOwner"),
           "head_repository_owner" => data.dig("headRepositoryOwner", "login"),
