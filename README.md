@@ -173,9 +173,11 @@ Log rows use compact, color-coded headers so agent output is easy to separate fr
 - `▪ meringue` — kernel, command, and system logs, in the theme accent color.
 - `● you` — your own prompts.
 
-The header owns the agent id and title; the body does not repeat an `<id> output:` label. Agent body lines use a colored `▌` gutter, while kernel and user lines keep a plain indent. ANSI sequences, common pasted terminal boxes, duplicate transcript headers, excess whitespace, and duplicate PR URLs are removed at render time without changing the original text stored in state. Agent colors come from the active colorscheme's agent palette, so `/theme <name>` restyles them too. Set `NO_COLOR=1` to disable color; icons, ids, status text, and the gutter keep rows distinguishable.
+The header owns the agent id and title; the body does not repeat an `<id> output:` label. Agent body lines use a colored `▌` gutter, while kernel and user lines keep a plain indent. Conversational head and worker output renders common Markdown—headings, emphasis, ordered/unordered/task lists, blockquotes, inline and fenced code, and links—with terminal-aware wrapping. Kernel/command rows and warnings/errors retain their semantic log presentation instead of being interpreted as chat Markdown.
 
-See [`docs/agent-output.md`](docs/agent-output.md) for the Pi RPC-to-TUI rendering path and before/after examples.
+ANSI sequences, control characters, common pasted terminal boxes, duplicate transcript headers, excess whitespace, and duplicate PR URLs are removed at render time without changing the original text stored in state. Styles are emitted as Canvas metadata rather than accepted from agent text. Agent colors come from the active colorscheme's deterministic identity palette, so `/theme <name>` restyles Markdown markers, gutters, and headers together. Set `NO_COLOR=1` to disable color; icons, ids, status text, gutters, Markdown block markers, and visible link targets keep the output usable.
+
+See [`docs/agent-output.md`](docs/agent-output.md) for the Pi RPC-to-TUI rendering path, Markdown behavior, safety constraints, and before/after examples.
 
 ## Configuration and state
 

@@ -37,9 +37,9 @@ module Meringue
         lines = reflow_box_text(lines) if boxed_layout
         lines = remove_transcript_labels(lines, source_id)
         lines.reject! { |line| line.strip.match?(/\APR:\s*\z/i) }
-        trim_blank_lines(lines).join("\n").gsub(/\n{3,}/, "\n\n").strip
+        collapse_blank_lines(trim_blank_lines(lines)).join("\n").rstrip
       rescue ArgumentError
-        text.to_s.strip
+        text.to_s.rstrip
       end
 
       def strip_terminal_sequences(text)
@@ -109,13 +109,16 @@ module Meringue
       end
 
       def reflow_box_text(lines)
+        in_fence = false
         lines.each_with_object([]) do |line, result|
+          fence = line.to_s.lstrip.match?(/\A(?:```|~~~)/)
           previous = result.last
-          if previous && prose_continuation?(previous, line)
+          if !in_fence && !fence && previous && prose_continuation?(previous, line)
             result[-1] = "#{previous.rstrip} #{line.strip}"
           else
             result << line
           end
+          in_fence = !in_fence if fence
         end
       end
 
@@ -130,6 +133,24 @@ module Meringue
 
       def markdown_structure?(line)
         line.to_s.lstrip.match?(/\A(?:```|~~~|\#{1,6}\s|[-*+]\s|\d+[.)]\s|>\s|\|)/)
+      end
+
+      def collapse_blank_lines(lines)
+        in_fence = false
+        blank_count = 0
+        Array(lines).each_with_object([]) do |line, result|
+          fence = line.to_s.lstrip.match?(/\A(?:```|~~~)/)
+          if in_fence
+            result << line
+          elsif line.to_s.strip.empty?
+            result << line if blank_count.zero?
+            blank_count += 1
+          else
+            result << line
+            blank_count = 0
+          end
+          in_fence = !in_fence if fence
+        end
       end
 
       def trim_blank_lines(lines)

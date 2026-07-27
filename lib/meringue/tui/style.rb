@@ -53,6 +53,12 @@ module Meringue
         "\e[#{codes.flatten.join(";")}m"
       end
 
+      # Compose semantic terminal attributes with a colorscheme or per-agent
+      # foreground. Canvas owns emission, so these values never enter content.
+      def with_codes(style, *codes)
+        "#{style}#{ansi(*codes)}"
+      end
+
       # Deterministic FNV-1a hash so an unchanged agent id keeps the same color
       # across renders and restarts without storing palette assignments.
       def agent_palette_index(agent_id)

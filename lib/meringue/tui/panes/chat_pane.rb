@@ -37,14 +37,7 @@ module Meringue
           entries.flat_map do |entry|
             gutter = gutter_segment(entry)
             lines = [role_line(entry, selected_agent_id: selected_agent_id)]
-            lines.concat(
-              wrapped_text_lines(
-                entry.fetch("text", ""),
-                width: width,
-                gutter: gutter,
-                style: body_text_style(entry)
-              )
-            )
+            lines.concat(body_lines(entry, width: width, gutter: gutter))
             lines << status_line(entry.fetch("status"), gutter) if entry.fetch("kind", nil) == "message" && entry.fetch("status", nil)
             lines
           end
@@ -214,6 +207,7 @@ module Meringue
             "source_id" => source_id,
             "text" => log_display_text(entry),
             "message" => entry.fetch("message", "").to_s,
+            "details" => entry.fetch("details", {}) || {},
             "status" => log_status(entry),
             "level" => entry.fetch("level", "info"),
             "presentation" => log_presentation(entry),
@@ -425,6 +419,35 @@ module Meringue
           when "error" then Style::LOG_ERROR
           else entry.fetch("status", nil) == "cmd" ? Style::LOG_COMMAND : Style::LOG_INFO
           end
+        end
+
+        def body_lines(entry, width:, gutter:)
+          if conversational_markdown?(entry)
+            Markdown.render(
+              entry.fetch("text", ""),
+              width: width,
+              gutter: gutter,
+              base_style: Style::TEXT,
+              accent_style: agent_body_style(entry)
+            )
+          else
+            wrapped_text_lines(
+              entry.fetch("text", ""),
+              width: width,
+              gutter: gutter,
+              style: body_text_style(entry)
+            )
+          end
+        end
+
+        def conversational_markdown?(entry)
+          return false unless entry.fetch("role", nil) == "agent"
+          return false if entry.fetch("status", nil).to_s.match?(/err|fail|warn/i)
+          return true if entry.fetch("kind", nil) == "message"
+          return true if entry.fetch("presentation", nil) == "result"
+
+          details = entry.fetch("details", {}) || {}
+          details.is_a?(Hash) && details.fetch("kind", nil).to_s == "head_summary"
         end
 
         def body_text_style(entry)
