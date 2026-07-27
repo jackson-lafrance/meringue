@@ -37,12 +37,56 @@ module Meringue
         LOG_ERROR
       ].freeze
 
+      # Per-agent log colors. Each colorscheme supplies the same number of
+      # 256-color foreground codes, ordered red, orange, yellow, green, cyan,
+      # blue, purple, magenta, so every theme keeps the same hue spread.
+      AGENT_PALETTE_KEY = :AGENT_PALETTE
+      AGENT_PALETTE_SIZE = 8
+      HEAD_AGENT_KIND = "head"
+      WORKER_AGENT_KIND = "worker"
+
       class StyleValue < String; end
 
       module_function
 
       def ansi(*codes)
         "\e[#{codes.flatten.join(";")}m"
+      end
+
+      # Deterministic FNV-1a hash so an agent keeps the same color across
+      # renders, restarts, and recounts without storing palette assignments.
+      def agent_palette_index(agent_id)
+        hash = 2166136261
+        agent_id.to_s.each_byte do |byte|
+          hash = ((hash ^ byte) * 16777619) & 0xffffffff
+        end
+        hash % AGENT_PALETTE_SIZE
+      end
+
+      # Header style for an agent's log lines. Heads are bold so they stay
+      # distinguishable from workers that hash to the same palette slot.
+      def agent_style(agent_id, kind: WORKER_AGENT_KIND)
+        agent_styles.fetch(head_kind?(kind) ? HEAD_AGENT_KIND : WORKER_AGENT_KIND).fetch(agent_palette_index(agent_id))
+      end
+
+      # Body/gutter style for an agent's log lines: same hue, never bold.
+      def agent_body_style(agent_id)
+        agent_styles.fetch(WORKER_AGENT_KIND).fetch(agent_palette_index(agent_id))
+      end
+
+      def head_kind?(kind)
+        kind.to_s == HEAD_AGENT_KIND
+      end
+
+      def agent_styles
+        @agent_styles ||= build_agent_styles(SCHEMES.fetch(current_colorscheme).fetch(AGENT_PALETTE_KEY))
+      end
+
+      def build_agent_styles(palette)
+        {
+          HEAD_AGENT_KIND => palette.map { |code| ansi(1, 38, 5, code).freeze }.freeze,
+          WORKER_AGENT_KIND => palette.map { |code| ansi(38, 5, code).freeze }.freeze
+        }.freeze
       end
 
       def colorschemes
@@ -63,6 +107,7 @@ module Meringue
         STYLE_NAMES.each do |style_name|
           const_get(style_name).replace(ansi(*scheme.fetch(style_name)))
         end
+        @agent_styles = build_agent_styles(scheme.fetch(AGENT_PALETTE_KEY))
         @current_colorscheme = name
       end
 
@@ -105,7 +150,8 @@ module Meringue
         LOG_INFO: [38, 5, 117],
         LOG_COMMAND: [38, 5, 203],
         LOG_WARNING: [38, 5, 221],
-        LOG_ERROR: [38, 5, 203]
+        LOG_ERROR: [38, 5, 203],
+        AGENT_PALETTE: [174, 216, 222, 151, 116, 110, 141, 176]
       }.freeze
 
       MERINGUE = {
@@ -136,7 +182,10 @@ module Meringue
         LOG_INFO: [38, 5, 220],
         LOG_COMMAND: [38, 5, 203],
         LOG_WARNING: [38, 5, 214],
-        LOG_ERROR: [38, 5, 203]
+        LOG_ERROR: [38, 5, 203],
+        # The default theme is yellow, so agent colors skip yellow to stay
+        # separable from the kernel/meringue accent styles.
+        AGENT_PALETTE: [210, 215, 156, 122, 80, 111, 183, 218]
       }.freeze
 
       TOKYONIGHT = {
@@ -167,7 +216,8 @@ module Meringue
         LOG_INFO: [38, 5, 117],
         LOG_COMMAND: [38, 5, 203],
         LOG_WARNING: [38, 5, 221],
-        LOG_ERROR: [38, 5, 203]
+        LOG_ERROR: [38, 5, 203],
+        AGENT_PALETTE: [210, 216, 222, 150, 117, 111, 141, 176]
       }.freeze
 
       GRUVBOX = {
@@ -198,7 +248,8 @@ module Meringue
         LOG_INFO: [38, 5, 109],
         LOG_COMMAND: [38, 5, 167],
         LOG_WARNING: [38, 5, 214],
-        LOG_ERROR: [38, 5, 167]
+        LOG_ERROR: [38, 5, 167],
+        AGENT_PALETTE: [167, 208, 214, 142, 108, 109, 139, 175]
       }.freeze
 
       CATPPUCCIN = {
@@ -229,7 +280,8 @@ module Meringue
         LOG_INFO: [38, 5, 117],
         LOG_COMMAND: [38, 5, 210],
         LOG_WARNING: [38, 5, 222],
-        LOG_ERROR: [38, 5, 210]
+        LOG_ERROR: [38, 5, 210],
+        AGENT_PALETTE: [210, 216, 223, 151, 116, 111, 183, 218]
       }.freeze
 
       KANAGAWA = {
@@ -260,7 +312,8 @@ module Meringue
         LOG_INFO: [38, 5, 110],
         LOG_COMMAND: [38, 5, 203],
         LOG_WARNING: [38, 5, 179],
-        LOG_ERROR: [38, 5, 203]
+        LOG_ERROR: [38, 5, 203],
+        AGENT_PALETTE: [174, 216, 222, 108, 115, 110, 140, 175]
       }.freeze
 
       SCHEMES = {
