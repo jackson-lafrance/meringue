@@ -1237,35 +1237,42 @@ module Meringue
 
       def refresh_worker_delivery_pull_requests!(state)
         workers_by_issue = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }.group_by { |worker| worker.fetch("issue_id", nil) }
-        state.fetch("issues").filter_map do |issue|
+        state.fetch("issues").flat_map do |issue|
           workers = workers_by_issue.fetch(issue.fetch("id", nil), [])
-          candidate_urls = (Array(issue.fetch("candidate_pr_urls", nil)) + workers.flat_map { |worker| worker_legacy_candidate_pr_urls(worker) }).map(&:to_s).map(&:strip).reject(&:empty?).uniq
-          next if candidate_urls.empty?
-
           project = find_project(state, issue.fetch("project_id", nil))
-          next unless project
+          next [] unless project
 
-          matched_worker = nil
-          delivery_pull_request = workers.filter_map do |worker|
-            verified_worker_pull_request(agent: worker, project: project, candidate_urls: candidate_urls).tap do |pull_request|
-              matched_worker = worker if pull_request
+          candidate_urls = (
+            Array(issue.fetch("candidate_pr_urls", nil)) +
+            workers.flat_map { |worker| worker_legacy_candidate_pr_urls(worker) } +
+            workers.flat_map { |worker| discovered_worker_candidate_pr_urls(agent: worker, project: project) }
+          ).map(&:to_s).map(&:strip).reject(&:empty?).uniq
+          next [] if candidate_urls.empty?
+
+          matches = workers.flat_map do |worker|
+            verified_worker_pull_requests(agent: worker, project: project, candidate_urls: candidate_urls).map do |pull_request|
+              [worker, pull_request]
             end
-          end.first
-          delivery_pull_request ||= workers.filter_map do |worker|
-            merged_same_repo_candidate_pull_request(agent: worker, project: project, candidate_urls: candidate_urls).tap do |pull_request|
-              matched_worker = worker if pull_request
+          end
+          if matches.empty?
+            matches = workers.filter_map do |worker|
+              pull_request = merged_same_repo_candidate_pull_request(agent: worker, project: project, candidate_urls: candidate_urls)
+              [worker, pull_request] if pull_request
             end
-          end.first
-          next unless delivery_pull_request
+          end
+          matches = matches.uniq { |_worker, pull_request| pull_request.fetch("url", nil) }
+          next [] if matches.empty?
 
-          attach_issue_pull_requests!(issue, delivery_pull_request, candidate_urls)
+          matches.map do |matched_worker, delivery_pull_request|
+            attach_issue_pull_requests!(issue, delivery_pull_request, candidate_urls)
 
-          {
-            "agent_id" => matched_worker&.fetch("id", nil),
-            "issue_id" => issue.fetch("id", nil),
-            "url" => delivery_pull_request.fetch("url", nil),
-            "matched_by" => delivery_pull_request.fetch("matched_by", nil)
-          }.compact
+            {
+              "agent_id" => matched_worker.fetch("id", nil),
+              "issue_id" => issue.fetch("id", nil),
+              "url" => delivery_pull_request.fetch("url", nil),
+              "matched_by" => delivery_pull_request.fetch("matched_by", nil)
+            }.compact
+          end
         end
       end
 
@@ -1318,9 +1325,13 @@ module Meringue
       end
 
       def verified_worker_pull_request(agent:, project:, candidate_urls:)
+        verified_worker_pull_requests(agent: agent, project: project, candidate_urls: candidate_urls).first
+      end
+
+      def verified_worker_pull_requests(agent:, project:, candidate_urls:)
         branch = worker_delivery_branch(agent)
         project_repository = project && project_github_repository(project)
-        return nil if blank?(branch) || blank?(project_repository)
+        return [] if blank?(branch) || blank?(project_repository)
 
         Array(candidate_urls).filter_map do |url|
           status = pull_request_status(url)
@@ -1331,13 +1342,30 @@ module Meringue
             "matched_branch" => branch,
             "verified_at" => timestamp
           )
-        end.first
+        end
       end
 
       def verified_worker_pull_request?(status, branch:, project_repository:)
         status.fetch("provider", nil) == "github" &&
           status.fetch("base_repository", nil).to_s.downcase == project_repository.to_s.downcase &&
+          !status.fetch("is_cross_repository", false) &&
+          status.fetch("head_repository", nil).to_s.downcase == project_repository.to_s.downcase &&
           normalized_branch_name(status.fetch("head_branch", nil)) == normalized_branch_name(branch)
+      end
+
+      def discovered_worker_candidate_pr_urls(agent:, project:)
+        # A worker can settle without usable final output, so recover from the durable branch
+        # identity rather than treating arbitrary URLs elsewhere in its session as deliveries.
+        return [] unless agent.fetch("status", nil) == "completed"
+        return [] unless forge_client.respond_to?(:pull_request_urls_for_branch)
+
+        branch = normalized_branch_name(persisted_worker_delivery_branch(agent))
+        repository = project_github_repository(project)
+        return [] if blank?(branch) || blank?(repository)
+
+        Array(forge_client.pull_request_urls_for_branch(repository: repository, branch: branch))
+      rescue StandardError
+        []
       end
 
       def merged_same_repo_candidate_pull_request(agent:, project:, candidate_urls:)
