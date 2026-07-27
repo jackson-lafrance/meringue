@@ -30,7 +30,7 @@ agent_select_next = ["j", "down", "right"]
 
 ## Chat input
 
-- `Enter`: send the prompt or apply the selected slash completion.
+- `Enter`: send the prompt as typed, or apply the slash suggestion once one is selected.
 - `Shift-Enter`: insert a newline.
 - Arrow keys: move the cursor.
 - `Home` / `Ctrl-A`: move to the start of the current line.
@@ -43,9 +43,10 @@ agent_select_next = ["j", "down", "right"]
 
 ## Slash suggestions
 
-- Type `/` to show command suggestions.
-- `Tab`: complete the selected suggestion.
-- `Up` / `Down`: change the selected suggestion.
+- Type `/` to show command suggestions. Nothing is selected until you navigate the list, so `Enter` still sends what you typed.
+- `Up` / `Down`: select a suggestion; `Down` starts at the first entry and `Up` starts at the last.
+- `Enter`: insert the selected suggestion into the input. Press `Enter` again to run it.
+- `Tab`: complete the selected suggestion, or the first one when nothing is selected.
 
 ## Jump mode
 
