@@ -190,7 +190,7 @@ Default paths:
 
 The config supports TUI colorschemes, TUI keybinding overrides, default harness selection, role-specific head/worker harnesses, and provider command overrides. See `docs/config.md` for the full reference.
 
-The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state.
+The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state. Durable logs retain the newest 500 entries so lifecycle history cannot grow without bound; see [`docs/log-retention.md`](docs/log-retention.md) for the measured rationale, compatibility behavior, and benchmark.
 
 ## Current architecture in one flow
 

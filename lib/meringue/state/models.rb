@@ -11,6 +11,10 @@ module Meringue
       QUESTION_STATUSES = %w[open answered dismissed].freeze
       LOG_LEVELS = %w[info warning error].freeze
       LOG_SOURCE_TYPES = %w[user kernel head worker harness system].freeze
+      # This keeps roughly two weeks of activity at the event rate measured while
+      # investigating TUI latency, without allowing lifecycle output to dominate
+      # persistence indefinitely. Logs remain chronological within this window.
+      LOG_RETENTION_LIMIT = 500
       PULL_REQUEST_STORAGE_KEYS = %w[
         delivery_pull_request delivery_pull_requests reported_pr_urls candidate_pr_urls
       ].freeze
@@ -35,7 +39,13 @@ module Meringue
         state["counters"]["projects"] ||= max_numeric_suffix(state.fetch("projects"), /^P(\d+)$/)
         state["counters"]["heads"] ||= max_numeric_suffix(state.fetch("agents").select { |agent| agent["type"] == "head" }, /^H(\d+)$/)
         state["counters"]["questions"] ||= max_numeric_suffix(state.fetch("questions"), /^Q(\d+)$/)
-        state["counters"]["logs"] ||= max_numeric_suffix(state.fetch("logs"), /^L(\d+)$/)
+        # Calculate the high-water mark before retention so loading an older,
+        # unbounded state without a log counter cannot reuse a discarded ID.
+        state["counters"]["logs"] = [
+          state["counters"].fetch("logs", 0).to_i,
+          max_numeric_suffix(state.fetch("logs"), /^L(\d+)$/)
+        ].max
+        retain_recent_logs!(state)
         state["counters"]["issues_by_project"] ||= {}
         state["counters"]["workers_by_issue"] ||= {}
         state["metadata"] ||= {}
@@ -43,6 +53,15 @@ module Meringue
         state["metadata"]["updated_at"] ||= state["metadata"].fetch("created_at")
         migrate_pull_requests_to_issues!(state)
         state
+      end
+
+      def retain_recent_logs!(state, limit: LOG_RETENTION_LIMIT)
+        logs = state.fetch("logs")
+        overflow = logs.length - limit
+        return false unless overflow.positive?
+
+        logs.shift(overflow)
+        true
       end
 
       def max_log_message_id(state)
