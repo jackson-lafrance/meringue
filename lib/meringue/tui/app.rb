@@ -836,9 +836,18 @@ module Meringue
         appends_space = record.fetch("append_space", record.fetch("requires_arguments", false))
 
         return nil if stripped.casecmp?(completion) && !appends_space
-        return nil unless completion.downcase.start_with?(stripped.downcase) || stripped == "/"
+        unless argument_suggestion_record?(record)
+          return nil unless completion.downcase.start_with?(stripped.downcase) || stripped == "/"
+        end
 
         slash_completion_for(record)
+      end
+
+      # Argument suggestions (ids for /kill, /prompt, /jump, and friends) are selected from a
+      # list, so the highlighted entry should always be inserted into the input buffer even when
+      # the typed query only matches the middle of the id.
+      def argument_suggestion_record?(record)
+        record.fetch("kind", "command") != "command"
       end
 
       def slash_suggestions_active?(input_buffer)

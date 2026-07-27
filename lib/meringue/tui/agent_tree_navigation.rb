@@ -63,7 +63,11 @@ module Meringue
       end
 
       def records(state, key)
-        state.fetch(key, []) || []
+        entries = state.fetch(key, []) || []
+        return entries unless %w[projects issues].include?(key)
+
+        # Keep selectable ids aligned with the rendered AgentTree, which hides killed subtrees.
+        entries.reject { |entry| entry.is_a?(Hash) && entry["status"] == "killed" }
       end
 
       def project_tree_ids(projects, issues, agents)
