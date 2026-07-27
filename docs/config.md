@@ -50,6 +50,7 @@ Supported action names:
 - `quit`
 - `clear_or_quit`
 - `cancel_navigation`
+- `open_delivery_pr` (defaults to `ctrl-b`)
 - `focus_next`, `focus_previous`
 - `scroll_up`, `scroll_down`, `scroll_page_up`, `scroll_page_down`
 - `submit`, `newline`

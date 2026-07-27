@@ -108,6 +108,10 @@ module Meringue
           log["source_id"] = rewrite_id(log["source_id"], id_map)
           rewrite_structured_references!(log["details"], id_map)
         end
+
+        # Presentation state follows a recounted worker just like persisted orchestration
+        # references do. Opaque workspace paths, terminal state, and harness ids are untouched.
+        rewrite_structured_references!(state["ui"], id_map)
       end
 
       def rewrite_keys!(record, id_map, keys)

@@ -64,7 +64,7 @@ module Meringue
         err: err,
         state_path: options.fetch(:state_path),
         state_store: store,
-        tui_app: TUI::App.new(input: input, out: out, session_opener: registry.terminal_session_opener, keybindings: keybindings),
+        tui_app: TUI::App.new(input: input, out: out, session_opener: registry.terminal_session_opener, log_store: store, keybindings: keybindings),
         prompt_handler: engine ? Heads::PromptLoop.new(engine: engine, wait_for_workers: false) : nil,
         reconciler: engine ? -> { engine.reconcile_sessions } : nil
       ).run
@@ -241,6 +241,7 @@ module Meringue
           /keybind                  # show all TUI keybindings
           /jump [agent_id]          # open an agent session in Alacritty; omit id to navigate the AgentTree
           /recount                  # compact AgentTree numbering after records are removed
+          Ctrl-B                    # open the selected worker's verified delivery PR
           Enter in jump mode        # open selected issue/agent PR when one is available
           a in jump mode            # open selected agent session
           issue/worker double-click # open that item's PR when one is available

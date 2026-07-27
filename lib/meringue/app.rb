@@ -34,6 +34,7 @@ module Meringue
       ui = tui
       loaded_state = state_store.load
       ui.restore_logs!(loaded_state) if ui.respond_to?(:restore_logs!)
+      ui.restore_agent_workspace!(loaded_state) if ui.respond_to?(:restore_agent_workspace!)
       ui.remember_existing_log_events!(loaded_state) if ui.respond_to?(:remember_existing_log_events!)
       ui.run(state_provider: -> { current_state }, on_submit: prompt_handler)
     rescue JSON::ParserError => e

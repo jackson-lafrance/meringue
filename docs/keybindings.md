@@ -14,6 +14,7 @@ agent_select_next = ["j", "down", "right"]
 
 ## Global
 
+- `Ctrl-B`: open the selected worker's kernel-verified delivery pull request. If the PR is missing, malformed, or its status cannot be refreshed, Meringue reports that state without closing the dashboard or changing the worker.
 - `Ctrl-D`: quit.
 - `Ctrl-C`: clear input; quit when input is empty.
 - `Esc`: cancel jump mode when navigation is active.
@@ -53,8 +54,11 @@ agent_select_next = ["j", "down", "right"]
 Start jump mode with `/jump` or by focusing the agent tree or logs pane and pressing `Enter`.
 
 - `Up` / `Down` / `Left` / `Right`: select an agent. In the logs pane, only the selected agent title is highlighted; non-agent events are not selected.
+- `Ctrl-B`: open the selected worker's verified delivery pull request. The PR remains easy to open when status refresh is temporarily unavailable.
 - `Enter`: open the selected agent's pull request when a PR is available.
 - `a`: open the selected agent session. Completed Pi sessions reopen from their saved JSONL history. If that history is missing or malformed, Meringue reports that the session is unavailable without closing the dashboard or changing the saved agent record, logs, or captured output.
 - `Esc`: cancel jump mode.
 
-Agents with an open pull request are marked `↗` in the AgentTree.
+Agents with an open pull request are marked `↗` in the AgentTree. Worker selection and focused-workspace view state are restored from the state file after restart; selections for pruned workers are cleared safely.
+
+See [Agent workspace delivery and recovery integration](agent_workspace_integration.md) for persistence, stale PR metadata, and degraded dependency behavior.
