@@ -27,20 +27,24 @@ module Meringue
         end
 
         def log_lines(state, width: nil)
+          cache_key = log_lines_cache_key(state, width)
+          return @log_lines_cache.fetch(:lines) if @log_lines_cache&.fetch(:key, nil) == cache_key
+
           entries = log_entries(state)
-
-          if entries.empty?
-            return [[["No logs yet. Type a prompt below and press Enter.", Style::MUTED]]]
-          end
-
-          selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
-          entries.flat_map do |entry|
-            gutter = gutter_segment(entry)
-            lines = [role_line(entry, selected_agent_id: selected_agent_id)]
-            lines.concat(body_lines(entry, width: width, gutter: gutter))
-            lines << status_line(entry.fetch("status"), gutter) if entry.fetch("kind", nil) == "message" && entry.fetch("status", nil)
-            lines
-          end
+          lines = if entries.empty?
+                    [[["No logs yet. Type a prompt below and press Enter.", Style::MUTED]]]
+                  else
+                    selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
+                    entries.flat_map do |entry|
+                      gutter = gutter_segment(entry)
+                      entry_lines = [role_line(entry, selected_agent_id: selected_agent_id)]
+                      entry_lines.concat(body_lines(entry, width: width, gutter: gutter))
+                      entry_lines << status_line(entry.fetch("status"), gutter) if entry.fetch("kind", nil) == "message" && entry.fetch("status", nil)
+                      entry_lines
+                    end
+                  end
+          @log_lines_cache = { key: cache_key, lines: lines }
+          lines
         end
 
         def composer_lines(state, width: nil)
@@ -116,7 +120,7 @@ module Meringue
         def delivery_pr_hint_segments(state)
           navigation_id = AgentTreeNavigation.selected_agent_id(state)
           workspace = state.fetch("_agent_workspace", {}) || {}
-          agent_id = navigation_id || workspace["selected_agent_id"]
+          agent_id = navigation_id || workspace["agent_id"]
           return [] if agent_id.to_s.empty?
 
           presentation = DeliveryPullRequest.for_id(state, agent_id)
@@ -131,6 +135,22 @@ module Meringue
             ["PR ##{number}", Style::ACCENT_BOLD],
             [" #{status}", status_style],
             ["  Ctrl-B open", Style::MUTED]
+          ]
+        end
+
+        # Input editing only changes _chat.input_buffer, but the layout asks for
+        # the complete, wrapped log history twice per frame (scroll bounds and
+        # drawing). Cache that expensive work by the state that can affect log
+        # presentation so a keystroke only redraws the composer.
+        def log_lines_cache_key(state, width)
+          chat = chat_state(state)
+          [
+            width,
+            Array(state.fetch("logs", [])).hash,
+            Array(state.fetch("agents", [])).hash,
+            Array(chat.fetch("messages", [])).hash,
+            AgentTreeNavigation.selected_agent_id(state),
+            Style.current_colorscheme
           ]
         end
 
