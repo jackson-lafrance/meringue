@@ -7,8 +7,12 @@ module Meringue
     module Panes
       class ChatPane
         VISIBLE_SUGGESTION_LIMIT = 3
-        AGENT_ICON = "✦"
+        HEAD_ICON = "◆"
+        WORKER_ICON = "✦"
+        KERNEL_ICON = "▪"
         USER_ICON = "●"
+        AGENT_GUTTER = "▌ "
+        PLAIN_GUTTER = "  "
 
         def render(state)
           log_lines(state).map { |line| plain_text(line) }.join("\n")
@@ -27,9 +31,10 @@ module Meringue
 
           selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
           entries.flat_map.with_index do |entry, index|
+            gutter = gutter_segment(entry)
             lines = [role_line(entry, selected_agent_id: selected_agent_id)]
-            lines.concat(wrapped_text_lines(entry.fetch("text", ""), width: width))
-            lines << status_line(entry.fetch("status")) if entry.fetch("kind", nil) == "message" && entry.fetch("status", nil)
+            lines.concat(wrapped_text_lines(entry.fetch("text", ""), width: width, gutter: gutter))
+            lines << status_line(entry.fetch("status"), gutter) if entry.fetch("kind", nil) == "message" && entry.fetch("status", nil)
             lines << spacer_line unless index == entries.length - 1
             lines
           end
@@ -101,7 +106,7 @@ module Meringue
         private
 
         def log_entries(state)
-          message_entries = visible_messages(chat_state(state).fetch("messages", []) || []).map.with_index { |message, index| message_entry(message, index) }
+          message_entries = visible_messages(chat_state(state).fetch("messages", []) || []).map.with_index { |message, index| message_entry(message, index, state) }
           durable_log_entries = Array(state.fetch("logs", [])).map.with_index { |entry, index| log_entry(entry, index, state) }.compact
           message_topics = topic_index(message_entries)
           durable_log_entries = durable_log_entries.reject { |entry| redundant_lifecycle_log?(entry, message_topics) }
@@ -170,15 +175,17 @@ module Meringue
           text.to_s.gsub(/[[:space:]]+/, " ").strip
         end
 
-        def message_entry(message, index)
+        def message_entry(message, index, state = {})
           role = normalized_message_role(message.fetch("role", "meringue"))
+          source_id = message.fetch("source_id", nil)
           {
             "kind" => "message",
             "timestamp" => message.fetch("timestamp", nil),
             "role" => role,
-            "source_id" => message.fetch("source_id", nil),
+            "source_id" => source_id,
             "text" => message.fetch("text", "").to_s,
             "status" => message.fetch("status", nil),
+            "agent" => agent_by_id(state, source_id),
             "ordinal" => index
           }
         end
@@ -294,11 +301,10 @@ module Meringue
         end
 
         def role_line(entry, selected_agent_id: nil)
-          role = entry.fetch("role", "meringue")
-          style = role_style(role)
+          style = entry_style(entry)
           segments = [
             ["[#{timestamp(entry)}] ", Style::DIM],
-            [role == "you" ? USER_ICON : AGENT_ICON, style],
+            [entry_icon(entry), style],
             [" #{participant_label(entry)}", style]
           ]
           segments.concat(log_level_segments(entry))
@@ -306,20 +312,66 @@ module Meringue
           segments
         end
 
-        def role_style(role)
-          case role
+        # Agent lines are colored per agent id; everything else keeps the
+        # kernel/user styles so agent output stays separable from kernel logs.
+        def entry_style(entry)
+          case entry.fetch("role", "meringue")
           when "you" then Style::USER
-          when "agent" then Style::ASSISTANT
+          when "agent" then agent_role_style(entry)
           else Style::ACCENT_BOLD
           end
         end
 
+        def agent_role_style(entry)
+          agent_id = entry.fetch("source_id", nil).to_s
+          return Style::ASSISTANT if agent_id.empty?
+
+          Style.agent_style(agent_id, kind: agent_kind(entry))
+        end
+
+        def agent_body_style(entry)
+          agent_id = entry.fetch("source_id", nil).to_s
+          return Style::ASSISTANT if agent_id.empty?
+
+          Style.agent_body_style(agent_id)
+        end
+
+        def agent_kind(entry)
+          agent = entry.fetch("agent", nil)
+          kind = agent.is_a?(Hash) ? agent.fetch("type", nil).to_s : ""
+          return kind if %w[head worker].include?(kind)
+
+          source_type = entry.fetch("source_type", nil).to_s
+          return source_type if %w[head worker].include?(source_type)
+          return "head" if entry.fetch("source_id", nil).to_s.match?(/\AH\d+\z/)
+
+          ""
+        end
+
+        def entry_icon(entry)
+          case entry.fetch("role", "meringue")
+          when "you" then USER_ICON
+          when "agent" then agent_kind(entry) == "head" ? HEAD_ICON : WORKER_ICON
+          else KERNEL_ICON
+          end
+        end
+
+        def gutter_segment(entry)
+          return [PLAIN_GUTTER, Style::DIM] unless entry.fetch("role", nil) == "agent"
+
+          [AGENT_GUTTER, agent_body_style(entry)]
+        end
+
         def participant_label(entry)
           return "you" if entry.fetch("role", nil) == "you"
-          return "agent #{entry.fetch("source_id", nil)}" if entry.fetch("role", nil) == "agent" && !entry.fetch("source_id", nil).to_s.empty?
-          return "agent" if entry.fetch("role", nil) == "agent"
+          return "meringue" unless entry.fetch("role", nil) == "agent"
 
-          "meringue"
+          agent_id = entry.fetch("source_id", nil).to_s
+          return "agent" if agent_id.empty?
+
+          kind = agent_kind(entry)
+          label = kind.empty? ? "agent" : kind
+          "#{label} #{agent_id}"
         end
 
         def agent_title_segments(entry, selected_agent_id: nil)
@@ -365,16 +417,16 @@ module Meringue
           "--:--:--"
         end
 
-        def text_line(text)
+        def text_line(text, gutter = [PLAIN_GUTTER, Style::DIM])
           [
-            ["  ", Style::DIM],
+            gutter,
             [text, Style::TEXT]
           ]
         end
 
-        def status_line(status)
+        def status_line(status, gutter = [PLAIN_GUTTER, Style::DIM])
           [
-            ["  ", Style::DIM],
+            gutter,
             [status.to_s, Style::MUTED]
           ]
         end
@@ -418,11 +470,11 @@ module Meringue
           segments
         end
 
-        def wrapped_text_lines(text, width: nil)
+        def wrapped_text_lines(text, width: nil, gutter: [PLAIN_GUTTER, Style::DIM])
           content_width = width ? [width.to_i - 2, 1].max : nil
           text.to_s.split("\n", -1).flat_map do |line|
             wrap_text_line(line, content_width)
-          end.map { |line| text_line(line) }
+          end.map { |line| text_line(line, gutter) }
         end
 
         def wrap_text_line(line, width)
