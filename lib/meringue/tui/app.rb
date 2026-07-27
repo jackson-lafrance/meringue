@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "shellwords"
 require "time"
 require_relative "keybindings"
 
@@ -48,12 +49,20 @@ module Meringue
       # completion popup never steals Enter from the typed prompt.
       NO_SLASH_SELECTION = -1
 
-      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default)
+      # workspace_controller is a harness-neutral UI adapter. Integrations may
+      # implement open_workspace, agent_snapshot, open_terminal,
+      # terminal_snapshot, handle_terminal_key, and open_editor.
+      # agent_session_service may open the generic live worker-session view.
+      # Returning from this TUI workspace closes only that read handle and never
+      # calls an abort/kill worker lifecycle operation.
+      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, workspace_controller: nil, agent_session_service: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default)
         @layout = layout
         @out = out
         @terminal = terminal || Terminal.new(input: input, output: out)
         @session_opener = session_opener || Harness::TerminalSessionOpener.new
         @pull_request_opener = pull_request_opener || PullRequestOpener.new
+        @workspace_controller = workspace_controller
+        @agent_session_service = agent_session_service
         @log_store = log_store || conversation_store
         @keybindings = keybindings || Keybindings.default
         @messages = []
@@ -65,6 +74,15 @@ module Meringue
         @selected_agent_id = nil
         @focused_pane = "chat"
         @last_worker_click = nil
+        @agent_workspace_active = false
+        @agent_workspace_agent_id = nil
+        @agent_workspace_session = nil
+        @agent_workspace_view = "agent"
+        @agent_workspace_notice = nil
+        @agent_workspace_error = nil
+        @agent_workspace_pending_count = 0
+        @agent_workspace_terminal_size = nil
+        @agent_workspace_messages = Hash.new { |messages, agent_id| messages[agent_id] = [] }
         @last_render_width = DEFAULT_WIDTH
         @last_render_height = DEFAULT_HEIGHT
         @scroll_offsets = Hash.new(0)
@@ -138,11 +156,24 @@ module Meringue
         0
       rescue Interrupt
         0
+      ensure
+        shutdown_workspace_resources
       end
 
       private
 
-      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :log_store, :keybindings
+      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :workspace_controller, :agent_session_service, :log_store, :keybindings
+
+      def shutdown_workspace_resources
+        close_agent_workspace_session
+        if workspace_controller&.respond_to?(:shutdown)
+          workspace_controller.shutdown
+        elsif workspace_controller&.respond_to?(:close)
+          workspace_controller.close
+        end
+      rescue StandardError
+        nil
+      end
 
       def render_once(state)
         out.puts render(state, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, color: false)
@@ -157,6 +188,7 @@ module Meringue
 
       def quit_key?(key, input_buffer)
         return false unless key
+        return false if @agent_workspace_active
         return true if keybinding?("quit", key)
 
         ctrl_c_key?(key) && input_buffer.empty? && !@agent_tree_navigation_active
@@ -193,6 +225,10 @@ module Meringue
       def handle_chat_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state, legacy_slash_navigation: false)
         input_cursor = clamp_cursor(input_buffer, input_cursor)
         return [input_buffer, input_cursor, slash_suggestion_index] unless key
+
+        if @agent_workspace_active
+          return handle_agent_workspace_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
 
         if paste_key?(key)
           return insert_text(input_buffer, input_cursor, paste_text(key)) + [NO_SLASH_SELECTION]
@@ -379,8 +415,8 @@ module Meringue
 
         @focused_pane = pane
         if pane == "agent_tree"
-          worker_id = worker_at_mouse_position(key, state)
-          handle_agent_tree_worker_click(worker_id, key, state) if worker_id
+          item_id = agent_tree_item_at_mouse_position(key, state)
+          handle_agent_tree_item_click(item_id, key, state) if item_id
         else
           @last_worker_click = nil
           exit_agent_tree_navigation if @agent_tree_navigation_active && !%w[agent_tree logs].include?(pane)
@@ -404,8 +440,8 @@ module Meringue
         )
       end
 
-      def worker_at_mouse_position(key, state)
-        layout.agent_tree_worker_at(
+      def agent_tree_item_at_mouse_position(key, state)
+        layout.agent_tree_item_at(
           state,
           width: @last_render_width || DEFAULT_WIDTH,
           height: @last_render_height || DEFAULT_HEIGHT,
@@ -414,19 +450,24 @@ module Meringue
         )
       end
 
-      def handle_agent_tree_worker_click(worker_id, key, state)
-        double_click = worker_double_click?(worker_id, key)
-        select_agent_tree_worker(state, worker_id)
-        open_pr_by_agent_id(state, worker_id) if double_click
+      def handle_agent_tree_item_click(item_id, key, state)
+        double_click = worker_double_click?(item_id, key)
+        select_agent_tree_item(state, item_id)
+        open_agent_workspace_by_id(state, item_id) if double_click
       end
 
-      def select_agent_tree_worker(state, worker_id)
-        return false unless agent_tree_selectable_agent_ids(state).include?(worker_id)
+      def select_agent_tree_item(state, item_id)
+        return false unless agent_tree_selectable_agent_ids(state).include?(item_id)
 
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :agent
-        @selected_agent_id = worker_id
+        @selected_agent_id = item_id
         true
+      end
+
+      # Compatibility for extensions that invoked the old worker-only helper.
+      def select_agent_tree_worker(state, worker_id)
+        select_agent_tree_item(state, worker_id)
       end
 
       def worker_double_click?(worker_id, key)
@@ -504,6 +545,206 @@ module Meringue
         end
       end
 
+      def handle_agent_workspace_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        if keybinding?("cancel_navigation", key)
+          close_agent_workspace
+          return [+"", 0, NO_SLASH_SELECTION]
+        end
+
+        if keybinding?("workspace_switch_view", key)
+          switch_agent_workspace_view(state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if keybinding?("workspace_open_editor", key)
+          open_agent_workspace_editor(state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if keybinding?("workspace_open_pull_request", key)
+          if open_pr_by_agent_id(state, @agent_workspace_agent_id)
+            @agent_workspace_notice = "Opened the attached pull request."
+            @agent_workspace_error = nil
+          else
+            @agent_workspace_error = "This agent does not have an attached pull request yet."
+          end
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if @agent_workspace_view == "terminal"
+          forward_agent_workspace_terminal_key(key, state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if paste_key?(key)
+          return insert_text(input_buffer, input_cursor, paste_text(key)) + [NO_SLASH_SELECTION]
+        end
+        if plain_text_paste_key?(key)
+          return insert_text(input_buffer, input_cursor, key) + [NO_SLASH_SELECTION]
+        end
+        if keybinding?("newline", key)
+          return insert_text(input_buffer, input_cursor, "\n") + [NO_SLASH_SELECTION]
+        end
+        if keybinding?("submit", key)
+          submit_agent_workspace_prompt(input_buffer, on_submit)
+          return [+"", 0, NO_SLASH_SELECTION]
+        end
+        if ctrl_c_key?(key)
+          return [+"", 0, NO_SLASH_SELECTION]
+        end
+        if keybinding?("delete_backward", key)
+          return delete_backward(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
+        end
+        if keybinding?("delete_forward", key)
+          return delete_forward(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
+        end
+        if keybinding?("delete_word_backward", key)
+          return delete_backward_word(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
+        end
+        if keybinding?("delete_word_forward", key)
+          return delete_forward_word(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
+        end
+
+        new_cursor = cursor_after_navigation(key, input_buffer, input_cursor)
+        return [input_buffer, new_cursor, slash_suggestion_index] if new_cursor != input_cursor
+        return [input_buffer, input_cursor, slash_suggestion_index] unless printable_key?(key)
+
+        insert_text(input_buffer, input_cursor, key) + [NO_SLASH_SELECTION]
+      end
+
+      def switch_agent_workspace_view(state)
+        @agent_workspace_view = @agent_workspace_view == "agent" ? "terminal" : "agent"
+        @agent_workspace_notice = nil
+        @agent_workspace_error = nil
+        prepare_workspace_terminal(state) if @agent_workspace_view == "terminal"
+      end
+
+      def prepare_workspace_terminal(state)
+        agent = agent_workspace_agent(state)
+        unless agent
+          @agent_workspace_error = "Selected agent is no longer available."
+          return
+        end
+        unless workspace_controller&.respond_to?(:open_terminal)
+          @agent_workspace_error = "This harness does not provide an in-dashboard terminal."
+          return
+        end
+
+        rows, columns = agent_workspace_terminal_dimensions
+        result = workspace_controller.open_terminal(agent: agent, state: state, rows: rows, columns: columns)
+        @agent_workspace_terminal_size = [rows, columns] unless %w[failed rejected errored].include?(result.fetch("status", nil).to_s)
+        apply_workspace_controller_result(result)
+      rescue ArgumentError
+        # Compatibility for external controllers written before size-aware workspaces.
+        apply_workspace_controller_result(workspace_controller.open_terminal(agent: agent, state: state))
+      rescue StandardError => e
+        @agent_workspace_error = "Could not open terminal: #{e.message}"
+      end
+
+      def agent_workspace_terminal_dimensions
+        rows = [(@last_render_height || DEFAULT_HEIGHT) - 3, 1].max
+        columns = [(@last_render_width || DEFAULT_WIDTH) - 6, 1].max
+        [rows, columns]
+      end
+
+      def resize_agent_workspace_terminal(agent)
+        return unless workspace_controller&.respond_to?(:resize_terminal)
+
+        rows, columns = agent_workspace_terminal_dimensions
+        return if @agent_workspace_terminal_size == [rows, columns]
+
+        result = workspace_controller.resize_terminal(agent: agent, rows: rows, columns: columns)
+        @agent_workspace_terminal_size = [rows, columns] unless %w[failed rejected errored].include?(result.fetch("status", nil).to_s)
+      end
+
+      def forward_agent_workspace_terminal_key(key, state)
+        unless workspace_controller&.respond_to?(:handle_terminal_key)
+          @agent_workspace_error = "This harness does not provide an in-dashboard terminal."
+          return
+        end
+
+        agent = agent_workspace_agent(state)
+        return @agent_workspace_error = "Selected agent is no longer available." unless agent
+
+        result = workspace_controller.handle_terminal_key(key: key, agent: agent, state: state)
+        apply_workspace_controller_result(result)
+      rescue StandardError => e
+        @agent_workspace_error = "Terminal input failed: #{e.message}"
+      end
+
+      def open_agent_workspace_editor(state)
+        agent = agent_workspace_agent(state)
+        return @agent_workspace_error = "Selected agent is no longer available." unless agent
+        unless workspace_controller&.respond_to?(:open_editor)
+          @agent_workspace_error = "No editor command is configured for this workspace."
+          return
+        end
+
+        apply_workspace_controller_result(workspace_controller.open_editor(agent: agent, state: state))
+      rescue StandardError => e
+        @agent_workspace_error = "Could not open editor: #{e.message}"
+      end
+
+      def apply_workspace_controller_result(result)
+        return unless result.is_a?(Hash)
+
+        status = result.fetch("status", result.fetch(:status, nil)).to_s
+        message = result.fetch("message", result.fetch(:message, nil)).to_s.strip
+        if %w[failed rejected errored].include?(status)
+          @agent_workspace_error = message.empty? ? "Workspace action failed." : message
+          @agent_workspace_notice = nil
+        elsif !message.empty?
+          @agent_workspace_notice = message
+          @agent_workspace_error = nil
+        end
+      end
+
+      def submit_agent_workspace_prompt(input_buffer, on_submit)
+        text = input_buffer.to_s.strip
+        return if text.empty?
+
+        agent_id = @agent_workspace_agent_id.to_s
+        append_agent_workspace_message(agent_id, "you", text)
+        @chat_mutex.synchronize { @agent_workspace_pending_count += 1 }
+        Thread.new do
+          begin
+            result, command_result = if @agent_workspace_session&.respond_to?(:submit)
+                                       direct_result = @agent_workspace_session.submit(text, mode: "auto")
+                                       [direct_result, direct_result]
+                                     else
+                                       raise "Prompt handling is not enabled for this TUI session." unless on_submit
+
+                                       routed_result = on_submit.call(Shellwords.join(["/prompt", agent_id, text]))
+                                       prompt_result = Array(routed_result.fetch("command_results", [])).find { |entry| entry.fetch("command_type", nil) == "PromptAgent" }
+                                       [routed_result, prompt_result]
+                                     end
+            unless command_result&.fetch("status", nil) == "accepted"
+              message = command_result&.fetch("message", nil) || result.fetch("summary", "Agent prompt was rejected.")
+              append_agent_workspace_message(agent_id, "system", message)
+              @chat_mutex.synchronize { @agent_workspace_error = message.to_s }
+            end
+          rescue StandardError => e
+            message = "Could not prompt #{agent_id}: #{e.message}"
+            append_agent_workspace_message(agent_id, "system", message)
+            @chat_mutex.synchronize { @agent_workspace_error = message }
+          ensure
+            @chat_mutex.synchronize do
+              @agent_workspace_pending_count -= 1 if @agent_workspace_pending_count.positive?
+            end
+          end
+        end
+      end
+
+      def append_agent_workspace_message(agent_id, role, text)
+        @chat_mutex.synchronize do
+          @agent_workspace_messages[agent_id.to_s] << {
+            "role" => role,
+            "text" => text.to_s,
+            "timestamp" => Time.now.utc.iso8601
+          }
+        end
+      end
+
       def handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         if keybinding?("cancel_navigation", key)
           exit_agent_tree_navigation("Agent tree navigation cancelled.")
@@ -534,7 +775,7 @@ module Meringue
       end
 
       def agent_session_open_key?(key)
-        key == "a"
+        keybinding?("open_agent_workspace", key)
       end
 
       def handle_local_navigation_command(input_buffer, state)
@@ -551,7 +792,7 @@ module Meringue
         if agent_id.empty?
           enter_agent_tree_navigation(state)
         else
-          open_agent_by_id(state, agent_id)
+          open_agent_workspace_by_id(state, agent_id)
         end
         true
       end
@@ -570,11 +811,12 @@ module Meringue
         <<~TEXT.strip
           Keybindings (from [tui.keybindings], with defaults for omitted actions):
           Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels jump mode.
-          Focus: click a dashboard section to focus it; clicking an issue or worker in the agent tree selects it, and double-clicking opens its PR when available. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
+          Focus: click a dashboard section to focus it; clicking an issue or agent in the AgentTree selects it, and double-clicking opens its focused workspace. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
           Chat: #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode.
-          Jump mode: /jump starts agent navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent; Enter opens the selected agent PR when one is available; a opens the selected agent session; #{keys_for("cancel_navigation")} cancels.
+          Jump mode: /jump starts agent navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent; Enter opens the selected agent PR when one is available; #{keys_for("open_agent_workspace")} opens the focused workspace; #{keys_for("cancel_navigation")} cancels.
+          Focused workspace: #{keys_for("workspace_switch_view")} switches between agent and terminal; #{keys_for("workspace_open_editor")} opens the editor; #{keys_for("workspace_open_pull_request")} opens the PR; #{keys_for("cancel_navigation")} returns to the AgentTree without stopping the worker.
         TEXT
       end
 
@@ -609,7 +851,7 @@ module Meringue
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
-        append_jump_response("Agent tree navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects issues and agents (kernel events are skipped), Enter opens PRs, a opens agent sessions, #{keys_for("cancel_navigation")} cancels.")
+        append_jump_response("Agent tree navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects issues and agents (kernel events are skipped), Enter opens PRs, #{keys_for("open_agent_workspace")} opens the focused workspace, #{keys_for("cancel_navigation")} cancels.")
       end
 
       def exit_agent_tree_navigation(message = nil)
@@ -631,8 +873,7 @@ module Meringue
         selected_id = normalized_selected_agent_id(state)
         return exit_agent_tree_navigation("No agents are available to jump into yet.") unless selected_id
 
-        open_agent_by_id(state, selected_id)
-        exit_agent_tree_navigation
+        open_agent_workspace_by_id(state, selected_id)
       end
 
       def open_selected_agent_pr(state)
@@ -643,17 +884,81 @@ module Meringue
         exit_agent_tree_navigation
       end
 
-      def open_agent_by_id(state, agent_id)
-        agent = Array(state["agents"]).find { |candidate| candidate["id"].to_s == agent_id.to_s }
+      def open_agent_workspace_by_id(state, item_id)
+        agent = agent_workspace_agent_for_item(state, item_id)
         unless agent
-          append_jump_response("Agent #{agent_id} does not exist or is not a session-backed record.")
-          return
+          append_jump_response("AgentTree item #{item_id} has no agent session to open yet.")
+          return false
         end
 
-        result = session_opener.open(agent)
-        append_jump_response(result.fetch("message", "Could not open agent #{agent_id}."))
+        @agent_workspace_active = true
+        @agent_workspace_agent_id = agent.fetch("id")
+        @agent_workspace_view = "agent"
+        @agent_workspace_terminal_size = nil
+        @agent_workspace_notice = nil
+        @agent_workspace_error = nil
+        @selected_agent_id = agent.fetch("id")
+        @agent_tree_navigation_active = true
+        @focused_pane = "agent_tree"
+        if workspace_controller&.respond_to?(:open_workspace)
+          apply_workspace_controller_result(workspace_controller.open_workspace(agent: agent, state: state))
+        end
+        open_agent_workspace_session(agent)
+        true
       rescue StandardError => e
-        append_jump_response("Could not open agent #{agent_id}: #{e.class}: #{e.message}")
+        close_agent_workspace_session
+        @agent_workspace_active = false
+        append_jump_response("Could not open focused workspace for #{item_id}: #{e.message}")
+        false
+      end
+
+      def open_agent_workspace_session(agent)
+        close_agent_workspace_session
+        return unless agent_session_service&.respond_to?(:open)
+
+        @agent_workspace_session = agent_session_service.open(agent.fetch("id"))
+      rescue StandardError => e
+        @agent_workspace_session = nil
+        @agent_workspace_error = "Could not open live agent session: #{e.message}"
+      end
+
+      def close_agent_workspace_session
+        session = @agent_workspace_session
+        @agent_workspace_session = nil
+        session.close if session&.respond_to?(:close)
+      rescue StandardError
+        nil
+      end
+
+      def close_agent_workspace
+        close_agent_workspace_session
+        @agent_workspace_active = false
+        @agent_workspace_view = "agent"
+        @agent_workspace_terminal_size = nil
+        @agent_workspace_notice = nil
+        @agent_workspace_error = nil
+        @focused_pane = "agent_tree"
+        @agent_tree_navigation_active = !@agent_workspace_agent_id.to_s.empty?
+        @selected_agent_id = @agent_workspace_agent_id if @agent_tree_navigation_active
+      end
+
+      def agent_workspace_agent_for_item(state, item_id)
+        agents = Array(state.fetch("agents", []))
+        direct = agents.find { |agent| agent.fetch("id", nil).to_s == item_id.to_s }
+        return direct if direct
+
+        issue = Array(state.fetch("issues", [])).find { |candidate| candidate.fetch("id", nil).to_s == item_id.to_s }
+        return nil unless issue
+
+        agents.select { |agent| agent.fetch("type", nil) == "worker" && agent.fetch("issue_id", nil).to_s == issue.fetch("id").to_s }
+              .reject { |agent| agent.fetch("status", nil) == "killed" }
+              .max_by { |agent| AgentTreeNavigation.sort_key(agent.fetch("id", "")) }
+      end
+
+      def agent_workspace_agent(state)
+        Array(state.fetch("agents", [])).find do |agent|
+          agent.fetch("id", nil).to_s == @agent_workspace_agent_id.to_s
+        end
       end
 
       def open_pr_by_agent_id(state, agent_id, silent_fail: false)
@@ -1137,10 +1442,84 @@ module Meringue
         composed_state = state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
+          "_agent_workspace" => agent_workspace_snapshot(state, input_buffer, input_cursor),
           "_scroll" => scroll_snapshot
         )
         clamp_scroll_offsets!(composed_state)
         composed_state.merge("_scroll" => scroll_snapshot)
+      end
+
+      def agent_workspace_snapshot(state, input_buffer, input_cursor)
+        snapshot = @chat_mutex.synchronize do
+          {
+            "active" => @agent_workspace_active,
+            "agent_id" => @agent_workspace_agent_id,
+            "view" => @agent_workspace_view,
+            "input_buffer" => input_buffer,
+            "input_cursor" => clamp_cursor(input_buffer, input_cursor || input_buffer.chars.length),
+            "pending_count" => @agent_workspace_pending_count,
+            "messages" => @agent_workspace_messages[@agent_workspace_agent_id.to_s].map(&:dup),
+            "notice" => @agent_workspace_notice,
+            "error" => @agent_workspace_error
+          }.compact
+        end
+        if @agent_workspace_active
+          if @agent_workspace_view == "terminal"
+            snapshot["terminal"] = terminal_workspace_snapshot(state)
+          else
+            snapshot["agent_session"] = live_agent_workspace_snapshot(state)
+          end
+        end
+        snapshot
+      end
+
+      def live_agent_workspace_snapshot(state)
+        agent = agent_workspace_agent(state)
+        return { "error" => "Selected agent is no longer available." } unless agent
+
+        result = if @agent_workspace_session&.respond_to?(:snapshot)
+                   @agent_workspace_session.snapshot
+                 elsif workspace_controller&.respond_to?(:agent_snapshot)
+                   workspace_controller.agent_snapshot(agent: agent, state: state)
+                 elsif workspace_controller&.respond_to?(:snapshot)
+                   workspace_controller.snapshot(agent: agent, state: state, view: "agent")
+                 else
+                   {}
+                 end
+        result.is_a?(Hash) ? stringify_workspace_snapshot(result) : {}
+      rescue StandardError => e
+        { "error" => "Could not read agent session: #{e.message}" }
+      end
+
+      def terminal_workspace_snapshot(state)
+        agent = agent_workspace_agent(state)
+        return { "error" => "Selected agent is no longer available.", "lines" => [] } unless agent
+        return { "error" => "This harness does not provide an in-dashboard terminal.", "lines" => [] } unless workspace_controller
+
+        resize_agent_workspace_terminal(agent)
+        result = if workspace_controller.respond_to?(:terminal_snapshot)
+                   workspace_controller.terminal_snapshot(agent: agent, state: state)
+                 elsif workspace_controller.respond_to?(:snapshot)
+                   workspace_controller.snapshot(agent: agent, state: state, view: "terminal")
+                 else
+                   { "error" => "This harness does not provide an in-dashboard terminal.", "lines" => [] }
+                 end
+        result.is_a?(Hash) ? stringify_workspace_snapshot(result) : { "lines" => Array(result).map(&:to_s) }
+      rescue StandardError => e
+        { "error" => "Could not read terminal: #{e.message}", "lines" => [] }
+      end
+
+      def stringify_workspace_snapshot(value)
+        case value
+        when Hash
+          value.each_with_object({}) do |(key, child), result|
+            result[key.to_s] = stringify_workspace_snapshot(child)
+          end
+        when Array
+          value.map { |child| stringify_workspace_snapshot(child) }
+        else
+          value
+        end
       end
 
       def agent_tree_navigation_snapshot

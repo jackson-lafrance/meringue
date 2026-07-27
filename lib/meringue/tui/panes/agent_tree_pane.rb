@@ -43,7 +43,7 @@ module Meringue
           output.empty? ? [[['No AgentTree data yet.', Style::MUTED]]] : output
         end
 
-        def line_worker_ids(state, width: nil)
+        def line_item_ids(state, width: nil)
           projects = records(state, "projects")
           issues = records(state, "issues")
           agents = records(state, "agents")
@@ -53,6 +53,11 @@ module Meringue
           append_head_worker_ids(output, agents, selected_agent_id, width)
           append_project_worker_ids(output, projects, issues, agents, selected_agent_id, width)
           output.empty? ? [nil] : output
+        end
+
+        # Compatibility for callers from before issue/head rows became clickable.
+        def line_worker_ids(state, width: nil)
+          line_item_ids(state, width: width)
         end
 
         private
@@ -99,7 +104,7 @@ module Meringue
               suffix: active_pr_marker(head),
               selected: AgentTreeNavigation.selected_agent?(head, selected_agent_id),
               width: width
-            )))
+            ), head.fetch("id")))
           end
           output << nil
         end
@@ -235,7 +240,10 @@ module Meringue
         end
 
         def normal_item_lines(prefix:, record:, id:, content:, suffix_text: "", suffix_style: nil, width: nil)
+          # Reserve the same two columns used by the selected-row marker so
+          # selecting an item cannot reflow wrapped rows under the mouse.
           leader_segments = [
+            ["  ", Style::DIM],
             ["#{prefix} ", Style::DIM],
             [status_dot(record), status_style(record)],
             [" #{id}", Style::MUTED],
@@ -321,6 +329,7 @@ module Meringue
 
         def normal_continuation_segments(prefix, record, id)
           [
+            ["  ", Style::DIM],
             ["#{continuation_prefix(prefix)} ", Style::DIM],
             [" " * status_dot(record).length, Style::DIM],
             [" " * (id.to_s.length + 1), Style::DIM],

@@ -31,7 +31,11 @@ module Meringue
         "delete_word_backward" => ["alt-backspace", "ctrl-backspace", "ctrl-w"],
         "delete_word_forward" => ["alt-delete", "ctrl-delete"],
         "agent_select_previous" => ["up", "left"],
-        "agent_select_next" => ["down", "right"]
+        "agent_select_next" => ["down", "right"],
+        "open_agent_workspace" => ["a"],
+        "workspace_switch_view" => ["ctrl-t"],
+        "workspace_open_editor" => ["ctrl-e"],
+        "workspace_open_pull_request" => ["ctrl-b"]
       }.freeze
 
       ACTION_LABELS = {
@@ -62,7 +66,11 @@ module Meringue
         "delete_word_backward" => "Delete previous word",
         "delete_word_forward" => "Delete next word",
         "agent_select_previous" => "Select previous agent",
-        "agent_select_next" => "Select next agent"
+        "agent_select_next" => "Select next agent",
+        "open_agent_workspace" => "Open focused agent workspace",
+        "workspace_switch_view" => "Switch agent / terminal view",
+        "workspace_open_editor" => "Open workspace in configured editor",
+        "workspace_open_pull_request" => "Open delivery pull request"
       }.freeze
 
       KEY_ALIASES = {
@@ -71,6 +79,9 @@ module Meringue
         "ctrl-c" => ["\u0003", "\e[99;5u", "\e[67;5u", "\e[27;5;99~", "\e[27;5;67~"],
         "ctrl-d" => ["\u0004"],
         "ctrl-w" => ["\u0017"],
+        "ctrl-b" => ["\u0002"],
+        "ctrl-e" => ["\u0005"],
+        "ctrl-t" => ["\u0014"],
         "enter" => ["\r", "\n"],
         "return" => ["\r", "\n"],
         "shift-enter" => ["\e[13;2u", "\e[10;2u", "\e[27;2;13~", "\e[27;2;10~", "\e[13;2~", "\e[10;2~"],

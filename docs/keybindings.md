@@ -21,8 +21,8 @@ agent_select_next = ["j", "down", "right"]
 ## Focus and scrolling
 
 - Click a dashboard section: move focus to that section (the active outline follows the focused section). The logs pane includes user-visible prompts, agent output, and important kernel events.
-- Click a worker in the agent tree: select/highlight that worker, matching jump mode selection.
-- Double-click a worker in the agent tree: open that worker's pull request when one is available.
+- Click an issue or agent in the AgentTree: select/highlight it, matching jump mode selection.
+- Double-click an agent (or an issue with a worker): open its focused workspace. This is the primary mouse action; PR opening remains an explicit action.
 - `Tab` / `Ctrl-Tab`: move focus forward.
 - `Shift-Tab`: move focus backward.
 - Arrow keys, `PageUp` / `PageDown`, and mouse wheel: scroll the focused non-chat pane.
@@ -54,7 +54,20 @@ Start jump mode with `/jump` or by focusing the agent tree or logs pane and pres
 
 - `Up` / `Down` / `Left` / `Right`: select an agent. In the logs pane, only the selected agent title is highlighted; non-agent events are not selected.
 - `Enter`: open the selected agent's pull request when a PR is available.
-- `a`: open the selected agent session. Completed Pi sessions reopen from their saved JSONL history. If that history is missing or malformed, Meringue reports that the session is unavailable without closing the dashboard or changing the saved agent record, logs, or captured output.
+- `a`: open the selected agent's focused workspace. Selecting an issue opens its newest non-killed worker.
 - `Esc`: cancel jump mode.
+
+## Focused agent workspace
+
+The focused workspace replaces the dashboard while it is open, so the live agent and terminal never compete in simultaneous subviews. The header keeps the selected agent, status, issue, harness, working directory, and PR visible.
+
+- `Enter`: send the focused agent a direct follow-up through the normal kernel `PromptAgent` path.
+- `Shift-Enter`: insert a newline in that follow-up.
+- `Ctrl-T`: switch between the live agent and terminal experiences.
+- `Ctrl-E`: open the agent workspace in the configured editor.
+- `Ctrl-B`: open the attached pull request when one exists.
+- `Esc`: return to the selected item in the AgentTree. This only changes TUI navigation; it does not abort, kill, or otherwise change the worker session.
+
+In terminal view, all other keys—including `Ctrl-C` and `Ctrl-D`—are sent to the workspace terminal instead of quitting Meringue. Completed or unavailable sessions remain inspectable in agent view, and failures are shown in the workspace without closing the dashboard or mutating the saved worker record.
 
 Agents with an open pull request are marked `↗` in the AgentTree.
