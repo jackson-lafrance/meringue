@@ -7,6 +7,8 @@ module Meringue
     module Panes
       class ChatPane
         VISIBLE_SUGGESTION_LIMIT = 3
+        # Matches TUI::App::NO_SLASH_SELECTION: no suggestion is highlighted until the user navigates.
+        NO_SLASH_SELECTION = -1
         AGENT_ICON = "✦"
         USER_ICON = "●"
 
@@ -507,13 +509,15 @@ module Meringue
         end
 
         def selected_slash_suggestion_index(state, count)
-          return 0 unless count.positive?
+          index = chat_state(state).fetch("slash_suggestion_index", NO_SLASH_SELECTION).to_i
+          # Negative means the user has not navigated the list yet, so nothing is highlighted.
+          return NO_SLASH_SELECTION unless count.positive? && index >= 0
 
-          chat_state(state).fetch("slash_suggestion_index", 0).to_i.clamp(0, count - 1)
+          index.clamp(0, count - 1)
         end
 
         def slash_suggestion_window_start(count, selected_index)
-          return 0 if count <= VISIBLE_SUGGESTION_LIMIT
+          return 0 if count <= VISIBLE_SUGGESTION_LIMIT || selected_index.negative?
 
           max_start = count - VISIBLE_SUGGESTION_LIMIT
           [selected_index - VISIBLE_SUGGESTION_LIMIT + 1, 0].max.clamp(0, max_start)
