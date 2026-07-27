@@ -325,9 +325,9 @@ Users should be able to navigate to the agent tree using a keybind and JUMP into
 Logs are the user-visible history of what Meringue, the kernel, heads, and workers have done.
 They should be concise enough to scan during a hackathon demo, but structured enough that the TUI can render them differently by source and severity.
 
-Logs should be append-only. Do not use logs as the source of truth for state.
+Logs should be append-only within the bounded retained window. The state layer may evict only the oldest entries when enforcing the documented retention limit; this must remain independent from issue and project pruning, and log ID counters must stay monotonic. Do not use logs as the source of truth for state.
 The JSON state owns projects, issues, agents, questions, and harness session metadata.
-Logs explain how that state changed.
+Logs explain how that state changed. See `docs/log-retention.md` for the retention rationale and tradeoffs.
 
 A log entry should include:
 - `id`
