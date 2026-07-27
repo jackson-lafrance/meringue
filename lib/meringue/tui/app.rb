@@ -652,6 +652,8 @@ module Meringue
 
         result = session_opener.open(agent)
         append_jump_response(result.fetch("message", "Could not open agent #{agent_id}."))
+      rescue StandardError => e
+        append_jump_response("Could not open agent #{agent_id}: #{e.class}: #{e.message}")
       end
 
       def open_pr_by_agent_id(state, agent_id, silent_fail: false)
