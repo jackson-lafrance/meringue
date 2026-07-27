@@ -25,6 +25,7 @@ module Meringue
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
         ["/prune <merged|errored>", "Remove merged PR issue bundles or errored records from active state."],
+        ["/recount", "Compact project, issue, worker, and question IDs after records are removed."],
         ["/clear", "Reset persisted Meringue state and clear the visible logs. Dev/debug helper."]
       ].freeze
 
@@ -280,6 +281,8 @@ module Meringue
           parse_dismiss(arguments)
         when "prune"
           parse_prune(arguments)
+        when "recount"
+          parse_recount(arguments)
         when "clear"
           kernel_command("ClearState")
         else
@@ -375,6 +378,12 @@ module Meringue
         return invalid("Usage: /prune <merged|errored>") unless %w[merged errored].include?(selector.to_s.downcase)
 
         kernel_command("Prune", "selector" => selector.to_s.downcase)
+      end
+
+      def parse_recount(arguments)
+        return invalid("Usage: /recount") unless split_arguments(arguments).empty?
+
+        kernel_command("Recount")
       end
 
       def split_arguments(arguments)
