@@ -789,8 +789,9 @@ module Meringue
         updated_ref = client.prompt_session(session_ref, prompt.to_s, mode: mode.to_s)
         now = timestamp
         apply_session_ref_to_agent!(agent, updated_ref)
-        agent["status"] = "working" if agent.fetch("status", nil) == "idle"
+        agent["status"] = "working"
         agent["updated_at"] = now
+        refresh_worker_parent_statuses!(state, agent, now)
 
         log_ids = append_log(
           state,

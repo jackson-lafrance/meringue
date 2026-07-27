@@ -16,6 +16,7 @@ module Meringue
       READ_CHUNK_BYTES = 16 * 1024
       TERMINATION_GRACE_SECONDS = 1.0
       POLL_INTERVAL = 0.025
+      MANAGED_HARNESS_ENV_PATTERN = /\API_/.freeze
 
       def self.from_config(config, env: ENV)
         section = config.respond_to?(:section) ? config.section("workspace") : {}
@@ -87,7 +88,7 @@ module Meringue
         end
 
         reader, writer, child_pid = pty.spawn(
-          terminal_environment,
+          terminal_environment(path),
           executable,
           *command.argv.drop(1),
           chdir: path
@@ -247,10 +248,13 @@ module Meringue
         environment["MERINGUE_SHELL"] || environment["SHELL"] || "/bin/sh"
       end
 
-      def terminal_environment
+      def terminal_environment(workspace_path)
+        scrubbed = env.keys.grep(MANAGED_HARNESS_ENV_PATTERN).to_h { |key| [key, nil] }
         env.merge(
+          scrubbed,
           "TERM" => env.fetch("TERM", "xterm-256color"),
-          "COLORTERM" => env.fetch("COLORTERM", "truecolor")
+          "COLORTERM" => env.fetch("COLORTERM", "truecolor"),
+          "MERINGUE_WORKSPACE" => workspace_path.to_s
         )
       end
 

@@ -8,6 +8,8 @@ module Meringue
     # Converts Pi RPC/session-file records into the generic SessionView contract.
     # Pi event names and message shapes intentionally stop at this boundary.
     module PiSessionView
+      MAX_TOOL_CONTENT_CHARS = 12_000
+
       module_function
 
       def live_snapshot(pi_state:, messages:, session_ref:)
@@ -129,6 +131,7 @@ module Meringue
       def normalize_message(message, id:, timestamp: nil)
         role = message.fetch("role", "unknown").to_s
         content = message_content(message)
+        content["text"] = truncate_tool_content(content.fetch("text")) if role == "toolResult"
         {
           "id" => id || message_identity(message),
           "kind" => role == "toolResult" ? "tool" : "message",
@@ -187,12 +190,23 @@ module Meringue
       end
 
       def result_text(result)
-        return result if result.is_a?(String)
-        return nil unless result.is_a?(Hash)
+        text = if result.is_a?(String)
+                 result
+               elsif result.is_a?(Hash)
+                 Array(result["content"]).filter_map do |part|
+                   part["text"] if part.is_a?(Hash) && part["type"] == "text"
+                 end.join("\n")
+               end
+        truncate_tool_content(text)
+      end
 
-        Array(result["content"]).filter_map do |part|
-          part["text"] if part.is_a?(Hash) && part["type"] == "text"
-        end.join("\n")
+      def truncate_tool_content(text)
+        value = text.to_s
+        return value if value.length <= MAX_TOOL_CONTENT_CHARS
+
+        head_length = MAX_TOOL_CONTENT_CHARS / 2
+        tail_length = MAX_TOOL_CONTENT_CHARS - head_length
+        "#{value[0, head_length]}\n… tool output truncated …\n#{value[-tail_length, tail_length]}"
       end
 
       def capabilities(live:, prompt:)

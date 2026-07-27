@@ -22,6 +22,10 @@ module Meringue
 
       attr_reader :rows, :columns
 
+      def cursor
+        [@cursor_row, @cursor_column]
+      end
+
       def feed(bytes)
         bytes.to_s.b.force_encoding(Encoding::UTF_8).scrub.each_char { |character| consume(character) }
         self

@@ -52,7 +52,6 @@ Supported action names:
 - `cancel_navigation`
 - `open_delivery_pr` (defaults to `ctrl-b`)
 - `focus_next`, `focus_previous`
-- `workspace_switch_view`, `workspace_open_editor`
 - `scroll_up`, `scroll_down`, `scroll_page_up`, `scroll_page_down`
 - `submit`, `newline`
 - `complete_suggestion`, `suggestion_previous`, `suggestion_next`
@@ -67,7 +66,7 @@ Use `/keybind` in the TUI to show the active keybindings after config has been l
 
 ## Worker workspace terminal and editor
 
-The focused worker workspace has mutually exclusive agent and terminal views. `Ctrl-T` switches between them; terminal input goes only to the workspace shell while that view is active. `Ctrl-E` opens the selected worker's assigned worktree in an external editor. Both actions can be rebound:
+The optional focused worker workspace has mutually exclusive live-worker and worktree-terminal views. `Ctrl-T` switches between them; terminal input goes only to the isolated workspace shell while that view is active. `Ctrl-E` opens the selected worker's assigned worktree in an external editor. These actions can be rebound:
 
 ```toml
 [tui.keybindings]
@@ -94,14 +93,16 @@ Defaults, in precedence order:
 - editor: `MERINGUE_EDITOR`, then `VISUAL`, then `EDITOR`, then `code`;
 - editor args: `["."]`.
 
-The shell is started in a PTY whose current directory is the worker's persisted `workspace_path`. It remains alive while switching back to the agent view, receives terminal resize events, and is stopped with its process group when Meringue exits. It is separate from the managed coding-agent process; terminal cleanup never signals the worker harness pid.
+The shell is started in a PTY whose current directory is the worker's persisted `workspace_path`. It remains alive while switching back to the worker view, receives terminal resize events, and is stopped with its process group when the workspace or Meringue exits. It is separate from the managed coding-agent process; terminal cleanup never signals the worker harness pid. Meringue also removes inherited `PI_*` variables so the shell cannot accidentally target the enclosing managed Pi session.
 
 The editor command is spawned directly with the worktree as both its current directory and, by default, the `.` argument. GUI editor CLIs normally detach or reuse an existing window. For a terminal-only editor, configure a terminal-emulator wrapper as the command (for example, an Alacritty command ending in `-e nvim`) so the editor has its own terminal. A missing executable, invalid command/argument type, malformed quoting, or removed worktree is reported in the workspace rather than crashing Meringue or mutating agent state.
 
 Supported workspace action names:
 
+- `open_agent_workspace`
 - `workspace_switch_view`
 - `workspace_open_editor`
+- `workspace_open_pull_request`
 
 ## Selecting harnesses
 
