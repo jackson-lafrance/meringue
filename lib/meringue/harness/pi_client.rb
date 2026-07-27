@@ -26,6 +26,7 @@ module Meringue
       class Error < StandardError; end
       class ProcessNotFoundError < Error; end
       class ProcessExitedError < Error; end
+      class SessionTransportUnavailableError < Error; end
       class RpcError < Error; end
       class RpcTimeoutError < Error; end
       class InvalidModeError < Error; end
@@ -81,6 +82,10 @@ module Meringue
         current_ref = session_ref
         process = process_for(current_ref, required: false)
         unless process
+          if unmanaged_process_alive?(current_ref)
+            raise SessionTransportUnavailableError,
+                  "Pi is still running, but this Meringue instance no longer owns its RPC transport; wait for it to settle before continuing"
+          end
           if normalized_mode != "normal"
             raise InvalidModeError,
                   "Pi session is not active; resume it with mode: \"normal\" before using #{normalized_mode.inspect}"
@@ -160,12 +165,37 @@ module Meringue
         process = process_for(session_ref, required: false)
         return [] unless process
 
-        process.drain_events
+        process.drain_events(consumer: "kernel")
+      end
+
+      def open_session_view(session_ref)
+        process = process_for(session_ref, required: false)
+        unless process
+          return SessionView::Handle.new(
+            snapshot_loader: -> { PiSessionView.history_snapshot(session_ref: session_ref, process_alive: unmanaged_process_alive?(session_ref)) }
+          )
+        end
+
+        initial_cursor = process.event_cursor
+        SessionView::Handle.new(
+          initial_cursor: initial_cursor,
+          snapshot_loader: lambda {
+            state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
+            messages = rpc_data(process.request({ "type" => "get_messages" }, timeout: command_timeout)).fetch("messages", [])
+            PiSessionView.live_snapshot(pi_state: state, messages: messages, session_ref: session_ref)
+          },
+          event_reader: ->(cursor, limit) { process.events_after(cursor, limit: limit) },
+          event_normalizer: ->(entry) { PiSessionView.normalize_event(entry) }
+        )
       end
 
       def attach_session(session_ref)
         process = process_for(session_ref, required: false)
         return get_state(session_ref) if process
+        if unmanaged_process_alive?(session_ref)
+          raise SessionTransportUnavailableError,
+                "Refusing to start a second Pi process while the saved process is still alive"
+        end
 
         expanded_cwd = validate_cwd!(session_ref["cwd"] || session_ref[:cwd])
         session = resume_session_argument(session_ref)
@@ -402,6 +432,11 @@ module Meringue
         end
       end
 
+      def unmanaged_process_alive?(session_ref)
+        pid = session_ref["pid"] || session_ref[:pid]
+        process_alive?(pid) && process_for(session_ref, required: false).nil?
+      end
+
       def process_alive?(pid)
         return false unless present?(pid)
 
@@ -496,7 +531,9 @@ module Meringue
           @pending = {}
           @pending_mutex = Mutex.new
           @write_mutex = Mutex.new
-          @event_queue = Queue.new
+          @event_journal = EventJournal.new
+          @consumer_cursors = {}
+          @consumer_mutex = Mutex.new
           @stderr_buffer = +""
           @stderr_mutex = Mutex.new
 
@@ -528,20 +565,27 @@ module Meringue
           raise ProcessExitedError, "Pi RPC stdin is closed: #{e.message}"
         end
 
-        def drain_events
-          events = []
-          loop do
-            events << @event_queue.pop(true)
-          rescue ThreadError
-            break
-          end
-          events
+        def drain_events(consumer: "default")
+          result = read_for_consumer(consumer)
+          result.fetch("entries").map { |entry| entry.fetch("event") }
         end
 
-        def next_event(timeout:)
-          Timeout.timeout(timeout) { @event_queue.pop }
-        rescue Timeout::Error
-          raise RpcTimeoutError, "Timed out waiting for next Pi RPC event"
+        def event_cursor
+          @event_journal.cursor
+        end
+
+        def events_after(cursor, limit: nil)
+          @event_journal.read(after: cursor, limit: limit)
+        end
+
+        def next_event(timeout:, consumer: "waiter")
+          cursor = consumer_cursor(consumer)
+          result = @event_journal.wait(after: cursor, timeout: timeout, limit: 1)
+          entry = result.fetch("entries").first
+          raise RpcTimeoutError, "Timed out waiting for next Pi RPC event" unless entry
+
+          update_consumer_cursor(consumer, result.fetch("cursor"))
+          entry.fetch("event")
         end
 
         def stderr_tail
@@ -663,7 +707,22 @@ module Meringue
 
         def enqueue_event(event)
           @last_event_at = Time.now.utc.iso8601
-          @event_queue << event
+          @event_journal.publish(event)
+        end
+
+        def read_for_consumer(consumer)
+          cursor = consumer_cursor(consumer)
+          result = @event_journal.read(after: cursor)
+          update_consumer_cursor(consumer, result.fetch("cursor"))
+          result
+        end
+
+        def consumer_cursor(consumer)
+          @consumer_mutex.synchronize { @consumer_cursors.fetch(consumer.to_s, 0) }
+        end
+
+        def update_consumer_cursor(consumer, cursor)
+          @consumer_mutex.synchronize { @consumer_cursors[consumer.to_s] = cursor.to_i }
         end
 
         def fail_pending(error)
