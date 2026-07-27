@@ -54,7 +54,7 @@ Start jump mode with `/jump` or by focusing the agent tree or logs pane and pres
 
 - `Up` / `Down` / `Left` / `Right`: select an agent. In the logs pane, only the selected agent title is highlighted; non-agent events are not selected.
 - `Enter`: open the selected agent's pull request when a PR is available.
-- `a`: open the selected agent session.
+- `a`: open the selected agent session. Completed Pi sessions reopen from their saved JSONL history. If that history is missing or malformed, Meringue reports that the session is unavailable without closing the dashboard or changing the saved agent record, logs, or captured output.
 - `Esc`: cancel jump mode.
 
 Agents with an open pull request are marked `↗` in the AgentTree.
