@@ -6,6 +6,29 @@ require "open3"
 module Meringue
   module Forge
     class GitHubClient
+      def pull_request_urls_for_branch(repository:, branch:)
+        stdout, _stderr, status = Open3.capture3(
+          "gh",
+          "pr",
+          "list",
+          "--repo",
+          repository.to_s,
+          "--head",
+          branch.to_s,
+          "--state",
+          "all",
+          "--limit",
+          "100",
+          "--json",
+          "url"
+        )
+        return [] unless status.success?
+
+        Array(JSON.parse(stdout)).filter_map { |pull_request| pull_request["url"] }.uniq
+      rescue Errno::ENOENT, JSON::ParserError
+        []
+      end
+
       def pull_request_status(url)
         stdout, stderr, status = Open3.capture3(
           "gh",
