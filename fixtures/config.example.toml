@@ -38,3 +38,12 @@ worker_extra_args = []
 
 [terminal]
 # alacritty_command = "/Applications/Alacritty.app/Contents/MacOS/alacritty"
+
+[workspace]
+# Commands can be argv arrays (recommended) or safely split quoted strings.
+# Defaults: $MERINGUE_SHELL/$SHELL or /bin/sh; and
+# $MERINGUE_EDITOR/$VISUAL/$EDITOR or code.
+# shell_command = ["/bin/zsh", "-l"]
+# editor_command = ["code", "--reuse-window"]
+editor_args = ["."]
+# terminal_buffer_bytes = 4194304

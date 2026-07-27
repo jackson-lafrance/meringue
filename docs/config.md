@@ -52,6 +52,7 @@ Supported action names:
 - `cancel_navigation`
 - `open_delivery_pr` (defaults to `ctrl-b`)
 - `focus_next`, `focus_previous`
+- `workspace_switch_view`, `workspace_open_editor`
 - `scroll_up`, `scroll_down`, `scroll_page_up`, `scroll_page_down`
 - `submit`, `newline`
 - `complete_suggestion`, `suggestion_previous`, `suggestion_next`
@@ -62,6 +63,44 @@ Supported action names:
 Common key names include `enter`, `shift-enter`, `tab`, `shift-tab`, `ctrl-tab`, `escape`, arrow keys (`up`, `down`, `left`, `right`), `home`, `end`, `page-up`, `page-down`, `backspace`, `delete`, `ctrl-a` through `ctrl-z`, `alt-left`, `alt-right`, `ctrl-left`, `ctrl-right`, `alt-backspace`, `ctrl-backspace`, `alt-delete`, `ctrl-delete`, `space`, and single printable characters like `j` or `p`. Advanced users can bind a raw terminal sequence with `raw:<sequence>`; literal `\\e` inside that string is converted to Escape.
 
 Use `/keybind` in the TUI to show the active keybindings after config has been loaded.
+
+## Worker workspace terminal and editor
+
+The focused worker workspace has mutually exclusive agent and terminal views. `Ctrl-T` switches between them; terminal input goes only to the workspace shell while that view is active. `Ctrl-E` opens the selected worker's assigned worktree in an external editor. Both actions can be rebound:
+
+```toml
+[tui.keybindings]
+workspace_switch_view = ["ctrl-t"]
+workspace_open_editor = ["ctrl-e"]
+```
+
+Configure the shell and editor under `[workspace]`:
+
+```toml
+[workspace]
+shell_command = ["/bin/zsh", "-l"]
+editor_command = ["code", "--reuse-window"]
+editor_args = ["."]
+# Raw terminal output retained when switching views (default: 4194304).
+terminal_buffer_bytes = 4194304
+```
+
+Commands may be either an argv array (recommended) or a shell-quoted string such as `editor_command = "code --reuse-window"`. Strings are split into arguments, but are **never executed by a shell**: redirects, substitutions, pipes, semicolons, and worktree paths cannot become shell code. `editor_args` is a string or array of strings and defaults to `["."]`.
+
+Defaults, in precedence order:
+
+- shell: `MERINGUE_SHELL`, then `SHELL`, then `/bin/sh`;
+- editor: `MERINGUE_EDITOR`, then `VISUAL`, then `EDITOR`, then `code`;
+- editor args: `["."]`.
+
+The shell is started in a PTY whose current directory is the worker's persisted `workspace_path`. It remains alive while switching back to the agent view, receives terminal resize events, and is stopped with its process group when Meringue exits. It is separate from the managed coding-agent process; terminal cleanup never signals the worker harness pid.
+
+The editor command is spawned directly with the worktree as both its current directory and, by default, the `.` argument. GUI editor CLIs normally detach or reuse an existing window. For a terminal-only editor, configure a terminal-emulator wrapper as the command (for example, an Alacritty command ending in `-e nvim`) so the editor has its own terminal. A missing executable, invalid command/argument type, malformed quoting, or removed worktree is reported in the workspace rather than crashing Meringue or mutating agent state.
+
+Supported workspace action names:
+
+- `workspace_switch_view`
+- `workspace_open_editor`
 
 ## Selecting harnesses
 
