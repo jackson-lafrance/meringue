@@ -14,15 +14,18 @@ module Meringue
       MAX_COMPOSER_HEIGHT = 12
       MIN_CHAT_HEIGHT = 5
       def initialize(agent_tree_pane: Panes::AgentTreePane.new,
-                     chat_pane: Panes::ChatPane.new)
+                     chat_pane: Panes::ChatPane.new,
+                     agent_workspace_pane: Panes::AgentWorkspacePane.new)
         @agent_tree_pane = agent_tree_pane
         @chat_pane = chat_pane
+        @agent_workspace_pane = agent_workspace_pane
       end
 
       def render(state, width:, height:, color: false)
         width = [width.to_i, MIN_WIDTH].max
         height = [height.to_i, MIN_HEIGHT].max
         canvas = Canvas.new(width: width, height: height)
+        return render_agent_workspace(canvas, state, width, height, color: color) if agent_workspace_active?(state)
 
         metrics = layout_metrics(width, height, state)
         agent_tree_lines = agent_tree_pane.lines(state, width: metrics.fetch(:sidebar_width) - 4)
@@ -87,13 +90,17 @@ module Meringue
       end
 
       def pane_at(state, width:, height:, x:, y:)
+        return "agent_workspace" if agent_workspace_active?(state)
+
         metrics = layout_metrics([width.to_i, MIN_WIDTH].max, [height.to_i, MIN_HEIGHT].max, state)
         focusable_pane_bounds(metrics).find do |_pane, bounds|
           point_in_bounds?(x.to_i, y.to_i, bounds)
         end&.first
       end
 
-      def agent_tree_worker_at(state, width:, height:, x:, y:)
+      def agent_tree_item_at(state, width:, height:, x:, y:)
+        return nil if agent_workspace_active?(state)
+
         metrics = layout_metrics([width.to_i, MIN_WIDTH].max, [height.to_i, MIN_HEIGHT].max, state)
         return nil unless point_in_bounds?(x.to_i, y.to_i, pane_bounds(metrics, :sidebar_x, :top_y, :sidebar_width, :top_height))
 
@@ -106,12 +113,19 @@ module Meringue
         return nil unless y.to_i >= content_y && y.to_i < content_y + content_height
 
         lines = agent_tree_pane.lines(state, width: content_width)
-        worker_ids = agent_tree_pane.line_worker_ids(state, width: content_width)
+        item_ids = agent_tree_pane.line_item_ids(state, width: content_width)
         offset = agent_tree_scroll_offset(state, lines, content_height)
-        worker_ids[y.to_i - content_y + offset]
+        item_ids[y.to_i - content_y + offset]
+      end
+
+      # Compatibility for integrations that still use the worker-specific name.
+      def agent_tree_worker_at(state, width:, height:, x:, y:)
+        agent_tree_item_at(state, width: width, height: height, x: x, y: y)
       end
 
       def scroll_limits(state, width:, height:)
+        return { "agent_tree" => 0, "logs" => 0, "chat" => 0 } if agent_workspace_active?(state)
+
         width = [width.to_i, MIN_WIDTH].max
         height = [height.to_i, MIN_HEIGHT].max
         metrics = layout_metrics(width, height, state)
@@ -126,7 +140,72 @@ module Meringue
 
       private
 
-      attr_reader :agent_tree_pane, :chat_pane
+      attr_reader :agent_tree_pane, :chat_pane, :agent_workspace_pane
+
+      def agent_workspace_active?(state)
+        workspace = state.fetch("_agent_workspace", {}) || {}
+        !!workspace.fetch("active", false)
+      end
+
+      def render_agent_workspace(canvas, state, width, height, color:)
+        workspace = state.fetch("_agent_workspace", {}) || {}
+        view = workspace.fetch("view", "agent")
+        pane_x = OUTER_MARGIN
+        pane_width = width - (OUTER_MARGIN * 2)
+        hint_y = height - BOTTOM_HINT_HEIGHT
+
+        if view == "terminal"
+          draw_pane(
+            canvas,
+            pane_x,
+            0,
+            pane_width,
+            hint_y,
+            agent_workspace_pane.title(state),
+            agent_workspace_pane.content_lines(state, width: pane_width - 4),
+            active: true,
+            overflow: :tail
+          )
+        else
+          composer_width = pane_width
+          composer_content_width = composer_width - 4
+          composer_line_count = agent_workspace_pane.composer_lines(state, width: composer_content_width).length
+          composer_height = composer_height_for(height - BOTTOM_HINT_HEIGHT, composer_line_count)
+          content_height = height - BOTTOM_HINT_HEIGHT - composer_height - GAP
+          draw_pane(
+            canvas,
+            pane_x,
+            0,
+            pane_width,
+            content_height,
+            agent_workspace_pane.title(state),
+            agent_workspace_pane.content_lines(state, width: pane_width - 4),
+            active: true,
+            overflow: :pinned_tail
+          )
+          draw_pane(
+            canvas,
+            pane_x,
+            content_height + GAP,
+            composer_width,
+            composer_height,
+            "direct worker follow-up",
+            agent_workspace_pane.composer_lines(state, width: composer_content_width),
+            active: true,
+            overflow: :tail
+          )
+        end
+
+        draw_hint_line(
+          canvas,
+          pane_x + 1,
+          hint_y,
+          pane_width - 2,
+          agent_workspace_pane.hint_line(state),
+          agent_workspace_pane.status_line(state)
+        )
+        canvas.render(color: color)
+      end
 
       def layout_metrics(width, height, state)
         top_y = 0
@@ -287,6 +366,8 @@ module Meringue
         case overflow
         when :tail
           draw_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset)
+        when :pinned_tail
+          draw_pinned_tail_content(canvas, x, y, content_width, content_height, lines)
         when :agent_tree
           draw_scroll_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset)
         else
@@ -312,6 +393,24 @@ module Meringue
 
         overflow = "… #{lines.length - visible_capacity} more"
         canvas.write(x + 2, y + height - 2, overflow.ljust(content_width), max_width: content_width, style: Style::DIM)
+      end
+
+      def draw_pinned_tail_content(canvas, x, y, content_width, content_height, lines)
+        separator = lines.index do |line|
+          Array(line).all? { |segment| (segment.is_a?(Array) ? segment.first : segment).to_s.empty? }
+        end
+        pinned_count = separator ? separator + 1 : [lines.length, 5].min
+        pinned = lines.first([pinned_count, content_height].min)
+        pinned.each_with_index { |line, index| draw_line(canvas, x + 2, y + 1 + index, content_width, line) }
+
+        remaining_height = content_height - pinned.length
+        return unless remaining_height.positive?
+
+        tail = lines.drop(pinned_count)
+        visible = tail.last(remaining_height)
+        visible.each_with_index do |line, index|
+          draw_line(canvas, x + 2, y + 1 + pinned.length + index, content_width, line)
+        end
       end
 
       def draw_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: 0)
