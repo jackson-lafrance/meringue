@@ -142,7 +142,7 @@ module Meringue
                 record: worker,
                 id: short_id(worker["id"]),
                 title: record_title(worker),
-                suffix: worker_suffix(worker),
+                suffix: worker_suffix(worker, issue),
                 selected: AgentTreeNavigation.selected_agent?(worker, selected_agent_id),
                 width: width
               ))
@@ -190,7 +190,7 @@ module Meringue
                 record: worker,
                 id: short_id(worker["id"]),
                 title: record_title(worker),
-                suffix: worker_suffix(worker),
+                suffix: worker_suffix(worker, issue),
                 selected: AgentTreeNavigation.selected_agent?(worker, selected_agent_id),
                 width: width
               )
@@ -431,8 +431,10 @@ module Meringue
           "#{completed}/#{visible_workers.length}"
         end
 
-        def worker_suffix(worker)
-          [worker_relationship_marker(worker), active_pr_marker(worker)].reject(&:empty?).join(" ")
+        def worker_suffix(worker, issue = nil)
+          # Delivery PRs are owned by issues so they survive worker replacement and restart.
+          # Reflect the issue marker on its worker rows without copying metadata back to workers.
+          [worker_relationship_marker(worker), active_pr_marker(issue || worker)].reject(&:empty?).join(" ")
         end
 
         def worker_relationship_marker(worker)

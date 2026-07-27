@@ -98,6 +98,7 @@ module Meringue
       HEAD_RECONCILE_WARNING_DELAY_SECONDS = 5
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
+      DELIVERY_PULL_REQUEST_REFRESH_INTERVAL_SECONDS = 5 * 60
       RECONCILE_STATE_HEALTHY = "healthy"
       RECONCILE_STATE_RESUMING = "resuming"
       RECONCILE_STATE_RESUME_FAILED = "resume_failed"
@@ -422,6 +423,7 @@ module Meringue
         recovered_worker_results = recover_worker_reservations
         recovered_results = recover_unapplied_head_results
         prune_result = prune_killed_records
+        delivery_pr_refreshes = refresh_stale_delivery_pull_requests
         agents = synchronized_state do
           normalized_state.fetch("agents").select { |agent| reconcile_candidate?(agent) }.map { |agent| deep_copy(agent) }
         end
@@ -433,6 +435,7 @@ module Meringue
         changed_count += recovered_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += 1 if normalized_state_changed
         changed_count += 1 if prune_result.fetch("changed", false)
+        changed_count += delivery_pr_refreshes.count { |refresh| refresh.fetch("changed", false) }
         accepted_result(
           command_id,
           command_type,
@@ -446,6 +449,7 @@ module Meringue
             "pruned_project_ids" => prune_result.fetch("removed_project_ids", []),
             "recovered_worker_results" => recovered_worker_results,
             "recovered_head_results" => recovered_results,
+            "delivery_pull_request_refreshes" => delivery_pr_refreshes,
             "poll_results" => applied_results
           },
           (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
@@ -1301,6 +1305,60 @@ module Meringue
         accepted_result(command_id, command_type, nil, "Pruned #{prune_result.fetch("removed_issue_ids").length} errored issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"} and #{prune_result.fetch("removed_standalone_agent_ids").length} standalone errored agent#{prune_result.fetch("removed_standalone_agent_ids").length == 1 ? "" : "s"}.", prune_result, log_ids)
       end
 
+      # Refresh only already-verified delivery PRs. Candidate/reported URLs remain inert, and an
+      # unavailable forge never replaces the last known open/closed/merged state. /prune merged
+      # still performs its own authoritative checks and therefore keeps its conservative rules.
+      def refresh_stale_delivery_pull_requests
+        synchronized_state do
+          state = normalized_state
+          now = timestamp
+          refreshes = state.fetch("issues").flat_map do |issue|
+            State::Models.merge_pull_request_records(State::Models.pull_request_records_from(issue)).filter_map do |record|
+              url = State::Models.pull_request_record_url(record)
+              next if blank?(url) || !delivery_pull_request_refresh_due?(record, now)
+
+              status = pull_request_status(url)
+              unavailable = status.fetch("state", nil).to_s == "unknown"
+              refreshed = if unavailable
+                            record.merge(
+                              "availability" => "unavailable",
+                              "last_checked_at" => now,
+                              "last_refresh_error" => present_string(status.fetch("error", nil))
+                            ).compact
+                          else
+                            record.merge(status).merge(
+                              "availability" => "available",
+                              "last_checked_at" => now,
+                              "last_refresh_error" => nil
+                            ).compact
+                          end
+              State::Models.attach_pull_requests_to_issue!(issue, delivery_pull_requests: [refreshed])
+              {
+                "issue_id" => issue.fetch("id", nil),
+                "url" => url,
+                "state" => refreshed.fetch("state", "unknown"),
+                "availability" => refreshed.fetch("availability"),
+                "changed" => refreshed != record
+              }.compact
+            end
+          end
+          if refreshes.any? { |refresh| refresh.fetch("changed", false) }
+            touch_state!(state, now)
+            store.save(state)
+          end
+          refreshes
+        end
+      end
+
+      def delivery_pull_request_refresh_due?(record, now)
+        checked_at = record.is_a?(Hash) && (record["last_checked_at"] || record["verified_at"])
+        return true if blank?(checked_at)
+
+        Time.iso8601(now) - Time.iso8601(checked_at.to_s) >= DELIVERY_PULL_REQUEST_REFRESH_INTERVAL_SECONDS
+      rescue ArgumentError, TypeError
+        true
+      end
+
       def refresh_worker_delivery_pull_requests!(state)
         workers_by_issue = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }.group_by { |worker| worker.fetch("issue_id", nil) }
         state.fetch("issues").flat_map do |issue|
@@ -1406,7 +1464,9 @@ module Meringue
           status.merge(
             "matched_by" => "workspace_branch",
             "matched_branch" => branch,
-            "verified_at" => timestamp
+            "verified_at" => timestamp,
+            "last_checked_at" => timestamp,
+            "availability" => "available"
           )
         end
       end
@@ -1451,7 +1511,9 @@ module Meringue
 
         status.merge(
           "matched_by" => "merged_same_repo_candidate_without_branch",
-          "verified_at" => timestamp
+          "verified_at" => timestamp,
+          "last_checked_at" => timestamp,
+          "availability" => "available"
         )
       end
 

@@ -50,6 +50,20 @@ module Meringue
         end
       end
 
+      # Persist only non-orchestration agent-workspace presentation state against the latest
+      # state on disk. This avoids a stale TUI snapshot overwriting kernel reconciliation,
+      # delivery-PR refreshes, or pruning performed on another thread.
+      def save_agent_workspace(workspace)
+        @mutex.synchronize do
+          state = load_unlocked
+          Models.normalize_agent_workspace_state!(state, workspace: deep_copy(workspace || {}))
+          state.fetch("ui").fetch("agent_workspace")["updated_at"] = Time.now.utc.iso8601
+          state.fetch("metadata")["updated_at"] = Time.now.utc.iso8601
+          save_unlocked(state, preserve_log_buffer: false)
+          deep_copy(state.fetch("ui").fetch("agent_workspace"))
+        end
+      end
+
       def save_log_buffer(messages:, next_message_id: nil)
         @mutex.synchronize do
           state = load_unlocked

@@ -63,6 +63,12 @@ module Meringue
         @quit_requested = false
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = nil
+        @workspace_agent_id = nil
+        @workspace_view = "agent"
+        @workspace_draft = ""
+        @workspace_agent_scroll_offset = 0
+        @workspace_terminal_scroll_offset = 0
+        @workspace_persistence_error = nil
         @focused_pane = "chat"
         @last_worker_click = nil
         @last_render_width = DEFAULT_WIDTH
@@ -84,6 +90,16 @@ module Meringue
           @messages = messages.map { |message| normalize_persisted_message(message) }.compact
           @next_message_id = [legacy_log_buffer.fetch("next_message_id", 0).to_i, @messages.map { |message| message.fetch("id", 0).to_i }.max.to_i].max
         end
+      end
+
+      def restore_agent_workspace!(state)
+        workspace = State::Models.agent_workspace_state(state)
+        @workspace_agent_id = workspace["selected_agent_id"]
+        @workspace_view = workspace.fetch("view", "agent")
+        @workspace_draft = workspace.fetch("draft", "")
+        @workspace_agent_scroll_offset = workspace.fetch("agent_scroll_offset", 0).to_i
+        @workspace_terminal_scroll_offset = workspace.fetch("terminal_scroll_offset", 0).to_i
+        workspace
       end
 
       def remember_existing_log_events!(state)
@@ -208,6 +224,11 @@ module Meringue
         if legacy_slash_navigation && slash_suggestion_navigation_key?(key) && slash_suggestions_active?(input_buffer)
           buffer, index = handle_legacy_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
           return [buffer, buffer.chars.length, index]
+        end
+
+        if keybinding?("open_delivery_pr", key)
+          open_workspace_delivery_pr(state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
         if @agent_tree_navigation_active
@@ -426,6 +447,7 @@ module Meringue
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = worker_id
+        remember_workspace_agent(state, worker_id)
         true
       end
 
@@ -574,7 +596,7 @@ module Meringue
           Chat: #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode.
-          Jump mode: /jump starts agent navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent; Enter opens the selected agent PR when one is available; a opens the selected agent session; #{keys_for("cancel_navigation")} cancels.
+          Jump mode: /jump starts agent navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent; #{keys_for("open_delivery_pr")} opens the selected worker's verified delivery PR; Enter opens the selected item PR when one is available; a opens the selected agent session; #{keys_for("cancel_navigation")} cancels.
         TEXT
       end
 
@@ -625,12 +647,14 @@ module Meringue
 
         current_index = ids.index(@selected_agent_id) || 0
         @selected_agent_id = ids[(current_index + delta) % ids.length]
+        remember_workspace_agent(state, @selected_agent_id)
       end
 
       def open_selected_agent(state)
         selected_id = normalized_selected_agent_id(state)
         return exit_agent_tree_navigation("No agents are available to jump into yet.") unless selected_id
 
+        remember_workspace_agent(state, selected_id)
         open_agent_by_id(state, selected_id)
         exit_agent_tree_navigation
       end
@@ -654,6 +678,28 @@ module Meringue
         append_jump_response(result.fetch("message", "Could not open agent #{agent_id}."))
       rescue StandardError => e
         append_jump_response("Could not open agent #{agent_id}: #{e.class}: #{e.message}")
+      end
+
+      def open_workspace_delivery_pr(state)
+        agent_id = @agent_tree_navigation_active ? normalized_selected_agent_id(state) : @workspace_agent_id
+        if agent_id.to_s.empty?
+          append_jump_response("Select a worker before opening its delivery pull request.")
+          return false
+        end
+
+        presentation = DeliveryPullRequest.for_id(state, agent_id)
+        unless DeliveryPullRequest.openable?(presentation)
+          append_jump_response("Delivery PR for #{agent_id} is unavailable: #{presentation.fetch("message")}")
+          return false
+        end
+
+        result = pull_request_opener.open(presentation.fetch("url"))
+        opened = result.fetch("status", nil) == "opened" || !%w[failed rejected].include?(result.fetch("status", nil).to_s)
+        append_jump_response(result.fetch("message", "Could not open delivery pull request for #{agent_id}.")) unless opened
+        opened
+      rescue StandardError => e
+        append_jump_response("Could not open delivery pull request for #{agent_id}: #{e.message}")
+        false
       end
 
       def open_pr_by_agent_id(state, agent_id, silent_fail: false)
@@ -1134,13 +1180,59 @@ module Meringue
           @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
           @agent_tree_navigation_active = false if ids.empty?
         end
+        reconcile_workspace_selection!(state)
         composed_state = state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
+          "_agent_workspace" => agent_workspace_snapshot,
           "_scroll" => scroll_snapshot
         )
         clamp_scroll_offsets!(composed_state)
         composed_state.merge("_scroll" => scroll_snapshot)
+      end
+
+      def agent_workspace_snapshot
+        {
+          "selected_agent_id" => @workspace_agent_id,
+          "view" => @workspace_view,
+          "draft" => @workspace_draft,
+          "agent_scroll_offset" => @workspace_agent_scroll_offset,
+          "terminal_scroll_offset" => @workspace_terminal_scroll_offset,
+          "persistence_error" => @workspace_persistence_error
+        }.compact
+      end
+
+      def remember_workspace_agent(state, agent_id)
+        worker = Array(state.fetch("agents", [])).find do |agent|
+          agent.is_a?(Hash) && agent["type"].to_s == "worker" && agent["id"].to_s == agent_id.to_s
+        end
+        return false unless worker
+        return true if @workspace_agent_id.to_s == worker.fetch("id").to_s
+
+        @workspace_agent_id = worker.fetch("id")
+        persist_agent_workspace
+        true
+      end
+
+      def reconcile_workspace_selection!(state)
+        return if @workspace_agent_id.to_s.empty?
+        return if Array(state.fetch("agents", [])).any? { |agent| agent.is_a?(Hash) && agent["type"] == "worker" && agent["id"].to_s == @workspace_agent_id.to_s }
+
+        @workspace_agent_id = nil
+        @workspace_view = "agent"
+        @workspace_draft = ""
+        persist_agent_workspace
+      end
+
+      def persist_agent_workspace
+        return unless log_store&.respond_to?(:save_agent_workspace)
+
+        persisted = log_store.save_agent_workspace(agent_workspace_snapshot)
+        @workspace_persistence_error = nil
+        persisted
+      rescue StandardError => e
+        @workspace_persistence_error = "Workspace selection could not be saved: #{e.message}"
+        nil
       end
 
       def agent_tree_navigation_snapshot
