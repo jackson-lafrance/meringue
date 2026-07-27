@@ -58,7 +58,12 @@ module Meringue
         private
 
         def records(state, key)
-          state.fetch(key, []) || []
+          entries = state.fetch(key, []) || []
+          return entries unless %w[projects issues].include?(key)
+
+          # Killed projects and issues are removed by the kernel, but state written by an older
+          # Meringue version can still contain them. Never render a killed subtree.
+          entries.reject { |entry| entry.is_a?(Hash) && entry["status"] == "killed" }
         end
 
         def append_heads(output, agents, selected_agent_id, width)
