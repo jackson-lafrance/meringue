@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "json"
 require "shellwords"
 
 module Meringue
@@ -32,10 +33,11 @@ module Meringue
         harness = agent.fetch("harness", nil).to_s
         return rejected("Agent #{agent_id(agent)} has no harness to open.") if harness.empty?
 
-        command_argv = harness_argv(harness, agent)
-        return rejected("Opening #{harness.inspect} sessions is not supported yet.") unless command_argv
+        launch = harness_launch(harness, agent)
+        return rejected("Opening #{harness.inspect} sessions is not supported yet.") unless launch
+        return rejected(launch.fetch("error")) if launch["error"]
 
-        open_agent_terminal(agent, command_argv)
+        open_agent_terminal(agent, launch.fetch("argv"))
       rescue StandardError => e
         failed("Could not open agent #{agent_id(agent)}: #{e.class}: #{e.message}")
       end
@@ -63,24 +65,25 @@ module Meringue
         failed("Could not open #{agent_id(agent)} in Alacritty: #{result.fetch("error")}")
       end
 
-      def harness_argv(harness, agent)
+      def harness_launch(harness, agent)
         case harness
         when "pi"
-          pi_argv(agent)
+          pi_launch(agent)
         when "claude"
-          claude_argv(agent)
+          argv = claude_argv(agent)
+          argv ? { "argv" => argv } : { "error" => "Agent #{agent_id(agent)} has no saved Claude session to open." }
         when "antigravity"
-          antigravity_argv(agent)
+          { "argv" => antigravity_argv(agent) }
         end
       end
 
-      def pi_argv(agent)
-        session = pi_session_argument(agent)
-        return nil unless present?(session)
+      def pi_launch(agent)
+        session_file, error = available_pi_session_file(agent)
+        return { "error" => "#{error} #{preserved_record_note}" } if error
 
         argv = command_parts("pi")
         argv += ["--session-dir", pi_session_dir] if present?(pi_session_dir)
-        argv + ["--session", session]
+        { "argv" => argv + ["--session", session_file] }
       end
 
       def claude_argv(agent)
@@ -94,14 +97,94 @@ module Meringue
         command_parts("antigravity") + ["--continue"]
       end
 
-      def pi_session_argument(agent)
-        session_file = agent.fetch("harness_session_file", nil)
-        return File.expand_path(session_file) if present?(session_file) && File.file?(File.expand_path(session_file))
-
+      def available_pi_session_file(agent)
+        configured_file = expanded_session_file(agent)
         session_id = agent.fetch("harness_session_id", nil)
-        return session_id if present?(session_id)
+
+        if configured_file && File.file?(configured_file)
+          error = pi_session_file_error(configured_file, expected_session_id: session_id)
+          return error ? [nil, unavailable_pi_session_message(agent, configured_file, error)] : [configured_file, nil]
+        end
+
+        discovered_file, discovery_error = discover_pi_session_file(session_id)
+        return [discovered_file, nil] if discovered_file
+
+        if configured_file
+          message = "Pi session history for #{agent_id(agent)} is unavailable because its saved session file is missing: #{configured_file}."
+          message += " #{discovery_error}" if discovery_error
+          return [nil, message]
+        end
+
+        unless present?(session_id)
+          return [nil, "Agent #{agent_id(agent)} has no saved Pi session file or session id to open."]
+        end
+
+        message = "Pi session history for #{agent_id(agent)} is unavailable because no saved session file matches #{session_id.inspect}"
+        message += present?(pi_session_dir) ? " in #{File.expand_path(pi_session_dir)}." : "."
+        message += " #{discovery_error}" if discovery_error
+        [nil, message]
+      end
+
+      def expanded_session_file(agent)
+        session_file = agent.fetch("harness_session_file", nil)
+        File.expand_path(session_file) if present?(session_file)
+      end
+
+      def discover_pi_session_file(session_id)
+        return [nil, nil] unless present?(session_id) && present?(pi_session_dir)
+
+        directory = File.expand_path(pi_session_dir)
+        return [nil, "The configured Pi session directory is missing."] unless Dir.exist?(directory)
+
+        candidates = Dir.children(directory).select do |name|
+          name.end_with?(".jsonl") && name.include?(session_id.to_s)
+        end.sort.map { |name| File.join(directory, name) }
+        first_error = nil
+        candidates.each do |path|
+          error = pi_session_file_error(path, expected_session_id: session_id)
+          return [path, nil] unless error
+
+          first_error ||= "A matching file could not be opened: #{error}"
+        end
+        [nil, first_error]
+      rescue SystemCallError => e
+        [nil, "The configured Pi session directory could not be read: #{e.message}"]
+      end
+
+      def pi_session_file_error(path, expected_session_id: nil)
+        header = nil
+        record_count = 0
+
+        File.foreach(path).with_index(1) do |line, line_number|
+          next if line.strip.empty?
+
+          record = JSON.parse(line)
+          return "line #{line_number} is not a JSON object" unless record.is_a?(Hash)
+
+          header ||= record
+          record_count += 1
+        rescue JSON::ParserError => e
+          return "line #{line_number} is invalid JSON (#{e.message})"
+        end
+
+        return "the file is empty" if record_count.zero?
+        return "the first record is not a Pi session header" unless header["type"] == "session"
+        return "the session header has no id" unless present?(header["id"])
+        if present?(expected_session_id) && header["id"].to_s != expected_session_id.to_s
+          return "the session header id #{header["id"].inspect} does not match #{expected_session_id.inspect}"
+        end
 
         nil
+      rescue SystemCallError => e
+        "the file could not be read (#{e.message})"
+      end
+
+      def unavailable_pi_session_message(agent, path, error)
+        "Pi session history for #{agent_id(agent)} is unavailable because its saved session file is malformed: #{path} (#{error})."
+      end
+
+      def preserved_record_note
+        "The saved Meringue agent record, logs, and any captured worker output remain unchanged."
       end
 
       def open_alacritty(alacritty, cwd, command_argv)
