@@ -58,13 +58,23 @@ module Meringue
       registry = Harness::Registry.new(config: config)
       store = state_store(path: options.fetch(:state_path))
       engine = enable_agents ? tui_engine(store, registry, config_path: options.fetch(:config_path)) : nil
+      workspace_controller = Workspace::Controller.from_config(config)
+      agent_session_service = engine ? Sessions::WorkerSessionService.new(engine: engine) : nil
       App.new(
         input: input,
         out: out,
         err: err,
         state_path: options.fetch(:state_path),
         state_store: store,
-        tui_app: TUI::App.new(input: input, out: out, session_opener: registry.terminal_session_opener, log_store: store, keybindings: keybindings),
+        tui_app: TUI::App.new(
+          input: input,
+          out: out,
+          session_opener: registry.terminal_session_opener,
+          workspace_controller: workspace_controller,
+          agent_session_service: agent_session_service,
+          log_store: store,
+          keybindings: keybindings
+        ),
         prompt_handler: engine ? Heads::PromptLoop.new(engine: engine, wait_for_workers: false) : nil,
         reconciler: engine ? -> { engine.reconcile_sessions } : nil
       ).run
@@ -239,12 +249,14 @@ module Meringue
           /theme <name>             # set and persist the TUI theme
           /harness <pi|claude|antigravity> # select the harness backend for future agents
           /keybind                  # show all TUI keybindings
-          /jump [agent_id]          # open an agent session in Alacritty; omit id to navigate the AgentTree
+          /jump [agent_id]          # open a focused workspace; omit id to navigate the AgentTree
           /recount                  # compact AgentTree numbering after records are removed
           Ctrl-B                    # open the selected worker's verified delivery PR
           Enter in jump mode        # open selected issue/agent PR when one is available
-          a in jump mode            # open selected agent session
-          issue/worker double-click # open that item's PR when one is available
+          a in jump mode            # open the selected agent's focused workspace
+          issue/agent double-click  # open that agent's focused workspace
+          Ctrl-T in workspace       # switch between the live agent and terminal
+          Esc in workspace          # return to AgentTree without stopping the worker
           Ctrl-C on an empty prompt # quit the TUI; Esc cancels jump mode
       HELP
     end

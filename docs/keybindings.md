@@ -22,8 +22,8 @@ agent_select_next = ["j", "down", "right"]
 ## Focus and scrolling
 
 - Click a dashboard section: move focus to that section (the active outline follows the focused section). The logs pane includes user-visible prompts, agent output, and important kernel events.
-- Click a worker in the agent tree: select/highlight that worker, matching jump mode selection.
-- Double-click a worker in the agent tree: open that worker's pull request when one is available.
+- Click an issue or agent in the AgentTree: select/highlight it, matching jump mode selection.
+- Double-click an agent (or an issue with a worker): open its focused workspace. This is the primary mouse action; PR opening remains an explicit action.
 - `Tab` / `Ctrl-Tab`: move focus forward.
 - `Shift-Tab`: move focus backward.
 - Arrow keys, `PageUp` / `PageDown`, and mouse wheel: scroll the focused non-chat pane.
@@ -65,8 +65,23 @@ Start jump mode with `/jump` or by focusing the agent tree or logs pane and pres
 - `Up` / `Down` / `Left` / `Right`: select an agent. In the logs pane, only the selected agent title is highlighted; non-agent events are not selected.
 - `Ctrl-B`: open the selected worker's verified delivery pull request. The PR remains easy to open when status refresh is temporarily unavailable.
 - `Enter`: open the selected agent's pull request when a PR is available.
-- `a`: open the selected agent session. Completed Pi sessions reopen from their saved JSONL history. If that history is missing or malformed, Meringue reports that the session is unavailable without closing the dashboard or changing the saved agent record, logs, or captured output.
+- `a`: open the selected agent's focused workspace. Selecting an issue opens its newest non-killed worker.
 - `Esc`: cancel jump mode.
+
+## Focused worker workspace
+
+The workspace is an optional, issue-specific deep-interaction tool—not a replacement for Meringue's normal head-agent chat. Open it when a worker needs sustained direction, iterative discussion, research, investigation, or closer visibility into responses and tool calls. Keep using the dashboard chat for new goals and routine orchestration through head agents.
+
+The workspace replaces the dashboard while open, so the live worker and terminal never compete in simultaneous subviews. Its header keeps the selected worker, status, issue, harness, worktree, and verified delivery PR visible.
+
+- `Enter`: send a direct follow-up into the selected worker's existing context through the kernel-owned `PromptAgent` path.
+- `Shift-Enter`: insert a newline in that follow-up.
+- `Ctrl-T`: switch between the live worker and worktree terminal.
+- `Ctrl-E`: launch the configured external editor in the worker worktree.
+- `Ctrl-B`: open the verified delivery pull request when one exists.
+- `Esc`: return to the selected AgentTree item. This only changes TUI navigation; it never aborts, kills, detaches, or replaces the worker session.
+
+In terminal view, all other keys—including `Ctrl-C` and `Ctrl-D`—are sent to the isolated workspace terminal instead of the managed worker. Completed or unavailable sessions remain inspectable in worker view, and failures are shown in place without mutating the saved worker record.
 
 Agents with an open pull request are marked `↗` in the AgentTree. Worker selection and focused-workspace view state are restored from the state file after restart; selections for pruned workers are cleared safely.
 

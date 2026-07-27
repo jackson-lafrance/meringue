@@ -154,7 +154,7 @@ Useful slash commands inside the TUI include:
 - `/issue create <project_id> "<title>" ["description"]` — create an issue manually.
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
 - `/prompt <agent_id> "<message>"` — follow up with an existing agent.
-- `/jump [agent_id]` — open a worker harness session; omit the id to navigate issues/workers and open PRs from jump mode.
+- `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
 - `/theme <name>` — persist a TUI colorscheme.
 - `/harness <pi|claude|antigravity>` — select the harness for future agents.
 - `/keybind` — show active TUI keybindings.
@@ -191,6 +191,8 @@ Default paths:
 The config supports TUI colorschemes, TUI keybinding overrides, default harness selection, role-specific head/worker harnesses, and provider command overrides. See `docs/config.md` for the full reference.
 
 The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state.
+
+From the AgentTree, press `a` or double-click an agent to replace the dashboard with one focused workspace. `Ctrl-T` switches that workspace between the live agent and terminal; `Ctrl-E` opens its editor, `Ctrl-B` opens its PR, and `Esc` returns to the same AgentTree selection without stopping the worker. See `docs/keybindings.md` for the full interaction model.
 
 ## Current architecture in one flow
 
