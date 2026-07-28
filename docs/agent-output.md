@@ -48,6 +48,12 @@ The header owns the agent id, title, timestamp, and state; the body does not rep
 
 `TUI::AgentOutput` removes ANSI/control sequences, duplicate rendered headers and `<agent-id> output:` labels, common outer box borders and hard wrapping, trailing whitespace, excess blank lines, and duplicate PR URLs. Cleanup is structure-aware: fenced code keeps its indentation and blank rows, while headings, lists, quotes, and paragraph boundaries survive normalization for the renderer.
 
+## Timestamps and transient UI actions
+
+Durable timestamps are written by several layers: the kernel prefers local ISO8601, while the state layer and harness clients store UTC ISO8601. Rendering never assumes one of those formats. `TUI::Timestamps` parses either form, converts to the user's local timezone for display (`[14:30]`), and produces a numeric sort key so UTC-stored and local-stored entries interleave in true chronological order. Timestamp comparisons such as the `TUI::App` start-time gate go through the same parser, so filtering stays correct across offsets.
+
+Opening a PR or an agent session is transient UI feedback, not orchestration history, so successful opens no longer append a log entry. `TUI::PullRequestOpener` and `Harness::TerminalSessionOpener` return `{"status" => "opened"}` with no user-visible message, while rejected and failed opens keep their explanatory message and are still logged.
+
 ## Terminal Markdown
 
 Conversational `head` and `worker` entries are passed to `TUI::Markdown`, a dependency-free renderer that emits styled Canvas segments rather than terminal escape sequences. It handles the structures agents use most often:
