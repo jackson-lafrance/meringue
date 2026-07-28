@@ -14,6 +14,7 @@ agent_select_next = ["j", "down", "right"]
 
 ## Global
 
+- `Ctrl-B`: open the selected worker's kernel-verified delivery pull request. If the PR is missing, malformed, or its status cannot be refreshed, Meringue reports that state without closing the dashboard or changing the worker.
 - `Ctrl-D`: quit.
 - `Ctrl-C`: clear input; quit when input is empty.
 - `Esc`: cancel jump mode when navigation is active.
@@ -21,8 +22,8 @@ agent_select_next = ["j", "down", "right"]
 ## Focus and scrolling
 
 - Click a dashboard section: move focus to that section (the active outline follows the focused section). The logs pane includes user-visible prompts, agent output, and important kernel events.
-- Click a worker in the agent tree: select/highlight that worker, matching jump mode selection.
-- Double-click a worker in the agent tree: open that worker's pull request when one is available.
+- Click an issue or agent in the AgentTree: select/highlight it, matching jump mode selection.
+- Double-click an agent (or an issue with a worker): open its focused workspace. This is the primary mouse action; PR opening remains an explicit action.
 - `Tab` / `Ctrl-Tab`: move focus forward.
 - `Shift-Tab`: move focus backward.
 - Arrow keys, `PageUp` / `PageDown`, and mouse wheel: scroll the focused non-chat pane.
@@ -71,9 +72,65 @@ Paste is composer-only; the logs pane is copy-only.
 
 Start jump mode with `/jump` or by focusing the agent tree or logs pane and pressing `Enter`.
 
-- `Up` / `Down` / `Left` / `Right`: select an agent. In the logs pane, only the selected agent title is highlighted; non-agent events are not selected.
+- `Up` / `Down` / `Left` / `Right`: select an issue or agent. In the logs pane, only agent titles are selectable; non-agent events are skipped.
+- `Ctrl-B`: open the selected worker's verified delivery pull request. The PR remains easy to open when status refresh is temporarily unavailable.
 - `Enter`: open the selected agent's pull request when a PR is available.
-- `a`: open the selected agent session. Completed Pi sessions reopen from their saved JSONL history. If that history is missing or malformed, Meringue reports that the session is unavailable without closing the dashboard or changing the saved agent record, logs, or captured output.
+- `a`: open the selected worker's focused workspace. Selecting an issue opens its newest non-killed worker; heads without a durable worker context stay on the dashboard.
 - `Esc`: cancel jump mode.
 
-Agents with an open pull request are marked `↗` in the AgentTree.
+## Focused worker workspace
+
+The workspace is an optional, issue-specific deep-interaction tool—not a replacement for Meringue's normal head-agent chat. Open it when a worker needs sustained direction, iterative discussion, research, investigation, or closer visibility into responses and tool calls. Keep using the dashboard chat for new goals and routine orchestration through head agents.
+
+The workspace replaces the dashboard while open, so the live worker and terminal never compete in simultaneous subviews. Its header keeps the selected worker, status, issue, harness, worktree, and verified delivery PR visible. The worker view renders the complete available active harness transcript—not the compact dashboard completion log—including user and assistant messages, reasoning output, streaming updates, tool calls/results, errors, retries/compaction notices, and relevant turn/session lifecycle events. Normal output, final output, reasoning, tool calls, and tool results use distinct semantic colors in every TUI colorscheme.
+
+Focused commands use a leader sequence so normal terminal control bindings are not stolen. The default leader is `Ctrl-Space`:
+
+- `Ctrl-Space`, then `T`: switch between the terminal and agent view.
+- `Ctrl-Space`, then `F`: cycle transcript filters through `all`, `output`, `final`, `reasoning`, and `tools`.
+- `Ctrl-Space`, then `A`: open the worker's underlying agent session with Meringue's existing external session launcher. Missing, malformed, or otherwise unavailable sessions are reported in place.
+- `Ctrl-Space`, then `B`: launch the configured external editor in the worker worktree.
+- `Ctrl-Space`, then `P`: open the verified delivery pull request when one exists.
+- `Ctrl-Space`, then `Q`: quit either focused subview back to the AgentTree without stopping the worker or its workspace terminal.
+
+The composer is titled `chat`, and the helper line under it is exactly this leader line and nothing else:
+
+```txt
+Ctrl-Space  T terminal/agent · F filter: all · A agent session · B editor · P PR · Q quit
+```
+
+The dashboard's bottom bar uses the same styling — accented keys, muted labels, dim dividers — so both bars read as one product:
+
+```txt
+Enter send · Ctrl-C clear/quit · Tab focus · / commands · /keybind keys
+```
+
+Key letters and labels come from the active bindings, so custom bindings render accurately. The `F` entry always shows the active transcript filter, which resets scroll to the newest matching entry, persists across restart for the selected worker, and resets to `all` when another worker is selected.
+
+### Workspace slash commands
+
+The focused composer also accepts slash commands, scoped to the selected worker. Typing `/` opens a `workspace commands` list above the composer; `Tab` completes, `Up`/`Down` select, and `Enter` applies a highlighted suggestion or runs the typed command. Anything that does not start with `/` is still a direct follow-up prompt.
+
+| command | effect |
+| --- | --- |
+| `/help` | List the workspace commands. |
+| `/terminal` | Switch between the terminal and agent view. |
+| `/filter [all\|output\|final\|reasoning\|tools]` | Set the transcript filter, or cycle it when no value is given. |
+| `/session` | Open the worker's underlying agent session externally. |
+| `/editor` | Open the worker worktree in the configured editor. |
+| `/pr` | Open the verified delivery pull request. |
+| `/cwd` | Show the worker's resolved worktree directory. |
+| `/cancel` | Cancel the worker's current turn without ending its session. |
+| `/quit` | Return to the AgentTree, keeping the worker and its terminal alive. |
+
+`/agent`, `/back`, `/pwd`, `/abort`, and a few other obvious aliases resolve to the same actions. Aliases never name a specific harness backend, so nothing here is Pi-specific. Unknown commands, unknown filters, and stray arguments are reported in the workspace instead of being sent to the worker as a prompt. In terminal view there is no composer, so `/` goes to the shell and the leader keys remain the way to switch views.
+
+`Enter` still sends a direct follow-up into the selected worker's existing context through the kernel-owned `PromptAgent` path, `Shift-Enter` still inserts a newline, and `PageUp`/`PageDown` or the mouse wheel still scroll the agent transcript; those are no longer repeated in the hint line. In terminal view the mouse wheel scrolls the terminal viewport while `PageUp`/`PageDown` go to the shell.
+
+The leader and each suffix are configurable as `workspace_leader`, `workspace_switch_view`, `workspace_cycle_filter`, `workspace_open_agent_session` (legacy alias `workspace_open_pi_session`), `workspace_open_editor`, `workspace_open_pull_request`, and `workspace_close`. Leader + `q` is the only focused-workspace return command. `cancel_navigation`/`Esc` remains scoped to dashboard jump mode and never closes a focused workspace; Esc is ignored in worker view and forwarded in terminal view. An unknown suffix is passed to the active view rather than silently discarded. In terminal view, every key other than the configured leader—including bare `t`, `f`, `a`, `b`, `p`, `q`, `Ctrl-T`, `Ctrl-B`, `PageUp`/`PageDown`, `Esc`, `Ctrl-C`, and `Ctrl-D`—is sent to the isolated workspace terminal. The external agent-session action validates persisted session history and uses the established detached terminal launcher; it does not replace, signal, or transfer ownership of Meringue's managed harness RPC process. The embedded worktree terminal starts in the worker's real worktree directory, preserves child-process ANSI/SGR colors, consumes charset-designation and DCS/APC/PM/SOS escapes (so `sgr0`-style resets never leak a stray `B` into shell output), keeps multi-byte glyphs intact across PTY read boundaries, and redraws on a low-latency terminal cadence as a viewport (no row is spent on an overflow label); background harness transcript snapshots pause while terminal view is active and resume immediately on return. Press `Ctrl-Space`, then `t` to switch back, or `Ctrl-Space`, then `q` to return directly to the AgentTree while keeping the shell alive. The shell follows terminal resizes and is cleaned up without signaling the managed worker when Meringue exits. Completed or unavailable sessions remain inspectable in worker view, and failures are shown in place without mutating the saved worker record.
+
+Scrolling either focused view reuses the dashboard's frame-diffed rendering: composed lines are cached until the underlying transcript or terminal screen actually changes, offsets are clamped to what the pane can scroll, and the workspace selection is written to the state file on a slow cadence instead of once per scroll step.
+
+Agents with an open pull request are marked `↗` in the AgentTree. Worker selection and focused-workspace view state are restored from the state file after restart; selections for pruned workers are cleared safely.
+
+See [Agent workspace delivery and recovery integration](agent_workspace_integration.md) for persistence, stale PR metadata, and degraded dependency behavior.

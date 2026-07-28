@@ -18,6 +18,8 @@ module Meringue
       PULL_REQUEST_STORAGE_KEYS = %w[
         delivery_pull_request delivery_pull_requests reported_pr_urls candidate_pr_urls
       ].freeze
+      AGENT_WORKSPACE_VIEWS = %w[agent terminal].freeze
+      AGENT_WORKSPACE_FILTERS = %w[all output final reasoning tools].freeze
 
       module_function
 
@@ -35,6 +37,8 @@ module Meringue
         state["conversation"] ||= {}
         state["conversation"]["messages"] ||= []
         state["conversation"]["next_message_id"] ||= max_log_message_id(state)
+        state["ui"] = {} unless state["ui"].is_a?(Hash)
+        normalize_agent_workspace_state!(state)
         state["counters"] ||= {}
         state["counters"]["projects"] ||= max_numeric_suffix(state.fetch("projects"), /^P(\d+)$/)
         state["counters"]["heads"] ||= max_numeric_suffix(state.fetch("agents").select { |agent| agent["type"] == "head" }, /^H(\d+)$/)
@@ -53,6 +57,51 @@ module Meringue
         state["metadata"]["updated_at"] ||= state["metadata"].fetch("created_at")
         migrate_pull_requests_to_issues!(state)
         state
+      end
+
+      # Agent-workspace presentation state is durable but is not orchestration state. It is
+      # deliberately small: harness/process truth remains on the worker record and is reconciled
+      # by the kernel. Invalid selections are cleared rather than resurrecting pruned workers.
+      def normalize_agent_workspace_state!(state, workspace: nil)
+        state["ui"] = {} unless state["ui"].is_a?(Hash)
+        source = workspace || state["ui"]["agent_workspace"]
+        source = {} unless source.is_a?(Hash)
+
+        worker_ids = Array(state["agents"]).filter_map do |agent|
+          next unless agent.is_a?(Hash) && agent["type"].to_s == "worker"
+
+          agent["id"].to_s
+        end
+        selected_agent_id = pull_request_record_url(source["selected_agent_id"])
+        selected_agent_id = nil unless worker_ids.include?(selected_agent_id)
+        view = source["view"].to_s
+        view = "agent" unless AGENT_WORKSPACE_VIEWS.include?(view)
+        filter = source["filter"].to_s
+        filter = "all" unless AGENT_WORKSPACE_FILTERS.include?(filter)
+
+        normalized = {
+          "selected_agent_id" => selected_agent_id,
+          "view" => view,
+          "filter" => filter,
+          "draft" => selected_agent_id ? source.fetch("draft", "").to_s : "",
+          "agent_scroll_offset" => nonnegative_integer(source["agent_scroll_offset"]),
+          "terminal_scroll_offset" => nonnegative_integer(source["terminal_scroll_offset"]),
+          "updated_at" => source["updated_at"]
+        }.compact
+        state["ui"]["agent_workspace"] = normalized
+      end
+
+      def agent_workspace_state(state)
+        normalize_agent_workspace_state!(state)
+        stringify_keys(state.fetch("ui").fetch("agent_workspace")).transform_values do |value|
+          value.is_a?(String) ? value.dup : value
+        end
+      end
+
+      def nonnegative_integer(value)
+        [Integer(value || 0), 0].max
+      rescue ArgumentError, TypeError
+        0
       end
 
       def retain_recent_logs!(state, limit: LOG_RETENTION_LIMIT)

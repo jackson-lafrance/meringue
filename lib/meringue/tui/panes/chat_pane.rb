@@ -101,6 +101,11 @@ module Meringue
             prefix += [["  ·  ", Style::DIM]] unless prefix.empty?
             prefix += [["? #{open_questions}", Style::WARNING]]
           end
+          delivery_pr = delivery_pr_hint_segments(state)
+          unless delivery_pr.empty?
+            prefix += [["  ·  ", Style::DIM]] unless prefix.empty?
+            prefix += delivery_pr
+          end
           separator = prefix.empty? ? [] : [["  ·  ", Style::DIM]]
 
           prefix + separator + interaction_hint_segments
@@ -148,6 +153,27 @@ module Meringue
         end
 
         private
+
+        def delivery_pr_hint_segments(state)
+          navigation_id = AgentTreeNavigation.selected_agent_id(state)
+          workspace = state.fetch("_agent_workspace", {}) || {}
+          agent_id = navigation_id || workspace["agent_id"]
+          return [] if agent_id.to_s.empty?
+
+          presentation = DeliveryPullRequest.for_id(state, agent_id)
+          unless DeliveryPullRequest.openable?(presentation)
+            return [["PR", Style::MUTED], [" #{DeliveryPullRequest.status_label(presentation)}", Style::WARNING]]
+          end
+
+          number = presentation.fetch("number", "?")
+          status = DeliveryPullRequest.status_label(presentation)
+          status_style = presentation.fetch("metadata_available", true) && !presentation["stale"] ? Style::SUCCESS : Style::WARNING
+          [
+            ["PR ##{number}", Style::ACCENT_BOLD],
+            [" #{status}", status_style],
+            ["  Ctrl-B open", Style::MUTED]
+          ]
+        end
 
         # Input editing only changes _chat.input_buffer, but the layout asks for
         # the complete, wrapped log history twice per frame (scroll bounds and
@@ -678,16 +704,18 @@ module Meringue
           [["⧉ selection", Style::ACCENT], ["  Ctrl-C copies", Style::MUTED]]
         end
 
+        # Shares the focused workspace's bottom-bar styling: accented keys with
+        # muted labels and dim dividers, so both bars read as one product.
         def interaction_hint_segments
-          [
-            ["Enter sends", Style::MUTED],
-            [" • ", Style::DIM],
-            ["Ctrl-C clears/quits", Style::MUTED],
-            [" • ", Style::DIM],
-            ["Tab focus", Style::MUTED],
-            [" • ", Style::DIM],
-            ["/keybind help", Style::MUTED]
-          ]
+          HintLine.segments(
+            [
+              ["Enter", "send"],
+              ["Ctrl-C", "clear/quit"],
+              ["Tab", "focus"],
+              ["/", "commands"],
+              ["/keybind", "keys"]
+            ]
+          )
         end
 
         def active_harness_label(state)

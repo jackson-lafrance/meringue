@@ -17,7 +17,7 @@ module Meringue
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker session."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
-        ["/jump [agent_id]", "Open an agent harness session in Alacritty, or navigate the AgentTree when no id is provided."],
+        ["/jump [agent_id]", "Open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/keybind", "Show all TUI keybindings."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],

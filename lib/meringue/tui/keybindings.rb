@@ -7,6 +7,7 @@ module Meringue
         "quit" => ["ctrl-d"],
         "clear_or_quit" => ["ctrl-c"],
         "cancel_navigation" => ["escape"],
+        "open_delivery_pr" => ["ctrl-b"],
         "focus_next" => ["tab", "ctrl-tab"],
         "focus_previous" => ["shift-tab"],
         "scroll_up" => ["up"],
@@ -42,13 +43,40 @@ module Meringue
         "select_word_left" => ["shift-alt-left", "shift-ctrl-left"],
         "select_word_right" => ["shift-alt-right", "shift-ctrl-right"],
         "agent_select_previous" => ["up", "left"],
-        "agent_select_next" => ["down", "right"]
+        "agent_select_next" => ["down", "right"],
+        "open_agent_workspace" => ["a"],
+        "workspace_leader" => ["ctrl-space"],
+        "workspace_switch_view" => ["t"],
+        "workspace_cycle_filter" => ["f"],
+        "workspace_open_agent_session" => ["a"],
+        "workspace_open_editor" => ["b"],
+        "workspace_open_pull_request" => ["p"],
+        "workspace_close" => ["q"]
+      }.freeze
+
+      # Older config files bound the harness-specific action name. Keep them
+      # working by folding the legacy name onto the harness-agnostic action.
+      ACTION_ALIASES = {
+        "workspace_open_pi_session" => "workspace_open_agent_session",
+        "workspace_open_harness_session" => "workspace_open_agent_session",
+        "workspace_open_session" => "workspace_open_agent_session"
+      }.freeze
+
+      # Short, harness-agnostic labels for the focused-workspace leader line.
+      WORKSPACE_COMMAND_LABELS = {
+        "workspace_switch_view" => "terminal/agent",
+        "workspace_cycle_filter" => "filter",
+        "workspace_open_agent_session" => "agent session",
+        "workspace_open_editor" => "editor",
+        "workspace_open_pull_request" => "PR",
+        "workspace_close" => "quit"
       }.freeze
 
       ACTION_LABELS = {
         "quit" => "Quit",
         "clear_or_quit" => "Clear input / quit empty prompt",
-        "cancel_navigation" => "Cancel navigation",
+        "cancel_navigation" => "Cancel dashboard navigation",
+        "open_delivery_pr" => "Open selected worker delivery PR",
         "focus_next" => "Focus next pane",
         "focus_previous" => "Focus previous pane",
         "scroll_up" => "Scroll up",
@@ -84,7 +112,15 @@ module Meringue
         "select_word_left" => "Extend selection by word left",
         "select_word_right" => "Extend selection by word right",
         "agent_select_previous" => "Select previous agent",
-        "agent_select_next" => "Select next agent"
+        "agent_select_next" => "Select next agent",
+        "open_agent_workspace" => "Open optional focused worker workspace",
+        "workspace_leader" => "Focused workspace command leader",
+        "workspace_switch_view" => "After workspace leader: switch between terminal and agent view",
+        "workspace_cycle_filter" => "After workspace leader: cycle transcript filter",
+        "workspace_open_agent_session" => "After workspace leader: open the underlying agent session externally",
+        "workspace_open_editor" => "After workspace leader: open configured editor",
+        "workspace_open_pull_request" => "After workspace leader: open delivery pull request",
+        "workspace_close" => "After workspace leader: quit back to the AgentTree"
       }.freeze
 
       KEY_ALIASES = {
@@ -93,6 +129,10 @@ module Meringue
         "ctrl-c" => ["\u0003", "\e[99;5u", "\e[67;5u", "\e[27;5;99~", "\e[27;5;67~"],
         "ctrl-d" => ["\u0004"],
         "ctrl-w" => ["\u0017"],
+        "ctrl-b" => ["\u0002", "\e[98;5u", "\e[66;5u", "\e[27;5;98~", "\e[27;5;66~"],
+        "ctrl-e" => ["\u0005", "\e[101;5u", "\e[69;5u", "\e[27;5;101~", "\e[27;5;69~"],
+        "ctrl-t" => ["\u0014", "\e[116;5u", "\e[84;5u", "\e[27;5;116~", "\e[27;5;84~"],
+        "ctrl-space" => ["\u0000", "\e[32;5u", "\e[27;5;32~"],
         "ctrl-x" => ["\u0018", "\e[120;5u", "\e[27;5;120~"],
         "ctrl-v" => ["\u0016", "\e[118;5u", "\e[27;5;118~"],
         "alt-c" => ["\ec", "\e[99;3u", "\e[27;3;99~"],
@@ -164,7 +204,21 @@ module Meringue
       end
 
       def self.canonical_action(action)
-        action.to_s.strip.downcase.tr("- ", "__").gsub(/_+/, "_")
+        normalized = action.to_s.strip.downcase.tr("- ", "__").gsub(/_+/, "_")
+        ACTION_ALIASES.fetch(normalized, normalized)
+      end
+
+      # Display form used by hint lines: single letters read as command keys,
+      # named keys keep their conventional capitalization.
+      def self.display_name(name)
+        text = name.to_s.strip
+        return text.upcase if text.length == 1
+
+        text.split("-").map { |part| part.length <= 1 ? part.upcase : part.capitalize }.join("-")
+      end
+
+      def self.workspace_command_label(action)
+        WORKSPACE_COMMAND_LABELS.fetch(canonical_action(action), label_for(action))
       end
 
       def initialize(action_names = DEFAULT_BINDINGS)
@@ -182,8 +236,24 @@ module Meringue
         @key_names.fetch(self.class.canonical_action(action), []).dup
       end
 
+      # Returns the unconsumed suffix when +key+ starts with a configured
+      # sequence for +action+. This supports terminals that coalesce a leader
+      # control byte and its printable command key into one read.
+      def consume_prefix(action, key)
+        return nil unless key.is_a?(String)
+
+        sequence = bindings_for(action).select { |candidate| !candidate.empty? && key.start_with?(candidate) }.max_by(&:bytesize)
+        sequence && key.byteslice(sequence.bytesize..).to_s
+      end
+
       def label_for(action)
         self.class.label_for(action)
+      end
+
+      # First configured key for an action, in display form.
+      def display_name_for(action)
+        name = names_for(action).first
+        name && self.class.display_name(name)
       end
 
       private

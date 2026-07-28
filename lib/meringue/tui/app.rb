@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "shellwords"
 require "time"
 require_relative "keybindings"
 
@@ -9,6 +10,10 @@ module Meringue
       DEFAULT_WIDTH = 100
       DEFAULT_HEIGHT = 32
       REFRESH_INTERVAL = 0.2
+      TERMINAL_REFRESH_INTERVAL = 0.025
+      # Scroll steps defer the workspace state write; this is how often a
+      # deferred write is actually flushed to the state file.
+      WORKSPACE_PERSIST_INTERVAL = 1.0
       MOUSE_SCROLL_STEP = 3
       PAGE_SCROLL_STEP = 8
       DOUBLE_CLICK_INTERVAL_SECONDS = 0.5
@@ -60,13 +65,31 @@ module Meringue
       # No slash suggestion is selected until the user navigates the list, so an untouched
       # completion popup never steals Enter from the typed prompt.
       NO_SLASH_SELECTION = -1
+      WORKSPACE_COMMAND_ACTIONS = %w[
+        workspace_switch_view
+        workspace_cycle_filter
+        workspace_open_agent_session
+        workspace_open_editor
+        workspace_open_pull_request
+        workspace_close
+      ].freeze
+      # One list of transcript filters, shared with persistence and commands.
+      WORKSPACE_FILTERS = State::Models::AGENT_WORKSPACE_FILTERS
 
-      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default)
+      # workspace_controller is a harness-neutral UI adapter. Integrations may
+      # implement open_workspace, agent_snapshot, open_terminal,
+      # terminal_snapshot, handle_terminal_key, and open_editor.
+      # agent_session_service may open the generic live worker-session view.
+      # Returning from this TUI workspace closes only that read handle and never
+      # calls an abort/kill worker lifecycle operation.
+      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, workspace_controller: nil, agent_session_service: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default)
         @layout = layout
         @out = out
         @terminal = terminal || Terminal.new(input: input, output: out)
         @session_opener = session_opener || Harness::TerminalSessionOpener.new
         @pull_request_opener = pull_request_opener || PullRequestOpener.new
+        @workspace_controller = workspace_controller
+        @agent_session_service = agent_session_service
         @log_store = log_store || conversation_store
         @keybindings = keybindings || Keybindings.default
         @messages = []
@@ -76,8 +99,29 @@ module Meringue
         @quit_requested = false
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = nil
+        @workspace_draft = ""
+        @workspace_agent_scroll_offset = 0
+        @workspace_terminal_scroll_offset = 0
+        @workspace_persistence_error = nil
         @focused_pane = "chat"
         @last_worker_click = nil
+        @agent_workspace_active = false
+        @agent_workspace_agent_id = nil
+        @agent_workspace_session = nil
+        @agent_workspace_view = "agent"
+        @agent_workspace_filter = "all"
+        @agent_workspace_notice = nil
+        @agent_workspace_error = nil
+        @agent_workspace_pending_count = 0
+        @agent_workspace_terminal_size = nil
+        @workspace_leader_pending = false
+        @force_full_redraw = false
+        @agent_workspace_messages = Hash.new { |messages, agent_id| messages[agent_id] = [] }
+        @agent_workspace_events = Hash.new { |events, agent_id| events[agent_id] = [] }
+        @agent_workspace_events_revision = Hash.new(0)
+        @agent_workspace_events_cache = {}
+        @workspace_persist_dirty = false
+        @workspace_persisted_at = 0.0
         @last_render_width = DEFAULT_WIDTH
         @last_render_height = DEFAULT_HEIGHT
         @scroll_offsets = Hash.new(0)
@@ -107,6 +151,17 @@ module Meringue
         end
       end
 
+      def restore_agent_workspace!(state)
+        workspace = State::Models.agent_workspace_state(state)
+        @agent_workspace_agent_id = workspace["selected_agent_id"]
+        @agent_workspace_view = workspace.fetch("view", "agent")
+        @agent_workspace_filter = workspace.fetch("filter", "all")
+        @workspace_draft = workspace.fetch("draft", "")
+        @workspace_agent_scroll_offset = workspace.fetch("agent_scroll_offset", 0).to_i
+        @workspace_terminal_scroll_offset = workspace.fetch("terminal_scroll_offset", 0).to_i
+        workspace
+      end
+
       def remember_existing_log_events!(state)
         Array(state.fetch("agents", [])).each do |agent|
           if existing_head_completion_event?(agent)
@@ -125,6 +180,8 @@ module Meringue
         input_buffer = +""
         input_cursor = 0
         slash_suggestion_index = NO_SLASH_SELECTION
+        cached_base_state = nil
+        cached_base_state_at = 0.0
         terminal.with_screen do
           terminal.raw do
             last_frame = nil
@@ -133,14 +190,32 @@ module Meringue
               width, height = terminal.dimensions
               @last_render_width = width
               @last_render_height = height
-              current_state = compose_state(state_provider, input_buffer, slash_suggestion_index, input_cursor)
+              now = monotonic_time
+              base_state_provider = lambda do
+                terminal_fast_path = @agent_workspace_active && @agent_workspace_view == "terminal"
+                if terminal_fast_path && cached_base_state && (now - cached_base_state_at) < REFRESH_INTERVAL
+                  cached_base_state
+                else
+                  cached_base_state = state_provider.call || State::Models.empty_state
+                  cached_base_state_at = now
+                  cached_base_state
+                end
+              end
+              current_state = compose_state(base_state_provider, input_buffer, slash_suggestion_index, input_cursor)
               frame = render(current_state, width: width, height: height, color: color_output?)
+              if @force_full_redraw
+                terminal.invalidate_frame! if terminal.respond_to?(:invalidate_frame!)
+                last_frame = nil
+                @force_full_redraw = false
+              end
               if frame != last_frame
                 terminal.write_frame(frame)
                 last_frame = frame
               end
 
-              key = terminal.read_key(timeout: REFRESH_INTERVAL)
+              flush_deferred_agent_workspace_persistence
+              refresh_interval = @agent_workspace_active && @agent_workspace_view == "terminal" ? TERMINAL_REFRESH_INTERVAL : REFRESH_INTERVAL
+              key = terminal.read_key(timeout: refresh_interval)
               break if quit_key?(key, input_buffer)
 
               input_buffer, input_cursor, slash_suggestion_index = handle_key(
@@ -159,11 +234,25 @@ module Meringue
         0
       rescue Interrupt
         0
+      ensure
+        shutdown_workspace_resources
       end
 
       private
 
-      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :log_store, :keybindings
+      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :workspace_controller, :agent_session_service, :log_store, :keybindings
+
+      def shutdown_workspace_resources
+        persist_agent_workspace if @agent_workspace_active
+        close_agent_workspace_session
+        if workspace_controller&.respond_to?(:shutdown)
+          workspace_controller.shutdown
+        elsif workspace_controller&.respond_to?(:close)
+          workspace_controller.close
+        end
+      rescue StandardError
+        nil
+      end
 
       def render_once(state)
         out.puts render(state, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, color: false)
@@ -178,6 +267,7 @@ module Meringue
 
       def quit_key?(key, input_buffer)
         return false unless key
+        return false if @agent_workspace_active
         return true if keybinding?("quit", key)
         # An active selection makes Ctrl-C a copy action, never a quit.
         return false if selection_active?
@@ -217,6 +307,10 @@ module Meringue
         input_cursor = clamp_cursor(input_buffer, input_cursor)
         return [input_buffer, input_cursor, slash_suggestion_index] unless key
 
+        if @agent_workspace_active
+          return handle_agent_workspace_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
+
         if paste_key?(key)
           buffer, cursor = replace_chat_selection(input_buffer, input_cursor)
           return insert_text(buffer, cursor, paste_text(key)) + [NO_SLASH_SELECTION]
@@ -236,6 +330,11 @@ module Meringue
         if legacy_slash_navigation && slash_suggestion_navigation_key?(key) && slash_suggestions_active?(input_buffer)
           buffer, index = handle_legacy_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
           return [buffer, buffer.chars.length, index]
+        end
+
+        if keybinding?("open_delivery_pr", key)
+          open_workspace_delivery_pr(state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
         if @agent_tree_navigation_active
@@ -441,8 +540,13 @@ module Meringue
         case pane
         when "agent_tree"
           clear_selection
-          worker_id = worker_at_mouse_position(key, state)
-          handle_agent_tree_worker_click(worker_id, key, state) if worker_id
+          item_id = agent_tree_item_at_mouse_position(key, state)
+          opened = handle_agent_tree_item_click(item_id, key, state) if item_id
+          if opened
+            draft = @workspace_draft.to_s.dup
+            return [draft, draft.chars.length, NO_SLASH_SELECTION]
+          end
+
           [input_buffer, input_cursor, slash_suggestion_index]
         when "logs"
           @last_worker_click = nil
@@ -504,8 +608,8 @@ module Meringue
         layout.pane_at(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
       end
 
-      def worker_at_mouse_position(key, state)
-        layout.agent_tree_worker_at(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+      def agent_tree_item_at_mouse_position(key, state)
+        layout.agent_tree_item_at(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
       end
 
       def render_width
@@ -726,19 +830,25 @@ module Meringue
         end
       end
 
-      def handle_agent_tree_worker_click(worker_id, key, state)
-        double_click = worker_double_click?(worker_id, key)
-        select_agent_tree_worker(state, worker_id)
-        open_pr_by_agent_id(state, worker_id) if double_click
+      def handle_agent_tree_item_click(item_id, key, state)
+        double_click = worker_double_click?(item_id, key)
+        select_agent_tree_item(state, item_id)
+        double_click && open_agent_workspace_by_id(state, item_id)
       end
 
-      def select_agent_tree_worker(state, worker_id)
-        return false unless agent_tree_selectable_agent_ids(state).include?(worker_id)
+      def select_agent_tree_item(state, item_id)
+        return false unless agent_tree_selectable_agent_ids(state).include?(item_id)
 
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :agent
-        @selected_agent_id = worker_id
+        @selected_agent_id = item_id
+        remember_workspace_agent(state, item_id)
         true
+      end
+
+      # Compatibility for extensions that invoked the old worker-only helper.
+      def select_agent_tree_worker(state, worker_id)
+        select_agent_tree_item(state, worker_id)
       end
 
       def worker_double_click?(worker_id, key)
@@ -816,6 +926,470 @@ module Meringue
         end
       end
 
+      def handle_agent_workspace_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        command, remainder = consume_workspace_command(key)
+        if command
+          outcome = run_workspace_command(command, state)
+          return [+"", 0, NO_SLASH_SELECTION] if outcome == :closed
+          return [input_buffer, input_cursor, slash_suggestion_index] if remainder.empty?
+
+          return handle_agent_workspace_key(remainder, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
+        return [input_buffer, input_cursor, slash_suggestion_index] if remainder.nil?
+
+        key = remainder
+        if workspace_scroll_key?(key)
+          scroll_agent_workspace(key, state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if @agent_workspace_view == "terminal"
+          forward_agent_workspace_terminal_key(key, state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if paste_key?(key)
+          return insert_text(input_buffer, input_cursor, paste_text(key)) + [NO_SLASH_SELECTION]
+        end
+        if plain_text_paste_key?(key)
+          return insert_text(input_buffer, input_cursor, key) + [NO_SLASH_SELECTION]
+        end
+        if keybinding?("newline", key)
+          return insert_text(input_buffer, input_cursor, "\n") + [NO_SLASH_SELECTION]
+        end
+        if workspace_slash_navigation_key?(key, input_buffer)
+          buffer, index = handle_workspace_slash_navigation(key, input_buffer, slash_suggestion_index)
+          return [buffer, buffer.chars.length, index]
+        end
+        if keybinding?("submit", key)
+          if WorkspaceCommands.slash_prompt?(input_buffer)
+            completion = workspace_slash_completion(input_buffer, slash_suggestion_index)
+            return [completion, completion.chars.length, NO_SLASH_SELECTION] if completion
+
+            run_workspace_slash_command(input_buffer, state)
+            return [+"", 0, NO_SLASH_SELECTION]
+          end
+
+          submit_agent_workspace_prompt(input_buffer, on_submit)
+          return [+"", 0, NO_SLASH_SELECTION]
+        end
+        if ctrl_c_key?(key)
+          return [+"", 0, NO_SLASH_SELECTION]
+        end
+        if keybinding?("delete_backward", key)
+          return delete_backward(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
+        end
+        if keybinding?("delete_forward", key)
+          return delete_forward(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
+        end
+        if keybinding?("delete_word_backward", key)
+          return delete_backward_word(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
+        end
+        if keybinding?("delete_word_forward", key)
+          return delete_forward_word(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
+        end
+
+        new_cursor = cursor_after_navigation(key, input_buffer, input_cursor)
+        return [input_buffer, new_cursor, slash_suggestion_index] if new_cursor != input_cursor
+        return [input_buffer, input_cursor, slash_suggestion_index] unless printable_key?(key)
+
+        insert_text(input_buffer, input_cursor, key) + [NO_SLASH_SELECTION]
+      end
+
+      # Returns [action, remainder]. A nil remainder means a leader was consumed
+      # and the next key is awaited; otherwise an unrecognized suffix is passed
+      # back to the active worker/terminal view rather than silently discarded.
+      def consume_workspace_command(key)
+        if @workspace_leader_pending
+          @workspace_leader_pending = false
+          action, remainder = workspace_action_prefix(key)
+          if action
+            @agent_workspace_notice = nil
+            return [action, remainder]
+          end
+
+          @agent_workspace_notice = "Unknown workspace command. #{workspace_leader_help}"
+          return [nil, key]
+        end
+
+        remainder = keybindings.consume_prefix("workspace_leader", key)
+        return [nil, key] unless remainder
+
+        @workspace_leader_pending = true
+        @agent_workspace_notice = workspace_leader_help
+        return [nil, nil] if remainder.empty?
+
+        consume_workspace_command(remainder)
+      end
+
+      def workspace_action_prefix(key)
+        WORKSPACE_COMMAND_ACTIONS.each do |action|
+          remainder = keybindings.consume_prefix(action, key)
+          return [action, remainder] if remainder
+        end
+        [nil, key]
+      end
+
+      def run_workspace_command(action, state)
+        case action
+        when "workspace_switch_view"
+          switch_agent_workspace_view(state)
+        when "workspace_cycle_filter"
+          cycle_agent_workspace_filter
+        when "workspace_open_agent_session"
+          open_agent_workspace_harness_session(state)
+        when "workspace_open_editor"
+          open_agent_workspace_editor(state)
+        when "workspace_open_pull_request"
+          if open_workspace_delivery_pr(state)
+            @agent_workspace_notice = "Opened the verified delivery pull request."
+            @agent_workspace_error = nil
+          else
+            @agent_workspace_error = "No verified delivery pull request is available yet."
+          end
+        when "workspace_close"
+          close_agent_workspace(preserve_terminal: true)
+          return :closed
+        end
+        :handled
+      end
+
+      def cycle_agent_workspace_filter
+        index = WORKSPACE_FILTERS.index(@agent_workspace_filter) || 0
+        set_agent_workspace_filter(WORKSPACE_FILTERS[(index + 1) % WORKSPACE_FILTERS.length])
+      end
+
+      def set_agent_workspace_filter(filter)
+        @agent_workspace_filter = filter
+        @workspace_agent_scroll_offset = 0
+        @agent_workspace_notice = "Transcript filter: #{@agent_workspace_filter}."
+        @agent_workspace_error = nil
+        persist_agent_workspace
+      end
+
+      # Slash commands are the discoverable twin of the leader keys: they run the
+      # same workspace actions plus a couple of session-scoped operations, and
+      # anything that is not a slash command stays a direct worker follow-up.
+      def workspace_slash_navigation_key?(key, input_buffer)
+        WorkspaceCommands.slash_prompt?(input_buffer) && slash_suggestion_navigation_key?(key)
+      end
+
+      def handle_workspace_slash_navigation(key, input_buffer, slash_suggestion_index)
+        records = WorkspaceCommands.command_suggestion_records(input_buffer)
+        return [input_buffer, NO_SLASH_SELECTION] if records.empty?
+
+        if keybinding?("suggestion_previous", key)
+          return [input_buffer, slash_selection?(slash_suggestion_index) ? (slash_suggestion_index - 1) % records.length : records.length - 1]
+        end
+        if keybinding?("suggestion_next", key)
+          return [input_buffer, slash_selection?(slash_suggestion_index) ? (slash_suggestion_index + 1) % records.length : 0]
+        end
+
+        selected = slash_selection?(slash_suggestion_index) ? slash_suggestion_index.clamp(0, records.length - 1) : 0
+        [slash_completion_for(records.fetch(selected)), NO_SLASH_SELECTION]
+      end
+
+      # Enter applies a highlighted suggestion instead of running a partial
+      # command, matching the dashboard's completion behavior.
+      def workspace_slash_completion(input_buffer, slash_suggestion_index)
+        return nil unless slash_selection?(slash_suggestion_index)
+
+        records = WorkspaceCommands.command_suggestion_records(input_buffer)
+        return nil if records.empty?
+
+        completion = slash_completion_for(records.fetch(slash_suggestion_index.clamp(0, records.length - 1)))
+        completion == input_buffer.to_s ? nil : completion
+      end
+
+      def run_workspace_slash_command(input_buffer, state)
+        resolution = WorkspaceCommands.resolve(input_buffer)
+        if (error = resolution.fetch("error", nil))
+          @agent_workspace_error = error
+          @agent_workspace_notice = nil
+          return :rejected
+        end
+
+        action = resolution.fetch("action")
+        arguments = resolution.fetch("arguments", [])
+        case action
+        when "workspace_help"
+          @agent_workspace_error = nil
+          @agent_workspace_notice = "Workspace commands: #{WorkspaceCommands.help_lines.join(" · ")}"
+        when "workspace_filter"
+          arguments.empty? ? cycle_agent_workspace_filter : set_agent_workspace_filter(arguments.first)
+        when "workspace_cwd"
+          show_agent_workspace_directory(state)
+        when "workspace_cancel_turn"
+          cancel_agent_workspace_turn
+        else
+          return run_workspace_command(action, state)
+        end
+        :handled
+      end
+
+      def show_agent_workspace_directory(state)
+        agent = agent_workspace_agent(state)
+        return @agent_workspace_error = "Selected agent is no longer available." unless agent
+
+        resolution = Workspace::PathResolver.resolve(agent)
+        path = resolution.fetch("path", nil)
+        if path
+          @agent_workspace_error = nil
+          @agent_workspace_notice = ["Workspace directory: #{path}", resolution.fetch("message", nil)].compact.join(" ")
+        else
+          @agent_workspace_notice = nil
+          @agent_workspace_error = resolution.fetch("message", "This worker has no usable workspace directory.")
+        end
+      end
+
+      # Turn-level cancellation only. It never kills the worker, its session, or
+      # its workspace; the kernel owns that lifecycle.
+      def cancel_agent_workspace_turn
+        unless @agent_workspace_session&.respond_to?(:cancel_current_turn)
+          @agent_workspace_error = "Cancelling a turn is not available for this worker session."
+          return
+        end
+
+        result = @agent_workspace_session.cancel_current_turn
+        status = result.is_a?(Hash) ? result.fetch("status", nil).to_s : ""
+        if %w[failed rejected errored].include?(status)
+          @agent_workspace_notice = nil
+          @agent_workspace_error = result.fetch("message", "Could not cancel the current turn.")
+        else
+          @agent_workspace_error = nil
+          @agent_workspace_notice = result.is_a?(Hash) ? result.fetch("message", "Cancelled the worker's current turn.") : "Cancelled the worker's current turn."
+        end
+      rescue StandardError => e
+        @agent_workspace_notice = nil
+        @agent_workspace_error = "Could not cancel the current turn: #{e.message}"
+      end
+
+      # One leader line describes the whole focused workspace. Labels come from
+      # the active keybindings so custom bindings stay accurate, and they stay
+      # harness-agnostic so a non-Pi backend reads correctly.
+      def workspace_leader_commands
+        WORKSPACE_COMMAND_ACTIONS.filter_map do |action|
+          key = keybindings.display_name_for(action)
+          next unless key
+
+          { "action" => action, "key" => key, "label" => Keybindings.workspace_command_label(action) }
+        end
+      end
+
+      def workspace_leader_help
+        commands = workspace_leader_commands.map { |command| "#{command.fetch("key")} #{command.fetch("label")}" }
+        "#{workspace_leader_label}: #{commands.join(", ")}"
+      end
+
+      def workspace_leader_label
+        keybindings.display_name_for("workspace_leader") || "workspace leader"
+      end
+
+      # Page keys stay available to the shell in terminal view; the wheel is
+      # never forwarded to a shell, so it scrolls either view.
+      def workspace_scroll_key?(key)
+        mouse_wheel_up?(key) || mouse_wheel_down?(key) ||
+          (@agent_workspace_view == "agent" && (keybinding?("scroll_page_up", key) || keybinding?("scroll_page_down", key)))
+      end
+
+      # Offsets are clamped to what the pane can actually scroll. Without the
+      # clamp, wheeling past the top kept incrementing a dead offset and the
+      # next several scrolls down did nothing, which reads as choppy scrolling.
+      def scroll_agent_workspace(key, state = nil)
+        step = if mouse_wheel_up?(key) || mouse_wheel_down?(key)
+                 MOUSE_SCROLL_STEP * mouse_wheel_count(key)
+               else
+                 PAGE_SCROLL_STEP
+               end
+        direction = mouse_wheel_up?(key) || keybinding?("scroll_page_up", key) ? :up : :down
+        variable = @agent_workspace_view == "terminal" ? :@workspace_terminal_scroll_offset : :@workspace_agent_scroll_offset
+        current = instance_variable_get(variable).to_i
+        target = direction == :up ? current + step : current - step
+        instance_variable_set(variable, target.clamp(0, agent_workspace_scroll_max(state)))
+        persist_agent_workspace(deferred: true)
+      end
+
+      def agent_workspace_scroll_max(state)
+        return Float::INFINITY unless state && layout.respond_to?(:agent_workspace_scroll_max)
+
+        layout.agent_workspace_scroll_max(
+          state,
+          width: @last_render_width || DEFAULT_WIDTH,
+          height: @last_render_height || DEFAULT_HEIGHT
+        )
+      rescue StandardError
+        Float::INFINITY
+      end
+
+      def switch_agent_workspace_view(state)
+        @agent_workspace_view = @agent_workspace_view == "agent" ? "terminal" : "agent"
+        @agent_workspace_notice = nil
+        @agent_workspace_error = nil
+        if @agent_workspace_view == "terminal"
+          @agent_workspace_session.pause if @agent_workspace_session&.respond_to?(:pause)
+          prepare_workspace_terminal(state)
+        else
+          @agent_workspace_session.resume if @agent_workspace_session&.respond_to?(:resume)
+        end
+        persist_agent_workspace
+      end
+
+      def prepare_workspace_terminal(state)
+        agent = agent_workspace_agent(state)
+        unless agent
+          @agent_workspace_error = "Selected agent is no longer available."
+          return
+        end
+        unless workspace_controller&.respond_to?(:open_terminal)
+          @agent_workspace_error = "This harness does not provide an in-dashboard terminal."
+          return
+        end
+
+        rows, columns = agent_workspace_terminal_dimensions
+        result = workspace_controller.open_terminal(agent: agent, state: state, rows: rows, columns: columns)
+        unless %w[failed rejected errored].include?(result.fetch("status", nil).to_s)
+          @agent_workspace_terminal_size = [rows, columns]
+          @workspace_terminal_scroll_offset = 0 if result.fetch("started", false)
+        end
+        apply_workspace_controller_result(result)
+      rescue ArgumentError
+        # Compatibility for external controllers written before size-aware workspaces.
+        apply_workspace_controller_result(workspace_controller.open_terminal(agent: agent, state: state))
+      rescue StandardError => e
+        @agent_workspace_error = "Could not open terminal: #{e.message}"
+      end
+
+      def agent_workspace_terminal_dimensions
+        rows = [(@last_render_height || DEFAULT_HEIGHT) - 3, 1].max
+        columns = [(@last_render_width || DEFAULT_WIDTH) - 6, 1].max
+        [rows, columns]
+      end
+
+      def resize_agent_workspace_terminal(agent)
+        return unless workspace_controller&.respond_to?(:resize_terminal)
+
+        rows, columns = agent_workspace_terminal_dimensions
+        return if @agent_workspace_terminal_size == [rows, columns]
+
+        result = workspace_controller.resize_terminal(agent: agent, rows: rows, columns: columns)
+        @agent_workspace_terminal_size = [rows, columns] unless %w[failed rejected errored].include?(result.fetch("status", nil).to_s)
+      end
+
+      def forward_agent_workspace_terminal_key(key, state)
+        unless workspace_controller&.respond_to?(:handle_terminal_key)
+          @agent_workspace_error = "This harness does not provide an in-dashboard terminal."
+          return
+        end
+
+        agent = agent_workspace_agent(state)
+        return @agent_workspace_error = "Selected agent is no longer available." unless agent
+
+        result = workspace_controller.handle_terminal_key(key: key, agent: agent, state: state)
+        apply_workspace_controller_result(result)
+      rescue StandardError => e
+        @agent_workspace_error = "Terminal input failed: #{e.message}"
+      end
+
+      # Reuses the established detached terminal launcher. It validates the
+      # saved harness session and starts an external UI without attaching to,
+      # replacing, signaling, or taking ownership of Meringue's RPC process.
+      def open_agent_workspace_harness_session(state)
+        agent = agent_workspace_agent(state)
+        return @agent_workspace_error = "Selected agent is no longer available." unless agent
+
+        harness = agent.fetch("harness", nil).to_s
+        if harness.empty?
+          return @agent_workspace_error = "The selected worker has no recorded agent session to open."
+        end
+        unless session_opener&.respond_to?(:open)
+          return @agent_workspace_error = "Opening an external agent session is not configured."
+        end
+
+        result = session_opener.open(agent)
+        unless result.is_a?(Hash)
+          @agent_workspace_notice = nil
+          @agent_workspace_error = "Could not open the external agent session."
+          return
+        end
+        apply_workspace_controller_result(result)
+      rescue StandardError => e
+        @agent_workspace_notice = nil
+        @agent_workspace_error = "Could not open the external agent session: #{e.message}"
+      end
+
+      def open_agent_workspace_editor(state)
+        agent = agent_workspace_agent(state)
+        return @agent_workspace_error = "Selected agent is no longer available." unless agent
+        unless workspace_controller&.respond_to?(:open_editor)
+          @agent_workspace_error = "No editor command is configured for this workspace."
+          return
+        end
+
+        apply_workspace_controller_result(workspace_controller.open_editor(agent: agent, state: state))
+      rescue StandardError => e
+        @agent_workspace_error = "Could not open editor: #{e.message}"
+      end
+
+      def apply_workspace_controller_result(result)
+        return unless result.is_a?(Hash)
+
+        status = result.fetch("status", result.fetch(:status, nil)).to_s
+        message = result.fetch("message", result.fetch(:message, nil)).to_s.strip
+        if %w[failed rejected errored].include?(status)
+          @agent_workspace_error = message.empty? ? "Workspace action failed." : message
+          @agent_workspace_notice = nil
+        elsif !message.empty?
+          @agent_workspace_notice = message
+          @agent_workspace_error = nil
+        end
+      end
+
+      def submit_agent_workspace_prompt(input_buffer, on_submit)
+        text = input_buffer.to_s.strip
+        return if text.empty?
+
+        agent_id = @agent_workspace_agent_id.to_s
+        append_agent_workspace_message(agent_id, "you", text)
+        @chat_mutex.synchronize { @agent_workspace_pending_count += 1 }
+        Thread.new do
+          begin
+            result, command_result = if @agent_workspace_session&.respond_to?(:submit)
+                                       direct_result = @agent_workspace_session.submit(text, mode: "auto")
+                                       [direct_result, direct_result]
+                                     else
+                                       raise "Prompt handling is not enabled for this TUI session." unless on_submit
+
+                                       routed_result = on_submit.call(Shellwords.join(["/prompt", agent_id, text]))
+                                       prompt_result = Array(routed_result.fetch("command_results", [])).find { |entry| entry.fetch("command_type", nil) == "PromptAgent" }
+                                       [routed_result, prompt_result]
+                                     end
+            unless command_result&.fetch("status", nil) == "accepted"
+              message = command_result&.fetch("message", nil) || result.fetch("summary", "Agent prompt was rejected.")
+              append_agent_workspace_message(agent_id, "system", message)
+              @chat_mutex.synchronize { @agent_workspace_error = message.to_s }
+            end
+          rescue StandardError => e
+            message = "Could not prompt #{agent_id}: #{e.message}"
+            append_agent_workspace_message(agent_id, "system", message)
+            @chat_mutex.synchronize { @agent_workspace_error = message }
+          ensure
+            @chat_mutex.synchronize do
+              @agent_workspace_pending_count -= 1 if @agent_workspace_pending_count.positive?
+            end
+          end
+        end
+      end
+
+      def append_agent_workspace_message(agent_id, role, text)
+        @chat_mutex.synchronize do
+          @agent_workspace_messages[agent_id.to_s] << {
+            "role" => role,
+            "text" => text.to_s,
+            "timestamp" => Time.now.utc.iso8601
+          }
+        end
+      end
+
       def handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         if keybinding?("cancel_navigation", key)
           exit_agent_tree_navigation("Agent tree navigation cancelled.")
@@ -833,8 +1407,9 @@ module Meringue
         end
 
         if agent_session_open_key?(key)
-          open_selected_agent(state)
-          return [+"", 0, NO_SLASH_SELECTION]
+          opened = open_selected_agent(state)
+          draft = opened ? @workspace_draft.to_s.dup : ""
+          return [draft, draft.chars.length, NO_SLASH_SELECTION]
         end
 
         if ENTER_KEYS.include?(key)
@@ -846,7 +1421,7 @@ module Meringue
       end
 
       def agent_session_open_key?(key)
-        key == "a"
+        keybinding?("open_agent_workspace", key)
       end
 
       def handle_local_navigation_command(input_buffer, state)
@@ -863,7 +1438,7 @@ module Meringue
         if agent_id.empty?
           enter_agent_tree_navigation(state)
         else
-          open_agent_by_id(state, agent_id)
+          open_agent_workspace_by_id(state, agent_id)
         end
         true
       end
@@ -882,13 +1457,14 @@ module Meringue
         <<~TEXT.strip
           Keybindings (from [tui.keybindings], with defaults for omitted actions):
           Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels jump mode.
-          Focus: click a dashboard section to focus it; clicking an issue or worker in the agent tree selects it, and double-clicking opens its PR when available. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
+          Focus: click a dashboard section to focus it; clicking an issue or agent in the AgentTree selects it, and double-clicking opens its focused workspace. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
           Selection: drag with the mouse in the logs pane or the composer to select text; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
           Chat: #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode.
-          Jump mode: /jump starts agent navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an agent; Enter opens the selected agent PR when one is available; a opens the selected agent session; #{keys_for("cancel_navigation")} cancels.
+          Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
+          Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
         TEXT
       end
 
@@ -923,7 +1499,7 @@ module Meringue
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
-        append_jump_response("Agent tree navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects issues and agents (kernel events are skipped), Enter opens PRs, a opens agent sessions, #{keys_for("cancel_navigation")} cancels.")
+        append_jump_response("Agent tree navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects issues and agents (kernel events are skipped), Enter opens PRs, #{keys_for("open_agent_workspace")} opens the focused workspace, #{keys_for("cancel_navigation")} cancels.")
       end
 
       def exit_agent_tree_navigation(message = nil)
@@ -939,14 +1515,15 @@ module Meringue
 
         current_index = ids.index(@selected_agent_id) || 0
         @selected_agent_id = ids[(current_index + delta) % ids.length]
+        remember_workspace_agent(state, @selected_agent_id)
       end
 
       def open_selected_agent(state)
         selected_id = normalized_selected_agent_id(state)
         return exit_agent_tree_navigation("No agents are available to jump into yet.") unless selected_id
 
-        open_agent_by_id(state, selected_id)
-        exit_agent_tree_navigation
+        remember_workspace_agent(state, selected_id)
+        open_agent_workspace_by_id(state, selected_id)
       end
 
       def open_selected_agent_pr(state)
@@ -957,20 +1534,126 @@ module Meringue
         exit_agent_tree_navigation
       end
 
-      def open_agent_by_id(state, agent_id)
-        agent = Array(state["agents"]).find { |candidate| candidate["id"].to_s == agent_id.to_s }
+      def open_agent_workspace_by_id(state, item_id)
+        agent = agent_workspace_agent_for_item(state, item_id)
         unless agent
-          append_jump_response("Agent #{agent_id} does not exist or is not a session-backed record.")
-          return
+          append_jump_response("AgentTree item #{item_id} has no agent session to open yet.")
+          return false
         end
 
-        result = session_opener.open(agent)
-        # Opening a session is a transient UI action: only failures are worth a log entry.
-        return if open_succeeded?(result)
-
-        append_jump_response(result.fetch("message", "Could not open agent #{agent_id}."))
+        restored_view = @agent_workspace_agent_id.to_s == agent.fetch("id").to_s ? @agent_workspace_view : "agent"
+        @agent_workspace_active = true
+        @force_full_redraw = true
+        @agent_workspace_agent_id = agent.fetch("id")
+        @agent_workspace_view = restored_view
+        @agent_workspace_terminal_size = nil
+        @workspace_leader_pending = false
+        @agent_workspace_notice = nil
+        @agent_workspace_error = nil
+        @chat_mutex.synchronize { @agent_workspace_events[agent.fetch("id")] = [] }
+        @selected_agent_id = agent.fetch("id")
+        @agent_tree_navigation_active = true
+        @focused_pane = "agent_tree"
+        if workspace_controller&.respond_to?(:open_workspace)
+          apply_workspace_controller_result(workspace_controller.open_workspace(agent: agent, state: state))
+        end
+        open_agent_workspace_session(agent)
+        if @agent_workspace_view == "terminal"
+          @agent_workspace_session.pause if @agent_workspace_session&.respond_to?(:pause)
+          prepare_workspace_terminal(state)
+        end
+        persist_agent_workspace
+        true
       rescue StandardError => e
-        append_jump_response("Could not open agent #{agent_id}: #{e.class}: #{e.message}")
+        close_agent_workspace_session
+        @agent_workspace_active = false
+        append_jump_response("Could not open focused workspace for #{item_id}: #{e.message}")
+        false
+      end
+
+      def open_agent_workspace_session(agent)
+        close_agent_workspace_session
+        return unless agent_session_service&.respond_to?(:open)
+
+        @agent_workspace_session = agent_session_service.open(agent.fetch("id"))
+      rescue StandardError => e
+        @agent_workspace_session = nil
+        @agent_workspace_error = "Could not open the live worker session: #{e.message}"
+      end
+
+      def close_agent_workspace_session
+        session = @agent_workspace_session
+        @agent_workspace_session = nil
+        session.close if session&.respond_to?(:close)
+      rescue StandardError
+        nil
+      end
+
+      def close_agent_workspace(preserve_terminal: false)
+        close_agent_workspace_session
+        if !preserve_terminal && workspace_controller&.respond_to?(:close_terminal)
+          workspace_controller.close_terminal(agent: @agent_workspace_agent_id)
+        end
+        @agent_workspace_active = false
+        @agent_workspace_view = "agent"
+        @force_full_redraw = true
+        @agent_workspace_terminal_size = nil
+        @workspace_leader_pending = false
+        @agent_workspace_notice = nil
+        @agent_workspace_error = nil
+        @focused_pane = "agent_tree"
+        @agent_tree_navigation_active = !@agent_workspace_agent_id.to_s.empty?
+        @selected_agent_id = @agent_workspace_agent_id if @agent_tree_navigation_active
+        persist_agent_workspace
+      end
+
+      def agent_workspace_agent_for_item(state, item_id)
+        agents = Array(state.fetch("agents", []))
+        direct = agents.find do |agent|
+          agent.fetch("type", nil) == "worker" && agent.fetch("id", nil).to_s == item_id.to_s
+        end
+        return direct if direct
+
+        issue = Array(state.fetch("issues", [])).find { |candidate| candidate.fetch("id", nil).to_s == item_id.to_s }
+        return nil unless issue
+
+        agents.select { |agent| agent.fetch("type", nil) == "worker" && agent.fetch("issue_id", nil).to_s == issue.fetch("id").to_s }
+              .reject { |agent| agent.fetch("status", nil) == "killed" }
+              .max_by { |agent| AgentTreeNavigation.sort_key(agent.fetch("id", "")) }
+      end
+
+      def agent_workspace_agent(state)
+        Array(state.fetch("agents", [])).find do |agent|
+          agent.fetch("id", nil).to_s == @agent_workspace_agent_id.to_s
+        end
+      end
+
+      def open_workspace_delivery_pr(state)
+        agent_id = if @agent_workspace_active
+                     @agent_workspace_agent_id
+                   elsif @agent_tree_navigation_active
+                     normalized_selected_agent_id(state)
+                   else
+                     @agent_workspace_agent_id
+                   end
+        if agent_id.to_s.empty?
+          append_jump_response("Select a worker before opening its delivery pull request.")
+          return false
+        end
+
+        presentation = DeliveryPullRequest.for_id(state, agent_id)
+        unless DeliveryPullRequest.openable?(presentation)
+          append_jump_response("Delivery PR for #{agent_id} is unavailable: #{presentation.fetch("message")}")
+          return false
+        end
+
+        result = pull_request_opener.open(presentation.fetch("url"))
+        opened = result.fetch("status", nil) == "opened" || !%w[failed rejected].include?(result.fetch("status", nil).to_s)
+        append_jump_response(result.fetch("message", "Could not open delivery pull request for #{agent_id}.")) unless opened
+        opened
+      rescue StandardError => e
+        append_jump_response("Could not open delivery pull request for #{agent_id}: #{e.message}")
+        false
       end
 
       def open_pr_by_agent_id(state, agent_id, silent_fail: false)
@@ -1451,6 +2134,7 @@ module Meringue
       end
 
       def compose_state(state_provider, input_buffer, slash_suggestion_index = NO_SLASH_SELECTION, input_cursor = nil)
+        @workspace_draft = input_buffer.to_s if @agent_workspace_active
         state = state_provider.call || State::Models.empty_state
         sync_state_logs!(state)
         if @agent_tree_navigation_active
@@ -1458,14 +2142,256 @@ module Meringue
           @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
           @agent_tree_navigation_active = false if ids.empty?
         end
+        reconcile_workspace_selection!(state)
         composed_state = state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
+          "_agent_workspace" => agent_workspace_snapshot(state, input_buffer, input_cursor, slash_suggestion_index),
           "_scroll" => scroll_snapshot,
           "_selection" => selection_snapshot
         )
         clamp_scroll_offsets!(composed_state)
         composed_state.merge("_scroll" => scroll_snapshot)
+      end
+
+      def agent_workspace_snapshot(state, input_buffer, input_cursor, slash_suggestion_index = NO_SLASH_SELECTION)
+        snapshot = @chat_mutex.synchronize do
+          {
+            "active" => @agent_workspace_active,
+            "agent_id" => @agent_workspace_agent_id,
+            "view" => @agent_workspace_view,
+            "filter" => @agent_workspace_filter,
+            "input_buffer" => input_buffer,
+            "input_cursor" => clamp_cursor(input_buffer, input_cursor || input_buffer.chars.length),
+            "pending_count" => @agent_workspace_pending_count,
+            "leader_hint" => workspace_leader_help,
+            "leader_label" => workspace_leader_label,
+            "leader_commands" => workspace_leader_commands,
+            "leader_pending" => @workspace_leader_pending,
+            "slash_suggestion_index" => slash_suggestion_index.to_i,
+            "slash_suggestions" => WorkspaceCommands.command_suggestion_records(input_buffer),
+            "scroll_offset" => @agent_workspace_view == "terminal" ? @workspace_terminal_scroll_offset.to_i : @workspace_agent_scroll_offset.to_i,
+            "messages" => @agent_workspace_messages[@agent_workspace_agent_id.to_s].map(&:dup),
+            "notice" => @agent_workspace_notice,
+            "error" => @agent_workspace_error,
+            "persistence_error" => @workspace_persistence_error
+          }.compact
+        end
+        if @agent_workspace_active
+          terminal_view = @agent_workspace_view == "terminal"
+          live = terminal_view ? terminal_workspace_snapshot(state) : live_agent_workspace_snapshot(state)
+          snapshot[terminal_view ? "terminal" : "agent_session"] = live
+          revision = workspace_content_revision(snapshot, live)
+          snapshot["content_revision"] = revision if revision
+        end
+        snapshot
+      end
+
+      # Cheap signature of everything the focused workspace renders. Panes reuse
+      # composed lines while it is unchanged, so scrolling never repeats a full
+      # transcript or terminal re-layout.
+      def workspace_content_revision(snapshot, live)
+        return nil unless live.is_a?(Hash)
+
+        revision = live.fetch("revision", nil)
+        return nil if revision.nil?
+
+        [
+          revision,
+          live.fetch("error", nil).to_s,
+          live.fetch("notice", nil).to_s,
+          live.fetch("warning", nil).to_s,
+          live.fetch("availability", nil).to_s,
+          live.fetch("session_state", nil).to_s,
+          live.fetch("status", nil).to_s,
+          @chat_mutex.synchronize { @agent_workspace_events_revision[@agent_workspace_agent_id.to_s] },
+          Array(snapshot.fetch("messages", [])).length,
+          snapshot.fetch("notice", nil).to_s,
+          snapshot.fetch("error", nil).to_s,
+          snapshot.fetch("persistence_error", nil).to_s
+        ]
+      end
+
+      def persisted_agent_workspace_snapshot
+        {
+          "selected_agent_id" => @agent_workspace_agent_id,
+          "view" => @agent_workspace_view,
+          "filter" => @agent_workspace_filter,
+          "draft" => @workspace_draft.to_s,
+          "agent_scroll_offset" => @workspace_agent_scroll_offset.to_i,
+          "terminal_scroll_offset" => @workspace_terminal_scroll_offset.to_i
+        }
+      end
+
+      def remember_workspace_agent(state, agent_id)
+        worker = Array(state.fetch("agents", [])).find do |agent|
+          agent.is_a?(Hash) && agent["type"].to_s == "worker" && agent["id"].to_s == agent_id.to_s
+        end
+        return false unless worker
+        return true if @agent_workspace_agent_id.to_s == worker.fetch("id").to_s
+
+        @agent_workspace_agent_id = worker.fetch("id")
+        @agent_workspace_view = "agent"
+        @agent_workspace_filter = "all"
+        @workspace_agent_scroll_offset = 0
+        @workspace_terminal_scroll_offset = 0
+        @workspace_draft = ""
+        persist_agent_workspace
+        true
+      end
+
+      def reconcile_workspace_selection!(state)
+        return if @agent_workspace_agent_id.to_s.empty?
+        return if Array(state.fetch("agents", [])).any? { |agent| agent.is_a?(Hash) && agent["type"] == "worker" && agent["id"].to_s == @agent_workspace_agent_id.to_s }
+
+        close_agent_workspace_session
+        @force_full_redraw = true if @agent_workspace_active
+        @agent_workspace_active = false
+        @agent_workspace_agent_id = nil
+        @agent_workspace_view = "agent"
+        @agent_workspace_filter = "all"
+        @workspace_leader_pending = false
+        @workspace_draft = ""
+        persist_agent_workspace
+      end
+
+      # Saving rewrites the whole state file, so scroll steps only mark the
+      # workspace dirty. The run loop flushes on a slow cadence and lifecycle
+      # transitions flush immediately, which keeps wheel scrolling smooth
+      # without losing the persisted selection.
+      def persist_agent_workspace(deferred: false)
+        return unless log_store&.respond_to?(:save_agent_workspace)
+
+        if deferred
+          @workspace_persist_dirty = true
+          return nil
+        end
+
+        @workspace_persist_dirty = false
+        @workspace_persisted_at = monotonic_time
+        persisted = log_store.save_agent_workspace(persisted_agent_workspace_snapshot)
+        @workspace_persistence_error = nil
+        persisted
+      rescue StandardError => e
+        @workspace_persistence_error = "Workspace selection could not be saved: #{e.message}"
+        nil
+      end
+
+      def flush_deferred_agent_workspace_persistence
+        return unless @workspace_persist_dirty
+        return if monotonic_time - @workspace_persisted_at < WORKSPACE_PERSIST_INTERVAL
+
+        persist_agent_workspace
+      end
+
+      def live_agent_workspace_snapshot(state)
+        agent = agent_workspace_agent(state)
+        return { "error" => "Selected worker is no longer available." } unless agent
+
+        result = if @agent_workspace_session&.respond_to?(:snapshot)
+                   snapshot = @agent_workspace_session.snapshot
+                   polled = @agent_workspace_session.respond_to?(:poll_events) ? @agent_workspace_session.poll_events(limit: 200) : {}
+                   reduce_agent_workspace_events(agent.fetch("id"), Array(polled["events"]))
+                   snapshot.merge(
+                     "events" => frozen_agent_workspace_events(agent.fetch("id")),
+                     "event_gap" => !!polled["gap"],
+                     "warning" => polled["gap"] ? "Some transient live events expired; the transcript was refreshed from the managed session." : snapshot["warning"]
+                   ).compact
+                 elsif workspace_controller&.respond_to?(:agent_snapshot)
+                   workspace_controller.agent_snapshot(agent: agent, state: state)
+                 elsif workspace_controller&.respond_to?(:snapshot)
+                   workspace_controller.snapshot(agent: agent, state: state, view: "agent")
+                 else
+                   {}
+                 end
+        result.is_a?(Hash) ? stringify_workspace_snapshot(result) : {}
+      rescue StandardError => e
+        { "error" => "Could not read worker session: #{e.message}" }
+      end
+
+      # Renders from one frozen copy per change instead of duplicating every
+      # retained event on every frame.
+      def frozen_agent_workspace_events(agent_id)
+        key = agent_id.to_s
+        @chat_mutex.synchronize do
+          revision = @agent_workspace_events_revision[key]
+          cached = @agent_workspace_events_cache[key]
+          return cached.fetch("events") if cached && cached.fetch("revision") == revision
+
+          events = @agent_workspace_events[key].map { |event| deep_freeze_workspace_value(event) }.freeze
+          @agent_workspace_events_cache[key] = { "revision" => revision, "events" => events }
+          events
+        end
+      end
+
+      def deep_freeze_workspace_value(value)
+        case value
+        when Hash
+          value.each_with_object({}) { |(key, child), copy| copy[key.to_s] = deep_freeze_workspace_value(child) }.freeze
+        when Array
+          value.map { |child| deep_freeze_workspace_value(child) }.freeze
+        when String
+          value.frozen? ? value : value.dup.freeze
+        else
+          value
+        end
+      end
+
+      def reduce_agent_workspace_events(agent_id, events)
+        return if events.empty?
+
+        @chat_mutex.synchronize do
+          @agent_workspace_events_revision[agent_id.to_s] += 1
+          retained = @agent_workspace_events[agent_id.to_s]
+          events.each do |event|
+            next unless event.is_a?(Hash)
+
+            identity = [event["kind"], event["id"] || event["tool_call_id"]]
+            replace_at = identity.last && retained.index do |candidate|
+              [candidate["kind"], candidate["id"] || candidate["tool_call_id"]] == identity
+            end
+            if replace_at
+              retained[replace_at] = event
+            else
+              retained << event
+            end
+          end
+          retained.shift(retained.length - 300) if retained.length > 300
+        end
+      end
+
+      def terminal_workspace_snapshot(state)
+        agent = agent_workspace_agent(state)
+        return { "error" => "Selected worker is no longer available.", "lines" => [] } unless agent
+        return { "error" => "The worktree terminal is unavailable.", "lines" => [] } unless workspace_controller
+
+        resize_agent_workspace_terminal(agent)
+        result = if workspace_controller.respond_to?(:terminal_snapshot)
+                   workspace_controller.terminal_snapshot(agent: agent, state: state)
+                 elsif workspace_controller.respond_to?(:snapshot)
+                   workspace_controller.snapshot(agent: agent, state: state, view: "terminal")
+                 else
+                   { "error" => "The worktree terminal is unavailable.", "lines" => [] }
+                 end
+        result.is_a?(Hash) ? stringify_workspace_snapshot(result) : { "lines" => Array(result).map(&:to_s) }
+      rescue StandardError => e
+        { "error" => "Could not read terminal: #{e.message}", "lines" => [] }
+      end
+
+      # Frozen values already come from a normalized, string-keyed snapshot, so
+      # they are shared instead of rebuilt. That keeps a long transcript off the
+      # per-frame path while scrolling.
+      def stringify_workspace_snapshot(value)
+        return value if value.frozen? && (value.is_a?(Hash) || value.is_a?(Array))
+
+        case value
+        when Hash
+          value.each_with_object({}) { |(key, child), result| result[key.to_s] = stringify_workspace_snapshot(child) }
+        when Array
+          value.map { |child| stringify_workspace_snapshot(child) }
+        else
+          value
+        end
       end
 
       def agent_tree_navigation_snapshot

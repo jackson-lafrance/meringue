@@ -88,7 +88,7 @@ module Meringue
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker harness session."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
-        ["/jump [agent_id]", "TUI local: open an agent harness session in Alacritty, or navigate the AgentTree when no id is provided."],
+        ["/jump [agent_id]", "TUI local: open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/keybind", "TUI local: show all keybindings."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
@@ -106,6 +106,7 @@ module Meringue
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
       HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
+      DELIVERY_PULL_REQUEST_REFRESH_INTERVAL_SECONDS = 5 * 60
       RECONCILE_STATE_HEALTHY = "healthy"
       RECONCILE_STATE_RESUMING = "resuming"
       RECONCILE_STATE_RESUME_FAILED = "resume_failed"
@@ -145,6 +146,72 @@ module Meringue
 
       def list_all
         synchronized_state { store.load }
+      end
+
+      # Opens a read-only harness-neutral transcript handle. The handle cannot
+      # attach, detach, signal, or kill the managed process.
+      def open_agent_session_view(agent_id)
+        agent = synchronized_state do
+          candidate = find_agent(normalized_state, agent_id.to_s)
+          raise ArgumentError, "Agent #{agent_id} does not exist." unless candidate
+          raise ArgumentError, "Agent #{agent_id} is not a worker." unless candidate.fetch("type", nil) == "worker"
+
+          deep_copy(candidate)
+        end
+        client = harness_client_for_agent(agent)
+        client.open_session_view(agent_session_ref(agent))
+      end
+
+      # Abort is a turn-level operation, unlike Kill. It preserves the harness
+      # process/session and lets reconciliation observe the resulting settled
+      # state. This is intentionally not a general process-control API.
+      def cancel_agent_turn(agent_id)
+        agent = synchronized_state do
+          state = normalized_state
+          candidate = find_agent(state, agent_id.to_s)
+          return rejected_result(nil, "CancelAgentTurn", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless candidate
+          return rejected_result(nil, "CancelAgentTurn", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless candidate.fetch("type", nil) == "worker"
+          return rejected_result(nil, "CancelAgentTurn", "Agent #{agent_id} is not currently working.", ["agent_not_working"]) unless candidate.fetch("status", nil) == "working"
+
+          deep_copy(candidate)
+        end
+
+        client = harness_client_for_agent(agent)
+        session_ref = client.abort_session(agent_session_ref(agent))
+
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, agent.fetch("id"))
+          return rejected_result(nil, "CancelAgentTurn", "Agent #{agent.fetch("id")} no longer exists.", ["agent_not_found"]) unless current
+
+          now = timestamp
+          merge_session_ref_into_agent!(current, session_ref)
+          unless TERMINAL_AGENT_STATUSES.include?(current.fetch("status", nil))
+            current["status"] = session_ref.fetch("is_streaming", false) ? "working" : "idle"
+            current["updated_at"] = now
+            current["harness_metadata"] = (current.fetch("harness_metadata", {}) || {}).merge(
+              "turn_cancelled_at" => now,
+              "is_streaming" => session_ref.fetch("is_streaming", false)
+            )
+            refresh_worker_parent_statuses!(state, current, now)
+          end
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: current.fetch("id"),
+            level: "warning",
+            message: "Cancelled the current turn for worker #{current.fetch("id")} without terminating its harness session.",
+            details: { "agent_id" => current.fetch("id"), "session_preserved" => true }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(nil, "CancelAgentTurn", current.fetch("id"), "Cancelled the current turn for worker #{current.fetch("id")}.", current, log_ids)
+        end
+      rescue StandardError => e
+        synchronized_state do
+          error = error_payload(e)
+          failed_result(nil, "CancelAgentTurn", "Harness failed to cancel agent #{agent_id}: #{error.fetch("message")}", [error.fetch("class"), error.fetch("message")])
+        end
       end
 
       def apply(command)
@@ -364,6 +431,7 @@ module Meringue
         recovered_worker_results = recover_worker_reservations
         recovered_results = recover_unapplied_head_results
         prune_result = prune_killed_records
+        delivery_pr_refreshes = refresh_stale_delivery_pull_requests
         agents = synchronized_state do
           normalized_state.fetch("agents").select { |agent| reconcile_candidate?(agent) }.map { |agent| deep_copy(agent) }
         end
@@ -375,6 +443,7 @@ module Meringue
         changed_count += recovered_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += 1 if normalized_state_changed
         changed_count += 1 if prune_result.fetch("changed", false)
+        changed_count += delivery_pr_refreshes.count { |refresh| refresh.fetch("changed", false) }
         accepted_result(
           command_id,
           command_type,
@@ -388,6 +457,7 @@ module Meringue
             "pruned_project_ids" => prune_result.fetch("removed_project_ids", []),
             "recovered_worker_results" => recovered_worker_results,
             "recovered_head_results" => recovered_results,
+            "delivery_pull_request_refreshes" => delivery_pr_refreshes,
             "poll_results" => applied_results
           },
           (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
@@ -724,8 +794,9 @@ module Meringue
         updated_ref = client.prompt_session(session_ref, prompt.to_s, mode: mode.to_s)
         now = timestamp
         apply_session_ref_to_agent!(agent, updated_ref)
-        agent["status"] = "working" if agent.fetch("status", nil) == "idle"
+        agent["status"] = "working"
         agent["updated_at"] = now
+        refresh_worker_parent_statuses!(state, agent, now)
 
         log_ids = append_log(
           state,
@@ -1259,6 +1330,60 @@ module Meringue
         accepted_result(command_id, command_type, nil, "Pruned #{prune_result.fetch("removed_issue_ids").length} errored issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"} and #{prune_result.fetch("removed_standalone_agent_ids").length} standalone errored agent#{prune_result.fetch("removed_standalone_agent_ids").length == 1 ? "" : "s"}.", prune_result, log_ids)
       end
 
+      # Refresh only already-verified delivery PRs. Candidate/reported URLs remain inert, and an
+      # unavailable forge never replaces the last known open/closed/merged state. /prune merged
+      # still performs its own authoritative checks and therefore keeps its conservative rules.
+      def refresh_stale_delivery_pull_requests
+        synchronized_state do
+          state = normalized_state
+          now = timestamp
+          refreshes = state.fetch("issues").flat_map do |issue|
+            State::Models.merge_pull_request_records(State::Models.pull_request_records_from(issue)).filter_map do |record|
+              url = State::Models.pull_request_record_url(record)
+              next if blank?(url) || !delivery_pull_request_refresh_due?(record, now)
+
+              status = pull_request_status(url)
+              unavailable = status.fetch("state", nil).to_s == "unknown"
+              refreshed = if unavailable
+                            record.merge(
+                              "availability" => "unavailable",
+                              "last_checked_at" => now,
+                              "last_refresh_error" => present_string(status.fetch("error", nil))
+                            ).compact
+                          else
+                            record.merge(status).merge(
+                              "availability" => "available",
+                              "last_checked_at" => now,
+                              "last_refresh_error" => nil
+                            ).compact
+                          end
+              State::Models.attach_pull_requests_to_issue!(issue, delivery_pull_requests: [refreshed])
+              {
+                "issue_id" => issue.fetch("id", nil),
+                "url" => url,
+                "state" => refreshed.fetch("state", "unknown"),
+                "availability" => refreshed.fetch("availability"),
+                "changed" => refreshed != record
+              }.compact
+            end
+          end
+          if refreshes.any? { |refresh| refresh.fetch("changed", false) }
+            touch_state!(state, now)
+            store.save(state)
+          end
+          refreshes
+        end
+      end
+
+      def delivery_pull_request_refresh_due?(record, now)
+        checked_at = record.is_a?(Hash) && (record["last_checked_at"] || record["verified_at"])
+        return true if blank?(checked_at)
+
+        Time.iso8601(now) - Time.iso8601(checked_at.to_s) >= DELIVERY_PULL_REQUEST_REFRESH_INTERVAL_SECONDS
+      rescue ArgumentError, TypeError
+        true
+      end
+
       def refresh_worker_delivery_pull_requests!(state)
         workers_by_issue = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }.group_by { |worker| worker.fetch("issue_id", nil) }
         state.fetch("issues").flat_map do |issue|
@@ -1413,7 +1538,9 @@ module Meringue
           status.merge(
             "matched_by" => "workspace_branch",
             "matched_branch" => branch,
-            "verified_at" => timestamp
+            "verified_at" => timestamp,
+            "last_checked_at" => timestamp,
+            "availability" => "available"
           )
         end
       end
@@ -1458,7 +1585,9 @@ module Meringue
 
         status.merge(
           "matched_by" => "merged_same_repo_candidate_without_branch",
-          "verified_at" => timestamp
+          "verified_at" => timestamp,
+          "last_checked_at" => timestamp,
+          "availability" => "available"
         )
       end
 
