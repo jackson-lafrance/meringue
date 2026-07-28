@@ -88,7 +88,7 @@ module Meringue
           failed_result("Prompting agent #{agent_id} failed: #{e.message}", e)
         end
 
-        # Cancels only Pi's current agent operation. It never closes stdin,
+        # Cancels only the harness's current agent operation. It never closes stdin,
         # signals the process, kills the session, or changes workspace state.
         def cancel_current_turn
           @engine.cancel_agent_turn(agent_id)
