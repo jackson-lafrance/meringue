@@ -56,6 +56,16 @@ Required behavior:
 
 The terminal/editor adapters should return structured results rather than raising through the render/input loop. The existing URL and external harness-session openers follow the same pattern (`opened`, `rejected`, or `failed`). The focused agent-session action must reuse that opener rather than attaching to or taking ownership of the kernel-managed RPC process.
 
+## Focused workspace rendering layers
+
+The focused workspace is split so each layer has one job:
+
+- `TUI::WorkspaceTranscript` turns whatever the harness session view provides (assembled history, live events, harness message lists, local echoes, durable logs) into one deduplicated, chronological entry list. It emits no styles and knows no backend.
+- `TUI::Panes::AgentWorkspacePane` renders those entries, the live terminal screen, the composer, and the leader line, and caches composed rows per content revision.
+- `TUI::WorkspaceCommands` owns the composer's slash command registry, aliases, and argument validation.
+- `TUI::HintLine` owns the shared bottom-bar styling used by both the dashboard and the workspace.
+- `Workspace::PathResolver`, `Workspace::Controller`, and `Workspace::TerminalManager` own UI-side shell/editor processes; the kernel still owns all orchestration state.
+
 ## Workspace directory resolution
 
 `Workspace::PathResolver` is the single place that decides where a UI-owned shell or editor starts. It is used by the terminal manager, the workspace controller, the editor launcher, and the external session opener so all four agree.

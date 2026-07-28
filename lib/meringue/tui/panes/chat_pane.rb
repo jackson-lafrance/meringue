@@ -704,16 +704,18 @@ module Meringue
           [["⧉ selection", Style::ACCENT], ["  Ctrl-C copies", Style::MUTED]]
         end
 
+        # Shares the focused workspace's bottom-bar styling: accented keys with
+        # muted labels and dim dividers, so both bars read as one product.
         def interaction_hint_segments
-          [
-            ["Enter sends", Style::MUTED],
-            [" • ", Style::DIM],
-            ["Ctrl-C clears/quits", Style::MUTED],
-            [" • ", Style::DIM],
-            ["Tab focus", Style::MUTED],
-            [" • ", Style::DIM],
-            ["/keybind help", Style::MUTED]
-          ]
+          HintLine.segments(
+            [
+              ["Enter", "send"],
+              ["Ctrl-C", "clear/quit"],
+              ["Tab", "focus"],
+              ["/", "commands"],
+              ["/keybind", "keys"]
+            ]
+          )
         end
 
         def active_harness_label(state)

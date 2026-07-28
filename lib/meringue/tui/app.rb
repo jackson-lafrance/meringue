@@ -73,7 +73,8 @@ module Meringue
         workspace_open_pull_request
         workspace_close
       ].freeze
-      WORKSPACE_FILTERS = %w[all output final reasoning tools].freeze
+      # One list of transcript filters, shared with persistence and commands.
+      WORKSPACE_FILTERS = State::Models::AGENT_WORKSPACE_FILTERS
 
       # workspace_controller is a harness-neutral UI adapter. Integrations may
       # implement open_workspace, agent_snapshot, open_terminal,
@@ -1182,10 +1183,6 @@ module Meringue
 
       def workspace_leader_label
         keybindings.display_name_for("workspace_leader") || "workspace leader"
-      end
-
-      def workspace_command_label(action)
-        keybindings.display_name_for(action) || "(unbound)"
       end
 
       # Page keys stay available to the shell in terminal view; the wheel is

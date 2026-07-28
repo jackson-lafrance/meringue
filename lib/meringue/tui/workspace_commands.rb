@@ -10,7 +10,8 @@ module Meringue
     # session operation the kernel owns. Anything not starting with `/` is still
     # a direct follow-up prompt for the worker.
     module WorkspaceCommands
-      FILTERS = %w[all output final reasoning tools].freeze
+      # Mirrors the persisted transcript filters rather than restating them.
+      FILTERS = State::Models::AGENT_WORKSPACE_FILTERS
 
       # usage, description, action
       COMMAND_SPECS = [
