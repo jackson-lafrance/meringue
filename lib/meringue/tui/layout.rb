@@ -277,7 +277,7 @@ module Meringue
             height - BOTTOM_HINT_HEIGHT - composer_height,
             composer_width,
             composer_height,
-            "direct worker follow-up",
+            "chat",
             agent_workspace_pane.composer_lines(state, width: composer_content_width),
             active: true,
             overflow: :tail

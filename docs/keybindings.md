@@ -93,10 +93,16 @@ Focused commands use a leader sequence so normal terminal control bindings are n
 - `Ctrl-Space`, then `P`: open the verified delivery pull request when one exists.
 - `Ctrl-Space`, then `Q`: quit either focused subview back to the AgentTree without stopping the worker or its workspace terminal.
 
-The helper line under the focused chat box is exactly this leader line and nothing else:
+The composer is titled `chat`, and the helper line under it is exactly this leader line and nothing else:
 
 ```txt
 Ctrl-Space  T terminal/agent · F filter: all · A agent session · B editor · P PR · Q quit
+```
+
+The dashboard's bottom bar uses the same styling — accented keys, muted labels, dim dividers — so both bars read as one product:
+
+```txt
+Enter send · Ctrl-C clear/quit · Tab focus · / commands · /keybind keys
 ```
 
 Key letters and labels come from the active bindings, so custom bindings render accurately. The `F` entry always shows the active transcript filter, which resets scroll to the newest matching entry, persists across restart for the selected worker, and resets to `all` when another worker is selected.
