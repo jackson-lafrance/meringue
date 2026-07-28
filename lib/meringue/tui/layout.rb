@@ -245,7 +245,8 @@ module Meringue
           composer_content_width = composer_width - 4
           composer_line_count = agent_workspace_pane.composer_lines(state, width: composer_content_width).length
           composer_height = composer_height_for(height - BOTTOM_HINT_HEIGHT, composer_line_count)
-          content_height = height - BOTTOM_HINT_HEIGHT - composer_height - GAP
+          suggestion_height = workspace_suggestion_height(state, height, composer_height)
+          content_height = height - BOTTOM_HINT_HEIGHT - composer_height - GAP - (suggestion_height.positive? ? suggestion_height + GAP : 0)
           draw_pane(
             canvas,
             pane_x,
@@ -258,10 +259,22 @@ module Meringue
             overflow: :pinned_tail,
             scroll_offset: workspace.fetch("scroll_offset", 0)
           )
+          if suggestion_height.positive?
+            draw_pane(
+              canvas,
+              pane_x,
+              content_height + GAP,
+              pane_width,
+              suggestion_height,
+              "workspace commands",
+              agent_workspace_pane.slash_suggestion_lines(state),
+              active: false
+            )
+          end
           draw_pane(
             canvas,
             pane_x,
-            content_height + GAP,
+            height - BOTTOM_HINT_HEIGHT - composer_height,
             composer_width,
             composer_height,
             "direct worker follow-up",
@@ -326,6 +339,17 @@ module Meringue
         return line.to_s unless line.is_a?(Array)
 
         line.map { |segment| segment.is_a?(Array) ? segment.fetch(0, "").to_s : segment.to_s }.join
+      end
+
+      # Bounded like the dashboard's slash popup: the transcript keeps a usable
+      # minimum height, and the list collapses instead of squeezing it away.
+      def workspace_suggestion_height(state, height, composer_height)
+        return 0 unless agent_workspace_pane.respond_to?(:slash_suggestions?) && agent_workspace_pane.slash_suggestions?(state)
+
+        desired = [agent_workspace_pane.slash_suggestion_lines(state).length + 2, 8].min
+        available = height - BOTTOM_HINT_HEIGHT - composer_height - GAP - MIN_CHAT_HEIGHT - GAP
+        bounded = [desired, [available, 0].max].min
+        bounded >= 3 ? bounded : 0
       end
 
       def layout_metrics(width, height, state)

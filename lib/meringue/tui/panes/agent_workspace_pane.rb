@@ -89,6 +89,31 @@ module Meringue
         # When the line cannot fit, whole labels are dropped before whole
         # commands are, so every command stays discoverable at any width instead
         # of the list being cut mid-item.
+        # Workspace slash commands mirror the dashboard's completion popup, so the
+        # focused view stays discoverable without adding another hint line.
+        def slash_suggestions?(state)
+          workspace = workspace_state(state)
+          return false unless workspace.fetch("view", "agent") == "agent"
+
+          WorkspaceCommands.slash_prompt?(workspace.fetch("input_buffer", ""))
+        end
+
+        def slash_suggestion_lines(state)
+          workspace = workspace_state(state)
+          records = Array(workspace.fetch("slash_suggestions", []))
+          return [[["No matching workspace commands.", Style::MUTED]]] if records.empty?
+
+          selected_index = workspace.fetch("slash_suggestion_index", -1).to_i
+          records.each_with_index.map do |record, index|
+            selected = index == selected_index
+            [
+              [selected ? "› " : "  ", selected ? Style::ACCENT_BOLD : Style::DIM],
+              [record.fetch("usage", "").to_s, selected ? Style::ACCENT_BOLD : Style::TEXT],
+              [" — #{record.fetch("description", "")}", Style::MUTED]
+            ]
+          end
+        end
+
         def hint_line(state, width: nil)
           workspace = workspace_state(state)
           commands = Array(workspace.fetch("leader_commands", nil)).select { |command| command.is_a?(Hash) }
