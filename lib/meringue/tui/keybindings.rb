@@ -34,9 +34,12 @@ module Meringue
         "agent_select_previous" => ["up", "left"],
         "agent_select_next" => ["down", "right"],
         "open_agent_workspace" => ["a"],
-        "workspace_switch_view" => ["ctrl-t"],
-        "workspace_open_editor" => ["ctrl-e"],
-        "workspace_open_pull_request" => ["ctrl-b"]
+        "workspace_leader" => ["ctrl-space"],
+        "workspace_switch_view" => ["t"],
+        "workspace_cycle_filter" => ["f"],
+        "workspace_open_editor" => ["e"],
+        "workspace_open_pull_request" => ["b"],
+        "workspace_close" => ["q"]
       }.freeze
 
       ACTION_LABELS = {
@@ -70,9 +73,12 @@ module Meringue
         "agent_select_previous" => "Select previous agent",
         "agent_select_next" => "Select next agent",
         "open_agent_workspace" => "Open optional focused worker workspace",
-        "workspace_switch_view" => "Switch worker / worktree terminal view",
-        "workspace_open_editor" => "Open workspace in configured editor",
-        "workspace_open_pull_request" => "Open delivery pull request"
+        "workspace_leader" => "Focused workspace command leader",
+        "workspace_switch_view" => "After workspace leader: switch worker / terminal",
+        "workspace_cycle_filter" => "After workspace leader: cycle transcript filter",
+        "workspace_open_editor" => "After workspace leader: open configured editor",
+        "workspace_open_pull_request" => "After workspace leader: open delivery pull request",
+        "workspace_close" => "After workspace leader: return to AgentTree"
       }.freeze
 
       KEY_ALIASES = {
@@ -81,9 +87,10 @@ module Meringue
         "ctrl-c" => ["\u0003", "\e[99;5u", "\e[67;5u", "\e[27;5;99~", "\e[27;5;67~"],
         "ctrl-d" => ["\u0004"],
         "ctrl-w" => ["\u0017"],
-        "ctrl-b" => ["\u0002"],
-        "ctrl-e" => ["\u0005"],
-        "ctrl-t" => ["\u0014"],
+        "ctrl-b" => ["\u0002", "\e[98;5u", "\e[66;5u", "\e[27;5;98~", "\e[27;5;66~"],
+        "ctrl-e" => ["\u0005", "\e[101;5u", "\e[69;5u", "\e[27;5;101~", "\e[27;5;69~"],
+        "ctrl-t" => ["\u0014", "\e[116;5u", "\e[84;5u", "\e[27;5;116~", "\e[27;5;84~"],
+        "ctrl-space" => ["\u0000", "\e[32;5u", "\e[27;5;32~"],
         "enter" => ["\r", "\n"],
         "return" => ["\r", "\n"],
         "shift-enter" => ["\e[13;2u", "\e[10;2u", "\e[27;2;13~", "\e[27;2;10~", "\e[13;2~", "\e[10;2~"],
@@ -158,6 +165,16 @@ module Meringue
 
       def names_for(action)
         @key_names.fetch(self.class.canonical_action(action), []).dup
+      end
+
+      # Returns the unconsumed suffix when +key+ starts with a configured
+      # sequence for +action+. This supports terminals that coalesce a leader
+      # control byte and its printable command key into one read.
+      def consume_prefix(action, key)
+        return nil unless key.is_a?(String)
+
+        sequence = bindings_for(action).select { |candidate| !candidate.empty? && key.start_with?(candidate) }.max_by(&:bytesize)
+        sequence && key.byteslice(sequence.bytesize..).to_s
       end
 
       def label_for(action)

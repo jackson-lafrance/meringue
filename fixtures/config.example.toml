@@ -10,6 +10,13 @@ colorscheme = "meringue"
 # Omitted actions keep defaults. Use /keybind in the TUI to see active bindings.
 # agent_select_previous = ["k", "up", "left"]
 # agent_select_next = ["j", "down", "right"]
+# Focused workspace commands default to Ctrl-Space followed by one suffix.
+# workspace_leader = ["ctrl-space"]
+# workspace_switch_view = ["t"]
+# workspace_cycle_filter = ["f"]
+# workspace_open_editor = ["e"]
+# workspace_open_pull_request = ["b"]
+# workspace_close = ["q"]
 
 [harness]
 # provider applies to both head and worker agents unless overridden below.

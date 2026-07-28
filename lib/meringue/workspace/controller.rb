@@ -58,6 +58,7 @@ module Meringue
         status = session.status
         snapshot = {
           "lines" => screen.lines,
+          "styled_lines" => screen.styled_lines,
           "cursor" => screen.cursor,
           "status" => status.fetch("state", nil),
           "pid" => status.fetch("pid", nil)

@@ -164,7 +164,8 @@ module Meringue
             agent_workspace_pane.title(state),
             agent_workspace_pane.content_lines(state, width: pane_width - 4),
             active: true,
-            overflow: :tail
+            overflow: :tail,
+            scroll_offset: workspace.fetch("scroll_offset", 0)
           )
         else
           composer_width = pane_width
@@ -181,7 +182,8 @@ module Meringue
             agent_workspace_pane.title(state),
             agent_workspace_pane.content_lines(state, width: pane_width - 4),
             active: true,
-            overflow: :pinned_tail
+            overflow: :pinned_tail,
+            scroll_offset: workspace.fetch("scroll_offset", 0)
           )
           draw_pane(
             canvas,
@@ -367,7 +369,7 @@ module Meringue
         when :tail
           draw_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset)
         when :pinned_tail
-          draw_pinned_tail_content(canvas, x, y, content_width, content_height, lines)
+          draw_pinned_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset)
         when :agent_tree
           draw_scroll_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset)
         else
@@ -395,7 +397,7 @@ module Meringue
         canvas.write(x + 2, y + height - 2, overflow.ljust(content_width), max_width: content_width, style: Style::DIM)
       end
 
-      def draw_pinned_tail_content(canvas, x, y, content_width, content_height, lines)
+      def draw_pinned_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: 0)
         separator = lines.index do |line|
           Array(line).all? { |segment| (segment.is_a?(Array) ? segment.first : segment).to_s.empty? }
         end
@@ -407,9 +409,21 @@ module Meringue
         return unless remaining_height.positive?
 
         tail = lines.drop(pinned_count)
-        visible = tail.last(remaining_height)
-        visible.each_with_index do |line, index|
-          draw_line(canvas, x + 2, y + 1 + pinned.length + index, content_width, line)
+        if tail.length <= remaining_height
+          tail.each_with_index do |line, index|
+            draw_line(canvas, x + 2, y + 1 + pinned.length + index, content_width, line)
+          end
+          return
+        end
+
+        visible_capacity = [remaining_height - 1, 0].max
+        offset = scroll_offset.to_i.clamp(0, [tail.length - visible_capacity, 0].max)
+        finish_index = tail.length - offset
+        start_index = [finish_index - visible_capacity, 0].max
+        label = offset.positive? ? "… #{start_index} earlier · #{offset} later" : "… #{start_index} earlier"
+        canvas.write(x + 2, y + 1 + pinned.length, label.ljust(content_width), max_width: content_width, style: Style::DIM)
+        Array(tail[start_index...finish_index]).each_with_index do |line, index|
+          draw_line(canvas, x + 2, y + 2 + pinned.length + index, content_width, line)
         end
       end
 

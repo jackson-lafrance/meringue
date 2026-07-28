@@ -19,6 +19,7 @@ module Meringue
         delivery_pull_request delivery_pull_requests reported_pr_urls candidate_pr_urls
       ].freeze
       AGENT_WORKSPACE_VIEWS = %w[agent terminal].freeze
+      AGENT_WORKSPACE_FILTERS = %w[all output final reasoning tools].freeze
 
       module_function
 
@@ -75,10 +76,13 @@ module Meringue
         selected_agent_id = nil unless worker_ids.include?(selected_agent_id)
         view = source["view"].to_s
         view = "agent" unless AGENT_WORKSPACE_VIEWS.include?(view)
+        filter = source["filter"].to_s
+        filter = "all" unless AGENT_WORKSPACE_FILTERS.include?(filter)
 
         normalized = {
           "selected_agent_id" => selected_agent_id,
           "view" => view,
+          "filter" => filter,
           "draft" => selected_agent_id ? source.fetch("draft", "").to_s : "",
           "agent_scroll_offset" => nonnegative_integer(source["agent_scroll_offset"]),
           "terminal_scroll_offset" => nonnegative_integer(source["terminal_scroll_offset"]),

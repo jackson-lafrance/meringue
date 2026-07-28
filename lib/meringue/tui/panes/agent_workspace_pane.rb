@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "time"
+
 module Meringue
   module TUI
     module Panes
@@ -55,10 +57,14 @@ module Meringue
 
         def hint_line(state)
           workspace = workspace_state(state)
-          if workspace.fetch("view", "agent") == "terminal"
-            hint_segments("Ctrl-T worker", "Ctrl-E editor", "Ctrl-B PR", "other keys → terminal")
+          leader = workspace.fetch("leader_hint", "ctrl-space: t view, e editor, b PR")
+          if workspace.fetch("leader_pending", false)
+            hint_segments("command pending", leader)
+          elsif workspace.fetch("view", "agent") == "terminal"
+            hint_segments(leader, "mouse wheel scroll", "other keys → terminal")
           else
-            hint_segments("Esc tree", "Ctrl-T terminal", "Enter direct follow-up", "Ctrl-E editor", "Ctrl-B PR", "Shift-Enter newline")
+            filter = workspace.fetch("filter", "all")
+            hint_segments("Esc tree", leader, "filter #{filter}", "Enter direct follow-up", "PageUp/PageDown or wheel scroll", "Shift-Enter newline")
           end
         end
 
@@ -166,16 +172,22 @@ module Meringue
         end
 
         def transcript_lines(state, workspace, agent, metadata, width:)
-          entries = []
-          entries.concat(Array(workspace.fetch("messages", [])))
+          local_entries = Array(workspace.fetch("messages", []))
           live = workspace.fetch("agent_session", {}) || {}
-          entries.concat(Array(live.fetch("messages", [])))
-          entries.concat(Array(live.fetch("items", [])).filter_map { |item| live_item_entry(item) })
-          entries.concat(Array(live.fetch("events", [])).filter_map { |event| live_event_entry(event) })
+          session_entries = []
+          session_entries.concat(Array(live.fetch("messages", [])))
+          session_entries.concat(Array(live.fetch("items", [])).flat_map { |item| live_item_entries(item) })
+          session_entries.concat(Array(live.fetch("events", [])).flat_map { |event| live_event_entries(event) })
           live_lines = Array(live.fetch("lines", []))
-          entries << { "role" => "agent", "text" => live_lines.join("\n") } unless live_lines.empty?
-          entries.concat(durable_agent_entries(state, agent.fetch("id")))
-          entries = deduplicate_entries(entries)
+          session_entries << { "role" => "agent", "text" => live_lines.join("\n") } unless live_lines.empty?
+          local_entries = local_entries.reject { |entry| session_contains_entry?(session_entries, entry) }
+
+          entries = local_entries + session_entries
+          # Durable worker logs contain the compact completion summary, not the
+          # Pi transcript. They are only a fallback when no session output can
+          # be recovered, otherwise they can push the real transcript offscreen.
+          entries.concat(durable_agent_entries(state, agent.fetch("id"))) if session_entries.empty?
+          entries = chronological_entries(deduplicate_entries(entries))
 
           if entries.empty?
             last_text = metadata.fetch("last_assistant_text", "").to_s.strip
@@ -183,55 +195,170 @@ module Meringue
           end
           return [[[EMPTY_TRANSCRIPT, Style::MUTED]]] if entries.empty?
 
+          filter = workspace.fetch("filter", "all").to_s
+          entries = entries.select { |entry| transcript_filter_match?(entry, filter) }
+          return [[["No #{filter} transcript entries are available. Press the workspace leader then f to change the filter.", Style::MUTED]]] if entries.empty?
+
           entries.flat_map.with_index do |entry, index|
             role = entry.fetch("role", "agent").to_s
             label, label_style = transcript_label(role, agent.fetch("id"))
+            body_style = transcript_style(role, agent.fetch("id"))
             text = entry.fetch("text", entry.fetch("message", "")).to_s
             rows = wrap_text(text, width)
             rendered = [[[label, label_style]]]
-            rendered.concat(rows.map { |row| [["  #{row}", Style::TEXT]] })
+            rendered.concat(rows.map { |row| [["  #{row}", body_style]] })
             rendered << [["", Style::DIM]] unless index == entries.length - 1
             rendered
           end
         end
 
-        def live_item_entry(item)
-          return nil unless item.is_a?(Hash)
-
-          text = item.fetch("content", item.fetch("text", "")).to_s
-          tool_calls = Array(item.fetch("tool_calls", [])).filter_map do |call|
-            next unless call.is_a?(Hash)
-
-            arguments = call.fetch("arguments", nil)
-            suffix = arguments.nil? ? "" : " #{arguments.inspect}"
-            "→ #{call.fetch("name", "tool")}#{suffix}"
-          end
-          text = ([text.strip] + tool_calls).reject(&:empty?).join("\n")
-          return nil if text.empty?
+        def live_item_entries(item)
+          return [] unless item.is_a?(Hash)
 
           role = item.fetch("role", item.fetch("kind", "agent")).to_s
           role = "you" if role == "user"
           role = "agent" if role == "assistant"
-          role = "tool" if role == "tool"
-          { "role" => role, "text" => text }
+          role = "tool_result" if %w[tool toolResult bashExecution].include?(role)
+          timestamp = item.fetch("timestamp", nil)
+          entries = []
+
+          thinking = item.fetch("thinking", "").to_s.strip
+          unless thinking.empty?
+            entries << transcript_entry("thinking", thinking, item, timestamp: timestamp, part: "thinking")
+          end
+
+          text = item.fetch("content", item.fetch("text", "")).to_s.strip
+          if text.empty? && item.fetch("delta_type", nil).to_s.end_with?("_delta")
+            text = item.fetch("delta", "").to_s
+          end
+          unless text.empty?
+            text_role = if item.fetch("is_error", false)
+                          "error"
+                        elsif role == "agent" && final_agent_item?(item)
+                          "final"
+                        else
+                          role
+                        end
+            entries << transcript_entry(text_role, text, item, timestamp: timestamp, part: "content")
+          end
+
+          Array(item.fetch("tool_calls", [])).each do |call|
+            next unless call.is_a?(Hash)
+
+            arguments = call.fetch("arguments", nil)
+            suffix = arguments.nil? ? "" : " #{arguments.inspect}"
+            entries << transcript_entry("tool_call", "→ #{call.fetch("name", "tool")}#{suffix}", call, timestamp: timestamp, part: "call")
+          end
+
+          if item.fetch("is_error", false)
+            reason = item.fetch("error_message", item.fetch("stop_reason", "worker operation failed")).to_s.strip
+            if text.empty? || (!reason.empty? && !text.include?(reason))
+              entries << transcript_entry("error", reason.empty? ? "worker operation failed" : reason, item, timestamp: timestamp, part: "error")
+            end
+          end
+          entries
         end
 
-        def live_event_entry(event)
-          return nil unless event.is_a?(Hash)
+        def live_event_entries(event)
+          return [] unless event.is_a?(Hash)
 
           case event.fetch("kind", nil)
           when "message"
-            live_item_entry(event)
+            live_item_entries(event)
           when "tool"
             label = event.fetch("tool_name", "tool")
             phase = event.fetch("phase", "update")
+            arguments = event.fetch("arguments", nil)
             content = event.fetch("content", "").to_s.strip
-            text = ["#{phase == "end" ? "✓" : "→"} #{label}", content].reject(&:empty?).join("\n")
-            { "role" => "tool", "text" => text }
-          when "notice", "transport", "queue", "interaction_request"
-            text = event.fetch("message", event.fetch("phase", event.fetch("kind", "notice"))).to_s
-            { "role" => "system", "text" => text }
+            heading = "#{phase == "end" ? "✓" : "→"} #{label} · #{phase}"
+            heading += " #{arguments.inspect}" if phase == "start" && !arguments.nil?
+            role = event.fetch("is_error", false) ? "error" : (phase == "start" ? "tool_call" : "tool_result")
+            [transcript_entry(role, [heading, content].reject(&:empty?).join("\n"), event, part: "tool-#{phase}")]
+          when "lifecycle"
+            phase = event.fetch("phase", "update").to_s
+            message = {
+              "streaming" => "Worker started processing.",
+              "turn_start" => "Assistant turn started.",
+              "turn_complete" => event.fetch("will_retry", false) ? "Worker turn ended; retry pending." : "Worker turn ended.",
+              "turn_end" => "Assistant turn completed.",
+              "settled" => "Worker session settled."
+            }.fetch(phase, "Worker lifecycle: #{phase.tr("_", " ")}.")
+            [transcript_entry("lifecycle", message, event, part: "lifecycle-#{phase}")]
+          when "notice"
+            phase = event.fetch("phase", event.fetch("notice_type", "notice")).to_s
+            message = event.fetch("message", event.fetch("error", event.fetch("reason", phase))).to_s
+            [transcript_entry(event.fetch("error", nil) ? "error" : "system", "#{phase.tr("_", " ")}: #{message}", event, part: "notice-#{phase}")]
+          when "transport"
+            message = event.fetch("message", event.fetch("phase", "transport error")).to_s
+            [transcript_entry("error", message, event, part: "transport")]
+          when "queue"
+            steering = Array(event.fetch("steering", [])).map(&:to_s)
+            follow_up = Array(event.fetch("follow_up", [])).map(&:to_s)
+            details = []
+            details << "steering: #{steering.join(" | ")}" unless steering.empty?
+            details << "follow-up: #{follow_up.join(" | ")}" unless follow_up.empty?
+            [transcript_entry("system", details.empty? ? "Worker prompt queue updated." : details.join("\n"), event, part: "queue")]
+          when "interaction_request"
+            [transcript_entry("system", event.fetch("message", "Pi requested unsupported interactive input.").to_s, event, part: "interaction")]
+          else
+            []
           end
+        end
+
+        def final_agent_item?(item)
+          phase = item.fetch("phase", "complete").to_s
+          reason = item.fetch("stop_reason", "").to_s
+          %w[complete end].include?(phase) && !reason.empty? && reason != "toolUse"
+        end
+
+        def transcript_filter_match?(entry, filter)
+          category = entry.fetch("category", "output").to_s
+          filter == "all" || filter == category
+        end
+
+        def transcript_style(role, agent_id)
+          case role
+          when "thinking"
+            Style::WORKSPACE_REASONING
+          when "tool_call"
+            Style::WORKSPACE_TOOL_CALL
+          when "tool_result"
+            Style::WORKSPACE_TOOL_RESULT
+          when "final"
+            Style::WORKSPACE_FINAL
+          when "error"
+            Style::ERROR
+          when "you"
+            Style::USER
+          when "agent"
+            Style::WORKSPACE_OUTPUT
+          when "lifecycle", "system"
+            Style::MUTED
+          else
+            Style.agent_body_style(agent_id)
+          end
+        end
+
+        def transcript_entry(role, text, source, timestamp: nil, part: nil)
+          timestamp ||= source["timestamp"]
+          identity = timestamp || source["id"] || source["tool_call_id"] || source["sequence"]
+          source_kind = source["kind"].to_s
+          source_role = source["role"].to_s
+          category = case role
+                     when "thinking" then "reasoning"
+                     when "tool_call", "tool_result" then "tools"
+                     when "final" then "final"
+                     when "error"
+                       (source_kind == "tool" || %w[tool toolResult bashExecution].include?(source_role)) ? "tools" : "output"
+                     else "output"
+                     end
+          {
+            "role" => role,
+            "category" => category,
+            "text" => text.to_s,
+            "timestamp" => timestamp,
+            "dedup_key" => identity && [role, identity.to_s, part.to_s]
+          }.compact
         end
 
         def durable_agent_entries(state, agent_id)
@@ -245,6 +372,31 @@ module Meringue
           end
         end
 
+        def session_contains_entry?(session_entries, local_entry)
+          local_role = local_entry.fetch("role", "agent").to_s
+          local_role = "you" if local_role == "user"
+          local_role = "agent" if local_role == "assistant"
+          local_text = local_entry.fetch("text", local_entry.fetch("message", "")).to_s.strip
+          session_entries.any? do |entry|
+            entry.fetch("role", "agent").to_s == local_role &&
+              entry.fetch("text", entry.fetch("message", "")).to_s.strip == local_text
+          end
+        end
+
+        def chronological_entries(entries)
+          entries.each_with_index.sort_by do |(entry, index)|
+            value = entry.fetch("timestamp", nil)
+            time = if value.is_a?(Numeric)
+                     value.to_f / 1000
+                   elsif value
+                     Time.parse(value.to_s).to_f
+                   end
+            [time ? 0 : 1, time || 0, index]
+          rescue ArgumentError, TypeError
+            [1, 0, index]
+          end.map(&:first)
+        end
+
         def deduplicate_entries(entries)
           seen = {}
           entries.filter_map do |entry|
@@ -253,11 +405,10 @@ module Meringue
             text = entry.fetch("text", entry.fetch("message", "")).to_s.strip
             next if text.empty?
 
-            role = entry.fetch("role", "agent").to_s
-            key = [role, text.gsub(/\s+/, " ")]
-            next if seen[key]
+            key = entry.fetch("dedup_key", nil)
+            next if key && seen[key]
 
-            seen[key] = true
+            seen[key] = true if key
             entry.merge("text" => text)
           end
         end
@@ -268,8 +419,18 @@ module Meringue
             ["● you", Style::USER]
           when "system"
             ["▪ meringue", Style::ACCENT_BOLD]
-          when "tool"
-            ["◇ tool", Style::MUTED]
+          when "lifecycle"
+            ["▪ lifecycle", Style::MUTED]
+          when "thinking"
+            ["◌ reasoning", Style::WORKSPACE_REASONING]
+          when "error"
+            ["! error", Style::ERROR]
+          when "tool_call"
+            ["◇ tool call", Style::WORKSPACE_TOOL_CALL]
+          when "tool_result"
+            ["◆ tool result", Style::WORKSPACE_TOOL_RESULT]
+          when "final"
+            ["✓ final #{agent_id}", Style::WORKSPACE_FINAL]
           else
             ["✦ #{agent_id}", Style.agent_style(agent_id, kind: "worker")]
           end
@@ -278,25 +439,51 @@ module Meringue
         def terminal_lines(workspace, width:)
           terminal = workspace.fetch("terminal", {}) || {}
           lines = Array(terminal.fetch("lines", []))
+          styled_lines = Array(terminal.fetch("styled_lines", []))
           error = terminal.fetch("error", workspace.fetch("error", nil)).to_s.strip
           notice = terminal.fetch("notice", workspace.fetch("notice", nil)).to_s.strip
           output = []
           output.concat(wrapped_notice(notice, Style::MUTED, width)) unless notice.empty?
           output.concat(wrapped_notice(error, Style::ERROR, width)) unless error.empty?
           output << [["", Style::DIM]] unless output.empty? || lines.empty?
+          rendered_lines = if styled_lines.empty?
+                             lines.map { |line| [[line.to_s, Style::TEXT]] }
+                           else
+                             styled_lines.map do |segments|
+                               Array(segments).map { |text, style| [text.to_s, style || Style::TEXT] }
+                             end
+                           end
           cursor = Array(terminal.fetch("cursor", []))
-          output.concat(lines.map.with_index do |line, index|
-            text = line.to_s
-            if index == cursor[0].to_i && cursor.length >= 2
-              column = cursor[1].to_i.clamp(0, text.length)
-              before = text[0...column]
-              after = text[column..].to_s
-              [[before, Style::TEXT], ["▏", Style::ACCENT_BOLD], [after, Style::TEXT]]
-            else
-              [[text, Style::TEXT]]
-            end
-          end)
+          if cursor.length >= 2
+            row = cursor[0].to_i
+            rendered_lines << [] while rendered_lines.length <= row
+            rendered_lines[row] = insert_terminal_cursor(rendered_lines[row], cursor[1].to_i)
+          end
+          output.concat(rendered_lines)
           output.empty? ? [[["Terminal is starting…", Style::MUTED]]] : output
+        end
+
+        def insert_terminal_cursor(segments, column)
+          remaining = [column, 0].max
+          output = []
+          inserted = false
+          Array(segments).each do |text, style|
+            value = text.to_s
+            if !inserted && remaining <= value.length
+              output << [value[0...remaining], style] if remaining.positive?
+              output << ["▏", Style::ACCENT_BOLD]
+              output << [value[remaining..].to_s, style] if remaining < value.length
+              inserted = true
+            else
+              output << [value, style]
+              remaining -= value.length unless inserted
+            end
+          end
+          unless inserted
+            output << [" " * remaining, Style::TEXT] if remaining.positive?
+            output << ["▏", Style::ACCENT_BOLD]
+          end
+          output
         end
 
         def wrap_text(text, width)

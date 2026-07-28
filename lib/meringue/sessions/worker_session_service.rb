@@ -37,6 +37,7 @@ module Meringue
           @mutex = Mutex.new
           @condition = ConditionVariable.new
           @closed = false
+          @paused = false
           @handle_generation = 0
           @cached_snapshot = Harness::SessionView.unavailable_snapshot(
             harness: "unknown",
@@ -100,6 +101,28 @@ module Meringue
           @mutex.synchronize { @closed }
         end
 
+        # Terminal view does not need transcript RPC/history refreshes. Pausing
+        # removes that background JSON work from the latency-sensitive PTY path;
+        # resume wakes the refresher immediately when worker view returns.
+        def pause
+          @mutex.synchronize do
+            return false if @closed
+
+            @paused = true
+          end
+          true
+        end
+
+        def resume
+          @mutex.synchronize do
+            return false if @closed
+
+            @paused = false
+            @condition.broadcast
+          end
+          true
+        end
+
         private
 
         def current_handle
@@ -154,6 +177,7 @@ module Meringue
         def refresh_snapshots
           loop do
             handle, generation = @mutex.synchronize do
+              @condition.wait(@mutex) while @paused && !@closed
               break if @closed
 
               [@handle, @handle_generation]
@@ -178,7 +202,7 @@ module Meringue
             @mutex.synchronize do
               break if @closed
 
-              @condition.wait(@mutex, SNAPSHOT_REFRESH_INTERVAL)
+              @condition.wait(@mutex, SNAPSHOT_REFRESH_INTERVAL) unless @paused
             end
           end
         end
