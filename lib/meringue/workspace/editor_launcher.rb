@@ -36,9 +36,9 @@ module Meringue
       def open(agent_or_path)
         return rejected("Editor configuration is invalid: #{configuration_error}. Update [workspace] editor_command/editor_args in ~/.meringue/config.toml.") if configuration_error
 
-        workspace_path = workspace_path_for(agent_or_path)
-        return rejected("This worker has no assigned workspace to open in the editor.") if workspace_path.nil?
-        return rejected("Worker workspace is missing or is not a directory: #{workspace_path}") unless Dir.exist?(workspace_path)
+        resolution = PathResolver.resolve(agent_or_path)
+        workspace_path = resolution.fetch("path", nil)
+        return rejected(resolution.fetch("message", "This worker has no assigned workspace to open in the editor.")) if workspace_path.nil?
 
         executable = command.executable_path(cwd: workspace_path, path: env.fetch("PATH", ""))
         unless executable
@@ -95,15 +95,7 @@ module Meringue
       end
 
       def workspace_path_for(agent_or_path)
-        raw_path = if agent_or_path.is_a?(Hash)
-                     metadata = agent_or_path.fetch("harness_metadata", {}) || {}
-                     agent_or_path["workspace_path"] || metadata["cwd"]
-                   else
-                     agent_or_path
-                   end
-        return nil if raw_path.to_s.strip.empty?
-
-        File.expand_path(raw_path.to_s)
+        PathResolver.path_for(agent_or_path)
       end
 
       def workspace_label(agent_or_path)

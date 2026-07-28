@@ -11,6 +11,9 @@ module Meringue
       DEFAULT_HEIGHT = 32
       REFRESH_INTERVAL = 0.2
       TERMINAL_REFRESH_INTERVAL = 0.025
+      # Scroll steps defer the workspace state write; this is how often a
+      # deferred write is actually flushed to the state file.
+      WORKSPACE_PERSIST_INTERVAL = 1.0
       MOUSE_SCROLL_STEP = 3
       PAGE_SCROLL_STEP = 8
       DOUBLE_CLICK_INTERVAL_SECONDS = 0.5
@@ -52,7 +55,7 @@ module Meringue
       WORKSPACE_COMMAND_ACTIONS = %w[
         workspace_switch_view
         workspace_cycle_filter
-        workspace_open_pi_session
+        workspace_open_agent_session
         workspace_open_editor
         workspace_open_pull_request
         workspace_close
@@ -101,6 +104,10 @@ module Meringue
         @force_full_redraw = false
         @agent_workspace_messages = Hash.new { |messages, agent_id| messages[agent_id] = [] }
         @agent_workspace_events = Hash.new { |events, agent_id| events[agent_id] = [] }
+        @agent_workspace_events_revision = Hash.new(0)
+        @agent_workspace_events_cache = {}
+        @workspace_persist_dirty = false
+        @workspace_persisted_at = 0.0
         @last_render_width = DEFAULT_WIDTH
         @last_render_height = DEFAULT_HEIGHT
         @scroll_offsets = Hash.new(0)
@@ -184,6 +191,7 @@ module Meringue
                 last_frame = frame
               end
 
+              flush_deferred_agent_workspace_persistence
               refresh_interval = @agent_workspace_active && @agent_workspace_view == "terminal" ? TERMINAL_REFRESH_INTERVAL : REFRESH_INTERVAL
               key = terminal.read_key(timeout: refresh_interval)
               break if quit_key?(key, input_buffer)
@@ -617,7 +625,7 @@ module Meringue
 
         key = remainder
         if workspace_scroll_key?(key)
-          scroll_agent_workspace(key)
+          scroll_agent_workspace(key, state)
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
@@ -702,8 +710,8 @@ module Meringue
           switch_agent_workspace_view(state)
         when "workspace_cycle_filter"
           cycle_agent_workspace_filter
-        when "workspace_open_pi_session"
-          open_agent_workspace_pi_session(state)
+        when "workspace_open_agent_session"
+          open_agent_workspace_harness_session(state)
         when "workspace_open_editor"
           open_agent_workspace_editor(state)
         when "workspace_open_pull_request"
@@ -728,31 +736,42 @@ module Meringue
         persist_agent_workspace
       end
 
+      # One leader line describes the whole focused workspace. Labels come from
+      # the active keybindings so custom bindings stay accurate, and they stay
+      # harness-agnostic so a non-Pi backend reads correctly.
+      def workspace_leader_commands
+        WORKSPACE_COMMAND_ACTIONS.filter_map do |action|
+          key = keybindings.display_name_for(action)
+          next unless key
+
+          { "action" => action, "key" => key, "label" => Keybindings.workspace_command_label(action) }
+        end
+      end
+
       def workspace_leader_help
-        "#{workspace_leader_label}: #{workspace_command_label("workspace_switch_view")} view, " \
-          "#{workspace_command_label("workspace_cycle_filter")} filter, " \
-          "#{workspace_command_label("workspace_open_pi_session")} Pi, " \
-          "#{workspace_command_label("workspace_open_editor")} editor, " \
-          "#{workspace_command_label("workspace_open_pull_request")} PR, " \
-          "#{workspace_command_label("workspace_close")} tree"
+        commands = workspace_leader_commands.map { |command| "#{command.fetch("key")} #{command.fetch("label")}" }
+        "#{workspace_leader_label}: #{commands.join(", ")}"
       end
 
       def workspace_leader_label
-        names = keybindings.names_for("workspace_leader")
-        names.empty? ? "workspace leader" : names.join("/")
+        keybindings.display_name_for("workspace_leader") || "workspace leader"
       end
 
       def workspace_command_label(action)
-        names = keybindings.names_for(action)
-        names.empty? ? "(unbound)" : names.join("/")
+        keybindings.display_name_for(action) || "(unbound)"
       end
 
+      # Page keys stay available to the shell in terminal view; the wheel is
+      # never forwarded to a shell, so it scrolls either view.
       def workspace_scroll_key?(key)
         mouse_wheel_up?(key) || mouse_wheel_down?(key) ||
           (@agent_workspace_view == "agent" && (keybinding?("scroll_page_up", key) || keybinding?("scroll_page_down", key)))
       end
 
-      def scroll_agent_workspace(key)
+      # Offsets are clamped to what the pane can actually scroll. Without the
+      # clamp, wheeling past the top kept incrementing a dead offset and the
+      # next several scrolls down did nothing, which reads as choppy scrolling.
+      def scroll_agent_workspace(key, state = nil)
         step = if mouse_wheel_up?(key) || mouse_wheel_down?(key)
                  MOUSE_SCROLL_STEP * mouse_wheel_count(key)
                else
@@ -761,8 +780,21 @@ module Meringue
         direction = mouse_wheel_up?(key) || keybinding?("scroll_page_up", key) ? :up : :down
         variable = @agent_workspace_view == "terminal" ? :@workspace_terminal_scroll_offset : :@workspace_agent_scroll_offset
         current = instance_variable_get(variable).to_i
-        instance_variable_set(variable, direction == :up ? current + step : [current - step, 0].max)
-        persist_agent_workspace
+        target = direction == :up ? current + step : current - step
+        instance_variable_set(variable, target.clamp(0, agent_workspace_scroll_max(state)))
+        persist_agent_workspace(deferred: true)
+      end
+
+      def agent_workspace_scroll_max(state)
+        return Float::INFINITY unless state && layout.respond_to?(:agent_workspace_scroll_max)
+
+        layout.agent_workspace_scroll_max(
+          state,
+          width: @last_render_width || DEFAULT_WIDTH,
+          height: @last_render_height || DEFAULT_HEIGHT
+        )
+      rescue StandardError
+        Float::INFINITY
       end
 
       def switch_agent_workspace_view(state)
@@ -835,28 +867,30 @@ module Meringue
       end
 
       # Reuses the established detached terminal launcher. It validates the
-      # saved Pi session and starts an external UI without attaching to,
+      # saved harness session and starts an external UI without attaching to,
       # replacing, signaling, or taking ownership of Meringue's RPC process.
-      def open_agent_workspace_pi_session(state)
+      def open_agent_workspace_harness_session(state)
         agent = agent_workspace_agent(state)
         return @agent_workspace_error = "Selected agent is no longer available." unless agent
-        unless agent.fetch("harness", nil).to_s == "pi"
-          return @agent_workspace_error = "The selected worker does not have a Pi session to open."
+
+        harness = agent.fetch("harness", nil).to_s
+        if harness.empty?
+          return @agent_workspace_error = "The selected worker has no recorded agent session to open."
         end
         unless session_opener&.respond_to?(:open)
-          return @agent_workspace_error = "External Pi session opening is not configured."
+          return @agent_workspace_error = "Opening an external agent session is not configured."
         end
 
         result = session_opener.open(agent)
         unless result.is_a?(Hash)
           @agent_workspace_notice = nil
-          @agent_workspace_error = "Could not open the external Pi session."
+          @agent_workspace_error = "Could not open the external agent session."
           return
         end
         apply_workspace_controller_result(result)
       rescue StandardError => e
         @agent_workspace_notice = nil
-        @agent_workspace_error = "Could not open the external Pi session: #{e.message}"
+        @agent_workspace_error = "Could not open the external agent session: #{e.message}"
       end
 
       def open_agent_workspace_editor(state)
@@ -1004,7 +1038,7 @@ module Meringue
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
-          Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch views, #{keys_for("workspace_cycle_filter")} to filter the transcript, #{keys_for("workspace_open_pi_session")} to open the saved Pi session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to return while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the full Pi transcript. Use dashboard chat for normal head-agent orchestration.
+          Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. Use dashboard chat for normal head-agent orchestration.
         TEXT
       end
 
@@ -1697,6 +1731,8 @@ module Meringue
             "input_cursor" => clamp_cursor(input_buffer, input_cursor || input_buffer.chars.length),
             "pending_count" => @agent_workspace_pending_count,
             "leader_hint" => workspace_leader_help,
+            "leader_label" => workspace_leader_label,
+            "leader_commands" => workspace_leader_commands,
             "leader_pending" => @workspace_leader_pending,
             "scroll_offset" => @agent_workspace_view == "terminal" ? @workspace_terminal_scroll_offset.to_i : @workspace_agent_scroll_offset.to_i,
             "messages" => @agent_workspace_messages[@agent_workspace_agent_id.to_s].map(&:dup),
@@ -1706,10 +1742,38 @@ module Meringue
           }.compact
         end
         if @agent_workspace_active
-          snapshot[@agent_workspace_view == "terminal" ? "terminal" : "agent_session"] =
-            @agent_workspace_view == "terminal" ? terminal_workspace_snapshot(state) : live_agent_workspace_snapshot(state)
+          terminal_view = @agent_workspace_view == "terminal"
+          live = terminal_view ? terminal_workspace_snapshot(state) : live_agent_workspace_snapshot(state)
+          snapshot[terminal_view ? "terminal" : "agent_session"] = live
+          revision = workspace_content_revision(snapshot, live)
+          snapshot["content_revision"] = revision if revision
         end
         snapshot
+      end
+
+      # Cheap signature of everything the focused workspace renders. Panes reuse
+      # composed lines while it is unchanged, so scrolling never repeats a full
+      # transcript or terminal re-layout.
+      def workspace_content_revision(snapshot, live)
+        return nil unless live.is_a?(Hash)
+
+        revision = live.fetch("revision", nil)
+        return nil if revision.nil?
+
+        [
+          revision,
+          live.fetch("error", nil).to_s,
+          live.fetch("notice", nil).to_s,
+          live.fetch("warning", nil).to_s,
+          live.fetch("availability", nil).to_s,
+          live.fetch("session_state", nil).to_s,
+          live.fetch("status", nil).to_s,
+          @chat_mutex.synchronize { @agent_workspace_events_revision[@agent_workspace_agent_id.to_s] },
+          Array(snapshot.fetch("messages", [])).length,
+          snapshot.fetch("notice", nil).to_s,
+          snapshot.fetch("error", nil).to_s,
+          snapshot.fetch("persistence_error", nil).to_s
+        ]
       end
 
       def persisted_agent_workspace_snapshot
@@ -1755,15 +1819,33 @@ module Meringue
         persist_agent_workspace
       end
 
-      def persist_agent_workspace
+      # Saving rewrites the whole state file, so scroll steps only mark the
+      # workspace dirty. The run loop flushes on a slow cadence and lifecycle
+      # transitions flush immediately, which keeps wheel scrolling smooth
+      # without losing the persisted selection.
+      def persist_agent_workspace(deferred: false)
         return unless log_store&.respond_to?(:save_agent_workspace)
 
+        if deferred
+          @workspace_persist_dirty = true
+          return nil
+        end
+
+        @workspace_persist_dirty = false
+        @workspace_persisted_at = monotonic_time
         persisted = log_store.save_agent_workspace(persisted_agent_workspace_snapshot)
         @workspace_persistence_error = nil
         persisted
       rescue StandardError => e
         @workspace_persistence_error = "Workspace selection could not be saved: #{e.message}"
         nil
+      end
+
+      def flush_deferred_agent_workspace_persistence
+        return unless @workspace_persist_dirty
+        return if monotonic_time - @workspace_persisted_at < WORKSPACE_PERSIST_INTERVAL
+
+        persist_agent_workspace
       end
 
       def live_agent_workspace_snapshot(state)
@@ -1775,7 +1857,7 @@ module Meringue
                    polled = @agent_workspace_session.respond_to?(:poll_events) ? @agent_workspace_session.poll_events(limit: 200) : {}
                    reduce_agent_workspace_events(agent.fetch("id"), Array(polled["events"]))
                    snapshot.merge(
-                     "events" => @chat_mutex.synchronize { @agent_workspace_events[agent.fetch("id")].map(&:dup) },
+                     "events" => frozen_agent_workspace_events(agent.fetch("id")),
                      "event_gap" => !!polled["gap"],
                      "warning" => polled["gap"] ? "Some transient live events expired; the transcript was refreshed from the managed session." : snapshot["warning"]
                    ).compact
@@ -1791,8 +1873,39 @@ module Meringue
         { "error" => "Could not read worker session: #{e.message}" }
       end
 
-      def reduce_agent_workspace_events(agent_id, events)
+      # Renders from one frozen copy per change instead of duplicating every
+      # retained event on every frame.
+      def frozen_agent_workspace_events(agent_id)
+        key = agent_id.to_s
         @chat_mutex.synchronize do
+          revision = @agent_workspace_events_revision[key]
+          cached = @agent_workspace_events_cache[key]
+          return cached.fetch("events") if cached && cached.fetch("revision") == revision
+
+          events = @agent_workspace_events[key].map { |event| deep_freeze_workspace_value(event) }.freeze
+          @agent_workspace_events_cache[key] = { "revision" => revision, "events" => events }
+          events
+        end
+      end
+
+      def deep_freeze_workspace_value(value)
+        case value
+        when Hash
+          value.each_with_object({}) { |(key, child), copy| copy[key.to_s] = deep_freeze_workspace_value(child) }.freeze
+        when Array
+          value.map { |child| deep_freeze_workspace_value(child) }.freeze
+        when String
+          value.frozen? ? value : value.dup.freeze
+        else
+          value
+        end
+      end
+
+      def reduce_agent_workspace_events(agent_id, events)
+        return if events.empty?
+
+        @chat_mutex.synchronize do
+          @agent_workspace_events_revision[agent_id.to_s] += 1
           retained = @agent_workspace_events[agent_id.to_s]
           events.each do |event|
             next unless event.is_a?(Hash)
@@ -1829,7 +1942,12 @@ module Meringue
         { "error" => "Could not read terminal: #{e.message}", "lines" => [] }
       end
 
+      # Frozen values already come from a normalized, string-keyed snapshot, so
+      # they are shared instead of rebuilt. That keeps a long transcript off the
+      # per-frame path while scrolling.
       def stringify_workspace_snapshot(value)
+        return value if value.frozen? && (value.is_a?(Hash) || value.is_a?(Array))
+
         case value
         when Hash
           value.each_with_object({}) { |(key, child), result| result[key.to_s] = stringify_workspace_snapshot(child) }

@@ -11,6 +11,10 @@ module Meringue
       class AgentWorkspacePane
         EMPTY_TRANSCRIPT = "No agent output yet. Send a message below to continue this session."
 
+        def initialize
+          @line_cache = {}
+        end
+
         def title(state)
           workspace = workspace_state(state)
           agent = workspace_agent(state)
@@ -19,12 +23,26 @@ module Meringue
           "#{view} · #{id}"
         end
 
+        # Scrolling must not re-wrap and re-sort the whole transcript on every
+        # step. Composed lines are cached per view until the content signature
+        # changes, so a scroll only changes which cached rows are drawn.
         def content_lines(state, width: nil)
           workspace = workspace_state(state)
-          return terminal_lines(workspace, width: width) if workspace.fetch("view", "agent") == "terminal"
+          view = workspace.fetch("view", "agent")
+          signature = content_signature(state, workspace, view, width)
+          cached = @line_cache[view]
+          return cached.fetch("lines") if signature && cached && cached.fetch("signature") == signature
 
-          agent_lines(state, workspace, width: width)
+          lines = if view == "terminal"
+                    terminal_lines(workspace, width: width)
+                  else
+                    agent_lines(state, workspace, width: width)
+                  end
+          @line_cache[view] = { "signature" => signature, "lines" => lines } if signature
+          lines
         end
+
+
 
         def composer_lines(state, width: nil)
           workspace = workspace_state(state)
@@ -55,17 +73,24 @@ module Meringue
           end
         end
 
-        def hint_line(state)
+        # One leader-key line for both views: the leader, then every command key
+        # with a harness-agnostic label, plus the active transcript filter.
+        #
+        # When the line cannot fit, whole labels are dropped before whole
+        # commands are, so every command stays discoverable at any width instead
+        # of the list being cut mid-item.
+        def hint_line(state, width: nil)
           workspace = workspace_state(state)
-          leader = workspace.fetch("leader_hint", "ctrl-space: t view, f filter, p Pi, e editor, b PR, q tree")
-          if workspace.fetch("leader_pending", false)
-            hint_segments("command pending", leader)
-          elsif workspace.fetch("view", "agent") == "terminal"
-            hint_segments(leader, "mouse wheel scroll", "other keys → terminal")
-          else
-            filter = workspace.fetch("filter", "all")
-            hint_segments(leader, "filter #{filter}", "Enter direct follow-up", "PageUp/PageDown or wheel scroll", "Shift-Enter newline")
+          commands = Array(workspace.fetch("leader_commands", nil)).select { |command| command.is_a?(Hash) }
+          return legacy_hint_line(workspace) if commands.empty?
+
+          filter = workspace.fetch("filter", "all").to_s
+          available = width.nil? ? nil : [width.to_i, 0].max
+          %i[full compact keys leader].each do |style|
+            segments = leader_segments(workspace, commands, filter, style)
+            return segments if available.nil? || segment_width(segments) <= available
           end
+          leader_segments(workspace, commands, filter, :leader)
         end
 
         def status_line(state)
@@ -86,6 +111,22 @@ module Meringue
         end
 
         private
+
+        def content_signature(state, workspace, view, width)
+          revision = workspace.fetch("content_revision", nil)
+          return nil if revision.nil?
+
+          agent = workspace_agent(state)
+          [
+            view,
+            width.to_i,
+            workspace.fetch("agent_id", nil).to_s,
+            workspace.fetch("filter", "all").to_s,
+            revision,
+            agent&.fetch("updated_at", nil).to_s,
+            agent&.fetch("status", nil).to_s
+          ]
+        end
 
         def workspace_state(state)
           state.fetch("_agent_workspace", {}) || {}
@@ -493,6 +534,42 @@ module Meringue
 
         def wrapped_notice(text, style, width)
           wrap_text(text.to_s, width).map { |line| [[line, style]] }
+        end
+
+        def leader_segments(workspace, commands, filter, style)
+          pending = workspace.fetch("leader_pending", false)
+          segments = [[workspace.fetch("leader_label", "Ctrl-Space").to_s, pending ? Style::WORKING : Style::ACCENT_BOLD]]
+          return segments if style == :leader
+
+          segments << [pending ? " waiting… " : "  ", Style::DIM]
+          commands.each_with_index do |command, index|
+            filter_command = command.fetch("action", nil).to_s == "workspace_cycle_filter"
+            label = case style
+                    when :full
+                      filter_command && !filter.empty? ? "#{command.fetch("label", "")}: #{filter}" : command.fetch("label", "").to_s
+                    when :compact
+                      filter_command && !filter.empty? ? ": #{filter}" : ""
+                    else
+                      ""
+                    end
+            segments << [style == :keys ? " " : " · ", Style::DIM] if index.positive?
+            segments << [command.fetch("key", "?").to_s, Style::ACCENT]
+            segments << [label.start_with?(":") ? label : " #{label}", Style::MUTED] unless label.empty?
+          end
+          segments
+        end
+
+        def segment_width(segments)
+          Array(segments).sum { |text, _style| text.to_s.length }
+        end
+
+        # Retained for embedders that still feed only the flattened hint string.
+        def legacy_hint_line(workspace)
+          leader = workspace.fetch("leader_hint", "Ctrl-Space: T terminal/agent, F filter, A agent session, B editor, P PR, Q quit")
+          filter = workspace.fetch("filter", "all")
+          return hint_segments("command pending", leader) if workspace.fetch("leader_pending", false)
+
+          hint_segments(leader, "filter: #{filter}")
         end
 
         def hint_segments(*hints)

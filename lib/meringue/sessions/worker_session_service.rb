@@ -39,19 +39,31 @@ module Meringue
           @closed = false
           @paused = false
           @handle_generation = 0
-          @cached_snapshot = Harness::SessionView.unavailable_snapshot(
-            harness: "unknown",
-            availability: "unavailable",
-            message: "Connecting to the managed worker session…"
+          @snapshot_revision = 0
+          @cached_snapshot = deep_freeze(
+            Harness::SessionView.unavailable_snapshot(
+              harness: "unknown",
+              availability: "unavailable",
+              message: "Connecting to the managed worker session…"
+            )
           )
           start_snapshot_refresher
         end
 
         # Rendering must never wait on an RPC command or a large history file.
         # A background refresher owns those reads and this method returns the
-        # most recent immutable-style copy immediately.
+        # most recent deeply frozen snapshot immediately.
+        #
+        # The snapshot is frozen instead of copied so a large transcript is not
+        # duplicated on every frame, and `revision` only changes when the
+        # content actually changed. Renderers use it to skip re-layout while a
+        # user is only scrolling.
         def snapshot
-          @mutex.synchronize { deep_copy(@cached_snapshot) }
+          @mutex.synchronize { @cached_snapshot.merge("revision" => @snapshot_revision) }
+        end
+
+        def revision
+          @mutex.synchronize { @snapshot_revision }
         end
 
         def poll_events(limit: nil)
@@ -156,11 +168,14 @@ module Meringue
             old = @handle
             @handle = replacement
             @handle_generation += 1
-            @cached_snapshot = Harness::SessionView.unavailable_snapshot(
-              harness: "unknown",
-              availability: "unavailable",
-              message: "Refreshing the continued worker session…"
+            @cached_snapshot = deep_freeze(
+              Harness::SessionView.unavailable_snapshot(
+                harness: "unknown",
+                availability: "unavailable",
+                message: "Refreshing the continued worker session…"
+              )
             )
+            @snapshot_revision += 1
             @condition.broadcast
             old
           end
@@ -188,18 +203,19 @@ module Meringue
             handle, generation = current
             begin
               fresh = handle.snapshot
-              @mutex.synchronize do
-                @cached_snapshot = deep_copy(fresh) if !@closed && generation == @handle_generation
-              end
+              @mutex.synchronize { store_snapshot(fresh, generation) }
             rescue StandardError => e
               @mutex.synchronize do
-                if !@closed && generation == @handle_generation
-                  @cached_snapshot = Harness::SessionView.unavailable_snapshot(
+                next unless !@closed && generation == @handle_generation
+
+                store_snapshot(
+                  Harness::SessionView.unavailable_snapshot(
                     harness: @cached_snapshot.fetch("harness", "unknown"),
                     availability: "unavailable",
                     message: "Worker transcript refresh failed: #{e.message}"
-                  )
-                end
+                  ),
+                  generation
+                )
               end
             end
 
@@ -211,14 +227,26 @@ module Meringue
           end
         end
 
-        def deep_copy(value)
+        # Caller holds @mutex. The revision only advances on real content change
+        # so an idle or completed worker keeps a stable, cache-friendly view.
+        def store_snapshot(fresh, generation)
+          return if @closed || generation != @handle_generation
+
+          normalized = deep_freeze(fresh)
+          return if normalized == @cached_snapshot
+
+          @cached_snapshot = normalized
+          @snapshot_revision += 1
+        end
+
+        def deep_freeze(value)
           case value
           when Hash
-            value.each_with_object({}) { |(key, child), copy| copy[key.to_s] = deep_copy(child) }
+            value.each_with_object({}) { |(key, child), copy| copy[key.to_s] = deep_freeze(child) }.freeze
           when Array
-            value.map { |child| deep_copy(child) }
+            value.map { |child| deep_freeze(child) }.freeze
           when String
-            value.dup
+            value.frozen? ? value : value.dup.freeze
           else
             value
           end

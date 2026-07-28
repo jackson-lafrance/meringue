@@ -33,8 +33,17 @@ module Meringue
         session = session_for(agent)
         return { "status" => "rejected", "message" => "Select a worker before opening a terminal." } unless session
 
-        workspace_path = workspace_path_for(agent)
-        session.start(workspace_path: workspace_path, rows: rows, columns: columns)
+        resolution = PathResolver.resolve(agent)
+        workspace_path = resolution.fetch("path", nil)
+        unless workspace_path
+          return { "status" => "rejected", "message" => resolution.fetch("message", "This worker has no usable workspace directory.") }
+        end
+
+        result = session.start(workspace_path: workspace_path, rows: rows, columns: columns)
+        recovery_note = resolution.fetch("message", nil)
+        return result unless recovery_note && !%w[failed rejected errored].include?(result.fetch("status", nil).to_s)
+
+        result.merge("message" => [recovery_note, result.fetch("message", nil)].compact.join(" "))
       end
 
       def fetch(agent_or_id)
@@ -86,10 +95,7 @@ module Meringue
       end
 
       def workspace_path_for(agent)
-        return nil unless agent.is_a?(Hash)
-
-        metadata = agent.fetch("harness_metadata", {}) || {}
-        agent["workspace_path"] || metadata["cwd"]
+        PathResolver.path_for(agent)
       end
     end
   end

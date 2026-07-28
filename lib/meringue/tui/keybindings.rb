@@ -37,10 +37,28 @@ module Meringue
         "workspace_leader" => ["ctrl-space"],
         "workspace_switch_view" => ["t"],
         "workspace_cycle_filter" => ["f"],
-        "workspace_open_pi_session" => ["p"],
-        "workspace_open_editor" => ["e"],
-        "workspace_open_pull_request" => ["b"],
+        "workspace_open_agent_session" => ["a"],
+        "workspace_open_editor" => ["b"],
+        "workspace_open_pull_request" => ["p"],
         "workspace_close" => ["q"]
+      }.freeze
+
+      # Older config files bound the harness-specific action name. Keep them
+      # working by folding the legacy name onto the harness-agnostic action.
+      ACTION_ALIASES = {
+        "workspace_open_pi_session" => "workspace_open_agent_session",
+        "workspace_open_harness_session" => "workspace_open_agent_session",
+        "workspace_open_session" => "workspace_open_agent_session"
+      }.freeze
+
+      # Short, harness-agnostic labels for the focused-workspace leader line.
+      WORKSPACE_COMMAND_LABELS = {
+        "workspace_switch_view" => "terminal/agent",
+        "workspace_cycle_filter" => "filter",
+        "workspace_open_agent_session" => "agent session",
+        "workspace_open_editor" => "editor",
+        "workspace_open_pull_request" => "PR",
+        "workspace_close" => "quit"
       }.freeze
 
       ACTION_LABELS = {
@@ -75,12 +93,12 @@ module Meringue
         "agent_select_next" => "Select next agent",
         "open_agent_workspace" => "Open optional focused worker workspace",
         "workspace_leader" => "Focused workspace command leader",
-        "workspace_switch_view" => "After workspace leader: switch worker / terminal",
+        "workspace_switch_view" => "After workspace leader: switch between terminal and agent view",
         "workspace_cycle_filter" => "After workspace leader: cycle transcript filter",
-        "workspace_open_pi_session" => "After workspace leader: open external Pi session",
+        "workspace_open_agent_session" => "After workspace leader: open the underlying agent session externally",
         "workspace_open_editor" => "After workspace leader: open configured editor",
         "workspace_open_pull_request" => "After workspace leader: open delivery pull request",
-        "workspace_close" => "After workspace leader: return to AgentTree"
+        "workspace_close" => "After workspace leader: quit back to the AgentTree"
       }.freeze
 
       KEY_ALIASES = {
@@ -151,7 +169,21 @@ module Meringue
       end
 
       def self.canonical_action(action)
-        action.to_s.strip.downcase.tr("- ", "__").gsub(/_+/, "_")
+        normalized = action.to_s.strip.downcase.tr("- ", "__").gsub(/_+/, "_")
+        ACTION_ALIASES.fetch(normalized, normalized)
+      end
+
+      # Display form used by hint lines: single letters read as command keys,
+      # named keys keep their conventional capitalization.
+      def self.display_name(name)
+        text = name.to_s.strip
+        return text.upcase if text.length == 1
+
+        text.split("-").map { |part| part.length <= 1 ? part.upcase : part.capitalize }.join("-")
+      end
+
+      def self.workspace_command_label(action)
+        WORKSPACE_COMMAND_LABELS.fetch(canonical_action(action), label_for(action))
       end
 
       def initialize(action_names = DEFAULT_BINDINGS)
@@ -181,6 +213,12 @@ module Meringue
 
       def label_for(action)
         self.class.label_for(action)
+      end
+
+      # First configured key for an action, in display form.
+      def display_name_for(action)
+        name = names_for(action).first
+        name && self.class.display_name(name)
       end
 
       private

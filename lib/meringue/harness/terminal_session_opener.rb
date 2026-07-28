@@ -251,9 +251,11 @@ module Meringue
         end
       end
 
+      # Never fall back to the Meringue process cwd: it can already be inside a
+      # workspace, which is how nested workspace paths get produced.
       def agent_cwd(agent)
-        metadata = agent.fetch("harness_metadata", {}) || {}
-        File.expand_path(metadata["cwd"] || agent["workspace_path"] || Dir.pwd)
+        resolution = Workspace::PathResolver.resolve(agent)
+        resolution.fetch("path", nil) || resolution.fetch("expected_path", nil) || Dir.home
       end
 
       def stringify_keys(hash)

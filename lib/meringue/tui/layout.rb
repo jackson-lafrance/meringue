@@ -123,6 +123,27 @@ module Meringue
         agent_tree_item_at(state, width: width, height: height, x: x, y: y)
       end
 
+      # Largest useful scroll offset for the focused workspace pane, using the
+      # same geometry the renderer uses. Callers clamp with this so scrolling
+      # past the end cannot build up a dead offset.
+      def agent_workspace_scroll_max(state, width:, height:)
+        width = [width.to_i, MIN_WIDTH].max
+        height = [height.to_i, MIN_HEIGHT].max
+        workspace = state.fetch("_agent_workspace", {}) || {}
+        pane_width = width - (OUTER_MARGIN * 2)
+        content_width = pane_width - 4
+        lines = agent_workspace_pane.content_lines(state, width: content_width)
+
+        if workspace.fetch("view", "agent") == "terminal"
+          [lines.length - ((height - BOTTOM_HINT_HEIGHT) - 2), 0].max
+        else
+          composer_line_count = agent_workspace_pane.composer_lines(state, width: pane_width - 4).length
+          composer_height = composer_height_for(height - BOTTOM_HINT_HEIGHT, composer_line_count)
+          content_height = height - BOTTOM_HINT_HEIGHT - composer_height - GAP - 2
+          pinned_tail_scroll_max(lines, content_height)
+        end
+      end
+
       def scroll_limits(state, width:, height:)
         return { "agent_tree" => 0, "logs" => 0, "chat" => 0 } if agent_workspace_active?(state)
 
@@ -164,7 +185,7 @@ module Meringue
             agent_workspace_pane.title(state),
             agent_workspace_pane.content_lines(state, width: pane_width - 4),
             active: true,
-            overflow: :tail,
+            overflow: :terminal,
             scroll_offset: workspace.fetch("scroll_offset", 0)
           )
         else
@@ -198,13 +219,17 @@ module Meringue
           )
         end
 
+        status_line = agent_workspace_pane.status_line(state)
+        hint_width = pane_width - 2
+        status_width = segment_text_width(status_line)
+        available_hint_width = [hint_width - (status_width.positive? ? status_width + 2 : 0), 0].max
         draw_hint_line(
           canvas,
           pane_x + 1,
           hint_y,
-          pane_width - 2,
-          agent_workspace_pane.hint_line(state),
-          agent_workspace_pane.status_line(state)
+          hint_width,
+          agent_workspace_pane.hint_line(state, width: available_hint_width),
+          status_line
         )
         canvas.render(color: color)
       end
@@ -368,6 +393,8 @@ module Meringue
         case overflow
         when :tail
           draw_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset)
+        when :terminal
+          draw_terminal_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset)
         when :pinned_tail
           draw_pinned_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset)
         when :agent_tree
@@ -397,11 +424,32 @@ module Meringue
         canvas.write(x + 2, y + height - 2, overflow.ljust(content_width), max_width: content_width, style: Style::DIM)
       end
 
-      def draw_pinned_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: 0)
+      # Mirrors draw_pinned_tail_content so clamping and drawing agree.
+      def pinned_tail_scroll_max(lines, content_height)
+        content_height = content_height.to_i
+        return 0 if content_height <= 0
+
+        pinned_count = pinned_line_count(lines)
+        pinned_height = [pinned_count, content_height].min
+        remaining_height = content_height - pinned_height
+        return 0 unless remaining_height.positive?
+
+        tail_length = lines.length - pinned_count
+        visible_capacity = [remaining_height - 1, 0].max
+        return 0 if tail_length <= remaining_height || visible_capacity.zero?
+
+        [tail_length - visible_capacity, 0].max
+      end
+
+      def pinned_line_count(lines)
         separator = lines.index do |line|
           Array(line).all? { |segment| (segment.is_a?(Array) ? segment.first : segment).to_s.empty? }
         end
-        pinned_count = separator ? separator + 1 : [lines.length, 5].min
+        separator ? separator + 1 : [lines.length, 5].min
+      end
+
+      def draw_pinned_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: 0)
+        pinned_count = pinned_line_count(lines)
         pinned = lines.first([pinned_count, content_height].min)
         pinned.each_with_index { |line, index| draw_line(canvas, x + 2, y + 1 + index, content_width, line) }
 
@@ -424,6 +472,18 @@ module Meringue
         canvas.write(x + 2, y + 1 + pinned.length, label.ljust(content_width), max_width: content_width, style: Style::DIM)
         Array(tail[start_index...finish_index]).each_with_index do |line, index|
           draw_line(canvas, x + 2, y + 2 + pinned.length + index, content_width, line)
+        end
+      end
+
+      # A live shell screen is already sized to the pane, so it is drawn as a
+      # viewport: no row is spent on an overflow label and the newest rows stay
+      # visible. Transient notices above the screen scroll away first.
+      def draw_terminal_content(canvas, x, y, content_width, content_height, lines, scroll_offset: 0)
+        offset = scroll_offset.to_i.clamp(0, [lines.length - content_height, 0].max)
+        finish_index = lines.length - offset
+        start_index = [finish_index - content_height, 0].max
+        Array(lines[start_index...finish_index]).each_with_index do |line, index|
+          draw_line(canvas, x + 2, y + 1 + index, content_width, line)
         end
       end
 
