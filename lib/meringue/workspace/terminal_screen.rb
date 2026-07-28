@@ -20,6 +20,7 @@ module Meringue
         @saved_cursor = [0, 0]
         @parser_state = :text
         @sequence = +""
+        @pending_bytes = +"".b
         @revision = 0
       end
 
@@ -34,11 +35,24 @@ module Meringue
         [@cursor_row, @cursor_column]
       end
 
+      # PTY reads split wherever the kernel happens to break, so a multi-byte
+      # character (a Nerd Font icon, box drawing, emoji) can straddle two chunks.
+      # An incomplete trailing sequence is held back instead of being scrubbed
+      # into replacement characters, which is what turned glyphs into garbage.
       def feed(bytes)
-        text = bytes.to_s.b.force_encoding(Encoding::UTF_8).scrub
-        return self if text.empty?
+        buffer = @pending_bytes.empty? ? bytes.to_s.b : (@pending_bytes + bytes.to_s.b)
+        return self if buffer.empty?
 
-        text.each_char { |character| consume(character) }
+        held = incomplete_tail_length(buffer)
+        if held.positive?
+          @pending_bytes = buffer.byteslice(buffer.bytesize - held, held)
+          buffer = buffer.byteslice(0, buffer.bytesize - held)
+        else
+          @pending_bytes = +"".b
+        end
+        return self if buffer.empty?
+
+        buffer.force_encoding(Encoding::UTF_8).scrub.each_char { |character| consume(character) }
         @revision += 1
         self
       end
@@ -100,6 +114,32 @@ module Meringue
 
       private
 
+      # Bytes of an unfinished UTF-8 sequence at the end of +buffer+, or 0 when it
+      # already ends on a character boundary. Never holds more than one sequence.
+      def incomplete_tail_length(buffer)
+        length = buffer.bytesize
+        index = length - 1
+        while index >= 0 && (length - index) <= 4
+          byte = buffer.getbyte(index)
+          return 0 if byte < 0x80
+
+          if byte >= 0xC0
+            expected = if byte >= 0xF0
+                         4
+                       elsif byte >= 0xE0
+                         3
+                       else
+                         2
+                       end
+            have = length - index
+            return have < expected ? have : 0
+          end
+
+          index -= 1
+        end
+        0
+      end
+
       def consume(character)
         case @parser_state
         when :text
@@ -112,7 +152,20 @@ module Meringue
           consume_osc(character)
         when :osc_escape
           @parser_state = character == "\\" ? :text : :osc
+        when :charset
+          consume_charset(character)
         end
+      end
+
+      # Charset designation and DEC private single-parameter escapes. Their final
+      # byte is a printable character, so failing to consume it prints debris:
+      # terminfo's sgr0 is "ESC ( B ESC [ m", which leaked a literal "B" into
+      # shell output for every attribute reset.
+      def consume_charset(character)
+        # Multi-byte designators (for example "ESC ( % 5") take one more byte.
+        return if character == "%"
+
+        @parser_state = :text
       end
 
       def consume_text(character)
@@ -139,8 +192,16 @@ module Meringue
         when "["
           @sequence.clear
           @parser_state = :csi
-        when "]"
+        when "]", "P", "_", "^", "X"
+          # OSC, DCS, APC, PM, and SOS all carry a string payload terminated by
+          # ST or BEL. Their payloads are never screen content.
           @parser_state = :osc
+        when "(", ")", "*", "+", "-", ".", "/", "#", "%", " "
+          @parser_state = :charset
+        when "E"
+          @cursor_column = 0
+          line_feed
+          @parser_state = :text
         when "7"
           save_cursor
           @parser_state = :text

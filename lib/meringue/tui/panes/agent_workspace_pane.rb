@@ -10,6 +10,7 @@ module Meringue
       # the normal dashboard remains the primary head-agent workflow.
       class AgentWorkspacePane
         EMPTY_TRANSCRIPT = "No agent output yet. Send a message below to continue this session."
+        BODY_INDENT = "  "
 
         def initialize
           @line_cache = {}
@@ -228,7 +229,7 @@ module Meringue
           # Pi transcript. They are only a fallback when no session output can
           # be recovered, otherwise they can push the real transcript offscreen.
           entries.concat(durable_agent_entries(state, agent.fetch("id"))) if session_entries.empty?
-          entries = chronological_entries(deduplicate_entries(entries))
+          entries = chronological_entries(drop_superseded_partials(deduplicate_entries(entries)))
 
           if entries.empty?
             last_text = metadata.fetch("last_assistant_text", "").to_s.strip
@@ -244,11 +245,25 @@ module Meringue
             role = entry.fetch("role", "agent").to_s
             label, label_style = transcript_label(role, agent.fetch("id"), entry.fetch("timestamp", nil))
             text = entry.fetch("text", entry.fetch("message", "")).to_s
-            rows = wrap_text(text, width)
+            # Bodies are indented, so wrap to the indented width. Wrapping at the
+            # full width and then indenting pushed the last characters of every
+            # wrapped row past the pane edge, which dropped them from the text.
+            rows = wrap_text(text, width ? width.to_i - BODY_INDENT.length : nil)
+            body_style = body_style_for(role)
             rendered = [[[label, label_style]]]
-            rendered.concat(rows.map { |row| [["  #{row}", Style::TEXT]] })
+            rendered.concat(rows.map { |row| [["#{BODY_INDENT}#{row}", body_style]] })
             rendered << [["", Style::DIM]] unless index == entries.length - 1
             rendered
+          end
+        end
+
+        # Tool traffic is supporting detail, so its body is dimmer than assistant
+        # and reasoning text while headers keep their semantic colors.
+        def body_style_for(role)
+          case role
+          when "tool_call", "tool_result" then Style::MUTED
+          when "lifecycle" then Style::DIM
+          else Style::TEXT
           end
         end
 
@@ -262,14 +277,30 @@ module Meringue
           timestamp = item.fetch("timestamp", nil)
           entries = []
 
+          # Streaming deltas are fragments of the message that is being built.
+          # They must never be attributed to another category: a reasoning delta
+          # rendered as assistant output is what produced stray tail fragments
+          # such as a lone "…showing up at all." entry under the real reasoning.
+          delta_type = item.fetch("delta_type", nil).to_s
+          streaming_delta = delta_type.end_with?("_delta")
+          reasoning_delta = streaming_delta && (delta_type.include?("thinking") || delta_type.include?("reasoning"))
+          delta_text = item.fetch("delta", "").to_s
+
           thinking = item.fetch("thinking", "").to_s.strip
+          thinking_partial = false
+          if thinking.empty? && reasoning_delta
+            thinking = delta_text.strip
+            thinking_partial = true
+          end
           unless thinking.empty?
-            entries << transcript_entry("thinking", thinking, item, timestamp: timestamp, part: "thinking")
+            entries << transcript_entry("thinking", thinking, item, timestamp: timestamp, part: "thinking", partial: thinking_partial)
           end
 
           text = item.fetch("content", item.fetch("text", "")).to_s.strip
-          if text.empty? && item.fetch("delta_type", nil).to_s.end_with?("_delta")
-            text = item.fetch("delta", "").to_s
+          text_partial = false
+          if text.empty? && streaming_delta && !reasoning_delta
+            text = delta_text.strip
+            text_partial = true
           end
           unless text.empty?
             text_role = if item.fetch("is_error", false)
@@ -279,7 +310,7 @@ module Meringue
                         else
                           role
                         end
-            entries << transcript_entry(text_role, text, item, timestamp: timestamp, part: "content")
+            entries << transcript_entry(text_role, text, item, timestamp: timestamp, part: "content", partial: text_partial)
           end
 
           Array(item.fetch("tool_calls", [])).each do |call|
@@ -356,7 +387,7 @@ module Meringue
           filter == "all" || filter == category
         end
 
-        def transcript_entry(role, text, source, timestamp: nil, part: nil)
+        def transcript_entry(role, text, source, timestamp: nil, part: nil, partial: false)
           timestamp ||= source["timestamp"]
           identity = timestamp || source["id"] || source["tool_call_id"] || source["sequence"]
           source_kind = source["kind"].to_s
@@ -374,8 +405,24 @@ module Meringue
             "category" => category,
             "text" => text.to_s,
             "timestamp" => timestamp,
+            "partial" => partial || nil,
             "dedup_key" => identity && [role, identity.to_s, part.to_s]
           }.compact
+        end
+
+        # A streaming fragment is only worth showing until the assembled text
+        # arrives. Once any entry contains it, the fragment is redundant noise.
+        def drop_superseded_partials(entries)
+          partials, complete = entries.partition { |entry| entry.fetch("partial", false) }
+          return entries if partials.empty?
+
+          complete_texts = complete.map { |entry| entry.fetch("text", "").to_s }
+          entries.reject do |entry|
+            next false unless entry.fetch("partial", false)
+
+            text = entry.fetch("text", "").to_s.strip
+            text.empty? || complete_texts.any? { |candidate| candidate.include?(text) }
+          end
         end
 
         def durable_agent_entries(state, agent_id)
