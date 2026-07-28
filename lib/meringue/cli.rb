@@ -259,6 +259,7 @@ module Meringue
           Ctrl-Space, then A        # open the worker's underlying agent session externally
           Ctrl-Space, then B / P    # open the workspace editor / verified delivery PR
           Ctrl-Space, then Q        # only focused-workspace quit; keep worker and terminal alive
+          / in a focused workspace  # workspace commands: /help /terminal /filter /session /editor /pr /cwd /cancel /quit
           Ctrl-C on an empty prompt # quit the TUI; Esc cancels dashboard jump mode
       HELP
     end

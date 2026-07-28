@@ -956,7 +956,19 @@ module Meringue
         if keybinding?("newline", key)
           return insert_text(input_buffer, input_cursor, "\n") + [NO_SLASH_SELECTION]
         end
+        if workspace_slash_navigation_key?(key, input_buffer)
+          buffer, index = handle_workspace_slash_navigation(key, input_buffer, slash_suggestion_index)
+          return [buffer, buffer.chars.length, index]
+        end
         if keybinding?("submit", key)
+          if WorkspaceCommands.slash_prompt?(input_buffer)
+            completion = workspace_slash_completion(input_buffer, slash_suggestion_index)
+            return [completion, completion.chars.length, NO_SLASH_SELECTION] if completion
+
+            run_workspace_slash_command(input_buffer, state)
+            return [+"", 0, NO_SLASH_SELECTION]
+          end
+
           submit_agent_workspace_prompt(input_buffer, on_submit)
           return [+"", 0, NO_SLASH_SELECTION]
         end
@@ -1043,10 +1055,112 @@ module Meringue
 
       def cycle_agent_workspace_filter
         index = WORKSPACE_FILTERS.index(@agent_workspace_filter) || 0
-        @agent_workspace_filter = WORKSPACE_FILTERS[(index + 1) % WORKSPACE_FILTERS.length]
+        set_agent_workspace_filter(WORKSPACE_FILTERS[(index + 1) % WORKSPACE_FILTERS.length])
+      end
+
+      def set_agent_workspace_filter(filter)
+        @agent_workspace_filter = filter
         @workspace_agent_scroll_offset = 0
         @agent_workspace_notice = "Transcript filter: #{@agent_workspace_filter}."
+        @agent_workspace_error = nil
         persist_agent_workspace
+      end
+
+      # Slash commands are the discoverable twin of the leader keys: they run the
+      # same workspace actions plus a couple of session-scoped operations, and
+      # anything that is not a slash command stays a direct worker follow-up.
+      def workspace_slash_navigation_key?(key, input_buffer)
+        WorkspaceCommands.slash_prompt?(input_buffer) && slash_suggestion_navigation_key?(key)
+      end
+
+      def handle_workspace_slash_navigation(key, input_buffer, slash_suggestion_index)
+        records = WorkspaceCommands.command_suggestion_records(input_buffer)
+        return [input_buffer, NO_SLASH_SELECTION] if records.empty?
+
+        if keybinding?("suggestion_previous", key)
+          return [input_buffer, slash_selection?(slash_suggestion_index) ? (slash_suggestion_index - 1) % records.length : records.length - 1]
+        end
+        if keybinding?("suggestion_next", key)
+          return [input_buffer, slash_selection?(slash_suggestion_index) ? (slash_suggestion_index + 1) % records.length : 0]
+        end
+
+        selected = slash_selection?(slash_suggestion_index) ? slash_suggestion_index.clamp(0, records.length - 1) : 0
+        [slash_completion_for(records.fetch(selected)), NO_SLASH_SELECTION]
+      end
+
+      # Enter applies a highlighted suggestion instead of running a partial
+      # command, matching the dashboard's completion behavior.
+      def workspace_slash_completion(input_buffer, slash_suggestion_index)
+        return nil unless slash_selection?(slash_suggestion_index)
+
+        records = WorkspaceCommands.command_suggestion_records(input_buffer)
+        return nil if records.empty?
+
+        completion = slash_completion_for(records.fetch(slash_suggestion_index.clamp(0, records.length - 1)))
+        completion == input_buffer.to_s ? nil : completion
+      end
+
+      def run_workspace_slash_command(input_buffer, state)
+        resolution = WorkspaceCommands.resolve(input_buffer)
+        if (error = resolution.fetch("error", nil))
+          @agent_workspace_error = error
+          @agent_workspace_notice = nil
+          return :rejected
+        end
+
+        action = resolution.fetch("action")
+        arguments = resolution.fetch("arguments", [])
+        case action
+        when "workspace_help"
+          @agent_workspace_error = nil
+          @agent_workspace_notice = "Workspace commands: #{WorkspaceCommands.help_lines.join(" · ")}"
+        when "workspace_filter"
+          arguments.empty? ? cycle_agent_workspace_filter : set_agent_workspace_filter(arguments.first)
+        when "workspace_cwd"
+          show_agent_workspace_directory(state)
+        when "workspace_cancel_turn"
+          cancel_agent_workspace_turn
+        else
+          return run_workspace_command(action, state)
+        end
+        :handled
+      end
+
+      def show_agent_workspace_directory(state)
+        agent = agent_workspace_agent(state)
+        return @agent_workspace_error = "Selected agent is no longer available." unless agent
+
+        resolution = Workspace::PathResolver.resolve(agent)
+        path = resolution.fetch("path", nil)
+        if path
+          @agent_workspace_error = nil
+          @agent_workspace_notice = ["Workspace directory: #{path}", resolution.fetch("message", nil)].compact.join(" ")
+        else
+          @agent_workspace_notice = nil
+          @agent_workspace_error = resolution.fetch("message", "This worker has no usable workspace directory.")
+        end
+      end
+
+      # Turn-level cancellation only. It never kills the worker, its session, or
+      # its workspace; the kernel owns that lifecycle.
+      def cancel_agent_workspace_turn
+        unless @agent_workspace_session&.respond_to?(:cancel_current_turn)
+          @agent_workspace_error = "Cancelling a turn is not available for this worker session."
+          return
+        end
+
+        result = @agent_workspace_session.cancel_current_turn
+        status = result.is_a?(Hash) ? result.fetch("status", nil).to_s : ""
+        if %w[failed rejected errored].include?(status)
+          @agent_workspace_notice = nil
+          @agent_workspace_error = result.fetch("message", "Could not cancel the current turn.")
+        else
+          @agent_workspace_error = nil
+          @agent_workspace_notice = result.is_a?(Hash) ? result.fetch("message", "Cancelled the worker's current turn.") : "Cancelled the worker's current turn."
+        end
+      rescue StandardError => e
+        @agent_workspace_notice = nil
+        @agent_workspace_error = "Could not cancel the current turn: #{e.message}"
       end
 
       # One leader line describes the whole focused workspace. Labels come from
@@ -1353,7 +1467,7 @@ module Meringue
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
-          Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. Use dashboard chat for normal head-agent orchestration.
+          Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
         TEXT
       end
 
@@ -2035,7 +2149,7 @@ module Meringue
         composed_state = state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
-          "_agent_workspace" => agent_workspace_snapshot(state, input_buffer, input_cursor),
+          "_agent_workspace" => agent_workspace_snapshot(state, input_buffer, input_cursor, slash_suggestion_index),
           "_scroll" => scroll_snapshot,
           "_selection" => selection_snapshot
         )
@@ -2043,7 +2157,7 @@ module Meringue
         composed_state.merge("_scroll" => scroll_snapshot)
       end
 
-      def agent_workspace_snapshot(state, input_buffer, input_cursor)
+      def agent_workspace_snapshot(state, input_buffer, input_cursor, slash_suggestion_index = NO_SLASH_SELECTION)
         snapshot = @chat_mutex.synchronize do
           {
             "active" => @agent_workspace_active,
@@ -2057,6 +2171,8 @@ module Meringue
             "leader_label" => workspace_leader_label,
             "leader_commands" => workspace_leader_commands,
             "leader_pending" => @workspace_leader_pending,
+            "slash_suggestion_index" => slash_suggestion_index.to_i,
+            "slash_suggestions" => WorkspaceCommands.command_suggestion_records(input_buffer),
             "scroll_offset" => @agent_workspace_view == "terminal" ? @workspace_terminal_scroll_offset.to_i : @workspace_agent_scroll_offset.to_i,
             "messages" => @agent_workspace_messages[@agent_workspace_agent_id.to_s].map(&:dup),
             "notice" => @agent_workspace_notice,
