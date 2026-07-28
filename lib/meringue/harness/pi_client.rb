@@ -26,6 +26,7 @@ module Meringue
       class Error < StandardError; end
       class ProcessNotFoundError < Error; end
       class ProcessExitedError < Error; end
+      class UnmanagedProcessError < Error; end
       class RpcError < Error; end
       class RpcTimeoutError < Error; end
       class InvalidModeError < Error; end
@@ -167,6 +168,12 @@ module Meringue
         process = process_for(session_ref, required: false)
         return get_state(session_ref) if process
 
+        persisted_pid = session_ref["pid"] || session_ref[:pid]
+        if process_alive?(persisted_pid)
+          raise UnmanagedProcessError,
+                "Refusing to attach Pi session while its previous process #{persisted_pid} is still running"
+        end
+
         expanded_cwd = validate_cwd!(session_ref["cwd"] || session_ref[:cwd])
         session = resume_session_argument(session_ref)
         session_name = metadata_value(session_ref, "session_name")
@@ -275,9 +282,16 @@ module Meringue
 
       def build_session_ref_from_file(session_ref)
         summary = session_file_summary(session_ref)
-        if !summary.fetch("completed", false) && !summary.fetch("process_alive", false)
+        kind = metadata_value(session_ref, "kind").to_s
+        unless summary.fetch("completed", false) || (summary.fetch("process_alive", false) && kind != "head")
+          session = summary.fetch("session_file", nil) || summary.fetch("session_id", nil)
+          if summary.fetch("process_alive", false)
+            raise UnmanagedProcessError,
+                  "Pi head session #{session} is still running outside this client and has no completed assistant response"
+          end
+
           raise ProcessExitedError,
-                "Pi session #{summary.fetch("session_file", nil) || summary.fetch("session_id", nil)} has no live process and no completed assistant response"
+                "Pi session #{session} has no live process and no completed assistant response"
         end
 
         pi_state = {
@@ -339,7 +353,8 @@ module Meringue
             last_assistant = record
             text = assistant_text_from_message(record)
             summary["last_assistant_text"] = text if present?(text)
-            summary["last_stop_reason"] = record["stopReason"] if record.key?("stopReason")
+            stop_reason = record["stopReason"] || record.dig("message", "stopReason")
+            summary["last_stop_reason"] = stop_reason if present?(stop_reason)
           end
         rescue JSON::ParserError
           next
@@ -393,7 +408,7 @@ module Meringue
       def assistant_message_completed?(record)
         return false unless record
 
-        stop_reason = record["stopReason"]
+        stop_reason = record["stopReason"] || record.dig("message", "stopReason")
         return false if stop_reason.to_s == "toolUse"
         return true if present?(stop_reason)
 
