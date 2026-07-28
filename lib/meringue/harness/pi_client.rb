@@ -185,12 +185,38 @@ module Meringue
         return history_session_view(session_ref) unless process
 
         initial_cursor = process.event_cursor
+        transcript_mutex = Mutex.new
+        transcript_entries = []
+        transcript_leaf_id = nil
+        entries_supported = true
         SessionView::Handle.new(
           initial_cursor: initial_cursor,
           snapshot_loader: lambda {
-            state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
-            messages = rpc_data(process.request({ "type" => "get_messages" }, timeout: command_timeout)).fetch("messages", [])
-            PiSessionView.live_snapshot(pi_state: state, messages: messages, session_ref: session_ref)
+            transcript_mutex.synchronize do
+              state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
+              if entries_supported
+                begin
+                  command = { "type" => "get_entries" }
+                  command["since"] = transcript_leaf_id if transcript_leaf_id
+                  data = rpc_data(process.request(command, timeout: command_timeout))
+                  transcript_entries.concat(Array(data.fetch("entries", [])))
+                  transcript_leaf_id = data.fetch("leafId", transcript_leaf_id)
+                  next PiSessionView.live_snapshot(
+                    pi_state: state,
+                    entries: transcript_entries,
+                    leaf_id: transcript_leaf_id,
+                    session_ref: session_ref
+                  )
+                rescue StandardError
+                  # Older Pi versions may not expose get_entries. Fall back to
+                  # get_messages without weakening the live event stream.
+                  entries_supported = false
+                end
+              end
+
+              messages = rpc_data(process.request({ "type" => "get_messages" }, timeout: command_timeout)).fetch("messages", [])
+              PiSessionView.live_snapshot(pi_state: state, messages: messages, session_ref: session_ref)
+            end
           },
           event_reader: ->(cursor, limit) { process.events_after(cursor, limit: limit) },
           event_normalizer: ->(entry) { PiSessionView.normalize_event(entry) }

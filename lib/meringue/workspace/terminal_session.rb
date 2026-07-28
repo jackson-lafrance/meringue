@@ -75,7 +75,7 @@ module Meringue
         end
         if existing
           resize(rows: rows, columns: columns)
-          return active_result("Terminal is already running in #{path}.")
+          return active_result("Terminal is already running in #{path}.", started: false)
         end
 
         # Reap and close a previous shell before replacing its IO. This prevents
@@ -111,7 +111,7 @@ module Meringue
         end
         resize(rows: rows, columns: columns)
         start_background_threads(reader, child_pid)
-        active_result("Started terminal in #{path}.")
+        active_result("Started terminal in #{path}.", started: true)
       rescue Errno::ENOENT
         failed("Could not start the workspace terminal because #{command&.executable.inspect} was not found. Check [workspace] shell_command.")
       rescue Errno::EACCES
@@ -419,8 +419,14 @@ module Meringue
         Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
 
-      def active_result(message)
-        { "status" => "active", "message" => message, "pid" => @mutex.synchronize { @pid }, "workspace_path" => @mutex.synchronize { @workspace_path } }
+      def active_result(message, started: false)
+        {
+          "status" => "active",
+          "message" => message,
+          "pid" => @mutex.synchronize { @pid },
+          "workspace_path" => @mutex.synchronize { @workspace_path },
+          "started" => !!started
+        }
       end
 
       def rejected(message)

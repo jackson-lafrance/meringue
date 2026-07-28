@@ -16,7 +16,11 @@ Pi RPC JSONL stdout
   -> TUI::Panes::ChatPane normalizes and renders the completion log
 ```
 
-Streaming token/delta events are deliberately excluded from durable logs by the kernel. A sentence such as `Now creating the shared timestamp module:` is therefore harness-owned assistant text returned by `get_last_assistant_text`, not text invented by Meringue and not a raw Pi TUI stream. The source text stays unchanged in state; cleanup is display-only.
+Streaming token/delta events are deliberately excluded from durable dashboard logs by the kernel. A sentence such as `Now creating the shared timestamp module:` is therefore harness-owned assistant text returned by `get_last_assistant_text`, not text invented by Meringue and not a raw Pi TUI stream. The source text stays unchanged in state; cleanup is display-only.
+
+The optional focused worker workspace has a separate, non-destructive session-view path. It reads the active Pi transcript through `get_entries` (incrementally after the current leaf, with `get_messages` compatibility fallback), polls its own independent event cursor, and renders user/assistant text, reasoning, streaming partial messages, tool calls and results, direct-bash output, errors, queue/retry/compaction notices, and relevant turn/session lifecycle events. Persisted session history provides the same active-branch transcript after restart. Compact durable worker logs are shown only when no session transcript can be recovered, so a completion summary cannot replace or push the real Pi output offscreen.
+
+Focused transcript entries retain semantic categories. Reasoning, tool calls, tool results, normal output, and final assistant output use distinct theme-aware styles and can be filtered with the workspace filter command (`Ctrl-Space`, then `f` by default). Filters never discard transcript data: they change only presentation, reset the transcript scroll to the newest matching entry, and remain durable for the selected worker.
 
 The surrounding transcript chrome is Meringue-owned:
 

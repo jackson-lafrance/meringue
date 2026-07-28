@@ -10,6 +10,7 @@ module Meringue
       DEFAULT_WIDTH = 100
       DEFAULT_HEIGHT = 32
       REFRESH_INTERVAL = 0.2
+      TERMINAL_REFRESH_INTERVAL = 0.025
       MOUSE_SCROLL_STEP = 3
       PAGE_SCROLL_STEP = 8
       DOUBLE_CLICK_INTERVAL_SECONDS = 0.5
@@ -48,6 +49,14 @@ module Meringue
       # No slash suggestion is selected until the user navigates the list, so an untouched
       # completion popup never steals Enter from the typed prompt.
       NO_SLASH_SELECTION = -1
+      WORKSPACE_COMMAND_ACTIONS = %w[
+        workspace_switch_view
+        workspace_cycle_filter
+        workspace_open_editor
+        workspace_open_pull_request
+        workspace_close
+      ].freeze
+      WORKSPACE_FILTERS = %w[all output final reasoning tools].freeze
 
       # workspace_controller is a harness-neutral UI adapter. Integrations may
       # implement open_workspace, agent_snapshot, open_terminal,
@@ -82,10 +91,12 @@ module Meringue
         @agent_workspace_agent_id = nil
         @agent_workspace_session = nil
         @agent_workspace_view = "agent"
+        @agent_workspace_filter = "all"
         @agent_workspace_notice = nil
         @agent_workspace_error = nil
         @agent_workspace_pending_count = 0
         @agent_workspace_terminal_size = nil
+        @workspace_leader_pending = false
         @agent_workspace_messages = Hash.new { |messages, agent_id| messages[agent_id] = [] }
         @agent_workspace_events = Hash.new { |events, agent_id| events[agent_id] = [] }
         @last_render_width = DEFAULT_WIDTH
@@ -113,6 +124,7 @@ module Meringue
         workspace = State::Models.agent_workspace_state(state)
         @agent_workspace_agent_id = workspace["selected_agent_id"]
         @agent_workspace_view = workspace.fetch("view", "agent")
+        @agent_workspace_filter = workspace.fetch("filter", "all")
         @workspace_draft = workspace.fetch("draft", "")
         @workspace_agent_scroll_offset = workspace.fetch("agent_scroll_offset", 0).to_i
         @workspace_terminal_scroll_offset = workspace.fetch("terminal_scroll_offset", 0).to_i
@@ -137,6 +149,8 @@ module Meringue
         input_buffer = +""
         input_cursor = 0
         slash_suggestion_index = NO_SLASH_SELECTION
+        cached_base_state = nil
+        cached_base_state_at = 0.0
         terminal.with_screen do
           terminal.raw do
             last_frame = nil
@@ -145,14 +159,26 @@ module Meringue
               width, height = terminal.dimensions
               @last_render_width = width
               @last_render_height = height
-              current_state = compose_state(state_provider, input_buffer, slash_suggestion_index, input_cursor)
+              now = monotonic_time
+              base_state_provider = lambda do
+                terminal_fast_path = @agent_workspace_active && @agent_workspace_view == "terminal"
+                if terminal_fast_path && cached_base_state && (now - cached_base_state_at) < REFRESH_INTERVAL
+                  cached_base_state
+                else
+                  cached_base_state = state_provider.call || State::Models.empty_state
+                  cached_base_state_at = now
+                  cached_base_state
+                end
+              end
+              current_state = compose_state(base_state_provider, input_buffer, slash_suggestion_index, input_cursor)
               frame = render(current_state, width: width, height: height, color: color_output?)
               if frame != last_frame
                 terminal.write_frame(frame)
                 last_frame = frame
               end
 
-              key = terminal.read_key(timeout: REFRESH_INTERVAL)
+              refresh_interval = @agent_workspace_active && @agent_workspace_view == "terminal" ? TERMINAL_REFRESH_INTERVAL : REFRESH_INTERVAL
+              key = terminal.read_key(timeout: refresh_interval)
               break if quit_key?(key, input_buffer)
 
               input_buffer, input_cursor, slash_suggestion_index = handle_key(
@@ -572,23 +598,19 @@ module Meringue
       end
 
       def handle_agent_workspace_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
-        if keybinding?("workspace_switch_view", key)
-          switch_agent_workspace_view(state)
-          return [input_buffer, input_cursor, slash_suggestion_index]
-        end
+        command, remainder = consume_workspace_command(key)
+        if command
+          outcome = run_workspace_command(command, state)
+          return [+"", 0, NO_SLASH_SELECTION] if outcome == :closed
+          return [input_buffer, input_cursor, slash_suggestion_index] if remainder.empty?
 
-        if keybinding?("workspace_open_editor", key)
-          open_agent_workspace_editor(state)
-          return [input_buffer, input_cursor, slash_suggestion_index]
+          return handle_agent_workspace_key(remainder, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
         end
+        return [input_buffer, input_cursor, slash_suggestion_index] if remainder.nil?
 
-        if keybinding?("workspace_open_pull_request", key)
-          if open_workspace_delivery_pr(state)
-            @agent_workspace_notice = "Opened the verified delivery pull request."
-            @agent_workspace_error = nil
-          else
-            @agent_workspace_error = "No verified delivery pull request is available yet."
-          end
+        key = remainder
+        if workspace_scroll_key?(key)
+          scroll_agent_workspace(key)
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
@@ -639,11 +661,116 @@ module Meringue
         insert_text(input_buffer, input_cursor, key) + [NO_SLASH_SELECTION]
       end
 
+      # Returns [action, remainder]. A nil remainder means a leader was consumed
+      # and the next key is awaited; otherwise an unrecognized suffix is passed
+      # back to the active worker/terminal view rather than silently discarded.
+      def consume_workspace_command(key)
+        if @workspace_leader_pending
+          @workspace_leader_pending = false
+          action, remainder = workspace_action_prefix(key)
+          if action
+            @agent_workspace_notice = nil
+            return [action, remainder]
+          end
+
+          @agent_workspace_notice = "Unknown workspace command. #{workspace_leader_help}"
+          return [nil, key]
+        end
+
+        remainder = keybindings.consume_prefix("workspace_leader", key)
+        return [nil, key] unless remainder
+
+        @workspace_leader_pending = true
+        @agent_workspace_notice = workspace_leader_help
+        return [nil, nil] if remainder.empty?
+
+        consume_workspace_command(remainder)
+      end
+
+      def workspace_action_prefix(key)
+        WORKSPACE_COMMAND_ACTIONS.each do |action|
+          remainder = keybindings.consume_prefix(action, key)
+          return [action, remainder] if remainder
+        end
+        [nil, key]
+      end
+
+      def run_workspace_command(action, state)
+        case action
+        when "workspace_switch_view"
+          switch_agent_workspace_view(state)
+        when "workspace_cycle_filter"
+          cycle_agent_workspace_filter
+        when "workspace_open_editor"
+          open_agent_workspace_editor(state)
+        when "workspace_open_pull_request"
+          if open_workspace_delivery_pr(state)
+            @agent_workspace_notice = "Opened the verified delivery pull request."
+            @agent_workspace_error = nil
+          else
+            @agent_workspace_error = "No verified delivery pull request is available yet."
+          end
+        when "workspace_close"
+          close_agent_workspace(preserve_terminal: true)
+          return :closed
+        end
+        :handled
+      end
+
+      def cycle_agent_workspace_filter
+        index = WORKSPACE_FILTERS.index(@agent_workspace_filter) || 0
+        @agent_workspace_filter = WORKSPACE_FILTERS[(index + 1) % WORKSPACE_FILTERS.length]
+        @workspace_agent_scroll_offset = 0
+        @agent_workspace_notice = "Transcript filter: #{@agent_workspace_filter}."
+        persist_agent_workspace
+      end
+
+      def workspace_leader_help
+        "#{workspace_leader_label}: #{workspace_command_label("workspace_switch_view")} view, " \
+          "#{workspace_command_label("workspace_cycle_filter")} filter, " \
+          "#{workspace_command_label("workspace_open_editor")} editor, " \
+          "#{workspace_command_label("workspace_open_pull_request")} PR, " \
+          "#{workspace_command_label("workspace_close")} tree"
+      end
+
+      def workspace_leader_label
+        names = keybindings.names_for("workspace_leader")
+        names.empty? ? "workspace leader" : names.join("/")
+      end
+
+      def workspace_command_label(action)
+        names = keybindings.names_for(action)
+        names.empty? ? "(unbound)" : names.join("/")
+      end
+
+      def workspace_scroll_key?(key)
+        mouse_wheel_up?(key) || mouse_wheel_down?(key) ||
+          (@agent_workspace_view == "agent" && (keybinding?("scroll_page_up", key) || keybinding?("scroll_page_down", key)))
+      end
+
+      def scroll_agent_workspace(key)
+        step = if mouse_wheel_up?(key) || mouse_wheel_down?(key)
+                 MOUSE_SCROLL_STEP * mouse_wheel_count(key)
+               else
+                 PAGE_SCROLL_STEP
+               end
+        direction = mouse_wheel_up?(key) || keybinding?("scroll_page_up", key) ? :up : :down
+        variable = @agent_workspace_view == "terminal" ? :@workspace_terminal_scroll_offset : :@workspace_agent_scroll_offset
+        current = instance_variable_get(variable).to_i
+        instance_variable_set(variable, direction == :up ? current + step : [current - step, 0].max)
+        persist_agent_workspace
+      end
+
       def switch_agent_workspace_view(state)
         @agent_workspace_view = @agent_workspace_view == "agent" ? "terminal" : "agent"
         @agent_workspace_notice = nil
         @agent_workspace_error = nil
-        prepare_workspace_terminal(state) if @agent_workspace_view == "terminal"
+        if @agent_workspace_view == "terminal"
+          @agent_workspace_session.pause if @agent_workspace_session&.respond_to?(:pause)
+          prepare_workspace_terminal(state)
+        else
+          @agent_workspace_session.resume if @agent_workspace_session&.respond_to?(:resume)
+        end
         persist_agent_workspace
       end
 
@@ -660,7 +787,10 @@ module Meringue
 
         rows, columns = agent_workspace_terminal_dimensions
         result = workspace_controller.open_terminal(agent: agent, state: state, rows: rows, columns: columns)
-        @agent_workspace_terminal_size = [rows, columns] unless %w[failed rejected errored].include?(result.fetch("status", nil).to_s)
+        unless %w[failed rejected errored].include?(result.fetch("status", nil).to_s)
+          @agent_workspace_terminal_size = [rows, columns]
+          @workspace_terminal_scroll_offset = 0 if result.fetch("started", false)
+        end
         apply_workspace_controller_result(result)
       rescue ArgumentError
         # Compatibility for external controllers written before size-aware workspaces.
@@ -845,7 +975,7 @@ module Meringue
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
-          Focused worker workspace (optional deep interaction): #{keys_for("workspace_switch_view")} switches live worker / worktree terminal; #{keys_for("workspace_open_editor")} opens the external editor; #{keys_for("workspace_open_pull_request")} opens the delivery PR; #{keys_for("cancel_navigation")} returns to the AgentTree without stopping the worker. Use dashboard chat for normal head-agent orchestration.
+          Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch views, #{keys_for("workspace_cycle_filter")} to filter the transcript, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to return while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the full Pi transcript. Use dashboard chat for normal head-agent orchestration.
         TEXT
       end
 
@@ -927,6 +1057,7 @@ module Meringue
         @agent_workspace_agent_id = agent.fetch("id")
         @agent_workspace_view = restored_view
         @agent_workspace_terminal_size = nil
+        @workspace_leader_pending = false
         @agent_workspace_notice = nil
         @agent_workspace_error = nil
         @chat_mutex.synchronize { @agent_workspace_events[agent.fetch("id")] = [] }
@@ -937,7 +1068,10 @@ module Meringue
           apply_workspace_controller_result(workspace_controller.open_workspace(agent: agent, state: state))
         end
         open_agent_workspace_session(agent)
-        prepare_workspace_terminal(state) if @agent_workspace_view == "terminal"
+        if @agent_workspace_view == "terminal"
+          @agent_workspace_session.pause if @agent_workspace_session&.respond_to?(:pause)
+          prepare_workspace_terminal(state)
+        end
         persist_agent_workspace
         true
       rescue StandardError => e
@@ -965,12 +1099,15 @@ module Meringue
         nil
       end
 
-      def close_agent_workspace
+      def close_agent_workspace(preserve_terminal: false)
         close_agent_workspace_session
-        workspace_controller.close_terminal(agent: @agent_workspace_agent_id) if workspace_controller&.respond_to?(:close_terminal)
+        if !preserve_terminal && workspace_controller&.respond_to?(:close_terminal)
+          workspace_controller.close_terminal(agent: @agent_workspace_agent_id)
+        end
         @agent_workspace_active = false
         @agent_workspace_view = "agent"
         @agent_workspace_terminal_size = nil
+        @workspace_leader_pending = false
         @agent_workspace_notice = nil
         @agent_workspace_error = nil
         @focused_pane = "agent_tree"
@@ -1524,9 +1661,13 @@ module Meringue
             "active" => @agent_workspace_active,
             "agent_id" => @agent_workspace_agent_id,
             "view" => @agent_workspace_view,
+            "filter" => @agent_workspace_filter,
             "input_buffer" => input_buffer,
             "input_cursor" => clamp_cursor(input_buffer, input_cursor || input_buffer.chars.length),
             "pending_count" => @agent_workspace_pending_count,
+            "leader_hint" => workspace_leader_help,
+            "leader_pending" => @workspace_leader_pending,
+            "scroll_offset" => @agent_workspace_view == "terminal" ? @workspace_terminal_scroll_offset.to_i : @workspace_agent_scroll_offset.to_i,
             "messages" => @agent_workspace_messages[@agent_workspace_agent_id.to_s].map(&:dup),
             "notice" => @agent_workspace_notice,
             "error" => @agent_workspace_error,
@@ -1544,6 +1685,7 @@ module Meringue
         {
           "selected_agent_id" => @agent_workspace_agent_id,
           "view" => @agent_workspace_view,
+          "filter" => @agent_workspace_filter,
           "draft" => @workspace_draft.to_s,
           "agent_scroll_offset" => @workspace_agent_scroll_offset.to_i,
           "terminal_scroll_offset" => @workspace_terminal_scroll_offset.to_i
@@ -1559,6 +1701,9 @@ module Meringue
 
         @agent_workspace_agent_id = worker.fetch("id")
         @agent_workspace_view = "agent"
+        @agent_workspace_filter = "all"
+        @workspace_agent_scroll_offset = 0
+        @workspace_terminal_scroll_offset = 0
         @workspace_draft = ""
         persist_agent_workspace
         true
@@ -1572,6 +1717,8 @@ module Meringue
         @agent_workspace_active = false
         @agent_workspace_agent_id = nil
         @agent_workspace_view = "agent"
+        @agent_workspace_filter = "all"
+        @workspace_leader_pending = false
         @workspace_draft = ""
         persist_agent_workspace
       end

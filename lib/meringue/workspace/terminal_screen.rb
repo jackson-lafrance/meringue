@@ -3,8 +3,8 @@
 module Meringue
   module Workspace
     # Small VT-compatible screen model for rendering a shell PTY inside the TUI.
-    # It implements the cursor/erase/scroll sequences emitted by common shells;
-    # unsupported styling and private modes are safely ignored.
+    # It implements cursor/erase/scroll sequences and preserves SGR styling
+    # emitted by common shells; unsupported private modes are safely ignored.
     class TerminalScreen
       DEFAULT_ROWS = TerminalSession::DEFAULT_ROWS
       DEFAULT_COLUMNS = TerminalSession::DEFAULT_COLUMNS
@@ -13,6 +13,8 @@ module Meringue
         @rows = positive_dimension(rows, DEFAULT_ROWS)
         @columns = positive_dimension(columns, DEFAULT_COLUMNS)
         @cells = Array.new(@rows) { [] }
+        @styles = Array.new(@rows) { [] }
+        @current_style = nil
         @cursor_row = 0
         @cursor_column = 0
         @saved_cursor = [0, 0]
@@ -34,9 +36,19 @@ module Meringue
       def resize(rows:, columns:)
         new_rows = positive_dimension(rows, @rows)
         new_columns = positive_dimension(columns, @columns)
-        @cells = @cells.last(new_rows)
-        @cells.unshift(*Array.new(new_rows - @cells.length) { [] }) if @cells.length < new_rows
+        if new_rows < @rows
+          start_row = [@cursor_row - new_rows + 1, 0].max
+          @cells = @cells.slice(start_row, new_rows) || []
+          @styles = @styles.slice(start_row, new_rows) || []
+          @cursor_row -= start_row
+          @saved_cursor[0] -= start_row
+        elsif new_rows > @rows
+          missing = new_rows - @cells.length
+          @cells.concat(Array.new(missing) { [] })
+          @styles.concat(Array.new(missing) { [] })
+        end
         @cells.each { |line| line.slice!(new_columns..) if line.length > new_columns }
+        @styles.each { |line| line.slice!(new_columns..) if line.length > new_columns }
         @rows = new_rows
         @columns = new_columns
         @cursor_row = @cursor_row.clamp(0, @rows - 1)
@@ -45,7 +57,29 @@ module Meringue
       end
 
       def lines
-        @cells.map { |line| line.join.rstrip }
+        visible_row_indexes.map { |index| @cells[index].join.rstrip }
+      end
+
+      # Styled segments preserve child-process SGR colors without allowing raw
+      # PTY escape sequences to enter Canvas content.
+      def styled_lines
+        visible_row_indexes.map do |row_index|
+          chars = @cells[row_index]
+          styles = @styles[row_index]
+          length = visible_line_length(chars)
+          next [] if length.zero?
+
+          segments = []
+          chars.first(length).each_with_index do |character, column|
+            style = styles[column]
+            if segments.last && segments.last[1] == style
+              segments.last[0] << character.to_s
+            else
+              segments << [character.to_s, style]
+            end
+          end
+          segments
+        end
       end
 
       private
@@ -164,6 +198,7 @@ module Meringue
         when "M" then delete_lines(count)
         when "s" then save_cursor
         when "u" then restore_cursor
+        when "m" then apply_sgr(sequence)
         when "h", "l"
           clear_screen if private_mode && values.include?(1049)
         end
@@ -175,8 +210,13 @@ module Meringue
           line_feed
         end
         line = @cells[@cursor_row]
-        line.fill(" ", line.length...@cursor_column) if line.length < @cursor_column
+        styles = @styles[@cursor_row]
+        if line.length < @cursor_column
+          line.fill(" ", line.length...@cursor_column)
+          styles.fill(nil, styles.length...@cursor_column)
+        end
         line[@cursor_column] = character
+        styles[@cursor_column] = @current_style
         @cursor_column += 1
       end
 
@@ -198,66 +238,82 @@ module Meringue
 
       def scroll_up
         @cells.shift
+        @styles.shift
         @cells << []
+        @styles << []
       end
 
       def scroll_down
         @cells.pop
+        @styles.pop
         @cells.unshift([])
+        @styles.unshift([])
       end
 
       def erase_display(mode)
         case mode
         when 1
-          (0...@cursor_row).each { |row| @cells[row] = [] }
+          (0...@cursor_row).each { |row| clear_row(row) }
           erase_line(1)
         when 2, 3
           clear_screen
         else
           erase_line(0)
-          ((@cursor_row + 1)...@rows).each { |row| @cells[row] = [] }
+          ((@cursor_row + 1)...@rows).each { |row| clear_row(row) }
         end
       end
 
       def erase_line(mode)
         line = @cells[@cursor_row]
+        styles = @styles[@cursor_row]
         case mode
         when 1
           finish = [@cursor_column, @columns - 1].min
           line.fill(" ", 0..finish)
+          styles.fill(nil, 0..finish)
         when 2
-          @cells[@cursor_row] = []
+          clear_row(@cursor_row)
         else
           line.slice!(@cursor_column..) if line.length > @cursor_column
+          styles.slice!(@cursor_column..) if styles.length > @cursor_column
         end
       end
 
       def delete_characters(count)
         @cells[@cursor_row].slice!(@cursor_column, count)
+        @styles[@cursor_row].slice!(@cursor_column, count)
       end
 
       def insert_blanks(count)
         line = @cells[@cursor_row]
+        styles = @styles[@cursor_row]
         line.insert(@cursor_column, *Array.new(count, " "))
+        styles.insert(@cursor_column, *Array.new(count))
         line.slice!(@columns..) if line.length > @columns
+        styles.slice!(@columns..) if styles.length > @columns
       end
 
       def insert_lines(count)
         count.times do
           @cells.insert(@cursor_row, [])
+          @styles.insert(@cursor_row, [])
           @cells.pop
+          @styles.pop
         end
       end
 
       def delete_lines(count)
         count.times do
           @cells.delete_at(@cursor_row)
+          @styles.delete_at(@cursor_row)
           @cells << []
+          @styles << []
         end
       end
 
       def clear_screen
         @cells = Array.new(@rows) { [] }
+        @styles = Array.new(@rows) { [] }
         @cursor_row = 0
         @cursor_column = 0
       end
@@ -269,6 +325,36 @@ module Meringue
       def restore_cursor
         @cursor_row = @saved_cursor[0].clamp(0, @rows - 1)
         @cursor_column = @saved_cursor[1].clamp(0, @columns - 1)
+      end
+
+      def apply_sgr(sequence)
+        parts = sequence.to_s.split(";", -1)
+        parts = ["0"] if parts.empty? || parts.all?(&:empty?)
+        last_reset = parts.rindex { |part| part.empty? || part.to_i.zero? }
+        if last_reset
+          @current_style = nil
+          parts = parts.drop(last_reset + 1)
+        end
+        return if parts.empty?
+
+        addition = "\e[#{parts.join(";")}m"
+        @current_style = "#{@current_style}#{addition}"
+      end
+
+      def clear_row(row)
+        @cells[row] = []
+        @styles[row] = []
+      end
+
+      def visible_row_indexes
+        content_row = @cells.rindex { |line| line.any? { |character| character.to_s != " " } }
+        finish = [content_row || 0, @cursor_row].max
+        (0..finish).to_a
+      end
+
+      def visible_line_length(chars)
+        index = chars.rindex { |character| character.to_s != " " }
+        index ? index + 1 : 0
       end
 
       def position(value, maximum)

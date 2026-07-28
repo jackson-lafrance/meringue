@@ -255,7 +255,9 @@ module Meringue
           Enter in jump mode        # open selected issue/agent PR when one is available
           a in jump mode            # open the selected agent's focused workspace
           issue/worker double-click # open that worker's optional focused workspace
-          Ctrl-T in workspace       # switch between the live worker and worktree terminal
+          Ctrl-Space, then t / f    # switch focused view / cycle transcript filter
+          Ctrl-Space, then e / b    # open the workspace editor / verified delivery PR
+          Ctrl-Space, then q        # return to AgentTree; keep worker and terminal alive
           Esc in worker view        # return to AgentTree without stopping the worker
           Ctrl-C on an empty prompt # quit the TUI; Esc cancels jump mode
       HELP

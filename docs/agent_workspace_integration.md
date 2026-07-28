@@ -14,6 +14,7 @@ Agent-workspace presentation state is stored under `ui.agent_workspace` in the n
     "agent_workspace": {
       "selected_agent_id": "P1-I1-W1",
       "view": "agent",
+      "filter": "all",
       "draft": "",
       "agent_scroll_offset": 0,
       "terminal_scroll_offset": 0,
@@ -35,7 +36,7 @@ The presentation record must not become a second source of harness truth. PIDs, 
 - `TUI::DeliveryPullRequest.status_label` for `open`, `merged`, `closed`, stale, unavailable, invalid, and not-yet-tracked labels;
 - the returned `url` and `number` for the prominent workspace link.
 
-`Ctrl-B` (`open_delivery_pr`) opens the selected worker's verified delivery PR. The bottom status line shows the PR number/status and shortcut. The binding is configurable under `[tui.keybindings]`, but Ctrl-B is the default and should remain documented in workspace help.
+Outside a focused workspace, `Ctrl-B` (`open_delivery_pr`) opens the selected worker's verified delivery PR. Inside either focused view, use the configurable workspace leader followed by `workspace_open_pull_request` (`Ctrl-Space`, then `b` by default). The bottom status line keeps the PR number/status and sequence visible. Bare terminal `Ctrl-B` is forwarded to the PTY rather than stolen from shells, multiplexers, or editors.
 
 Reconciliation refreshes old verified PR status at most once every five minutes. A forge/auth/network failure records `availability: unavailable` and an error while preserving the last known PR state and URL. This is intentional: `/prune merged` still performs fresh conservative checks and will not prune an unknown PR.
 
@@ -60,8 +61,10 @@ The terminal/editor adapters should return structured results rather than raisin
 Repository policy forbids automated test files, so integration should be checked with focused Ruby smoke commands plus the interactive TUI:
 
 1. Select a worker with a verified open PR, restart Meringue, and confirm the worker selection and workspace view recover.
-2. Press Ctrl-B and confirm the tracked PR opens. Replace the PR URL with malformed metadata and confirm a useful unavailable notice is shown instead.
+2. Press the workspace leader followed by `b` and confirm the tracked PR opens from both focused views; confirm bare `Ctrl-B` still reaches the PTY. Replace the PR URL with malformed metadata and confirm a useful unavailable notice is shown instead.
 3. Remove/rename the worktree and harness session file, then render the workspace. Confirm notices are shown and state is not pruned or rewritten.
 4. Configure missing terminal/editor executables and confirm those actions fail in place without closing Meringue.
 5. Run `/prune merged` with open, closed, merged, and forge-unavailable PRs. Confirm only bundles satisfying the existing conservative merged semantics are removed.
 6. Run `/recount` and confirm the durable selected worker follows its new ID.
+7. Render a Pi session containing repeated assistant messages, streaming deltas, reasoning, tool calls/results, direct bash output, failures, and lifecycle events. Confirm all transcript entries—not only the compact completion log—remain visible and scrollable while live updates continue; cycle every transcript filter and verify category colors remain distinct.
+8. Run a colorized zsh child process and confirm SGR colors survive the embedded screen model. Type quickly in terminal view and confirm PTY echo remains responsive, the initial prompt appears in the viewport, ordinary keys are forwarded, and leader + `q` returns to the AgentTree while both worker and terminal continue running.

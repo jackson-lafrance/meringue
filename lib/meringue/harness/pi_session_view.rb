@@ -12,14 +12,23 @@ module Meringue
 
       module_function
 
-      def live_snapshot(pi_state:, messages:, session_ref:)
+      def live_snapshot(pi_state:, messages: nil, entries: nil, leaf_id: nil, session_ref:)
+        items = if entries
+                  active_session_records(Array(entries), leaf_id: leaf_id).filter_map do |record|
+                    next unless record["type"] == "message" && record["message"].is_a?(Hash)
+
+                    normalize_message(record.fetch("message"), id: record["id"], timestamp: record["timestamp"])
+                  end
+                else
+                  normalize_messages(messages)
+                end
         {
           "availability" => "live",
           "session_state" => pi_state.fetch("isStreaming", false) ? "streaming" : "idle",
           "harness" => "pi",
           "session_id" => pi_state["sessionId"] || session_ref["session_id"],
           "session_name" => pi_state["sessionName"] || metadata_value(session_ref, "session_name"),
-          "items" => normalize_messages(messages),
+          "items" => items,
           "capabilities" => capabilities(live: true, prompt: true),
           "warning" => nil
         }
@@ -74,9 +83,10 @@ module Meringue
         )
       end
 
-      def active_session_records(records)
+      def active_session_records(records, leaf_id: nil)
         entries = records.select { |record| record["id"] }
-        leaf = entries.last
+        leaf = leaf_id && entries.find { |record| record["id"].to_s == leaf_id.to_s }
+        leaf ||= entries.last
         return [] unless leaf
 
         by_id = entries.to_h { |record| [record["id"], record] }
@@ -103,10 +113,16 @@ module Meringue
           [base.merge("kind" => "lifecycle", "phase" => "turn_complete", "will_retry" => !!event["willRetry"])]
         when "agent_settled"
           [base.merge("kind" => "lifecycle", "phase" => "settled")]
+        when "turn_start"
+          [base.merge("kind" => "lifecycle", "phase" => "turn_start")]
+        when "turn_end"
+          [base.merge("kind" => "lifecycle", "phase" => "turn_end")]
         when "message_start", "message_update", "message_end"
           message_event(base, event, type)
         when "tool_execution_start", "tool_execution_update", "tool_execution_end"
           [tool_event(base, event, type)]
+        when "bash_execution_update"
+          [base.merge("kind" => "tool", "phase" => "update", "id" => event["id"], "tool_name" => "bash", "content" => truncate_tool_content(event["delta"]))]
         when "queue_update"
           [base.merge("kind" => "queue", "phase" => "update", "steering" => Array(event["steering"]), "follow_up" => Array(event["followUp"]))]
         when "compaction_start", "compaction_end"
@@ -141,8 +157,9 @@ module Meringue
           "tool_calls" => content.fetch("tool_calls"),
           "tool_name" => message["toolName"],
           "tool_call_id" => message["toolCallId"],
-          "is_error" => !!message["isError"] || message["stopReason"] == "error",
+          "is_error" => !!message["isError"] || %w[error aborted].include?(message["stopReason"]),
           "stop_reason" => message["stopReason"],
+          "error_message" => message["errorMessage"] || message["error"],
           "timestamp" => timestamp || normalize_timestamp(message["timestamp"]),
           "phase" => "complete"
         }.compact
@@ -175,11 +192,29 @@ module Meringue
       end
 
       def message_content(message)
+        if message.fetch("role", nil).to_s == "bashExecution"
+          command = message.fetch("command", "").to_s
+          output = message.fetch("output", "").to_s
+          status = message.fetch("exitCode", nil)
+          heading = command.empty? ? "direct bash" : "$ #{command}"
+          heading += " (exit #{status})" unless status.nil?
+          return { "text" => truncate_tool_content([heading, output].reject(&:empty?).join("\n")), "thinking" => "", "tool_calls" => [] }
+        end
+
         blocks = message["content"]
         blocks = [{ "type" => "text", "text" => blocks }] if blocks.is_a?(String)
         blocks = Array(blocks)
         {
-          "text" => blocks.filter_map { |part| part["text"] if part.is_a?(Hash) && part["type"] == "text" }.join("\n"),
+          "text" => blocks.filter_map do |part|
+            next unless part.is_a?(Hash)
+
+            if part["type"] == "text"
+              part["text"]
+            elsif part["type"] == "image"
+              mime = part["mimeType"].to_s
+              mime.empty? ? "[image]" : "[image #{mime}]"
+            end
+          end.join("\n"),
           "thinking" => blocks.filter_map { |part| part["thinking"] if part.is_a?(Hash) && part["type"] == "thinking" }.join("\n"),
           "tool_calls" => blocks.filter_map do |part|
             next unless part.is_a?(Hash) && part["type"] == "toolCall"

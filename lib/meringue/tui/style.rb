@@ -31,6 +31,11 @@ module Meringue
         IDLE
         USER
         ASSISTANT
+        WORKSPACE_OUTPUT
+        WORKSPACE_FINAL
+        WORKSPACE_REASONING
+        WORKSPACE_TOOL_CALL
+        WORKSPACE_TOOL_RESULT
         LOG_INFO
         LOG_COMMAND
         LOG_WARNING
@@ -153,6 +158,11 @@ module Meringue
         IDLE: [38, 5, 246],
         USER: [1, 38, 5, 117],
         ASSISTANT: [1, 38, 5, 183],
+        WORKSPACE_OUTPUT: [38, 5, 252],
+        WORKSPACE_FINAL: [1, 38, 5, 183],
+        WORKSPACE_REASONING: [38, 5, 141],
+        WORKSPACE_TOOL_CALL: [38, 5, 117],
+        WORKSPACE_TOOL_RESULT: [38, 5, 114],
         LOG_INFO: [38, 5, 117],
         LOG_COMMAND: [38, 5, 203],
         LOG_WARNING: [38, 5, 221],
@@ -185,6 +195,11 @@ module Meringue
         IDLE: [38, 5, 246],
         USER: [1, 38, 5, 231],
         ASSISTANT: [1, 38, 5, 226],
+        WORKSPACE_OUTPUT: [38, 5, 231],
+        WORKSPACE_FINAL: [1, 38, 5, 226],
+        WORKSPACE_REASONING: [38, 5, 183],
+        WORKSPACE_TOOL_CALL: [38, 5, 81],
+        WORKSPACE_TOOL_RESULT: [38, 5, 114],
         LOG_INFO: [38, 5, 220],
         LOG_COMMAND: [38, 5, 203],
         LOG_WARNING: [38, 5, 214],
@@ -219,6 +234,11 @@ module Meringue
         IDLE: [38, 5, 67],
         USER: [1, 38, 5, 117],
         ASSISTANT: [1, 38, 5, 147],
+        WORKSPACE_OUTPUT: [38, 5, 252],
+        WORKSPACE_FINAL: [1, 38, 5, 147],
+        WORKSPACE_REASONING: [38, 5, 141],
+        WORKSPACE_TOOL_CALL: [38, 5, 117],
+        WORKSPACE_TOOL_RESULT: [38, 5, 120],
         LOG_INFO: [38, 5, 117],
         LOG_COMMAND: [38, 5, 203],
         LOG_WARNING: [38, 5, 221],
@@ -251,6 +271,11 @@ module Meringue
         IDLE: [38, 5, 243],
         USER: [1, 38, 5, 109],
         ASSISTANT: [1, 38, 5, 220],
+        WORKSPACE_OUTPUT: [38, 5, 223],
+        WORKSPACE_FINAL: [1, 38, 5, 220],
+        WORKSPACE_REASONING: [38, 5, 175],
+        WORKSPACE_TOOL_CALL: [38, 5, 109],
+        WORKSPACE_TOOL_RESULT: [38, 5, 142],
         LOG_INFO: [38, 5, 109],
         LOG_COMMAND: [38, 5, 167],
         LOG_WARNING: [38, 5, 214],
@@ -283,6 +308,11 @@ module Meringue
         IDLE: [38, 5, 146],
         USER: [1, 38, 5, 117],
         ASSISTANT: [1, 38, 5, 219],
+        WORKSPACE_OUTPUT: [38, 5, 255],
+        WORKSPACE_FINAL: [1, 38, 5, 219],
+        WORKSPACE_REASONING: [38, 5, 183],
+        WORKSPACE_TOOL_CALL: [38, 5, 117],
+        WORKSPACE_TOOL_RESULT: [38, 5, 158],
         LOG_INFO: [38, 5, 117],
         LOG_COMMAND: [38, 5, 210],
         LOG_WARNING: [38, 5, 222],
@@ -315,6 +345,11 @@ module Meringue
         IDLE: [38, 5, 66],
         USER: [1, 38, 5, 110],
         ASSISTANT: [1, 38, 5, 176],
+        WORKSPACE_OUTPUT: [38, 5, 252],
+        WORKSPACE_FINAL: [1, 38, 5, 179],
+        WORKSPACE_REASONING: [38, 5, 176],
+        WORKSPACE_TOOL_CALL: [38, 5, 110],
+        WORKSPACE_TOOL_RESULT: [38, 5, 108],
         LOG_INFO: [38, 5, 110],
         LOG_COMMAND: [38, 5, 203],
         LOG_WARNING: [38, 5, 179],
