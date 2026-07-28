@@ -280,8 +280,9 @@ module Meringue
           [sortable_timestamp(entry.fetch("timestamp", nil)), entry.fetch("sequence", entry.fetch("ordinal", 0)).to_i]
         end
 
+        # Compare absolute instants so UTC-stored and local-stored timestamps interleave correctly.
         def sortable_timestamp(timestamp)
-          timestamp.to_s.empty? ? "9999-12-31T23:59:59Z" : timestamp.to_s
+          Timestamps.sort_key(timestamp)
         end
 
         def normalized_message_role(role)
@@ -479,9 +480,7 @@ module Meringue
         end
 
         def timestamp(entry)
-          Time.iso8601(entry.fetch("timestamp")).strftime("%H:%M")
-        rescue ArgumentError, KeyError, TypeError
-          "--:--:--"
+          Timestamps.format(entry.fetch("timestamp", nil), "%H:%M") || "--:--"
         end
 
         def status_line(status, gutter = [PLAIN_GUTTER, Style::DIM])

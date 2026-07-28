@@ -24,7 +24,7 @@ module Meringue
 
         pid = Process.spawn(*(argv + [url]), in: File::NULL, out: File::NULL, err: File::NULL)
         Process.detach(pid)
-        opened("Opened pull request: #{url}")
+        opened
       rescue Errno::ENOENT
         failed("Could not open pull request because #{opener_name.inspect} was not found.")
       rescue SystemCallError => e
@@ -75,8 +75,9 @@ module Meringue
         !value.nil? && !value.to_s.empty?
       end
 
-      def opened(message)
-        { "status" => "opened", "message" => message }
+      # Successful opens are transient UI feedback, so they carry no user-visible message.
+      def opened
+        { "status" => "opened" }
       end
 
       def rejected(message)
