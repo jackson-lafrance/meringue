@@ -265,7 +265,7 @@ module Meringue
 
           entries = tag_entry_source(local_entries, "local") + session_entries
           # Durable worker logs contain the compact completion summary, not the
-          # Pi transcript. They are only a fallback when no session output can
+          # harness transcript. They are only a fallback when no session output can
           # be recovered, otherwise they can push the real transcript offscreen.
           entries.concat(tag_entry_source(durable_agent_entries(state, agent.fetch("id")), "durable")) if session_entries.empty?
           entries = deduplicate_entries(entries)
@@ -494,7 +494,7 @@ module Meringue
             details << "follow-up: #{follow_up.join(" | ")}" unless follow_up.empty?
             [transcript_entry("system", details.empty? ? "Worker prompt queue updated." : details.join("\n"), event, part: "queue")]
           when "interaction_request"
-            [transcript_entry("system", event.fetch("message", "Pi requested unsupported interactive input.").to_s, event, part: "interaction")]
+            [transcript_entry("system", event.fetch("message", "The agent requested unsupported interactive input.").to_s, event, part: "interaction")]
           else
             []
           end

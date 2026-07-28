@@ -25,13 +25,13 @@ module Meringue
         ["/quit", "Return to the AgentTree, keeping the worker and its terminal alive.", "workspace_close"]
       ].freeze
 
+      # Aliases stay harness-agnostic: no alias may name a specific backend.
       ALIASES = {
         "?" => "help",
         "commands" => "help",
         "view" => "terminal",
         "shell" => "terminal",
         "agent" => "session",
-        "pi" => "session",
         "edit" => "editor",
         "pull-request" => "pr",
         "abort" => "cancel",
