@@ -30,6 +30,28 @@ module Meringue
         "select_word_left" => :word_left,
         "select_word_right" => :word_right
       }.freeze
+      # Keyboard logs selection reuses the same configurable movement actions and
+      # adds page granularity, which only makes sense for a scrolling pane.
+      LOGS_SELECTION_MOVEMENTS = SELECTION_MOVEMENTS.merge(
+        "select_page_up" => :page_up,
+        "select_page_down" => :page_down
+      ).freeze
+      # Unmodified movement inside logs selection mode moves the caret and
+      # collapses the selection, exactly like a text editor caret.
+      LOGS_CURSOR_MOVEMENTS = {
+        "cursor_left" => :left,
+        "cursor_right" => :right,
+        "cursor_up" => :up,
+        "cursor_down" => :down,
+        "cursor_home" => :home,
+        "cursor_end" => :end,
+        "cursor_word_left" => :word_left,
+        "cursor_word_right" => :word_right,
+        "scroll_page_up" => :page_up,
+        "scroll_page_down" => :page_down
+      }.freeze
+      # Vertical caret movement keeps the column the user last chose.
+      LOGS_STICKY_COLUMN_MOVEMENTS = %i[up down page_up page_down].freeze
       CTRL_C = "\u0003"
       # Keyboard-disambiguation modes used for Shift+Enter can encode Ctrl-C as
       # CSI-u or xterm modifyOtherKeys instead of the raw ETX byte.
@@ -130,6 +152,8 @@ module Meringue
         @logs_selection_focus = nil
         @chat_selection_anchor = nil
         @chat_selection = nil
+        @logs_cursor_active = false
+        @logs_cursor_column = 0
         @selection_dragging = false
         @selection_status = nil
         @selection_status_at = nil
@@ -269,8 +293,8 @@ module Meringue
         return false unless key
         return false if @agent_workspace_active
         return true if keybinding?("quit", key)
-        # An active selection makes Ctrl-C a copy action, never a quit.
-        return false if selection_active?
+        # An active selection or logs caret makes Ctrl-C a copy action, never a quit.
+        return false if selection_active? || @logs_cursor_active
 
         ctrl_c_key?(key) && input_buffer.empty? && !@agent_tree_navigation_active
       end
@@ -341,10 +365,13 @@ module Meringue
           return handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         end
 
-        if keybinding?("cancel_navigation", key) && selection_active?
+        if keybinding?("cancel_navigation", key) && (selection_active? || @logs_cursor_active)
           clear_selection
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
+
+        logs_selection_result = handle_logs_selection_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        return logs_selection_result if logs_selection_result
 
         selection_movement_result = handle_selection_movement_key(key, input_buffer, input_cursor, slash_suggestion_index)
         return selection_movement_result if selection_movement_result
@@ -484,6 +511,9 @@ module Meringue
       def cycle_focus(delta = 1)
         current_index = FOCUS_ORDER.index(@focused_pane) || 0
         @focused_pane = FOCUS_ORDER[(current_index + delta) % FOCUS_ORDER.length]
+        # The caret belongs to the logs pane, so moving focus away puts arrow keys
+        # back to scrolling/composer duty while any highlight stays copyable.
+        deactivate_logs_cursor_quietly unless @focused_pane == "logs"
       end
 
       def handle_focused_action_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
@@ -644,6 +674,8 @@ module Meringue
         @selection_pane = "logs"
         @logs_selection_anchor = position
         @logs_selection_focus = position
+        @logs_cursor_active = false
+        @logs_cursor_column = position.fetch("column", 0).to_i
         @selection_dragging = true
         clear_selection_status
       end
@@ -693,8 +725,172 @@ module Meringue
       def clear_logs_selection
         @logs_selection_anchor = nil
         @logs_selection_focus = nil
+        @logs_cursor_active = false
+        @logs_cursor_column = 0
         @selection_pane = nil if @selection_pane == "logs"
         nil
+      end
+
+      # Keyboard-driven logs selection.
+      #
+      # Selection mode is pane-scoped: it only reacts while the logs pane is
+      # focused, it never touches the AgentTree or the composer, and it leaves
+      # jump mode, slash suggestions, and typing in charge of their own keys.
+      def handle_logs_selection_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        return nil unless @focused_pane == "logs"
+
+        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
+        if keybinding?("logs_selection_mode", key)
+          toggle_logs_cursor(state)
+          return unchanged
+        end
+
+        extend_movement = LOGS_SELECTION_MOVEMENTS.keys.find { |action| keybinding?(action, key) }
+        if extend_movement
+          move_logs_cursor(LOGS_SELECTION_MOVEMENTS.fetch(extend_movement), state, extend: true)
+          return unchanged
+        end
+
+        return nil unless @logs_cursor_active
+
+        movement = LOGS_CURSOR_MOVEMENTS.keys.find { |action| keybinding?(action, key) }
+        return nil unless movement
+
+        move_logs_cursor(LOGS_CURSOR_MOVEMENTS.fetch(movement), state, extend: false)
+        unchanged
+      end
+
+      def toggle_logs_cursor(state)
+        return deactivate_logs_cursor if @logs_cursor_active
+
+        activate_logs_cursor(state)
+      end
+
+      def activate_logs_cursor(state)
+        lines = logs_selection_lines(state)
+        if lines.empty?
+          set_selection_status("no log text to select")
+          return false
+        end
+
+        clear_chat_selection
+        @selection_pane = "logs"
+        @logs_cursor_active = true
+        @logs_selection_focus ||= default_logs_cursor(state, lines)
+        @logs_selection_anchor ||= @logs_selection_focus
+        @logs_cursor_column = @logs_selection_focus.fetch("column", 0).to_i
+        reveal_logs_line(state, @logs_selection_focus.fetch("line", 0).to_i)
+        set_selection_status("logs selection on")
+        true
+      end
+
+      def deactivate_logs_cursor
+        clear_logs_selection
+        set_selection_status("logs selection off")
+        false
+      end
+
+      def deactivate_logs_cursor_quietly
+        return unless @logs_cursor_active
+
+        @logs_cursor_active = false
+        @logs_cursor_column = 0
+      end
+
+      # Caret and anchor are stored in logs content coordinates, so a selection
+      # keeps covering the same text while the pane scrolls.
+      def move_logs_cursor(movement, state, extend:)
+        lines = logs_selection_lines(state)
+        return false if lines.empty?
+        return false unless @logs_cursor_active || activate_logs_cursor(state)
+
+        current = @logs_selection_focus || default_logs_cursor(state, lines)
+        line = current.fetch("line", 0).to_i.clamp(0, lines.length - 1)
+        column = current.fetch("column", 0).to_i.clamp(0, lines.fetch(line).length)
+        anchor = extend ? (@logs_selection_anchor || Selection.point(line, column)) : nil
+        line, column = next_logs_cursor(movement, lines, line, column, logs_page_step(state))
+
+        clear_chat_selection
+        @selection_pane = "logs"
+        @logs_selection_focus = Selection.point(line, column)
+        @logs_selection_anchor = anchor || @logs_selection_focus
+        @logs_cursor_column = column unless LOGS_STICKY_COLUMN_MOVEMENTS.include?(movement)
+        reveal_logs_line(state, line)
+        clear_selection_status
+        true
+      end
+
+      def next_logs_cursor(movement, lines, line, column, page)
+        last_line = lines.length - 1
+        length = lines.fetch(line).length
+        desired_column = [@logs_cursor_column.to_i, column].max
+
+        case movement
+        when :left
+          return [line, column - 1] if column.positive?
+          return [line - 1, lines.fetch(line - 1).length] if line.positive?
+        when :right
+          return [line, column + 1] if column < length
+          return [line + 1, 0] if line < last_line
+        when :up then return logs_cursor_on_line(lines, line - 1, desired_column)
+        when :down then return logs_cursor_on_line(lines, line + 1, desired_column)
+        when :home then return [line, 0]
+        when :end then return [line, length]
+        when :word_left
+          return [line - 1, lines.fetch(line - 1).length] if column.zero? && line.positive?
+          return [line, previous_word_boundary(lines.fetch(line).chars, column)]
+        when :word_right
+          return [line + 1, 0] if column >= length && line < last_line
+          return [line, next_word_start(lines.fetch(line).chars, column)]
+        when :page_up then return logs_cursor_on_line(lines, line - page, desired_column)
+        when :page_down then return logs_cursor_on_line(lines, line + page, desired_column)
+        end
+
+        [line, column]
+      end
+
+      def logs_cursor_on_line(lines, line, desired_column)
+        target = line.clamp(0, lines.length - 1)
+        [target, [desired_column, lines.fetch(target).length].min]
+      end
+
+      def logs_page_step(state)
+        window = layout.logs_visible_window(state, width: render_width, height: render_height) || {}
+        [window.fetch("capacity", 1).to_i, 1].max
+      end
+
+      # A fresh caret starts on the newest visible line with text, so the first
+      # keystroke lands on real log content instead of trailing blank wrap rows.
+      def default_logs_cursor(state, lines)
+        window = layout.logs_visible_window(state, width: render_width, height: render_height) || {}
+        last_line = (window.fetch("finish_index", lines.length).to_i - 1).clamp(0, lines.length - 1)
+        first_line = window.fetch("start_index", 0).to_i.clamp(0, last_line)
+        line = last_line.downto(first_line).find { |candidate| !lines.fetch(candidate).strip.empty? } || last_line
+        Selection.point(line, 0)
+      end
+
+      def logs_selection_lines(state)
+        layout.logs_text_lines(state, width: render_width, height: render_height)
+      end
+
+      def reveal_logs_line(state, line_index)
+        offset = layout.logs_scroll_offset_for_line(
+          state,
+          width: render_width,
+          height: render_height,
+          line_index: line_index
+        )
+        @scroll_offsets["logs"] = offset.to_i unless offset.nil?
+      end
+
+      def logs_cursor_line_text(state)
+        return "" unless @logs_cursor_active && @logs_selection_focus
+
+        lines = logs_selection_lines(state)
+        line = @logs_selection_focus.fetch("line", 0).to_i
+        return "" unless line.between?(0, lines.length - 1)
+
+        lines.fetch(line)
       end
 
       def clear_chat_selection
@@ -725,11 +921,21 @@ module Meringue
         snapshot = { "active" => selection_active?, "pane" => @selection_pane }
         status = selection_status_text
         snapshot["status"] = status if status
-        snapshot.merge(logs_selection || {})
+        snapshot = snapshot.merge(logs_selection || {})
+        if @logs_cursor_active && @logs_selection_focus
+          snapshot["pane"] = "logs"
+          snapshot["mode"] = "logs_cursor"
+          snapshot["cursor"] = @logs_selection_focus
+        end
+        snapshot
+      end
+
+      def logs_cursor_selection?
+        @logs_cursor_active && @selection_pane == "logs"
       end
 
       def handle_selection_command_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
-        if keybinding?("copy_selection", key) && selection_active?
+        if keybinding?("copy_selection", key) && (selection_active? || logs_cursor_selection?)
           copy_selection(state, input_buffer)
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
@@ -769,7 +975,10 @@ module Meringue
       def selection_text(state, input_buffer)
         case @selection_pane
         when "logs"
-          layout.logs_selection_text(state, width: render_width, height: render_height, selection: logs_selection)
+          text = layout.logs_selection_text(state, width: render_width, height: render_height, selection: logs_selection)
+          # An unextended caret copies its whole line, so keyboard users never
+          # have to select a full line by hand to grab one log entry.
+          text.to_s.empty? ? logs_cursor_line_text(state) : text
         when "chat"
           range = chat_selection_range
           return "" unless range
@@ -1459,6 +1668,7 @@ module Meringue
           Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels jump mode.
           Focus: click a dashboard section to focus it; clicking an issue or agent in the AgentTree selects it, and double-clicking opens its focused workspace. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
           Selection: drag with the mouse in the logs pane or the composer to select text; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
+          Logs selection (keyboard): focus the logs pane, then #{keys_for("logs_selection_mode")} toggles the selection cursor or any Shift+movement starts it. #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor, #{keys_for("cursor_word_left")}/#{keys_for("cursor_word_right")} move by word, #{keys_for("cursor_home")}/#{keys_for("cursor_end")} jump to the line edges, and #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} move by page. #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")}, #{keys_for("select_home")}/#{keys_for("select_end")}, #{keys_for("select_word_left")}/#{keys_for("select_word_right")}, and #{keys_for("select_page_up")}/#{keys_for("select_page_down")} extend the selection. #{keys_for("copy_selection")} copies the selection (or the cursor line when nothing is extended); #{keys_for("cancel_navigation")} exits.
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
           Chat: #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
@@ -1496,6 +1706,7 @@ module Meringue
           return
         end
 
+        deactivate_logs_cursor_quietly
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
@@ -1542,6 +1753,9 @@ module Meringue
         end
 
         restored_view = @agent_workspace_agent_id.to_s == agent.fetch("id").to_s ? @agent_workspace_view : "agent"
+        # The logs caret belongs to the dashboard logs pane, so opening the
+        # focused workspace disarms it instead of leaving Ctrl-C bound to copy.
+        deactivate_logs_cursor_quietly
         @agent_workspace_active = true
         @force_full_redraw = true
         @agent_workspace_agent_id = agent.fetch("id")
