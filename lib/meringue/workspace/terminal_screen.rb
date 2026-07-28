@@ -20,22 +20,35 @@ module Meringue
         @saved_cursor = [0, 0]
         @parser_state = :text
         @sequence = +""
+        @revision = 0
       end
 
       attr_reader :rows, :columns
+
+      # Monotonic counter bumped whenever fed bytes or a resize change the
+      # screen. Renderers use it to reuse cached lines instead of re-laying out
+      # an unchanged screen on every frame.
+      attr_reader :revision
 
       def cursor
         [@cursor_row, @cursor_column]
       end
 
       def feed(bytes)
-        bytes.to_s.b.force_encoding(Encoding::UTF_8).scrub.each_char { |character| consume(character) }
+        text = bytes.to_s.b.force_encoding(Encoding::UTF_8).scrub
+        return self if text.empty?
+
+        text.each_char { |character| consume(character) }
+        @revision += 1
         self
       end
 
       def resize(rows:, columns:)
         new_rows = positive_dimension(rows, @rows)
         new_columns = positive_dimension(columns, @columns)
+        return self if new_rows == @rows && new_columns == @columns
+
+        @revision += 1
         if new_rows < @rows
           start_row = [@cursor_row - new_rows + 1, 0].max
           @cells = @cells.slice(start_row, new_rows) || []
@@ -72,10 +85,13 @@ module Meringue
           segments = []
           chars.first(length).each_with_index do |character, column|
             style = styles[column]
+            # Cells hold shared frozen characters, so a segment must own its own
+            # buffer. Appending into a cell's string would rewrite the screen and
+            # duplicate its content again on every later render.
             if segments.last && segments.last[1] == style
-              segments.last[0] << character.to_s
+              segments.last[0] << character
             else
-              segments << [character.to_s, style]
+              segments << [+"#{character}", style]
             end
           end
           segments
@@ -215,7 +231,9 @@ module Meringue
           line.fill(" ", line.length...@cursor_column)
           styles.fill(nil, styles.length...@cursor_column)
         end
-        line[@cursor_column] = character
+        # Freeze/dedupe stored characters so no reader can mutate the screen by
+        # appending to a cell string it received.
+        line[@cursor_column] = -character
         styles[@cursor_column] = @current_style
         @cursor_column += 1
       end

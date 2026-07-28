@@ -14,9 +14,9 @@ colorscheme = "meringue"
 # workspace_leader = ["ctrl-space"]
 # workspace_switch_view = ["t"]
 # workspace_cycle_filter = ["f"]
-# workspace_open_pi_session = ["p"]
-# workspace_open_editor = ["e"]
-# workspace_open_pull_request = ["b"]
+# workspace_open_agent_session = ["a"]   # legacy name workspace_open_pi_session still works
+# workspace_open_editor = ["b"]
+# workspace_open_pull_request = ["p"]
 # workspace_close = ["q"]
 
 [harness]

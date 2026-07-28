@@ -255,10 +255,10 @@ module Meringue
           Enter in jump mode        # open selected issue/agent PR when one is available
           a in jump mode            # open the selected agent's focused workspace
           issue/worker double-click # open that worker's optional focused workspace
-          Ctrl-Space, then t / f    # switch focused view / cycle transcript filter
-          Ctrl-Space, then p        # open the worker's saved Pi session externally
-          Ctrl-Space, then e / b    # open the workspace editor / verified delivery PR
-          Ctrl-Space, then q        # only focused-workspace return; keep worker and terminal alive
+          Ctrl-Space, then T / F    # switch terminal/agent view / cycle transcript filter
+          Ctrl-Space, then A        # open the worker's underlying agent session externally
+          Ctrl-Space, then B / P    # open the workspace editor / verified delivery PR
+          Ctrl-Space, then Q        # only focused-workspace quit; keep worker and terminal alive
           Ctrl-C on an empty prompt # quit the TUI; Esc cancels dashboard jump mode
       HELP
     end

@@ -21,9 +21,9 @@ module Meringue
       end
 
       def open_workspace(agent:, state: nil)
-        path = workspace_path_for(agent)
-        return rejected("Selected worker has no assigned workspace.") unless path
-        return rejected("Worker workspace is missing or is not a directory: #{path}") unless Dir.exist?(path)
+        resolution = PathResolver.resolve(agent)
+        path = resolution.fetch("path", nil)
+        return rejected(resolution.fetch("message", "Selected worker has no assigned workspace.")) unless path
 
         { "status" => "opened", "message" => "Focused #{agent.fetch("id", "worker")} in #{path}." }
       end
@@ -61,7 +61,10 @@ module Meringue
           "styled_lines" => screen.styled_lines,
           "cursor" => screen.cursor,
           "status" => status.fetch("state", nil),
-          "pid" => status.fetch("pid", nil)
+          "pid" => status.fetch("pid", nil),
+          "workspace_path" => status.fetch("workspace_path", nil),
+          # Renderers reuse cached terminal lines while this does not change.
+          "revision" => screen.revision
         }.compact
         if !status.fetch("alive", false) && status.fetch("state", nil) == "exited"
           exit_status = status.fetch("exit_status", {}) || {}
@@ -111,13 +114,7 @@ module Meringue
       end
 
       def workspace_path_for(agent)
-        return nil unless agent.is_a?(Hash)
-
-        metadata = agent.fetch("harness_metadata", {}) || {}
-        value = agent["workspace_path"] || metadata["cwd"]
-        return nil if value.to_s.strip.empty?
-
-        File.expand_path(value.to_s)
+        PathResolver.path_for(agent)
       end
 
       def terminal_key_bytes(key)

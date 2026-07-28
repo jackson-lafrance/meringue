@@ -15,6 +15,11 @@ module Meringue
       DEFAULT_EVENT_TIMEOUT = 120
       DEFAULT_SHUTDOWN_TIMEOUT = 2
       MAX_STDERR_CHARS = 20_000
+      # How long a takeover waits for another instance's in-flight turn to
+      # settle before reporting an actionable conflict.
+      DEFAULT_TAKEOVER_SETTLE_TIMEOUT = 5.0
+      TAKEOVER_POLL_INTERVAL = 0.25
+      TAKEOVER_EXIT_TIMEOUT = 5.0
 
       MODE_ALIASES = {
         "normal" => "normal",
@@ -42,7 +47,11 @@ module Meringue
       def initialize(command: DEFAULT_COMMAND, env: {}, extra_args: [], session_dir: nil,
                      command_timeout: DEFAULT_COMMAND_TIMEOUT,
                      event_timeout: DEFAULT_EVENT_TIMEOUT,
-                     shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT)
+                     shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
+                     transport_ownership: nil,
+                     takeover_settle_timeout: DEFAULT_TAKEOVER_SETTLE_TIMEOUT)
+        @transport_ownership = transport_ownership || TransportOwnership.new
+        @takeover_settle_timeout = Float(takeover_settle_timeout)
         @command = command
         @env = env.transform_keys(&:to_s).transform_values(&:to_s)
         @extra_args = extra_args.map(&:to_s)
@@ -65,6 +74,7 @@ module Meringue
         state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
         session_ref = build_session_ref(process, state, kind: kind, cwd: expanded_cwd,
                                                         session_name: session_name)
+        claim_transport(session_ref, note: "spawned")
 
         return session_ref unless present?(prompt)
 
@@ -81,19 +91,26 @@ module Meringue
         normalized_mode = normalize_mode!(mode)
         message = prompt.to_s
         current_ref = session_ref
+        recovery_metadata = {}
         process = process_for(current_ref, required: false)
         unless process
-          if unmanaged_process_alive?(current_ref)
-            raise SessionTransportUnavailableError,
-                  "Pi is still running, but this Meringue instance no longer owns its RPC transport; wait for it to settle before continuing"
-          end
-          if normalized_mode != "normal"
+          # Another Meringue instance (or a previous run of this one) may hold
+          # the pipes. Take the transport over instead of failing forever, then
+          # continue on the resumed session.
+          takeover = take_over_transport(current_ref)
+          if normalized_mode != "normal" && !takeover.fetch("resumable", false)
             raise InvalidModeError,
                   "Pi session is not active; resume it with mode: \"normal\" before using #{normalized_mode.inspect}"
           end
 
+          # A resumed session starts settled, so an urgent steer/follow-up has
+          # nothing to interrupt and is delivered as a normal continuation.
+          requested_mode = normalized_mode
+          normalized_mode = "normal"
           current_ref = attach_session(current_ref)
           process = process_for(current_ref)
+          recovery_metadata = takeover_metadata(takeover)
+          recovery_metadata["prompt_mode_downgraded_from"] = requested_mode if requested_mode != normalized_mode
         end
         current_ref = get_state(current_ref)
 
@@ -112,11 +129,29 @@ module Meringue
                   end
 
         rpc_data(process.request(command, timeout: command_timeout), allow_nil_data: true)
-        get_state(current_ref)
+        prompted_ref = get_state(current_ref)
+        # get_state rebuilds metadata from the live process, so recovery details
+        # are re-applied here to stay visible in state and logs.
+        return prompted_ref if recovery_metadata.empty?
+
+        prompted_ref.merge("metadata" => metadata_with(prompted_ref, recovery_metadata))
       end
 
       def abort_session(session_ref)
-        process = process_for(session_ref)
+        process = process_for(session_ref, required: false)
+        unless process
+          if unmanaged_process_alive?(session_ref)
+            owner_pid = transport_owner_pid(session_ref)
+            owner = owner_pid ? "Meringue instance #{owner_pid}" : "another Meringue instance"
+            raise SessionTransportUnavailableError,
+                  "This Pi session's turn is owned by #{owner}, so it cannot be cancelled from here. " \
+                  "Cancel it in that window, or prompt this worker to take the session over once its turn settles."
+          end
+
+          raise ProcessNotFoundError,
+                "No live Pi RPC process for pid #{(session_ref["pid"] || session_ref[:pid]).inspect}"
+        end
+
         rpc_data(process.request({ "type" => "abort" }, timeout: command_timeout), allow_nil_data: true)
         get_state(session_ref)
       end
@@ -132,6 +167,7 @@ module Meringue
 
         process.terminate(timeout: shutdown_timeout)
         unregister_process(process)
+        release_transport(session_ref, pid: process.pid)
 
         session_ref.merge(
           "pid" => process.pid,
@@ -166,7 +202,8 @@ module Meringue
             "metadata" => metadata_with(
               session_ref,
               "transport_available" => false,
-              "transport_note" => "The saved Pi process is alive, but this Meringue instance does not own its RPC pipes."
+              "transport_owner_pid" => transport_owner_pid(session_ref),
+              "transport_note" => unowned_transport_note(session_ref)
             )
           )
         end
@@ -233,7 +270,7 @@ module Meringue
         end
 
         persisted_pid = session_ref["pid"] || session_ref[:pid]
-        if process_alive?(persisted_pid)
+        if live_harness_process?(persisted_pid, session_ref)
           raise UnmanagedProcessError,
                 "Refusing to attach Pi session while its previous process #{persisted_pid} is still running"
         end
@@ -250,7 +287,7 @@ module Meringue
         state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
         resumed_ref = build_session_ref(process, state, kind: metadata_value(session_ref, "kind"), cwd: expanded_cwd,
                                                         session_name: session_name)
-        resumed_ref.merge(
+        attached_ref = resumed_ref.merge(
           "metadata" => metadata_with(
             session_ref,
             resumed_ref.fetch("metadata", {}).merge(
@@ -260,6 +297,8 @@ module Meringue
             )
           )
         )
+        claim_transport(attached_ref, note: "resumed")
+        attached_ref
       rescue StandardError
         if process
           unregister_process(process)
@@ -298,6 +337,211 @@ module Meringue
       end
 
       private
+
+      attr_reader :transport_ownership, :takeover_settle_timeout
+
+      # Key that identifies one durable harness session across Meringue
+      # instances. The session id is stable across resumes of the same session.
+      def transport_key(session_ref)
+        session_id = session_ref["session_id"] || session_ref[:session_id]
+        return "pi-#{session_id}" if present?(session_id)
+
+        session_file = session_ref["session_file"] || session_ref[:session_file]
+        return "pi-#{File.basename(session_file.to_s, ".jsonl")}" if present?(session_file)
+
+        pid = session_ref["pid"] || session_ref[:pid]
+        present?(pid) ? "pi-pid-#{pid}" : nil
+      end
+
+      def claim_transport(session_ref, note: nil)
+        key = transport_key(session_ref)
+        return false unless key
+
+        transport_ownership.claim(
+          key,
+          pid: session_ref["pid"] || session_ref[:pid],
+          session_id: session_ref["session_id"] || session_ref[:session_id],
+          note: note
+        )
+      rescue StandardError
+        false
+      end
+
+      def release_transport(session_ref, pid: nil)
+        key = transport_key(session_ref)
+        return false unless key
+
+        transport_ownership.release(key, pid: pid)
+      rescue StandardError
+        false
+      end
+
+      # Coordinated single-writer takeover.
+      #
+      # Returns a description of what happened so the caller can record it. It
+      # only raises when another *live* Meringue instance is still mid-turn on
+      # the session, and that message tells the user what to do.
+      def take_over_transport(session_ref)
+        key = transport_key(session_ref)
+        return { "action" => "none", "resumable" => resumable_session?(session_ref) } unless key
+
+        transport_ownership.with_lease(key) do |lease|
+          pid = live_unowned_pid(session_ref, lease)
+          unless pid
+            lease.release!(pid: lease.harness_pid) if lease.harness_pid && !process_alive?(lease.harness_pid)
+            next { "action" => "none", "resumable" => resumable_session?(session_ref) }
+          end
+
+          owner_pid = owner_pid_for(pid, lease)
+          owner_alive = owner_pid && owner_pid != Process.pid && ProcessIdentity.alive?(owner_pid)
+          if owner_alive && !settled_for_takeover?(session_ref)
+            raise SessionTransportUnavailableError, busy_owner_message(owner_pid, pid)
+          end
+
+          terminate_unowned_process(pid)
+          lease.release!(pid: pid)
+          {
+            "action" => "reclaimed",
+            "reclaimed_pid" => pid,
+            "previous_owner_pid" => owner_pid,
+            "previous_owner_alive" => !!owner_alive,
+            "resumable" => true
+          }
+        end
+      rescue TransportOwnership::LockTimeout => e
+        raise SessionTransportUnavailableError,
+              "#{e.message}. Another Meringue instance is taking this session over right now; retry in a moment."
+      end
+
+      # Recovery details recorded on the worker so a takeover is auditable in
+      # state and in the focused workspace.
+      def takeover_metadata(takeover)
+        return {} unless takeover.is_a?(Hash) && takeover.fetch("action", nil) == "reclaimed"
+
+        {
+          "transport_available" => true,
+          "transport_reclaimed_at" => Time.now.utc.iso8601,
+          "transport_reclaimed_pid" => takeover["reclaimed_pid"],
+          "transport_previous_owner_pid" => takeover["previous_owner_pid"],
+          "transport_note" => "Meringue instance #{Process.pid} took this Pi session over from " \
+                              "#{takeover["previous_owner_pid"] || "a previous owner"} and resumed it from its session file."
+        }.compact
+      end
+
+      # The lock record is more current than a persisted session ref, so it wins
+      # when it names a live harness process for this session.
+      def live_unowned_pid(session_ref, lease)
+        candidates = [lease.harness_pid, session_ref["pid"] || session_ref[:pid]].compact.uniq
+        candidates.find do |candidate|
+          next false if process_for({ "pid" => candidate }, required: false)
+
+          live_harness_process?(candidate, session_ref)
+        end
+      end
+
+      def owner_pid_for(pid, lease)
+        recorded = lease.recorded_owner_pid if lease.harness_pid == pid
+        return recorded if recorded
+
+        description = ProcessIdentity.describe(pid)
+        parent = description && description.fetch("ppid", nil)
+        parent && parent > 1 ? parent : nil
+      end
+
+      # A pid alone can belong to an unrelated process after reuse. Only a live
+      # process that still looks like our configured Pi command is treated as a
+      # harness transport, and only such a process is ever signaled.
+      def live_harness_process?(pid, session_ref)
+        return false unless process_alive?(pid)
+
+        ProcessIdentity.matches?(
+          pid,
+          command: Array(command).first,
+          started_at: metadata_value(session_ref, "started_at")
+        )
+      end
+
+      # Waits briefly for another instance's in-flight turn to finish. Pi appends
+      # completed assistant messages to the session file, so settling is visible
+      # without owning the transport.
+      def settled_for_takeover?(session_ref)
+        deadline = monotonic_time + takeover_settle_timeout
+        loop do
+          return true if resumable_session?(session_ref)
+          return false if monotonic_time >= deadline
+
+          sleep TAKEOVER_POLL_INTERVAL
+        end
+      end
+
+      def resumable_session?(session_ref)
+        session_file_summary(session_ref).fetch("completed", false)
+      rescue StandardError
+        false
+      end
+
+      def terminate_unowned_process(pid)
+        signal_unowned_process("TERM", pid)
+        return true unless wait_for_process_exit(pid, TAKEOVER_EXIT_TIMEOUT)
+
+        signal_unowned_process("KILL", pid)
+        wait_for_process_exit(pid, TAKEOVER_EXIT_TIMEOUT)
+        !process_alive?(pid)
+      end
+
+      def signal_unowned_process(signal, pid)
+        Process.kill(signal, Integer(pid))
+        true
+      rescue Errno::ESRCH, ArgumentError, TypeError
+        false
+      rescue Errno::EPERM
+        raise SessionTransportUnavailableError,
+              "Pi process #{pid} belongs to another user, so this Meringue instance cannot take its session over. " \
+              "Stop that process, or continue this issue with a new worker."
+      end
+
+      # Returns true when the process is still alive after the timeout.
+      def wait_for_process_exit(pid, timeout)
+        deadline = monotonic_time + timeout
+        while process_alive?(pid)
+          return true if monotonic_time >= deadline
+
+          sleep TAKEOVER_POLL_INTERVAL
+        end
+        false
+      end
+
+      def busy_owner_message(owner_pid, pid)
+        "Meringue instance #{owner_pid} owns this Pi session (process #{pid}) and is still mid-turn. " \
+          "Prompting will take it over automatically once that turn settles: retry in a moment, " \
+          "or quit instance #{owner_pid} to hand the session over now."
+      end
+
+      def transport_owner_pid(session_ref)
+        key = transport_key(session_ref)
+        return nil unless key
+
+        record = transport_ownership.record_for(key)
+        owner = record["owner_pid"]
+        owner && Integer(owner) != Process.pid ? Integer(owner) : nil
+      rescue StandardError
+        nil
+      end
+
+      def unowned_transport_note(session_ref)
+        owner_pid = transport_owner_pid(session_ref)
+        if owner_pid && ProcessIdentity.alive?(owner_pid)
+          "The saved Pi process is alive and Meringue instance #{owner_pid} owns its RPC pipes. " \
+            "Showing persisted history; prompting takes the session over once its current turn settles."
+        else
+          "The saved Pi process is alive but no Meringue instance owns its RPC pipes. " \
+            "Showing persisted history; prompting reclaims the session automatically."
+        end
+      end
+
+      def monotonic_time
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
 
       def build_argv(session_name:, system_prompt:, session: nil)
         argv = Array(command).map(&:to_s) + ["--mode", "rpc"]
