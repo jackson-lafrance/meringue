@@ -651,6 +651,9 @@ module Meringue
         end
 
         result = session_opener.open(agent)
+        # Opening a session is a transient UI action: only failures are worth a log entry.
+        return if open_succeeded?(result)
+
         append_jump_response(result.fetch("message", "Could not open agent #{agent_id}."))
       rescue StandardError => e
         append_jump_response("Could not open agent #{agent_id}: #{e.class}: #{e.message}")
@@ -670,12 +673,19 @@ module Meringue
         end
 
         result = pull_request_opener.open(pr_url)
-        opened = result.fetch("status", nil) == "opened" || !%w[failed rejected].include?(result.fetch("status", nil).to_s)
-        append_jump_response(result.fetch("message", "Could not open pull request for #{agent_id}.")) if opened || !silent_fail
-        opened
+        # Opening a PR is a transient UI action: only failures are worth a log entry.
+        return true if open_succeeded?(result)
+
+        append_jump_response(result.fetch("message", "Could not open pull request for #{agent_id}.")) unless silent_fail
+        false
       rescue StandardError => e
         append_jump_response("Could not open pull request for #{agent_id}: #{e.message}") unless silent_fail
         false
+      end
+
+      def open_succeeded?(result)
+        status = result.is_a?(Hash) ? result.fetch("status", nil).to_s : ""
+        !%w[failed rejected].include?(status)
       end
 
       def pr_record_for_id(state, id)
@@ -1215,9 +1225,10 @@ module Meringue
       def log_sync_after_start?(timestamp)
         return false if timestamp.to_s.empty?
 
-        Time.iso8601(timestamp.to_s) >= @started_at
-      rescue ArgumentError, TypeError
-        false
+        parsed = Timestamps.parse(timestamp)
+        return false unless parsed
+
+        parsed >= @started_at
       end
 
       def worker_completed_text_from_agent(agent, issue = nil)
