@@ -57,7 +57,7 @@ module Meringue
 
         def hint_line(state)
           workspace = workspace_state(state)
-          leader = workspace.fetch("leader_hint", "ctrl-space: t view, e editor, b PR")
+          leader = workspace.fetch("leader_hint", "ctrl-space: t view, f filter, p Pi, e editor, b PR, q tree")
           if workspace.fetch("leader_pending", false)
             hint_segments("command pending", leader)
           elsif workspace.fetch("view", "agent") == "terminal"

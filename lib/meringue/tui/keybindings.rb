@@ -37,6 +37,7 @@ module Meringue
         "workspace_leader" => ["ctrl-space"],
         "workspace_switch_view" => ["t"],
         "workspace_cycle_filter" => ["f"],
+        "workspace_open_pi_session" => ["p"],
         "workspace_open_editor" => ["e"],
         "workspace_open_pull_request" => ["b"],
         "workspace_close" => ["q"]
@@ -76,6 +77,7 @@ module Meringue
         "workspace_leader" => "Focused workspace command leader",
         "workspace_switch_view" => "After workspace leader: switch worker / terminal",
         "workspace_cycle_filter" => "After workspace leader: cycle transcript filter",
+        "workspace_open_pi_session" => "After workspace leader: open external Pi session",
         "workspace_open_editor" => "After workspace leader: open configured editor",
         "workspace_open_pull_request" => "After workspace leader: open delivery pull request",
         "workspace_close" => "After workspace leader: return to AgentTree"

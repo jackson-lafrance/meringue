@@ -54,7 +54,7 @@ Required behavior:
 - let kernel reconciliation decide whether a harness session is resumable, blocked, or terminally errored;
 - command launch failures must not close the dashboard.
 
-The terminal/editor adapters should return structured results rather than raising through the render/input loop. The existing URL opener follows the same pattern (`opened`, `rejected`, or `failed`).
+The terminal/editor adapters should return structured results rather than raising through the render/input loop. The existing URL and external harness-session openers follow the same pattern (`opened`, `rejected`, or `failed`). The focused Pi-session action must reuse that opener rather than attaching to or taking ownership of the kernel-managed RPC process.
 
 ## Manual integration verification
 
@@ -68,3 +68,4 @@ Repository policy forbids automated test files, so integration should be checked
 6. Run `/recount` and confirm the durable selected worker follows its new ID.
 7. Render a Pi session containing repeated assistant messages, streaming deltas, reasoning, tool calls/results, direct bash output, failures, and lifecycle events. Confirm all transcript entries—not only the compact completion log—remain visible and scrollable while live updates continue; cycle every transcript filter and verify category colors remain distinct.
 8. Run a colorized zsh child process and confirm SGR colors survive the embedded screen model. Type quickly in terminal view and confirm PTY echo remains responsive, the initial prompt appears in the viewport, ordinary keys are forwarded, and leader + `q` returns to the AgentTree while both worker and terminal continue running.
+9. Press leader + `p` from each focused subview and confirm the external launcher receives the selected Pi worker record without closing the native view, read handle, managed worker, or worktree PTY. Repeat with a missing/malformed session file, a non-Pi worker, and a failing launcher; confirm each error is shown in place and no agent state or process ownership changes.

@@ -52,6 +52,7 @@ module Meringue
       WORKSPACE_COMMAND_ACTIONS = %w[
         workspace_switch_view
         workspace_cycle_filter
+        workspace_open_pi_session
         workspace_open_editor
         workspace_open_pull_request
         workspace_close
@@ -701,6 +702,8 @@ module Meringue
           switch_agent_workspace_view(state)
         when "workspace_cycle_filter"
           cycle_agent_workspace_filter
+        when "workspace_open_pi_session"
+          open_agent_workspace_pi_session(state)
         when "workspace_open_editor"
           open_agent_workspace_editor(state)
         when "workspace_open_pull_request"
@@ -728,6 +731,7 @@ module Meringue
       def workspace_leader_help
         "#{workspace_leader_label}: #{workspace_command_label("workspace_switch_view")} view, " \
           "#{workspace_command_label("workspace_cycle_filter")} filter, " \
+          "#{workspace_command_label("workspace_open_pi_session")} Pi, " \
           "#{workspace_command_label("workspace_open_editor")} editor, " \
           "#{workspace_command_label("workspace_open_pull_request")} PR, " \
           "#{workspace_command_label("workspace_close")} tree"
@@ -828,6 +832,31 @@ module Meringue
         apply_workspace_controller_result(result)
       rescue StandardError => e
         @agent_workspace_error = "Terminal input failed: #{e.message}"
+      end
+
+      # Reuses the established detached terminal launcher. It validates the
+      # saved Pi session and starts an external UI without attaching to,
+      # replacing, signaling, or taking ownership of Meringue's RPC process.
+      def open_agent_workspace_pi_session(state)
+        agent = agent_workspace_agent(state)
+        return @agent_workspace_error = "Selected agent is no longer available." unless agent
+        unless agent.fetch("harness", nil).to_s == "pi"
+          return @agent_workspace_error = "The selected worker does not have a Pi session to open."
+        end
+        unless session_opener&.respond_to?(:open)
+          return @agent_workspace_error = "External Pi session opening is not configured."
+        end
+
+        result = session_opener.open(agent)
+        unless result.is_a?(Hash)
+          @agent_workspace_notice = nil
+          @agent_workspace_error = "Could not open the external Pi session."
+          return
+        end
+        apply_workspace_controller_result(result)
+      rescue StandardError => e
+        @agent_workspace_notice = nil
+        @agent_workspace_error = "Could not open the external Pi session: #{e.message}"
       end
 
       def open_agent_workspace_editor(state)
@@ -975,7 +1004,7 @@ module Meringue
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
-          Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch views, #{keys_for("workspace_cycle_filter")} to filter the transcript, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to return while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the full Pi transcript. Use dashboard chat for normal head-agent orchestration.
+          Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch views, #{keys_for("workspace_cycle_filter")} to filter the transcript, #{keys_for("workspace_open_pi_session")} to open the saved Pi session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to return while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the full Pi transcript. Use dashboard chat for normal head-agent orchestration.
         TEXT
       end
 
