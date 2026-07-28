@@ -176,12 +176,16 @@ module Meringue
 
         def refresh_snapshots
           loop do
-            handle, generation = @mutex.synchronize do
+            # Return an explicit sentinel from the synchronize block. `break`
+            # here would exit Mutex#synchronize, not this outer loop, leaving a
+            # closed session in a hot nil-handle retry loop.
+            current = @mutex.synchronize do
               @condition.wait(@mutex) while @paused && !@closed
-              break if @closed
-
-              [@handle, @handle_generation]
+              @closed ? nil : [@handle, @handle_generation]
             end
+            break unless current
+
+            handle, generation = current
             begin
               fresh = handle.snapshot
               @mutex.synchronize do
@@ -199,11 +203,11 @@ module Meringue
               end
             end
 
-            @mutex.synchronize do
-              break if @closed
-
-              @condition.wait(@mutex, SNAPSHOT_REFRESH_INTERVAL) unless @paused
+            closed = @mutex.synchronize do
+              @condition.wait(@mutex, SNAPSHOT_REFRESH_INTERVAL) unless @closed || @paused
+              @closed
             end
+            break if closed
           end
         end
 

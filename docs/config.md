@@ -79,7 +79,7 @@ workspace_open_pull_request = ["b"]
 workspace_close = ["q"]
 ```
 
-Suffixes are interpreted only after the leader while a focused workspace is active. Outside the workspace, the global `open_delivery_pr = ["ctrl-b"]` action is unchanged. In terminal view, bare `Ctrl-T`, `Ctrl-E`, and `Ctrl-B` are forwarded to the PTY like other ordinary terminal input.
+Suffixes are interpreted only after the leader while a focused workspace is active. `workspace_close` (leader + `q` by default) is the only return action; the global `cancel_navigation = ["escape"]` binding applies only to dashboard jump mode and cannot close the focused workspace. Outside the workspace, the global `open_delivery_pr = ["ctrl-b"]` action is unchanged. In terminal view, bare `Ctrl-T`, `Ctrl-E`, and `Ctrl-B` are forwarded to the PTY like other ordinary terminal input.
 
 Configure the shell and editor under `[workspace]`:
 

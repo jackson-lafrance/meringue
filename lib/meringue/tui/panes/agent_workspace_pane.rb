@@ -64,7 +64,7 @@ module Meringue
             hint_segments(leader, "mouse wheel scroll", "other keys → terminal")
           else
             filter = workspace.fetch("filter", "all")
-            hint_segments("Esc tree", leader, "filter #{filter}", "Enter direct follow-up", "PageUp/PageDown or wheel scroll", "Shift-Enter newline")
+            hint_segments(leader, "filter #{filter}", "Enter direct follow-up", "PageUp/PageDown or wheel scroll", "Shift-Enter newline")
           end
         end
 
@@ -201,12 +201,11 @@ module Meringue
 
           entries.flat_map.with_index do |entry, index|
             role = entry.fetch("role", "agent").to_s
-            label, label_style = transcript_label(role, agent.fetch("id"))
-            body_style = transcript_style(role, agent.fetch("id"))
+            label, label_style = transcript_label(role, agent.fetch("id"), entry.fetch("timestamp", nil))
             text = entry.fetch("text", entry.fetch("message", "")).to_s
             rows = wrap_text(text, width)
             rendered = [[[label, label_style]]]
-            rendered.concat(rows.map { |row| [["  #{row}", body_style]] })
+            rendered.concat(rows.map { |row| [["  #{row}", Style::TEXT]] })
             rendered << [["", Style::DIM]] unless index == entries.length - 1
             rendered
           end
@@ -316,29 +315,6 @@ module Meringue
           filter == "all" || filter == category
         end
 
-        def transcript_style(role, agent_id)
-          case role
-          when "thinking"
-            Style::WORKSPACE_REASONING
-          when "tool_call"
-            Style::WORKSPACE_TOOL_CALL
-          when "tool_result"
-            Style::WORKSPACE_TOOL_RESULT
-          when "final"
-            Style::WORKSPACE_FINAL
-          when "error"
-            Style::ERROR
-          when "you"
-            Style::USER
-          when "agent"
-            Style::WORKSPACE_OUTPUT
-          when "lifecycle", "system"
-            Style::MUTED
-          else
-            Style.agent_body_style(agent_id)
-          end
-        end
-
         def transcript_entry(role, text, source, timestamp: nil, part: nil)
           timestamp ||= source["timestamp"]
           identity = timestamp || source["id"] || source["tool_call_id"] || source["sequence"]
@@ -368,7 +344,7 @@ module Meringue
 
             source_type = entry.fetch("source_type", "worker").to_s
             role = source_type == "user" ? "you" : "agent"
-            { "role" => role, "text" => entry.fetch("message", "").to_s }
+            { "role" => role, "text" => entry.fetch("message", "").to_s, "timestamp" => entry.fetch("timestamp", nil) }.compact
           end
         end
 
@@ -413,27 +389,45 @@ module Meringue
           end
         end
 
-        def transcript_label(role, agent_id)
-          case role
-          when "you", "user"
-            ["● you", Style::USER]
-          when "system"
-            ["▪ meringue", Style::ACCENT_BOLD]
-          when "lifecycle"
-            ["▪ lifecycle", Style::MUTED]
-          when "thinking"
-            ["◌ reasoning", Style::WORKSPACE_REASONING]
-          when "error"
-            ["! error", Style::ERROR]
-          when "tool_call"
-            ["◇ tool call", Style::WORKSPACE_TOOL_CALL]
-          when "tool_result"
-            ["◆ tool result", Style::WORKSPACE_TOOL_RESULT]
-          when "final"
-            ["✓ final #{agent_id}", Style::WORKSPACE_FINAL]
-          else
-            ["✦ #{agent_id}", Style.agent_style(agent_id, kind: "worker")]
-          end
+        def transcript_label(role, agent_id, timestamp = nil)
+          label, style = case role
+                         when "you", "user"
+                           ["● you", Style::USER]
+                         when "system"
+                           ["▪ meringue", Style::ACCENT_BOLD]
+                         when "lifecycle"
+                           ["▪ lifecycle", Style::MUTED]
+                         when "thinking"
+                           ["◌ reasoning", Style::WORKSPACE_REASONING]
+                         when "error"
+                           ["! error", Style::ERROR]
+                         when "tool_call"
+                           ["◇ tool call", Style::WORKSPACE_TOOL_CALL]
+                         when "tool_result"
+                           ["◆ tool result", Style::WORKSPACE_TOOL_RESULT]
+                         when "final"
+                           ["✓ final #{agent_id}", Style::WORKSPACE_FINAL]
+                         else
+                           ["✦ #{agent_id}", Style::WORKSPACE_OUTPUT]
+                         end
+          retained_timestamp = transcript_timestamp(timestamp)
+          label = "#{label} · #{retained_timestamp}" if retained_timestamp
+          [label, style]
+        end
+
+        def transcript_timestamp(value)
+          return nil if value.nil? || value.to_s.empty?
+
+          time = if value.is_a?(Numeric)
+                   seconds = value.to_f
+                   seconds /= 1000 if seconds > 10_000_000_000
+                   Time.at(seconds).utc
+                 else
+                   Time.parse(value.to_s)
+                 end
+          time.strftime("%H:%M:%S")
+        rescue ArgumentError, RangeError, TypeError
+          value.to_s
         end
 
         def terminal_lines(workspace, width:)

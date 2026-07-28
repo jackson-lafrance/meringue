@@ -46,7 +46,7 @@ module Meringue
       ACTION_LABELS = {
         "quit" => "Quit",
         "clear_or_quit" => "Clear input / quit empty prompt",
-        "cancel_navigation" => "Cancel navigation",
+        "cancel_navigation" => "Cancel dashboard navigation",
         "open_delivery_pr" => "Open selected worker delivery PR",
         "focus_next" => "Focus next pane",
         "focus_previous" => "Focus previous pane",
