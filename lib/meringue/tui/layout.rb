@@ -48,7 +48,8 @@ module Meringue
           chat_pane.log_lines(state, width: metrics.fetch(:main_width) - 4),
           active: scroll_pane_active?(state, "logs"),
           overflow: :tail,
-          scroll_offset: pane_scroll_offset(state, "logs")
+          scroll_offset: pane_scroll_offset(state, "logs"),
+          selection: pane_selection(state, "logs")
         )
         if metrics.fetch(:suggestion_height).positive?
           draw_pane(
@@ -93,6 +94,57 @@ module Meringue
         end&.first
       end
 
+      # Logs selection points are content coordinates (index into the wrapped log
+      # lines plus a column) so a highlight follows the content while scrolling.
+      # Coordinates are clamped into the logs text area, which is what keeps a
+      # drag started in the logs pane from bleeding into the agent tree.
+      def logs_text_position(state, width:, height:, x:, y:)
+        view = logs_text_view(state, width: width, height: height)
+        rows = view ? view.fetch(:rows) : []
+        return nil if rows.empty?
+
+        row_index = (y.to_i - rows.first.fetch(:y)).clamp(0, rows.length - 1)
+        row = rows.fetch(row_index)
+        column = (x.to_i - view.fetch(:x)).clamp(0, row.fetch(:text).length)
+        Selection.point(row.fetch(:line_index), column)
+      end
+
+      def logs_selection_text(state, width:, height:, selection:)
+        view = logs_text_view(state, width: width, height: height)
+        return "" unless view
+
+        texts = {}
+        view.fetch(:lines).each_with_index { |line, index| texts[index] = line_plain_text(line) }
+        Selection.text_for(selection, texts)
+      end
+
+      # Composer selection is stored as character offsets into the input buffer,
+      # so a click maps to one index that the chat pane owns the wrapping for.
+      def composer_text_index(state, width:, height:, x:, y:)
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        content_x = metrics.fetch(:composer_x) + 2
+        content_y = metrics.fetch(:composer_y) + 1
+        content_width = metrics.fetch(:composer_content_width)
+        content_height = metrics.fetch(:composer_height) - 2
+        return nil if content_width <= 0 || content_height <= 0
+
+        row_count = chat_pane.composer_row_spans(state, width: content_width).length
+        return 0 if row_count.zero?
+
+        window = tail_window(row_count, content_height, 0)
+        visible_rows = window.fetch(:finish_index) - window.fetch(:start_index)
+        return 0 if visible_rows <= 0
+
+        row_offset = (y.to_i - (content_y + window.fetch(:row_offset))).clamp(0, visible_rows - 1)
+        chat_pane.composer_char_index_at(
+          state,
+          row: window.fetch(:start_index) + row_offset,
+          # The composer prints a two column prompt prefix before buffer text.
+          column: x.to_i - content_x - 2,
+          width: content_width
+        )
+      end
+
       def agent_tree_worker_at(state, width:, height:, x:, y:)
         metrics = layout_metrics([width.to_i, MIN_WIDTH].max, [height.to_i, MIN_HEIGHT].max, state)
         return nil unless point_in_bounds?(x.to_i, y.to_i, pane_bounds(metrics, :sidebar_x, :top_y, :sidebar_width, :top_height))
@@ -127,6 +179,48 @@ module Meringue
       private
 
       attr_reader :agent_tree_pane, :chat_pane
+
+      def bounded_width(width)
+        [width.to_i, MIN_WIDTH].max
+      end
+
+      def bounded_height(height)
+        [height.to_i, MIN_HEIGHT].max
+      end
+
+      def logs_text_view(state, width:, height:)
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        content_x = metrics.fetch(:main_x) + 2
+        content_width = metrics.fetch(:main_width) - 4
+        content_height = metrics.fetch(:logs_height) - 2
+        return nil if content_width <= 0 || content_height <= 0
+
+        lines = chat_pane.log_lines(state, width: content_width)
+        window = tail_window(lines.length, content_height, pane_scroll_offset(state, "logs"))
+        first_row_y = metrics.fetch(:top_y) + 1 + window.fetch(:row_offset)
+        rows = (window.fetch(:start_index)...window.fetch(:finish_index)).each_with_index.map do |line_index, offset|
+          {
+            line_index: line_index,
+            y: first_row_y + offset,
+            text: line_plain_text(lines[line_index])
+          }
+        end
+
+        { x: content_x, width: content_width, rows: rows, lines: lines }
+      end
+
+      def pane_selection(state, pane)
+        selection = state.fetch("_selection", {}) || {}
+        return nil unless selection.fetch("pane", nil).to_s == pane.to_s
+
+        selection
+      end
+
+      def line_plain_text(line)
+        return line.to_s unless line.is_a?(Array)
+
+        line.map { |segment| segment.is_a?(Array) ? segment.fetch(0, "").to_s : segment.to_s }.join
+      end
 
       def layout_metrics(width, height, state)
         top_y = 0
@@ -277,7 +371,7 @@ module Meringue
         end
       end
 
-      def draw_pane(canvas, x, y, width, height, title, lines, active: false, overflow: :head, scroll_offset: 0)
+      def draw_pane(canvas, x, y, width, height, title, lines, active: false, overflow: :head, scroll_offset: 0, selection: nil)
         border_style = active ? Style::BORDER_ACTIVE : Style::BORDER
         canvas.draw_box(x, y, width, height, title: title, style: border_style, title_style: Style::PANEL_TITLE)
         content_width = width - 4
@@ -286,7 +380,7 @@ module Meringue
 
         case overflow
         when :tail
-          draw_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset)
+          draw_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset, selection: selection)
         when :agent_tree
           draw_scroll_content(canvas, x, y, content_width, content_height, lines, scroll_offset: scroll_offset)
         else
@@ -314,27 +408,47 @@ module Meringue
         canvas.write(x + 2, y + height - 2, overflow.ljust(content_width), max_width: content_width, style: Style::DIM)
       end
 
-      def draw_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: 0)
-        has_overflow = lines.length > content_height
-        unless has_overflow
-          lines.each_with_index do |line, index|
-            draw_line(canvas, x + 2, y + 1 + index, content_width, line)
-          end
-          return
+      def draw_tail_content(canvas, x, y, content_width, content_height, lines, scroll_offset: 0, selection: nil)
+        window = tail_window(lines.length, content_height, scroll_offset)
+        label = window.fetch(:label)
+        canvas.write(x + 2, y + 1, label.ljust(content_width), max_width: content_width, style: Style::DIM) if label
+
+        first_row_y = y + 1 + window.fetch(:row_offset)
+        (window.fetch(:start_index)...window.fetch(:finish_index)).each_with_index do |line_index, offset|
+          row_y = first_row_y + offset
+          line = lines[line_index]
+          draw_line(canvas, x + 2, row_y, content_width, line)
+          highlight_selection(canvas, x + 2, row_y, content_width, line, line_index, selection)
+        end
+      end
+
+      # Shared visible window for tail panes so rendering, scroll bounds, and
+      # selection hit-testing always agree on which content line is on which row.
+      def tail_window(line_count, content_height, scroll_offset)
+        line_count = line_count.to_i
+        content_height = content_height.to_i
+        if line_count <= content_height
+          return { start_index: 0, finish_index: line_count, row_offset: 0, label: nil }
         end
 
         visible_capacity = [content_height - 1, 0].max
-        max_offset = tail_scroll_max(lines.length, content_height)
-        offset = scroll_offset.to_i.clamp(0, max_offset)
-        finish_index = lines.length - offset
+        offset = scroll_offset.to_i.clamp(0, tail_scroll_max(line_count, content_height))
+        finish_index = line_count - offset
         start_index = [finish_index - visible_capacity, 0].max
-        visible_lines = lines[start_index...finish_index] || []
-        hidden_count = start_index
-        label = offset.positive? ? "… #{hidden_count} earlier · #{offset} later" : "… #{hidden_count} earlier"
-        canvas.write(x + 2, y + 1, label.ljust(content_width), max_width: content_width, style: Style::DIM)
-        visible_lines.each_with_index do |line, index|
-          draw_line(canvas, x + 2, y + 2 + index, content_width, line)
-        end
+        label = offset.positive? ? "… #{start_index} earlier · #{offset} later" : "… #{start_index} earlier"
+        { start_index: start_index, finish_index: finish_index, row_offset: 1, label: label }
+      end
+
+      # Selection only restyles cells that were already drawn for this pane, so a
+      # highlight cannot escape the pane and costs nothing extra to redraw.
+      def highlight_selection(canvas, x, y, content_width, line, line_index, selection)
+        return unless selection
+
+        text = line_plain_text(line)
+        columns = Selection.columns_for(selection, line_index, [text.length, content_width].min)
+        return unless columns
+
+        canvas.restyle(x + columns.first, y, columns.size, Style::SELECTION)
       end
 
       def scroll_max(line_count, content_height)

@@ -52,13 +52,50 @@ module Meringue
           input_buffer = chat.fetch("input_buffer", "").to_s
           input_cursor = chat.fetch("input_cursor", input_buffer.chars.length).to_i
 
-          wrapped_input_lines(input_buffer, input_cursor: input_cursor, width: width)
+          wrapped_input_lines(
+            input_buffer,
+            input_cursor: input_cursor,
+            width: width,
+            selection: chat.fetch("selection", nil)
+          )
+        end
+
+        # Visual rows of the composer as buffer character spans. Mouse selection
+        # uses this to map a click back to a character index without duplicating
+        # the wrapping rules used for rendering.
+        def composer_row_spans(state, width: nil)
+          input_buffer = chat_state(state).fetch("input_buffer", "").to_s
+          return [] if input_buffer.empty?
+
+          input_row_spans(input_buffer, composer_available_width(input_buffer, width))
+        end
+
+        def composer_char_index_at(state, row:, column:, width: nil)
+          chat = chat_state(state)
+          input_buffer = chat.fetch("input_buffer", "").to_s
+          return 0 if input_buffer.empty?
+
+          spans = composer_row_spans(state, width: width)
+          return 0 if spans.empty?
+
+          row_index = row.to_i.clamp(0, spans.length - 1)
+          span = spans.fetch(row_index)
+          cursor = chat.fetch("input_cursor", input_buffer.chars.length).to_i.clamp(0, input_buffer.chars.length)
+          cursor_row, cursor_column = composer_cursor_location(spans, cursor)
+          column = column.to_i
+          # The cursor marker occupies one visual cell, so clicks to its right
+          # land one column further along the row than the buffer index.
+          column -= 1 if cursor_row == row_index && column > cursor_column
+          span.fetch(:start) + column.clamp(0, span.fetch(:length))
         end
 
         def bottom_hint_line(state)
           chat = chat_state(state)
           pending_count = chat.fetch("pending_count", 0).to_i
-          prefix = compact_status_segments(state, pending_count)
+          prefix = selection_hint_segments(state)
+          status_segments = compact_status_segments(state, pending_count)
+          prefix += [["  ·  ", Style::DIM]] unless prefix.empty? || status_segments.empty?
+          prefix += status_segments
           open_questions = state.fetch("questions", []).count { |question| question["status"] == "open" }
           if open_questions.positive?
             prefix += [["  ·  ", Style::DIM]] unless prefix.empty?
@@ -490,7 +527,7 @@ module Meringue
           ]
         end
 
-        def wrapped_input_lines(input_buffer, input_cursor:, width: nil)
+        def wrapped_input_lines(input_buffer, input_cursor:, width: nil, selection: nil)
           if input_buffer.empty?
             return [[
               ["›", Style::ACCENT_BOLD],
@@ -498,34 +535,105 @@ module Meringue
             ]]
           end
 
-          cursor_marker = "\u0000"
           chars = input_buffer.chars
           cursor = input_cursor.to_i.clamp(0, chars.length)
-          chars.insert(cursor, cursor_marker)
-          available_width = width ? [width.to_i - 2, 1].max : [chars.length, 1].max
+          spans = input_row_spans(input_buffer, composer_available_width(input_buffer, width))
+          cursor_row, cursor_column = composer_cursor_location(spans, cursor)
+          selection_range = composer_selection_range(selection, chars.length)
 
-          rows = []
-          chars.join.split("\n", -1).each do |logical_line|
-            chunks = logical_line.empty? ? [""] : logical_line.chars.each_slice(available_width).map(&:join)
-            chunks.each do |chunk|
-              rows << input_line_segments(chunk, first_line: rows.empty?, cursor_marker: cursor_marker)
-            end
+          spans.each_with_index.map do |span, index|
+            input_line_segments(
+              chars,
+              span,
+              first_line: index.zero?,
+              cursor_column: index == cursor_row ? cursor_column : nil,
+              selection_range: selection_range
+            )
           end
-          rows
         end
 
-        def input_line_segments(chunk, first_line:, cursor_marker:)
-          prefix = first_line ? "› " : "  "
-          prefix_style = first_line ? Style::ACCENT_BOLD : Style::DIM
-          marker_index = chunk.index(cursor_marker)
-          return [[prefix, prefix_style], [chunk, Style::TEXT]] unless marker_index
+        def composer_available_width(input_buffer, width)
+          return [width.to_i - 2, 1].max if width
 
-          before = chunk[0...marker_index]
-          after = chunk[(marker_index + cursor_marker.length)..].to_s
-          segments = [[prefix, prefix_style]]
-          segments << [before, Style::TEXT] unless before.empty?
-          segments << ["_", Style::ACCENT_BOLD]
-          segments << [after, Style::TEXT] unless after.empty?
+          [input_buffer.to_s.chars.length, 1].max
+        end
+
+        # Wrapping is computed from the buffer itself (not from a buffer with the
+        # cursor marker spliced in) so visual rows map back to exact character
+        # indexes for mouse selection.
+        def input_row_spans(input_buffer, available_width)
+          spans = []
+          index = 0
+          input_buffer.to_s.split("\n", -1).each do |logical_line|
+            line_length = logical_line.chars.length
+            if line_length.zero?
+              spans << { start: index, length: 0 }
+            else
+              offset = 0
+              while offset < line_length
+                length = [available_width, line_length - offset].min
+                spans << { start: index + offset, length: length }
+                offset += length
+              end
+            end
+            index += line_length + 1
+          end
+          spans
+        end
+
+        def composer_cursor_location(spans, cursor)
+          spans.each_with_index do |span, index|
+            finish = span.fetch(:start) + span.fetch(:length)
+            return [index, cursor - span.fetch(:start)] if cursor < finish
+            next unless cursor == finish
+
+            next_span = spans[index + 1]
+            # A cursor sitting at the end of a wrapped row belongs at the start of
+            # the continuation row; a hard newline keeps it on the current row.
+            return [index, cursor - span.fetch(:start)] if next_span.nil? || next_span.fetch(:start) > cursor
+
+            return [index + 1, 0]
+          end
+
+          last_span = spans.last
+          [[spans.length - 1, 0].max, last_span ? last_span.fetch(:length) : 0]
+        end
+
+        def composer_selection_range(selection, buffer_length)
+          return nil unless selection.is_a?(Hash)
+
+          start_index = selection.fetch("start", 0).to_i.clamp(0, buffer_length)
+          finish_index = selection.fetch("end", 0).to_i.clamp(0, buffer_length)
+          return nil if finish_index <= start_index
+
+          (start_index...finish_index)
+        end
+
+        def input_line_segments(chars, span, first_line:, cursor_column:, selection_range:)
+          prefix = first_line ? "› " : "  "
+          segments = [[prefix, first_line ? Style::ACCENT_BOLD : Style::DIM]]
+          run = +""
+          run_style = nil
+
+          span.fetch(:length).times do |offset|
+            index = span.fetch(:start) + offset
+            if cursor_column == offset
+              segments << [run.dup, run_style] unless run.empty?
+              run.clear
+              segments << ["_", Style::ACCENT_BOLD]
+            end
+
+            style = selection_range&.include?(index) ? Style::SELECTION : Style::TEXT
+            if style != run_style
+              segments << [run.dup, run_style] unless run.empty?
+              run.clear
+              run_style = style
+            end
+            run << chars[index].to_s
+          end
+
+          segments << [run.dup, run_style] unless run.empty?
+          segments << ["_", Style::ACCENT_BOLD] if cursor_column && cursor_column >= span.fetch(:length)
           segments
         end
 
@@ -559,6 +667,15 @@ module Meringue
             end
           end
           chunks
+        end
+
+        def selection_hint_segments(state)
+          selection = state.fetch("_selection", {}) || {}
+          status = selection.fetch("status", "").to_s.strip
+          return [["⧉ #{status}", Style::SUCCESS]] unless status.empty?
+          return [] unless selection.fetch("active", false)
+
+          [["⧉ selection", Style::ACCENT], ["  Ctrl-C copies", Style::MUTED]]
         end
 
         def interaction_hint_segments

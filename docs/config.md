@@ -56,9 +56,13 @@ Supported action names:
 - `complete_suggestion`, `suggestion_previous`, `suggestion_next`
 - `cursor_left`, `cursor_right`, `cursor_up`, `cursor_down`, `cursor_home`, `cursor_end`, `cursor_word_left`, `cursor_word_right`
 - `delete_backward`, `delete_forward`, `delete_word_backward`, `delete_word_forward`
+- `copy_selection`, `cut_selection`, `paste_clipboard`
+- `select_left`, `select_right`, `select_up`, `select_down`, `select_home`, `select_end`, `select_word_left`, `select_word_right`
 - `agent_select_previous`, `agent_select_next`
 
-Common key names include `enter`, `shift-enter`, `tab`, `shift-tab`, `ctrl-tab`, `escape`, arrow keys (`up`, `down`, `left`, `right`), `home`, `end`, `page-up`, `page-down`, `backspace`, `delete`, `ctrl-a` through `ctrl-z`, `alt-left`, `alt-right`, `ctrl-left`, `ctrl-right`, `alt-backspace`, `ctrl-backspace`, `alt-delete`, `ctrl-delete`, `space`, and single printable characters like `j` or `p`. Advanced users can bind a raw terminal sequence with `raw:<sequence>`; literal `\\e` inside that string is converted to Escape.
+`copy_selection` defaults to `["ctrl-c", "alt-c"]`. `Ctrl-C` only copies while a selection is active, so it keeps clearing the input and quitting an empty prompt otherwise. Mouse drag selection in the logs pane and the composer is always on and is not configurable. See `docs/keybindings.md` for the selection and clipboard behavior.
+
+Common key names include `enter`, `shift-enter`, `tab`, `shift-tab`, `ctrl-tab`, `escape`, arrow keys (`up`, `down`, `left`, `right`), `shift-left`, `shift-right`, `shift-up`, `shift-down`, `shift-home`, `shift-end`, `shift-alt-left`, `shift-alt-right`, `shift-ctrl-left`, `shift-ctrl-right`, `home`, `end`, `page-up`, `page-down`, `backspace`, `delete`, `ctrl-a` through `ctrl-z`, `alt-c`, `alt-left`, `alt-right`, `ctrl-left`, `ctrl-right`, `alt-backspace`, `ctrl-backspace`, `alt-delete`, `ctrl-delete`, `space`, and single printable characters like `j` or `p`. Advanced users can bind a raw terminal sequence with `raw:<sequence>`; literal `\\e` inside that string is converted to Escape.
 
 Use `/keybind` in the TUI to show the active keybindings after config has been loaded.
 
