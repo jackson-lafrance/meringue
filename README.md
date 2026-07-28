@@ -154,7 +154,7 @@ Useful slash commands inside the TUI include:
 - `/issue create <project_id> "<title>" ["description"]` — create an issue manually.
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
 - `/prompt <agent_id> "<message>"` — follow up with an existing agent.
-- `/jump [agent_id]` — open a worker harness session; omit the id to navigate issues/workers and open PRs from jump mode.
+- `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
 - `/theme <name>` — persist a TUI colorscheme.
 - `/harness <pi|claude|antigravity>` — select the harness for future agents.
 - `/keybind` — show active TUI keybindings.
@@ -191,6 +191,8 @@ Default paths:
 The config supports TUI colorschemes, TUI keybinding overrides, default harness selection, role-specific head/worker harnesses, and provider command overrides. See `docs/config.md` for the full reference.
 
 The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state. Durable logs retain the newest 500 entries so lifecycle history cannot grow without bound; see [`docs/log-retention.md`](docs/log-retention.md) for the measured rationale, compatibility behavior, and benchmark.
+
+The dashboard chat remains the primary workflow: describe new goals naturally and let head agents route the work. When one issue needs sustained direction, iterative plan discussion, research, investigation, or closer transparency, press `a` or double-click its worker to open the optional focused workspace. It continues that worker's existing context and shows the complete available Pi transcript, with distinct role/type header colors and filters for normal output, final output, reasoning, and tools/results while message bodies stay in the normal foreground. Focused commands use a configurable leader so shell/editor bindings remain available: by default press `Ctrl-Space`, then `t` to switch views, `f` to cycle transcript filters, `p` to open the worker's saved Pi session with the existing external launcher, `e` to launch the editor, `b` to open the verified delivery PR, or `q` to return to the AgentTree without stopping the worker or terminal. See `docs/keybindings.md` for the full interaction model.
 
 ## Current architecture in one flow
 
