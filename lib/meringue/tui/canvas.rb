@@ -53,6 +53,21 @@ module Meringue
         end
       end
 
+      # Restyles already-drawn cells without touching their characters. Selection
+      # highlights use this so a drag never re-wraps or re-renders pane content.
+      def restyle(x, y, cell_count, style)
+        row = y.to_i
+        return if row.negative? || row >= height
+
+        start_column = [x.to_i, 0].max
+        finish_column = [x.to_i + cell_count.to_i, width].min
+        return if finish_column <= start_column
+
+        (start_column...finish_column).each do |column|
+          @styles[row][column] = style
+        end
+      end
+
       def draw_box(x, y, box_width, box_height, title: nil, style: Style::BORDER, title_style: Style::PANEL_TITLE)
         left = x.to_i
         top = y.to_i

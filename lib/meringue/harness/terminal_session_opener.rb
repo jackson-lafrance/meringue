@@ -60,7 +60,7 @@ module Meringue
         end
 
         result = open_alacritty(alacritty, cwd, command_argv)
-        return opened("Opened #{agent_id(agent)} in Alacritty.") if result.fetch("opened")
+        return opened if result.fetch("opened")
 
         failed("Could not open #{agent_id(agent)} in Alacritty: #{result.fetch("error")}")
       end
@@ -270,8 +270,9 @@ module Meringue
         !value.nil? && !value.to_s.empty?
       end
 
-      def opened(message)
-        { "status" => "opened", "message" => message }
+      # Successful opens are transient UI feedback, so they carry no user-visible message.
+      def opened
+        { "status" => "opened" }
       end
 
       def rejected(message)

@@ -19,7 +19,9 @@ module Meringue
       # Kitty/CSI-u uses \e[>1u / \e[<u; xterm modifyOtherKeys uses \e[>4;2m / \e[>4;0m.
       ENABLE_KEYBOARD_DISAMBIGUATION = "\e[>1u\e[>4;2m"
       DISABLE_KEYBOARD_DISAMBIGUATION = "\e[<u\e[>4;0m"
-      ENABLE_MOUSE = "\e[?1000h\e[?1006h"
+      # 1000 reports button press/release, 1002 adds motion reports while a
+      # button is held (native drag selection), 1006 is SGR extended coordinates.
+      ENABLE_MOUSE = "\e[?1000h\e[?1002h\e[?1006h"
       DISABLE_MOUSE = "\e[?1006l\e[?1003l\e[?1002l\e[?1000l"
       BRACKETED_PASTE_START = "\e[200~"
       BRACKETED_PASTE_END = "\e[201~"
@@ -118,7 +120,10 @@ module Meringue
               end
         return nil unless key
 
-        mouse_wheel_event?(key) ? coalesce_mouse_wheel_events(key) : key
+        return coalesce_mouse_wheel_events(key) if mouse_wheel_event?(key)
+        return coalesce_mouse_motion_events(key) if mouse_motion_event?(key)
+
+        key
       end
 
       private
@@ -182,22 +187,46 @@ module Meringue
         return nil unless match
 
         button = match[1].to_i
-        kind = case button
-               when 64
-                 "wheel_up"
-               when 65
-                 "wheel_down"
-               else
-                 "button"
-               end
         {
           "type" => "mouse",
           "button" => button,
           "x" => match[2].to_i,
           "y" => match[3].to_i,
           "pressed" => match[4] == "M",
-          "kind" => kind
+          "kind" => mouse_event_kind(button),
+          "shift" => (button & 4).positive?,
+          "alt" => (button & 8).positive?,
+          "ctrl" => (button & 16).positive?
         }
+      end
+
+      # SGR button bits: 0-1 button number, 4 shift, 8 meta, 16 ctrl,
+      # 32 motion, 64 wheel. Mask the modifier bits so Shift-drag and
+      # Ctrl-wheel keep reporting the same kind as an unmodified event.
+      def mouse_event_kind(button)
+        return (button & 1).zero? ? "wheel_up" : "wheel_down" if (button & 64).positive?
+        return "motion" if (button & 32).positive?
+
+        "button"
+      end
+
+      def mouse_motion_event?(key)
+        key.is_a?(Hash) && key.fetch("type", nil) == "mouse" && key.fetch("kind", nil) == "motion"
+      end
+
+      # A drag floods the input with motion reports. Only the newest position
+      # matters for selection, so collapse the queued run into one event.
+      def coalesce_mouse_motion_events(first_key)
+        latest = first_key
+        while (next_key = read_next_key(timeout: 0))
+          unless mouse_motion_event?(next_key)
+            @pending_keys << next_key
+            break
+          end
+
+          latest = next_key
+        end
+        latest
       end
 
       def mouse_wheel_event?(key)
