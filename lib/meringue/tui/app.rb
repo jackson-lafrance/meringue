@@ -17,6 +17,19 @@ module Meringue
       MOUSE_SCROLL_STEP = 3
       PAGE_SCROLL_STEP = 8
       DOUBLE_CLICK_INTERVAL_SECONDS = 0.5
+      # How long a copy/cut confirmation stays in the bottom hint line.
+      SELECTION_STATUS_SECONDS = 3.0
+      # Selection-extending keys reuse the composer's cursor movement math.
+      SELECTION_MOVEMENTS = {
+        "select_left" => :left,
+        "select_right" => :right,
+        "select_up" => :up,
+        "select_down" => :down,
+        "select_home" => :home,
+        "select_end" => :end,
+        "select_word_left" => :word_left,
+        "select_word_right" => :word_right
+      }.freeze
       CTRL_C = "\u0003"
       # Keyboard-disambiguation modes used for Shift+Enter can encode Ctrl-C as
       # CSI-u or xterm modifyOtherKeys instead of the raw ETX byte.
@@ -111,6 +124,14 @@ module Meringue
         @last_render_width = DEFAULT_WIDTH
         @last_render_height = DEFAULT_HEIGHT
         @scroll_offsets = Hash.new(0)
+        @selection_pane = nil
+        @logs_selection_anchor = nil
+        @logs_selection_focus = nil
+        @chat_selection_anchor = nil
+        @chat_selection = nil
+        @selection_dragging = false
+        @selection_status = nil
+        @selection_status_at = nil
         @log_event_keys = {}
         @started_at = Time.iso8601(Time.now.utc.iso8601)
         @chat_mutex = Mutex.new
@@ -247,6 +268,8 @@ module Meringue
         return false unless key
         return false if @agent_workspace_active
         return true if keybinding?("quit", key)
+        # An active selection makes Ctrl-C a copy action, never a quit.
+        return false if selection_active?
 
         ctrl_c_key?(key) && input_buffer.empty? && !@agent_tree_navigation_active
       end
@@ -288,14 +311,19 @@ module Meringue
         end
 
         if paste_key?(key)
-          return insert_text(input_buffer, input_cursor, paste_text(key)) + [NO_SLASH_SELECTION]
+          buffer, cursor = replace_chat_selection(input_buffer, input_cursor)
+          return insert_text(buffer, cursor, paste_text(key)) + [NO_SLASH_SELECTION]
         end
 
-        mouse_focus_result = handle_mouse_focus_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
-        return mouse_focus_result if mouse_focus_result
+        mouse_result = handle_mouse_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        return mouse_result if mouse_result
+
+        selection_command_result = handle_selection_command_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        return selection_command_result if selection_command_result
 
         if plain_text_paste_key?(key)
-          return insert_text(input_buffer, input_cursor, key) + [NO_SLASH_SELECTION]
+          buffer, cursor = replace_chat_selection(input_buffer, input_cursor)
+          return insert_text(buffer, cursor, key) + [NO_SLASH_SELECTION]
         end
 
         if legacy_slash_navigation && slash_suggestion_navigation_key?(key) && slash_suggestions_active?(input_buffer)
@@ -311,6 +339,14 @@ module Meringue
         if @agent_tree_navigation_active
           return handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         end
+
+        if keybinding?("cancel_navigation", key) && selection_active?
+          clear_selection
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        selection_movement_result = handle_selection_movement_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        return selection_movement_result if selection_movement_result
 
         if slash_suggestion_navigation_key?(key) && slash_suggestions_active?(input_buffer)
           buffer, index = handle_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
@@ -331,6 +367,7 @@ module Meringue
         end
 
         if keybinding?("submit", key)
+          clear_selection
           return [+"", 0, NO_SLASH_SELECTION] if local_navigation_command_without_id?(input_buffer) && handle_local_navigation_command(input_buffer, state)
 
           completion = safe_slash_completion(input_buffer, slash_suggestion_index, state)
@@ -343,7 +380,12 @@ module Meringue
         end
 
         if ctrl_c_key?(key)
+          clear_selection
           return [+"", 0, NO_SLASH_SELECTION]
+        end
+
+        if selection_edit_key?(key) && chat_selection_range
+          return delete_chat_selection(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
         end
 
         if keybinding?("delete_backward", key)
@@ -363,12 +405,23 @@ module Meringue
         end
 
         new_cursor = cursor_after_navigation(key, input_buffer, input_cursor)
-        return [input_buffer, new_cursor, slash_suggestion_index] if new_cursor != input_cursor
+        if new_cursor != input_cursor
+          clear_chat_selection
+          return [input_buffer, new_cursor, slash_suggestion_index]
+        end
 
         return [input_buffer, input_cursor, slash_suggestion_index] unless printable_key?(key)
 
         @focused_pane = "chat"
-        insert_text(input_buffer, input_cursor, key) + [NO_SLASH_SELECTION]
+        # Typing dismisses a logs highlight and replaces a composer selection,
+        # matching normal text-input behavior.
+        clear_selection unless chat_selection_range
+        buffer, cursor = replace_chat_selection(input_buffer, input_cursor)
+        insert_text(buffer, cursor, key) + [NO_SLASH_SELECTION]
+      end
+
+      def selection_edit_key?(key)
+        keybinding?("delete_backward", key) || keybinding?("delete_forward", key)
       end
 
       def keybinding?(action, key)
@@ -469,51 +522,311 @@ module Meringue
         @focused_pane != "chat"
       end
 
-      def handle_mouse_focus_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
-        return nil unless mouse_button_press?(key)
+      def handle_mouse_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        return nil unless mouse_event?(key)
+        return handle_mouse_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_button_press?(key)
+        return handle_mouse_drag_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_drag?(key)
+        return handle_mouse_release_key(input_buffer, input_cursor, slash_suggestion_index) if mouse_button_release?(key)
 
+        nil
+      end
+
+      def handle_mouse_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         pane = pane_at_mouse_position(key, state)
         return [input_buffer, input_cursor, slash_suggestion_index] unless pane
 
         @focused_pane = pane
-        if pane == "agent_tree"
+        case pane
+        when "agent_tree"
+          clear_selection
           item_id = agent_tree_item_at_mouse_position(key, state)
           opened = handle_agent_tree_item_click(item_id, key, state) if item_id
           if opened
             draft = @workspace_draft.to_s.dup
             return [draft, draft.chars.length, NO_SLASH_SELECTION]
           end
+
+          [input_buffer, input_cursor, slash_suggestion_index]
+        when "logs"
+          @last_worker_click = nil
+          begin_logs_selection(key, state)
+          [input_buffer, input_cursor, slash_suggestion_index]
         else
           @last_worker_click = nil
-          exit_agent_tree_navigation if @agent_tree_navigation_active && !%w[agent_tree logs].include?(pane)
+          exit_agent_tree_navigation if @agent_tree_navigation_active
+          [input_buffer, begin_chat_selection(key, state, input_cursor), slash_suggestion_index]
         end
+      end
+
+      # Drag reports are clamped inside the pane the press started in, so a
+      # selection can never grow into the agent tree or the composer.
+      def handle_mouse_drag_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        return [input_buffer, input_cursor, slash_suggestion_index] unless @selection_dragging
+
+        case @selection_pane
+        when "logs"
+          position = logs_text_position(key, state)
+          @logs_selection_focus = position if position
+          [input_buffer, input_cursor, slash_suggestion_index]
+        when "chat"
+          cursor = composer_text_index(key, state)
+          return [input_buffer, input_cursor, slash_suggestion_index] unless cursor
+
+          update_chat_selection(@chat_selection_anchor || cursor, cursor)
+          [input_buffer, cursor, slash_suggestion_index]
+        else
+          [input_buffer, input_cursor, slash_suggestion_index]
+        end
+      end
+
+      def handle_mouse_release_key(input_buffer, input_cursor, slash_suggestion_index)
+        @selection_dragging = false
+        clear_selection unless selection_active?
         [input_buffer, input_cursor, slash_suggestion_index]
       end
 
+      def mouse_event?(key)
+        key.is_a?(Hash) && key.fetch("type", nil) == "mouse"
+      end
+
       def mouse_button_press?(key)
-        key.is_a?(Hash) && key.fetch("type", nil) == "mouse" &&
+        mouse_event?(key) &&
           key.fetch("kind", nil) == "button" && key.fetch("pressed", false) &&
           (key.fetch("button", 0).to_i & 3).zero?
       end
 
+      def mouse_drag?(key)
+        mouse_event?(key) && key.fetch("kind", nil) == "motion"
+      end
+
+      def mouse_button_release?(key)
+        mouse_event?(key) && key.fetch("kind", nil) == "button" && !key.fetch("pressed", false)
+      end
+
       def pane_at_mouse_position(key, state)
-        layout.pane_at(
-          state,
-          width: @last_render_width || DEFAULT_WIDTH,
-          height: @last_render_height || DEFAULT_HEIGHT,
-          x: key.fetch("x", 1).to_i - 1,
-          y: key.fetch("y", 1).to_i - 1
-        )
+        layout.pane_at(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
       end
 
       def agent_tree_item_at_mouse_position(key, state)
-        layout.agent_tree_item_at(
-          state,
-          width: @last_render_width || DEFAULT_WIDTH,
-          height: @last_render_height || DEFAULT_HEIGHT,
-          x: key.fetch("x", 1).to_i - 1,
-          y: key.fetch("y", 1).to_i - 1
-        )
+        layout.agent_tree_item_at(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+      end
+
+      def render_width
+        @last_render_width || DEFAULT_WIDTH
+      end
+
+      def render_height
+        @last_render_height || DEFAULT_HEIGHT
+      end
+
+      def mouse_x(key)
+        key.fetch("x", 1).to_i - 1
+      end
+
+      def mouse_y(key)
+        key.fetch("y", 1).to_i - 1
+      end
+
+      def logs_text_position(key, state)
+        layout.logs_text_position(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+      end
+
+      def composer_text_index(key, state)
+        layout.composer_text_index(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+      end
+
+      def begin_logs_selection(key, state)
+        position = logs_text_position(key, state)
+        return clear_selection unless position
+
+        clear_chat_selection
+        @selection_pane = "logs"
+        @logs_selection_anchor = position
+        @logs_selection_focus = position
+        @selection_dragging = true
+        clear_selection_status
+      end
+
+      def begin_chat_selection(key, state, input_cursor)
+        index = composer_text_index(key, state)
+        return input_cursor unless index
+
+        clear_logs_selection
+        update_chat_selection(index, index)
+        @selection_dragging = true
+        clear_selection_status
+        index
+      end
+
+      def update_chat_selection(anchor, cursor)
+        @selection_pane = "chat"
+        @chat_selection_anchor = anchor.to_i
+        start_index, finish_index = [anchor.to_i, cursor.to_i].minmax
+        @chat_selection = finish_index > start_index ? { "start" => start_index, "end" => finish_index } : nil
+      end
+
+      def chat_selection_range
+        @chat_selection
+      end
+
+      def logs_selection
+        Selection.normalize("logs", @logs_selection_anchor, @logs_selection_focus)
+      end
+
+      def selection_active?
+        case @selection_pane
+        when "logs" then !Selection.empty?(logs_selection)
+        when "chat" then !chat_selection_range.nil?
+        else false
+        end
+      end
+
+      def clear_selection
+        clear_logs_selection
+        clear_chat_selection
+        @selection_pane = nil
+        @selection_dragging = false
+        nil
+      end
+
+      def clear_logs_selection
+        @logs_selection_anchor = nil
+        @logs_selection_focus = nil
+        @selection_pane = nil if @selection_pane == "logs"
+        nil
+      end
+
+      def clear_chat_selection
+        @chat_selection_anchor = nil
+        @chat_selection = nil
+        @selection_pane = nil if @selection_pane == "chat"
+        nil
+      end
+
+      def set_selection_status(message)
+        @selection_status = message.to_s
+        @selection_status_at = monotonic_time
+      end
+
+      def clear_selection_status
+        @selection_status = nil
+        @selection_status_at = nil
+      end
+
+      def selection_status_text
+        return nil unless @selection_status && @selection_status_at
+        return nil if monotonic_time - @selection_status_at > SELECTION_STATUS_SECONDS
+
+        @selection_status
+      end
+
+      def selection_snapshot
+        snapshot = { "active" => selection_active?, "pane" => @selection_pane }
+        status = selection_status_text
+        snapshot["status"] = status if status
+        snapshot.merge(logs_selection || {})
+      end
+
+      def handle_selection_command_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        if keybinding?("copy_selection", key) && selection_active?
+          copy_selection(state, input_buffer)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if keybinding?("cut_selection", key) && chat_selection_range
+          copy_selection(state, input_buffer)
+          return delete_chat_selection(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
+        end
+
+        if keybinding?("paste_clipboard", key)
+          text = Clipboard.paste
+          if text.to_s.empty?
+            set_selection_status("clipboard is empty")
+            return [input_buffer, input_cursor, slash_suggestion_index]
+          end
+
+          buffer, cursor = replace_chat_selection(input_buffer, input_cursor)
+          return insert_text(buffer, cursor, text) + [NO_SLASH_SELECTION]
+        end
+
+        nil
+      end
+
+      def copy_selection(state, input_buffer)
+        text = selection_text(state, input_buffer)
+        return if text.to_s.empty?
+
+        transport = Clipboard.copy(text, output: clipboard_output)
+        if transport
+          line_count = text.count("\n") + 1
+          set_selection_status("copied #{line_count} line#{line_count == 1 ? "" : "s"}")
+        else
+          set_selection_status("clipboard unavailable")
+        end
+      end
+
+      def selection_text(state, input_buffer)
+        case @selection_pane
+        when "logs"
+          layout.logs_selection_text(state, width: render_width, height: render_height, selection: logs_selection)
+        when "chat"
+          range = chat_selection_range
+          return "" unless range
+
+          input_buffer.to_s.chars[range.fetch("start")...range.fetch("end")].to_a.join
+        else
+          ""
+        end
+      end
+
+      def clipboard_output
+        terminal.respond_to?(:output) ? terminal.output : out
+      end
+
+      def delete_chat_selection(input_buffer, input_cursor)
+        range = chat_selection_range
+        return [input_buffer, clamp_cursor(input_buffer, input_cursor)] unless range
+
+        chars = input_buffer.chars
+        start_index = range.fetch("start")
+        chars.slice!(start_index...range.fetch("end"))
+        clear_chat_selection
+        [chars.join, start_index]
+      end
+
+      def replace_chat_selection(input_buffer, input_cursor)
+        return [input_buffer, clamp_cursor(input_buffer, input_cursor)] unless chat_selection_range
+
+        delete_chat_selection(input_buffer, input_cursor)
+      end
+
+      def handle_selection_movement_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        movement = SELECTION_MOVEMENTS.keys.find { |action| keybinding?(action, key) }
+        return nil unless movement
+
+        cursor = selection_movement_cursor(SELECTION_MOVEMENTS.fetch(movement), input_buffer, input_cursor)
+        anchor = @selection_pane == "chat" && @chat_selection_anchor ? @chat_selection_anchor : clamp_cursor(input_buffer, input_cursor)
+        clear_logs_selection
+        update_chat_selection(anchor, cursor)
+        @focused_pane = "chat"
+        [input_buffer, cursor, slash_suggestion_index]
+      end
+
+      def selection_movement_cursor(movement, input_buffer, input_cursor)
+        chars = input_buffer.chars
+        cursor = clamp_cursor(input_buffer, input_cursor)
+
+        case movement
+        when :left then [cursor - 1, 0].max
+        when :right then [cursor + 1, chars.length].min
+        when :up then cursor_up(chars, cursor)
+        when :down then cursor_down(chars, cursor)
+        when :home then current_line_start(chars, cursor)
+        when :end then current_line_end(chars, cursor)
+        when :word_left then previous_word_boundary(chars, cursor)
+        when :word_right then next_word_start(chars, cursor)
+        else cursor
+        end
       end
 
       def handle_agent_tree_item_click(item_id, key, state)
@@ -1034,6 +1347,8 @@ module Meringue
           Keybindings (from [tui.keybindings], with defaults for omitted actions):
           Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels jump mode.
           Focus: click a dashboard section to focus it; clicking an issue or agent in the AgentTree selects it, and double-clicking opens its focused workspace. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
+          Selection: drag with the mouse in the logs pane or the composer to select text; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
+          Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
           Chat: #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode.
@@ -1244,12 +1559,19 @@ module Meringue
         end
 
         result = pull_request_opener.open(pr_url)
-        opened = result.fetch("status", nil) == "opened" || !%w[failed rejected].include?(result.fetch("status", nil).to_s)
-        append_jump_response(result.fetch("message", "Could not open pull request for #{agent_id}.")) if opened || !silent_fail
-        opened
+        # Opening a PR is a transient UI action: only failures are worth a log entry.
+        return true if open_succeeded?(result)
+
+        append_jump_response(result.fetch("message", "Could not open pull request for #{agent_id}.")) unless silent_fail
+        false
       rescue StandardError => e
         append_jump_response("Could not open pull request for #{agent_id}: #{e.message}") unless silent_fail
         false
+      end
+
+      def open_succeeded?(result)
+        status = result.is_a?(Hash) ? result.fetch("status", nil).to_s : ""
+        !%w[failed rejected].include?(status)
       end
 
       def pr_record_for_id(state, id)
@@ -1714,7 +2036,8 @@ module Meringue
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
           "_agent_workspace" => agent_workspace_snapshot(state, input_buffer, input_cursor),
-          "_scroll" => scroll_snapshot
+          "_scroll" => scroll_snapshot,
+          "_selection" => selection_snapshot
         )
         clamp_scroll_offsets!(composed_state)
         composed_state.merge("_scroll" => scroll_snapshot)
@@ -2030,9 +2353,10 @@ module Meringue
       def log_sync_after_start?(timestamp)
         return false if timestamp.to_s.empty?
 
-        Time.iso8601(timestamp.to_s) >= @started_at
-      rescue ArgumentError, TypeError
-        false
+        parsed = Timestamps.parse(timestamp)
+        return false unless parsed
+
+        parsed >= @started_at
       end
 
       def worker_completed_text_from_agent(agent, issue = nil)
@@ -2112,6 +2436,7 @@ module Meringue
             "input_buffer" => input_buffer,
             "input_cursor" => clamp_cursor(input_buffer, input_cursor || input_buffer.chars.length),
             "slash_suggestion_index" => slash_suggestion_index,
+            "selection" => @chat_selection,
             "pending_count" => @pending_count
           }
         end

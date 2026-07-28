@@ -17,6 +17,7 @@ module Meringue
         AGENT_TREE_SELECTED
         AGENT_TREE_SELECTED_DIM
         AGENT_TREE_SELECTED_STATUS
+        SELECTION
         PR_MARKER
         PR_MARKER_SELECTED
         TITLE
@@ -144,6 +145,7 @@ module Meringue
         AGENT_TREE_SELECTED: [1, 38, 5, 231, 48, 5, 61],
         AGENT_TREE_SELECTED_DIM: [38, 5, 189, 48, 5, 61],
         AGENT_TREE_SELECTED_STATUS: [1, 38, 5, 159, 48, 5, 61],
+        SELECTION: [38, 5, 232, 48, 5, 189],
         PR_MARKER: [1, 38, 5, 51],
         PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 61],
         TITLE: [1, 38, 5, 255],
@@ -181,6 +183,7 @@ module Meringue
         AGENT_TREE_SELECTED: [1, 38, 5, 231, 48, 5, 94],
         AGENT_TREE_SELECTED_DIM: [38, 5, 229, 48, 5, 94],
         AGENT_TREE_SELECTED_STATUS: [1, 38, 5, 226, 48, 5, 94],
+        SELECTION: [38, 5, 232, 48, 5, 222],
         PR_MARKER: [1, 38, 5, 51],
         PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 94],
         TITLE: [1, 38, 5, 231],
@@ -220,6 +223,7 @@ module Meringue
         AGENT_TREE_SELECTED: [1, 38, 5, 231, 48, 5, 24],
         AGENT_TREE_SELECTED_DIM: [38, 5, 153, 48, 5, 24],
         AGENT_TREE_SELECTED_STATUS: [1, 38, 5, 120, 48, 5, 24],
+        SELECTION: [38, 5, 232, 48, 5, 153],
         PR_MARKER: [1, 38, 5, 51],
         PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 24],
         TITLE: [1, 38, 5, 255],
@@ -257,6 +261,7 @@ module Meringue
         AGENT_TREE_SELECTED: [1, 38, 5, 223, 48, 5, 94],
         AGENT_TREE_SELECTED_DIM: [38, 5, 248, 48, 5, 94],
         AGENT_TREE_SELECTED_STATUS: [1, 38, 5, 142, 48, 5, 94],
+        SELECTION: [38, 5, 235, 48, 5, 223],
         PR_MARKER: [1, 38, 5, 51],
         PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 94],
         TITLE: [1, 38, 5, 230],
@@ -294,6 +299,7 @@ module Meringue
         AGENT_TREE_SELECTED: [1, 38, 5, 231, 48, 5, 60],
         AGENT_TREE_SELECTED_DIM: [38, 5, 189, 48, 5, 60],
         AGENT_TREE_SELECTED_STATUS: [1, 38, 5, 158, 48, 5, 60],
+        SELECTION: [38, 5, 232, 48, 5, 183],
         PR_MARKER: [1, 38, 5, 51],
         PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 60],
         TITLE: [1, 38, 5, 255],
@@ -331,6 +337,7 @@ module Meringue
         AGENT_TREE_SELECTED: [1, 38, 5, 231, 48, 5, 24],
         AGENT_TREE_SELECTED_DIM: [38, 5, 152, 48, 5, 24],
         AGENT_TREE_SELECTED_STATUS: [1, 38, 5, 179, 48, 5, 24],
+        SELECTION: [38, 5, 232, 48, 5, 152],
         PR_MARKER: [1, 38, 5, 51],
         PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 24],
         TITLE: [1, 38, 5, 255],
