@@ -31,6 +31,10 @@ module Meringue
         First inspect the current repository state, then continue the assigned issue from the last incomplete step.
         If the issue is already complete, summarize the final status and include any pull request link.
       PROMPT
+      HEAD_RESUME_PROMPT = <<~PROMPT.freeze
+        Continue the interrupted Meringue head request from this session's existing context.
+        Return exactly one valid HeadResult JSON object and no other text. Do not repeat tool work that is already complete.
+      PROMPT
       HEAD_RESULT_REPAIR_PROMPT = <<~PROMPT.freeze
         Your previous response was not valid Meringue HeadResult JSON.
         Return exactly one JSON object with string fields "title" and "summary", an array field "commands", and an array field "questions".
@@ -100,6 +104,7 @@ module Meringue
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
       HEAD_RECONCILE_WARNING_DELAY_SECONDS = 5
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
+      HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
       RECONCILE_STATE_HEALTHY = "healthy"
       RECONCILE_STATE_RESUMING = "resuming"
@@ -824,7 +829,9 @@ module Meringue
             now: now,
             provider: active_provider,
             runner: active_runner,
-            harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
+            harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i,
+            user_message: user_message.to_s,
+            question_id: present_string(question_id)
           )
           state.fetch("agents") << agent
 
@@ -2393,7 +2400,7 @@ module Meringue
         end
       end
 
-      def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0)
+      def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0, user_message: nil, question_id: nil)
         {
           "id" => head_id,
           "type" => "head",
@@ -2410,7 +2417,11 @@ module Meringue
           "harness_metadata" => {
             "runner" => runner.class.name,
             "cwd" => cwd,
-            "harness_generation" => harness_generation
+            "harness_generation" => harness_generation,
+            "head_request" => {
+              "user_message" => user_message,
+              "question_id" => question_id
+            }.compact
           },
           "created_at" => now,
           "updated_at" => now
@@ -3396,7 +3407,7 @@ module Meringue
           "session_file" => agent.fetch("harness_session_file", nil),
           "is_streaming" => metadata.fetch("is_streaming", false),
           "last_event_at" => metadata.fetch("last_event_at", nil),
-          "metadata" => metadata
+          "metadata" => metadata.merge("kind" => metadata.fetch("kind", agent.fetch("type", nil)))
         }
       end
 
@@ -3404,12 +3415,12 @@ module Meringue
         metadata = agent.fetch("harness_metadata", {}) || {}
         return false if agent.fetch("type", nil) == "head" && present_string(metadata.fetch("head_result_applied_at", nil))
         return false if blank?(agent.fetch("harness", nil)) || agent.fetch("harness", nil) == "fake"
-        return false unless agent_has_session_reference?(agent)
+        return false unless agent_has_session_reference?(agent) || recoverable_untracked_head?(agent)
         return false if %w[completed killed].include?(agent.fetch("status", nil))
         return false unless harness_client_available_for_agent?(agent)
         return true unless agent.fetch("status", nil) == "errored"
 
-        resumable_worker_reconcile_candidate?(agent)
+        resumable_worker_reconcile_candidate?(agent) || resumable_head_reconcile_candidate?(agent)
       end
 
       def harness_client_available_for_agent?(agent)
@@ -3426,6 +3437,14 @@ module Meringue
 
       def resumable_worker_reconcile_candidate?(agent)
         agent.fetch("type", nil) == "worker" && worker_resume_attempt_count(agent) < WORKER_RECONCILE_RESUME_MAX_ATTEMPTS
+      end
+
+      def resumable_head_reconcile_candidate?(agent)
+        agent.fetch("type", nil) == "head" && head_recovery_attempt_count(agent) < HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS
+      end
+
+      def recoverable_untracked_head?(agent)
+        agent.fetch("type", nil) == "head" && %w[queued working blocked errored].include?(agent.fetch("status", nil))
       end
 
       def poll_agent_session(agent)
@@ -3445,6 +3464,7 @@ module Meringue
         }
       rescue StandardError => e
         return resume_worker_session_from_poll_error(agent, client, session_ref, e) if worker_reconcile_resume_eligible?(agent, client)
+        return recover_head_session_from_poll_error(agent, client, session_ref, e) if head_reconcile_recovery_eligible?(agent)
 
         {
           "agent_id" => agent.fetch("id", nil),
@@ -3506,7 +3526,7 @@ module Meringue
           agent["updated_at"] = now
           refresh_worker_parent_statuses!(state, agent, now) if agent.fetch("type", nil) == "worker"
           log_ids = append_harness_event_logs(state, agent, poll_result.fetch("events", []))
-          log_ids.concat(append_resume_success_log(state, agent, poll_result))
+          log_ids.concat(append_recovery_success_log(state, agent, poll_result))
           touch_state!(state, now)
           store.save(state)
           poll_result.merge("changed" => poll_result.fetch("resumed", false) || log_ids.any?, "log_entry_ids" => log_ids)
@@ -3790,12 +3810,194 @@ module Meringue
         reconcile.fetch("resume_attempt_count", reconcile.fetch("error_count", 0)).to_i
       end
 
+      def head_reconcile_recovery_eligible?(agent)
+        return false unless agent.fetch("type", nil) == "head"
+        return false if %w[completed killed].include?(agent.fetch("status", nil))
+        return false if head_recovery_attempt_count(agent) >= HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        reconcile = metadata.fetch("reconcile", {}) || {}
+        first_error_at = reconcile.fetch("first_error_at", nil)
+        return true if agent.fetch("status", nil) == "errored" && present_string(first_error_at)
+        return false unless present_string(first_error_at)
+
+        !head_reconcile_grace_active?(first_error_at, timestamp)
+      end
+
+      def head_recovery_attempt_count(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        reconcile = metadata.fetch("reconcile", {}) || {}
+        reconcile.fetch("head_recovery_attempt_count", metadata.fetch("head_recovery_attempt_count", 0)).to_i
+      end
+
+      def recover_head_session_from_poll_error(agent, client, session_ref, original_error)
+        attempt = head_recovery_attempt_count(agent) + 1
+        request = head_recovery_request(agent)
+        resumed_ref = nil
+        attach_error = nil
+
+        if agent_has_session_reference?(agent) && client.respond_to?(:attach_session)
+          begin
+            resumed_ref = client.attach_session(session_ref)
+            resumed_ref = prompt_recovered_head_session(client, resumed_ref)
+            return recovered_head_poll_result(
+              agent,
+              client,
+              resumed_ref,
+              original_error,
+              attempt: attempt,
+              mode: "resumed"
+            )
+          rescue StandardError => e
+            attach_error = e
+            safely_kill_recovery_session(client, resumed_ref) if resumed_ref
+          end
+        end
+
+        raise attach_error || RuntimeError.new("persisted head request is unavailable") if request.nil?
+
+        restarted_ref = restart_head_session(agent, request)
+        recovered_head_poll_result(
+          agent,
+          client_for_restarted_head(agent),
+          restarted_ref,
+          original_error,
+          attempt: attempt,
+          mode: "restarted",
+          attach_error: attach_error
+        )
+      rescue StandardError => recovery_error
+        previous_reconcile = (agent.fetch("harness_metadata", {}) || {}).fetch("reconcile", {}) || {}
+        {
+          "agent_id" => agent.fetch("id", nil),
+          "agent_type" => "head",
+          "state" => "errored",
+          "session_ref" => session_ref,
+          "error" => error_payload(recovery_error),
+          "reconcile" => previous_reconcile.merge(
+            "state" => RECONCILE_STATE_TRANSIENT_ERROR,
+            "head_recovery_attempt_count" => attempt || head_recovery_attempt_count(agent) + 1,
+            "head_recovery_attempted_at" => timestamp,
+            "original_error_class" => original_error.class.name,
+            "original_error_message" => sanitized_error_message(original_error),
+            "recovery_error_class" => recovery_error.class.name,
+            "recovery_error_message" => sanitized_error_message(recovery_error)
+          ).compact
+        }
+      end
+
+      def prompt_recovered_head_session(client, session_ref)
+        return session_ref if session_ref.fetch("is_streaming", false)
+
+        client.prompt_session(session_ref, HEAD_RESUME_PROMPT, mode: "normal")
+      end
+
+      def restart_head_session(agent, request)
+        runner = active_head_runner(provider: agent.fetch("harness", nil))
+        unless runner.respond_to?(:spawn_head_session)
+          raise RuntimeError, "head runner cannot restart a persisted session"
+        end
+
+        snapshot = synchronized_state { deep_copy(normalized_state) }
+        context = Heads::Context.new(
+          head_id: agent.fetch("id"),
+          user_message: request.fetch("user_message"),
+          snapshot: snapshot,
+          question_id: request.fetch("question_id", nil),
+          cwd: cwd,
+          state_path: store.path
+        )
+        runner.spawn_head_session(
+          user_message: request.fetch("user_message"),
+          snapshot: snapshot,
+          question_id: request.fetch("question_id", nil),
+          context: context
+        )
+      end
+
+      def head_recovery_request(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        request = metadata.fetch("head_request", {}) || {}
+        user_message = present_string(request.fetch("user_message", nil))
+        return { "user_message" => user_message, "question_id" => present_string(request.fetch("question_id", nil)) }.compact if user_message
+
+        synchronized_state do
+          state = normalized_state
+          log = state.fetch("logs", []).reverse.find do |entry|
+            entry.fetch("source_type", nil) == "user" && entry.dig("details", "head_id").to_s == agent.fetch("id").to_s
+          end
+          message = log && present_string(log.fetch("message", nil))
+          next nil unless message
+
+          { "user_message" => message, "question_id" => present_string(log.dig("details", "question_id")) }.compact
+        end
+      end
+
+      def recovered_head_poll_result(agent, client, session_ref, original_error, attempt:, mode:, attach_error: nil)
+        metadata = session_ref.fetch("metadata", {}) || {}
+        request = head_recovery_request(agent)
+        session_ref = session_ref.merge(
+          "metadata" => metadata.merge(
+            "head_request" => request,
+            "head_recovery_attempt_count" => attempt,
+            "head_recovery_mode" => mode,
+            "head_recovered_at" => timestamp
+          ).compact
+        )
+        completed = completed_session?(session_ref)
+        original_identity = session_ref_identity(agent_session_ref(agent))
+        result = {
+          "agent_id" => agent.fetch("id"),
+          "agent_type" => "head",
+          "state" => completed ? "completed" : "working",
+          "session_ref" => session_ref,
+          "events" => client.respond_to?(:read_events) ? client.read_events(session_ref) : [],
+          "last_assistant_text" => completed ? safe_last_assistant_text(client, session_ref) : nil,
+          "reconcile" => {
+            "state" => RECONCILE_STATE_RESUMING,
+            "head_recovery_attempt_count" => attempt,
+            "head_recovery_attempted_at" => timestamp,
+            "head_recovery_mode" => mode,
+            "original_pid" => original_identity.fetch("pid", nil),
+            "original_session_id" => original_identity.fetch("session_id", nil),
+            "original_session_file" => original_identity.fetch("session_file", nil),
+            "original_error_class" => original_error.class.name,
+            "original_error_message" => sanitized_error_message(original_error),
+            "attach_error_class" => attach_error&.class&.name,
+            "attach_error_message" => attach_error && sanitized_error_message(attach_error)
+          }.compact
+        }
+        result[mode == "resumed" ? "resumed" : "restarted"] = true
+        result
+      end
+
+      def session_ref_identity(session_ref)
+        {
+          "pid" => session_ref.fetch("pid", nil),
+          "session_id" => session_ref.fetch("session_id", nil),
+          "session_file" => session_ref.fetch("session_file", nil)
+        }.compact
+      end
+
+      def client_for_restarted_head(agent)
+        runner = active_head_runner(provider: agent.fetch("harness", nil))
+        return runner.harness_client if runner.respond_to?(:harness_client)
+
+        harness_client_for_agent(agent)
+      end
+
+      def safely_kill_recovery_session(client, session_ref)
+        client.kill_session(session_ref) if client.respond_to?(:kill_session)
+      rescue StandardError
+        nil
+      end
+
       def defer_head_reconcile_error_from_poll(poll_result)
         synchronized_state do
           state = normalized_state
           agent = find_agent(state, poll_result.fetch("agent_id"))
           return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless agent
-          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if %w[completed killed].include?(agent.fetch("status", nil))
           return mark_agent_errored_from_poll(poll_result) unless agent.fetch("type", nil) == "head"
 
           now = timestamp
@@ -3957,17 +4159,31 @@ module Meringue
         update_project_status_from_issues!(state, project, now) if project
       end
 
-      def append_resume_success_log(state, agent, poll_result)
-        return [] unless poll_result.fetch("resumed", false)
+      def append_recovery_success_log(state, agent, poll_result)
+        return [] unless poll_result.fetch("resumed", false) || poll_result.fetch("restarted", false)
 
-        append_log(
-          state,
-          source_type: "worker",
-          source_id: agent.fetch("id"),
-          level: "info",
-          message: "Resumed worker #{agent.fetch("id")} from its harness session and prompted it to continue.",
-          details: poll_result.fetch("reconcile", {})
-        )
+        if agent.fetch("type", nil) == "head"
+          restarted = poll_result.fetch("restarted", false)
+          append_log(
+            state,
+            source_type: "head",
+            source_id: agent.fetch("id"),
+            level: restarted ? "warning" : "info",
+            message: restarted ?
+              "Restarted head #{agent.fetch("id")} because its persisted harness session could not be safely resumed." :
+              "Resumed head #{agent.fetch("id")} from its persisted harness session and requested its HeadResult.",
+            details: poll_result.fetch("reconcile", {})
+          )
+        else
+          append_log(
+            state,
+            source_type: "worker",
+            source_id: agent.fetch("id"),
+            level: "info",
+            message: "Resumed worker #{agent.fetch("id")} from its harness session and prompted it to continue.",
+            details: poll_result.fetch("reconcile", {})
+          )
+        end
       end
 
       def completed_session?(session_ref)
