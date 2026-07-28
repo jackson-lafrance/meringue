@@ -22,6 +22,12 @@ The optional focused worker workspace has a separate, non-destructive session-vi
 
 Focused transcript entries retain semantic categories. Reasoning, tool calls, tool results, normal output, and final assistant output use distinct theme-aware styles on each role/type header, alongside the retained timestamp. Assistant, reasoning, and user bodies use the theme's normal foreground; tool call and tool result bodies are dimmed, and lifecycle bodies dimmer still, so supporting detail reads as background while conversation text stays prominent. Categories can be filtered with the workspace filter command (`Ctrl-Space`, then `F` by default). Filters never discard transcript data: they change only presentation, reset the transcript scroll to the newest matching entry, and remain durable for the selected worker.
 
+Entry bodies are rendered with the same Markdown renderer the dashboard log uses, so fenced code blocks, inline code, lists, headings, and links look identical in both places. Code blocks keep their own framed gutter and preserve leading whitespace.
+
+Tool traffic is rendered as a labelled block instead of an inspected hash: a shell tool shows its command as a shell code block, a file tool shows its content with the language inferred from the path, other tools show `key: value` arguments, and secondary arguments are listed beside the block rather than inside it. Tool payloads are the only place escape sequences are normalized, so an encoded `\n` becomes a real line break there while authored backslashes inside assistant prose are left untouched. Tool results are framed as preformatted output, and a result is only labelled `diff` when its content actually looks like one.
+
+The same message is often visible in assembled history, the live event stream, and a harness message list at once. Each entry records its origin, so identical content observed from two origins collapses to one entry while a genuinely repeated message from a single origin is preserved. Tool traffic prefers assembled history when it is available and falls back to the event stream while a call is still streaming.
+
 Entry bodies are wrapped to the indented body width, so no character is pushed past the pane edge mid-word. Streaming deltas are fragments of a message that is still being assembled: a reasoning delta stays in the reasoning category instead of appearing as assistant output, and any fragment already contained in an assembled entry is dropped rather than rendered as a duplicate tail.
 
 The surrounding transcript chrome is Meringue-owned:

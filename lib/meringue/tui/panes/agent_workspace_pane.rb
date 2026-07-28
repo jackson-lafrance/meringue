@@ -11,6 +11,15 @@ module Meringue
       class AgentWorkspacePane
         EMPTY_TRANSCRIPT = "No agent output yet. Send a message below to continue this session."
         BODY_INDENT = "  "
+        # Conversational text is rendered as Markdown so fenced code, lists, and
+        # inline code look the same here as in the dashboard log.
+        # Reasoning entries carry the role "thinking"; "reasoning" is accepted too
+        # so an embedder using the display name still gets Markdown rendering.
+        MARKDOWN_ROLES = %w[you user agent final thinking reasoning system].freeze
+        TOOL_ROLES = %w[tool_call tool_result].freeze
+        BASH_TOOL_NAMES = %w[bash sh shell zsh run exec command].freeze
+        COMMAND_ARGUMENT_KEYS = %w[command cmd script shell_command].freeze
+        PATH_ARGUMENT_KEYS = %w[path file file_path filename target].freeze
 
         def initialize
           @line_cache = {}
@@ -216,20 +225,28 @@ module Meringue
         def transcript_lines(state, workspace, agent, metadata, width:)
           local_entries = Array(workspace.fetch("messages", []))
           live = workspace.fetch("agent_session", {}) || {}
+          # The same message is often visible in more than one place: assembled
+          # history ("items"), the live event stream ("events"), and any
+          # harness-provided message list. Tagging the origin lets identical
+          # content observed twice collapse while a genuinely repeated message
+          # from one origin is preserved.
           session_entries = []
-          session_entries.concat(Array(live.fetch("messages", [])))
-          session_entries.concat(Array(live.fetch("items", [])).flat_map { |item| live_item_entries(item) })
-          session_entries.concat(Array(live.fetch("events", [])).flat_map { |event| live_event_entries(event) })
+          session_entries.concat(tag_entry_source(Array(live.fetch("messages", [])), "messages"))
+          session_entries.concat(tag_entry_source(Array(live.fetch("items", [])).flat_map { |item| live_item_entries(item) }, "items"))
+          session_entries.concat(tag_entry_source(Array(live.fetch("events", [])).flat_map { |event| live_event_entries(event) }, "events"))
           live_lines = Array(live.fetch("lines", []))
-          session_entries << { "role" => "agent", "text" => live_lines.join("\n") } unless live_lines.empty?
+          session_entries << { "role" => "agent", "text" => live_lines.join("\n"), "source" => "lines" } unless live_lines.empty?
           local_entries = local_entries.reject { |entry| session_contains_entry?(session_entries, entry) }
 
-          entries = local_entries + session_entries
+          entries = tag_entry_source(local_entries, "local") + session_entries
           # Durable worker logs contain the compact completion summary, not the
           # Pi transcript. They are only a fallback when no session output can
           # be recovered, otherwise they can push the real transcript offscreen.
-          entries.concat(durable_agent_entries(state, agent.fetch("id"))) if session_entries.empty?
-          entries = chronological_entries(drop_superseded_partials(deduplicate_entries(entries)))
+          entries.concat(tag_entry_source(durable_agent_entries(state, agent.fetch("id")), "durable")) if session_entries.empty?
+          entries = deduplicate_entries(entries)
+          entries = drop_cross_source_duplicates(entries)
+          entries = drop_duplicate_tool_sources(entries)
+          entries = chronological_entries(drop_superseded_partials(entries))
 
           if entries.empty?
             last_text = metadata.fetch("last_assistant_text", "").to_s.strip
@@ -244,17 +261,73 @@ module Meringue
           entries.flat_map.with_index do |entry, index|
             role = entry.fetch("role", "agent").to_s
             label, label_style = transcript_label(role, agent.fetch("id"), entry.fetch("timestamp", nil))
-            text = entry.fetch("text", entry.fetch("message", "")).to_s
-            # Bodies are indented, so wrap to the indented width. Wrapping at the
-            # full width and then indenting pushed the last characters of every
-            # wrapped row past the pane edge, which dropped them from the text.
-            rows = wrap_text(text, width ? width.to_i - BODY_INDENT.length : nil)
-            body_style = body_style_for(role)
             rendered = [[[label, label_style]]]
-            rendered.concat(rows.map { |row| [["#{BODY_INDENT}#{row}", body_style]] })
+            rendered.concat(entry_body_lines(entry, role, label_style, width))
             rendered << [["", Style::DIM]] unless index == entries.length - 1
             rendered
           end
+        end
+
+        def entry_body_lines(entry, role, label_style, width)
+          text = entry.fetch("text", entry.fetch("message", "")).to_s
+          gutter = [BODY_INDENT, Style::DIM]
+
+          if TOOL_ROLES.include?(role)
+            return Markdown.render(
+              tool_markdown(entry, role),
+              width: width,
+              gutter: gutter,
+              base_style: body_style_for(role),
+              accent_style: label_style
+            )
+          end
+
+          if MARKDOWN_ROLES.include?(role)
+            return Markdown.render(
+              text,
+              width: width,
+              gutter: gutter,
+              base_style: body_style_for(role),
+              accent_style: label_style
+            )
+          end
+
+          # Errors and lifecycle notes stay verbatim: they are short and must not
+          # be reflowed or reinterpreted as Markdown.
+          #
+          # Bodies are indented, so wrap to the indented width. Wrapping at the
+          # full width and then indenting pushed the last characters of every
+          # wrapped row past the pane edge, which dropped them from the text.
+          wrap_text(text, width ? width.to_i - BODY_INDENT.length : nil)
+            .map { |row| [["#{BODY_INDENT}#{row}", body_style_for(role)]] }
+        end
+
+        # Tool traffic is rendered as a labelled, fenced block so multi-line
+        # commands, diffs, and command output keep their real line breaks and
+        # alignment instead of being flattened into one escaped string.
+        def tool_markdown(entry, role)
+          name = entry.fetch("tool_name", nil).to_s.strip
+          body = entry.fetch("text", "").to_s
+          parts = []
+          heading = [name.empty? ? nil : "**#{name}**", entry.fetch("tool_status", nil)].compact.join(" · ")
+          parts << heading unless heading.empty?
+          if body.strip.empty?
+            parts << (role == "tool_call" ? "_no arguments_" : "_no output_")
+          else
+            parts << fenced_block(body, entry.fetch("tool_language", nil).to_s)
+          end
+          # Secondary arguments read better beside the block than inside it.
+          extra = entry.fetch("tool_extra", nil).to_s
+          parts << extra unless extra.strip.empty?
+          parts.join("\n\n")
+        end
+
+        # Chooses a fence longer than any run inside the payload so tool output
+        # that itself contains backticks cannot break out of the block.
+        def fenced_block(body, language)
+          longest = body.scan(/`+/).map(&:length).max.to_i
+          fence = "`" * [longest + 1, 3].max
+          "#{fence}#{language}\n#{body.rstrip}\n#{fence}"
         end
 
         # Tool traffic is supporting detail, so its body is dimmer than assistant
@@ -296,6 +369,23 @@ module Meringue
             entries << transcript_entry("thinking", thinking, item, timestamp: timestamp, part: "thinking", partial: thinking_partial)
           end
 
+          # Tool results arrive as preformatted output, sometimes with escapes
+          # still encoded, so they are normalized and labelled like tool traffic
+          # rather than treated as prose.
+          if role == "tool_result"
+            output = normalize_tool_text(item.fetch("content", item.fetch("text", "")))
+            unless output.strip.empty?
+              tool_name = item.fetch("tool_name", item.fetch("name", "")).to_s
+              entries << transcript_entry("tool_result", output, item, timestamp: timestamp, part: "content").merge(
+                {
+                  "tool_name" => tool_name.empty? ? nil : tool_name,
+                  "tool_language" => tool_language(tool_name, nil, output, role: "tool_result")
+                }.compact
+              )
+            end
+            return entries
+          end
+
           text = item.fetch("content", item.fetch("text", "")).to_s.strip
           text_partial = false
           if text.empty? && streaming_delta && !reasoning_delta
@@ -316,9 +406,7 @@ module Meringue
           Array(item.fetch("tool_calls", [])).each do |call|
             next unless call.is_a?(Hash)
 
-            arguments = call.fetch("arguments", nil)
-            suffix = arguments.nil? ? "" : " #{arguments.inspect}"
-            entries << transcript_entry("tool_call", "→ #{call.fetch("name", "tool")}#{suffix}", call, timestamp: timestamp, part: "call")
+            entries << tool_call_entry(call, timestamp: timestamp)
           end
 
           if item.fetch("is_error", false)
@@ -337,14 +425,25 @@ module Meringue
           when "message"
             live_item_entries(event)
           when "tool"
-            label = event.fetch("tool_name", "tool")
-            phase = event.fetch("phase", "update")
+            name = event.fetch("tool_name", "tool").to_s
+            phase = event.fetch("phase", "update").to_s
             arguments = event.fetch("arguments", nil)
-            content = event.fetch("content", "").to_s.strip
-            heading = "#{phase == "end" ? "✓" : "→"} #{label} · #{phase}"
-            heading += " #{arguments.inspect}" if phase == "start" && !arguments.nil?
-            role = event.fetch("is_error", false) ? "error" : (phase == "start" ? "tool_call" : "tool_result")
-            [transcript_entry(role, [heading, content].reject(&:empty?).join("\n"), event, part: "tool-#{phase}")]
+            content = normalize_tool_text(event.fetch("content", ""))
+            starting = phase == "start"
+            body, extra, primary_key = starting && content.empty? ? split_tool_arguments(name, arguments) : [content, nil, nil]
+            role = event.fetch("is_error", false) ? "error" : (starting ? "tool_call" : "tool_result")
+            entry = transcript_entry(role, body, event, part: "tool-#{phase}")
+            if TOOL_ROLES.include?(role)
+              entry = entry.merge(
+                {
+                  "tool_name" => name,
+                  "tool_extra" => extra,
+                  "tool_status" => phase == "end" ? "done" : nil,
+                  "tool_language" => tool_language(name, arguments, body, primary: !primary_key.nil?, role: role)
+                }.compact
+              )
+            end
+            [entry]
           when "lifecycle"
             phase = event.fetch("phase", "update").to_s
             message = {
@@ -374,6 +473,117 @@ module Meringue
           else
             []
           end
+        end
+
+        def tool_call_entry(call, timestamp: nil)
+          name = call.fetch("name", "tool").to_s
+          arguments = call.fetch("arguments", nil)
+          body, extra, primary_key = split_tool_arguments(name, arguments)
+          transcript_entry("tool_call", body, call, timestamp: timestamp, part: "call").merge(
+            {
+              "tool_name" => name,
+              "tool_extra" => extra,
+              "tool_language" => tool_language(name, arguments, body, primary: !primary_key.nil?)
+            }.compact
+          )
+        end
+
+        # Returns [primary payload, secondary argument summary, primary key].
+        # The primary key tells the renderer whether the block holds real file or
+        # command content, which is what makes a syntax label meaningful.
+        def split_tool_arguments(name, arguments)
+          return [format_tool_arguments(name, arguments), nil, nil] unless arguments.is_a?(Hash)
+
+          key = primary_argument_key(name, arguments)
+          return [format_tool_arguments(name, arguments), nil, nil] unless key
+
+          extra = arguments.reject { |argument_key, _value| argument_key.to_s == key.to_s }
+          summary = extra.map { |argument_key, value| format_tool_pair(argument_key, value) }.join("\n")
+          [normalize_tool_text(arguments.fetch(key)), summary.empty? ? nil : summary, key]
+        end
+
+        def primary_argument_key(name, arguments)
+          keys = BASH_TOOL_NAMES.include?(name.to_s.downcase) ? COMMAND_ARGUMENT_KEYS : COMMAND_ARGUMENT_KEYS + %w[content text patch diff]
+          key = keys.find { |candidate| arguments.key?(candidate) }
+          return nil unless key
+          return nil unless arguments.fetch(key).is_a?(String)
+
+          key
+        end
+
+        # Arguments arrive as decoded JSON, so a shell command carries real
+        # newlines. Rendering them with Hash#inspect re-escaped those newlines
+        # and printed literal "\n" in the transcript.
+        def format_tool_arguments(name, arguments)
+          case arguments
+          when nil then ""
+          when String then normalize_tool_text(arguments)
+          when Array then arguments.map { |value| format_tool_value(value) }.join("\n")
+          when Hash then arguments.map { |key, value| format_tool_pair(key, value) }.join("\n")
+          else normalize_tool_text(arguments.to_s)
+          end
+        end
+
+        def format_tool_pair(key, value)
+          text = format_tool_value(value)
+          return "#{key}: #{text}" unless text.include?("\n")
+
+          "#{key}:\n#{text}"
+        end
+
+        def format_tool_value(value)
+          case value
+          when String then normalize_tool_text(value)
+          when nil then ""
+          when Hash then value.map { |key, nested| format_tool_pair(key, nested) }.join("\n")
+          when Array then value.map { |nested| format_tool_value(nested) }.join("\n")
+          else value.to_s
+          end
+        end
+
+        # Some harness payloads deliver tool text with escapes still encoded.
+        # This only runs on tool traffic, never on assistant prose, so genuine
+        # backslash sequences inside authored code are left alone.
+        def normalize_tool_text(value)
+          text = value.to_s
+          return text if text.empty?
+
+          text = text.gsub("\\r\\n", "\n").gsub("\\n", "\n").gsub("\\t", "\t").gsub("\\\"", "\"")
+          text.delete("\r")
+        end
+
+        # Output is labelled from what it actually contains. A tool's name only
+        # implies a language for its call payload: an edit tool's *result* is
+        # usually a status line, not a diff.
+        def tool_language(name, arguments, body, primary: false, role: "tool_call")
+          normalized = name.to_s.downcase
+          if role == "tool_result"
+            return "diff" if diff_like?(body)
+            return "json" if body.to_s.strip.start_with?("{", "[")
+
+            return BASH_TOOL_NAMES.include?(normalized) ? "sh" : ""
+          end
+
+          return "sh" if BASH_TOOL_NAMES.include?(normalized)
+          return "diff" if normalized.include?("edit") || normalized.include?("patch")
+
+          # An argument summary is not source code, so it must not be labelled
+          # with the language of a path that happens to appear in it.
+          if primary && arguments.is_a?(Hash)
+            path = PATH_ARGUMENT_KEYS.filter_map { |key| arguments[key] }.first
+            extension = File.extname(path.to_s).delete_prefix(".").downcase
+            return extension unless extension.empty?
+          end
+          return "json" if body.to_s.strip.start_with?("{", "[")
+
+          ""
+        end
+
+        def diff_like?(body)
+          lines = body.to_s.lines.first(6).map(&:chomp)
+          return false if lines.empty?
+
+          lines.any? { |line| line.start_with?("@@", "--- ", "+++ ", "diff --git") }
         end
 
         def final_agent_item?(item)
@@ -408,6 +618,60 @@ module Meringue
             "partial" => partial || nil,
             "dedup_key" => identity && [role, identity.to_s, part.to_s]
           }.compact
+        end
+
+        def tag_entry_source(entries, source)
+          Array(entries).map do |entry|
+            entry.is_a?(Hash) ? entry.merge("source" => entry.fetch("source", source)) : entry
+          end
+        end
+
+        # Drops a repeat only when the identical content also arrived from a
+        # different origin, which is the duplication users see when history and
+        # the live event stream describe the same message.
+        def drop_cross_source_duplicates(entries)
+          seen = {}
+          entries.reject do |entry|
+            next false unless entry.is_a?(Hash)
+
+            key = [
+              entry.fetch("role", "agent").to_s,
+              entry.fetch("tool_name", nil).to_s,
+              entry.fetch("text", entry.fetch("message", "")).to_s.strip
+            ]
+            next false if key.last.empty?
+
+            source = entry.fetch("source", nil).to_s
+            if seen.key?(key)
+              seen.fetch(key) != source
+            else
+              seen[key] = source
+              false
+            end
+          end
+        end
+
+        # Assembled history and the live event stream both describe tool traffic:
+        # history carries the final call and result, while events carry the
+        # phases of the same call. When history already describes a tool, its
+        # event copies are dropped; a tool that only exists in the event stream
+        # (still streaming) is still shown.
+        def drop_duplicate_tool_sources(entries)
+          history_tools = entries.each_with_object({}) do |entry, names|
+            next unless entry.is_a?(Hash) && TOOL_ROLES.include?(entry.fetch("role", nil).to_s)
+            next unless entry.fetch("source", nil).to_s == "items"
+
+            names[entry.fetch("tool_name", "").to_s] = true
+          end
+          return entries if history_tools.empty?
+
+          entries.reject do |entry|
+            next false unless entry.is_a?(Hash)
+            next false unless TOOL_ROLES.include?(entry.fetch("role", nil).to_s)
+            next false unless entry.fetch("source", nil).to_s == "events"
+
+            history_tools.key?(entry.fetch("tool_name", "").to_s)
+          end
         end
 
         # A streaming fragment is only worth showing until the assembled text
