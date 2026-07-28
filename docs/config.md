@@ -58,7 +58,7 @@ Supported action names:
 - `cursor_left`, `cursor_right`, `cursor_up`, `cursor_down`, `cursor_home`, `cursor_end`, `cursor_word_left`, `cursor_word_right`
 - `delete_backward`, `delete_forward`, `delete_word_backward`, `delete_word_forward`
 - `agent_select_previous`, `agent_select_next`, `open_agent_workspace`
-- `workspace_leader`, `workspace_switch_view`, `workspace_cycle_filter`, `workspace_open_editor`, `workspace_open_pull_request`, `workspace_close`
+- `workspace_leader`, `workspace_switch_view`, `workspace_cycle_filter`, `workspace_open_pi_session`, `workspace_open_editor`, `workspace_open_pull_request`, `workspace_close`
 
 Common key names include `enter`, `shift-enter`, `tab`, `shift-tab`, `ctrl-tab`, `escape`, arrow keys (`up`, `down`, `left`, `right`), `home`, `end`, `page-up`, `page-down`, `backspace`, `delete`, `ctrl-space`, `ctrl-a` through `ctrl-z`, `alt-left`, `alt-right`, `ctrl-left`, `ctrl-right`, `alt-backspace`, `ctrl-backspace`, `alt-delete`, `ctrl-delete`, `space`, and single printable characters like `j` or `p`. Advanced users can bind a raw terminal sequence with `raw:<sequence>`; literal `\\e` inside that string is converted to Escape.
 
@@ -66,13 +66,14 @@ Use `/keybind` in the TUI to show the active keybindings after config has been l
 
 ## Worker workspace terminal and editor
 
-The optional focused worker workspace has mutually exclusive live-worker and worktree-terminal views. Commands use a configurable leader sequence so common shell/editor controls are not intercepted while the terminal is active. The default is `Ctrl-Space` followed by `t` to switch views, `f` to cycle transcript filters, `e` to open the editor, `b` to open the verified delivery PR, or `q` to return to the AgentTree while preserving the worker and terminal. Configure the leader and suffixes under `[tui.keybindings]`:
+The optional focused worker workspace has mutually exclusive live-worker and worktree-terminal views. Commands use a configurable leader sequence so common shell/editor controls are not intercepted while the terminal is active. The default is `Ctrl-Space` followed by `t` to switch views, `f` to cycle transcript filters, `p` to open the saved Pi session in the established external terminal UI, `e` to open the editor, `b` to open the verified delivery PR, or `q` to return to the AgentTree while preserving the worker and terminal. Configure the leader and suffixes under `[tui.keybindings]`:
 
 ```toml
 [tui.keybindings]
 workspace_leader = ["ctrl-space"]
 workspace_switch_view = ["t"]
 workspace_cycle_filter = ["f"]
+workspace_open_pi_session = ["p"]
 workspace_open_editor = ["e"]
 workspace_open_pull_request = ["b"]
 workspace_close = ["q"]
@@ -103,12 +104,15 @@ The shell is started in a PTY whose current directory is the worker's persisted 
 
 The editor command is spawned directly with the worktree as both its current directory and, by default, the `.` argument. GUI editor CLIs normally detach or reuse an existing window. For a terminal-only editor, configure a terminal-emulator wrapper as the command (for example, an Alacritty command ending in `-e nvim`) so the editor has its own terminal. A missing executable, invalid command/argument type, malformed quoting, or removed worktree is reported in the workspace rather than crashing Meringue or mutating agent state.
 
+The focused `p` action reuses Meringue's existing external session opener: it validates the worker's persisted Pi session file (or discovers it from the saved session ID), then launches the configured Pi command in Alacritty at the worker worktree. `[terminal].alacritty_command`, `[harness.pi].command`, and `[harness.pi].session_dir` apply. The detached external UI does not replace, attach to, signal, or transfer ownership of Meringue's managed RPC process, and opening failures or missing/malformed session history are reported in the focused workspace without changing the worker record.
+
 Supported workspace action names:
 
 - `open_agent_workspace`
 - `workspace_leader`
 - `workspace_switch_view`
 - `workspace_cycle_filter`
+- `workspace_open_pi_session`
 - `workspace_open_editor`
 - `workspace_open_pull_request`
 - `workspace_close`
