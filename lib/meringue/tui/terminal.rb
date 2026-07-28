@@ -101,6 +101,13 @@ module Meringue
         output.flush
       end
 
+      # A major layout transition (dashboard ↔ focused workspace) changes
+      # nearly every row. Discarding the diff baseline lets the next frame be
+      # written as one clear/full-frame update instead of visible row patches.
+      def invalidate_frame!
+        @last_frame = nil
+      end
+
       def read_key(timeout:)
         return nil unless interactive?
 

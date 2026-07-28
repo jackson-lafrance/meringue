@@ -98,6 +98,7 @@ module Meringue
         @agent_workspace_pending_count = 0
         @agent_workspace_terminal_size = nil
         @workspace_leader_pending = false
+        @force_full_redraw = false
         @agent_workspace_messages = Hash.new { |messages, agent_id| messages[agent_id] = [] }
         @agent_workspace_events = Hash.new { |events, agent_id| events[agent_id] = [] }
         @last_render_width = DEFAULT_WIDTH
@@ -173,6 +174,11 @@ module Meringue
               end
               current_state = compose_state(base_state_provider, input_buffer, slash_suggestion_index, input_cursor)
               frame = render(current_state, width: width, height: height, color: color_output?)
+              if @force_full_redraw
+                terminal.invalidate_frame! if terminal.respond_to?(:invalidate_frame!)
+                last_frame = nil
+                @force_full_redraw = false
+              end
               if frame != last_frame
                 terminal.write_frame(frame)
                 last_frame = frame
@@ -618,12 +624,6 @@ module Meringue
         if @agent_workspace_view == "terminal"
           forward_agent_workspace_terminal_key(key, state)
           return [input_buffer, input_cursor, slash_suggestion_index]
-        end
-
-        if keybinding?("cancel_navigation", key)
-          @workspace_draft = input_buffer.to_s
-          close_agent_workspace
-          return [+"", 0, NO_SLASH_SELECTION]
         end
 
         if paste_key?(key)
@@ -1083,6 +1083,7 @@ module Meringue
 
         restored_view = @agent_workspace_agent_id.to_s == agent.fetch("id").to_s ? @agent_workspace_view : "agent"
         @agent_workspace_active = true
+        @force_full_redraw = true
         @agent_workspace_agent_id = agent.fetch("id")
         @agent_workspace_view = restored_view
         @agent_workspace_terminal_size = nil
@@ -1135,6 +1136,7 @@ module Meringue
         end
         @agent_workspace_active = false
         @agent_workspace_view = "agent"
+        @force_full_redraw = true
         @agent_workspace_terminal_size = nil
         @workspace_leader_pending = false
         @agent_workspace_notice = nil
@@ -1743,6 +1745,7 @@ module Meringue
         return if Array(state.fetch("agents", [])).any? { |agent| agent.is_a?(Hash) && agent["type"] == "worker" && agent["id"].to_s == @agent_workspace_agent_id.to_s }
 
         close_agent_workspace_session
+        @force_full_redraw = true if @agent_workspace_active
         @agent_workspace_active = false
         @agent_workspace_agent_id = nil
         @agent_workspace_view = "agent"

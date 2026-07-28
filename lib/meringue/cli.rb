@@ -258,9 +258,8 @@ module Meringue
           Ctrl-Space, then t / f    # switch focused view / cycle transcript filter
           Ctrl-Space, then p        # open the worker's saved Pi session externally
           Ctrl-Space, then e / b    # open the workspace editor / verified delivery PR
-          Ctrl-Space, then q        # return to AgentTree; keep worker and terminal alive
-          Esc in worker view        # return to AgentTree without stopping the worker
-          Ctrl-C on an empty prompt # quit the TUI; Esc cancels jump mode
+          Ctrl-Space, then q        # only focused-workspace return; keep worker and terminal alive
+          Ctrl-C on an empty prompt # quit the TUI; Esc cancels dashboard jump mode
       HELP
     end
   end
