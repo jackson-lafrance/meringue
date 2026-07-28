@@ -699,9 +699,17 @@ module Meringue
           selection = state.fetch("_selection", {}) || {}
           status = selection.fetch("status", "").to_s.strip
           return [["⧉ #{status}", Style::SUCCESS]] unless status.empty?
-          return [] unless selection.fetch("active", false)
+          if selection.fetch("mode", nil).to_s == "logs_cursor"
+            return [["⧉ logs select", Style::ACCENT], ["  arrows move · Shift+arrows extend · Ctrl-C copies · Esc exits", Style::MUTED]]
+          end
+          return [["⧉ selection", Style::ACCENT], ["  Ctrl-C copies", Style::MUTED]] if selection.fetch("active", false)
+          return [["Alt-V or Shift+arrows select logs", Style::MUTED]] if logs_pane_focused?(state)
 
-          [["⧉ selection", Style::ACCENT], ["  Ctrl-C copies", Style::MUTED]]
+          []
+        end
+
+        def logs_pane_focused?(state)
+          (state.fetch("_scroll", {}) || {}).fetch("active_pane", nil).to_s == "logs"
         end
 
         # Shares the focused workspace's bottom-bar styling: accented keys with
