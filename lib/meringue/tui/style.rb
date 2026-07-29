@@ -65,6 +65,13 @@ module Meringue
         "#{style}#{ansi(*codes)}"
       end
 
+      # Caret cell for keyboard-driven selection: the colorscheme's SELECTION
+      # colors plus bold/underline so the cursor stays visible inside a
+      # highlighted range and on an empty line, without adding a theme key.
+      def selection_cursor
+        with_codes(SELECTION, 1, 4)
+      end
+
       # Deterministic FNV-1a hash so an unchanged agent id keeps the same color
       # across renders and restarts without storing palette assignments.
       def agent_palette_index(agent_id)
