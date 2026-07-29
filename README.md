@@ -159,6 +159,7 @@ Useful slash commands inside the TUI include:
 - `/theme <name>` — persist a TUI colorscheme.
 - `/harness <pi|claude|antigravity>` — select the harness for future agents.
 - `/keybind` — show active TUI keybindings.
+- `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together, keeping anything unresolved work still needs.
 - `/recount` — compact project, issue, worker, and question numbering after records are removed.
 
 See `docs/recount.md` for the renumbering, cross-reference, and active-session rules. See `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
