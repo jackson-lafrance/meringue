@@ -1,0 +1,198 @@
+# frozen_string_literal: true
+
+require "test_helper"
+require "support/state_support"
+
+# State::Models shape normalization: defaults, tolerance for unknown fields, the
+# documented status/level vocabularies, counters, and agent-workspace presentation state.
+class StateModelsShapeTest < Minitest::Test
+  include StateSupport
+
+  def test_allowed_status_and_level_vocabularies
+    assert_equal %w[queued working idle blocked completed errored killed], Models::LIFECYCLE_STATUSES
+    assert_equal %w[open answered dismissed], Models::QUESTION_STATUSES
+    assert_equal %w[info warning error], Models::LOG_LEVELS
+    assert_equal %w[user kernel head worker harness system], Models::LOG_SOURCE_TYPES
+    assert_equal 500, Models::LOG_RETENTION_LIMIT
+    assert_equal 1, Models::SCHEMA_VERSION
+
+    [Models::LIFECYCLE_STATUSES, Models::QUESTION_STATUSES, Models::LOG_LEVELS, Models::LOG_SOURCE_TYPES].each do |list|
+      assert list.frozen?, "status vocabularies must be frozen"
+    end
+  end
+
+  def test_empty_state_has_every_required_section
+    state = Models.empty_state(now: "2026-07-11T00:00:00Z")
+
+    assert_equal(
+      %w[schema_version projects issues agents questions logs conversation ui counters metadata].sort,
+      state.keys.sort
+    )
+    assert_equal "2026-07-11T00:00:00Z", state.dig("metadata", "created_at")
+    assert_equal "2026-07-11T00:00:00Z", state.dig("metadata", "updated_at")
+    assert_equal(
+      %w[projects heads questions logs issues_by_project workers_by_issue].sort,
+      state.fetch("counters").keys.sort
+    )
+  end
+
+  def test_ensure_state_shape_is_idempotent
+    state = Models.ensure_state_shape!({}, now: "2026-07-11T00:00:00Z")
+    snapshot = JSON.generate(state)
+
+    Models.ensure_state_shape!(state, now: "2027-01-01T00:00:00Z")
+
+    assert_equal snapshot, JSON.generate(state), "re-normalizing an already-normal state must not change it"
+  end
+
+  def test_ensure_state_shape_preserves_unknown_sections_and_record_fields
+    state = {
+      "unknown_section" => { "keep" => true },
+      "projects" => [{ "id" => "P1", "unknown_project_field" => 7 }],
+      "questions" => [{ "id" => "Q1", "status" => "answered", "unknown" => nil }]
+    }
+
+    Models.ensure_state_shape!(state)
+
+    assert_equal({ "keep" => true }, state.fetch("unknown_section"))
+    assert_equal 7, state.fetch("projects").first.fetch("unknown_project_field")
+    assert state.fetch("questions").first.key?("unknown")
+  end
+
+  def test_ensure_state_shape_does_not_reject_out_of_vocabulary_statuses
+    # Normalization is tolerant by design: the kernel owns lifecycle transitions, so a
+    # hand-edited or future status is preserved rather than raising or being rewritten.
+    state = {
+      "agents" => [{ "id" => "P1-I1-W1", "type" => "worker", "issue_id" => "P1-I1", "status" => "sleeping" }],
+      "questions" => [{ "id" => "Q1", "status" => "escalated" }],
+      "logs" => [{ "id" => "L1", "level" => "trace", "source_type" => "cosmic" }]
+    }
+
+    Models.ensure_state_shape!(state)
+
+    assert_equal "sleeping", state.fetch("agents").first.fetch("status")
+    assert_equal "escalated", state.fetch("questions").first.fetch("status")
+    assert_equal "trace", state.fetch("logs").first.fetch("level")
+  end
+
+  def test_counters_are_derived_from_the_highest_existing_identifier
+    state = {
+      "projects" => [{ "id" => "P2" }, { "id" => "P10" }, { "id" => "not-a-project" }],
+      "agents" => [
+        { "id" => "H3", "type" => "head" },
+        { "id" => "H11", "type" => "head" },
+        { "id" => "P1-I1-W9", "type" => "worker" }
+      ],
+      "questions" => [{ "id" => "Q4" }],
+      "logs" => [{ "id" => "L12" }]
+    }
+
+    Models.ensure_state_shape!(state)
+
+    counters = state.fetch("counters")
+    assert_equal 10, counters.fetch("projects")
+    assert_equal 11, counters.fetch("heads")
+    assert_equal 4, counters.fetch("questions")
+    assert_equal 12, counters.fetch("logs")
+  end
+
+  def test_existing_counters_are_never_lowered_for_logs
+    state = { "counters" => { "logs" => 99 }, "logs" => [{ "id" => "L3" }] }
+
+    Models.ensure_state_shape!(state)
+
+    assert_equal 99, state.dig("counters", "logs")
+  end
+
+  def test_existing_counters_are_preserved_for_other_record_types
+    state = { "counters" => { "projects" => 42, "questions" => 7 }, "projects" => [{ "id" => "P1" }] }
+
+    Models.ensure_state_shape!(state)
+
+    assert_equal 42, state.dig("counters", "projects")
+    assert_equal 7, state.dig("counters", "questions")
+  end
+
+  def test_conversation_next_message_id_defaults_to_the_highest_message_id
+    state = { "conversation" => { "messages" => [{ "id" => 4 }, { "id" => 9 }, { "id" => 2 }] } }
+
+    Models.ensure_state_shape!(state)
+
+    assert_equal 9, state.dig("conversation", "next_message_id")
+    assert_equal 9, Models.max_log_message_id(state)
+    assert_equal 0, Models.max_log_message_id({})
+  end
+
+  def test_agent_workspace_state_defaults_and_invalid_selection_clearing
+    state = {
+      "agents" => [{ "id" => "P1-I1-W1", "type" => "worker" }],
+      "ui" => { "agent_workspace" => { "selected_agent_id" => "P9-I9-W9", "view" => "hologram", "filter" => "sparkles", "draft" => "hi" } }
+    }
+
+    Models.ensure_state_shape!(state)
+    workspace = state.dig("ui", "agent_workspace")
+
+    refute workspace.key?("selected_agent_id"), "a selection pointing at a pruned worker is cleared"
+    assert_equal "agent", workspace.fetch("view")
+    assert_equal "all", workspace.fetch("filter")
+    assert_equal "", workspace.fetch("draft"), "the draft is dropped with the selection"
+    assert_equal 0, workspace.fetch("agent_scroll_offset")
+    assert_equal 0, workspace.fetch("terminal_scroll_offset")
+  end
+
+  def test_agent_workspace_state_keeps_valid_selection_and_bounds_offsets
+    state = {
+      "agents" => [{ "id" => "P1-I1-W1", "type" => "worker" }],
+      "ui" => {
+        "agent_workspace" => {
+          "selected_agent_id" => "P1-I1-W1", "view" => "terminal", "filter" => "tools",
+          "draft" => "ship it", "agent_scroll_offset" => -5, "terminal_scroll_offset" => "12"
+        }
+      }
+    }
+
+    Models.ensure_state_shape!(state)
+    workspace = Models.agent_workspace_state(state)
+
+    assert_equal "P1-I1-W1", workspace.fetch("selected_agent_id")
+    assert_equal "terminal", workspace.fetch("view")
+    assert_equal "tools", workspace.fetch("filter")
+    assert_equal "ship it", workspace.fetch("draft")
+    assert_equal 0, workspace.fetch("agent_scroll_offset")
+    assert_equal 12, workspace.fetch("terminal_scroll_offset")
+    assert_equal %w[agent terminal], Models::AGENT_WORKSPACE_VIEWS
+    assert_equal %w[all output final reasoning tools], Models::AGENT_WORKSPACE_FILTERS
+  end
+
+  def test_nonnegative_integer_tolerates_garbage
+    assert_equal 0, Models.nonnegative_integer(nil)
+    assert_equal 0, Models.nonnegative_integer("nope")
+    assert_equal 0, Models.nonnegative_integer(-3)
+    assert_equal 4, Models.nonnegative_integer("4")
+  end
+
+  def test_worker_pull_request_records_migrate_onto_the_issue
+    state = {
+      "issues" => [{ "id" => "P1-I1", "project_id" => "P1" }],
+      "agents" => [{
+        "id" => "P1-I1-W1", "type" => "worker", "issue_id" => "P1-I1",
+        "delivery_pull_request" => { "url" => "https://github.com/o/r/pull/1", "state" => "open" },
+        "reported_pr_urls" => ["https://github.com/o/r/pull/1"],
+        "harness_metadata" => { "candidate_pr_urls" => ["https://github.com/o/r/pull/2"] }
+      }]
+    }
+
+    Models.ensure_state_shape!(state)
+
+    issue = state.fetch("issues").first
+    worker = state.fetch("agents").first
+    assert_equal "https://github.com/o/r/pull/1", issue.fetch("delivery_pull_request").fetch("url")
+    assert_equal ["https://github.com/o/r/pull/1"], issue.fetch("delivery_pull_requests").map { |record| record.fetch("url") }
+    assert_equal ["https://github.com/o/r/pull/2"], issue.fetch("candidate_pr_urls")
+    assert_equal ["https://github.com/o/r/pull/1"], issue.fetch("reported_pr_urls")
+    Models::PULL_REQUEST_STORAGE_KEYS.each do |key|
+      refute worker.key?(key), "worker should no longer store #{key}"
+      refute worker.fetch("harness_metadata").key?(key), "worker harness_metadata should no longer store #{key}"
+    end
+  end
+end
