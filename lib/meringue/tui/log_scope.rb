@@ -81,13 +81,26 @@ module Meringue
       # heads without an owning issue remain useful log-only filters. The TUI
       # sends only selected_id; the kernel resolves the authoritative issue again
       # before a head is spawned.
+      #
+      # Renderers ask "what is selected?" and want a Hash they can read fields
+      # from, so this is always a Hash and never nil.
       def selected_target(state)
         value = scope(state).fetch("selected_target", nil)
         value.is_a?(Hash) ? value : {}
       end
 
+      # Routing callers ask "is there a target to attach?" and want a
+      # present-or-absent value, so an absent, cleared, or unbound selection is
+      # nil here instead of an empty Hash every caller has to re-test.
+      def chat_target(state)
+        target = selected_target(state)
+        return nil if target.fetch("issue_id", "").to_s.empty?
+
+        target
+      end
+
       def chat_target?(state)
-        !selected_target(state).fetch("issue_id", "").to_s.empty?
+        !chat_target(state).nil?
       end
 
       # True when the id still names a rendered AgentTree node, so a pruned or
@@ -167,7 +180,8 @@ module Meringue
           "issue_title" => issue.fetch("title", nil).to_s
         }
         if kind != "issue"
-          metadata = record.fetch("harness_metadata", {}) || {}
+          metadata = record.fetch("harness_metadata", nil)
+          metadata = {} unless metadata.is_a?(Hash)
           target["selected_agent_id"] = record.fetch("id").to_s
           target["selected_agent_type"] = record.fetch("type", nil).to_s
           target["selected_agent_title"] = metadata.fetch("title", nil).to_s

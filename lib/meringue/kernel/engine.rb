@@ -5574,9 +5574,10 @@ module Meringue
                         requested_target
                       end
         selected_id = selected_id.to_s.strip
-        if selected_id.empty?
-          return [nil, { "code" => "selected_target_id_required", "message" => "selected target id is required." }]
-        end
+        # A blank or shapeless selection carries no destination, so it means the
+        # same thing as no selection: route the message normally instead of
+        # rejecting it for an empty routing hint.
+        return [nil, nil] if selected_id.empty?
 
         issue = find_issue(state, selected_id)
         agent = nil
