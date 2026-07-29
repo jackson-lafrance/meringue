@@ -38,7 +38,7 @@ The presentation record must not become a second source of harness truth. PIDs, 
 
 Outside a focused workspace, `Ctrl-B` (`open_delivery_pr`) opens the selected worker's verified delivery PR. Inside either focused view, use the configurable workspace leader followed by `workspace_open_pull_request` (`Ctrl-Space`, then `p` by default). The bottom status line keeps the PR number/status and sequence visible. Bare terminal `Ctrl-B` is forwarded to the PTY rather than stolen from shells, multiplexers, or editors.
 
-Reconciliation refreshes old verified PR status at most once every five minutes. A forge/auth/network failure records `availability: unavailable` and an error while preserving the last known PR state and URL. This is intentional: `/prune merged` still performs fresh conservative checks and will not prune an unknown PR.
+Reconciliation refreshes old verified PR status at most once every five minutes. A forge/auth/network failure records `availability: unavailable` and an error while preserving the last known PR state and URL. This is intentional: `/prune` still performs fresh conservative checks and will not prune an unknown PR.
 
 ## Degraded runtime dependencies
 
@@ -97,7 +97,7 @@ Repository policy forbids automated test files, so integration should be checked
 2. Press the workspace leader followed by `p` and confirm the tracked PR opens from both focused views; confirm bare `Ctrl-B` still reaches the PTY. Replace the PR URL with malformed metadata and confirm a useful unavailable notice is shown instead.
 3. Remove/rename the worktree and harness session file, then render the workspace. Confirm notices are shown and state is not pruned or rewritten.
 4. Configure missing terminal/editor executables and confirm those actions fail in place without closing Meringue.
-5. Run `/prune merged` with open, closed, merged, and forge-unavailable PRs. Confirm only bundles satisfying the existing conservative merged semantics are removed.
+5. Run `/prune` with open, closed, merged, and forge-unavailable PRs. Confirm only bundles whose PRs are settled (merged or closed) are removed and that open/unknown PRs still retain their bundles.
 6. Run `/recount` and confirm the durable selected worker follows its new ID.
 7. Render a Pi session containing repeated assistant messages, streaming deltas, reasoning, tool calls/results, direct bash output, failures, and lifecycle events. Confirm all transcript entries—not only the compact completion log—remain visible and scrollable while live updates continue; cycle every transcript filter and verify category colors apply to the role/type-and-timestamp header, that assistant/reasoning/user bodies use the normal foreground while tool call/result bodies are dimmed, that wrapped bodies keep every character, and that streaming reasoning deltas never appear as a duplicate assistant fragment.
 8. Run a colorized zsh child process and confirm SGR colors survive the embedded screen model. Type quickly in terminal view and confirm PTY echo remains responsive, the initial prompt appears in the viewport, and ordinary keys are forwarded. Repeatedly switch worker/terminal views and use leader + `q`; confirm each dashboard return is an immediate full redraw, the read refresher exits, no thread/CPU leak or exception occurs, and both worker and terminal continue running. Confirm Esc neither closes worker view nor takes a stale return path (and still reaches the PTY in terminal view).
