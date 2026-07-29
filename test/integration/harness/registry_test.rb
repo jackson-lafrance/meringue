@@ -131,6 +131,70 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_equal ["pi"], worker.command
   end
 
+  def test_pi_scalar_session_defaults_override_role_argv_for_future_heads_and_workers
+    subject = registry(
+      "harness" => {
+        "pi" => {
+          "model" => "openai/gpt-5.6-sol",
+          "thinking_level" => "xhigh",
+          "head_extra_args" => ["--model", "old/head", "--thinking", "low", "--tools", "read"],
+          "worker_extra_args" => ["--model", "old/worker", "--thinking", "medium", "--tools", "write"]
+        }
+      }
+    )
+
+    defaults = subject.session_defaults(provider: "pi")
+
+    assert_equal "openai/gpt-5.6-sol", defaults.fetch("model")
+    assert_equal "xhigh", defaults.fetch("thinking_level")
+    assert_equal "consistent", defaults.fetch("consistency")
+    %w[head worker].each do |kind|
+      args = subject.client_for(provider: "pi", kind: kind).extra_args
+      assert_equal ["--model", "openai/gpt-5.6-sol"], args.last(4).first(2)
+      assert_equal ["--thinking", "xhigh"], args.last(2)
+    end
+  end
+
+  def test_updating_pi_session_defaults_persists_and_reconfigures_cached_clients_in_place
+    subject = registry
+    head = subject.client_for(provider: "pi", kind: "head")
+    worker = subject.client_for(provider: "pi", kind: "worker")
+
+    defaults = subject.update_session_defaults!(
+      provider: "pi",
+      model: "openai/gpt-5.6-sol",
+      thinking_level: "xhigh"
+    )
+
+    assert_same head, subject.client_for(provider: "pi", kind: "head")
+    assert_same worker, subject.client_for(provider: "pi", kind: "worker")
+    assert_equal "openai/gpt-5.6-sol", defaults.fetch("model")
+    assert_equal "xhigh", defaults.fetch("thinking_level")
+    assert_equal ["--model", "openai/gpt-5.6-sol", "--thinking", "xhigh"], worker.extra_args.last(4)
+    saved = Meringue::Config.load(path: subject.config.path)
+    assert_equal "openai/gpt-5.6-sol", saved.value("harness", "pi", "model")
+    assert_equal "xhigh", saved.value("harness", "pi", "thinking_level")
+  end
+
+  def test_role_specific_pi_argv_is_reported_as_mixed_until_scalar_defaults_are_set
+    subject = registry(
+      "harness" => {
+        "pi" => {
+          "head_extra_args" => ["--model", "anthropic/head", "--thinking", "high"],
+          "worker_extra_args" => ["--model", "openai/worker", "--thinking", "xhigh"]
+        }
+      }
+    )
+
+    defaults = subject.session_defaults(provider: "pi")
+
+    assert_nil defaults.fetch("model")
+    assert_nil defaults.fetch("thinking_level")
+    assert_equal "mixed", defaults.fetch("consistency")
+    assert_equal "anthropic/head", defaults.dig("roles", "head", "model")
+    assert_equal "openai/worker", defaults.dig("roles", "worker", "model")
+  end
+
   def test_client_for_builds_claude_and_antigravity_clients
     subject = registry(
       "harness" => {

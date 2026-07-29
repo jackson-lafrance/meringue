@@ -231,7 +231,7 @@ module Meringue
           end
 
           [
-            ["session ", Style::DIM],
+            ["session settings · ", Style::DIM],
             ["model #{model}", Style::MUTED],
             [" · ", Style::DIM],
             ["thinking #{thinking}", Style::MUTED]

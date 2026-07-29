@@ -47,7 +47,7 @@ module Meringue
 
       THINKING_LEVELS = %w[off minimal low medium high xhigh max].freeze
 
-      attr_reader :command, :env, :extra_args, :session_dir, :command_timeout,
+      attr_reader :command, :env, :session_dir, :command_timeout,
                   :event_timeout, :shutdown_timeout
 
       def harness_name
@@ -65,12 +65,24 @@ module Meringue
         @command = command
         @env = env.transform_keys(&:to_s).transform_values(&:to_s)
         @extra_args = extra_args.map(&:to_s)
+        @spawn_arguments_mutex = Mutex.new
         @session_dir = session_dir
         @command_timeout = command_timeout
         @event_timeout = event_timeout
         @shutdown_timeout = shutdown_timeout
         @processes_by_pid = {}
         @processes_mutex = Mutex.new
+      end
+
+      def extra_args
+        @spawn_arguments_mutex.synchronize { @extra_args.dup }
+      end
+
+      # Registry updates this client in place so its already-running RPC
+      # transports remain owned while future sessions use new app defaults.
+      def configure_spawn_arguments(arguments)
+        @spawn_arguments_mutex.synchronize { @extra_args = Array(arguments).map(&:to_s) }
+        extra_args
       end
 
       def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:)
@@ -762,7 +774,33 @@ module Meringue
         argv += ["--session", session.to_s] if present?(session)
         argv += ["--name", session_name.to_s] if present?(session_name)
         argv += ["--append-system-prompt", system_prompt.to_s] if present?(system_prompt)
-        argv + extra_args
+        session_arguments = extra_args
+        # Model/thinking defaults are spawn-only. Passing newly configured
+        # defaults while resuming an existing session would silently mutate the
+        # very session that global commands promise to leave unchanged.
+        session_arguments = without_options(session_arguments, "--model", "--thinking") if present?(session)
+        argv + session_arguments
+      end
+
+      def without_options(arguments, *options)
+        result = []
+        skip_next = false
+        Array(arguments).each do |argument|
+          if skip_next
+            skip_next = false
+            next
+          end
+
+          text = argument.to_s
+          if options.include?(text)
+            skip_next = true
+          elsif options.any? { |option| text.start_with?("#{option}=") }
+            next
+          else
+            result << text
+          end
+        end
+        result
       end
 
       def start_rpc_process(argv:, cwd:)

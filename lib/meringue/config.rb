@@ -34,6 +34,22 @@ module Meringue
       new(data, path: expanded_path, loaded: true)
     end
 
+    # Persists app-wide Pi spawn defaults without rewriting role-specific tool
+    # flags. Registry appends these scalar values after head/worker extra args,
+    # so they authoritatively apply to every future Pi session.
+    def self.save_pi_session_defaults!(model: nil, thinking_level: nil, path: DEFAULT_PATH)
+      expanded_path = File.expand_path(path.to_s)
+      config = load(path: expanded_path)
+      data = config.to_h
+      data["harness"] = {} unless data["harness"].is_a?(Hash)
+      data.fetch("harness")["pi"] = {} unless data.fetch("harness")["pi"].is_a?(Hash)
+      pi = data.fetch("harness").fetch("pi")
+      pi["model"] = model.to_s unless model.nil?
+      pi["thinking_level"] = thinking_level.to_s unless thinking_level.nil?
+      write_toml(expanded_path, data)
+      new(data, path: expanded_path, loaded: true)
+    end
+
     def self.write_toml(path, data)
       FileUtils.mkdir_p(File.dirname(path))
       temp_path = "#{path}.tmp.#{$$}"

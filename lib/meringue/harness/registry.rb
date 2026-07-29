@@ -200,12 +200,60 @@ module Meringue
         command.is_a?(Array) ? command.join(" ") : command.to_s
       end
 
+      # Effective defaults used when the registry next starts a Pi head or
+      # worker. Role details stay visible for older configs whose explicit argv
+      # values differ; the dedicated scalar defaults make both roles converge.
+      def session_defaults(provider: "pi")
+        provider = normalize_provider!(provider)
+        raise ArgumentError, "Session defaults are currently Pi-only." unless provider == "pi"
+
+        provider_settings = provider_config(provider)
+        roles = %w[head worker].to_h do |kind|
+          args = extra_args_for(provider, provider_settings, kind)
+          [kind, {
+            "model" => command_option(args, "--model") || DEFAULT_PI_MODEL,
+            "thinking_level" => command_option(args, "--thinking") || DEFAULT_PI_THINKING_LEVEL
+          }]
+        end
+        shared_model = roles.values.map { |role| role.fetch("model") }.uniq
+        shared_thinking = roles.values.map { |role| role.fetch("thinking_level") }.uniq
+        {
+          "harness" => "pi",
+          "model" => shared_model.one? ? shared_model.first : nil,
+          "thinking_level" => shared_thinking.one? ? shared_thinking.first : nil,
+          "consistency" => shared_model.one? && shared_thinking.one? ? "consistent" : "mixed",
+          "roles" => roles,
+          "scope" => "future_pi_sessions"
+        }
+      end
+
+      # Saves the selected values and reconfigures cached Pi clients in place.
+      # Existing RPC processes keep their current effective settings; only a
+      # later new-session spawn applies the replacement model/thinking argv.
+      def update_session_defaults!(provider: "pi", model: nil, thinking_level: nil)
+        provider = normalize_provider!(provider)
+        raise ArgumentError, "Session defaults are currently Pi-only." unless provider == "pi"
+
+        Config.save_pi_session_defaults!(model: model, thinking_level: thinking_level, path: config.path)
+        overrides = { "harness" => { "pi" => {} } }
+        overrides.fetch("harness").fetch("pi")["model"] = model.to_s unless model.nil?
+        overrides.fetch("harness").fetch("pi")["thinking_level"] = thinking_level.to_s unless thinking_level.nil?
+        @config = config.with_overrides(overrides)
+        provider_settings = provider_config("pi")
+        @clients.each do |(cached_provider, kind), client|
+          next unless cached_provider == "pi" && client.respond_to?(:configure_spawn_arguments)
+
+          client.configure_spawn_arguments(extra_args_for("pi", provider_settings, kind))
+        end
+        session_defaults(provider: "pi")
+      end
+
       private
 
       def build_client(provider:, kind:)
         provider = normalize_provider!(provider)
         provider_config = provider_config(provider)
-        extra_args = extra_args_for(provider_config, kind)
+        extra_args = extra_args_for(provider, provider_config, kind)
         env = env_for(provider_config)
         command = command_argv(provider_config.fetch("command"))
 
@@ -236,8 +284,26 @@ module Meringue
         Config.deep_merge(Config.deep_merge(defaults, legacy_configured), public_configured)
       end
 
-      def extra_args_for(provider_config, kind)
-        Array(provider_config["extra_args"]) + Array(provider_config["#{kind}_extra_args"])
+      def extra_args_for(provider, provider_config, kind)
+        args = Array(provider_config["extra_args"]) + Array(provider_config["#{kind}_extra_args"])
+        return args unless provider == "pi"
+
+        args = args.dup
+        model = provider_config["model"].to_s.strip
+        thinking_level = provider_config["thinking_level"].to_s.strip
+        args.concat(["--model", model]) unless model.empty?
+        args.concat(["--thinking", thinking_level]) unless thinking_level.empty?
+        args
+      end
+
+      def command_option(args, option)
+        values = []
+        Array(args).each_with_index do |argument, index|
+          text = argument.to_s
+          values << args[index + 1].to_s if text == option && args[index + 1]
+          values << text.delete_prefix("#{option}=") if text.start_with?("#{option}=")
+        end
+        values.reject(&:empty?).last
       end
 
       def env_for(provider_config)
