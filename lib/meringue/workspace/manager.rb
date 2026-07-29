@@ -12,6 +12,11 @@ module Meringue
       DEFAULT_ROOT = File.expand_path("~/.meringue/workspaces")
       DEFAULT_COMMAND_TIMEOUT = 60
       TERMINATION_GRACE_SECONDS = 1
+      # A worker branch/worktree can already exist when a previous attempt was interrupted or when
+      # another actor provisioned the same worker concurrently. Reuse it when it is usable, and
+      # otherwise fall back to a uniquified branch/path instead of failing the spawn.
+      ALLOCATION_ATTEMPT_LIMIT = 3
+      COLLISION_ERROR_PATTERN = /already exists|already used by worktree|is already checked out/i
 
       class CommandTimeout < StandardError
         attr_reader :argv, :timeout, :stdout, :stderr
@@ -67,60 +72,40 @@ module Meringue
 
         worktree_root = File.expand_path(plan.fetch("workspace_path"))
         relative_project_path = relative_path(project_path, git_root)
-        workspace_path = relative_project_path == "." ? worktree_root : File.join(worktree_root, relative_project_path)
         base_ref = preferred_base_ref(git_root)
         return failed_workspace(plan, ["could not find a git base ref for worker workspace"], git_root: git_root, worktree_root: worktree_root) unless base_ref
 
-        if Dir.exist?(worktree_root)
-          adopted = adopt_existing_worktree(plan, git_root: git_root, worktree_root: worktree_root, workspace_path: workspace_path,
-                                            relative_project_path: relative_project_path, base_ref: base_ref)
-          return adopted if adopted
-
-          return failed_workspace(plan, ["worker worktree path already exists: #{worktree_root}"], git_root: git_root, worktree_root: worktree_root, base_ref: base_ref)
-        end
-
-        remove_orphaned_owned_branch(git_root, plan.fetch("workspace_branch"))
-        FileUtils.mkdir_p(File.dirname(worktree_root))
-        result = run_command(
-          "git",
-          "-C",
-          git_root,
-          "worktree",
-          "add",
-          "-b",
-          plan.fetch("workspace_branch"),
-          worktree_root,
-          base_ref
-        )
-        stdout = result.fetch("stdout")
-        stderr = result.fetch("stderr")
-        status = result.fetch("status")
-
-        unless status.success?
-          return failed_workspace(
-            plan,
-            ["git worktree add failed: #{present_output(stderr) || present_output(stdout) || "exit #{status.exitstatus}"}"],
+        errors = []
+        last_failure = nil
+        ALLOCATION_ATTEMPT_LIMIT.times do |attempt|
+          candidate = candidate_allocation(plan, attempt)
+          worktree_root = candidate.fetch("worktree_root")
+          outcome = allocate_candidate_worktree(
+            plan: plan,
             git_root: git_root,
-            worktree_root: worktree_root,
             base_ref: base_ref,
-            stdout: stdout,
-            stderr: stderr,
-            exit_status: status.exitstatus
+            relative_project_path: relative_project_path,
+            branch: candidate.fetch("branch"),
+            worktree_root: worktree_root
           )
+          workspace = outcome.fetch("workspace", nil)
+          return workspace if workspace
+
+          errors.concat(Array(outcome.fetch("errors", [])))
+          last_failure = outcome
+          break unless outcome.fetch("retry", false)
         end
 
-        plan.merge(
-          "workspace_path" => workspace_path,
-          "workspace_root_path" => worktree_root,
-          "worktree_root_path" => worktree_root,
-          "git_root" => git_root,
-          "base_ref" => base_ref,
-          "project_relative_path" => relative_project_path,
-          "created" => true,
-          "errors" => [],
-          "stdout" => present_output(stdout),
-          "stderr" => present_output(stderr)
-        ).compact
+        failed_workspace(
+          plan,
+          errors,
+          git_root: git_root,
+          worktree_root: worktree_root,
+          base_ref: base_ref,
+          stdout: last_failure && last_failure["stdout"],
+          stderr: last_failure && last_failure["stderr"],
+          exit_status: last_failure && last_failure["exit_status"]
+        )
       rescue CommandTimeout => e
         cleanup = cleanup_incomplete_allocation(
           git_root: defined?(git_root) && git_root,
@@ -223,6 +208,95 @@ module Meringue
           "timeout_seconds" => timeout_seconds,
           "cleanup" => cleanup
         ).compact
+      end
+
+      # Attempt numbers above zero uniquify the branch and worktree path so a worker can still be
+      # provisioned when the preferred names are taken by another worktree or an unrelated branch.
+      def candidate_allocation(plan, attempt)
+        branch = plan.fetch("workspace_branch")
+        worktree_root = File.expand_path(plan.fetch("workspace_path"))
+        return { "branch" => branch, "worktree_root" => worktree_root } if attempt.zero?
+
+        suffix = "-#{attempt + 1}"
+        { "branch" => "#{branch}#{suffix}", "worktree_root" => "#{worktree_root}#{suffix}" }
+      end
+
+      def allocate_candidate_worktree(plan:, git_root:, base_ref:, relative_project_path:, branch:, worktree_root:)
+        candidate_plan = plan.merge("workspace_branch" => branch, "workspace_path" => worktree_root)
+        workspace_path = relative_project_path == "." ? worktree_root : File.join(worktree_root, relative_project_path)
+
+        if Dir.exist?(worktree_root)
+          adopted = adopt_existing_worktree(candidate_plan, git_root: git_root, worktree_root: worktree_root, workspace_path: workspace_path,
+                                            relative_project_path: relative_project_path, base_ref: base_ref)
+          return { "workspace" => adopted } if adopted
+
+          discarded = discard_empty_owned_directory(worktree_root)
+          return { "retry" => true, "errors" => ["worker worktree path already exists: #{worktree_root}"] } unless discarded
+        end
+
+        remove_orphaned_owned_branch(git_root, branch)
+        FileUtils.mkdir_p(File.dirname(worktree_root))
+        argv = if branch_exists?(git_root, branch)
+                 return { "retry" => true, "errors" => ["worker branch #{branch} is checked out in another worktree"] } if branch_checked_out?(git_root, branch)
+
+                 # The branch survived a previous attempt for this worker; check it out instead of
+                 # failing on "a branch named ... already exists".
+                 ["git", "-C", git_root, "worktree", "add", worktree_root, branch]
+               else
+                 ["git", "-C", git_root, "worktree", "add", "-b", branch, worktree_root, base_ref]
+               end
+        result = run_command(*argv)
+        stdout = result.fetch("stdout")
+        stderr = result.fetch("stderr")
+        status = result.fetch("status")
+
+        unless status.success?
+          output = present_output(stderr) || present_output(stdout)
+          return {
+            "retry" => collision_output?(output),
+            "errors" => ["git worktree add failed: #{output || "exit #{status.exitstatus}"}"],
+            "stdout" => stdout,
+            "stderr" => stderr,
+            "exit_status" => status.exitstatus
+          }
+        end
+
+        {
+          "workspace" => candidate_plan.merge(
+            "workspace_path" => workspace_path,
+            "workspace_root_path" => worktree_root,
+            "worktree_root_path" => worktree_root,
+            "git_root" => git_root,
+            "base_ref" => base_ref,
+            "project_relative_path" => relative_project_path,
+            "created" => true,
+            "errors" => [],
+            "stdout" => present_output(stdout),
+            "stderr" => present_output(stderr)
+          ).compact
+        }
+      end
+
+      def collision_output?(output)
+        output.to_s.match?(COLLISION_ERROR_PATTERN)
+      end
+
+      def branch_exists?(git_root, branch)
+        run_command("git", "-C", git_root, "show-ref", "--verify", "--quiet", "refs/heads/#{branch}").fetch("status").success?
+      end
+
+      def branch_checked_out?(git_root, branch)
+        worktree_records(git_root).any? { |record| record["branch"] == "refs/heads/#{branch}" }
+      end
+
+      def discard_empty_owned_directory(path)
+        return false unless owned_workspace_path?(path)
+        return false unless (Dir.children(path) - [".DS_Store"]).empty?
+
+        FileUtils.rm_rf(path)
+        !Dir.exist?(path)
+      rescue StandardError
+        false
       end
 
       def adopt_existing_worktree(plan, git_root:, worktree_root:, workspace_path:, relative_project_path:, base_ref:)
