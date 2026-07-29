@@ -61,6 +61,6 @@ These need real credentials, real processes, or a real terminal, so they stay ma
 - Network calls of any kind, including GitHub/forge API access, PR verification against real repositories, and `gh` invocations.
 - Interactive terminal behavior that needs a live TTY/PTY: raw-mode key handling, PTY echo timing, mouse events, and true-color rendering fidelity. Rendering logic is tested through the pane/canvas objects instead.
 - Editor and terminal launches into external applications.
-- Performance characteristics: use `scripts/benchmark_*.rb` for those.
+- Absolute performance numbers and profiling. The suite keeps a few deliberately generous bounded checks (`test/integration/tui/typing_throughput_test.rb`, `test/integration/workspace/terminal_scroll_performance_test.rb`, and the persistence bounds in `test/integration/state/log_retention_test.rb`) so an accidental O(n) regression fails, but real measurement on a specific machine is still a manual exercise.
 
 Manual verification checklists for these areas live in `docs/agent_workspace_integration.md` and the relevant feature docs.
