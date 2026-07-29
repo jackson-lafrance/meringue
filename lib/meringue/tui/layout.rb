@@ -114,6 +114,53 @@ module Meringue
         Selection.point(row.fetch(:line_index), column)
       end
 
+      # Plain text of every wrapped logs content line. Keyboard selection uses
+      # this to move a caret through the same coordinates the mouse produces.
+      def logs_text_lines(state, width:, height:)
+        view = logs_text_view(state, width: width, height: height)
+        return [] unless view
+
+        view.fetch(:lines).map { |line| line_plain_text(line) }
+      end
+
+      # Which content lines the logs pane is currently showing, so keyboard
+      # selection can page by a real screenful and place a fresh caret in view.
+      def logs_visible_window(state, width:, height:)
+        dimensions = logs_content_dimensions(state, width: width, height: height)
+        return nil unless dimensions
+
+        line_count = dimensions.fetch(:lines).length
+        window = tail_window(line_count, dimensions.fetch(:content_height), pane_scroll_offset(state, "logs"))
+        {
+          "start_index" => window.fetch(:start_index),
+          "finish_index" => window.fetch(:finish_index),
+          "capacity" => [window.fetch(:finish_index) - window.fetch(:start_index), 0].max,
+          "line_count" => line_count,
+          "content_width" => dimensions.fetch(:content_width)
+        }
+      end
+
+      # Smallest logs scroll offset change that keeps a content line on screen.
+      # Keyboard selection uses it so a caret can never walk out of the view.
+      def logs_scroll_offset_for_line(state, width:, height:, line_index:)
+        dimensions = logs_content_dimensions(state, width: width, height: height)
+        return nil unless dimensions
+
+        lines = dimensions.fetch(:lines)
+        content_height = dimensions.fetch(:content_height)
+        line_count = lines.length
+        offset = pane_scroll_offset(state, "logs")
+        max_offset = tail_scroll_max(line_count, content_height)
+        return 0 if max_offset.zero?
+
+        window = tail_window(line_count, content_height, offset)
+        capacity = [window.fetch(:finish_index) - window.fetch(:start_index), 1].max
+        index = line_index.to_i.clamp(0, line_count - 1)
+        offset = line_count - index - 1 if index >= window.fetch(:finish_index)
+        offset = line_count - index - capacity if index < window.fetch(:start_index)
+        offset.clamp(0, max_offset)
+      end
+
       def logs_selection_text(state, width:, height:, selection:)
         view = logs_text_view(state, width: width, height: height)
         return "" unless view
@@ -307,16 +354,33 @@ module Meringue
         [height.to_i, MIN_HEIGHT].max
       end
 
-      def logs_text_view(state, width:, height:)
+      # Shared logs geometry so hit-testing, keyboard selection, and scrolling
+      # all wrap the same content at the same width.
+      def logs_content_dimensions(state, width:, height:)
         metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
-        content_x = metrics.fetch(:main_x) + 2
         content_width = metrics.fetch(:main_width) - 4
         content_height = metrics.fetch(:logs_height) - 2
         return nil if content_width <= 0 || content_height <= 0
 
-        lines = chat_pane.log_lines(state, width: content_width)
+        {
+          content_x: metrics.fetch(:main_x) + 2,
+          content_y: metrics.fetch(:top_y) + 1,
+          content_width: content_width,
+          content_height: content_height,
+          lines: chat_pane.log_lines(state, width: content_width)
+        }
+      end
+
+      def logs_text_view(state, width:, height:)
+        dimensions = logs_content_dimensions(state, width: width, height: height)
+        return nil unless dimensions
+
+        content_x = dimensions.fetch(:content_x)
+        content_width = dimensions.fetch(:content_width)
+        content_height = dimensions.fetch(:content_height)
+        lines = dimensions.fetch(:lines)
         window = tail_window(lines.length, content_height, pane_scroll_offset(state, "logs"))
-        first_row_y = metrics.fetch(:top_y) + 1 + window.fetch(:row_offset)
+        first_row_y = dimensions.fetch(:content_y) + window.fetch(:row_offset)
         rows = (window.fetch(:start_index)...window.fetch(:finish_index)).each_with_index.map do |line_index, offset|
           {
             line_index: line_index,
@@ -642,10 +706,21 @@ module Meringue
         return unless selection
 
         text = line_plain_text(line)
-        columns = Selection.columns_for(selection, line_index, [text.length, content_width].min)
-        return unless columns
+        visible_length = [text.length, content_width].min
+        columns = Selection.columns_for(selection, line_index, visible_length)
+        canvas.restyle(x + columns.first, y, columns.size, Style::SELECTION) if columns
+        highlight_selection_cursor(canvas, x, y, content_width, line_index, selection)
+      end
 
-        canvas.restyle(x + columns.first, y, columns.size, Style::SELECTION)
+      # The keyboard selection caret is one restyled cell, so it renders with the
+      # same SELECTION colors as a drag highlight and costs one extra cell.
+      def highlight_selection_cursor(canvas, x, y, content_width, line_index, selection)
+        cursor = selection.fetch("cursor", nil)
+        return unless cursor.is_a?(Hash)
+        return unless cursor.fetch("line", -1).to_i == line_index
+
+        column = cursor.fetch("column", 0).to_i.clamp(0, [content_width - 1, 0].max)
+        canvas.restyle(x + column, y, 1, Style.selection_cursor)
       end
 
       def scroll_max(line_count, content_height)

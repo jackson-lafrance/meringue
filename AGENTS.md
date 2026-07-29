@@ -177,6 +177,7 @@ State should include:
 
 Use ISO8601 timestamps.
 Write state atomically where practical.
+More than one Meringue instance can share one state file, so kernel state sections must stay single-writer across processes and command application must be exactly-once. See `docs/kernel-command-application.md`.
 
 # Agents
 ## Heads
@@ -633,3 +634,5 @@ KernelCommandResult
 ```
 
 Rejected commands should not mutate state. Failed commands may partially mutate state only when unavoidable, and the failure should be logged clearly.
+
+One logical command produces one set of side effects and one user-visible log line, even when the same command or head result is delivered twice. Transient conditions such as a harness session that is momentarily busy should be deferred and retried rather than logged as failures. See `docs/kernel-command-application.md`.

@@ -24,7 +24,7 @@ module Meringue
         ["/questions", "List questions and their statuses."],
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
-        ["/prune [resolved|errored]", "Remove completed or killed records unless unresolved work requires retention."],
+        ["/prune", "Remove resolved and errored records together unless unresolved work requires retention."],
         ["/recount", "Compact project, issue, worker, and question IDs after records are removed."],
         ["/clear", "Reset persisted Meringue state and clear the visible logs. Dev/debug helper."]
       ].freeze
@@ -38,9 +38,13 @@ module Meringue
         { "prefix" => "/theme", "source" => "themes", "append_space" => false },
         { "prefix" => "/jump", "source" => "agents", "append_space" => false },
         { "prefix" => "/answer", "source" => "open_questions", "append_space" => true },
-        { "prefix" => "/dismiss", "source" => "open_questions", "append_space" => false },
-        { "prefix" => "/prune", "source" => "prune_selectors", "append_space" => false }
+        { "prefix" => "/dismiss", "source" => "open_questions", "append_space" => false }
       ].freeze
+
+      # `/prune` takes no arguments. These legacy words are still accepted as no-op aliases so
+      # existing muscle memory (`/prune resolved`) keeps working and prunes everything eligible.
+      PRUNE_COMPATIBILITY_ARGUMENTS = %w[all resolved errored completed merged].freeze
+      PRUNE_USAGE_MESSAGE = "Usage: /prune (no arguments; prunes resolved and errored records together)"
 
       def self.command_suggestions(input = nil, limit: nil, state: nil)
         command_suggestion_records(input, limit: limit, state: state).map do |record|
@@ -121,7 +125,6 @@ module Meringue
 
       def self.records_for_context(context, state)
         return harness_provider_suggestion_records(context) if context.fetch("source") == "harness_providers"
-        return prune_selector_suggestion_records(context) if context.fetch("source") == "prune_selectors"
 
         items = case context.fetch("source")
                 when "projects"
@@ -160,26 +163,6 @@ module Meringue
             "append_space" => false,
             "index" => index,
             "kind" => "harness_providers"
-          }
-        end
-      end
-
-      def self.prune_selector_suggestion_records(context)
-        query = context.fetch("query", "").to_s.downcase
-        [
-          ["resolved", "Remove eligible completed or killed issue and project records."],
-          ["errored", "Remove errored issue bundles and standalone errored agents."]
-        ].filter_map.with_index do |(selector, description), index|
-          next unless query.empty? || selector.start_with?(query)
-
-          {
-            "usage" => selector,
-            "description" => description,
-            "completion" => "#{context.fetch("prefix")} #{selector}",
-            "requires_arguments" => false,
-            "append_space" => false,
-            "index" => index,
-            "kind" => "prune_selectors"
           }
         end
       end
@@ -372,14 +355,14 @@ module Meringue
         kernel_command("DismissQuestion", "question_id" => tokens[0])
       end
 
+      # A bare `/prune` performs the full cleanup. A single legacy selector word is accepted as a
+      # no-op compatibility alias; anything else is rejected with the short usage message.
       def parse_prune(arguments)
         tokens = split_arguments(arguments)
-        return invalid("Usage: /prune [resolved|errored]") if tokens.length > 1
+        return kernel_command("Prune") if tokens.empty?
+        return invalid(PRUNE_USAGE_MESSAGE) if tokens.length > 1 || !PRUNE_COMPATIBILITY_ARGUMENTS.include?(tokens[0].to_s.downcase)
 
-        selector = tokens[0]
-        return invalid("Usage: /prune [resolved|errored]") unless selector.nil? || %w[resolved completed merged errored].include?(selector.downcase)
-
-        kernel_command("Prune", "selector" => selector&.downcase)
+        kernel_command("Prune", "selector" => tokens[0].downcase)
       end
 
       def parse_recount(arguments)
