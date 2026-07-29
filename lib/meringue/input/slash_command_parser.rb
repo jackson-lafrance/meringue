@@ -22,7 +22,7 @@ module Meringue
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
-        ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
+        ["/answer <question_id> \"<answer>\"", "Answer an open question and let a head route the work it unblocks."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
         ["/prune", "Remove resolved and errored records together unless unresolved work requires retention."],
         ["/recount", "Compact project, issue, worker, and question IDs after records are removed."],
@@ -341,11 +341,19 @@ module Meringue
 
       def parse_answer(arguments)
         tokens = split_arguments(arguments)
+        answer = tokens[1..]&.join(" ")
+        return invalid("Usage: /answer <question_id> \"<answer>\"") if tokens.empty? || answer.nil? || answer.strip.empty?
+
         kernel_command(
           "AnswerQuestion",
-          "question_id" => tokens[0],
-          "answer" => tokens[1..]&.join(" ")
+          "question_id" => normalized_question_id(tokens[0]),
+          "answer" => answer
         )
+      end
+
+      def normalized_question_id(token)
+        text = token.to_s.strip
+        text.match?(/\Aq\d+\z/i) ? text.upcase : text
       end
 
       def parse_dismiss(arguments)

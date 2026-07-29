@@ -67,6 +67,7 @@ Issue and worker selection rules for the MVP:
 - Use `PromptAgent` mode `steer` for an urgent correction that should affect active work, `follow_up` for related work that should wait until the active turn settles, and `normal` for a settled resumable session.
 - Spawn a new worker on the same issue only when the previous session is unavailable/unhealthy, its context is known to be over 50%, its delivered workspace should remain immutable, the next step is independent, or parallel work is intentional. Set `follow_up_of_agent_id` so that relationship is visible.
 - Replace a worker only when it is stale, unhealthy, pursuing the wrong approach, or must be stopped. Set `replace_agent_id` on `SpawnWorker`; the kernel starts the successor before killing the old session and records both sides of the relationship. Do not separately propose `Kill` for the same replacement.
+- Before routing anything, check `routing_context.open_questions` and `routing_context.answer_inference`. If this message answers an open question, close that question and route the unblocked work in the same result. See "Answering open questions" below.
 - Never prompt a worker from a different issue. If multiple issues or workers are plausible, ask a clarifying question instead of guessing.
 - Do not create nested/subissues for ordinary follow-up prompts. Set `parent_issue_id` to `null` unless the user explicitly asks for a child issue hierarchy.
 - Give each `SpawnWorker` a short action-oriented `title`; this is what appears under the issue in the AgentTree.
@@ -178,6 +179,58 @@ A corrected route is never silent. The kernel appends `Rerouted from predicted i
 
 A worker's issue is immutable once it is spawned: no kernel command, reconciliation pass, or repair path moves an existing agent between issues. If a worker did land on the wrong issue, the only correction is to `SpawnWorker` on the right issue and `Kill` the misplaced worker.
 
+## Answering open questions
+
+A user answering a clarification usually does not use the `/answer` command. They reply in plain prose, sometimes with a phrase such as "answering Q4", sometimes only by restating the subject. Meringue does not assume the next message answers a pending question, so this judgement is yours.
+
+The head context gives you what you need:
+
+- `routing_context.open_questions`: every open question with `id`, `question`, `context`, `project_id`, `issue_id`, `head_id`, `created_at`, `updated_at`, `original_user_message` (the message that caused the question), and `explicitly_referenced_in_user_message`.
+- `routing_context.answer_inference`: `open_question_ids`, `explicitly_referenced_question_ids`, `single_referenced_question_id`, `only_open_question_id`, an `ambiguous` flag, and the confidence rules.
+- `routing_context.question_being_answered`: populated when the kernel already answered a question for this head, or when the user message names exactly one open question.
+
+When the message clearly answers exactly one open question, treat it exactly as if the user had run `/answer`:
+
+1. Propose `AnswerQuestion` with that `question_id` and the user's message (or the relevant part of it) as `answer`. This closes the question.
+2. In the same `commands` array, route the work the answer unblocks. Reuse the question's `issue_id`/`project_id` when it still represents the durable goal, prefer `PromptAgent` on the healthiest existing worker for that issue, and use `CreateIssue`/`SpawnWorker` only when nothing suitable exists.
+3. Order matters. The kernel applies commands in array order, so put `AnswerQuestion` first.
+
+Confidence and ambiguity rules:
+
+- Answer a question only when the message is a response to it. An explicit id reference ("answering Q4", "re: Q4"), a direct restatement of the question's subject, or a choice between options the question offered are strong signals.
+- If two or more open questions are plausible, do not guess. Leave them open and either route the message as its own request or ask one clarifying question that names the candidate ids.
+- If the message is plainly a new goal, an unrelated request, or a question about status, leave every open question open and route normally.
+- Never propose `AnswerQuestion` alone. A closed question with no routing or `ModifyIssue` command silently drops the user's request, which is the failure this contract exists to prevent.
+- Do not re-ask a question that the current message answers, and do not answer a question the user only mentioned in passing.
+- Answer at most one question per message unless the message clearly answers several distinct questions point by point.
+
+Example of an inferred answer plus routing in one result:
+
+```json
+{
+  "title": "Answer Q4 and continue the investigation",
+  "summary": "The reply answers Q4, so the question is closed and the existing worker on P1-I2 continues with the answer.",
+  "commands": [
+    {
+      "type": "AnswerQuestion",
+      "payload": {
+        "question_id": "Q4",
+        "answer": "I meant the log snippet showing the worker landing under the wrong issue."
+      }
+    },
+    {
+      "type": "PromptAgent",
+      "payload": {
+        "agent_id": "P1-I2-W1",
+        "prompt": "The user clarified Q4: they meant the log snippet showing the worker landing under the wrong issue. Continue from that evidence.",
+        "mode": "follow_up"
+      }
+    }
+  ],
+  "questions": []
+}
+```
+
 ## Status and level constants
 
 Lifecycle statuses for projects, issues, and agents:
@@ -261,7 +314,7 @@ Example:
 
 ### SpawnHead
 
-Spawns a fresh stateless head for one user message. Head agents should rarely propose this command themselves; natural-language input routing usually creates it.
+Spawns a fresh stateless head for one user message. Head agents should rarely propose this command themselves; natural-language input routing usually creates it. The kernel also uses it after `AnswerQuestion` from `/answer`, passing the answered `question_id` so the new head receives the full question context plus the answer.
 
 Payload:
 
@@ -505,7 +558,7 @@ Example:
 
 ### AnswerQuestion
 
-Marks a question as answered and stores the answer.
+Marks a question as answered and stores the answer. Answering is a routing event, not bookkeeping: the answer is the input some earlier head said it needed, so something must act on it.
 
 Payload:
 
@@ -527,6 +580,13 @@ Example:
   }
 }
 ```
+
+Two paths reach this command, and they behave differently:
+
+- The user ran `/answer <question_id> "<answer>"`. The kernel records the answer, closes the question, and then spawns a fresh head whose `user_message` contains the question text, the question context, the originating head, the project/issue scope, the original user message that triggered the question, and the answer. That head sees `routing_context.question_being_answered` with `status: "answered"` and `inference_source: "answer_command"`. Do not propose `AnswerQuestion` again on that path; just route the work the answer unblocks.
+- A head inferred the answer from a free-form message. That head proposes `AnswerQuestion` itself, paired with routing commands in the same result. The kernel does not spawn another head for a head-proposed answer, so the routing must be in your batch.
+
+See "Answering open questions" above for the inference and ambiguity rules.
 
 ### DismissQuestion
 
@@ -650,3 +710,5 @@ When the head cannot safely choose commands, add a question object to `questions
   "issue_id": "Optional issue id"
 }
 ```
+
+Write `context` for a future head, not for yourself: it is shown to whichever head later handles the answer. Set `project_id` and `issue_id` whenever you know them, because the answer is routed back into that scope. The kernel also stores the user message that triggered the question on the question record, so the answering head can see what the user originally asked.
