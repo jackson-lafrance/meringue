@@ -441,6 +441,97 @@ begin
     [first && first.fetch("status", nil) != "blocked", first&.slice("id", "status").inspect]
   end
 
+  puts "Scenario 9: the reported incident timeline is corrected loudly, not silently"
+  # Mirrors 2026-07-29 11:28-11:29 in ~/.meringue/state.json: the /prune head was spawned while
+  # the rebase head's issue did not exist yet, so its predicted id later resolved to the rebase
+  # head's issue and its worker was attached there as P1-I7-W2.
+  prune_head = spawn_head(engine, "Make /prune a single no-option command")
+  rebase_head = spawn_head(engine, "Rebase the open PR onto main")
+  apply_head_result(
+    engine,
+    rebase_head,
+    head_result([
+      create_issue_command(project_id, "Rebase the other PR", command_id: "#{rebase_head}-C1"),
+      spawn_worker_command(title: "Rebase the other PR", extra_payload: { "issue_from_command" => "#{rebase_head}-C1" })
+    ])
+  )
+  rebase_issue_id = issue_by_title(engine.list_all, "Rebase the other PR").fetch("id")
+  incident = apply_head_result(
+    engine,
+    prune_head,
+    head_result([
+      create_issue_command(project_id, "Prune without options"),
+      spawn_worker_command(title: "Simplify /prune", issue_id: rebase_issue_id)
+    ])
+  )
+  state = engine.list_all
+  prune_issue = issue_by_title(state, "Prune without options")
+  check("the /prune worker lands on the /prune issue") do
+    titles = worker_titles(state, prune_issue&.fetch("id", nil))
+    [titles == ["Simplify /prune"], titles.inspect]
+  end
+  check("the rebase issue keeps only its own worker") do
+    titles = worker_titles(state, rebase_issue_id)
+    [titles == ["Rebase the other PR"], titles.inspect]
+  end
+  check("the spawn log itself reports the reroute") do
+    spawn_log = state.fetch("logs").reverse.find { |entry| entry.fetch("message", "").to_s.start_with?("Spawned worker") && entry.fetch("message", "").to_s.include?("Rerouted from predicted issue") }
+    [spawn_log && spawn_log.dig("details", "rerouted_from_issue_id") == rebase_issue_id, spawn_log&.fetch("message", nil).inspect]
+  end
+  check("the worker record remembers the corrected route") do
+    worker = workers_for(state, prune_issue&.fetch("id", nil)).first
+    metadata = worker ? (worker.fetch("harness_metadata", {}) || {}) : {}
+    [metadata.fetch("rerouted_from_issue_id", nil) == rebase_issue_id, metadata.fetch("rerouted_from_issue_id", nil).inspect]
+  end
+  check("the batch is still reported as accepted") do
+    result = command_result(incident, "SpawnWorker")
+    [result && result.fetch("status", nil) == "accepted", result&.slice("status", "message").inspect]
+  end
+
+  puts "Scenario 10: nothing re-parents an existing agent across issues"
+  before = engine.list_all.fetch("agents").to_h { |agent| [agent.fetch("id"), agent.fetch("issue_id", nil)] }
+  logging_worker = workers_for(engine.list_all, logging_issue.fetch("id")).first.fetch("id")
+  engine.apply("type" => "ModifyIssue", "payload" => { "issue_id" => prune_issue.fetch("id"), "title" => "Prune without options (v2)", "status" => "blocked" })
+  engine.apply("type" => "PromptAgent", "payload" => { "agent_id" => workers_for(engine.list_all, prune_issue.fetch("id")).first.fetch("id"), "prompt" => "Keep going.", "mode" => "normal" })
+  engine.apply("type" => "Kill", "payload" => { "target_id" => logging_worker })
+  engine.apply("type" => "ReconcileSessions", "payload" => {})
+  state = engine.list_all
+  after = state.fetch("agents").to_h { |agent| [agent.fetch("id"), agent.fetch("issue_id", nil)] }
+  check("every surviving agent keeps its original issue") do
+    moved = after.reject { |agent_id, issue_id| !before.key?(agent_id) || before.fetch(agent_id) == issue_id }
+    [moved.empty?, moved.inspect]
+  end
+  check("the killed worker is removed rather than moved") do
+    [!after.key?(logging_worker), after.fetch(logging_worker, nil).inspect]
+  end
+  check("the kernel never assigns issue_id on an existing agent record") do
+    source = File.read(File.expand_path("../lib/meringue/kernel/engine.rb", __dir__))
+    assignments = source.scan(/^.*\b(?:agent|worker|reserved_agent|related_agent|existing)\w*\["issue_id"\]\s*=[^=].*$/)
+    [assignments.empty?, assignments.inspect]
+  end
+
+  puts "Scenario 11: killing a worker leaves no dangling routing pointer behind"
+  head_o = spawn_head(engine, "Add one more worker to the rebase issue")
+  apply_head_result(
+    engine,
+    head_o,
+    head_result([spawn_worker_command(title: "Second rebase pass", issue_id: rebase_issue_id)])
+  )
+  state = engine.list_all
+  extra_worker = workers_for(state, rebase_issue_id).find { |agent| (agent.fetch("harness_metadata", {}) || {}).fetch("title", nil) == "Second rebase pass" }
+  check("the extra worker is recorded as the issue's last routed agent") do
+    issue = state.fetch("issues").find { |candidate| candidate.fetch("id") == rebase_issue_id }
+    [issue.fetch("last_agent_id", nil) == extra_worker&.fetch("id", nil), issue.fetch("last_agent_id", nil).inspect]
+  end
+  engine.apply("type" => "Kill", "payload" => { "target_id" => extra_worker.fetch("id") })
+  state = engine.list_all
+  check("last_agent_id no longer names the killed worker") do
+    issue = state.fetch("issues").find { |candidate| candidate.fetch("id") == rebase_issue_id }
+    last_agent_id = issue.fetch("last_agent_id", nil)
+    surviving = workers_for(state, rebase_issue_id).map { |agent| agent.fetch("id") }
+    [last_agent_id != extra_worker.fetch("id") && (last_agent_id.nil? || surviving.include?(last_agent_id)), "#{last_agent_id.inspect} of #{surviving.inspect}"]
+  end
+
   puts
   if FAILURES.empty?
     puts "All head batch issue routing checks passed."

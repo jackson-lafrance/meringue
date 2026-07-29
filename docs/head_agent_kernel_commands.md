@@ -123,7 +123,11 @@ The referenced `CreateIssue` must appear earlier in `commands` than the command 
 
 When you target an issue that already exists, keep using its real `issue_id` exactly as it appears in the supplied state. That path is unchanged.
 
-A predicted issue id is still accepted only when the kernel can prove it is safe. `SpawnWorker` and `ModifyIssue` must resolve to an issue that existed in the head's spawn snapshot or to an issue the same batch created. If a predicted id points at an issue that appeared after this head was spawned, the kernel reroutes the command to the single issue this batch created and logs a warning, or rejects the command when that would be ambiguous. Rejections use `issue_id_not_created_by_this_head_result`, `batch_issue_reference_not_found`, `batch_issue_reference_out_of_order`, or `batch_issue_reference_unresolved`.
+A predicted issue id is still accepted only when the kernel can prove it is safe. `SpawnWorker` and `ModifyIssue` must resolve to an issue that existed in the head's spawn snapshot or to an issue the same batch created. If a predicted id points at an issue that appeared after this head was spawned, the kernel reroutes the command to the single issue this batch created and says so out loud, or rejects the command when that would be ambiguous or cross-project. Rejections use `issue_id_not_created_by_this_head_result`, `batch_issue_reference_not_found`, `batch_issue_reference_out_of_order`, or `batch_issue_reference_unresolved`.
+
+A corrected route is never silent. The kernel appends `Rerouted from predicted issue <id>.` to the worker's spawn log line, adds `rerouted_from_issue_id` to that log's details and to the worker's `harness_metadata`, and emits a separate warning log naming both issues.
+
+A worker's issue is immutable once it is spawned: no kernel command, reconciliation pass, or repair path moves an existing agent between issues. If a worker did land on the wrong issue, the only correction is to `SpawnWorker` on the right issue and `Kill` the misplaced worker.
 
 ## Status and level constants
 
