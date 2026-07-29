@@ -121,6 +121,10 @@ module Meringue
         @quit_requested = false
         @agent_tree_navigation_mode = :agent
         @selected_agent_id = nil
+        # Sticky AgentTree selection that scopes the logs pane. It is separate
+        # from the jump-mode cursor because projects are selectable here, and it
+        # deliberately survives focus changes.
+        @log_scope_id = nil
         @workspace_draft = ""
         @workspace_agent_scroll_offset = 0
         @workspace_terminal_scroll_offset = 0
@@ -371,6 +375,13 @@ module Meringue
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
+        # Esc also clears a sticky AgentTree selection, so a filtered logs pane is
+        # never a dead end even when jump mode is no longer active.
+        if keybinding?("cancel_navigation", key) && log_scope_active?
+          clear_log_scope
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
         logs_selection_result = handle_logs_selection_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return logs_selection_result if logs_selection_result
 
@@ -604,7 +615,7 @@ module Meringue
         when "agent_tree"
           clear_selection
           item_id = agent_tree_item_at_mouse_position(key, state)
-          opened = handle_agent_tree_item_click(item_id, key, state) if item_id
+          opened = handle_agent_tree_item_click(item_id, key, state)
           if opened
             draft = @workspace_draft.to_s.dup
             return [draft, draft.chars.length, NO_SLASH_SELECTION]
@@ -1100,20 +1111,77 @@ module Meringue
         end
       end
 
+      # A single left click selects the clicked AgentTree row and scopes the logs
+      # pane to it. Clicking the already-selected row, or empty space inside the
+      # tree, is the explicit deselect gesture. Double-click still opens the
+      # focused workspace and must not be read as a deselect.
       def handle_agent_tree_item_click(item_id, key, state)
+        if item_id.to_s.empty?
+          @last_worker_click = nil
+          deselect_agent_tree_item
+          return false
+        end
+
         double_click = worker_double_click?(item_id, key)
+        if !double_click && @log_scope_id.to_s == item_id.to_s
+          deselect_agent_tree_item
+          return false
+        end
+
         select_agent_tree_item(state, item_id)
         double_click && open_agent_workspace_by_id(state, item_id)
       end
 
       def select_agent_tree_item(state, item_id)
-        return false unless agent_tree_selectable_agent_ids(state).include?(item_id)
+        if agent_tree_selectable_agent_ids(state).include?(item_id)
+          @agent_tree_navigation_active = true
+          @agent_tree_navigation_mode = :agent
+          @selected_agent_id = item_id
+          remember_workspace_agent(state, item_id)
+        elsif LogScope.selectable?(state, item_id)
+          # Projects are valid log-filter targets but not jump targets, so
+          # selecting one leaves jump mode instead of moving its cursor.
+          @agent_tree_navigation_active = false
+          @agent_tree_navigation_mode = :agent
+          @selected_agent_id = nil
+        else
+          return false
+        end
 
-        @agent_tree_navigation_active = true
-        @agent_tree_navigation_mode = :agent
-        @selected_agent_id = item_id
-        remember_workspace_agent(state, item_id)
+        set_log_scope(item_id)
         true
+      end
+
+      def deselect_agent_tree_item
+        clear_log_scope
+        exit_agent_tree_navigation if @agent_tree_navigation_active
+        false
+      end
+
+      # The logs filter follows the selection, so retargeting it also resets the
+      # logs viewport to the newest matching entry and drops a caret/highlight
+      # that pointed at lines the filter no longer renders.
+      def set_log_scope(item_id)
+        id = item_id.to_s
+        return false if id.empty?
+
+        @log_scope_id = id
+        @scroll_offsets["logs"] = 0
+        clear_logs_selection
+        true
+      end
+
+      def clear_log_scope
+        return false unless log_scope_active?
+
+        @log_scope_id = nil
+        @scroll_offsets["logs"] = 0
+        clear_logs_selection
+        true
+      end
+
+      def log_scope_active?
+        !@log_scope_id.to_s.empty?
       end
 
       # Compatibility for extensions that invoked the old worker-only helper.
@@ -1679,6 +1747,14 @@ module Meringue
 
       def handle_agent_tree_navigation_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         if keybinding?("cancel_navigation", key)
+          # Esc cancels the innermost thing first: a text selection or logs caret,
+          # then the AgentTree selection (with its logs filter) and jump mode.
+          if selection_active? || @logs_cursor_active
+            clear_selection
+            return [input_buffer, input_cursor, slash_suggestion_index]
+          end
+
+          clear_log_scope
           exit_agent_tree_navigation("Agent tree navigation cancelled.")
           return [+"", 0, NO_SLASH_SELECTION]
         end
@@ -1746,8 +1822,9 @@ module Meringue
       def keybinding_help_text
         <<~TEXT.strip
           Keybindings (from [tui.keybindings], with defaults for omitted actions):
-          Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels jump mode.
-          Focus: click a dashboard section to focus it; clicking an issue or agent in the AgentTree selects it, and double-clicking opens its focused workspace. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
+          Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels a selection first, then the AgentTree log filter and jump mode.
+          Focus: click a dashboard section to focus it; double-clicking an issue or agent in the AgentTree opens its focused workspace. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
+          AgentTree selection and log filter: single-click a project, issue, head, or worker row to select it and filter the logs pane to that node (a worker shows its own logs, an issue adds all of its workers and child issues, a project adds its whole subtree). The selection stays highlighted, is scrolled back into view when it changes, and keeps filtering while you work in the logs or chat pane; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} in jump mode retarget it. Click the highlighted row again, click empty space in the AgentTree, or press #{keys_for("cancel_navigation")} to clear it.
           Selection: drag with the mouse in the logs pane or the composer to select text; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
           Logs selection (keyboard): focus the logs pane, then #{keys_for("logs_selection_mode")} toggles the selection cursor or any Shift+movement starts it. #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor, #{keys_for("cursor_word_left")}/#{keys_for("cursor_word_right")} move by word, #{keys_for("cursor_home")}/#{keys_for("cursor_end")} jump to the line edges, and #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} move by page. #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")}, #{keys_for("select_home")}/#{keys_for("select_end")}, #{keys_for("select_word_left")}/#{keys_for("select_word_right")}, and #{keys_for("select_page_up")}/#{keys_for("select_page_down")} extend the selection. #{keys_for("copy_selection")} copies the selection (or the cursor line when nothing is extended); #{keys_for("cancel_navigation")} exits.
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
@@ -1791,8 +1868,12 @@ module Meringue
         deactivate_logs_cursor_quietly
         @agent_tree_navigation_active = true
         @agent_tree_navigation_mode = :agent
-        @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
-        append_jump_response("Agent tree navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects issues and agents (kernel events are skipped), Enter opens PRs, #{keys_for("open_agent_workspace")} opens the focused workspace, #{keys_for("cancel_navigation")} cancels.")
+        # Start on the sticky selection when it is a jump target, so entering jump
+        # mode never argues with what the logs pane is already filtered by.
+        # Entering jump mode by itself does not retarget the filter; moving the
+        # cursor does.
+        @selected_agent_id = [@log_scope_id, @selected_agent_id].find { |id| ids.include?(id) } || ids.first
+        append_jump_response("Agent tree navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects issues and agents and filters the logs pane to the selection (kernel events are skipped), Enter opens PRs, #{keys_for("open_agent_workspace")} opens the focused workspace, #{keys_for("cancel_navigation")} cancels and clears the filter.")
       end
 
       def exit_agent_tree_navigation(message = nil)
@@ -1808,6 +1889,9 @@ module Meringue
 
         current_index = ids.index(@selected_agent_id) || 0
         @selected_agent_id = ids[(current_index + delta) % ids.length]
+        # Moving the cursor is an explicit selection action, so the logs filter
+        # follows it and the highlighted row always matches the filter.
+        set_log_scope(@selected_agent_id)
         remember_workspace_agent(state, @selected_agent_id)
       end
 
@@ -2451,9 +2535,11 @@ module Meringue
           @agent_tree_navigation_active = false if ids.empty?
         end
         reconcile_workspace_selection!(state)
+        reconcile_log_scope!(state)
         composed_state = state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
+          LogScope::STATE_KEY => LogScope.snapshot(state, @log_scope_id),
           "_agent_workspace" => agent_workspace_snapshot(state, input_buffer, input_cursor, slash_suggestion_index),
           "_scroll" => scroll_snapshot,
           "_selection" => selection_snapshot
@@ -2469,7 +2555,7 @@ module Meringue
       # the same way the logs caret reveals its line. Reveal only runs when the
       # selection actually changed, so scrolling by hand is never yanked back.
       def reveal_selected_agent_tree_item!(state)
-        selected_id = @agent_tree_navigation_active ? @selected_agent_id : nil
+        selected_id = revealable_agent_tree_item_id
         if selected_id.to_s.empty?
           @revealed_agent_tree_item_id = nil
           return
@@ -2478,6 +2564,15 @@ module Meringue
 
         @revealed_agent_tree_item_id = selected_id
         reveal_agent_tree_item(state, selected_id)
+      end
+
+      # Whichever row is rendered as selected: the jump-mode cursor while it is
+      # active, otherwise the sticky selection that scopes the logs pane. The
+      # sticky row outlives jump mode, so it still deserves to be revealed.
+      def revealable_agent_tree_item_id
+        return @selected_agent_id if @agent_tree_navigation_active && !@selected_agent_id.to_s.empty?
+
+        @log_scope_id
       end
 
       def reveal_agent_tree_item(state, item_id)
@@ -2732,6 +2827,15 @@ module Meringue
         else
           value
         end
+      end
+
+      # A pruned, killed, or renumbered node stops filtering instead of hiding
+      # every log line.
+      def reconcile_log_scope!(state)
+        return unless log_scope_active?
+        return if LogScope.selectable?(state, @log_scope_id)
+
+        clear_log_scope
       end
 
       def agent_tree_navigation_snapshot

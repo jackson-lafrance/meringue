@@ -35,7 +35,9 @@ module Meringue
           projects = records(state, "projects")
           issues = records(state, "issues")
           agents = records(state, "agents")
-          selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
+          # Both the jump-mode cursor and the sticky logs selection render as a
+          # selected row, so the highlight survives focus changes.
+          selected_agent_id = AgentTreeNavigation.highlighted_ids_for(state)
 
           output = []
           append_heads(output, agents, selected_agent_id, width)
@@ -47,7 +49,7 @@ module Meringue
           projects = records(state, "projects")
           issues = records(state, "issues")
           agents = records(state, "agents")
-          selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
+          selected_agent_id = AgentTreeNavigation.highlighted_ids_for(state)
 
           output = []
           append_head_worker_ids(output, agents, selected_agent_id, width)
@@ -112,7 +114,7 @@ module Meringue
         def append_projects(output, projects, issues, agents, selected_agent_id, width)
           sorted_projects = projects.sort_by { |project| sort_key(project["id"]) }
           sorted_projects.each_with_index do |project, index|
-            output.concat(project_lines(project, width: width))
+            output.concat(project_lines(project, width: width, selected: AgentTreeNavigation.selected_agent?(project, selected_agent_id)))
 
             project_issues = issues.select { |issue| issue["project_id"] == project["id"] }
             issues_by_parent = project_issues.group_by { |issue| issue["parent_issue_id"] }
@@ -160,7 +162,11 @@ module Meringue
         def append_project_worker_ids(output, projects, issues, agents, selected_agent_id, width)
           sorted_projects = projects.sort_by { |project| sort_key(project["id"]) }
           sorted_projects.each_with_index do |project, index|
-            output.concat(Array.new(project_lines(project, width: width).length))
+            # Project rows are clickable, so they carry their own id for hit-testing.
+            # The same selected flag is passed here and in #lines so wrapped row
+            # counts stay aligned with the rendered rows.
+            project_line_count = project_lines(project, width: width, selected: AgentTreeNavigation.selected_agent?(project, selected_agent_id)).length
+            output.concat(Array.new(project_line_count, project.fetch("id")))
 
             project_issues = issues.select { |issue| issue["project_id"] == project["id"] }
             issues_by_parent = project_issues.group_by { |issue| issue["parent_issue_id"] }
@@ -218,14 +224,34 @@ module Meringue
           [["", Style::DIM]]
         end
 
-        def project_lines(project, width: nil)
-          leader_segments = [
-            [status_dot(project), status_style(project)],
-            [" #{project.fetch("id")}", Style::MUTED],
-            ["  ", Style::DIM]
-          ]
+        # A selected project keeps the exact leader width of an unselected one, so
+        # selecting it can never reflow the rows under the mouse. The marker takes
+        # over the two separator columns instead of adding an indent, which keeps
+        # the selection visible even with colors disabled.
+        def project_lines(project, width: nil, selected: false)
+          leader_segments = if selected
+                              [
+                                [status_dot(project), Style::AGENT_TREE_SELECTED_STATUS],
+                                [" #{project.fetch("id")}", Style::AGENT_TREE_SELECTED_DIM],
+                                [" ▸", Style::AGENT_TREE_SELECTED_STATUS]
+                              ]
+                            else
+                              [
+                                [status_dot(project), status_style(project)],
+                                [" #{project.fetch("id")}", Style::MUTED],
+                                ["  ", Style::DIM]
+                              ]
+                            end
           content = [project.fetch("name", "Untitled project"), project.fetch("status", "idle")].join("  ")
-          wrapped_lines(leader_segments, content, title_style: Style::TITLE, continuation_style: Style::TITLE, width: width)
+          title_style = selected ? Style::AGENT_TREE_SELECTED : Style::TITLE
+          wrapped_lines(
+            leader_segments,
+            content,
+            title_style: title_style,
+            continuation_style: title_style,
+            width: width,
+            selected: selected
+          )
         end
 
         def item_lines(prefix:, record:, id:, title:, suffix: "", selected: false, width: nil)
