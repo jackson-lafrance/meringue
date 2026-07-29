@@ -94,8 +94,11 @@ actual behavior and is documented here.
 ## Merge-overlap notes (resolved)
 
 The keyboard-driven logs-pane selection work is on `main` and the merged suite is green against
-it: no layout, selection, or app-wiring assertion needed changing. The notes below are kept as a
-map of where TUI coverage touches selection code.
+it: no layout, selection, or app-wiring assertion needed changing. The AgentTree scrolling work
+that landed later renamed the pane title to `agent tree  ↑N ↓M`, so the three frame assertions
+that looked for a closed `─ agent tree ─` border now match the label plus its scroll indicators
+(`layout_test.rb`, `app_wiring_test.rb`). The notes below are kept as a map of where TUI coverage
+touches selection code.
 
 
 - Two other branches touch TUI/logs-pane code (a keyboard log-selection rebase). These tests were
