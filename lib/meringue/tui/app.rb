@@ -2279,8 +2279,20 @@ module Meringue
           question_id = question_ids[index].to_s
           label = question_id.empty? ? "Question" : "Question #{question_id}"
           context = question.fetch("context", "").to_s.strip
-          ["#{label}: #{question_text}", context.empty? ? nil : "Context: #{context}"].compact.join("\n")
+          [
+            "#{label}: #{question_text}",
+            context.empty? ? nil : "Context: #{context}",
+            question_answer_hint(question_id)
+          ].compact.join("\n")
         end
+      end
+
+      # Answering is a real routing action: the kernel records the answer and spawns a head that
+      # continues the work. Tell the user both ways to answer so the question is not a dead end.
+      def question_answer_hint(question_id)
+        return "Reply here to answer, or run /answer <question_id> \"<answer>\"." if question_id.to_s.empty?
+
+        "Reply here to answer, or run /answer #{question_id} \"<answer>\"."
       end
 
       def worker_summary_lines(worker_wait_results)

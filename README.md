@@ -75,6 +75,7 @@ fixtures/config.example.toml       # example local config
 fixtures/demo_state.json           # demo state for the TUI
 scripts/head_session_smoke.rb      # prints the head harness session lifetime without a real harness
 scripts/kernel_exactly_once_smoke.rb # checks exactly-once command application across instances
+scripts/question_answer_smoke.rb   # checks that answering a question routes real work, with no harness
 ```
 
 ## Setup
@@ -158,6 +159,9 @@ Useful slash commands inside the TUI include:
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
 - `/prompt <agent_id> "<message>"` — follow up with an existing agent.
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
+- `/questions` — list questions and their statuses.
+- `/answer <question_id> "<answer>"` — answer an open question; the kernel records the answer and routes the work it unblocks.
+- `/dismiss <question_id>` — close an open question without answering it.
 - `/theme <name>` — persist a TUI colorscheme.
 - `/harness <pi|claude|antigravity>` — select the harness for future agents.
 - `/keybind` — show active TUI keybindings.
@@ -165,6 +169,16 @@ Useful slash commands inside the TUI include:
 - `/recount` — compact project, issue, worker, and question numbering after records are removed.
 
 See `docs/recount.md` for the renumbering, cross-reference, and active-session rules. See `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
+
+### Answering a head's question
+
+When a head cannot route a request safely it asks a clarifying question, and the chat shows `Question Q1: …` with the reason and the ways to answer it. Answering is a real routing action, not just bookkeeping:
+
+- `/answer Q1 "<answer>"` records the answer, closes the question, and spawns a fresh head that receives the question text, the question context, the project/issue scope, the message that originally triggered the question, and your answer. That head reuses the question's issue and prompts the worker already working on it whenever that is the right move.
+- Replying in plain chat also works. A head reads the open questions in its context; if your message clearly answers exactly one of them, it closes that question and routes the unblocked work in the same step. If several questions could match, or the message is a new goal, the questions stay open and the message is routed as its own request.
+- `/dismiss Q1` closes a question you no longer care about without routing any work.
+
+Open questions are visible as a `? <count>` marker in the chat header and through `/questions`, which also prints the exact `/answer` command to use.
 
 ### Reading the logs pane
 
