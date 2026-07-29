@@ -117,6 +117,28 @@ module Meringue
       # refreshes this lease as it works, so another instance (or another Meringue process
       # sharing the same state file) can tell an in-flight batch from an abandoned one.
       HEAD_RESULT_APPLY_LEASE_SECONDS = 60
+      # Heads propose a whole batch at once, so a command that targets an issue created earlier in
+      # the same batch cannot know the real issue id yet. These payload keys let a head point at
+      # the issue-creating command instead of predicting the id the kernel will mint.
+      BATCH_ISSUE_REFERENCE_KEYS = %w[
+        issue_from_command IssueFromCommand issueFromCommand
+        issue_ref IssueRef issueRef
+      ].freeze
+      # Marks a symbolic intra-batch reference when it is written in the `issue_id` field, e.g.
+      # "@H1-C1" or "@index:0".
+      BATCH_REFERENCE_PREFIX = "@"
+      # Command types whose payload `issue_id` may be an intra-batch reference.
+      BATCH_ISSUE_REFERENCE_COMMANDS = %w[SpawnWorker ModifyIssue AskQuestion].freeze
+      # Command types where a wrong predicted issue id would silently route work onto another
+      # head's issue, so the kernel verifies the reference before applying them.
+      BATCH_ISSUE_GUARDED_COMMANDS = %w[SpawnWorker ModifyIssue].freeze
+      # Same idea for a project created earlier in the same batch: a head can point at the
+      # AddProject command instead of predicting `P<n>`.
+      BATCH_PROJECT_REFERENCE_KEYS = %w[
+        project_from_command ProjectFromCommand projectFromCommand
+        project_ref ProjectRef projectRef
+      ].freeze
+      BATCH_PROJECT_REFERENCE_COMMANDS = %w[CreateIssue].freeze
       # Reconciliation redelivery attempts for a prompt that arrived while the session was busy.
       PENDING_PROMPT_MAX_ATTEMPTS = 20
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
@@ -1030,7 +1052,10 @@ module Meringue
             runner: active_runner,
             harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i,
             user_message: user_message.to_s,
-            question_id: present_string(question_id)
+            question_id: present_string(question_id),
+            snapshot_issue_ids: state.fetch("issues").map { |issue| issue.fetch("id", nil) }.compact,
+            snapshot_project_ids: state.fetch("projects").map { |project| project.fetch("id", nil) }.compact,
+            snapshot_counters: deep_copy(state.fetch("counters", {}))
           )
           state.fetch("agents") << agent
 
@@ -1262,7 +1287,27 @@ module Meringue
             break
           end
 
-          result = apply(command)
+          # Resolve intra-batch issue references (and catch mispredicted issue ids) before the
+          # command can attach work to an issue this head never created.
+          resolution = resolve_head_batch_issue_reference(
+            command: command,
+            head_id: head_id.to_s,
+            index: index,
+            commands: head_result.fetch("commands")
+          )
+          result = if (rejection = resolution.fetch("rejection", nil))
+                     synchronized_state do
+                       rejected_result(
+                         value_at(command, "command_id", "id"),
+                         canonical_command_type(value_at(command, "type", "command_type")),
+                         rejection.fetch("message"),
+                         rejection.fetch("errors")
+                       )
+                     end
+                   else
+                     log_ids.concat(log_head_batch_issue_remap(head_id.to_s, resolution))
+                     apply(resolution.fetch("command"))
+                   end
           command_results << result
           unless checkpoint_head_command_result!(head_id.to_s, index, result)
             interrupted = true
@@ -2032,6 +2077,10 @@ module Meringue
         state["projects"] = state.fetch("projects").reject { |project| removed_project_ids.include?(project.fetch("id", nil)) }
         state.fetch("issues").each do |issue|
           issue["agent_ids"] = Array(issue.fetch("agent_ids", [])) - agent_ids_to_remove if issue.key?("agent_ids")
+          # Killing a worker removes its record, so routing pointers must not keep naming it.
+          # A misrouted worker that was killed used to leave `last_agent_id` dangling on the
+          # issue it never belonged to.
+          clear_dangling_issue_routing_pointer!(issue, agent_ids_to_remove, now)
         end
         updated_project_ids = refresh_projects_after_prune!(state, affected_project_ids - removed_project_ids, now)
 
@@ -2045,6 +2094,14 @@ module Meringue
           "updated_project_ids" => updated_project_ids,
           "released_head_session_agent_ids" => released_head_ids
         }
+      end
+
+      def clear_dangling_issue_routing_pointer!(issue, removed_agent_ids, now)
+        return unless removed_agent_ids.include?(issue.fetch("last_agent_id", nil))
+
+        issue["last_agent_id"] = Array(issue.fetch("agent_ids", [])).last
+        issue["last_routing_action"] = nil if issue["last_agent_id"].nil?
+        issue["updated_at"] = now
       end
 
       # A head's harness session only lives as long as its head record. Whenever a head
@@ -2078,7 +2135,8 @@ module Meringue
         metadata = head.fetch("harness_metadata", {}) || {}
         head_result = metadata.fetch("head_result", nil)
         commands = head_result.is_a?(Hash) ? Array(value_at(head_result, "commands") || []) : []
-        commands.each_with_object({ "issue_ids" => [], "project_ids" => [] }) do |command, ids|
+        journal_issue_ids = head_batch_created_issues(Array(metadata.fetch("head_result_command_journal", []))).filter_map { |entry| entry.fetch("issue_id", nil) }
+        commands.each_with_object({ "issue_ids" => journal_issue_ids.dup, "project_ids" => [] }) do |command, ids|
           next unless command.is_a?(Hash)
 
           payload = value_at(command, "payload")
@@ -2093,7 +2151,7 @@ module Meringue
         agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
         target_id = value_at(payload, "target_id", "TargetID", "targetId", "id")
 
-        ids.fetch("issue_ids") << issue_id if present_string(issue_id)
+        ids.fetch("issue_ids") << issue_id if present_string(issue_id) && !batch_issue_reference_value?(issue_id)
         ids.fetch("project_ids") << project_id if present_string(project_id)
         collect_related_ids_for_agent_target!(state, ids, agent_id)
         collect_related_ids_for_target!(state, ids, target_id)
@@ -2614,6 +2672,9 @@ module Meringue
         follow_up_of_agent_id = value_at(payload, "follow_up_of_agent_id", "followUpOfAgentID", "followUpOfAgentId")
         replace_agent_id = value_at(payload, "replace_agent_id", "replaceAgentID", "replaceAgentId")
         requested_workspace_path = value_at(payload, "workspace_path", "WorkspacePath", "workspacePath")
+        # Set by the kernel when it corrected a head's predicted issue id; kept on the worker and
+        # in its spawn log so a corrected route is visible instead of silent.
+        rerouted_from_issue_id = present_string(value_at(payload, "_rerouted_from_issue_id", "rerouted_from_issue_id"))
         errors = []
 
         errors << "issue_id is required" if blank?(issue_id)
@@ -2821,7 +2882,8 @@ module Meringue
           agent["harness_metadata"] = (reserved_agent.fetch("harness_metadata", {}) || {}).merge(agent.fetch("harness_metadata", {})).merge(
             "provisioning_state" => "ready",
             "provisioned_at" => now,
-            "spawn_command_id" => command_id
+            "spawn_command_id" => command_id,
+            "rerouted_from_issue_id" => rerouted_from_issue_id
           ).compact
           state.fetch("agents")[state.fetch("agents").index(reserved_agent)] = agent
           issue.fetch("agent_ids") << reservation.fetch("agent_id") unless issue.fetch("agent_ids").include?(reservation.fetch("agent_id"))
@@ -2859,7 +2921,8 @@ module Meringue
               "workspace_path" => agent.fetch("workspace_path"),
               "workspace_strategy" => agent.fetch("workspace_strategy"),
               "workspace_branch" => agent.fetch("workspace_branch"),
-              "title" => agent.fetch("harness_metadata", {}).fetch("title", nil)
+              "title" => agent.fetch("harness_metadata", {}).fetch("title", nil),
+              "rerouted_from_issue_id" => rerouted_from_issue_id
             }.compact
           )
           touch_state!(state, now)
@@ -3007,7 +3070,8 @@ module Meringue
         end
       end
 
-      def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0, user_message: nil, question_id: nil)
+      def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0, user_message: nil, question_id: nil,
+                           snapshot_issue_ids: [], snapshot_project_ids: [], snapshot_counters: {})
         {
           "id" => head_id,
           "type" => "head",
@@ -3027,6 +3091,12 @@ module Meringue
             "harness_generation" => harness_generation,
             "head_session_state" => HEAD_SESSION_STATE_PENDING,
             **instance_ownership_metadata,
+            # What this head can actually see. A batch command that targets an issue outside this
+            # set and outside the head's own batch is a mispredicted id, not a deliberate target,
+            # and the counters let the kernel recompute exactly which ids the head would predict.
+            "snapshot_issue_ids" => Array(snapshot_issue_ids),
+            "snapshot_project_ids" => Array(snapshot_project_ids),
+            "snapshot_counters" => (snapshot_counters.is_a?(Hash) ? snapshot_counters : {}),
             "head_request" => {
               "user_message" => user_message,
               "question_id" => question_id
@@ -3298,13 +3368,17 @@ module Meringue
       end
 
       def spawn_worker_log_message(agent, issue)
-        if present_string(agent.fetch("replaces_agent_id", nil))
-          "Replaced worker #{agent.fetch("replaces_agent_id")} with #{agent.fetch("id")} on #{issue.fetch("id")}."
-        elsif present_string(agent.fetch("follow_up_of_agent_id", nil))
-          "Spawned follow-up worker #{agent.fetch("id")} after #{agent.fetch("follow_up_of_agent_id")} on #{issue.fetch("id")}."
-        else
-          "Spawned worker #{agent.fetch("id")} for #{issue.fetch("id")}."
-        end
+        base = if present_string(agent.fetch("replaces_agent_id", nil))
+                 "Replaced worker #{agent.fetch("replaces_agent_id")} with #{agent.fetch("id")} on #{issue.fetch("id")}."
+               elsif present_string(agent.fetch("follow_up_of_agent_id", nil))
+                 "Spawned follow-up worker #{agent.fetch("id")} after #{agent.fetch("follow_up_of_agent_id")} on #{issue.fetch("id")}."
+               else
+                 "Spawned worker #{agent.fetch("id")} for #{issue.fetch("id")}."
+               end
+        rerouted_from = present_string((agent.fetch("harness_metadata", {}) || {}).fetch("rerouted_from_issue_id", nil))
+        return base unless rerouted_from
+
+        "#{base} Rerouted from predicted issue #{rerouted_from}."
       end
 
       def validate_head_result_shape(head_result)
@@ -3518,6 +3592,592 @@ module Meringue
           metadata = head && (head.fetch("harness_metadata", {}) || {})
           entry = metadata && Array(metadata.fetch("head_result_command_journal", []))[index]
           entry && deep_copy(entry)
+        end
+      end
+
+      def current_head_command_journal(head_id)
+        synchronized_state do
+          head = find_agent(normalized_state, head_id)
+          metadata = head && (head.fetch("harness_metadata", {}) || {})
+          journal = metadata ? Array(metadata.fetch("head_result_command_journal", [])) : []
+          deep_copy(journal)
+        end
+      end
+
+      # A head returns its whole batch at once, so a `SpawnWorker` that targets an issue the same
+      # batch creates cannot know the real issue id yet. Heads used to predict that id, which
+      # silently attached the worker to whatever issue happened to own the predicted id: when two
+      # head batches interleaved, the second head's worker landed under the first head's issue.
+      #
+      # The kernel now resolves the pointer itself. A head may reference the issue-creating command
+      # in the same batch (`issue_from_command`, or an `issue_id` like "@H1-C1"/"@index:0"), and a
+      # still-predicted id is verified against the issues the head could actually see plus the
+      # issues its own batch created. An unverifiable prediction is remapped to this batch's issue
+      # when that is unambiguous, and rejected otherwise, so work never routes onto another head's
+      # issue. Pre-existing issue ids keep working unchanged.
+      def resolve_head_batch_issue_reference(command:, head_id:, index:, commands: [])
+        return { "command" => command } unless command.is_a?(Hash)
+
+        command_type = canonical_command_type(value_at(command, "type", "command_type"))
+        payload = value_at(command, "payload")
+        return { "command" => command } unless payload.is_a?(Hash)
+
+        plan = head_batch_plan(head_id: head_id, commands: commands, index: index)
+        if BATCH_PROJECT_REFERENCE_COMMANDS.include?(command_type)
+          project_resolution = resolve_batch_project_target(command: command, payload: payload, command_type: command_type, plan: plan)
+          return project_resolution if project_resolution
+        end
+        return { "command" => command } unless BATCH_ISSUE_REFERENCE_COMMANDS.include?(command_type)
+
+        reference = head_batch_issue_reference(payload)
+        if reference
+          return resolve_symbolic_batch_issue_reference(
+            command: command,
+            payload: payload,
+            command_type: command_type,
+            reference: reference,
+            created: plan.fetch("created"),
+            index: index
+          )
+        end
+
+        return { "command" => command } unless BATCH_ISSUE_GUARDED_COMMANDS.include?(command_type)
+
+        requested = present_string(value_at(payload, "issue_id", "IssueID", "issueId"))
+        return { "command" => command } if requested.nil?
+
+        resolve_batch_issue_target(
+          command: command,
+          payload: payload,
+          command_type: command_type,
+          requested: requested,
+          head_id: head_id,
+          plan: plan
+        )
+      end
+
+      # Resolution order for a literal `issue_id` inside a head batch. Every step is a fact about
+      # the batch or about what the head could see, never a guess about what it meant:
+      #
+      #   1. the id is one this head would have predicted for an issue its own batch created
+      #      (recomputed from the head's snapshot counters) -> bind to the real created issue,
+      #   2. the id is literally one of this batch's created issues -> keep it,
+      #   3. the batch left an issue it created with no worker of its own while this command points
+      #      somewhere else -> the batch is internally inconsistent, so bind to that orphan issue
+      #      (single, same project) or reject rather than silently pile work onto another issue,
+      #   4. the id was visible in the head's spawn snapshot -> deliberate pre-existing target,
+      #   5. anything else -> reject loudly.
+      def resolve_batch_issue_target(command:, payload:, command_type:, requested:, head_id:, plan:)
+        aliases = plan.fetch("issue_aliases")
+        if plan.fetch("ambiguous_issue_aliases").include?(requested)
+          return {
+            "rejection" => {
+              "message" => "#{command_type} targets predicted issue #{requested}, which matches more than one issue created by this head result. " \
+                           "Use issue_from_command to name the CreateIssue command it belongs to.",
+              "errors" => ["ambiguous_batch_issue_prediction"]
+            }
+          }
+        end
+
+        if (aliased = aliases[requested])
+          return { "command" => command } if aliased == requested
+
+          return batch_issue_remap(command, payload, command_type, requested, aliased, "predicted_issue_id_shifted")
+        end
+
+        created_ids = plan.fetch("created_issue_ids")
+        orphans = plan.fetch("orphan_created_issue_ids")
+        return { "command" => command } if created_ids.include?(requested)
+
+        # Only worker routing is subject to the batch-consistency rule. Modifying some other issue
+        # in the same batch is a normal operation and never claims a created issue.
+        if command_type == "SpawnWorker" && !orphans.empty? && !batch_target_declared_deliberate?(payload)
+          candidates = orphans.select { |issue_id| same_project_issue_ids?(issue_id, requested) }
+          if candidates.length == 1
+            return batch_issue_remap(command, payload, command_type, requested, candidates.first, "batch_created_issue_left_without_worker")
+          end
+
+          return {
+            "rejection" => {
+              "message" => "SpawnWorker targets issue #{requested}, but this head result created #{orphans.join(", ")} without giving #{orphans.length == 1 ? "it" : "them"} a worker. " \
+                           "Use issue_from_command to bind each worker to the issue it belongs to, or mark a deliberate existing-issue worker with follow_up_of_agent_id or existing_issue.",
+              "errors" => ["ambiguous_batch_issue_target"]
+            }
+          }
+        end
+
+        return { "command" => command } if head_could_see_issue?(head_id: head_id, issue_id: requested)
+
+        {
+          "rejection" => {
+            "message" => "#{command_type} targets issue #{requested}, which this head result did not create and the head could not have seen. " \
+                         "Reference the issue-creating command with issue_from_command instead of predicting an issue id.",
+            "errors" => ["issue_id_not_created_by_this_head_result"]
+          }
+        }
+      end
+
+      def batch_issue_remap(command, payload, command_type, requested, issue_id, reason)
+        {
+          "command" => command_with_issue_id(command, payload, issue_id, rerouted_from: requested),
+          "remap" => {
+            "command_type" => command_type,
+            "requested_issue_id" => requested,
+            "issue_id" => issue_id,
+            "reason" => reason
+          }
+        }
+      end
+
+      # A head states that a worker belongs to an already existing issue's session lineage by
+      # setting follow_up_of_agent_id or replace_agent_id. That is an explicit target, so the
+      # batch-consistency check leaves it alone.
+      def batch_target_declared_deliberate?(payload)
+        present_string(value_at(payload, "follow_up_of_agent_id", "followUpOfAgentID", "followUpOfAgentId")) ||
+          present_string(value_at(payload, "replace_agent_id", "replaceAgentID", "replaceAgentId")) ||
+          !!value_at(payload, "existing_issue", "ExistingIssue", "existingIssue")
+      end
+
+      def same_project_issue_ids?(left, right)
+        project_id_from_issue_id(left) == project_id_from_issue_id(right)
+      end
+
+      def project_id_from_issue_id(issue_id)
+        issue_id.to_s[/\A(P\d+)-I\d+/, 1]
+      end
+
+      def resolve_batch_project_target(command:, payload:, command_type:, plan:)
+        reference = head_batch_project_reference(payload)
+        added = plan.fetch("added_projects")
+        if reference
+          described = describe_batch_issue_reference(reference)
+          entry = find_batch_issue_reference_entry(reference, added)
+          unless entry && entry.fetch("project_id", nil)
+            return {
+              "rejection" => {
+                "message" => "#{command_type} references #{described}, but this head result has no applied AddProject command there.",
+                "errors" => ["batch_project_reference_unresolved"]
+              }
+            }
+          end
+
+          return { "command" => command_with_project_id(command, payload, entry.fetch("project_id")) }
+        end
+
+        requested = present_string(value_at(payload, "project_id", "ProjectID", "projectId"))
+        return nil unless requested
+
+        aliased = plan.fetch("project_aliases")[requested]
+        return nil if aliased.nil? || aliased == requested
+
+        {
+          "command" => command_with_project_id(command, payload, aliased, rerouted_from: requested),
+          "remap" => {
+            "command_type" => command_type,
+            "requested_project_id" => requested,
+            "project_id" => aliased,
+            "reason" => "predicted_project_id_shifted"
+          }
+        }
+      end
+
+      # Everything the kernel knows about the batch being applied: what it has created so far, which
+      # ids the head would have predicted for those creations, and which created issues the batch
+      # never gives a worker of their own.
+      def head_batch_plan(head_id:, commands:, index:)
+        journal = current_head_command_journal(head_id)
+        snapshot = head_batch_snapshot(head_id)
+        created = head_batch_created_issues(journal)
+        added_projects = head_batch_added_projects(journal)
+        aliases = head_batch_predicted_aliases(
+          commands: commands,
+          journal: journal,
+          snapshot: snapshot,
+          index: index
+        )
+        created_issue_ids = created.filter_map { |entry| entry.fetch("issue_id", nil) }
+        {
+          "created" => created,
+          "created_issue_ids" => created_issue_ids,
+          "added_projects" => added_projects,
+          "issue_aliases" => aliases.fetch("issues"),
+          "ambiguous_issue_aliases" => aliases.fetch("ambiguous_issues"),
+          "project_aliases" => aliases.fetch("projects"),
+          "orphan_created_issue_ids" => orphan_created_issue_ids(
+            commands: commands,
+            created: created,
+            aliases: aliases.fetch("issues")
+          )
+        }
+      end
+
+      def head_batch_snapshot(head_id)
+        synchronized_state do
+          head = find_agent(normalized_state, head_id)
+          metadata = head ? (head.fetch("harness_metadata", {}) || {}) : {}
+          issue_ids = metadata.fetch("snapshot_issue_ids", nil)
+          counters = metadata.fetch("snapshot_counters", nil)
+          {
+            "issue_ids" => issue_ids.is_a?(Array) ? issue_ids.map(&:to_s) : nil,
+            "project_ids" => Array(metadata.fetch("snapshot_project_ids", [])).map(&:to_s),
+            "counters" => counters.is_a?(Hash) ? counters : {}
+          }
+        end
+      end
+
+      # Recomputes the ids the head would have predicted for its own creations, following the same
+      # rule the head contract documents (`counters` or the max existing number, plus one per
+      # creation in the batch). Those predictions become aliases for the ids the kernel actually
+      # minted, so a batch stays correctly bound even when another head consumed the ids first.
+      def head_batch_predicted_aliases(commands:, journal:, snapshot:, index:)
+        issues = {}
+        ambiguous_issues = []
+        projects = {}
+        return { "issues" => issues, "ambiguous_issues" => ambiguous_issues, "projects" => projects } unless snapshot.fetch("issue_ids")
+
+        journal_by_index = {}
+        Array(journal).each_with_index do |entry, position|
+          next unless entry.is_a?(Hash)
+
+          journal_by_index[entry.fetch("index", position).to_i] = entry
+        end
+
+        snapshot_issue_ids = snapshot.fetch("issue_ids")
+        snapshot_counters = snapshot.fetch("counters")
+        issue_counters = snapshot_counters.fetch("issues_by_project", {}) || {}
+        project_counter = snapshot_counters.fetch("projects", nil)
+        project_counter = snapshot.fetch("project_ids").length if project_counter.nil?
+        snapshot_max_issue = snapshot_max_issue_numbers(snapshot_issue_ids)
+        added_projects = 0
+        created_per_project = Hash.new(0)
+
+        Array(commands).each_with_index do |proposed, position|
+          break if position >= index
+
+          entry = journal_by_index[position]
+          next unless entry && entry.fetch("status", nil) == "accepted"
+
+          target_id = present_string(entry.fetch("target_id", nil))
+          next unless target_id
+
+          command_type = canonical_command_type(value_at(proposed, "type", "command_type"))
+          payload = value_at(proposed, "payload")
+          payload = {} unless payload.is_a?(Hash)
+
+          case command_type
+          when "AddProject"
+            added_projects += 1
+            predicted = "P#{project_counter.to_i + added_projects}"
+            register_batch_alias!(projects, [], predicted, target_id, snapshot.fetch("project_ids"))
+          when "CreateIssue"
+            requested_project = present_string(value_at(payload, "project_id", "ProjectID", "projectId"))
+            resolved_project = projects.fetch(requested_project, requested_project)
+            next unless resolved_project
+
+            created_per_project[resolved_project] += 1
+            offset = created_per_project[resolved_project]
+            counter_base = issue_counters.fetch(resolved_project, nil)
+            max_base = snapshot_max_issue.fetch(resolved_project, 0)
+            bases = [counter_base, max_base].compact.map(&:to_i).uniq
+            bases = [max_base] if bases.empty?
+            prefixes = [resolved_project, requested_project].compact.uniq
+            prefixes.each do |prefix|
+              bases.each do |base|
+                register_batch_alias!(issues, ambiguous_issues, "#{prefix}-I#{base + offset}", target_id, snapshot_issue_ids)
+              end
+            end
+          end
+        end
+
+        { "issues" => issues, "ambiguous_issues" => ambiguous_issues, "projects" => projects }
+      end
+
+      # An alias is only recorded when the head could not already see something with that id, so a
+      # prediction never shadows a real pre-existing target. Two creations claiming the same
+      # prediction make it ambiguous, and ambiguous predictions are rejected instead of guessed.
+      def register_batch_alias!(table, ambiguous, predicted_id, real_id, visible_ids)
+        return if blank?(predicted_id)
+        return if Array(visible_ids).include?(predicted_id)
+        return if ambiguous.include?(predicted_id)
+
+        existing = table[predicted_id]
+        if existing && existing != real_id
+          table.delete(predicted_id)
+          ambiguous << predicted_id
+          return
+        end
+
+        table[predicted_id] = real_id
+      end
+
+      def snapshot_max_issue_numbers(snapshot_issue_ids)
+        Array(snapshot_issue_ids).each_with_object({}) do |issue_id, maxima|
+          match = issue_id.to_s.match(/\A(P\d+)-I(\d+)\z/)
+          next unless match
+
+          project_id = match[1]
+          number = match[2].to_i
+          maxima[project_id] = number if number > maxima.fetch(project_id, 0)
+        end
+      end
+
+      # Issues this batch created that no SpawnWorker in the batch claims. Claims are read from the
+      # head's declared payloads (explicit reference, predicted id, or the real created id), never
+      # from state that earlier commands already mutated, so every command in a large fan-out batch
+      # sees the same answer.
+      def orphan_created_issue_ids(commands:, created:, aliases:)
+        created_ids = created.filter_map { |entry| entry.fetch("issue_id", nil) }
+        return [] if created_ids.empty?
+
+        created_by_index = created.to_h { |entry| [entry.fetch("index", -1).to_i, entry.fetch("issue_id", nil)] }
+        created_by_command_id = created.to_h { |entry| [entry.fetch("command_id", nil).to_s, entry.fetch("issue_id", nil)] }
+        claimed = []
+        Array(commands).each_with_index do |proposed, position|
+          next unless proposed.is_a?(Hash)
+          next unless canonical_command_type(value_at(proposed, "type", "command_type")) == "SpawnWorker"
+
+          payload = value_at(proposed, "payload")
+          payload = {} unless payload.is_a?(Hash)
+          reference = head_batch_issue_reference(payload)
+          if reference
+            claimed << if reference.fetch("kind") == "index"
+                         created_by_index[reference.fetch("index").to_i]
+                       else
+                         created_by_command_id[reference.fetch("command_id").to_s]
+                       end
+            next
+          end
+
+          requested = present_string(value_at(payload, "issue_id", "IssueID", "issueId"))
+          next unless requested
+
+          claimed << (aliases[requested] || (created_ids.include?(requested) ? requested : nil))
+        end
+
+        created_ids.uniq - claimed.compact.uniq
+      end
+
+      def resolve_symbolic_batch_issue_reference(command:, payload:, command_type:, reference:, created:, index:)
+        described = describe_batch_issue_reference(reference)
+        entry = find_batch_issue_reference_entry(reference, created)
+        if entry.nil?
+          return {
+            "rejection" => {
+              "message" => "#{command_type} references #{described}, but this head result has no matching CreateIssue command.",
+              "errors" => ["batch_issue_reference_not_found"]
+            }
+          }
+        end
+        if entry.fetch("index", -1).to_i >= index
+          return {
+            "rejection" => {
+              "message" => "#{command_type} references #{described}, which is not applied before it. List the CreateIssue command first.",
+              "errors" => ["batch_issue_reference_out_of_order"]
+            }
+          }
+        end
+
+        issue_id = entry.fetch("issue_id", nil)
+        unless issue_id
+          return {
+            "rejection" => {
+              "message" => "#{command_type} references #{described}, but that command did not create an issue (#{entry.fetch("status", "pending")}).",
+              "errors" => ["batch_issue_reference_unresolved"]
+            }
+          }
+        end
+
+        {
+          "command" => command_with_issue_id(command, payload, issue_id),
+          "resolved_reference" => { "reference" => described, "issue_id" => issue_id, "command_type" => command_type }
+        }
+      end
+
+      def find_batch_issue_reference_entry(reference, entries)
+        if reference.fetch("kind") == "index"
+          entries.find { |entry| entry.fetch("index", nil).to_i == reference.fetch("index").to_i }
+        else
+          wanted = reference.fetch("command_id").to_s
+          entries.find { |entry| entry.fetch("command_id", nil).to_s == wanted }
+        end
+      end
+
+      def head_batch_created_issues(journal)
+        Array(journal).each_with_index.filter_map do |entry, position|
+          next unless entry.is_a?(Hash)
+          next unless canonical_command_type(entry.fetch("command_type", nil)) == "CreateIssue"
+
+          {
+            "index" => entry.fetch("index", position).to_i,
+            "command_id" => entry.fetch("command_id", nil).to_s,
+            "status" => entry.fetch("status", nil),
+            "issue_id" => entry.fetch("status", nil) == "accepted" ? present_string(entry.fetch("target_id", nil)) : nil
+          }
+        end
+      end
+
+      def head_batch_added_projects(journal)
+        Array(journal).each_with_index.filter_map do |entry, position|
+          next unless entry.is_a?(Hash)
+          next unless canonical_command_type(entry.fetch("command_type", nil)) == "AddProject"
+
+          {
+            "index" => entry.fetch("index", position).to_i,
+            "command_id" => entry.fetch("command_id", nil).to_s,
+            "status" => entry.fetch("status", nil),
+            "project_id" => entry.fetch("status", nil) == "accepted" ? present_string(entry.fetch("target_id", nil)) : nil
+          }
+        end
+      end
+
+      def head_batch_project_reference(payload)
+        return nil unless payload.is_a?(Hash)
+
+        explicit = value_at(payload, *BATCH_PROJECT_REFERENCE_KEYS)
+        return parse_batch_issue_reference(explicit) unless explicit.nil? || (!explicit.is_a?(Integer) && blank?(explicit))
+
+        project_id = value_at(payload, "project_id", "ProjectID", "projectId")
+        return nil unless batch_issue_reference_value?(project_id)
+
+        parse_batch_issue_reference(project_id)
+      end
+
+      def command_with_project_id(command, payload, project_id, rerouted_from: nil)
+        cleaned = payload.reject do |key, _value|
+          name = key.to_s
+          BATCH_PROJECT_REFERENCE_KEYS.include?(name) || %w[project_id ProjectID projectId].include?(name)
+        end
+        resolved = { "project_id" => project_id, "_rerouted_from_project_id" => present_string(rerouted_from) }.compact
+        command.merge("payload" => cleaned.merge(resolved))
+      end
+
+      def head_batch_issue_reference(payload)
+        return nil unless payload.is_a?(Hash)
+
+        explicit = value_at(payload, *BATCH_ISSUE_REFERENCE_KEYS)
+        return parse_batch_issue_reference(explicit) unless explicit.nil? || (!explicit.is_a?(Integer) && blank?(explicit))
+
+        issue_id = value_at(payload, "issue_id", "IssueID", "issueId")
+        return nil unless batch_issue_reference_value?(issue_id)
+
+        parse_batch_issue_reference(issue_id)
+      end
+
+      def batch_issue_reference_value?(value)
+        value.is_a?(String) && value.strip.start_with?(BATCH_REFERENCE_PREFIX)
+      end
+
+      def parse_batch_issue_reference(value)
+        return { "kind" => "index", "index" => value.to_i } if value.is_a?(Integer)
+
+        if value.is_a?(Hash)
+          command_id = present_string(value_at(value, "command_id", "commandId", "command"))
+          return { "kind" => "command_id", "command_id" => command_id } if command_id
+
+          index = value_at(value, "index", "command_index", "commandIndex")
+          return { "kind" => "index", "index" => index.to_i } unless index.nil?
+
+          return nil
+        end
+
+        text = value.to_s.strip.delete_prefix(BATCH_REFERENCE_PREFIX).strip
+        return nil if text.empty?
+
+        if (match = text.match(/\A(?:command|command_id|commandId)\s*[:=]\s*(.+)\z/))
+          return { "kind" => "command_id", "command_id" => match[1].strip }
+        end
+        if (match = text.match(/\A(?:index|command_index|commandIndex)\s*[:=]\s*(\d+)\z/))
+          return { "kind" => "index", "index" => match[1].to_i }
+        end
+        return { "kind" => "index", "index" => text.to_i } if text.match?(/\A\d+\z/)
+
+        { "kind" => "command_id", "command_id" => text }
+      end
+
+      def describe_batch_issue_reference(reference)
+        if reference.fetch("kind") == "index"
+          "command index #{reference.fetch("index")} in this head result"
+        else
+          "command #{reference.fetch("command_id")} in this head result"
+        end
+      end
+
+      def command_with_issue_id(command, payload, issue_id, rerouted_from: nil)
+        cleaned = payload.reject do |key, _value|
+          name = key.to_s
+          BATCH_ISSUE_REFERENCE_KEYS.include?(name) || %w[issue_id IssueID issueId].include?(name)
+        end
+        resolved = { "issue_id" => issue_id, "_rerouted_from_issue_id" => present_string(rerouted_from) }.compact
+        command.merge("payload" => cleaned.merge(resolved))
+      end
+
+      # Only remap a predicted id inside the project the head was already routing to. A predicted
+      # id that resolves to another project is a routing mistake the kernel should not paper over.
+      def batch_issue_remap_compatible?(requested_issue_id:, candidate_issue_id:)
+        synchronized_state do
+          state = normalized_state
+          requested = find_issue(state, requested_issue_id)
+          next true unless requested
+
+          candidate = find_issue(state, candidate_issue_id)
+          next false unless candidate
+
+          requested.fetch("project_id", nil) == candidate.fetch("project_id", nil)
+        end
+      end
+
+      # An issue is visible to a head only when the head's spawn snapshot contained it, so an issue
+      # another head created after this head was spawned can never be a deliberate target.
+      def head_could_see_issue?(head_id:, issue_id:)
+        synchronized_state do
+          state = normalized_state
+          issue = find_issue(state, issue_id)
+          next false unless issue
+          next true if issue.fetch("originating_head_id", nil).to_s == head_id.to_s
+
+          head = find_agent(state, head_id)
+          next true unless head
+
+          metadata = head.fetch("harness_metadata", {}) || {}
+          snapshot_issue_ids = metadata.fetch("snapshot_issue_ids", nil)
+          next Array(snapshot_issue_ids).include?(issue.fetch("id")) if snapshot_issue_ids.is_a?(Array)
+
+          # Heads recorded before snapshot ids were tracked fall back to creation order.
+          issue_created = parse_time_or_nil(issue.fetch("created_at", nil))
+          head_created = parse_time_or_nil(head.fetch("created_at", nil))
+          next true unless issue_created && head_created
+
+          issue_created <= head_created
+        end
+      end
+
+      def head_batch_remap_message(remap)
+        if remap.key?("project_id")
+          "Routed #{remap.fetch("command_type")} to project #{remap.fetch("project_id")} added by this head result instead of predicted project #{remap.fetch("requested_project_id")}."
+        elsif remap.fetch("reason", nil) == "batch_created_issue_left_without_worker"
+          "Routed #{remap.fetch("command_type")} to issue #{remap.fetch("issue_id")} created by this head result, which would otherwise have had no worker, instead of #{remap.fetch("requested_issue_id")}."
+        else
+          "Routed #{remap.fetch("command_type")} to issue #{remap.fetch("issue_id")} created by this head result instead of predicted issue #{remap.fetch("requested_issue_id")}."
+        end
+      end
+
+      def log_head_batch_issue_remap(head_id, resolution)
+        remap = resolution.fetch("remap", nil)
+        return [] unless remap
+
+        synchronized_state do
+          state = normalized_state
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: head_id,
+            level: "warning",
+            message: head_batch_remap_message(remap),
+            details: remap.merge("head_id" => head_id)
+          )
+          touch_state!(state)
+          store.save(state)
+          log_ids
         end
       end
 
