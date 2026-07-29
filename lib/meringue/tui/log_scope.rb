@@ -45,12 +45,15 @@ module Meringue
         record = find_record(state, id)
         return {} unless record
 
-        {
+        value = {
           "id" => record.fetch("id").to_s,
           "kind" => kind_for(record),
           "label" => label_for(record),
           "member_ids" => member_ids(state, record)
         }
+        target = selected_target_for(state, record)
+        value["selected_target"] = target if target
+        value
       end
 
       def scope(state)
@@ -72,6 +75,19 @@ module Meringue
 
       def kind(state)
         scope(state).fetch("kind", "").to_s
+      end
+
+      # Issue/agent selections also become a chat-routing target. Projects and
+      # heads without an owning issue remain useful log-only filters. The TUI
+      # sends only selected_id; the kernel resolves the authoritative issue again
+      # before a head is spawned.
+      def selected_target(state)
+        value = scope(state).fetch("selected_target", nil)
+        value.is_a?(Hash) ? value : {}
+      end
+
+      def chat_target?(state)
+        !selected_target(state).fetch("issue_id", "").to_s.empty?
       end
 
       # True when the id still names a rendered AgentTree node, so a pruned or
@@ -128,6 +144,35 @@ module Meringue
 
       def label_for(record)
         record.fetch("id", "").to_s
+      end
+
+      # Selecting an issue targets it directly. Selecting an agent with an owning
+      # issue keeps that exact row as the focused log scope while resolving chat
+      # to the durable issue. A top-level head normally has no issue, so it stays
+      # a log-only selection rather than fabricating routing context.
+      def selected_target_for(state, record)
+        kind = kind_for(record)
+        issue = if kind == "issue"
+                  record
+                elsif %w[worker head].include?(kind)
+                  issues(state).find { |candidate| candidate.fetch("id", nil).to_s == record.fetch("issue_id", nil).to_s }
+                end
+        return nil unless issue
+
+        target = {
+          "selected_id" => record.fetch("id").to_s,
+          "selected_type" => kind == "issue" ? "issue" : "agent",
+          "issue_id" => issue.fetch("id").to_s,
+          "project_id" => issue.fetch("project_id", nil).to_s,
+          "issue_title" => issue.fetch("title", nil).to_s
+        }
+        if kind != "issue"
+          metadata = record.fetch("harness_metadata", {}) || {}
+          target["selected_agent_id"] = record.fetch("id").to_s
+          target["selected_agent_type"] = record.fetch("type", nil).to_s
+          target["selected_agent_title"] = metadata.fetch("title", nil).to_s
+        end
+        target.reject { |_key, value| value.to_s.empty? }
       end
 
       # Ids whose logs belong to the selected node, mirroring the AgentTree.

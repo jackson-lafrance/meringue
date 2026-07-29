@@ -14,8 +14,12 @@ module Meringue
         @router = router
       end
 
-      def call(text, &on_event)
-        route = router.route(text)
+      def call(text, selected_target: nil, &on_event)
+        route = if selected_target
+                  router.route(text, selected_target: selected_target)
+                else
+                  router.route(text)
+                end
         return handle_slash_command(route, on_event: on_event) if route.fetch("kind", nil) == "slash_command"
 
         handle_prompt(text, route: route, on_event: on_event)
@@ -122,13 +126,15 @@ module Meringue
         command_results.map { |result| result.fetch("message", "Command was not accepted.") }.join("\n")
       end
 
-      def natural_language_route(text)
+      def natural_language_route(text, selected_target: nil)
+        payload = { "user_message" => text.to_s }
+        payload["selected_target"] = selected_target if selected_target
         {
           "kind" => "natural_language",
           "commands" => [
             Meringue::Kernel::Command.new(
               type: "SpawnHead",
-              payload: { "user_message" => text.to_s }
+              payload: payload
             ).to_h
           ]
         }

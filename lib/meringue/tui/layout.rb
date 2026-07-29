@@ -75,7 +75,7 @@ module Meringue
           metrics.fetch(:composer_y),
           metrics.fetch(:composer_width),
           metrics.fetch(:composer_height),
-          "chat",
+          composer_pane_title(state),
           chat_pane.composer_lines(state, width: metrics.fetch(:composer_content_width)),
           active: scroll_pane_active?(state, "chat"),
           overflow: :tail
@@ -489,6 +489,12 @@ module Meringue
         return "logs" unless chat_pane.respond_to?(:log_pane_title)
 
         chat_pane.log_pane_title(state)
+      end
+
+      def composer_pane_title(state)
+        return "chat" unless chat_pane.respond_to?(:composer_pane_title)
+
+        chat_pane.composer_pane_title(state)
       end
 
       def pane_selection(state, pane)

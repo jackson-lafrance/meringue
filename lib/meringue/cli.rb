@@ -254,9 +254,9 @@ module Meringue
           Ctrl-B                    # open the selected worker's verified delivery PR
           Enter in jump mode        # open selected issue/agent PR when one is available
           a in jump mode            # open the selected agent's focused workspace
-          AgentTree single-click    # select that project/issue/head/worker and filter the logs pane to it
-          click the selected row    # deselect and show all logs again (empty AgentTree space also deselects)
-          issue/worker double-click # open that worker's optional focused workspace
+          AgentTree single-click    # focus logs; issue/worker selections also target chat through a fresh head
+          click the selected row    # clear the log/chat target (empty AgentTree space also clears it)
+          issue/worker double-click # open that worker's optional focused workspace; unavailable rows stay quiet
           Ctrl-Space, then T / F    # switch terminal/agent view / cycle transcript filter
           Ctrl-Space, then A        # open the worker's underlying agent session externally
           Ctrl-Space, then B / P    # open the workspace editor / verified delivery PR
