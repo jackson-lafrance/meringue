@@ -1,0 +1,123 @@
+# Findings — heads slice (head context, result parser, prompt/simple loops, runners)
+
+Scope: `lib/meringue/heads/*` plus the kernel entry points those loops drive
+(`SpawnHead`, `ApplyHeadResult`, `AnswerQuestion`). Tests live in
+`test/integration/heads/` with shared doubles in `test/support/heads_support.rb`.
+They replace the manual `scripts/head_loop_smoke.rb` walkthrough.
+
+All tests assert **current** behaviour. Where current behaviour looks wrong, the
+test says so in a comment and the bug is recorded below. No production code was
+changed in this slice.
+
+## Bugs found
+
+### 1. `Engine#harness_client` is private, so the worker-wait path raises
+
+`lib/meringue/kernel/engine.rb:134` declares `attr_reader :harness_client`, but
+`lib/meringue/kernel/engine.rb:3634` redefines `harness_client` (and
+`head_runner`) *after* the `private` keyword at line 493. The public reader is
+therefore replaced by a private method.
+
+`Heads::PromptLoop#wait_for_worker_results` (`prompt_loop.rb:173`) and
+`Heads::SimpleLoop#wait_for_spawned_workers` (`simple_loop.rb:83`) both call
+`engine.harness_client`, so any run with `wait_for_workers: true` raises:
+
+```
+NoMethodError: private method 'harness_client' called for an instance of Meringue::Kernel::Engine
+```
+
+Impact: `meringue heads` (`lib/meringue/cli.rb:140` passes
+`wait_for_workers: true`) applies the head batch, then blows up before it can
+settle the spawned worker; `SimpleLoop#run` swallows it into an `event: "error"`
+payload on stderr. The TUI path is unaffected because `lib/meringue/cli.rb:78`
+uses `wait_for_workers: false`, which returns early before touching the reader.
+
+Likely fix: move the `harness_client` / `head_runner` overrides above the
+`private` keyword (or re-expose them with `public :harness_client, :head_runner`).
+
+Covered by:
+- `HeadPromptLoopTest#test_worker_waiting_against_the_real_engine_raises_because_harness_client_is_private`
+- `HeadSimpleLoopTest#test_waiting_for_workers_surfaces_the_private_harness_client_error`
+
+The happy path of the wait/settle/complete flow is still exercised through a
+test-only shim (`HeadsSupport::HarnessAccessibleEngine`) in
+`HeadPromptLoopTest#test_waiting_for_workers_settles_them_and_records_pull_requests`.
+Those two tests should start failing (and can be simplified) once the visibility
+bug is fixed.
+
+### 2. Answering an open question is a dead end (matches issue P1-I9)
+
+`/answer <question_id> <answer>` routes to `AnswerQuestion`, which marks the
+question answered, stores the answer, and logs `Answered question Q1.` — and
+that is all. No head is spawned with the answer plus the question's context, so
+the answer never drives routing (`engine.rb:1187`).
+
+Observed in `HeadPromptLoopTest#test_answering_a_question_marks_it_answered_but_spawns_no_head`:
+after answering, there are no new heads, issues, or workers, and the head runner
+was never called a second time.
+
+Related gaps in the head contract, all asserted as current behaviour:
+
+- The head context exposes only `current_state_summary.open_question_count`; the
+  open-question records (id/question/context/project_id/issue_id/head_id/
+  created_at) are not in the prompt payload at all
+  (`HeadContextTest#test_open_questions_are_only_surfaced_as_a_count`,
+  `HeadQuestionAnsweringTest#test_head_context_for_an_implicit_reply_lists_the_question_ids_it_could_answer`).
+  A head cannot reliably infer which open question a prose reply answers from
+  what it is given today; question text only appears incidentally when a
+  `Question Qn: ...` log happens to be inside the 16-entry `recent_activity`
+  window.
+- `routing_context.question_being_answered` is populated only from an explicit
+  `SpawnHead` `question_id`. A prose reply such as `ANSWERING Q4 ...` leaves it
+  `null` even though `explicit_references.known_ids` already contains `Q4`
+  (`HeadContextTest#test_question_being_answered_is_null_without_an_explicit_question_id`).
+- The plumbing that *would* be needed already works: `SpawnHead` accepts
+  `question_id`, validates it, and the resulting context carries the full
+  question record; `AnswerQuestion` can be batched with `PromptAgent` /
+  `SpawnWorker` in one `HeadResult` and both are applied
+  (`HeadQuestionAnsweringTest#test_head_result_can_answer_a_question_and_route_work_in_one_batch`,
+  `#test_question_id_is_passed_through_spawn_head_to_the_head_context`).
+
+## Rough edges (not clearly bugs, but surprising)
+
+- A head runner that returns `nil` produces an *accepted* `SpawnHead` result, a
+  head left in state with status `completed`, an empty `summary`, and
+  `state_mutated: true` even though nothing was applied
+  (`HeadPromptLoopTest#test_runner_returning_nothing_produces_an_empty_summary`).
+  Nothing ever cleans that head up.
+- A rejected/unknown command inside an otherwise valid batch leaves the head
+  `blocked` and skips cleanup with reason `partially_applied`
+  (`HeadPromptLoopTest#test_unknown_command_types_are_rejected_and_block_head_cleanup`).
+  Intentional, but the head record stays in state indefinitely from the loop's
+  point of view.
+- `Heads::SimpleLoop` carries a private copy of the worker-wait helpers
+  (`wait_for_spawned_workers`, `wait_for_worker`, `state_summary`,
+  `head_result_from`, …) that `PromptLoop` already implements. The copies are
+  dead code today; `handle_input` delegates to `PromptLoop`.
+- `SimpleLoop#state_summary` and `PromptLoop#state_summary` return different
+  shapes (`working_worker_count`/`active_head_count` only exist in the latter),
+  so the stderr error payload from `SimpleLoop` is not comparable to the payload
+  from a normal iteration.
+
+## Verified-good behaviour worth keeping
+
+- Head context excludes harness transcripts and secrets: worker candidates are
+  built from an allow-list, so `harness_events`, `prompt`, `system_prompt`,
+  `api_key`, and `pi_state` never reach the head
+  (`HeadContextTest#test_context_never_embeds_harness_transcripts_or_secrets`).
+  Long text is truncated at `ROUTING_TEXT_LIMIT` and activity at
+  `ROUTING_ACTIVITY_LIMIT`.
+- Heads cannot mutate state or files: mutations to the snapshot handed to a
+  runner never reach the store, and only kernel-applied commands change state
+  (`HeadPromptLoopTest#test_head_cannot_mutate_state_or_project_files_itself`).
+- `ResultParser` accepts fenced and prose-wrapped JSON, rejects malformed JSON
+  and bad envelope shapes with indexed error messages, and leaves unknown command
+  names for the kernel to reject.
+- Two heads can be in flight while a slash command runs to completion, because
+  `SpawnHead` is applied outside the shared engine mutex
+  (`HeadPromptLoopTest#test_multiple_concurrent_heads_do_not_block_user_input`).
+- `FakeRunner`, `HarnessRunner`, and `PiRunner` all satisfy the same `#run`
+  signature, and `HarnessRunner`'s split lifecycle
+  (`spawn_head_session` / `await_head_result` / `close_head_session`) is what the
+  kernel drives when a runner owns a session
+  (`HeadRunnerParityTest`).
