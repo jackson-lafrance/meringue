@@ -55,7 +55,19 @@ There is currently no separate tracked MVP implementation plan. If a future mile
 If an implementation plan conflicts with `AGENTS.md`, follow `AGENTS.md` and call out the conflict before editing code.
 
 ### Test file policy
-Agents must never write test files in this repository. Do not create, add, or regenerate any file whose purpose is to define automated tests, including files under `test/`, `tests/`, `spec/`, or `specs/`, or files named with `test` or `spec` conventions.
+Automated tests are allowed and expected in this repository. The earlier blanket ban on test files is retired: agents should add or extend tests alongside implementation work, and should not ship behavior changes to the kernel, heads, state, input, or TUI layers without covering them.
+
+Suite conventions:
+
+- Minitest only, driven by Rake. No new gem dependencies beyond `rake` and `minitest`, both of which ship with Ruby.
+- Run everything with `rake test`. Run one file with `ruby -Ilib -Itest test/<path>_test.rb`, and one test with `ruby -Ilib -Itest test/<path>_test.rb --name test_<name>`.
+- Layout: integration tests live under `test/integration/<area>/` (for example `test/integration/kernel/`, `test/integration/heads/`), end-to-end flows live under `test/e2e/`, shared helpers live under `test/support/`.
+- Every test file is named `*_test.rb`, starts with `require "test_helper"` (never `require_relative`), and defines a uniquely named `Minitest::Test` subclass so parallel work merges without class collisions.
+- Tests must be hermetic and fast: no network access, no real Pi/Claude/harness processes, no reliance on a developer's machine state. Write only inside `Dir.mktmpdir`, and never read or write `~/.meringue`. Use `Meringue::Harness::FakeClient` and `Meringue::Heads::FakeRunner` instead of real harnesses.
+- Never commit a failing or skipped test. If a test uncovers a real bug that is out of scope, assert the current actual behavior, note the bug explicitly in the test and in the PR description, and file the follow-up.
+- Tests are development-only and are not packaged in the gem.
+
+See `docs/testing.md` for the full guide, including what is intentionally not covered by automated tests.
 
 ### Branch, worktree, and PR workflow
 Agents must do implementation work on a fresh task branch, not directly on `main`, `master`, or any shared base branch.
