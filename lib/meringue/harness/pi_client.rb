@@ -32,6 +32,11 @@ module Meringue
       class ProcessNotFoundError < Error; end
       class ProcessExitedError < Error; end
       class SessionTransportUnavailableError < Error; end
+      # Another live Meringue instance owns the session and is still mid-turn. Prompting succeeds
+      # once that turn settles, so the kernel queues and retries instead of failing the command.
+      class SessionBusyError < SessionTransportUnavailableError
+        include Harness::TransientSessionError
+      end
       class UnmanagedProcessError < Error; end
       class RpcError < Error; end
       class RpcTimeoutError < Error; end
@@ -394,9 +399,7 @@ module Meringue
 
           owner_pid = owner_pid_for(pid, lease)
           owner_alive = owner_pid && owner_pid != Process.pid && ProcessIdentity.alive?(owner_pid)
-          if owner_alive && !settled_for_takeover?(session_ref)
-            raise SessionTransportUnavailableError, busy_owner_message(owner_pid, pid)
-          end
+          raise SessionBusyError, busy_owner_message(owner_pid, pid) if owner_alive && !settled_for_takeover?(session_ref)
 
           terminate_unowned_process(pid)
           lease.release!(pid: pid)

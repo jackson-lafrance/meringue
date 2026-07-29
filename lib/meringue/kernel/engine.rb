@@ -3,6 +3,7 @@
 require "json"
 require "monitor"
 require "open3"
+require "socket"
 require "time"
 
 require_relative "../config"
@@ -103,6 +104,15 @@ module Meringue
       PROMPT_MODES = %w[normal steer follow_up].freeze
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
       HEAD_RECONCILE_WARNING_DELAY_SECONDS = 5
+      # Token-overlap ratio above which two clarifications from the same head are treated as
+      # one restated question instead of two separate questions.
+      DUPLICATE_QUESTION_SIMILARITY_THRESHOLD = 0.6
+      # A head command batch is applied by one kernel instance at a time. The applying instance
+      # refreshes this lease as it works, so another instance (or another Meringue process
+      # sharing the same state file) can tell an in-flight batch from an abandoned one.
+      HEAD_RESULT_APPLY_LEASE_SECONDS = 60
+      # Reconciliation redelivery attempts for a prompt that arrived while the session was busy.
+      PENDING_PROMPT_MAX_ATTEMPTS = 20
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
       HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
@@ -437,6 +447,7 @@ module Meringue
       def reconcile_sessions_once(command_id:, command_type:)
         normalized_state_changed = persist_normalized_state_if_changed
         recovered_worker_results = recover_worker_reservations
+        pending_prompt_results = deliver_pending_agent_prompts
         recovered_results = recover_unapplied_head_results
         prune_result = prune_killed_records
         delivery_pr_refreshes = refresh_stale_delivery_pull_requests
@@ -448,6 +459,7 @@ module Meringue
         applied_results = poll_results.map { |poll_result| apply_poll_result(poll_result) }
         changed_count = applied_results.count { |result| result.fetch("changed", false) }
         changed_count += recovered_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
+        changed_count += pending_prompt_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += recovered_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += 1 if normalized_state_changed
         changed_count += 1 if prune_result.fetch("changed", false)
@@ -464,11 +476,12 @@ module Meringue
             "pruned_agent_ids" => prune_result.fetch("removed_agent_ids", []),
             "pruned_project_ids" => prune_result.fetch("removed_project_ids", []),
             "recovered_worker_results" => recovered_worker_results,
+            "pending_prompt_results" => pending_prompt_results,
             "recovered_head_results" => recovered_results,
             "delivery_pull_request_refreshes" => delivery_pr_refreshes,
             "poll_results" => applied_results
           },
-          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
+          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
         )
       rescue StandardError => e
         error = error_payload(e)
@@ -518,6 +531,9 @@ module Meringue
             next if present_string(metadata.fetch("head_result_applied_at", nil))
             next unless metadata.fetch("head_result_apply_state", nil) == "applying" ||
                         (agent.fetch("status", nil) == "completed" && agent_has_session_reference?(agent))
+            # Another kernel instance is applying this batch right now; recovering it here would
+            # apply every command a second time.
+            next if head_result_apply_lease_held_elsewhere?(agent)
 
             { "head_id" => agent.fetch("id"), "head_result" => deep_copy(head_result) }
           end
@@ -1041,6 +1057,17 @@ module Meringue
           return rejected_result(command_id, command_type, "Head #{head_id} does not exist.", ["head_not_found"]) unless head
           return rejected_result(command_id, command_type, "Agent #{head_id} is not a head.", ["agent_is_not_head"]) unless head.fetch("type", nil) == "head"
 
+          if head_result_apply_lease_held_elsewhere?(head)
+            return accepted_result(
+              command_id,
+              command_type,
+              head_id.to_s,
+              "Head result for #{head_id} is already being applied by another kernel instance.",
+              { "head_id" => head_id.to_s, "skipped" => "head_result_apply_in_progress" },
+              []
+            )
+          end
+
           now = timestamp
           metadata = head.fetch("harness_metadata", {}) || {}
           already_initialized = present_string(metadata.fetch("head_result_initialized_at", nil))
@@ -1052,7 +1079,7 @@ module Meringue
             "head_result" => head_result,
             "head_result_apply_state" => "applying",
             "head_result_initialized_at" => metadata.fetch("head_result_initialized_at", nil) || now
-          )
+          ).merge(head_result_apply_lease(now))
           metadata["head_result_command_journal"] = initialize_head_command_journal(
             state: state,
             head_id: head_id.to_s,
@@ -1074,17 +1101,22 @@ module Meringue
         end
         return initialization if kernel_command_result?(initialization)
 
-        command_results = head_result.fetch("commands").each_with_index.map do |proposed_command, index|
+        command_results = []
+        head_result.fetch("commands").each_with_index do |proposed_command, index|
           command = command_with_default_id(proposed_command, head_id: head_id.to_s, index: index)
           journal_entry = current_head_journal_entry(head_id.to_s, index)
           if journal_entry && terminal_command_status?(journal_entry.fetch("status", nil))
-            command_result_from_journal(journal_entry)
-          else
-            mark_head_command_started!(head_id.to_s, index)
-            result = apply(command)
-            checkpoint_head_command_result!(head_id.to_s, index, result)
-            result
+            command_results << command_result_from_journal(journal_entry)
+            next
           end
+
+          # The head record can disappear mid-batch when another kernel instance finishes and
+          # cleans up the same batch. Stop instead of raising so reconciliation keeps working.
+          break unless mark_head_command_started!(head_id.to_s, index)
+
+          result = apply(command)
+          command_results << result
+          break unless checkpoint_head_command_result!(head_id.to_s, index, result)
         end
 
         synchronized_state do
@@ -1913,6 +1945,20 @@ module Meringue
         return rejected_result(command_id, command_type, "Project #{project_id} does not exist.", ["project_not_found"]) if present_string(project_id) && !find_project(state, project_id)
         return rejected_result(command_id, command_type, "Issue #{issue_id} does not exist.", ["issue_not_found"]) if present_string(issue_id) && !find_issue(state, issue_id)
 
+        # One clarification must produce one question record and one log line, even when a head
+        # expresses it both in its HeadResult `questions` array and as an `AskQuestion` command.
+        existing_question = find_duplicate_head_question(state, head_id.to_s, question_text)
+        if existing_question
+          return accepted_result(
+            command_id,
+            command_type,
+            existing_question.fetch("id"),
+            "Question #{existing_question.fetch("id")} already records this clarification for head #{head_id}.",
+            existing_question,
+            []
+          )
+        end
+
         log_ids = []
         question = build_question(
           state: state,
@@ -2118,11 +2164,24 @@ module Meringue
           return rejected_result(command_id, command_type, "Agent #{agent_id} has no harness session.", ["missing_harness_session"])
         end
 
+        pending_prompt_id = present_string(value_at(payload, "_pending_prompt_id", "pending_prompt_id"))
         client = harness_client_for_agent(agent)
         session_ref = agent_session_ref(agent)
         begin
           session_ref = client.prompt_session(session_ref, prompt.to_s, mode: mode)
         rescue StandardError => e
+          if Harness.transient_session_error?(e)
+            return queue_transient_prompt(
+              command_id: command_id,
+              command_type: command_type,
+              agent_id: agent.fetch("id"),
+              prompt: prompt.to_s,
+              mode: mode,
+              pending_prompt_id: pending_prompt_id,
+              error: e
+            )
+          end
+
           return failed_result(
             command_id,
             command_type,
@@ -2163,6 +2222,8 @@ module Meringue
           project["updated_at"] = now
         end
 
+        # The harness accepted the prompt, so the delivery is logged exactly once, here.
+        remove_pending_prompts!(agent, pending_prompt_id: pending_prompt_id, command_id: command_id)
         log_ids = append_log(
           state,
           source_type: "kernel",
@@ -2182,6 +2243,146 @@ module Meringue
         store.save(state)
 
         accepted_result(command_id, command_type, agent.fetch("id"), prompt_log_message(agent, mode), agent, log_ids)
+      end
+
+      # A session that is momentarily owned by another instance mid-turn is not a command failure.
+      # The prompt is stored on the agent and redelivered by reconciliation until it lands.
+      def queue_transient_prompt(command_id:, command_type:, agent_id:, prompt:, mode:, pending_prompt_id:, error:)
+        state = normalized_state
+        agent = find_agent(state, agent_id)
+        return failed_result(command_id, command_type, "Agent #{agent_id} disappeared before its prompt could be queued.", ["agent_not_found"]) unless agent
+
+        now = timestamp
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        pending = Array(metadata.fetch("pending_prompts", [])).select { |entry| entry.is_a?(Hash) }
+        existing = pending.find do |entry|
+          (pending_prompt_id && entry.fetch("id", nil).to_s == pending_prompt_id) ||
+            (present_string(command_id) && entry.fetch("command_id", nil).to_s == command_id.to_s) ||
+            (entry.fetch("prompt", nil).to_s == prompt && entry.fetch("mode", nil).to_s == mode.to_s)
+        end
+
+        attempts = existing ? existing.fetch("attempts", 0).to_i + 1 : 1
+        if attempts > PENDING_PROMPT_MAX_ATTEMPTS
+          pending.delete(existing)
+          metadata["pending_prompts"] = pending
+          agent["harness_metadata"] = metadata
+          agent["updated_at"] = now
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: agent.fetch("id"),
+            level: "warning",
+            message: "Gave up the queued #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} after #{PENDING_PROMPT_MAX_ATTEMPTS} attempts: #{error.message}",
+            details: { "agent_id" => agent.fetch("id"), "mode" => mode, "attempts" => attempts }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          return rejected_result(command_id, command_type, "Worker #{agent.fetch("id")} could not accept the prompt: #{error.message}", ["session_busy"])
+        end
+
+        entry = existing || {
+          "id" => next_pending_prompt_id(agent, pending),
+          "command_id" => present_string(command_id),
+          "prompt" => prompt,
+          "mode" => mode.to_s,
+          "queued_at" => now
+        }.compact
+        entry["attempts"] = attempts
+        entry["last_attempted_at"] = now
+        entry["last_error"] = error.message
+        pending << entry unless existing
+        metadata["pending_prompts"] = pending
+        agent["harness_metadata"] = metadata
+        agent["updated_at"] = now
+
+        log_ids = if existing
+                    []
+                  else
+                    append_log(
+                      state,
+                      source_type: "kernel",
+                      source_id: agent.fetch("id"),
+                      level: "info",
+                      message: "Waiting to deliver the #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} until its current turn settles.",
+                      details: {
+                        "agent_id" => agent.fetch("id"),
+                        "issue_id" => agent.fetch("issue_id", nil),
+                        "mode" => mode.to_s,
+                        "pending_prompt_id" => entry.fetch("id")
+                      }
+                    )
+                  end
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(
+          command_id,
+          command_type,
+          agent.fetch("id"),
+          "Queued the #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} until its current turn settles.",
+          { "agent_id" => agent.fetch("id"), "queued" => true, "pending_prompt_id" => entry.fetch("id"), "attempts" => attempts },
+          log_ids
+        )
+      end
+
+      def remove_pending_prompts!(agent, pending_prompt_id:, command_id:)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        pending = Array(metadata.fetch("pending_prompts", [])).select { |entry| entry.is_a?(Hash) }
+        return if pending.empty?
+
+        remaining = pending.reject do |entry|
+          (pending_prompt_id && entry.fetch("id", nil).to_s == pending_prompt_id) ||
+            (present_string(command_id) && entry.fetch("command_id", nil).to_s == command_id.to_s)
+        end
+        metadata["pending_prompts"] = remaining
+        agent["harness_metadata"] = metadata
+      end
+
+      def prompt_delivery_noun(mode)
+        case mode.to_s
+        when "steer" then "correction"
+        when "follow_up" then "follow-up"
+        else "prompt"
+        end
+      end
+
+      def next_pending_prompt_id(agent, pending)
+        numbers = Array(pending).filter_map do |entry|
+          match = entry.is_a?(Hash) && entry.fetch("id", "").to_s.match(/-PP(\d+)\z/)
+          match && match[1].to_i
+        end
+        "#{agent.fetch("id")}-PP#{(numbers.max || 0) + 1}"
+      end
+
+      # Redelivers prompts that were queued while a session was busy mid-turn.
+      def deliver_pending_agent_prompts
+        pending = synchronized_state do
+          normalized_state.fetch("agents").flat_map do |agent|
+            next [] unless agent.fetch("type", nil) == "worker"
+            next [] if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+
+            metadata = agent.fetch("harness_metadata", {}) || {}
+            Array(metadata.fetch("pending_prompts", [])).filter_map do |entry|
+              next nil unless entry.is_a?(Hash) && present_string(entry.fetch("prompt", nil))
+
+              { "agent_id" => agent.fetch("id"), "entry" => deep_copy(entry) }
+            end
+          end
+        end
+
+        pending.map do |item|
+          entry = item.fetch("entry")
+          apply(
+            "command_id" => entry.fetch("command_id", nil),
+            "type" => "PromptAgent",
+            "payload" => {
+              "agent_id" => item.fetch("agent_id"),
+              "prompt" => entry.fetch("prompt"),
+              "mode" => entry.fetch("mode", "normal"),
+              "_pending_prompt_id" => entry.fetch("id", nil)
+            }
+          )
+        end
       end
 
       def spawn_worker(command_id, command_type, payload)
@@ -3014,14 +3215,61 @@ module Meringue
 
       def ensure_head_questions!(state, head_id, questions, log_ids)
         Array(questions).map do |question_payload|
-          existing = state.fetch("questions").find do |question|
-            question.fetch("head_id", nil) == head_id &&
-              question.fetch("question", nil).to_s == question_payload.fetch("question").to_s
-          end
+          existing = find_duplicate_head_question(state, head_id, question_payload.fetch("question"))
           next existing.fetch("id") if existing
 
           create_head_questions!(state, head_id, [question_payload], log_ids).first
         end
+      end
+
+      def find_head_question_by_text(state, head_id, question_text)
+        normalized = normalized_question_text(question_text)
+        return nil if normalized.empty?
+
+        state.fetch("questions").find do |question|
+          question.fetch("head_id", nil).to_s == head_id.to_s &&
+            normalized_question_text(question.fetch("question", nil)) == normalized
+        end
+      end
+
+      # Heads sometimes restate one clarification twice: once in the HeadResult `questions`
+      # array and once as an `AskQuestion` command, often with slightly reworded text. The
+      # kernel records a clarification once per head, so a near-identical restatement resolves
+      # to the question that is already stored instead of creating a second record and log line.
+      def find_duplicate_head_question(state, head_id, question_text)
+        normalized = normalized_question_text(question_text)
+        return nil if normalized.empty?
+
+        exact = find_head_question_by_text(state, head_id, question_text)
+        return exact if exact
+
+        head_questions = state.fetch("questions").select { |question| question.fetch("head_id", nil).to_s == head_id.to_s }
+        scored = head_questions.map do |question|
+          [question_text_similarity(normalized_question_text(question.fetch("question", nil)), normalized), question]
+        end
+        score, question = scored.max_by { |similarity, _question| similarity }
+        return nil unless question && score.to_f >= DUPLICATE_QUESTION_SIMILARITY_THRESHOLD
+
+        question
+      end
+
+      def normalized_question_text(question_text)
+        question_text.to_s.strip.downcase.gsub(/\s+/, " ")
+      end
+
+      def question_text_similarity(left, right)
+        left_words = question_text_words(left)
+        right_words = question_text_words(right)
+        return 0.0 if left_words.empty? || right_words.empty?
+
+        union = (left_words | right_words).length
+        return 0.0 if union.zero?
+
+        (left_words & right_words).length.to_f / union
+      end
+
+      def question_text_words(text)
+        text.to_s.downcase.scan(/[a-z0-9]+/).uniq
       end
 
       def current_head_journal_entry(head_id, index)
@@ -3037,20 +3285,22 @@ module Meringue
         synchronized_state do
           state = normalized_state
           head = find_agent(state, head_id)
-          raise "Head #{head_id} disappeared before command #{index + 1} started." unless head
+          next false unless head
 
           metadata = head.fetch("harness_metadata", {}) || {}
           journal = Array(metadata.fetch("head_result_command_journal", []))
           entry = journal[index]
-          raise "Head #{head_id} has no journal entry for command #{index + 1}." unless entry
+          next false unless entry
 
+          now = timestamp
           entry["status"] = "running"
-          entry["started_at"] = timestamp
+          entry["started_at"] = now
           metadata["head_result_command_journal"] = journal
-          head["harness_metadata"] = metadata
-          head["updated_at"] = timestamp
+          head["harness_metadata"] = metadata.merge(head_result_apply_lease(now))
+          head["updated_at"] = now
           touch_state!(state)
           store.save(state)
+          true
         end
       end
 
@@ -3058,12 +3308,12 @@ module Meringue
         synchronized_state do
           state = normalized_state
           head = find_agent(state, head_id)
-          raise "Head #{head_id} disappeared before command #{index + 1} was checkpointed." unless head
+          next false unless head
 
           metadata = head.fetch("harness_metadata", {}) || {}
           journal = Array(metadata.fetch("head_result_command_journal", []))
           entry = journal[index]
-          raise "Head #{head_id} has no journal entry for command #{index + 1}." unless entry
+          next false unless entry
 
           entry.merge!(
             "status" => result.fetch("status", "failed"),
@@ -3075,11 +3325,64 @@ module Meringue
             "completed_at" => timestamp
           )
           metadata["head_result_command_journal"] = journal
-          head["harness_metadata"] = metadata
+          head["harness_metadata"] = metadata.merge(head_result_apply_lease(timestamp))
           head["updated_at"] = timestamp
           touch_state!(state)
           store.save(state)
+          true
         end
+      end
+
+      # Identifies this kernel instance so a head command batch is applied exactly once even when
+      # more than one Meringue process shares the same state file.
+      def kernel_instance_id
+        @kernel_instance_id ||= "#{kernel_host_name}:#{Process.pid}:#{object_id}"
+      end
+
+      def kernel_host_name
+        @kernel_host_name ||= begin
+          Socket.gethostname
+        rescue StandardError
+          "localhost"
+        end
+      end
+
+      def head_result_apply_lease(now = timestamp)
+        {
+          "head_result_apply_owner" => kernel_instance_id,
+          "head_result_apply_owner_host" => kernel_host_name,
+          "head_result_apply_owner_pid" => Process.pid,
+          "head_result_apply_heartbeat" => now
+        }
+      end
+
+      def head_result_apply_lease_held_elsewhere?(head)
+        metadata = head.is_a?(Hash) ? (head.fetch("harness_metadata", {}) || {}) : {}
+        return false unless metadata.is_a?(Hash)
+
+        owner = present_string(metadata.fetch("head_result_apply_owner", nil))
+        return false unless owner
+        return false if owner == kernel_instance_id
+        return false if present_string(metadata.fetch("head_result_applied_at", nil))
+
+        heartbeat = parse_time_or_nil(metadata.fetch("head_result_apply_heartbeat", nil))
+        return false unless heartbeat
+        return false if Time.now - heartbeat > HEAD_RESULT_APPLY_LEASE_SECONDS
+
+        owner_host = present_string(metadata.fetch("head_result_apply_owner_host", nil))
+        owner_pid = metadata.fetch("head_result_apply_owner_pid", nil).to_i
+        return true unless owner_host == kernel_host_name && owner_pid.positive?
+
+        owner_process_alive?(owner_pid)
+      end
+
+      def owner_process_alive?(pid)
+        Process.kill(0, pid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue StandardError
+        true
       end
 
       def command_result_from_journal(entry)
@@ -3104,8 +3407,18 @@ module Meringue
       end
 
       def head_result_fully_applied?(apply_result)
+        return false if head_result_apply_skipped?(apply_result)
+
         command_results = apply_result.dig("result", "command_results")
         Array(command_results).all? { |result| result.fetch("status", nil) == "accepted" }
+      end
+
+      # True when this instance deliberately did nothing because another kernel instance holds the
+      # apply lease for the batch. The owner finishes the batch and owns the head bookkeeping.
+      def head_result_apply_skipped?(apply_result)
+        return false unless apply_result.is_a?(Hash)
+
+        apply_result.dig("result", "skipped").to_s == "head_result_apply_in_progress"
       end
 
       def command_with_default_id(command, head_id:, index:)
@@ -3946,6 +4259,13 @@ module Meringue
 
           now = timestamp
           merge_session_ref_into_agent!(head, poll_result.fetch("session_ref", {}))
+          if head_result_apply_skipped?(apply_result)
+            log_ids = append_harness_event_logs(state, head, poll_result.fetch("events", []))
+            touch_state!(state, now)
+            store.save(state)
+            return log_ids
+          end
+
           fully_applied = head_result_fully_applied?(apply_result)
           head["status"] = if apply_result.fetch("status", nil) != "accepted"
                              "errored"

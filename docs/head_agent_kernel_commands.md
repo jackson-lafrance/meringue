@@ -43,6 +43,8 @@ Every head result must match this shape:
 - `commands`: array of kernel command envelopes.
 - `questions`: array of clarifying question objects when ambiguity would likely cause bad work.
 
+Express each clarification exactly once. Put it in `questions`, or send one `AskQuestion` command for it, but do not restate the same clarification in both places. The `questions` array is the preferred form and is recorded first. If a head does restate one clarification twice, the kernel records it once: a repeated or reworded restatement from the same head resolves to the already stored question instead of creating a second question and a second chat log line. Genuinely different clarifications are still stored separately, so list every distinct question you need.
+
 ## Kernel command envelope
 
 Each command in `commands` must use this shape:
@@ -190,6 +192,8 @@ Example:
 
 Validates and applies the structured result from a completed head. Head agents should not normally propose this command directly; the kernel uses it after receiving a head result.
 
+The kernel applies each head command batch exactly once. It journals every command with its result and holds a refreshed apply lease on the head while it works, so a retry, a reconciliation pass, or a second Meringue process sharing the same state file resumes only the commands that never completed instead of re-running the batch. Do not resend a batch to force progress, and do not repeat a command that was already accepted.
+
 Payload:
 
 ```json
@@ -281,7 +285,7 @@ Example:
 
 ### SpawnWorker
 
-Spawns a real worker harness session for an issue. The kernel owns workspace allocation before calling the harness. For git-backed projects, the kernel creates a dedicated Meringue-owned worktree/branch and passes that workspace to the harness. Use this directly on an existing issue for follow-up prompts instead of creating nested issues.
+Spawns a real worker harness session for an issue. The kernel owns workspace allocation before calling the harness. For git-backed projects, the kernel creates a dedicated Meringue-owned worktree/branch and passes that workspace to the harness. When the preferred `meringue/<slug>` branch or worktree path already exists, the kernel reuses the existing workspace when it belongs to that worker, and otherwise provisions a uniquified branch/path instead of failing the spawn, so the delivered branch name can carry a short numeric suffix. Use this directly on an existing issue for follow-up prompts instead of creating nested issues.
 
 Workers receive standing guidance that they do not need to ask for user permission before editing files, committing, pushing, or opening/updating a PR when the assigned issue asks for those actions. Do not add worker prompts that tell them to wait for routine git/PR approval; do include requested delivery actions in the prompt, and let the worker report only true blockers such as missing auth, remote setup problems, branch/worktree collisions, unrelated work that would be overwritten, or unsafe/destructive operations. Workers should stay in the kernel-assigned workspace/branch unless it is unusable or the user explicitly asks for a different branch/worktree.
 
@@ -346,6 +350,8 @@ Choose the mode deliberately:
 
 Killed and errored workers are not resumable through this command. Spawn a related or replacement worker on the same issue instead.
 
+A session that is momentarily busy is not a failure. When the worker's harness session is mid-turn under another Meringue instance, the kernel accepts the command, queues the prompt on the worker, and redelivers it during reconciliation; the delivery is logged only once the harness has accepted it. Do not resend the prompt to force delivery.
+
 Example:
 
 ```json
@@ -361,7 +367,9 @@ Example:
 
 ### AskQuestion
 
-Stores a clarifying question from a head agent.
+Stores a clarifying question from a head agent. Prefer the HeadResult `questions` array; use this command only for a clarification that is not already listed there.
+
+The kernel keeps one question record per clarification per head. When this command repeats or lightly rewords a clarification the same head already recorded, the command is accepted and resolves to the existing question id without storing a duplicate or emitting a second log line.
 
 Payload:
 
@@ -520,7 +528,7 @@ Example:
 
 ## Question object shape
 
-When the head cannot safely choose commands, add a question object to `questions` instead of guessing.
+When the head cannot safely choose commands, add a question object to `questions` instead of guessing. One clarification is one entry; do not also send an `AskQuestion` command for that same clarification.
 
 ```json
 {
