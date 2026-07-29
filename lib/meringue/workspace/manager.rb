@@ -236,6 +236,7 @@ module Meringue
 
         remove_orphaned_owned_branch(git_root, branch)
         FileUtils.mkdir_p(File.dirname(worktree_root))
+        created_branch = !branch_exists?(git_root, branch)
         argv = if branch_exists?(git_root, branch)
                  return { "retry" => true, "errors" => ["worker branch #{branch} is checked out in another worktree"] } if branch_checked_out?(git_root, branch)
 
@@ -252,6 +253,10 @@ module Meringue
 
         unless status.success?
           output = present_output(stderr) || present_output(stdout)
+          # A failed attempt must not leave a half-provisioned directory or an unused branch behind,
+          # otherwise the next attempt collides with this instance's own leftovers.
+          cleanup_failed_attempt(git_root: git_root, worktree_root: worktree_root, branch: branch,
+                                 created_branch: created_branch, collision: collision_output?(output))
           return {
             "retry" => collision_output?(output),
             "errors" => ["git worktree add failed: #{output || "exit #{status.exitstatus}"}"],
@@ -279,6 +284,15 @@ module Meringue
 
       def collision_output?(output)
         output.to_s.match?(COLLISION_ERROR_PATTERN)
+      end
+
+      def cleanup_failed_attempt(git_root:, worktree_root:, branch:, created_branch:, collision:)
+        discard_empty_owned_directory(worktree_root)
+        # Only remove a branch this attempt intended to create; a collision means the branch belongs
+        # to an existing worktree or another actor.
+        remove_orphaned_owned_branch(git_root, branch) if created_branch && !collision
+      rescue StandardError
+        nil
       end
 
       def branch_exists?(git_root, branch)

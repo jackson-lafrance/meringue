@@ -111,6 +111,8 @@ module Meringue
       # refreshes this lease as it works, so another instance (or another Meringue process
       # sharing the same state file) can tell an in-flight batch from an abandoned one.
       HEAD_RESULT_APPLY_LEASE_SECONDS = 60
+      # Reconciliation redelivery attempts for a prompt that arrived while the session was busy.
+      PENDING_PROMPT_MAX_ATTEMPTS = 20
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
       HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
@@ -437,6 +439,7 @@ module Meringue
       def reconcile_sessions_once(command_id:, command_type:)
         normalized_state_changed = persist_normalized_state_if_changed
         recovered_worker_results = recover_worker_reservations
+        pending_prompt_results = deliver_pending_agent_prompts
         recovered_results = recover_unapplied_head_results
         prune_result = prune_killed_records
         delivery_pr_refreshes = refresh_stale_delivery_pull_requests
@@ -448,6 +451,7 @@ module Meringue
         applied_results = poll_results.map { |poll_result| apply_poll_result(poll_result) }
         changed_count = applied_results.count { |result| result.fetch("changed", false) }
         changed_count += recovered_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
+        changed_count += pending_prompt_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += recovered_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += 1 if normalized_state_changed
         changed_count += 1 if prune_result.fetch("changed", false)
@@ -464,11 +468,12 @@ module Meringue
             "pruned_agent_ids" => prune_result.fetch("removed_agent_ids", []),
             "pruned_project_ids" => prune_result.fetch("removed_project_ids", []),
             "recovered_worker_results" => recovered_worker_results,
+            "pending_prompt_results" => pending_prompt_results,
             "recovered_head_results" => recovered_results,
             "delivery_pull_request_refreshes" => delivery_pr_refreshes,
             "poll_results" => applied_results
           },
-          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
+          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
         )
       rescue StandardError => e
         error = error_payload(e)
@@ -2121,11 +2126,24 @@ module Meringue
           return rejected_result(command_id, command_type, "Agent #{agent_id} has no harness session.", ["missing_harness_session"])
         end
 
+        pending_prompt_id = present_string(value_at(payload, "_pending_prompt_id", "pending_prompt_id"))
         client = harness_client_for_agent(agent)
         session_ref = agent_session_ref(agent)
         begin
           session_ref = client.prompt_session(session_ref, prompt.to_s, mode: mode)
         rescue StandardError => e
+          if Harness.transient_session_error?(e)
+            return queue_transient_prompt(
+              command_id: command_id,
+              command_type: command_type,
+              agent_id: agent.fetch("id"),
+              prompt: prompt.to_s,
+              mode: mode,
+              pending_prompt_id: pending_prompt_id,
+              error: e
+            )
+          end
+
           return failed_result(
             command_id,
             command_type,
@@ -2166,6 +2184,8 @@ module Meringue
           project["updated_at"] = now
         end
 
+        # The harness accepted the prompt, so the delivery is logged exactly once, here.
+        remove_pending_prompts!(agent, pending_prompt_id: pending_prompt_id, command_id: command_id)
         log_ids = append_log(
           state,
           source_type: "kernel",
@@ -2185,6 +2205,146 @@ module Meringue
         store.save(state)
 
         accepted_result(command_id, command_type, agent.fetch("id"), prompt_log_message(agent, mode), agent, log_ids)
+      end
+
+      # A session that is momentarily owned by another instance mid-turn is not a command failure.
+      # The prompt is stored on the agent and redelivered by reconciliation until it lands.
+      def queue_transient_prompt(command_id:, command_type:, agent_id:, prompt:, mode:, pending_prompt_id:, error:)
+        state = normalized_state
+        agent = find_agent(state, agent_id)
+        return failed_result(command_id, command_type, "Agent #{agent_id} disappeared before its prompt could be queued.", ["agent_not_found"]) unless agent
+
+        now = timestamp
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        pending = Array(metadata.fetch("pending_prompts", [])).select { |entry| entry.is_a?(Hash) }
+        existing = pending.find do |entry|
+          (pending_prompt_id && entry.fetch("id", nil).to_s == pending_prompt_id) ||
+            (present_string(command_id) && entry.fetch("command_id", nil).to_s == command_id.to_s) ||
+            (entry.fetch("prompt", nil).to_s == prompt && entry.fetch("mode", nil).to_s == mode.to_s)
+        end
+
+        attempts = existing ? existing.fetch("attempts", 0).to_i + 1 : 1
+        if attempts > PENDING_PROMPT_MAX_ATTEMPTS
+          pending.delete(existing)
+          metadata["pending_prompts"] = pending
+          agent["harness_metadata"] = metadata
+          agent["updated_at"] = now
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: agent.fetch("id"),
+            level: "warning",
+            message: "Gave up the queued #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} after #{PENDING_PROMPT_MAX_ATTEMPTS} attempts: #{error.message}",
+            details: { "agent_id" => agent.fetch("id"), "mode" => mode, "attempts" => attempts }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          return rejected_result(command_id, command_type, "Worker #{agent.fetch("id")} could not accept the prompt: #{error.message}", ["session_busy"])
+        end
+
+        entry = existing || {
+          "id" => next_pending_prompt_id(agent, pending),
+          "command_id" => present_string(command_id),
+          "prompt" => prompt,
+          "mode" => mode.to_s,
+          "queued_at" => now
+        }.compact
+        entry["attempts"] = attempts
+        entry["last_attempted_at"] = now
+        entry["last_error"] = error.message
+        pending << entry unless existing
+        metadata["pending_prompts"] = pending
+        agent["harness_metadata"] = metadata
+        agent["updated_at"] = now
+
+        log_ids = if existing
+                    []
+                  else
+                    append_log(
+                      state,
+                      source_type: "kernel",
+                      source_id: agent.fetch("id"),
+                      level: "info",
+                      message: "Waiting to deliver the #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} until its current turn settles.",
+                      details: {
+                        "agent_id" => agent.fetch("id"),
+                        "issue_id" => agent.fetch("issue_id", nil),
+                        "mode" => mode.to_s,
+                        "pending_prompt_id" => entry.fetch("id")
+                      }
+                    )
+                  end
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(
+          command_id,
+          command_type,
+          agent.fetch("id"),
+          "Queued the #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} until its current turn settles.",
+          { "agent_id" => agent.fetch("id"), "queued" => true, "pending_prompt_id" => entry.fetch("id"), "attempts" => attempts },
+          log_ids
+        )
+      end
+
+      def remove_pending_prompts!(agent, pending_prompt_id:, command_id:)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        pending = Array(metadata.fetch("pending_prompts", [])).select { |entry| entry.is_a?(Hash) }
+        return if pending.empty?
+
+        remaining = pending.reject do |entry|
+          (pending_prompt_id && entry.fetch("id", nil).to_s == pending_prompt_id) ||
+            (present_string(command_id) && entry.fetch("command_id", nil).to_s == command_id.to_s)
+        end
+        metadata["pending_prompts"] = remaining
+        agent["harness_metadata"] = metadata
+      end
+
+      def prompt_delivery_noun(mode)
+        case mode.to_s
+        when "steer" then "correction"
+        when "follow_up" then "follow-up"
+        else "prompt"
+        end
+      end
+
+      def next_pending_prompt_id(agent, pending)
+        numbers = Array(pending).filter_map do |entry|
+          match = entry.is_a?(Hash) && entry.fetch("id", "").to_s.match(/-PP(\d+)\z/)
+          match && match[1].to_i
+        end
+        "#{agent.fetch("id")}-PP#{(numbers.max || 0) + 1}"
+      end
+
+      # Redelivers prompts that were queued while a session was busy mid-turn.
+      def deliver_pending_agent_prompts
+        pending = synchronized_state do
+          normalized_state.fetch("agents").flat_map do |agent|
+            next [] unless agent.fetch("type", nil) == "worker"
+            next [] if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+
+            metadata = agent.fetch("harness_metadata", {}) || {}
+            Array(metadata.fetch("pending_prompts", [])).filter_map do |entry|
+              next nil unless entry.is_a?(Hash) && present_string(entry.fetch("prompt", nil))
+
+              { "agent_id" => agent.fetch("id"), "entry" => deep_copy(entry) }
+            end
+          end
+        end
+
+        pending.map do |item|
+          entry = item.fetch("entry")
+          apply(
+            "command_id" => entry.fetch("command_id", nil),
+            "type" => "PromptAgent",
+            "payload" => {
+              "agent_id" => item.fetch("agent_id"),
+              "prompt" => entry.fetch("prompt"),
+              "mode" => entry.fetch("mode", "normal"),
+              "_pending_prompt_id" => entry.fetch("id", nil)
+            }
+          )
+        end
       end
 
       def spawn_worker(command_id, command_type, payload)
