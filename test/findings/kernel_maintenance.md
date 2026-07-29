@@ -20,19 +20,20 @@ Verified by running the suite with `HOME` pointed at an empty temp directory: th
 suite passes and creates nothing under that fake `HOME`, so `~/.meringue` is never
 touched.
 
-## Overlap with concurrent work
+## Overlap with concurrent work (resolved during consolidation)
 
-- Another slice is changing `/prune` to a no-option command. These tests exercise
-  the **kernel** `Prune` command (`{"type" => "Prune", "payload" => {"selector" => ...}}`)
-  as it exists in this worktree, not the slash-command parser, so they should keep
-  passing while the parser changes. If the engine itself drops selector support,
-  `test_completed_and_merged_selector_aliases_run_the_resolved_prune`,
-  `test_missing_selector_defaults_to_resolved`, and
-  `test_unknown_selector_is_rejected_without_mutating_state` in
-  `prune_resolved_test.rb` are the tests to update.
-- `lib/meringue/input/slash_command_parser.rb` currently advertises
-  `/prune [resolved|errored]` and offers `prune_selectors` argument suggestions.
-  That surface is owned by the input/TUI slices.
+The `/prune` simplification landed on `main` while this slice was being written, so these
+tests were updated to the shipped behavior:
+
+- `Prune` takes no options. One pass removes resolved (completed/killed) **and** errored
+  records; a legacy `selector` word is recorded as `requested_selector` for traceability and
+  changes nothing. The old `selector` / `reason` result keys are gone.
+- The summary message is now `"Pruned N issues, M projects, and K standalone agents."`.
+- Blocking worker statuses are `queued`, `working`, `blocked` — an `errored` or `idle` worker
+  no longer retains its issue.
+- The project blocker is named `project_not_terminal`.
+- An unknown selector value is no longer rejected by the kernel; `/prune bogus` is rejected by
+  the slash-command parser instead (see `test/integration/input/input_slash_command_parser_test.rb`).
 
 ## Behaviour worth flagging (tests assert current actual behaviour)
 
@@ -72,7 +73,7 @@ touched.
    settled. `open`, draft (`state == "open"` plus `is_draft`), and unresolvable
    (`state == "unknown"`, e.g. `gh` failing) PRs all block pruning of the issue and
    therefore of its project.
-8. **Project removal requires both** a terminal (`completed`/`killed`) project status
+8. **Project removal requires both** a terminal (`completed`/`killed`/`errored`) project status
    and every child issue being eligible; otherwise the eligible issues are removed
    and the project record is retained and refreshed.
 9. **Session identity beats the persisted agent id.** `find_session_agent` resolves

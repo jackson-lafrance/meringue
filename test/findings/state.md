@@ -92,12 +92,17 @@ Files:
    ("Project is already registered.") consumes a log id and occupies a slot in the retained
    window. Noticed while porting the benchmark's append assertions.
 
-## Doc follow-up (outside this slice's writable paths)
+## Doc follow-up (resolved)
 
-`docs/log-retention.md` ends with "Reproducing the measurement" and tells the reader to run
-`ruby scripts/benchmark_log_retention.rb`. That script was deleted in this slice and its
-correctness assertions now live in `test/integration/state/log_retention_test.rb`
-(boundary, legacy load, bounded save/reload, monotonic ids, plus a bounded size/timing
-check). This slice may not modify `docs/`, so that section still points at a removed file
-and should be updated to reference `rake test` /
-`ruby -Ilib -Itest test/integration/state/log_retention_test.rb`.
+`docs/log-retention.md` used to end with "Reproducing the measurement" pointing at
+`ruby scripts/benchmark_log_retention.rb`. That script was deleted here and its correctness
+assertions now live in `test/integration/state/log_retention_test.rb` (boundary, legacy load,
+bounded save/reload, monotonic ids, plus a bounded size/timing check). The doc section now points
+at that test file.
+
+## Update after merging the current `main`
+
+`State::Store` now takes a cross-process advisory lock (`lib/meringue/state/file_lock.rb`), so a
+`state.json.lock` file sits next to the state file. Finding 2 above is therefore partly addressed
+for same-machine writers; the store-directory assertions in `store_persistence_test.rb` and
+`store_concurrency_test.rb` expect `state.json` plus `state.json.lock` and nothing else.

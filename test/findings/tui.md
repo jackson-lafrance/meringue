@@ -91,7 +91,12 @@ actual behavior and is documented here.
    and every colorscheme test goes through it. Worth knowing for future test authors: a leaked
    colorscheme change would corrupt unrelated style assertions in the same process.
 
-## Merge-overlap notes for the consolidation worker
+## Merge-overlap notes (resolved)
+
+The keyboard-driven logs-pane selection work is on `main` and the merged suite is green against
+it: no layout, selection, or app-wiring assertion needed changing. The notes below are kept as a
+map of where TUI coverage touches selection code.
+
 
 - Two other branches touch TUI/logs-pane code (a keyboard log-selection rebase). These tests were
   written against the code in this worktree. The most likely collision points are:
