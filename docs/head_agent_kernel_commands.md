@@ -80,7 +80,50 @@ When proposing a worker flow for an already registered project:
 
 If no matching project is registered and the discovered local repository/directory is the right target, propose `AddProject` first, then `CreateIssue`, then `SpawnWorker` for the first top-level goal in that newly registered project.
 
-If `CreateIssue` targets a project created earlier in the same HeadResult, compute the new project id from `kernel_state.counters.projects` or the max existing `P<number>` and use that id in `CreateIssue.project_id`. If the worker targets an issue created earlier in the same HeadResult, compute the next issue id from `kernel_state.counters.issues_by_project[project_id]` or the max existing `I<number>` for that project, then use that id in the `SpawnWorker.issue_id` payload. The kernel validates each command in order and rejects any command whose predicted id is wrong. When reusing an existing issue, use the existing `issue_id` directly in `SpawnWorker` and do not predict or create a new issue id.
+If `CreateIssue` targets a project created earlier in the same HeadResult, compute the new project id from `kernel_state.counters.projects` or the max existing `P<number>` and use that id in `CreateIssue.project_id`.
+
+## Referencing an issue created in the same HeadResult
+
+Do not predict the id of an issue your own HeadResult creates. Other heads run at the same time and can consume the id you would have predicted, which used to attach your worker to another head's issue.
+
+Reference the issue-creating command instead. On `SpawnWorker`, `ModifyIssue`, and `AskQuestion`, either:
+
+- set `issue_from_command` to the `command_id` of the `CreateIssue` command in the same batch, or to its 0-based position in `commands`, or
+- set `issue_id` to `"@<command_id>"` or `"@index:<position>"`.
+
+The referenced `CreateIssue` must appear earlier in `commands` than the command that references it. The kernel resolves the reference to the real issue id it minted, so the worker always lands on the issue your batch created.
+
+```json
+{
+  "title": "Fix signup validation",
+  "summary": "Create one issue and spawn one worker for it.",
+  "commands": [
+    {
+      "command_id": "c1",
+      "type": "CreateIssue",
+      "payload": {
+        "project_id": "P1",
+        "title": "Fix signup validation",
+        "description": "Reproduce the failing path, make the smallest fix, and report verification.",
+        "parent_issue_id": null
+      }
+    },
+    {
+      "type": "SpawnWorker",
+      "payload": {
+        "issue_from_command": "c1",
+        "title": "Fix signup validation",
+        "prompt": "Investigate the signup validation bug, make the smallest safe fix, and summarize verification."
+      }
+    }
+  ],
+  "questions": []
+}
+```
+
+When you target an issue that already exists, keep using its real `issue_id` exactly as it appears in the supplied state. That path is unchanged.
+
+A predicted issue id is still accepted only when the kernel can prove it is safe. `SpawnWorker` and `ModifyIssue` must resolve to an issue that existed in the head's spawn snapshot or to an issue the same batch created. If a predicted id points at an issue that appeared after this head was spawned, the kernel reroutes the command to the single issue this batch created and logs a warning, or rejects the command when that would be ambiguous. Rejections use `issue_id_not_created_by_this_head_result`, `batch_issue_reference_not_found`, `batch_issue_reference_out_of_order`, or `batch_issue_reference_unresolved`.
 
 ## Status and level constants
 
@@ -263,6 +306,7 @@ Payload:
 ```json
 {
   "issue_id": "P1-I1",
+  "issue_from_command": "Optional CreateIssue command id or index in this batch instead of issue_id",
   "title": "Optional new title",
   "description": "Optional new description",
   "parent_issue_id": "Optional new parent issue id",
@@ -291,6 +335,8 @@ Workers receive standing guidance that they do not need to ask for user permissi
 
 Not every worker issue requires a PR. For investigation-only or informational work that does not require repository changes, tell the worker to return findings or an answer without opening a PR unless the user explicitly requested one.
 
+When the worker belongs to an issue this same HeadResult creates, set `issue_from_command` (or an `"@<command_id>"`/`"@index:<position>"` value in `issue_id`) instead of predicting the new issue id. See "Referencing an issue created in the same HeadResult".
+
 Worker delivery names should be human-facing. When a head supplies a worker title or prompt, prefer the issue/task title or requested change that should become the branch/PR name. Do not ask workers to put Meringue agent ids, worker ids, Pi ids, or subagent implementation details in branch names, PR titles, or PR metadata.
 
 Payload:
@@ -298,6 +344,7 @@ Payload:
 ```json
 {
   "issue_id": "P1-I1",
+  "issue_from_command": "Optional CreateIssue command id or index in this batch instead of issue_id",
   "title": "Short worker title",
   "prompt": "Worker instructions",
   "workspace_path": "Optional preselected workspace path",
@@ -379,7 +426,8 @@ Payload:
   "question": "Question text",
   "context": "Why this question matters",
   "project_id": "Optional project id",
-  "issue_id": "Optional issue id"
+  "issue_id": "Optional issue id",
+  "issue_from_command": "Optional CreateIssue command id or index in this batch instead of issue_id"
 }
 ```
 

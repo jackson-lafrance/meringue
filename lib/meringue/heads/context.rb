@@ -361,6 +361,7 @@ module Meringue
             "Do not create nested/subissues for ordinary follow-up prompts; keep parent_issue_id null unless the user explicitly asks for a child issue hierarchy.",
             "Always include a short action-oriented title in SpawnWorker payloads so workers render clearly under their issue in the AgentTree.",
             "When chaining AddProject with CreateIssue and SpawnWorker in one HeadResult, read state counters when necessary and compute the future project id from counters.projects or the max existing P<number>.",
+            "Never predict the id of an issue your own HeadResult creates. Give the CreateIssue command a command_id and set SpawnWorker.issue_from_command to that command_id (or its 0-based index), or set issue_id to \"@<command_id>\"; the kernel resolves it to the issue it actually created. Use a real issue_id only for an issue that already exists in the supplied state.",
             "If the app was launched outside the target project, use registered projects and candidate_search_roots to inspect likely local repositories by name/path before choosing.",
             "Ask a clarifying question when multiple repositories are plausible."
           ]
