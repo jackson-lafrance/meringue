@@ -227,6 +227,17 @@ Heads must not mutate files, git state, Meringue state, dependencies, databases,
 
 The kernel still validates `AddProject` paths and owns all Meringue state mutation. The kernel also still owns worker workspace allocation and git worktree creation for accepted `SpawnWorker` commands.
 
+### Head harness sessions
+A head is stateless per user message, but for as long as that head agent is alive it owns exactly one harness session, just like a worker does.
+
+The kernel spawns that session as part of `SpawnHead`, records the generic session reference on the head agent record (`harness`, `pid`, `harness_session_id`, `harness_session_file`, `harness_metadata.cwd`), and keeps a small lifetime marker in `harness_metadata`:
+- `head_session_state`: `pending` before the session exists, `active` while the head owns it, `released` once it is terminal, `unavailable` when the configured head runner cannot back the head with a harness session.
+- `head_session_started_at`, `head_session_released_at`, and `head_session_release_reason` for lifecycle history.
+
+The kernel is the only layer that opens or closes head sessions. It tears the session down and marks it `released` when the head result is applied, when the head errors, when the head is killed, and when the head record leaves active state. Reconciliation therefore treats a live head session like any other tracked harness session, and never treats a released head session as live work.
+
+This does not change head semantics: heads still route one user message, still return only the `HeadResult` JSON contract, and are still killed after their result is applied.
+
 ### Head result format
 Heads should return structured JSON only.
 
