@@ -2063,6 +2063,10 @@ module Meringue
         state["projects"] = state.fetch("projects").reject { |project| removed_project_ids.include?(project.fetch("id", nil)) }
         state.fetch("issues").each do |issue|
           issue["agent_ids"] = Array(issue.fetch("agent_ids", [])) - agent_ids_to_remove if issue.key?("agent_ids")
+          # Killing a worker removes its record, so routing pointers must not keep naming it.
+          # A misrouted worker that was killed used to leave `last_agent_id` dangling on the
+          # issue it never belonged to.
+          clear_dangling_issue_routing_pointer!(issue, agent_ids_to_remove, now)
         end
         updated_project_ids = refresh_projects_after_prune!(state, affected_project_ids - removed_project_ids, now)
 
@@ -2076,6 +2080,14 @@ module Meringue
           "updated_project_ids" => updated_project_ids,
           "released_head_session_agent_ids" => released_head_ids
         }
+      end
+
+      def clear_dangling_issue_routing_pointer!(issue, removed_agent_ids, now)
+        return unless removed_agent_ids.include?(issue.fetch("last_agent_id", nil))
+
+        issue["last_agent_id"] = Array(issue.fetch("agent_ids", [])).last
+        issue["last_routing_action"] = nil if issue["last_agent_id"].nil?
+        issue["updated_at"] = now
       end
 
       # A head's harness session only lives as long as its head record. Whenever a head
@@ -2646,6 +2658,9 @@ module Meringue
         follow_up_of_agent_id = value_at(payload, "follow_up_of_agent_id", "followUpOfAgentID", "followUpOfAgentId")
         replace_agent_id = value_at(payload, "replace_agent_id", "replaceAgentID", "replaceAgentId")
         requested_workspace_path = value_at(payload, "workspace_path", "WorkspacePath", "workspacePath")
+        # Set by the kernel when it corrected a head's predicted issue id; kept on the worker and
+        # in its spawn log so a corrected route is visible instead of silent.
+        rerouted_from_issue_id = present_string(value_at(payload, "_rerouted_from_issue_id", "rerouted_from_issue_id"))
         errors = []
 
         errors << "issue_id is required" if blank?(issue_id)
@@ -2853,7 +2868,8 @@ module Meringue
           agent["harness_metadata"] = (reserved_agent.fetch("harness_metadata", {}) || {}).merge(agent.fetch("harness_metadata", {})).merge(
             "provisioning_state" => "ready",
             "provisioned_at" => now,
-            "spawn_command_id" => command_id
+            "spawn_command_id" => command_id,
+            "rerouted_from_issue_id" => rerouted_from_issue_id
           ).compact
           state.fetch("agents")[state.fetch("agents").index(reserved_agent)] = agent
           issue.fetch("agent_ids") << reservation.fetch("agent_id") unless issue.fetch("agent_ids").include?(reservation.fetch("agent_id"))
@@ -2891,7 +2907,8 @@ module Meringue
               "workspace_path" => agent.fetch("workspace_path"),
               "workspace_strategy" => agent.fetch("workspace_strategy"),
               "workspace_branch" => agent.fetch("workspace_branch"),
-              "title" => agent.fetch("harness_metadata", {}).fetch("title", nil)
+              "title" => agent.fetch("harness_metadata", {}).fetch("title", nil),
+              "rerouted_from_issue_id" => rerouted_from_issue_id
             }.compact
           )
           touch_state!(state, now)
@@ -3334,13 +3351,17 @@ module Meringue
       end
 
       def spawn_worker_log_message(agent, issue)
-        if present_string(agent.fetch("replaces_agent_id", nil))
-          "Replaced worker #{agent.fetch("replaces_agent_id")} with #{agent.fetch("id")} on #{issue.fetch("id")}."
-        elsif present_string(agent.fetch("follow_up_of_agent_id", nil))
-          "Spawned follow-up worker #{agent.fetch("id")} after #{agent.fetch("follow_up_of_agent_id")} on #{issue.fetch("id")}."
-        else
-          "Spawned worker #{agent.fetch("id")} for #{issue.fetch("id")}."
-        end
+        base = if present_string(agent.fetch("replaces_agent_id", nil))
+                 "Replaced worker #{agent.fetch("replaces_agent_id")} with #{agent.fetch("id")} on #{issue.fetch("id")}."
+               elsif present_string(agent.fetch("follow_up_of_agent_id", nil))
+                 "Spawned follow-up worker #{agent.fetch("id")} after #{agent.fetch("follow_up_of_agent_id")} on #{issue.fetch("id")}."
+               else
+                 "Spawned worker #{agent.fetch("id")} for #{issue.fetch("id")}."
+               end
+        rerouted_from = present_string((agent.fetch("harness_metadata", {}) || {}).fetch("rerouted_from_issue_id", nil))
+        return base unless rerouted_from
+
+        "#{base} Rerouted from predicted issue #{rerouted_from}."
       end
 
       def validate_head_result_shape(head_result)
@@ -3612,7 +3633,7 @@ module Meringue
         candidates = earlier.filter_map { |entry| entry.fetch("issue_id", nil) }.uniq
         if candidates.length == 1 && batch_issue_remap_compatible?(requested_issue_id: requested, candidate_issue_id: candidates.first)
           {
-            "command" => command_with_issue_id(command, payload, candidates.first),
+            "command" => command_with_issue_id(command, payload, candidates.first, rerouted_from: requested),
             "remap" => {
               "command_type" => command_type,
               "requested_issue_id" => requested,
@@ -3741,12 +3762,13 @@ module Meringue
         end
       end
 
-      def command_with_issue_id(command, payload, issue_id)
+      def command_with_issue_id(command, payload, issue_id, rerouted_from: nil)
         cleaned = payload.reject do |key, _value|
           name = key.to_s
           BATCH_ISSUE_REFERENCE_KEYS.include?(name) || %w[issue_id IssueID issueId].include?(name)
         end
-        command.merge("payload" => cleaned.merge("issue_id" => issue_id))
+        resolved = { "issue_id" => issue_id, "_rerouted_from_issue_id" => present_string(rerouted_from) }.compact
+        command.merge("payload" => cleaned.merge(resolved))
       end
 
       # Only remap a predicted id inside the project the head was already routing to. A predicted
