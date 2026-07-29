@@ -468,25 +468,32 @@ Example:
 
 ### Prune
 
-Removes resolved records from active Meringue state without deleting worker workspaces. This is a user slash-command cleanup tool; head agents should not propose it.
+Removes resolved and errored records from active Meringue state without deleting worker workspaces. This is a user slash-command cleanup tool; head agents should not propose it.
+
+Prune takes no options. `/prune` is a single no-argument command and one kernel pass removes every eligible record at once, so there is no separate resolved-versus-errored cleanup to remember.
 
 Payload:
 
 ```json
-{
-  "selector": "resolved"
-}
+{}
 ```
 
-The selector is optional and defaults to `resolved`. Supported selectors:
+What one pass removes:
 
-```txt
-resolved, errored
-```
+- Terminal issues, where terminal means `completed`, `killed`, or `errored`. No merged PR is required.
+- Workers, heads, and child issues bundled with those removed issues.
+- Standalone `errored` head records.
+- A terminal project, but only when every issue it contains is eligible and no project-level unresolved worker or open question remains.
 
-- `resolved` prunes completed or killed issues by default; no merged PR is required. An issue is retained when its subtree contains a nonterminal issue, a `working`, `blocked`, or `errored` worker, an open question, or an attached PR that is open (including a draft) or whose status cannot be resolved. Merged and closed-without-merge PRs are settled and do not block pruning. A completed or killed project is removed only when all of its contained issues are eligible and no project-level unresolved worker or question remains.
-- `errored` preserves the explicit legacy cleanup for errored issue bundles that have no active workers, plus standalone errored heads.
-- `completed` and the former `merged` selector remain accepted as compatibility aliases for `resolved`.
+What is retained:
+
+- An issue whose subtree still contains a nonterminal issue.
+- An issue whose subtree still has a `queued`, `working`, or `blocked` worker. An `errored` worker is settled and does not retain its issue.
+- An issue whose subtree has an open question.
+- An issue with an attached PR that is open (including a draft) or whose status cannot be resolved. Merged and closed-without-merge PRs are settled and do not block pruning.
+- Every worker workspace on disk. Prune only removes state records.
+
+Compatibility: a legacy `selector` value (`resolved`, `errored`, `completed`, or `merged`) is still accepted and recorded as `requested_selector` in the log details, but it is a no-op that prunes exactly the same records as a bare `/prune`. Any other `/prune` argument is rejected by the slash-command parser with a short usage message.
 
 Example:
 

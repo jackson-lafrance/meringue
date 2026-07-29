@@ -44,8 +44,12 @@ module Meringue
         Do not include markdown, prose, code fences, or tool calls.
       PROMPT
       PULL_REQUEST_URL_PATTERN = /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+(?:[\/?#][^\s<>"'\])}]*)?/.freeze
-      PRUNE_ELIGIBLE_STATUSES = %w[completed killed].freeze
-      PRUNE_BLOCKING_WORKER_STATUSES = %w[working blocked errored].freeze
+      # `/prune` is one combined cleanup pass: resolved (completed/killed) and errored records
+      # are eligible together, so an errored record is terminal rather than a retention blocker.
+      PRUNE_ELIGIBLE_STATUSES = %w[completed killed errored].freeze
+      # Only work that could still move on its own retains a record. An errored worker is
+      # settled; a queued, working, or blocked worker is not.
+      PRUNE_BLOCKING_WORKER_STATUSES = %w[queued working blocked].freeze
       PRUNE_SETTLED_PULL_REQUEST_STATES = %w[merged closed].freeze
       ERROR_MESSAGE_MAX_BYTES = 2_000
       HARNESS_EVENT_LOG_LIMIT = 20
@@ -98,7 +102,7 @@ module Meringue
         ["/questions", "List questions and their statuses."],
         ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
-        ["/prune [resolved|errored]", "Remove completed or killed records unless unresolved work requires retention."],
+        ["/prune", "Remove resolved and errored records together unless unresolved work requires retention."],
         ["/recount", "Compact project, issue, worker, and question IDs after records are removed."],
         ["/clear", "Reset persisted Meringue state and clear the visible logs."]
       ].freeze
@@ -692,6 +696,7 @@ module Meringue
           prune_result = result || {}
           [
             "  removed issues: #{Array(prune_result["removed_issue_ids"]).length}",
+            "  removed projects: #{Array(prune_result["removed_project_ids"]).length}",
             "  removed agents: #{Array(prune_result["removed_agent_ids"]).length}"
           ]
         when "Recount"
@@ -1488,18 +1493,12 @@ module Meringue
         accepted_result(command_id, command_type, question.fetch("id"), "Dismissed question #{question.fetch("id")}.", question, log_ids)
       end
 
+      # Prune takes no options. One pass removes resolved (completed/killed) and errored records
+      # that are eligible for cleanup. A legacy `selector` value is still accepted for
+      # compatibility and recorded for traceability, but it never changes what is pruned.
       def prune(command_id, command_type, payload)
-        selector = value_at(payload, "selector", "Selector", "kind", "status").to_s.downcase
-        selector = "resolved" if blank?(selector)
-
-        case selector
-        when "resolved", "completed", "merged"
-          prune_resolved(command_id, command_type, requested_selector: selector)
-        when "errored"
-          prune_errored(command_id, command_type)
-        else
-          rejected_result(command_id, command_type, "Unknown prune selector: #{selector}", ["supported selectors: resolved, errored"])
-        end
+        requested_selector = present_string(value_at(payload, "selector", "Selector", "kind", "status").to_s.downcase)
+        prune_records(command_id, command_type, requested_selector: requested_selector)
       end
 
       def recount(command_id, command_type)
@@ -1550,21 +1549,27 @@ module Meringue
         )
       end
 
-      def prune_resolved(command_id, command_type, requested_selector: "resolved")
+      # One prune pass over the whole tree. Eligibility is shared by resolved and errored
+      # records: an issue subtree must be free of nonterminal issues, queued/working/blocked
+      # workers, open questions, and unsettled pull requests, and a project is removed only when
+      # it is terminal with every contained issue eligible. Standalone errored heads are removed
+      # in the same pass. Worker workspaces are never deleted here.
+      def prune_records(command_id, command_type, requested_selector: nil)
         state = normalized_state
         delivery_refreshes = refresh_worker_delivery_pull_requests!(state)
         pull_request_checks = prune_pull_request_checks(state)
-        issue_decisions = resolved_issue_prune_decisions(state, pull_request_checks)
-        project_decisions = resolved_project_prune_decisions(state, issue_decisions)
+        issue_decisions = issue_prune_decisions(state, pull_request_checks)
+        project_decisions = project_prune_decisions(state, issue_decisions)
         removable_project_ids = project_decisions.select { |decision| decision.fetch("prunable", false) }.map { |decision| decision.fetch("project_id") }
-        removable_issue_ids = resolved_issue_prune_roots(issue_decisions, removable_project_ids)
+        removable_issue_ids = issue_prune_roots(issue_decisions, removable_project_ids)
+        errored_head_ids = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "head" && agent.fetch("status", nil) == "errored" }.map { |agent| agent.fetch("id") }
         now = timestamp
         prune_result = remove_issue_bundles_and_agents!(
           state,
           issue_ids: removable_issue_ids,
           project_ids: removable_project_ids,
-          extra_agent_ids: [],
-          reason: "resolved",
+          extra_agent_ids: errored_head_ids,
+          reason: "prune",
           now: now,
           remove_empty_projects: false
         )
@@ -1572,9 +1577,8 @@ module Meringue
         blocked_urls = issue_decisions.flat_map do |decision|
           decision.fetch("pull_request_blockers", []).map { |status| status.fetch("url", nil) }
         end.compact.uniq
-        message = "Pruned #{prune_result.fetch("removed_issue_ids").length} resolved issue#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"} and #{prune_result.fetch("removed_project_ids").length} project#{prune_result.fetch("removed_project_ids").length == 1 ? "" : "s"}."
+        message = prune_summary_message(prune_result)
         details = prune_result.merge(
-          "selector" => "resolved",
           "requested_selector" => requested_selector,
           "checked_pr_urls" => checked_urls,
           "blocked_pr_urls" => blocked_urls,
@@ -1582,7 +1586,7 @@ module Meringue
           "issue_decisions" => issue_decisions,
           "project_decisions" => project_decisions,
           "delivery_pull_request_refreshes" => delivery_refreshes
-        )
+        ).compact
         log_ids = append_log(
           state,
           source_type: "kernel",
@@ -1597,29 +1601,21 @@ module Meringue
         accepted_result(command_id, command_type, nil, message, details, log_ids)
       end
 
-      def prune_errored(command_id, command_type)
-        state = normalized_state
-        errored_issue_ids = state.fetch("issues").select { |issue| errored_issue_prune_candidate?(state, issue) }.map { |issue| issue.fetch("id") }
-        errored_head_ids = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "head" && agent.fetch("status", nil) == "errored" }.map { |agent| agent.fetch("id") }
-        now = timestamp
-        prune_result = remove_issue_bundles_and_agents!(state, issue_ids: errored_issue_ids, extra_agent_ids: errored_head_ids, reason: "errored", now: now)
-        log_ids = append_log(
-          state,
-          source_type: "kernel",
-          source_id: nil,
-          level: "info",
-          message: "Pruned #{prune_result.fetch("removed_issue_ids").length} errored issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"} and #{prune_result.fetch("removed_standalone_agent_ids").length} standalone errored agent#{prune_result.fetch("removed_standalone_agent_ids").length == 1 ? "" : "s"}.",
-          details: prune_result.merge("selector" => "errored")
-        )
-        touch_state!(state, now)
-        store.save(state)
-
-        accepted_result(command_id, command_type, nil, "Pruned #{prune_result.fetch("removed_issue_ids").length} errored issue bundle#{prune_result.fetch("removed_issue_ids").length == 1 ? "" : "s"} and #{prune_result.fetch("removed_standalone_agent_ids").length} standalone errored agent#{prune_result.fetch("removed_standalone_agent_ids").length == 1 ? "" : "s"}.", prune_result, log_ids)
+      def prune_summary_message(prune_result)
+        issues = Array(prune_result.fetch("removed_issue_ids", [])).length
+        projects = Array(prune_result.fetch("removed_project_ids", [])).length
+        standalone_agents = Array(prune_result.fetch("removed_standalone_agent_ids", [])).length
+        parts = [
+          "#{issues} issue#{issues == 1 ? "" : "s"}",
+          "#{projects} project#{projects == 1 ? "" : "s"}",
+          "#{standalone_agents} standalone agent#{standalone_agents == 1 ? "" : "s"}"
+        ]
+        "Pruned #{parts[0]}, #{parts[1]}, and #{parts[2]}."
       end
 
       # Refresh only already-verified delivery PRs. Candidate/reported URLs remain inert, and an
-      # unavailable forge never replaces the last known open/closed/merged state. /prune merged
-      # still performs its own authoritative checks and therefore keeps its conservative rules.
+      # unavailable forge never replaces the last known open/closed/merged state. /prune still
+      # performs its own authoritative checks and therefore keeps its conservative rules.
       def refresh_stale_delivery_pull_requests
         synchronized_state do
           state = normalized_state
@@ -1726,7 +1722,7 @@ module Meringue
         end
       end
 
-      def resolved_issue_prune_decisions(state, pull_request_checks)
+      def issue_prune_decisions(state, pull_request_checks)
         checks_by_issue = pull_request_checks.to_h { |check| [check.fetch("issue_id", nil), check] }
         state.fetch("issues").map do |issue|
           subtree_ids = issue_subtree_ids(state, issue.fetch("id"))
@@ -1767,7 +1763,7 @@ module Meringue
         end
       end
 
-      def resolved_project_prune_decisions(state, issue_decisions)
+      def project_prune_decisions(state, issue_decisions)
         decisions_by_issue = issue_decisions.to_h { |decision| [decision.fetch("issue_id"), decision] }
         state.fetch("projects").map do |project|
           issue_ids = state.fetch("issues").select { |issue| issue.fetch("project_id", nil) == project.fetch("id") }.map { |issue| issue.fetch("id") }
@@ -1781,7 +1777,7 @@ module Meringue
           end
           ineligible_issue_ids = issue_ids.reject { |issue_id| decisions_by_issue.fetch(issue_id).fetch("prunable", false) }
           blockers = []
-          blockers << "project_not_completed_or_killed" unless PRUNE_ELIGIBLE_STATUSES.include?(project.fetch("status", nil).to_s)
+          blockers << "project_not_terminal" unless PRUNE_ELIGIBLE_STATUSES.include?(project.fetch("status", nil).to_s)
           blockers << "ineligible_issues" if ineligible_issue_ids.any?
           blockers << "unresolved_workers" if blocking_workers.any?
           blockers << "open_questions" if open_questions.any?
@@ -1798,7 +1794,7 @@ module Meringue
         end
       end
 
-      def resolved_issue_prune_roots(issue_decisions, removable_project_ids)
+      def issue_prune_roots(issue_decisions, removable_project_ids)
         eligible_issue_ids = issue_decisions.select { |decision| decision.fetch("prunable", false) }.map { |decision| decision.fetch("issue_id") }
         issue_decisions.filter_map do |decision|
           next unless decision.fetch("prunable", false)
@@ -2001,13 +1997,6 @@ module Meringue
           *Array(agent.fetch("candidate_pr_urls", nil)),
           *Array(metadata.fetch("candidate_pr_urls", nil))
         ])
-      end
-
-      def errored_issue_prune_candidate?(state, issue)
-        return false unless issue.fetch("status", nil) == "errored"
-
-        workers = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" && agent.fetch("issue_id", nil) == issue.fetch("id") }
-        workers.none? { |worker| %w[queued working idle blocked].include?(worker.fetch("status", nil)) }
       end
 
       def remove_issue_bundles_and_agents!(state, issue_ids:, extra_agent_ids:, reason:, now:, remove_empty_projects: true, project_ids: [])
