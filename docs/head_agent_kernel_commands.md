@@ -385,6 +385,8 @@ Payload:
 
 `selected_target` comes from dashboard natural-language input, not from slash commands. The input layer sends only the selected node id. The kernel resolves it against current state before spawning the head, rejects stale or unbound selections, stores the canonical target on the head request for recovery, and exposes it as `routing_context.selected_target` with `issue_id`, `project_id`, and selected-agent metadata when applicable. An agent id always resolves to its owning issue; it never turns `SpawnHead` into a direct `PromptAgent` call.
 
+Omitted, `null`, and blank (`""`, `{}`, whitespace-only id) values all mean "nothing is selected": the head spawns with no `routing_context.selected_target` instead of the message being rejected. Only a non-blank id that no longer resolves to an available issue is rejected.
+
 Example:
 
 ```json

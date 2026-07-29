@@ -61,7 +61,8 @@ Chat routing uses the same selection without turning the dashboard into a direct
 - Selecting `P1-I9` sends its id with the next natural-language `SpawnHead`; the kernel resolves and supplies `P1-I9` as `routing_context.selected_target.issue_id`.
 - Selecting `P1-I9-W3` sends the worker id. The kernel resolves it to owning issue `P1-I9`, includes the selected worker as a context hint, and rejects a stale/unbound selection instead of silently routing elsewhere.
 - The fresh head still chooses `PromptAgent` mode (`normal`, `steer`, or `follow_up`), a healthy worker on that issue, a follow-up/replacement, or a clarification. Selection never emits `PromptAgent` directly.
-- Slash commands bypass the head as usual and do not inherit selection. The focused worker workspace also retains its explicit direct-prompt behavior; this section applies to dashboard natural-language chat.
+- Slash commands bypass the head as usual and do not inherit selection: `/prune`, `/help`, `/kill`, and the local navigation commands submit identically whether or not a row is selected, and they leave the selection in place. The focused worker workspace also retains its explicit direct-prompt behavior; this section applies to dashboard natural-language chat.
+- Selecting a project, or a head with no owning issue, filters logs only. Chat keeps its unscoped routing rather than sending a half-populated target, and clearing the selection restores unscoped routing.
 - The composer title reads `chat → P1-I9`. The bottom chip reads `target: P1-I9`, includes `via P1-I9-W3` for a worker selection, says `head routes`, and shows the clear gesture.
 
 The selection is sticky and independent of focus:

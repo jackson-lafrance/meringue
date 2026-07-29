@@ -36,6 +36,17 @@ class InputSelectedTargetRouterTest < Minitest::Test
     assert_equal({ "selected_id" => "P1-I2" }, payload.fetch("selected_target"))
   end
 
+  # nil, "", and {} all mean "nothing is selected", so the payload stays the
+  # plain unscoped SpawnHead instead of carrying an empty routing hint.
+  def test_blank_selections_are_treated_as_no_selection
+    [nil, "", "   ", {}, { "selected_id" => "  " }].each do |blank|
+      payload = @router.route("continue", selected_target: blank)
+                       .fetch("commands").first.fetch("payload")
+
+      assert_equal({ "user_message" => "continue" }, payload, "#{blank.inspect} should route unscoped")
+    end
+  end
+
   def test_slash_commands_ignore_the_dashboard_target_and_bypass_the_head
     route = @router.route("/help", selected_target: { "selected_id" => "P1-I2-W3" })
 

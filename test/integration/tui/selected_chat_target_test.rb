@@ -103,6 +103,122 @@ class TuiSelectedChatTargetTest < Minitest::Test
     assert_equal "P1-I1", submission.dig("selected_target", "issue_id")
   end
 
+  # Regression: submit_prompt used to call empty? on the deliberately nil target
+  # for slash commands, so every slash submit raised NoMethodError and took the
+  # whole TUI down.
+  def test_slash_command_submits_without_a_selection
+    submissions, handler = recording_prompt_handler("event" => "slash_command_applied", "command_results" => [])
+    composed = compose_app_state(@app, @state, "/prune")
+
+    result = @app.send(:handle_key, "\r", "/prune", 6, -1, handler, composed)
+
+    assert_equal ["", 0, -1], result
+    submission = Timeout.timeout(5) { submissions.pop }
+    assert_equal "/prune", submission.fetch("text")
+    assert_nil submission.fetch("selected_target")
+    assert_empty @app.instance_variable_get(:@messages)
+  end
+
+  def test_slash_command_submits_while_a_target_is_selected_and_ignores_it
+    select_chat_target("P1-I1-W1")
+    submissions, handler = recording_prompt_handler("event" => "slash_command_applied", "command_results" => [])
+    composed = compose_app_state(@app, @state, "/help")
+
+    assert_equal "P1-I1", Meringue::TUI::LogScope.chat_target(composed).fetch("issue_id")
+
+    result = @app.send(:handle_key, "\r", "/help", 5, -1, handler, composed)
+
+    assert_equal ["", 0, -1], result
+    submission = Timeout.timeout(5) { submissions.pop }
+    assert_equal "/help", submission.fetch("text")
+    assert_nil submission.fetch("selected_target")
+    # The selection is a chat-routing hint, not a slash-command argument, so it
+    # survives the submit untouched.
+    assert_equal "P1-I1-W1", Meringue::TUI::LogScope.id(compose_app_state(@app, @state))
+  end
+
+  # Locally handled slash commands answer on the calling thread, so they never
+  # reach the prompt handler and never consult the selected target at all.
+  def test_local_navigation_slash_commands_submit_while_a_target_is_selected
+    select_chat_target("P1-I1")
+    submissions, handler = recording_prompt_handler
+
+    keybind = @app.send(:handle_key, "\r", "/keybind", 8, -1, handler, compose_app_state(@app, @state, "/keybind"))
+    jump = @app.send(:handle_key, "\r", "/jump", 5, -1, handler, compose_app_state(@app, @state, "/jump"))
+
+    assert_equal ["", 0, -1], keybind
+    assert_equal ["", 0, -1], jump
+    assert_empty submissions
+    assert @app.instance_variable_get(:@messages).any? { |message| message.fetch("text", "").include?("Enter") }
+    # /jump enters navigation on the already selected row instead of clearing it.
+    assert_equal "P1-I1", Meringue::TUI::LogScope.id(compose_app_state(@app, @state))
+  end
+
+  def test_plain_prompt_submits_without_a_selection
+    submissions, handler = recording_prompt_handler
+    composed = compose_app_state(@app, @state, "look at retries")
+
+    assert_nil Meringue::TUI::LogScope.chat_target(composed)
+
+    result = @app.send(:handle_key, "\r", "look at retries", 15, -1, handler, composed)
+
+    assert_equal ["", 0, -1], result
+    submission = Timeout.timeout(5) { submissions.pop }
+    assert_equal "look at retries", submission.fetch("text")
+    assert_nil submission.fetch("selected_target")
+  end
+
+  def test_plain_prompt_carries_a_selected_issue_and_stops_after_it_is_cleared
+    select_chat_target("P1-I1")
+    submissions, handler = recording_prompt_handler
+
+    @app.send(:handle_key, "\r", "keep going", 10, -1, handler, compose_app_state(@app, @state, "keep going"))
+    selected = Timeout.timeout(5) { submissions.pop }
+    assert_equal "P1-I1", selected.dig("selected_target", "selected_id")
+    assert_equal "issue", selected.dig("selected_target", "selected_type")
+    assert_equal "P1-I1", selected.dig("selected_target", "issue_id")
+
+    @app.send(:deselect_agent_tree_item)
+    @app.send(:handle_key, "\r", "keep going", 10, -1, handler, compose_app_state(@app, @state, "keep going"))
+    cleared = Timeout.timeout(5) { submissions.pop }
+    assert_nil cleared.fetch("selected_target")
+  end
+
+  # A selection on a project or an unbound head filters logs but resolves to no
+  # issue, so chat has to fall back to unscoped routing instead of shipping a
+  # half-populated target.
+  def test_project_and_unbound_head_selections_do_not_target_chat
+    select_chat_target("P1")
+    assert_nil Meringue::TUI::LogScope.chat_target(compose_app_state(@app, @state))
+
+    select_chat_target("H83")
+    composed = compose_app_state(@app, @state, "keep going")
+    assert_nil Meringue::TUI::LogScope.chat_target(composed)
+
+    submissions, handler = recording_prompt_handler
+    @app.send(:handle_key, "\r", "keep going", 10, -1, handler, composed)
+
+    assert_nil Timeout.timeout(5) { submissions.pop }.fetch("selected_target")
+  end
+
+  # Embedders that predate selected-target routing still pass a one-argument
+  # prompt handler. A selection must not turn their next prompt into an
+  # ArgumentError.
+  def test_legacy_single_argument_prompt_handler_still_receives_selected_prompts
+    select_chat_target("P1-I1-W1")
+    submissions = Queue.new
+    handler = lambda do |text|
+      submissions << text
+      { "summary" => "routed", "spawn_head_result" => { "status" => "accepted", "log_entry_ids" => ["L1"] } }
+    end
+
+    @app.send(:handle_key, "\r", "keep going", 10, -1, handler, compose_app_state(@app, @state, "keep going"))
+
+    assert_equal "keep going", Timeout.timeout(5) { submissions.pop }
+    messages = @app.instance_variable_get(:@messages)
+    refute messages.any? { |message| message.fetch("text", "").include?("ArgumentError") }
+  end
+
   def test_selected_user_prompt_is_visible_in_the_focused_worker_logs
     @state["logs"] = [
       log_record(
@@ -160,5 +276,29 @@ class TuiSelectedChatTargetTest < Minitest::Test
     assert_includes messages.first.fetch("text"), "Could not open focused workspace for P1-I1-W1"
     assert_includes messages.first.fetch("text"), "workspace transport failed"
     assert_equal 1, store.log_buffer_writes.length
+  end
+
+  private
+
+  # Click a row, then move focus back to the composer. Jump mode swallows Enter
+  # while it is active, so this is the state a user types their next prompt in:
+  # the sticky selected target outlives jump mode.
+  def select_chat_target(item_id)
+    assert @app.send(:select_agent_tree_item, @state, item_id)
+    @app.send(:exit_agent_tree_navigation)
+  end
+
+  # Prompt handler shaped like Heads::PromptLoop#call: it accepts the optional
+  # selected_target keyword and records exactly what the TUI handed it.
+  def recording_prompt_handler(result = nil)
+    submissions = Queue.new
+    handler = lambda do |text, selected_target: nil, &_on_event|
+      submissions << { "text" => text, "selected_target" => selected_target }
+      result || {
+        "summary" => "routed",
+        "spawn_head_result" => { "status" => "accepted", "log_entry_ids" => ["L1"] }
+      }
+    end
+    [submissions, handler]
   end
 end
