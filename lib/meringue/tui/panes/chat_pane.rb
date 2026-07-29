@@ -56,6 +56,17 @@ module Meringue
           "logs — #{label}"
         end
 
+        # The composer names the durable issue that a fresh head will receive as
+        # explicit routing context. An agent click therefore reads as its owning
+        # issue rather than implying that chat bypasses the head and talks to the
+        # worker directly.
+        def composer_pane_title(state)
+          issue_id = LogScope.selected_target(state).fetch("issue_id", "").to_s
+          return "chat" if issue_id.empty?
+
+          "chat → #{issue_id}"
+        end
+
         def composer_lines(state, width: nil)
           chat = chat_state(state)
           input_buffer = chat.fetch("input_buffer", "").to_s
@@ -179,11 +190,23 @@ module Meringue
 
         private
 
-        # Filter chip plus its clear affordance, so a filtered-empty logs pane can
-        # never look like a bug.
+        # Selection chip plus its clear affordance, so both focused logs and the
+        # head-routing target stay visible. Projects and unbound heads keep the
+        # older log-only wording.
         def log_scope_hint_segments(state)
           label = LogScope.label(state)
           return [] if label.empty?
+
+          target = LogScope.selected_target(state)
+          issue_id = target.fetch("issue_id", "").to_s
+          if !issue_id.empty?
+            selected_agent_id = target.fetch("selected_agent_id", "").to_s
+            via = selected_agent_id.empty? ? "" : " via #{selected_agent_id}"
+            return [
+              ["⌖ target: #{issue_id}#{via}", Style::ACCENT],
+              ["  head routes · Esc clears", Style::MUTED]
+            ]
+          end
 
           [
             ["⌖ logs: #{label}", Style::ACCENT],
