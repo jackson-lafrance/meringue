@@ -147,6 +147,7 @@ module Meringue
         @last_render_width = DEFAULT_WIDTH
         @last_render_height = DEFAULT_HEIGHT
         @scroll_offsets = Hash.new(0)
+        @revealed_agent_tree_item_id = nil
         @selection_pane = nil
         @logs_selection_anchor = nil
         @logs_selection_focus = nil
@@ -546,6 +547,37 @@ module Meringue
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
+        edge = scroll_edge_for(key)
+        if edge
+          scroll_focused_pane_to(edge, state: state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        nil
+      end
+
+      # Jump mode owns the arrow keys for selection, so paging and top/bottom
+      # keys stay available for scrolling the pane the selection lives in.
+      def handle_navigation_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        return nil unless focused_scrollable?
+
+        edge = scroll_edge_for(key)
+        if edge
+          scroll_focused_pane_to(edge, state: state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        page_up = keybinding?("scroll_page_up", key)
+        return nil unless page_up || keybinding?("scroll_page_down", key)
+
+        scroll_focused_pane(page_up ? :up : :down, steps: scroll_key_step(page: true), state: state)
+        [input_buffer, input_cursor, slash_suggestion_index]
+      end
+
+      def scroll_edge_for(key)
+        return :top if keybinding?("scroll_top", key)
+        return :bottom if keybinding?("scroll_bottom", key)
+
         nil
       end
 
@@ -555,6 +587,7 @@ module Meringue
 
       def handle_mouse_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return nil unless mouse_event?(key)
+        return handle_mouse_wheel_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_wheel?(key)
         return handle_mouse_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_button_press?(key)
         return handle_mouse_drag_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_drag?(key)
         return handle_mouse_release_key(input_buffer, input_cursor, slash_suggestion_index) if mouse_button_release?(key)
@@ -614,6 +647,34 @@ module Meringue
         @selection_dragging = false
         clear_selection unless selection_active?
         [input_buffer, input_cursor, slash_suggestion_index]
+      end
+
+      # The wheel scrolls whatever scrollable pane the pointer is over, so the
+      # AgentTree and the logs pane behave the same and neither needs focus or a
+      # jump-mode exit first. Hovering something that cannot scroll falls back to
+      # the focused pane, which is the older behavior.
+      def handle_mouse_wheel_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        # One limits lookup per wheel event keeps hover routing as cheap as the
+        # previous focus-only path.
+        limits = scroll_limits_for(state)
+        pane = wheel_target_pane(key, state, limits)
+        return nil unless pane
+
+        scroll_pane(
+          pane,
+          mouse_wheel_up?(key) ? :up : :down,
+          steps: MOUSE_SCROLL_STEP * mouse_wheel_count(key),
+          state: state,
+          max_offset: limits.fetch(pane, 0).to_i
+        )
+        [input_buffer, input_cursor, slash_suggestion_index]
+      end
+
+      def wheel_target_pane(key, state, limits)
+        hovered = pane_at_mouse_position(key, state)
+        return hovered if hovered && limits.fetch(hovered, 0).to_i.positive?
+
+        focused_scrollable? ? @focused_pane.to_s : nil
       end
 
       def mouse_event?(key)
@@ -1094,11 +1155,28 @@ module Meringue
         key.is_a?(Hash) && key.fetch("type", nil) == "mouse" && key.fetch("kind", nil) == "wheel_down"
       end
 
+      def mouse_wheel?(key)
+        mouse_wheel_up?(key) || mouse_wheel_down?(key)
+      end
+
       def scroll_focused_pane(direction, steps:, state:)
-        pane = @focused_pane.to_s
+        scroll_pane(@focused_pane.to_s, direction, steps: steps, state: state)
+      end
+
+      def scroll_pane(pane, direction, steps:, state:, max_offset: nil)
+        pane = pane.to_s
         delta = scroll_delta_for(pane, direction, steps)
-        max_offset = scroll_max_for(pane, state)
+        max_offset ||= scroll_max_for(pane, state)
         @scroll_offsets[pane] = (@scroll_offsets[pane].to_i + delta).clamp(0, max_offset)
+      end
+
+      def scroll_focused_pane_to(edge, state:)
+        pane = @focused_pane.to_s
+        max_offset = scroll_max_for(pane, state)
+        # The AgentTree counts rows from the first line down; tail panes count
+        # back from the newest line, so "top" is the opposite end there.
+        top_offset, bottom_offset = pane == "agent_tree" ? [0, max_offset] : [max_offset, 0]
+        @scroll_offsets[pane] = edge == :top ? top_offset : bottom_offset
       end
 
       def scroll_delta_for(pane, direction, step)
@@ -1117,20 +1195,20 @@ module Meringue
         [key.fetch("count", 1).to_i, 1].max
       end
 
-      def scroll_max_for(pane, state)
+      def scroll_limits_for(state)
         layout.scroll_limits(
           state,
           width: @last_render_width || DEFAULT_WIDTH,
           height: @last_render_height || DEFAULT_HEIGHT
-        ).fetch(pane.to_s, 0).to_i
+        )
+      end
+
+      def scroll_max_for(pane, state)
+        scroll_limits_for(state).fetch(pane.to_s, 0).to_i
       end
 
       def clamp_scroll_offsets!(state)
-        layout.scroll_limits(
-          state,
-          width: @last_render_width || DEFAULT_WIDTH,
-          height: @last_render_height || DEFAULT_HEIGHT
-        ).each do |pane, max_offset|
+        scroll_limits_for(state).each do |pane, max_offset|
           @scroll_offsets[pane] = @scroll_offsets[pane].to_i.clamp(0, max_offset.to_i)
         end
       end
@@ -1605,6 +1683,9 @@ module Meringue
           return [+"", 0, NO_SLASH_SELECTION]
         end
 
+        scroll_result = handle_navigation_scroll_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        return scroll_result if scroll_result
+
         if keybinding?("agent_select_previous", key)
           move_agent_tree_selection(state, -1)
           return [input_buffer, input_cursor, slash_suggestion_index]
@@ -1666,13 +1747,14 @@ module Meringue
         <<~TEXT.strip
           Keybindings (from [tui.keybindings], with defaults for omitted actions):
           Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels jump mode.
-          Focus: click a dashboard section to focus it; clicking an issue or agent in the AgentTree selects it, and double-clicking opens its focused workspace. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and mouse wheel scroll the focused pane.
+          Focus: click a dashboard section to focus it; clicking an issue or agent in the AgentTree selects it, and double-clicking opens its focused workspace. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
           Selection: drag with the mouse in the logs pane or the composer to select text; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
           Logs selection (keyboard): focus the logs pane, then #{keys_for("logs_selection_mode")} toggles the selection cursor or any Shift+movement starts it. #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor, #{keys_for("cursor_word_left")}/#{keys_for("cursor_word_right")} move by word, #{keys_for("cursor_home")}/#{keys_for("cursor_end")} jump to the line edges, and #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} move by page. #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")}, #{keys_for("select_home")}/#{keys_for("select_end")}, #{keys_for("select_word_left")}/#{keys_for("select_word_right")}, and #{keys_for("select_page_up")}/#{keys_for("select_page_down")} extend the selection. #{keys_for("copy_selection")} copies the selection (or the cursor line when nothing is extended); #{keys_for("cancel_navigation")} exits.
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
           Chat: #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode.
+          Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
           Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
         TEXT
@@ -2365,7 +2447,39 @@ module Meringue
           "_selection" => selection_snapshot
         )
         clamp_scroll_offsets!(composed_state)
+        # Reveal reads the offsets it is about to adjust, so it runs against the
+        # clamped snapshot instead of the pre-clamp one.
+        reveal_selected_agent_tree_item!(composed_state.merge("_scroll" => scroll_snapshot))
         composed_state.merge("_scroll" => scroll_snapshot)
+      end
+
+      # A newly selected AgentTree item scrolls into view by the minimum amount,
+      # the same way the logs caret reveals its line. Reveal only runs when the
+      # selection actually changed, so scrolling by hand is never yanked back.
+      def reveal_selected_agent_tree_item!(state)
+        selected_id = @agent_tree_navigation_active ? @selected_agent_id : nil
+        if selected_id.to_s.empty?
+          @revealed_agent_tree_item_id = nil
+          return
+        end
+        return if @revealed_agent_tree_item_id.to_s == selected_id.to_s
+
+        @revealed_agent_tree_item_id = selected_id
+        reveal_agent_tree_item(state, selected_id)
+      end
+
+      def reveal_agent_tree_item(state, item_id)
+        range = layout.agent_tree_item_line_range(state, width: render_width, height: render_height, item_id: item_id)
+        return unless range
+
+        offset = layout.agent_tree_scroll_offset_for_line(
+          state,
+          width: render_width,
+          height: render_height,
+          line_index: range.first,
+          last_line_index: range.last
+        )
+        @scroll_offsets["agent_tree"] = offset.to_i unless offset.nil?
       end
 
       def agent_workspace_snapshot(state, input_buffer, input_cursor, slash_suggestion_index = NO_SLASH_SELECTION)
