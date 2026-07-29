@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
+require "digest"
 require "json"
 require "monitor"
 require "open3"
+require "securerandom"
 require "socket"
 require "time"
 
@@ -131,7 +133,8 @@ module Meringue
       HEAD_SESSION_STATE_RELEASED = "released"
       HEAD_SESSION_STATE_UNAVAILABLE = "unavailable"
 
-      attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path
+      attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path,
+                  :state_lock, :instance_pid, :instance_id
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
                      head_runner: Heads::FakeRunner.new,
@@ -143,7 +146,10 @@ module Meringue
                      cwd: Dir.pwd,
                      async_heads: false,
                      forge_client: Forge::GitHubClient.new,
-                     config_path: Config::DEFAULT_PATH)
+                     config_path: Config::DEFAULT_PATH,
+                     state_lock: nil,
+                     instance_pid: Process.pid,
+                     instance_id: nil)
         @store = store
         @harness_client = harness_client
         @head_runner = head_runner
@@ -156,6 +162,14 @@ module Meringue
         @forge_client = forge_client
         @config_path = File.expand_path(config_path.to_s)
         @harness_client_resolver = harness_client_resolver
+        @instance_pid = Integer(instance_pid)
+        # Identifies this engine across processes. The pid alone is not enough:
+        # liveness comes from the pid, identity from this token.
+        @instance_id = (instance_id || "#{@instance_pid}-#{SecureRandom.hex(4)}").to_s
+        # Meringue instances share one state file, so in-process mutexes alone
+        # cannot keep command application exactly-once. The state lock makes each
+        # read-modify-write section a single writer across instances.
+        @state_lock = state_lock || State::FileLock.for_store(store)
         @state_mutex = Monitor.new
         @head_result_mutex = Mutex.new
         @worker_spawn_mutex = Mutex.new
@@ -445,12 +459,14 @@ module Meringue
       end
 
       def reconcile_sessions_once(command_id:, command_type:)
-        normalized_state_changed = persist_normalized_state_if_changed
-        recovered_worker_results = recover_worker_reservations
-        pending_prompt_results = deliver_pending_agent_prompts
-        recovered_results = recover_unapplied_head_results
-        prune_result = prune_killed_records
-        delivery_pr_refreshes = refresh_stale_delivery_pull_requests
+        # Each step is isolated: a single unhealthy record must not turn a routine
+        # reconciliation pass into a user-visible "Failed ReconcileSessions" error.
+        normalized_state_changed = reconcile_step("normalize_state", false) { persist_normalized_state_if_changed }
+        recovered_worker_results = reconcile_step("recover_worker_reservations", []) { recover_worker_reservations }
+        pending_prompt_results = reconcile_step("deliver_pending_prompts", []) { deliver_pending_agent_prompts }
+        recovered_results = reconcile_step("recover_head_results", []) { recover_unapplied_head_results }
+        prune_result = reconcile_step("prune_killed_records", { "changed" => false, "log_entry_ids" => [] }) { prune_killed_records }
+        delivery_pr_refreshes = reconcile_step("refresh_delivery_pull_requests", []) { refresh_stale_delivery_pull_requests }
         agents = synchronized_state do
           normalized_state.fetch("agents").select { |agent| reconcile_candidate?(agent) }.map { |agent| deep_copy(agent) }
         end
@@ -492,11 +508,82 @@ module Meringue
 
       private
 
+      # Isolates one reconciliation step. A step that raises records a warning and
+      # falls back, instead of aborting the whole pass with an error log.
+      def reconcile_step(name, fallback)
+        yield
+      rescue StandardError => e
+        synchronized_state do
+          state = normalized_state
+          append_log(
+            state,
+            source_type: "kernel",
+            source_id: nil,
+            level: "warning",
+            message: "Skipped session reconciliation step #{name}: #{sanitized_error_message(e)}",
+            details: { "step" => name, "error" => error_payload(e) }
+          )
+          touch_state!(state)
+          store.save(state)
+        end
+        fallback
+      end
+
+      # True when another *live* Meringue instance owns this record. Recovery is
+      # for records whose owner is gone; stealing in-flight work from a live
+      # instance is what applies one logical command twice.
+      def owned_by_other_live_instance?(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        !other_live_instance_pid(
+          metadata.fetch("owner_instance_id", nil),
+          metadata.fetch("owner_instance_pid", nil),
+          metadata.fetch("owner_instance_started_at", nil)
+        ).nil?
+      end
+
+      # Returns the pid of the other live owner, or nil when the record is
+      # unowned, owned by this engine, or owned by a process that is gone.
+      def other_live_instance_pid(owner_instance_id, owner_instance_pid, owner_started_at = nil)
+        return nil if blank?(owner_instance_id) && blank?(owner_instance_pid)
+        return nil if present_string(owner_instance_id) && owner_instance_id.to_s == instance_id
+        return nil if blank?(owner_instance_id) && owner_instance_pid.to_i == instance_pid
+
+        pid = blank?(owner_instance_pid) ? instance_pid : owner_instance_pid.to_i
+        instance_alive?(pid, owner_started_at) ? pid : nil
+      end
+
+      # A recorded pid can be reused by an unrelated process, which would make a
+      # crashed owner look alive and block recovery forever. The recorded start
+      # time settles it when available.
+      def instance_alive?(pid, started_at)
+        return false unless Harness::ProcessIdentity.alive?(pid)
+        return true if blank?(started_at)
+
+        Harness::ProcessIdentity.matches?(pid, started_at: started_at)
+      end
+
+      def instance_started_at
+        return @instance_started_at if defined?(@instance_started_at)
+
+        described = Harness::ProcessIdentity.describe(instance_pid)
+        started_at = described && described.fetch("started_at", nil)
+        @instance_started_at = started_at && started_at.iso8601
+      end
+
+      def instance_ownership_metadata
+        {
+          "owner_instance_pid" => instance_pid,
+          "owner_instance_id" => instance_id,
+          "owner_instance_started_at" => instance_started_at
+        }.compact
+      end
+
       def recover_worker_reservations
         reservations = synchronized_state do
           normalized_state.fetch("agents").filter_map do |agent|
             next unless agent.fetch("type", nil) == "worker" && agent.fetch("status", nil) == "queued"
             next if agent_has_session_reference?(agent)
+            next if owned_by_other_live_instance?(agent)
 
             metadata = agent.fetch("harness_metadata", {}) || {}
             command_id = present_string(metadata.fetch("spawn_command_id", nil))
@@ -529,6 +616,7 @@ module Meringue
             head_result = metadata.fetch("head_result", nil)
             next unless head_result.is_a?(Hash)
             next if present_string(metadata.fetch("head_result_applied_at", nil))
+            next if owned_by_other_live_instance?(agent)
             next unless metadata.fetch("head_result_apply_state", nil) == "applying" ||
                         (agent.fetch("status", nil) == "completed" && agent_has_session_reference?(agent))
             # Another kernel instance is applying this batch right now; recovering it here would
@@ -540,14 +628,25 @@ module Meringue
         end
 
         candidates.map do |candidate|
-          @head_result_mutex.synchronize do
-            apply_head_result(
-              nil,
-              "ApplyHeadResult",
-              "head_id" => candidate.fetch("head_id"),
-              "head_result" => candidate.fetch("head_result"),
-              "_recover" => true
-            )
+          begin
+            @head_result_mutex.synchronize do
+              apply_head_result(
+                nil,
+                "ApplyHeadResult",
+                "head_id" => candidate.fetch("head_id"),
+                "head_result" => candidate.fetch("head_result"),
+                "_recover" => true
+              )
+            end
+          rescue StandardError => e
+            synchronized_state do
+              rejected_result(
+                nil,
+                "ApplyHeadResult",
+                "Head result recovery for #{candidate.fetch("head_id")} was skipped: #{sanitized_error_message(e)}",
+                [e.class.name, sanitized_error_message(e)]
+              )
+            end
           end
         end
       end
@@ -1071,15 +1170,47 @@ module Meringue
           now = timestamp
           metadata = head.fetch("harness_metadata", {}) || {}
           already_initialized = present_string(metadata.fetch("head_result_initialized_at", nil))
+          # Exactly-once: a finished batch is never re-applied, no matter which
+          # loop (prompt loop, session poll, or recovery) delivers it again.
+          if present_string(metadata.fetch("head_result_applied_at", nil))
+            return already_applied_head_result(command_id, command_type, head_id.to_s, metadata)
+          end
+
+          stored_result = metadata.fetch("head_result", nil)
+          fingerprint = head_result_fingerprint(head_result)
+          stored_fingerprint = present_string(metadata.fetch("head_result_fingerprint", nil))
+          duplicate_variant = already_initialized && stored_result.is_a?(Hash) &&
+                              stored_fingerprint && stored_fingerprint != fingerprint
+          if duplicate_variant
+            # The first recorded result stays authoritative so a re-read or
+            # re-parse of the head's output cannot append a second batch of
+            # questions, issues, or workers.
+            head_result = deep_copy(stored_result)
+            fingerprint = stored_fingerprint
+          end
+
           head["status"] = "working"
           head["updated_at"] = now
           metadata = metadata.merge(
             "title" => head_result.fetch("title"),
             "summary" => head_result.fetch("summary"),
             "head_result" => head_result,
+            "head_result_fingerprint" => fingerprint,
             "head_result_apply_state" => "applying",
             "head_result_initialized_at" => metadata.fetch("head_result_initialized_at", nil) || now
           ).merge(head_result_apply_lease(now))
+          instance_ownership_metadata.each { |key, value| metadata[key] ||= value }
+          if duplicate_variant
+            metadata["head_result_duplicate_count"] = metadata.fetch("head_result_duplicate_count", 0).to_i + 1
+            log_ids.concat(append_log(
+              state,
+              source_type: "kernel",
+              source_id: head_id.to_s,
+              level: "warning",
+              message: "Ignored a duplicate result for head #{head_id}; its first result is still being applied.",
+              details: { "head_id" => head_id.to_s, "duplicate_count" => metadata.fetch("head_result_duplicate_count") }
+            ))
+          end
           metadata["head_result_command_journal"] = initialize_head_command_journal(
             state: state,
             head_id: head_id.to_s,
@@ -1102,6 +1233,8 @@ module Meringue
         return initialization if kernel_command_result?(initialization)
 
         command_results = []
+        interrupted = false
+        claimed_by = nil
         head_result.fetch("commands").each_with_index do |proposed_command, index|
           command = command_with_default_id(proposed_command, head_id: head_id.to_s, index: index)
           journal_entry = current_head_journal_entry(head_id.to_s, index)
@@ -1110,24 +1243,60 @@ module Meringue
             next
           end
 
-          # The head record can disappear mid-batch when another kernel instance finishes and
-          # cleans up the same batch. Stop instead of raising so reconciliation keeps working.
-          break unless mark_head_command_started!(head_id.to_s, index)
+          # Another live instance already claimed this command. Re-running it here
+          # is what produced duplicate workers and duplicate spawn logs.
+          if (owner = head_command_claim_owner(journal_entry))
+            claimed_by = owner
+            break
+          end
+
+          # The head record can disappear mid-batch when it is killed, cleaned up, or finished
+          # by another kernel instance. Stop instead of raising so reconciliation keeps working.
+          unless mark_head_command_started!(head_id.to_s, index)
+            interrupted = true
+            break
+          end
 
           result = apply(command)
           command_results << result
-          break unless checkpoint_head_command_result!(head_id.to_s, index, result)
+          unless checkpoint_head_command_result!(head_id.to_s, index, result)
+            interrupted = true
+            break
+          end
+        end
+
+        if claimed_by
+          return synchronized_state do
+            rejected_result(
+              command_id,
+              command_type,
+              "Head #{head_id}'s result is already being applied by Meringue instance #{claimed_by}.",
+              ["head_result_claimed_by_another_instance"]
+            )
+          end
         end
 
         synchronized_state do
           state = normalized_state
           head = find_agent(state, head_id)
-          return rejected_result(command_id, command_type, "Head #{head_id} disappeared while applying its result.", ["head_not_found"]) unless head
+          unless head
+            return interrupted_head_result(command_id, command_type, state, head_id.to_s, command_results, log_ids)
+          end
 
           accepted_count = command_results.count { |result| result.fetch("status", nil) == "accepted" }
           rejected_count = command_results.count { |result| result.fetch("status", nil) == "rejected" }
           failed_count = command_results.count { |result| result.fetch("status", nil) == "failed" }
           question_ids = initialization.fetch("question_ids")
+          if interrupted
+            log_ids.concat(append_log(
+              state,
+              source_type: "kernel",
+              source_id: head_id.to_s,
+              level: "warning",
+              message: "Stopped applying head #{head_id}'s remaining commands because its command journal is no longer tracked.",
+              details: { "head_id" => head_id.to_s, "applied_command_count" => command_results.length }
+            ))
+          end
           summary_log_ids = if rejected_count.positive? || failed_count.positive?
                               append_log(
                                 state,
@@ -1182,6 +1351,68 @@ module Meringue
             log_ids.uniq
           )
         end
+      end
+
+      # Stable identity for one head result, so a re-delivered or re-parsed copy of
+      # the same decision can be recognized instead of applied again.
+      def head_result_fingerprint(head_result)
+        Digest::SHA256.hexdigest(
+          JSON.generate(
+            "title" => head_result.fetch("title", nil).to_s,
+            "summary" => head_result.fetch("summary", nil).to_s,
+            "commands" => Array(head_result.fetch("commands", [])),
+            "questions" => Array(head_result.fetch("questions", []))
+          )
+        )
+      end
+
+      def already_applied_head_result(command_id, command_type, head_id, metadata)
+        journal = Array(metadata.fetch("head_result_command_journal", []))
+        accepted_result(
+          command_id,
+          command_type,
+          head_id,
+          "Head result for #{head_id} was already applied.",
+          {
+            "head_id" => head_id,
+            "title" => metadata.fetch("title", nil),
+            "summary" => metadata.fetch("summary", nil),
+            "question_ids" => Array(metadata.fetch("head_result_question_ids", [])),
+            "command_results" => journal.map { |entry| command_result_from_journal(entry) },
+            "duplicate_apply" => true
+          },
+          []
+        )
+      end
+
+      # The head record can be killed or cleaned up while its batch is running.
+      # Commands that already ran still count as applied work, so this reports what
+      # happened as a warning rather than a command failure.
+      def interrupted_head_result(command_id, command_type, state, head_id, command_results, log_ids)
+        log_ids.concat(command_results.flat_map { |result| result.fetch("log_entry_ids", []) })
+        log_ids.concat(append_log(
+          state,
+          source_type: "kernel",
+          source_id: head_id,
+          level: "warning",
+          message: "Head #{head_id} was no longer tracked when its result finished applying; #{command_results.length} command(s) were applied.",
+          details: { "head_id" => head_id, "applied_command_count" => command_results.length }
+        ))
+        touch_state!(state)
+        store.save(state)
+
+        accepted_result(
+          command_id,
+          command_type,
+          head_id,
+          "Applied head result for #{head_id} after the head was cleaned up.",
+          {
+            "head_id" => head_id,
+            "command_results" => command_results,
+            "head_missing" => true
+          },
+          log_ids.uniq
+        )
       end
 
       def answer_question(command_id, command_type, payload)
@@ -2170,6 +2401,8 @@ module Meringue
         begin
           session_ref = client.prompt_session(session_ref, prompt.to_s, mode: mode)
         rescue StandardError => e
+          # A session that is busy elsewhere is a timing condition, not a failure: queue the
+          # prompt and let reconciliation deliver it once the current turn settles.
           if Harness.transient_session_error?(e)
             return queue_transient_prompt(
               command_id: command_id,
@@ -2413,6 +2646,17 @@ module Meringue
           if existing && agent_has_session_reference?(existing)
             return accepted_result(command_id, command_type, existing.fetch("id"), "Worker #{existing.fetch("id")} was already spawned.", existing, [])
           end
+          # A reservation being provisioned by another live instance must not be
+          # provisioned again here: that races on the same worktree branch and
+          # leaves two harness sessions in one workspace.
+          if existing && worker_provisioning_in_progress?(existing) && owned_by_other_live_instance?(existing)
+            return rejected_result(
+              command_id,
+              command_type,
+              "Worker #{existing.fetch("id")} is already being spawned by another Meringue instance.",
+              ["worker_spawn_in_progress"]
+            )
+          end
 
           unless existing
             related_agent_id = present_string(replace_agent_id) || present_string(follow_up_of_agent_id)
@@ -2650,6 +2894,11 @@ module Meringue
         raise e
       end
 
+      def worker_provisioning_in_progress?(agent)
+        state = (agent.fetch("harness_metadata", {}) || {}).fetch("provisioning_state", nil)
+        %w[allocating_workspace starting_harness].include?(state.to_s)
+      end
+
       def worker_for_spawn_command(state, command_id)
         return nil if blank?(command_id)
 
@@ -2685,6 +2934,7 @@ module Meringue
             "provisioning_state" => "allocating_workspace",
             "workspace_plan" => plan,
             "harness_generation" => harness_generation,
+            **instance_ownership_metadata,
             "is_streaming" => false
           }.compact,
           "created_at" => now,
@@ -2787,6 +3037,7 @@ module Meringue
             "cwd" => cwd,
             "harness_generation" => harness_generation,
             "head_session_state" => HEAD_SESSION_STATE_PENDING,
+            **instance_ownership_metadata,
             "head_request" => {
               "user_message" => user_message,
               "question_id" => question_id
@@ -3219,7 +3470,7 @@ module Meringue
           next existing.fetch("id") if existing
 
           create_head_questions!(state, head_id, [question_payload], log_ids).first
-        end
+        end.compact.uniq
       end
 
       def find_head_question_by_text(state, head_id, question_text)
@@ -3281,6 +3532,8 @@ module Meringue
         end
       end
 
+      # Returns false when the head or its journal entry is gone, so the caller can
+      # stop the batch instead of raising out of the whole apply/reconcile pass.
       def mark_head_command_started!(head_id, index)
         synchronized_state do
           state = normalized_state
@@ -3295,6 +3548,9 @@ module Meringue
           now = timestamp
           entry["status"] = "running"
           entry["started_at"] = now
+          # The claim identifies this instance so another live instance re-entering the same
+          # batch skips a command that is already running here instead of applying it twice.
+          entry.merge!(instance_ownership_metadata)
           metadata["head_result_command_journal"] = journal
           head["harness_metadata"] = metadata.merge(head_result_apply_lease(now))
           head["updated_at"] = now
@@ -3400,6 +3656,19 @@ module Meringue
 
       def terminal_command_status?(status)
         %w[accepted rejected failed].include?(status.to_s)
+      end
+
+      # Returns the pid of another live Meringue instance that is running this
+      # command right now, or nil when the command is free to run here.
+      def head_command_claim_owner(entry)
+        return nil unless entry.is_a?(Hash)
+        return nil unless entry.fetch("status", nil).to_s == "running"
+
+        other_live_instance_pid(
+          entry.fetch("owner_instance_id", nil),
+          entry.fetch("owner_instance_pid", nil),
+          entry.fetch("owner_instance_started_at", nil)
+        )
       end
 
       def kernel_command_result?(value)
@@ -3628,7 +3897,7 @@ module Meringue
       end
 
       def synchronized_state(&block)
-        @state_mutex.synchronize(&block)
+        @state_mutex.synchronize { @state_lock.synchronize(&block) }
       end
 
       def harness_client
@@ -4009,6 +4278,9 @@ module Meringue
       def reconcile_candidate?(agent)
         metadata = agent.fetch("harness_metadata", {}) || {}
         return false if agent.fetch("type", nil) == "head" && present_string(metadata.fetch("head_result_applied_at", nil))
+        # A head belongs to the instance that spawned it. Completing another live
+        # instance's head would apply its result a second time.
+        return false if agent.fetch("type", nil) == "head" && owned_by_other_live_instance?(agent)
         return false if blank?(agent.fetch("harness", nil)) || agent.fetch("harness", nil) == "fake"
         return false unless agent_has_session_reference?(agent) || recoverable_untracked_head?(agent)
         return false if %w[completed killed].include?(agent.fetch("status", nil))
