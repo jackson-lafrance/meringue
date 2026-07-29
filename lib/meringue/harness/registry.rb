@@ -33,10 +33,12 @@ module Meringue
       }.freeze
       DEFAULT_PI_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
       # Canonical "provider/model" reference so Pi never has to disambiguate the
-      # bare model id across providers that all expose Claude Opus 5.
-      DEFAULT_PI_MODEL = "anthropic/claude-opus-5"
-      # Highest thinking level Pi exposes; Claude Opus 5 only supports xhigh/max.
-      DEFAULT_PI_THINKING_LEVEL = "max"
+      # bare model id across providers that all expose GPT-5.6 Sol (for example
+      # the 1M-context twin some proxy extensions register).
+      DEFAULT_PI_MODEL = "openai/gpt-5.6-sol"
+      # GPT-5.6 Sol maps every Pi thinking level; xhigh is the deepest level that
+      # still keeps latency and cost reasonable for long agent sessions.
+      DEFAULT_PI_THINKING_LEVEL = "xhigh"
       DEFAULT_PI_HEAD_EXTRA_ARGS = [
         "--model", DEFAULT_PI_MODEL,
         "--thinking", DEFAULT_PI_THINKING_LEVEL,

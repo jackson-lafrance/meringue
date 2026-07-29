@@ -168,8 +168,8 @@ Each provider can set its executable command and role-specific extra args.
 [harness.pi]
 command = "pi"
 session_dir = "~/.meringue/pi-sessions"
-head_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls"]
-worker_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls,edit,write"]
+head_extra_args = ["--model", "openai/gpt-5.6-sol", "--thinking", "xhigh", "--tools", "read,bash,grep,find,ls"]
+worker_extra_args = ["--model", "openai/gpt-5.6-sol", "--thinking", "xhigh", "--tools", "read,bash,grep,find,ls,edit,write"]
 
 [harness.claude]
 command = "claude"
@@ -183,7 +183,7 @@ head_extra_args = []
 worker_extra_args = []
 ```
 
-Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). To use a different model or thinking level, set `head_extra_args` / `worker_extra_args` for `[harness.pi]`; a configured array replaces the default array entirely, so include the other flags you still want.
+Pi heads and workers default to `openai/gpt-5.6-sol` at Pi's `xhigh` thinking level (`--thinking xhigh`). To use a different model or thinking level, set `head_extra_args` / `worker_extra_args` for `[harness.pi]`; a configured array replaces the default array entirely, so include the other flags you still want.
 
 Claude Code runs through `claude --print --output-format stream-json --verbose`; Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace. Live steer/follow-up prompting is currently Pi-only.
 

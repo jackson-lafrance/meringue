@@ -28,10 +28,10 @@ provider = "pi"
 [harness.pi]
 command = "pi"
 session_dir = "~/.meringue/pi-sessions"
-# Defaults to Claude Opus 5 at Pi's maximum thinking level. Override these arrays
+# Defaults to GPT-5.6 Sol at Pi's xhigh thinking level. Override these arrays
 # (the whole array replaces the default) to use a different model or level.
-head_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
-worker_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls,edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
+head_extra_args = ["--model", "openai/gpt-5.6-sol", "--thinking", "xhigh", "--tools", "read,bash,grep,find,ls", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
+worker_extra_args = ["--model", "openai/gpt-5.6-sol", "--thinking", "xhigh", "--tools", "read,bash,grep,find,ls,edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 
 [harness.claude]
 command = "claude"
