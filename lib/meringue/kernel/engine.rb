@@ -112,6 +112,14 @@ module Meringue
       RECONCILE_STATE_RESUME_FAILED = "resume_failed"
       RECONCILE_STATE_TRANSIENT_ERROR = "transient_error"
       RECONCILE_STATE_TERMINAL_ERROR = "terminal_error"
+      # Head sessions live for as long as the head agent record is alive. `pending` is the
+      # window between creating the head record and its harness session, `active` means the
+      # head owns a tracked session, `released` is terminal, and `unavailable` means the
+      # configured head runner cannot back the head with a harness session at all.
+      HEAD_SESSION_STATE_PENDING = "pending"
+      HEAD_SESSION_STATE_ACTIVE = "active"
+      HEAD_SESSION_STATE_RELEASED = "released"
+      HEAD_SESSION_STATE_UNAVAILABLE = "unavailable"
 
       attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path
 
@@ -939,36 +947,46 @@ module Meringue
         end
 
         runner = started.fetch("head_runner")
-        if async_heads? && runner.respond_to?(:spawn_head_session)
+        # A head owns a harness session for its whole lifetime. The kernel spawns that
+        # session, records it on the head agent record, and only tears it down when the
+        # head reaches a terminal state (result applied, errored, or killed).
+        session_ref = nil
+        if runner.respond_to?(:spawn_head_session)
           session_ref = runner.spawn_head_session(
             user_message: user_message.to_s,
             snapshot: started.fetch("snapshot"),
             question_id: present_string(question_id),
             context: started.fetch("context")
           )
+          session_record = record_head_session!(head_id, session_ref)
+          session_log_ids = session_record.fetch("log_entry_ids", [])
 
-          return synchronized_state do
-            state = normalized_state
-            agent = find_agent(state, head_id)
-            raise "Head #{head_id} disappeared before its session could be recorded." unless agent
-
-            merge_session_ref_into_agent!(agent, session_ref)
-            agent["status"] = "working"
-            agent["updated_at"] = timestamp
-            log_ids = started.fetch("log_ids")
-            touch_state!(state)
-            store.save(state)
-
-            accepted_result(command_id, command_type, head_id, "Spawned head #{head_id}; polling will apply its HeadResult when complete.", agent, log_ids)
+          if async_heads?
+            return synchronized_state do
+              accepted_result(
+                command_id,
+                command_type,
+                head_id,
+                "Spawned head #{head_id}; polling will apply its HeadResult when complete.",
+                session_record.fetch("agent"),
+                (started.fetch("log_ids") + session_log_ids).uniq
+              )
+            end
           end
+        else
+          session_log_ids = mark_head_session_unavailable!(head_id, reason: "head_runner_has_no_session").fetch("log_entry_ids", [])
         end
 
-        head_result = runner.run(
-          user_message: user_message.to_s,
-          snapshot: started.fetch("snapshot"),
-          question_id: present_string(question_id),
-          context: started.fetch("context")
-        )
+        head_result = if session_ref && runner.respond_to?(:await_head_result)
+                        runner.await_head_result(session_ref)
+                      else
+                        runner.run(
+                          user_message: user_message.to_s,
+                          snapshot: started.fetch("snapshot"),
+                          question_id: present_string(question_id),
+                          context: started.fetch("context")
+                        )
+                      end
 
         synchronized_state do
           state = normalized_state
@@ -980,16 +998,21 @@ module Meringue
           agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
             "title" => head_result.is_a?(Hash) ? head_result["title"] : nil,
             "summary" => head_result.is_a?(Hash) ? head_result["summary"] : nil,
-            "head_result" => head_result
+            "head_result" => head_result,
+            "is_streaming" => false
           ).compact
-          log_ids = started.fetch("log_ids")
+          log_ids = (started.fetch("log_ids") + session_log_ids).uniq
           touch_state!(state)
           store.save(state)
 
           accepted_result(command_id, command_type, head_id, "Spawned and completed head #{head_id}.", agent, log_ids)
         end
       rescue StandardError => e
-        mark_head_errored(head_id, e) if defined?(head_id) && head_id
+        released = mark_head_errored(head_id, e, release_session: true) if defined?(head_id) && head_id
+        # If the head record itself is gone the kernel still owns the session it spawned.
+        if !released && defined?(session_ref) && session_ref && runner.respond_to?(:close_head_session)
+          runner.close_head_session(session_ref)
+        end
         synchronized_state do
           failed_result(
             command_id,
@@ -1107,6 +1130,7 @@ module Meringue
                     else
                       { "changed" => false, "reason" => "deferred" }
                     end
+          log_ids.concat(cleanup.fetch("log_entry_ids", []))
           touch_state!(state, now)
           store.save(state)
 
@@ -1750,6 +1774,7 @@ module Meringue
         agent_ids_to_remove = (bundled_agent_ids + Array(extra_agent_ids)).compact.uniq
         standalone_agent_ids = Array(extra_agent_ids).compact.uniq - bundled_agent_ids
 
+        released_head_ids = release_head_sessions_for_removed_agents!(state, agent_ids_to_remove, now)
         state["issues"] = state.fetch("issues").reject { |issue| issue_ids_to_remove.include?(issue.fetch("id", nil)) }
         state["agents"] = state.fetch("agents").reject { |agent| agent_ids_to_remove.include?(agent.fetch("id", nil)) }
         state["projects"] = state.fetch("projects").reject { |project| removed_project_ids.include?(project.fetch("id", nil)) }
@@ -1765,8 +1790,21 @@ module Meringue
           "removed_agent_ids" => agent_ids_to_remove,
           "removed_standalone_agent_ids" => standalone_agent_ids,
           "removed_project_ids" => removed_project_ids,
-          "updated_project_ids" => updated_project_ids
+          "updated_project_ids" => updated_project_ids,
+          "released_head_session_agent_ids" => released_head_ids
         }
+      end
+
+      # A head's harness session only lives as long as its head record. Whenever a head
+      # leaves active state its session is stopped and marked terminal; worker session
+      # handling is intentionally untouched here.
+      def release_head_sessions_for_removed_agents!(state, agent_ids, now)
+        Array(agent_ids).filter_map do |agent_id|
+          agent = find_agent(state, agent_id)
+          next unless agent && agent.fetch("type", nil) == "head"
+
+          release_head_session!(agent, reason: "head_record_removed", now: now).fetch("changed", false) ? agent_id : nil
+        end
       end
 
       def pruned_related_head_agent_ids(state, issue_ids_to_remove, removed_project_ids)
@@ -2547,6 +2585,7 @@ module Meringue
             "runner" => runner.class.name,
             "cwd" => cwd,
             "harness_generation" => harness_generation,
+            "head_session_state" => HEAD_SESSION_STATE_PENDING,
             "head_request" => {
               "user_message" => user_message,
               "question_id" => question_id
@@ -2657,6 +2696,17 @@ module Meringue
         agent["status"] = "killed"
         agent["updated_at"] = now
         agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("killed_at" => now)
+        return unless agent.fetch("type", nil) == "head"
+
+        # The caller stops attached harness sessions; only mark the head session terminal here
+        # so a killed head can never look like a live or resumable session.
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        agent["harness_metadata"] = metadata.merge(
+          "head_session_state" => HEAD_SESSION_STATE_RELEASED,
+          "head_session_released_at" => present_string(metadata.fetch("head_session_released_at", nil)) || now,
+          "head_session_release_reason" => present_string(metadata.fetch("head_session_release_reason", nil)) || "killed",
+          "is_streaming" => false
+        ).compact
       end
 
       def resolve_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:, task_title:, create: false)
@@ -3128,7 +3178,108 @@ module Meringue
         project["updated_at"] = now
       end
 
-      def mark_head_errored(head_id, error)
+      # Records the harness session the head owns for its lifetime. Called for both the
+      # polled/async head path and the synchronous head path so head session metadata is
+      # inspectable and reconcilable the same way worker session metadata is.
+      def record_head_session!(head_id, session_ref)
+        synchronized_state do
+          state = normalized_state
+          head = find_agent(state, head_id)
+          raise "Head #{head_id} disappeared before its session could be recorded." unless head
+
+          now = timestamp
+          merge_session_ref_into_agent!(head, session_ref)
+          head["status"] = "working"
+          head["updated_at"] = now
+          log_ids = append_log(
+            state,
+            source_type: "harness",
+            source_id: head_id.to_s,
+            level: "info",
+            message: "Opened #{head.fetch("harness", "harness")} session for head #{head_id}.",
+            details: {
+              "head_id" => head_id.to_s,
+              "harness" => head.fetch("harness", nil),
+              "pid" => head.fetch("pid", nil),
+              "session_id" => head.fetch("harness_session_id", nil),
+              "session_file" => head.fetch("harness_session_file", nil),
+              "head_session_state" => (head.fetch("harness_metadata", {}) || {}).fetch("head_session_state", nil)
+            }.compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+
+          { "agent" => deep_copy(head), "log_entry_ids" => log_ids }
+        end
+      end
+
+      def mark_head_session_unavailable!(head_id, reason:)
+        synchronized_state do
+          state = normalized_state
+          head = find_agent(state, head_id)
+          return { "agent" => nil, "log_entry_ids" => [] } unless head
+
+          now = timestamp
+          head["harness_metadata"] = (head.fetch("harness_metadata", {}) || {}).merge(
+            "head_session_state" => HEAD_SESSION_STATE_UNAVAILABLE,
+            "head_session_note" => reason
+          )
+          head["updated_at"] = now
+          touch_state!(state, now)
+          store.save(state)
+
+          { "agent" => deep_copy(head), "log_entry_ids" => [] }
+        end
+      end
+
+      def mark_head_session_active!(agent, now: timestamp)
+        return unless agent.fetch("type", nil) == "head"
+        return unless agent_has_session_reference?(agent)
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        reactivated = metadata.fetch("head_session_state", nil) == HEAD_SESSION_STATE_RELEASED
+        updated = metadata.merge(
+          "head_session_state" => HEAD_SESSION_STATE_ACTIVE,
+          "head_session_started_at" => present_string(metadata.fetch("head_session_started_at", nil)) || now
+        )
+        if reactivated
+          updated["head_session_restarted_at"] = now
+          updated.delete("head_session_released_at")
+          updated.delete("head_session_release_reason")
+        end
+        agent["harness_metadata"] = updated.compact
+      end
+
+      # Terminal teardown for a head session. Stops the harness session the head owned and
+      # records why it ended so reconciliation never treats a dead head as resumable.
+      def release_head_session!(agent, reason:, now: timestamp)
+        return { "changed" => false, "reason" => "agent_is_not_head" } unless agent.fetch("type", nil) == "head"
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        already_released = metadata.fetch("head_session_state", nil) == HEAD_SESSION_STATE_RELEASED
+        killed_session = false
+        if !already_released && present_string(agent.fetch("harness", nil))
+          kill_session_safely(session_ref_from_agent(agent), agent: agent)
+          killed_session = !!agent_has_session_reference?(agent)
+        end
+
+        agent["harness_metadata"] = metadata.merge(
+          "head_session_state" => HEAD_SESSION_STATE_RELEASED,
+          "head_session_released_at" => present_string(metadata.fetch("head_session_released_at", nil)) || now,
+          "head_session_release_reason" => present_string(metadata.fetch("head_session_release_reason", nil)) || reason,
+          "is_streaming" => false
+        ).compact
+
+        {
+          "changed" => !already_released,
+          "killed_session" => killed_session,
+          "reason" => reason
+        }
+      end
+
+      def mark_head_errored(head_id, error, release_session: false)
         synchronized_state do
           state = normalized_state
           head = find_agent(state, head_id)
@@ -3142,16 +3293,18 @@ module Meringue
             "error_class" => error_info.fetch("class"),
             "error_message" => error_info.fetch("message")
           )
+          released = release_session ? release_head_session!(head, reason: "head_errored", now: now) : nil
           append_log(
             state,
             source_type: "head",
             source_id: head_id,
             level: "error",
             message: "Head #{head_id} failed: #{error_info.fetch("message")}",
-            details: { "class" => error_info.fetch("class") }
+            details: { "class" => error_info.fetch("class") }.merge(released ? { "head_session_released" => true } : {})
           )
           touch_state!(state, now)
           store.save(state)
+          release_session
         end
       rescue StandardError
         nil
@@ -3837,11 +3990,10 @@ module Meringue
 
         synchronized_state do
           state = normalized_state
-          log_ids = []
           cleanup = cleanup_applied_head!(state, poll_result.fetch("agent_id"), now: timestamp)
           touch_state!(state)
           store.save(state)
-          { "changed" => cleanup.fetch("changed", false), "cleanup" => cleanup, "log_entry_ids" => log_ids }
+          { "changed" => cleanup.fetch("changed", false), "cleanup" => cleanup, "log_entry_ids" => cleanup.fetch("log_entry_ids", []) }
         end
       end
 
@@ -4402,6 +4554,7 @@ module Meringue
           "reconcile_state" => RECONCILE_STATE_HEALTHY,
           "reconcile" => nil
         ).compact
+        mark_head_session_active!(agent)
       end
 
       def cleanup_applied_head!(state, head_id, now: timestamp)
@@ -4409,8 +4562,7 @@ module Meringue
         return { "changed" => false, "reason" => "head_not_found" } unless head
         return { "changed" => false, "reason" => "agent_is_not_head" } unless head.fetch("type", nil) == "head"
 
-        session_ref = session_ref_from_agent(head)
-        kill_session_safely(session_ref, agent: head) if present_string(head.fetch("harness", nil))
+        session_release = release_head_session!(head, reason: "head_result_applied", now: now)
 
         metadata = head.fetch("harness_metadata", {}) || {}
         metadata = {} unless metadata.is_a?(Hash)
@@ -4426,7 +4578,16 @@ module Meringue
 
         remove_agent_from_active_state!(state, head_id)
 
-        { "changed" => true, "removed_agent_id" => head_id, "reason" => "head_result_applied" }
+        # Teardown detail rides along with the ApplyHeadResult log instead of adding a
+        # second per-message log line to the visible history.
+        {
+          "changed" => true,
+          "removed_agent_id" => head_id,
+          "reason" => "head_result_applied",
+          "session_release" => session_release,
+          "session_id" => head.fetch("harness_session_id", nil),
+          "log_entry_ids" => []
+        }.compact
       end
 
       def remove_agent_from_active_state!(state, agent_id)

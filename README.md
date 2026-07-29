@@ -72,6 +72,7 @@ docs/head_agent_kernel_commands.md # compact head-agent command contract
 docs/keybindings.md                # TUI keyboard and jump-mode controls
 fixtures/config.example.toml       # example local config
 fixtures/demo_state.json           # demo state for the TUI
+scripts/head_session_smoke.rb      # prints the head harness session lifetime without a real harness
 ```
 
 ## Setup
@@ -206,7 +207,7 @@ User prompt
   -> developer jumps into worker sessions or PRs only when needed
 ```
 
-Heads orchestrate by creating/reusing issues, prompting workers, and asking questions; they do not deliver substantive task answers directly. Every natural-language message still gets a fresh stateless head. Its routing context is assembled from existing issues, recent lifecycle logs, and generic harness/session metadata rather than a second conversation-state model.
+Heads orchestrate by creating/reusing issues, prompting workers, and asking questions; they do not deliver substantive task answers directly. Every natural-language message still gets a fresh stateless head. Each head owns one tracked harness session for as long as it is alive, so its session id, session file, and pid are visible in state and reconcilable exactly like a worker's; the kernel closes that session and marks it terminal when the head's result is applied, when it errors, or when it is killed. Its routing context is assembled from existing issues, recent lifecycle logs, and generic harness/session metadata rather than a second conversation-state model.
 
 For a follow-up, the head chooses among continuing a settled session (`normal`), correcting active work (`steer`), queuing a next step (`follow_up`), spawning a related worker on the same issue, or replacing an unhealthy/stale worker. Pi's persisted session retains the detailed conversation context. AgentTree worker rows label successors with `after W…` or `replaces W…`, while lifecycle logs state the full relationship. Workers carry out assigned implementation, investigation, or informational work, and only need PRs when the assigned delivery calls for repository changes. The kernel owns orchestration state. Harness-specific behavior stays behind the harness client layer.
 
