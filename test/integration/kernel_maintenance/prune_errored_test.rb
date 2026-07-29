@@ -3,8 +3,8 @@
 require "test_helper"
 require "support/kernel_maintenance_support"
 
-# Prune with the errored selector, plus the killed-record reconciliation prune
-# that runs inside ReconcileSessions.
+# Prune of errored records (removed in the same pass as resolved ones), plus the killed-record
+# reconciliation prune that runs inside ReconcileSessions.
 class KernelMaintenancePruneErroredTest < Minitest::Test
   include KernelMaintenanceSupport
 
@@ -16,7 +16,7 @@ class KernelMaintenancePruneErroredTest < Minitest::Test
     kernel_maintenance_teardown
   end
 
-  def test_errored_selector_removes_errored_issue_bundles_and_standalone_errored_heads
+  def test_prune_removes_errored_bundles_and_standalone_errored_heads
     write_state(
       state_fixture(
         projects: [project_record(id: "P1", status: "working")],
@@ -33,25 +33,29 @@ class KernelMaintenancePruneErroredTest < Minitest::Test
     )
     engine = build_engine
 
-    result = apply_command(engine, "Prune", "selector" => "errored")
+    # One pass: the errored bundle, the completed bundle, and the standalone errored head all go.
+    result = apply_command(engine, "Prune", {})
 
     assert_equal "accepted", result.fetch("status")
-    assert_equal "Pruned 1 errored issue bundle and 1 standalone errored agent.", result.fetch("message")
-    assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
+    assert_equal "Pruned 2 issues, 0 projects, and 1 standalone agent.", result.fetch("message")
+    assert_equal %w[P1-I1 P1-I2], result.dig("result", "removed_issue_ids").sort
     assert_equal ["H1"], result.dig("result", "removed_standalone_agent_ids")
-    assert_equal "errored", result.dig("result", "reason")
+    assert_includes result.dig("result", "removed_agent_ids"), "P1-I1-W1"
 
     state = read_state
-    assert_equal ["P1-I2"], ids(state.fetch("issues"))
+    assert_empty state.fetch("issues")
     assert_equal ["H2"], ids(state.fetch("agents"))
     log = state.fetch("logs").last
-    assert_equal "Pruned 1 errored issue bundle and 1 standalone errored agent.", log.fetch("message")
-    assert_equal "errored", log.dig("details", "selector")
+    assert_equal "Pruned 2 issues, 0 projects, and 1 standalone agent.", log.fetch("message")
+    assert_equal ["H1"], log.dig("details", "removed_standalone_agent_ids")
+    refute log.fetch("details").key?("selector"), "prune no longer has a selector"
     assert_documented_status_vocabulary(state)
   end
 
   def test_errored_issue_with_live_worker_is_retained
-    %w[queued working idle blocked].each do |worker_status|
+    # "idle" is deliberately absent: an idle worker has nothing in flight, so it does not block
+    # cleanup (see test_errored_issue_with_an_idle_worker_is_pruned below).
+    %w[queued working blocked].each do |worker_status|
       write_state(
         state_fixture(
           projects: [project_record(id: "P1", status: "working")],
@@ -61,7 +65,7 @@ class KernelMaintenancePruneErroredTest < Minitest::Test
       )
       engine = build_engine
 
-      result = apply_command(engine, "Prune", "selector" => "errored")
+      result = apply_command(engine, "Prune", {})
 
       assert_empty result.dig("result", "removed_issue_ids"),
                    "errored issue with a #{worker_status} worker must be retained"
@@ -69,25 +73,42 @@ class KernelMaintenancePruneErroredTest < Minitest::Test
     end
   end
 
-  def test_errored_selector_ignores_completed_issues_and_healthy_heads
+  def test_errored_issue_with_an_idle_worker_is_pruned
     write_state(
       state_fixture(
         projects: [project_record(id: "P1", status: "working")],
-        issues: [issue_record(id: "P1-I1", project_id: "P1", status: "completed")],
+        issues: [issue_record(id: "P1-I1", project_id: "P1", status: "errored", agent_ids: ["P1-I1-W1"])],
+        agents: [worker_record(id: "P1-I1-W1", issue_id: "P1-I1", project_id: "P1", status: "idle")]
+      )
+    )
+    engine = build_engine
+
+    result = apply_command(engine, "Prune", {})
+
+    assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
+    assert_equal ["P1-I1-W1"], result.dig("result", "removed_agent_ids")
+    assert_empty read_state.fetch("issues")
+  end
+
+  def test_prune_never_removes_a_healthy_head
+    write_state(
+      state_fixture(
+        projects: [project_record(id: "P1", status: "working")],
+        issues: [issue_record(id: "P1-I1", project_id: "P1", status: "working")],
         agents: [head_record(id: "H1", status: "working")]
       )
     )
     engine = build_engine
 
-    result = apply_command(engine, "Prune", "selector" => "errored")
+    result = apply_command(engine, "Prune", {})
 
-    assert_equal "Pruned 0 errored issue bundles and 0 standalone errored agents.", result.fetch("message")
+    assert_equal "Pruned 0 issues, 0 projects, and 0 standalone agents.", result.fetch("message")
     state = read_state
     assert_equal ["P1-I1"], ids(state.fetch("issues"))
     assert_equal ["H1"], ids(state.fetch("agents"))
   end
 
-  def test_errored_prune_removes_the_project_when_every_issue_is_removed
+  def test_prune_removes_the_project_when_every_issue_is_removed
     write_state(
       state_fixture(
         projects: [project_record(id: "P1", status: "errored")],
@@ -96,7 +117,7 @@ class KernelMaintenancePruneErroredTest < Minitest::Test
     )
     engine = build_engine
 
-    result = apply_command(engine, "Prune", "selector" => "errored")
+    result = apply_command(engine, "Prune", {})
 
     assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
     assert_equal ["P1"], result.dig("result", "removed_project_ids")

@@ -4,8 +4,8 @@ require "test_helper"
 require "support/e2e_support"
 
 # Flow 5: restarting Meringue over an existing state file. Reconciliation resumes the harness
-# sessions it can re-attach, errors the ones it cannot, and pruning then removes only the
-# resolved records while retaining everything still in flight.
+# sessions it can re-attach, errors the ones it cannot, and pruning then removes the settled
+# (resolved and errored) records while retaining everything still in flight.
 class E2eRestartRecoveryTest < Minitest::Test
   include E2eSupport
 
@@ -17,7 +17,7 @@ class E2eRestartRecoveryTest < Minitest::Test
     teardown_e2e
   end
 
-  def test_restart_resumes_recoverable_sessions_errors_dead_ones_and_prunes_resolved_work
+  def test_restart_resumes_recoverable_sessions_errors_dead_ones_and_prunes_settled_work
     script_goal("Fix the parser", "P1-I1", include_project: true)
     script_goal("Write release notes", "P1-I2")
     script_goal("Upgrade dependencies", "P1-I3")
@@ -77,28 +77,32 @@ class E2eRestartRecoveryTest < Minitest::Test
     assert_equal "working", agent(after_retries, "P1-I2-W1").fetch("status")
     assert_logged(/Worker P1-I3-W1 errored while reconciling its harness session\./, after_retries)
 
-    # Pruning resolved work removes the finished issue bundle and keeps the rest.
-    prune = restarted_engine.apply("type" => "Prune", "payload" => { "selector" => "resolved" })
+    # `/prune` takes no options: one pass removes the completed bundle and the errored one, and
+    # keeps the work that is still in flight.
+    prune = restarted_engine.apply("type" => "Prune", "payload" => {})
     assert_equal "accepted", prune.fetch("status")
-    assert_equal ["P1-I1"], prune.fetch("result").fetch("removed_issue_ids")
-    assert_includes prune.fetch("result").fetch("removed_agent_ids"), "P1-I1-W1"
+    assert_equal %w[P1-I1 P1-I3], prune.fetch("result").fetch("removed_issue_ids").sort
+    removed_agent_ids = prune.fetch("result").fetch("removed_agent_ids")
+    assert_includes removed_agent_ids, "P1-I1-W1"
+    assert_includes removed_agent_ids, "P1-I3-W1"
+    refute_includes removed_agent_ids, "P1-I2-W1", "the in-flight worker must survive the prune"
     assert_empty prune.fetch("result").fetch("removed_project_ids")
 
     pruned = reloaded_state
-    assert_equal %w[P1-I2 P1-I3], pruned.fetch("issues").map { |issue| issue.fetch("id") }
-    assert_equal %w[P1-I2-W1 P1-I3-W1], workers(pruned).map { |worker| worker.fetch("id") }.sort
+    assert_equal ["P1-I2"], pruned.fetch("issues").map { |issue| issue.fetch("id") }
+    assert_equal ["P1-I2-W1"], workers(pruned).map { |worker| worker.fetch("id") }.sort
     assert_equal ["P1"], pruned.fetch("projects").map { |project| project.fetch("id") }
-    assert_logged(/Pruned 1 resolved issue and 0 projects\./, pruned)
+    assert_logged(/Pruned 2 issues, 0 projects, and 0 standalone agents\./, pruned)
 
     tree = agent_tree_text(pruned)
     refute_includes tree, "I1  Fix the parser"
     assert_includes tree, "I2  Write release notes"
-    assert_includes tree, "I3  Upgrade dependencies"
+    refute_includes tree, "I3  Upgrade dependencies"
 
     # Everything above is what a third process would read back from disk.
     persisted = raw_persisted_state
-    assert_equal 2, persisted.fetch("issues").length
-    assert_equal 2, persisted.fetch("agents").length
+    assert_equal 1, persisted.fetch("issues").length
+    assert_equal 1, persisted.fetch("agents").length
     assert_equal({ "P1" => 3 }, persisted.fetch("counters").fetch("issues_by_project"))
   end
 

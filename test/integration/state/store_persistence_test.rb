@@ -58,7 +58,9 @@ class StateStorePersistenceTest < Minitest::Test
     with_store do |store, path, dir|
       store.save(sample_state, preserve_log_buffer: false)
 
-      assert_equal ["state.json"], Dir.children(dir).sort
+      # The only other file the store is allowed to leave behind is the cross-process lock file
+      # that guards single-writer state updates.
+      assert_equal ["state.json", "state.json.lock"], Dir.children(dir).sort
       assert_empty Dir.glob(File.join(dir, "*.tmp.*")), "no temporary files may remain after a save"
       assert_kind_of Hash, read_state_file(path)
     end
