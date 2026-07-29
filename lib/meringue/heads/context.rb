@@ -133,9 +133,8 @@ module Meringue
       end
 
       def routing_context
-        {
+        context = {
           "purpose" => "Stateless routing hints assembled from existing issues, logs, and inspectable harness session metadata. These are not a separate conversation history.",
-          "selected_target" => selected_target_context,
           "explicit_references" => explicit_references,
           "question_being_answered" => question_being_answered,
           "open_questions" => open_question_records,
@@ -156,6 +155,9 @@ module Meringue
             "When this message answers an open question, pair AnswerQuestion with the routing command that acts on the answer in the same HeadResult. Closing a question without routing the unblocked work drops the user's request."
           ]
         }
+        target = selected_target_context
+        context["selected_target"] = target if target
+        context
       end
 
       def selected_target_context
