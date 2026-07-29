@@ -103,6 +103,9 @@ module Meringue
       PROMPT_MODES = %w[normal steer follow_up].freeze
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
       HEAD_RECONCILE_WARNING_DELAY_SECONDS = 5
+      # Token-overlap ratio above which two clarifications from the same head are treated as
+      # one restated question instead of two separate questions.
+      DUPLICATE_QUESTION_SIMILARITY_THRESHOLD = 0.6
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
       HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
@@ -1875,6 +1878,20 @@ module Meringue
         return rejected_result(command_id, command_type, "Project #{project_id} does not exist.", ["project_not_found"]) if present_string(project_id) && !find_project(state, project_id)
         return rejected_result(command_id, command_type, "Issue #{issue_id} does not exist.", ["issue_not_found"]) if present_string(issue_id) && !find_issue(state, issue_id)
 
+        # One clarification must produce one question record and one log line, even when a head
+        # expresses it both in its HeadResult `questions` array and as an `AskQuestion` command.
+        existing_question = find_duplicate_head_question(state, head_id.to_s, question_text)
+        if existing_question
+          return accepted_result(
+            command_id,
+            command_type,
+            existing_question.fetch("id"),
+            "Question #{existing_question.fetch("id")} already records this clarification for head #{head_id}.",
+            existing_question,
+            []
+          )
+        end
+
         log_ids = []
         question = build_question(
           state: state,
@@ -2964,14 +2981,61 @@ module Meringue
 
       def ensure_head_questions!(state, head_id, questions, log_ids)
         Array(questions).map do |question_payload|
-          existing = state.fetch("questions").find do |question|
-            question.fetch("head_id", nil) == head_id &&
-              question.fetch("question", nil).to_s == question_payload.fetch("question").to_s
-          end
+          existing = find_duplicate_head_question(state, head_id, question_payload.fetch("question"))
           next existing.fetch("id") if existing
 
           create_head_questions!(state, head_id, [question_payload], log_ids).first
         end
+      end
+
+      def find_head_question_by_text(state, head_id, question_text)
+        normalized = normalized_question_text(question_text)
+        return nil if normalized.empty?
+
+        state.fetch("questions").find do |question|
+          question.fetch("head_id", nil).to_s == head_id.to_s &&
+            normalized_question_text(question.fetch("question", nil)) == normalized
+        end
+      end
+
+      # Heads sometimes restate one clarification twice: once in the HeadResult `questions`
+      # array and once as an `AskQuestion` command, often with slightly reworded text. The
+      # kernel records a clarification once per head, so a near-identical restatement resolves
+      # to the question that is already stored instead of creating a second record and log line.
+      def find_duplicate_head_question(state, head_id, question_text)
+        normalized = normalized_question_text(question_text)
+        return nil if normalized.empty?
+
+        exact = find_head_question_by_text(state, head_id, question_text)
+        return exact if exact
+
+        head_questions = state.fetch("questions").select { |question| question.fetch("head_id", nil).to_s == head_id.to_s }
+        scored = head_questions.map do |question|
+          [question_text_similarity(normalized_question_text(question.fetch("question", nil)), normalized), question]
+        end
+        score, question = scored.max_by { |similarity, _question| similarity }
+        return nil unless question && score.to_f >= DUPLICATE_QUESTION_SIMILARITY_THRESHOLD
+
+        question
+      end
+
+      def normalized_question_text(question_text)
+        question_text.to_s.strip.downcase.gsub(/\s+/, " ")
+      end
+
+      def question_text_similarity(left, right)
+        left_words = question_text_words(left)
+        right_words = question_text_words(right)
+        return 0.0 if left_words.empty? || right_words.empty?
+
+        union = (left_words | right_words).length
+        return 0.0 if union.zero?
+
+        (left_words & right_words).length.to_f / union
+      end
+
+      def question_text_words(text)
+        text.to_s.downcase.scan(/[a-z0-9]+/).uniq
       end
 
       def current_head_journal_entry(head_id, index)

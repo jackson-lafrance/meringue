@@ -43,6 +43,8 @@ Every head result must match this shape:
 - `commands`: array of kernel command envelopes.
 - `questions`: array of clarifying question objects when ambiguity would likely cause bad work.
 
+Express each clarification exactly once. Put it in `questions`, or send one `AskQuestion` command for it, but do not restate the same clarification in both places. The `questions` array is the preferred form and is recorded first. If a head does restate one clarification twice, the kernel records it once: a repeated or reworded restatement from the same head resolves to the already stored question instead of creating a second question and a second chat log line. Genuinely different clarifications are still stored separately, so list every distinct question you need.
+
 ## Kernel command envelope
 
 Each command in `commands` must use this shape:
@@ -361,7 +363,9 @@ Example:
 
 ### AskQuestion
 
-Stores a clarifying question from a head agent.
+Stores a clarifying question from a head agent. Prefer the HeadResult `questions` array; use this command only for a clarification that is not already listed there.
+
+The kernel keeps one question record per clarification per head. When this command repeats or lightly rewords a clarification the same head already recorded, the command is accepted and resolves to the existing question id without storing a duplicate or emitting a second log line.
 
 Payload:
 
@@ -520,7 +524,7 @@ Example:
 
 ## Question object shape
 
-When the head cannot safely choose commands, add a question object to `questions` instead of guessing.
+When the head cannot safely choose commands, add a question object to `questions` instead of guessing. One clarification is one entry; do not also send an `AskQuestion` command for that same clarification.
 
 ```json
 {
