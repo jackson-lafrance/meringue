@@ -615,7 +615,7 @@ Example:
 
 Kills an agent, issue, or project subtree.
 
-Killing is an immediate stop-and-remove operation. It cascades lifecycle state downward, stops attached harness sessions, and removes the worker or target subtree from active state in the same command, so killed records do not linger in the AgentTree. `/prune` remains a separate command for cleaning up eligible completed records.
+Killing is an immediate stop-and-remove operation. It cascades lifecycle state downward, stops attached harness sessions, and removes the worker or target subtree from active state in the same command, so killed records do not linger in the AgentTree. It does not force-remove a worktree during the emergency stop; `/prune` remains the lifecycle cleanup command for eligible completed/errored records, and startup reconciliation applies the same safe worktree cleanup to any killed records left by an interrupted command.
 
 Payload:
 
@@ -633,9 +633,9 @@ Example:
 
 ### Prune
 
-Removes resolved and errored records from active Meringue state without deleting worker workspaces. This is a user slash-command cleanup tool; head agents should not propose it.
+Removes resolved and errored records from active Meringue state and cleans up their Meringue-managed git worktrees. This is a user slash-command cleanup tool; head agents should not propose it.
 
-Prune takes no options. `/prune` is a single no-argument command and one kernel pass removes every eligible record at once, so there is no separate resolved-versus-errored cleanup to remember.
+Prune takes no options. `/prune` is a single no-argument command and one kernel pass removes every eligible record at once, so there is no separate resolved-versus-errored cleanup to remember. Worktree branches are retained after the directory is removed so committed delivery work remains reachable.
 
 Payload:
 
@@ -656,7 +656,15 @@ What is retained:
 - An issue whose subtree still has a `queued`, `working`, or `blocked` worker. An `errored` worker is settled and does not retain its issue.
 - An issue whose subtree has an open question.
 - An issue with an attached PR that is open (including a draft) or whose status cannot be resolved. Merged and closed-without-merge PRs are settled and do not block pruning.
-- Every worker workspace on disk. Prune only removes state records.
+- A bundle whose managed worktree cannot be removed safely. Dirty and locked worktrees are never forced; ownership/path/branch mismatches and git failures also retain the record so a later `/prune` can retry.
+
+Worktree cleanup safety and outcomes:
+
+- Only `git_worktree` workspaces under Meringue's configured workspace root are candidates. Project-root and dedicated-directory workspaces are left untouched.
+- The persisted worktree path must still be registered to the persisted `meringue/…` branch in the expected repository and must not be the main checkout or overlap a path referenced by another worker.
+- Clean, unlocked worktrees are removed with `git worktree remove` **without** `--force`. The branch is not deleted.
+- A missing but still-registered worktree is safely deregistered. A worktree already absent from both disk and git's registry is an idempotent success.
+- Dirty, locked, ambiguous, or failed cleanups leave the issue/worker record in state. The worker stores its latest `harness_metadata.workspace_cleanup` result, warning/info logs name each outcome, and the `Prune` result exposes `workspace_cleanup_outcomes` plus blocked agent/issue/project IDs.
 
 Compatibility: a legacy `selector` value (`resolved`, `errored`, `completed`, or `merged`) is still accepted and recorded as `requested_selector` in the log details, but it is a no-op that prunes exactly the same records as a bare `/prune`. Any other `/prune` argument is rejected by the slash-command parser with a short usage message.
 
