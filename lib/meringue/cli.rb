@@ -254,6 +254,8 @@ module Meringue
           Ctrl-B                    # open the selected worker's verified delivery PR
           Enter in jump mode        # open selected issue/agent PR when one is available
           a in jump mode            # open the selected agent's focused workspace
+          AgentTree single-click    # select that project/issue/head/worker and filter the logs pane to it
+          click the selected row    # deselect and show all logs again (empty AgentTree space also deselects)
           issue/worker double-click # open that worker's optional focused workspace
           Ctrl-Space, then T / F    # switch terminal/agent view / cycle transcript filter
           Ctrl-Space, then A        # open the worker's underlying agent session externally
@@ -262,7 +264,7 @@ module Meringue
           / in a focused workspace  # workspace commands: /help /terminal /filter /session /editor /pr /cwd /cancel /quit
           Alt-V with logs focused   # toggle keyboard logs selection; Shift+arrows also start it
           Ctrl-C with a selection   # copy the selection to the system clipboard
-          Ctrl-C on an empty prompt # quit the TUI; Esc cancels dashboard jump mode or clears a selection
+          Ctrl-C on an empty prompt # quit the TUI; Esc clears a selection, then the AgentTree log filter and jump mode
       HELP
     end
   end

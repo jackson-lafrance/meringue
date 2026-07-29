@@ -49,7 +49,7 @@ module Meringue
           metrics.fetch(:top_y),
           metrics.fetch(:main_width),
           metrics.fetch(:logs_height),
-          "logs",
+          logs_pane_title(state),
           chat_pane.log_lines(state, width: metrics.fetch(:main_width) - 4),
           active: scroll_pane_active?(state, "logs"),
           overflow: :tail,
@@ -482,6 +482,13 @@ module Meringue
         end
 
         { x: content_x, width: content_width, rows: rows, lines: lines }
+      end
+
+      # The logs title carries the active AgentTree filter when one is selected.
+      def logs_pane_title(state)
+        return "logs" unless chat_pane.respond_to?(:log_pane_title)
+
+        chat_pane.log_pane_title(state)
       end
 
       def pane_selection(state, pane)
