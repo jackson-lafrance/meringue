@@ -183,14 +183,14 @@ The focused composer also accepts slash commands, scoped to the selected worker.
 | `/help` | List the workspace commands. |
 | `/terminal` | Switch between the terminal and agent view. |
 | `/filter [all\|output\|final\|reasoning\|tools]` | Set the transcript filter, or cycle it when no value is given. |
-| `/session` | Open the worker's underlying agent session externally. |
+| `/open-session` | Open the worker's underlying agent session externally. |
 | `/editor` | Open the worker worktree in the configured editor. |
 | `/pr` | Open the verified delivery pull request. |
 | `/cwd` | Show the worker's resolved worktree directory. |
 | `/cancel` | Cancel the worker's current turn without ending its session. |
 | `/quit` | Return to the AgentTree, keeping the worker and its terminal alive. |
 
-`/agent`, `/back`, `/pwd`, `/abort`, and a few other obvious aliases resolve to the same actions. Aliases never name a specific harness backend, so nothing here is Pi-specific. Unknown commands, unknown filters, and stray arguments are reported in the workspace instead of being sent to the worker as a prompt. In terminal view there is no composer, so `/` goes to the shell and the leader keys remain the way to switch views.
+The old argumentless `/session`, plus `/agent`, `/back`, `/pwd`, `/abort`, and a few other obvious aliases resolve to the same actions. Aliases never name a specific harness backend, so nothing here is Pi-specific. Unknown commands, unknown filters, and stray arguments are reported in the workspace instead of being sent to the worker as a prompt. In terminal view there is no composer, so `/` goes to the shell and the leader keys remain the way to switch views.
 
 `Enter` still sends a direct follow-up into the selected worker's existing context through the kernel-owned `PromptAgent` path, `Shift-Enter` still inserts a newline, and `PageUp`/`PageDown` or the mouse wheel still scroll the agent transcript; those are no longer repeated in the hint line. In terminal view the mouse wheel scrolls the terminal viewport while `PageUp`/`PageDown` go to the shell.
 

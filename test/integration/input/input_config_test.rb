@@ -219,6 +219,38 @@ class InputConfigTest < Minitest::Test
     end
   end
 
+  def test_saving_pi_session_defaults_preserves_unrelated_config_and_role_arguments
+    Dir.mktmpdir("meringue-config-test") do |dir|
+      path = write_config(File.join(dir, "config.toml"), FULL_CONFIG)
+
+      saved = Meringue::Config.save_pi_session_defaults!(
+        model: "openai/gpt-5.6-sol",
+        thinking_level: "xhigh",
+        path: path
+      )
+
+      assert_equal "openai/gpt-5.6-sol", saved.value("harness", "pi", "model")
+      assert_equal "xhigh", saved.value("harness", "pi", "thinking_level")
+      assert_equal ["--model", "anthropic/claude-opus-5"], saved.value("harness", "pi", "head_extra_args")
+      assert_equal "gruvbox", saved.value("tui", "colorscheme")
+      reloaded = Meringue::Config.load(path: path)
+      assert_equal "openai/gpt-5.6-sol", reloaded.value("harness", "pi", "model")
+      assert_equal "xhigh", reloaded.value("harness", "pi", "thinking_level")
+    end
+  end
+
+  def test_saving_one_pi_session_default_preserves_the_other
+    Dir.mktmpdir("meringue-config-test") do |dir|
+      path = File.join(dir, "config.toml")
+      Meringue::Config.save_pi_session_defaults!(model: "openai/gpt-5.6-sol", thinking_level: "high", path: path)
+
+      saved = Meringue::Config.save_pi_session_defaults!(thinking_level: "xhigh", path: path)
+
+      assert_equal "openai/gpt-5.6-sol", saved.value("harness", "pi", "model")
+      assert_equal "xhigh", saved.value("harness", "pi", "thinking_level")
+    end
+  end
+
   def test_shipped_example_config_parses
     config = Meringue::Config.load(path: Meringue.root_path("fixtures", "config.example.toml"))
 

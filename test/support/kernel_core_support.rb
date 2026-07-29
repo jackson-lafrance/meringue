@@ -51,14 +51,15 @@ module KernelCoreSupport
     super
   end
 
-  def build_engine(store: @store, head_runner: @head_runner)
+  def build_engine(store: @store, head_runner: @head_runner, **options)
     Meringue::Kernel::Engine.new(
       store: store,
       harness_client: Meringue::Harness::FakeClient.new,
       head_runner: head_runner,
       workspace_manager: Meringue::Workspace::Manager.new(root_path: File.join(@tmp_root, "workspaces")),
       cwd: @tmp_root,
-      config_path: File.join(@tmp_root, "config.toml")
+      config_path: File.join(@tmp_root, "config.toml"),
+      **options
     )
   end
 

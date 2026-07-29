@@ -16,9 +16,12 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker session."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
-        ["/session <agent_id>", "Show the effective model and thinking level reported by a harness session."],
-        ["/model <agent_id> <provider/model>", "Change one Pi session's model without changing defaults."],
-        ["/thinking <agent_id> <level>", "Change one Pi session's thinking level."],
+        ["/defaults", "Show the model and thinking level for all future Pi sessions."],
+        ["/default-model <provider/model>", "Persist the model for all future Pi sessions; existing sessions are unchanged."],
+        ["/default-thinking <level>", "Persist the thinking level for all future Pi sessions; existing sessions are unchanged."],
+        ["/session-settings <agent_id>", "Refresh and show one existing agent's effective Pi model and thinking level."],
+        ["/model <agent_id> <provider/model>", "Change only one existing Pi session's model; defaults are unchanged."],
+        ["/thinking <agent_id> <level>", "Change only one existing Pi session's thinking level; defaults are unchanged."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/keybind", "Show all TUI keybindings."],
@@ -37,7 +40,9 @@ module Meringue
         { "prefix" => "/issue create", "source" => "projects", "append_space" => true },
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
         { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
-        { "prefix" => "/session", "source" => "sessions", "append_space" => false },
+        { "prefix" => "/session-settings", "source" => "sessions", "append_space" => false },
+        { "prefix" => "/default-model", "source" => "session_models", "append_space" => false },
+        { "prefix" => "/default-thinking", "source" => "thinking_levels", "append_space" => false },
         { "prefix" => "/model", "source" => "sessions", "append_space" => true, "position" => 1 },
         { "prefix" => "/model", "source" => "session_models", "append_space" => false, "position" => 2 },
         { "prefix" => "/thinking", "source" => "sessions", "append_space" => true, "position" => 1 },
@@ -189,10 +194,11 @@ module Meringue
         values = if source == "thinking_levels"
                    Meringue::Harness::PiClient::THINKING_LEVELS
                  else
-                   configured = Array(state["agents"]).filter_map do |agent|
+                   configured_default = state.dig("metadata", "pi_session_defaults", "model")
+                   observed = Array(state["agents"]).filter_map do |agent|
                      agent.dig("session_settings", "model", "reference")
                    end
-                   ([Meringue::Harness::Registry::DEFAULT_PI_MODEL] + configured).uniq
+                   ([configured_default, Meringue::Harness::Registry::DEFAULT_PI_MODEL] + observed).compact.uniq
                  end
         query = context.fetch("query", "").to_s.downcase
         values.filter_map.with_index do |value, index|
@@ -200,7 +206,7 @@ module Meringue
 
           {
             "usage" => value,
-            "description" => source == "thinking_levels" ? "Pi thinking level" : "observed Pi model",
+            "description" => session_value_description(context, source),
             "completion" => "#{context.fetch("completion_prefix")} #{value}",
             "requires_arguments" => false,
             "append_space" => false,
@@ -208,6 +214,13 @@ module Meringue
             "kind" => source
           }
         end
+      end
+
+      def self.session_value_description(context, source)
+        future = context.fetch("prefix", "").start_with?("/default-")
+        return future ? "thinking level for future Pi sessions" : "Pi thinking level" if source == "thinking_levels"
+
+        future ? "model for future Pi sessions" : "observed Pi model"
       end
 
       def self.id_suggestion_records(items, context)
@@ -285,8 +298,14 @@ module Meringue
           parse_theme(arguments)
         when "harness"
           parse_harness(arguments)
-        when "session"
-          parse_session(arguments)
+        when "defaults"
+          parse_defaults(arguments)
+        when "default-model"
+          parse_default_model(arguments)
+        when "default-thinking"
+          parse_default_thinking(arguments)
+        when "session-settings", "session"
+          parse_session_settings(arguments, legacy: command_text == "session")
         when "model"
           parse_model(arguments)
         when "thinking"
@@ -344,9 +363,30 @@ module Meringue
         kernel_command("SetHarness", "provider" => tokens[0])
       end
 
-      def parse_session(arguments)
+      def parse_defaults(arguments)
+        return invalid("Usage: /defaults") unless split_arguments(arguments).empty?
+
+        kernel_command("GetSessionDefaults")
+      end
+
+      def parse_default_model(arguments)
         tokens = split_arguments(arguments)
-        return invalid("Usage: /session <agent_id>") unless tokens.length == 1
+        return invalid("Usage: /default-model <provider/model>") unless tokens.length == 1
+
+        kernel_command("SetDefaultSessionModel", "model" => tokens[0])
+      end
+
+      def parse_default_thinking(arguments)
+        tokens = split_arguments(arguments)
+        return invalid("Usage: /default-thinking <off|minimal|low|medium|high|xhigh|max>") unless tokens.length == 1
+
+        kernel_command("SetDefaultSessionThinkingLevel", "level" => tokens[0])
+      end
+
+      def parse_session_settings(arguments, legacy: false)
+        tokens = split_arguments(arguments)
+        usage = legacy ? "/session <agent_id> (alias for /session-settings <agent_id>)" : "/session-settings <agent_id>"
+        return invalid("Usage: #{usage}") unless tokens.length == 1
 
         kernel_command("GetSessionSettings", "agent_id" => tokens[0])
       end
@@ -415,13 +455,10 @@ module Meringue
 
       def parse_answer(arguments)
         tokens = split_arguments(arguments)
-        answer = tokens[1..]&.join(" ")
-        return invalid("Usage: /answer <question_id> \"<answer>\"") if tokens.empty? || answer.nil? || answer.strip.empty?
-
         kernel_command(
           "AnswerQuestion",
-          "question_id" => normalized_question_id(tokens[0]),
-          "answer" => answer
+          "question_id" => tokens[0] && normalized_question_id(tokens[0]),
+          "answer" => tokens[1..]&.join(" ")
         )
       end
 

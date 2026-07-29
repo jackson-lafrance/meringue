@@ -76,6 +76,36 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_match(/session file is missing/, error.message)
   end
 
+  def test_session_settings_are_discovered_from_the_current_persisted_pi_branch
+    session_file = pi_session_file(
+      tmpdir,
+      session_id: "sess-settings",
+      extra_lines: [
+        JSON.generate(
+          "type" => "model_change",
+          "id" => "model-1",
+          "parentId" => "m2",
+          "provider" => "openai",
+          "modelId" => "gpt-5.6-sol"
+        ),
+        JSON.generate(
+          "type" => "thinking_level_change",
+          "id" => "thinking-1",
+          "parentId" => "model-1",
+          "thinkingLevel" => "xhigh"
+        )
+      ]
+    )
+    client, = build_pi_client(tmpdir)
+    ref = pi_session_ref(session_file: session_file, session_id: "sess-settings", cwd: tmpdir)
+
+    outcome = client.get_session_settings(ref)
+
+    assert_equal "openai/gpt-5.6-sol", outcome.dig("settings", "model", "reference")
+    assert_equal "xhigh", outcome.dig("settings", "thinking_level")
+    assert_equal "persisted_session", outcome.dig("settings", "source")
+  end
+
   def test_attach_session_resumes_from_the_persisted_session_file
     ownership = build_transport_ownership(tmpdir)
     stub = write_pi_stub(tmpdir, "session_id" => "sess-1")
@@ -85,6 +115,7 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
       session_dir: File.join(tmpdir, "pi-sessions"),
       command_timeout: 10,
       shutdown_timeout: 1,
+      extra_args: ["--model", "openai/future-model", "--thinking", "xhigh", "--tools", "read,bash"],
       transport_ownership: ownership
     )
     session_file = pi_session_file(tmpdir, session_id: "sess-1")
@@ -96,8 +127,12 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_equal session_file, attached.fetch("metadata").fetch("resume_session")
     assert_equal true, attached.fetch("metadata").fetch("attach_supported")
     assert_equal "worker", attached.fetch("metadata").fetch("kind")
-    assert_includes stub_argv(stub).each_cons(2).to_a, ["--session", session_file]
-    assert_includes stub_argv(stub).each_cons(2).to_a, ["--name", "Fix login redirect"]
+    argv = stub_argv(stub)
+    assert_includes argv.each_cons(2).to_a, ["--session", session_file]
+    assert_includes argv.each_cons(2).to_a, ["--name", "Fix login redirect"]
+    assert_includes argv.each_cons(2).to_a, ["--tools", "read,bash"]
+    refute_includes argv, "openai/future-model"
+    refute_includes argv, "xhigh"
     assert_equal ["Fix login redirect"], stub_commands_of_type(stub, "set_session_name").map { |c| c.fetch("name") }
     assert_equal "resumed", ownership.record_for("pi-sess-1").fetch("note")
     assert_equal attached.fetch("pid"), ownership.record_for("pi-sess-1").fetch("pid")

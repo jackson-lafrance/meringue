@@ -77,6 +77,9 @@ module Meringue
         "theme" => "SetTheme",
         "set_theme" => "SetTheme",
         "get_state" => "GetState",
+        "get_session_defaults" => "GetSessionDefaults",
+        "set_default_session_model" => "SetDefaultSessionModel",
+        "set_default_session_thinking_level" => "SetDefaultSessionThinkingLevel",
         "get_session_settings" => "GetSessionSettings",
         "set_session_model" => "SetSessionModel",
         "set_session_thinking_level" => "SetSessionThinkingLevel",
@@ -97,9 +100,12 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker agent session."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
-        ["/session <agent_id>", "Show the effective model and thinking level reported by the agent's harness session."],
-        ["/model <agent_id> <provider/model>", "Change one Pi session's model without changing Meringue defaults."],
-        ["/thinking <agent_id> <level>", "Change one Pi session's thinking level: off, minimal, low, medium, high, xhigh, or max."],
+        ["/defaults", "Show the model and thinking level used for all future Pi heads and workers."],
+        ["/default-model <provider/model>", "Persist the model used for all future Pi heads and workers; existing sessions are unchanged."],
+        ["/default-thinking <level>", "Persist the thinking level used for all future Pi heads and workers: off, minimal, low, medium, high, xhigh, or max."],
+        ["/session-settings <agent_id>", "Refresh and show one existing agent's effective Pi session model and thinking level."],
+        ["/model <agent_id> <provider/model>", "Change only one existing Pi session's model; future-session defaults are unchanged."],
+        ["/thinking <agent_id> <level>", "Change only one existing Pi session's thinking level: off, minimal, low, medium, high, xhigh, or max."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "TUI local: open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/keybind", "TUI local: show all keybindings."],
@@ -174,6 +180,8 @@ module Meringue
                      harness_client_provider: nil,
                      head_runner_provider: nil,
                      default_harness_provider: nil,
+                     session_defaults_provider: nil,
+                     session_defaults_updater: nil,
                      workspace_manager: Workspace::Manager.new,
                      cwd: Dir.pwd,
                      async_heads: false,
@@ -188,6 +196,8 @@ module Meringue
         @harness_client_provider = harness_client_provider
         @head_runner_provider = head_runner_provider
         @default_harness_provider = normalize_initial_harness_provider(default_harness_provider || inferred_default_harness_provider)
+        @session_defaults_provider = session_defaults_provider
+        @session_defaults_updater = session_defaults_updater
         @workspace_manager = workspace_manager
         @cwd = File.expand_path(cwd)
         @async_heads = async_heads
@@ -321,6 +331,12 @@ module Meringue
           accepted_result(command_id, command_type, nil, "Loaded Meringue state.", store.load, [])
         when "GetState"
           get_state(command_id, command_type)
+        when "GetSessionDefaults"
+          get_session_defaults(command_id, command_type)
+        when "SetDefaultSessionModel"
+          set_default_session_model(command_id, command_type, payload)
+        when "SetDefaultSessionThinkingLevel"
+          set_default_session_thinking_level(command_id, command_type, payload)
         when "GetSessionSettings"
           get_session_settings(command_id, command_type, payload)
         when "SetSessionModel"
@@ -798,6 +814,154 @@ module Meringue
 
       def get_state(command_id, command_type)
         accepted_result(command_id, command_type, nil, "Loaded Meringue state.", store.load, [])
+      end
+
+      def get_session_defaults(command_id, command_type)
+        state = normalized_state
+        defaults = configured_pi_session_defaults
+        message = pi_session_defaults_message(defaults)
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: nil,
+          level: "info",
+          message: message,
+          details: defaults.merge("config_path" => config_path)
+        )
+        touch_state!(state)
+        store.save(state)
+        accepted_result(command_id, command_type, "pi", message, defaults.merge("config_path" => config_path), log_ids)
+      end
+
+      def set_default_session_model(command_id, command_type, payload)
+        model_reference = value_at(payload, "model", "model_reference", "Model", "ModelReference")
+        return rejected_result(command_id, command_type, "Default Pi model was not changed.", ["model is required"]) if blank?(model_reference)
+        unless model_reference.to_s.match?(%r{\A[^/\s]+/[^/\s]+\z})
+          return rejected_result(
+            command_id,
+            command_type,
+            "Default Pi model was not changed.",
+            ["model must use an exact provider/model id, for example openai/gpt-5.6-sol"]
+          )
+        end
+
+        update_pi_session_defaults(
+          command_id,
+          command_type,
+          model: model_reference.to_s,
+          changed_field: "model"
+        )
+      end
+
+      def set_default_session_thinking_level(command_id, command_type, payload)
+        level = value_at(payload, "level", "thinking_level", "Level", "ThinkingLevel").to_s.strip.downcase
+        unless Meringue::Harness::PiClient::THINKING_LEVELS.include?(level)
+          return rejected_result(
+            command_id,
+            command_type,
+            "Default Pi thinking level was not changed.",
+            ["thinking level must be one of: #{Meringue::Harness::PiClient::THINKING_LEVELS.join(", ")}"]
+          )
+        end
+
+        update_pi_session_defaults(
+          command_id,
+          command_type,
+          thinking_level: level,
+          changed_field: "thinking_level"
+        )
+      end
+
+      def update_pi_session_defaults(command_id, command_type, model: nil, thinking_level: nil, changed_field:)
+        previous = configured_pi_session_defaults
+        defaults = if @session_defaults_updater
+                     @session_defaults_updater.call("pi", model: model, thinking_level: thinking_level)
+                   else
+                     saved = Config.save_pi_session_defaults!(
+                       model: model,
+                       thinking_level: thinking_level,
+                       path: config_path
+                     )
+                     Meringue::Harness::Registry.new(config: saved).session_defaults(provider: "pi")
+                   end
+        defaults = Config.deep_stringify(defaults)
+        state = normalized_state
+        state.fetch("metadata")["pi_session_defaults"] = deep_copy(defaults)
+        unchanged_ids = existing_pi_session_ids(state)
+        value = changed_field == "model" ? defaults.fetch("model", model) : defaults.fetch("thinking_level", thinking_level)
+        label = changed_field == "model" ? "model" : "thinking level"
+        message = "Set the default Pi #{label} to #{value} for all future Pi heads and workers. " \
+                  "Existing Pi sessions were not changed#{unchanged_ids.empty? ? "." : ": #{unchanged_ids.join(", ")}."}"
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: nil,
+          level: "info",
+          message: message,
+          details: {
+            "changed_field" => changed_field,
+            "previous_defaults" => previous,
+            "pi_session_defaults" => defaults,
+            "scope" => "future_pi_sessions",
+            "existing_session_ids_unchanged" => unchanged_ids,
+            "config_path" => config_path
+          }
+        )
+        touch_state!(state)
+        store.save(state)
+        accepted_result(
+          command_id,
+          command_type,
+          "pi",
+          message,
+          defaults.merge(
+            "config_path" => config_path,
+            "existing_session_ids_unchanged" => unchanged_ids
+          ),
+          log_ids
+        )
+      rescue Config::ParseError => e
+        rejected_result(command_id, command_type, "Default Pi session settings were not changed because config could not be read.", [e.message])
+      end
+
+      def configured_pi_session_defaults
+        defaults = if @session_defaults_provider
+                     @session_defaults_provider.call("pi")
+                   else
+                     config = Config.load(path: config_path)
+                     Meringue::Harness::Registry.new(config: config).session_defaults(provider: "pi")
+                   end
+        Config.deep_stringify(defaults)
+      rescue Config::ParseError
+        fallback_pi_session_defaults
+      end
+
+      def fallback_pi_session_defaults
+        model = Meringue::Harness::Registry::DEFAULT_PI_MODEL
+        thinking = Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL
+        {
+          "harness" => "pi",
+          "model" => model,
+          "thinking_level" => thinking,
+          "consistency" => "consistent",
+          "roles" => {
+            "head" => { "model" => model, "thinking_level" => thinking },
+            "worker" => { "model" => model, "thinking_level" => thinking }
+          },
+          "scope" => "future_pi_sessions"
+        }
+      end
+
+      def existing_pi_session_ids(state)
+        state.fetch("agents", []).select do |agent|
+          agent.fetch("harness", nil).to_s == "pi" && agent_has_session_reference?(agent)
+        end.map { |agent| agent.fetch("id", nil) }.compact
+      end
+
+      def pi_session_defaults_message(defaults)
+        model = defaults.fetch("model", nil) || "mixed by role"
+        thinking = defaults.fetch("thinking_level", nil) || "mixed by role"
+        "Future Pi heads and workers use #{model} with thinking #{thinking}. Existing sessions keep their own effective settings."
       end
 
       def get_session_settings(command_id, command_type, payload)
@@ -4992,6 +5156,7 @@ module Meringue
         state["metadata"]["active_harness"] = selectable_harness_provider?(internal_harness) ? Meringue::Harness::Registry.public_provider_name(internal_harness) : internal_harness
         state["metadata"]["active_harness_label"] = Meringue::Harness::Registry.provider_label(internal_harness) if selectable_harness_provider?(internal_harness)
         state["metadata"]["harness_generation"] ||= 0
+        state["metadata"]["pi_session_defaults"] = configured_pi_session_defaults
       end
 
       def max_numeric_suffix(records, pattern)

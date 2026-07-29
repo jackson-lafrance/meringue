@@ -49,6 +49,49 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     assert_equal %w[--tools read,bash], argv.last(2)
   end
 
+  def test_spawn_arguments_can_change_for_future_sessions_without_replacing_the_client_or_live_processes
+    client, first_stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-42" })
+    first = spawn(client, session_name: "First task")
+
+    returned = client.configure_spawn_arguments(["--model", "openai/gpt-5.6-sol", "--thinking", "xhigh"])
+
+    assert_equal ["--model", "openai/gpt-5.6-sol", "--thinking", "xhigh"], returned
+    assert process_alive?(first.fetch("pid")), "changing defaults must not terminate an existing Pi transport"
+    # The next spawn reads the new argv. The stub executable is reusable, so no
+    # real Pi process or second client is needed; give its next process a unique
+    # session id just as Pi would.
+    config_path = first_stub.fetch("env").fetch("PI_STUB_CONFIG")
+    next_config = first_stub.fetch("config").merge("session_id" => "sess-43")
+    File.write(config_path, JSON.generate(next_config))
+    second = spawn(client, session_name: "Second task")
+    assert process_alive?(second.fetch("pid"))
+    assert_equal ["--model", "openai/gpt-5.6-sol", "--thinking", "xhigh"], stub_argv(first_stub).last(4)
+  end
+
+  def test_live_session_settings_are_discovered_and_updated_through_pi_rpc
+    client, stub = build_pi_client(
+      tmpdir,
+      stub_config: {
+        "session_id" => "sess-settings",
+        "model" => { "provider" => "anthropic", "id" => "claude-opus-5" },
+        "thinking_level" => "max",
+        "available_thinking_levels" => %w[high xhigh max]
+      }
+    )
+    ref = spawn(client)
+
+    inspected = client.get_session_settings(ref)
+    assert_equal "anthropic/claude-opus-5", inspected.dig("settings", "model", "reference")
+    assert_equal "max", inspected.dig("settings", "thinking_level")
+
+    model = client.set_session_model(ref, "openai/gpt-5.6-sol")
+    assert_equal "openai/gpt-5.6-sol", model.dig("settings", "model", "reference")
+    thinking = client.set_session_thinking_level(model.fetch("session_ref"), "xhigh")
+    assert_equal "xhigh", thinking.dig("settings", "thinking_level")
+    assert_equal ["set_model"], stub_commands_of_type(stub, "set_model").map { |command| command.fetch("type") }
+    assert_equal ["xhigh"], stub_commands_of_type(stub, "set_thinking_level").map { |command| command.fetch("level") }
+  end
+
   def test_spawn_session_sets_a_human_facing_session_name_without_meringue_or_pi_ids
     client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-42" })
 
