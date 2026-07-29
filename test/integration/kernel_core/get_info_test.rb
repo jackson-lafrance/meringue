@@ -3,11 +3,9 @@
 require "test_helper"
 require "support/kernel_core_support"
 
-# GetInfo is specified in AGENTS.md and docs/head_agent_kernel_commands.md but is not
-# implemented by Kernel::Engine#dispatch_command. These tests pin the behaviour that exists
-# today (rejection as an unknown command, plus the state-snapshot lookups that heads and the
-# TUI actually rely on) so the gap is visible instead of silent.
-# See test/findings/kernel_core.md, finding 1.
+# GetInfo is a read-only kernel command used by heads for questions such as "what is P1-I1?".
+# It returns the target record plus compact related records and recent target logs without
+# mutating state.
 class KernelCoreGetInfoTest < Minitest::Test
   include KernelCoreSupport
 
@@ -19,46 +17,44 @@ class KernelCoreGetInfoTest < Minitest::Test
     ask_question!("H1", question: "Which environment?", "project_id" => "P1", "issue_id" => "P1-I1")
   end
 
-  def test_get_info_is_currently_rejected_as_an_unknown_command
-    %w[P1 P1-I1 H1 Q1].each do |target_id|
+  def test_get_info_returns_project_issue_agent_and_question_records
+    expected_kinds = { "P1" => "project", "P1-I1" => "issue", "H1" => "agent", "Q1" => "question" }
+
+    expected_kinds.each do |target_id, expected_kind|
       result = apply_command("GetInfo", "target_id" => target_id)
 
-      assert_rejected(result, "unknown_command")
+      assert_accepted(result)
       assert_equal "GetInfo", result.fetch("command_type")
-      assert_equal "Unknown kernel command: GetInfo", result.fetch("message")
-      assert_nil result.fetch("target_id")
-      assert_nil result.fetch("result")
+      assert_equal target_id, result.fetch("target_id")
+      assert_equal expected_kind, result.dig("result", "kind")
+      assert_equal target_id, result.dig("result", "record", "id")
     end
   end
 
-  def test_get_info_rejection_is_logged_as_a_warning_and_leaves_records_alone
+  def test_get_info_is_read_only_and_includes_recent_target_logs
     before = domain_snapshot
 
     result = apply_command("GetInfo", { "target_id" => "P1" }, "cmd-info-1")
 
-    assert_rejected(result, "unknown_command")
-    entry = log_entry(result.fetch("log_entry_ids").first)
-    assert_equal "warning", entry.fetch("level")
-    assert_equal "kernel", entry.fetch("source_type")
-    assert_equal "cmd-info-1", entry.fetch("details").fetch("command_id")
-    assert_equal "GetInfo", entry.fetch("details").fetch("command_type")
+    assert_accepted(result)
+    assert_empty result.fetch("log_entry_ids")
+    assert_equal ["Added project P1: app"], result.dig("result", "recent_logs").map { |entry| entry.fetch("message") }
     assert_equal before, domain_snapshot
-    assert_log_levels_valid
   end
 
-  def test_get_info_snake_case_alias_is_not_registered_either
+  def test_get_info_snake_case_alias_is_registered
     result = apply_command("get_info", "target_id" => "P1")
 
-    assert_rejected(result, "unknown_command")
-    assert_equal "get_info", result.fetch("command_type")
+    assert_accepted(result)
+    assert_equal "GetInfo", result.fetch("command_type")
+    assert_equal "P1", result.fetch("target_id")
   end
 
-  def test_get_info_for_an_unknown_id_is_indistinguishable_from_a_known_id
-    unknown = apply_command("GetInfo", "target_id" => "P99")
-    known = apply_command("GetInfo", "target_id" => "P1")
+  def test_get_info_rejects_an_unknown_id
+    result = apply_command("GetInfo", "target_id" => "P99")
 
-    assert_equal known.fetch("errors"), unknown.fetch("errors")
-    assert_equal known.fetch("message"), unknown.fetch("message")
+    assert_rejected(result, "target_not_found")
+    assert_equal "P99 does not exist.", result.fetch("message")
   end
 
   def test_project_issue_agent_and_question_details_are_available_through_get_state
@@ -101,7 +97,7 @@ class KernelCoreGetInfoTest < Minitest::Test
     assert_equal "Loaded 1 question.", result.fetch("message")
     question = result.fetch("result").first
     expected_keys = %w[
-      answer context created_at head_id id issue_id project_id question status updated_at
+      answer context created_at head_id id issue_id original_user_message project_id question status updated_at
     ]
     assert_equal expected_keys, question.keys.sort
     assert_equal "open", question.fetch("status")
