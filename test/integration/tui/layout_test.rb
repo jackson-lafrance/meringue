@@ -16,7 +16,10 @@ class TuiLayoutTest < Minitest::Test
   def test_three_panes_render_at_the_default_size
     frame = @layout.render(@state, width: 100, height: 32)
 
-    assert_includes frame, "─ agent tree ─"
+    # The AgentTree title carries its scroll indicators ("agent tree  ↑0 ↓2"), so match the pane
+    # label rather than a fully closed border.
+    assert_includes frame, "─ agent tree "
+    assert_match(/─ agent tree +↑\d+ ↓\d+/, frame)
     assert_includes frame, "─ logs ─"
     assert_includes frame, "─ chat ─"
   end
@@ -42,7 +45,7 @@ class TuiLayoutTest < Minitest::Test
   def test_all_three_panes_survive_the_minimum_size
     frame = @layout.render(@state, width: Layout::MIN_WIDTH, height: Layout::MIN_HEIGHT)
 
-    assert_includes frame, "─ agent tree ─"
+    assert_includes frame, "─ agent tree "
     assert_includes frame, "─ logs ─"
     assert_includes frame, "─ chat ─"
     assert_includes frame, "Enter send"
@@ -180,7 +183,7 @@ class TuiLayoutTest < Minitest::Test
     )
     frame = @layout.render(workspace_state, width: 100, height: 20)
 
-    refute_includes frame, "─ agent tree ─"
+    refute_includes frame, "─ agent tree "
     refute_includes frame, "─ logs ─"
     assert_includes frame, "focused worker · P1-I1-W1"
     assert_includes frame, "─ chat ─"

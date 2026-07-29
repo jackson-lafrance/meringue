@@ -35,7 +35,7 @@ class TuiAppWiringTest < Minitest::Test
     lines = @out.string.split("\n")
     assert_equal App::DEFAULT_HEIGHT, lines.length
     assert_equal [App::DEFAULT_WIDTH], lines.map(&:length).uniq
-    assert_includes @out.string, "─ agent tree ─"
+    assert_includes @out.string, "─ agent tree "
   end
 
   def test_run_without_a_state_falls_back_to_an_empty_state
