@@ -40,7 +40,7 @@ module Meringue
           return SessionView.unavailable_snapshot(
             harness: "pi",
             availability: "unavailable",
-            message: "Saved Pi session history is unavailable#{path ? ": #{path}" : "."}"
+            message: "Saved agent session history is unavailable#{path ? ": #{path}" : "."}"
           )
         end
 
@@ -62,7 +62,7 @@ module Meringue
         completed = last_message["role"] == "assistant" && completed_stop_reason?(last_message["stop_reason"])
         availability = process_alive ? "history_follow" : "history"
         warning = if process_alive
-                    "The Pi process is still running, but this Meringue instance does not own its RPC transport. Showing persisted history without attaching a second process."
+                    "The agent process is still running, but this Meringue instance does not own its RPC transport. Showing persisted history without attaching a second process."
                   end
         {
           "availability" => availability,
@@ -79,7 +79,7 @@ module Meringue
         SessionView.unavailable_snapshot(
           harness: "pi",
           availability: "unavailable",
-          message: "Saved Pi session history could not be read: #{e.message}"
+          message: "Saved agent session history could not be read: #{e.message}"
         )
       end
 

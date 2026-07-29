@@ -13,20 +13,20 @@ module Meringue
         messages = []
         workspace_path = agent["workspace_path"].to_s
         if workspace_path.empty?
-          messages << notice("warning", "Worker has no tracked workspace path.", "The session can still be inspected if its harness history is available.")
+          messages << notice("warning", "Worker has no tracked workspace path.", "The session can still be inspected if its agent session history is available.")
         elsif !Dir.exist?(workspace_path)
           messages << notice("warning", "Worker worktree is unavailable: #{workspace_path}", "Meringue kept the worker and delivery metadata; restore the worktree or open the PR instead.")
         end
 
         if live_status?(agent) && process_missing?(agent["pid"])
-          messages << notice("warning", "Worker harness process is not running.", recovery_detail(agent))
+          messages << notice("warning", "Worker agent process is not running.", recovery_detail(agent))
         end
 
         session_file = agent["harness_session_file"].to_s
         if !session_file.empty? && !File.file?(session_file)
-          messages << notice("warning", "Saved harness history is unavailable: #{session_file}", "Live controls are disabled until the harness session can be reconciled; no state was deleted.")
+          messages << notice("warning", "Saved agent session history is unavailable: #{session_file}", "Live controls are disabled until the agent session can be reconciled; no state was deleted.")
         elsif session_file.empty? && agent["harness_session_id"].to_s.empty?
-          messages << notice("info", "Worker has no resumable harness history.", "Workspace and delivery-PR actions remain available when their dependencies exist.")
+          messages << notice("info", "Worker has no resumable agent session history.", "Workspace and delivery-PR actions remain available when their dependencies exist.")
         end
 
         messages

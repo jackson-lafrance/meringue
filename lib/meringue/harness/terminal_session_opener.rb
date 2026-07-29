@@ -31,10 +31,10 @@ module Meringue
         return rejected("Agent was not found.") unless agent
 
         harness = agent.fetch("harness", nil).to_s
-        return rejected("Agent #{agent_id(agent)} has no harness to open.") if harness.empty?
+        return rejected("Agent #{agent_id(agent)} has no agent session to open.") if harness.empty?
 
         launch = harness_launch(harness, agent)
-        return rejected("Opening #{harness.inspect} sessions is not supported yet.") unless launch
+        return rejected("Opening this agent session in a terminal is not supported yet.") unless launch
         return rejected(launch.fetch("error")) if launch["error"]
 
         open_agent_terminal(agent, launch.fetch("argv"))
@@ -110,16 +110,16 @@ module Meringue
         return [discovered_file, nil] if discovered_file
 
         if configured_file
-          message = "Pi session history for #{agent_id(agent)} is unavailable because its saved session file is missing: #{configured_file}."
+          message = "Agent session history for #{agent_id(agent)} is unavailable because its saved session file is missing: #{configured_file}."
           message += " #{discovery_error}" if discovery_error
           return [nil, message]
         end
 
         unless present?(session_id)
-          return [nil, "Agent #{agent_id(agent)} has no saved Pi session file or session id to open."]
+          return [nil, "Agent #{agent_id(agent)} has no saved agent session file or session id to open."]
         end
 
-        message = "Pi session history for #{agent_id(agent)} is unavailable because no saved session file matches #{session_id.inspect}"
+        message = "Agent session history for #{agent_id(agent)} is unavailable because no saved session file matches #{session_id.inspect}"
         message += present?(pi_session_dir) ? " in #{File.expand_path(pi_session_dir)}." : "."
         message += " #{discovery_error}" if discovery_error
         [nil, message]
@@ -134,7 +134,7 @@ module Meringue
         return [nil, nil] unless present?(session_id) && present?(pi_session_dir)
 
         directory = File.expand_path(pi_session_dir)
-        return [nil, "The configured Pi session directory is missing."] unless Dir.exist?(directory)
+        return [nil, "The configured agent session directory is missing."] unless Dir.exist?(directory)
 
         candidates = Dir.children(directory).select do |name|
           name.end_with?(".jsonl") && name.include?(session_id.to_s)
@@ -148,7 +148,7 @@ module Meringue
         end
         [nil, first_error]
       rescue SystemCallError => e
-        [nil, "The configured Pi session directory could not be read: #{e.message}"]
+        [nil, "The configured agent session directory could not be read: #{e.message}"]
       end
 
       def pi_session_file_error(path, expected_session_id: nil)
@@ -168,7 +168,7 @@ module Meringue
         end
 
         return "the file is empty" if record_count.zero?
-        return "the first record is not a Pi session header" unless header["type"] == "session"
+        return "the first record is not an agent session header" unless header["type"] == "session"
         return "the session header has no id" unless present?(header["id"])
         if present?(expected_session_id) && header["id"].to_s != expected_session_id.to_s
           return "the session header id #{header["id"].inspect} does not match #{expected_session_id.inspect}"
@@ -180,7 +180,7 @@ module Meringue
       end
 
       def unavailable_pi_session_message(agent, path, error)
-        "Pi session history for #{agent_id(agent)} is unavailable because its saved session file is malformed: #{path} (#{error})."
+        "Agent session history for #{agent_id(agent)} is unavailable because its saved session file is malformed: #{path} (#{error})."
       end
 
       def preserved_record_note
