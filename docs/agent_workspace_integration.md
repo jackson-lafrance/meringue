@@ -91,7 +91,9 @@ The kernel remains the only mutator of orchestration state; the client only repo
 
 ## Manual integration verification
 
-Repository policy forbids automated test files, so integration should be checked with focused Ruby smoke commands plus the interactive TUI:
+Start with the automated suite: `rake test` covers the parts of this integration that do not need a live terminal, a real harness process, or network access (see `docs/testing.md`). The retired head-loop smoke script under `scripts/` has been replaced by hermetic tests under `test/`, so run the suite rather than a one-off script.
+
+The checks below still require the interactive TUI, real worktrees, or real harness processes, so verify them by hand:
 
 1. Select a worker with a verified open PR, restart Meringue, and confirm the worker selection and workspace view recover.
 2. Press the workspace leader followed by `p` and confirm the tracked PR opens from both focused views; confirm bare `Ctrl-B` still reaches the PTY. Replace the PR URL with malformed metadata and confirm a useful unavailable notice is shown instead.
