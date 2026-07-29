@@ -244,9 +244,23 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_equal ["P1"], projects.map { |record| record.fetch("usage") }
   end
 
-  def test_prune_selector_suggestions_are_offered
-    selectors = Meringue::Input::SlashCommandParser.command_suggestion_records("/prune ", limit: 5, state: sample_state)
+  # `/prune` takes no arguments, so it contributes no argument suggestions: typing "/prune " keeps
+  # offering the command itself rather than a selector list.
+  def test_prune_offers_no_argument_suggestions
+    records = Meringue::Input::SlashCommandParser.command_suggestion_records("/prune ", limit: 5, state: sample_state)
 
-    assert_equal %w[resolved errored], selectors.map { |record| record.fetch("usage") }
+    assert_equal ["/prune"], records.map { |record| record.fetch("usage") }
+    refute_includes records.map { |record| record.fetch("kind") }, "prune_selectors"
+  end
+
+  # The legacy selector words still parse so existing muscle memory keeps working, but they are
+  # inert: the kernel prunes everything eligible either way.
+  def test_legacy_prune_selector_words_are_accepted_as_no_op_aliases
+    Meringue::Input::SlashCommandParser::PRUNE_COMPATIBILITY_ARGUMENTS.each do |word|
+      parsed = parse_slash("/prune #{word}")
+
+      assert_equal "Prune", parsed.fetch("type"), "type for /prune #{word}"
+      assert_equal({ "selector" => word }, parsed.fetch("payload"), "payload for /prune #{word}")
+    end
   end
 end

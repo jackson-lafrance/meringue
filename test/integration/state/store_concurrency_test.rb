@@ -50,7 +50,8 @@ class StateStoreConcurrencyTest < Minitest::Test
 
       assert_empty errors.map { |error| "#{error.class}: #{error.message}" }
       assert_operator reads, :>, 0, "the reader must have observed at least one snapshot"
-      assert_equal ["state.json"], Dir.children(File.dirname(path)).sort, "no temporary files may leak"
+      assert_equal %w[state.json state.json.lock], Dir.children(File.dirname(path)).sort,
+                   "only the state file and its lock file may remain"
     end
   end
 
@@ -75,7 +76,8 @@ class StateStoreConcurrencyTest < Minitest::Test
       assert_empty errors.map { |error| "#{error.class}: #{error.message}" }
       final = read_state_file(path)
       assert_equal ["P1"], final.fetch("projects").map { |project| project.fetch("id") }
-      assert_equal ["state.json"], Dir.children(File.dirname(path)).sort, "no temporary files may leak"
+      assert_equal %w[state.json state.json.lock], Dir.children(File.dirname(path)).sort,
+                   "only the state file and its lock file may remain"
     end
   end
 
@@ -112,7 +114,7 @@ class StateStoreConcurrencyTest < Minitest::Test
       assert_equal ["P1-I1"], final.fetch("issues").map { |issue| issue.fetch("id") }
       assert_equal ["L1"], log_ids(final)
       assert_equal 19, final.dig("metadata", "iteration")
-      assert_equal ["state.json"], Dir.children(File.dirname(path)).sort
+      assert_equal %w[state.json state.json.lock], Dir.children(File.dirname(path)).sort
     end
   end
 

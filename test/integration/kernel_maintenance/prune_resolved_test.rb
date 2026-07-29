@@ -3,9 +3,9 @@
 require "test_helper"
 require "support/kernel_maintenance_support"
 
-# Prune with the resolved selector (and its completed/merged aliases): which
-# records leave active state, which retention rules block removal, and what the
-# command reports back.
+# Prune of resolved (completed/killed) records: which records leave active state, which
+# retention rules block removal, and what the command reports back. `/prune` takes no options,
+# so the legacy selector words are only recorded for traceability and never change the outcome.
 class KernelMaintenancePruneResolvedTest < Minitest::Test
   include KernelMaintenanceSupport
 
@@ -30,12 +30,11 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     result = apply_command(engine, "Prune", "selector" => "resolved")
 
     assert_equal "accepted", result.fetch("status")
-    assert_equal "Pruned 1 resolved issue and 0 projects.", result.fetch("message")
+    assert_equal "Pruned 1 issue, 0 projects, and 0 standalone agents.", result.fetch("message")
     details = result.fetch("result")
     assert_equal ["P1-I1"], details.fetch("removed_issue_ids")
     assert_equal ["P1-I1-W1"], details.fetch("removed_agent_ids")
     assert_empty details.fetch("removed_project_ids")
-    assert_equal "resolved", details.fetch("selector")
     assert_equal "resolved", details.fetch("requested_selector")
 
     state = read_state
@@ -43,15 +42,15 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     assert_empty state.fetch("agents")
     assert_equal ["P1"], ids(state.fetch("projects"))
     prune_log = state.fetch("logs").last
-    assert_equal "Pruned 1 resolved issue and 0 projects.", prune_log.fetch("message")
+    assert_equal "Pruned 1 issue, 0 projects, and 0 standalone agents.", prune_log.fetch("message")
     assert_equal "kernel", prune_log.fetch("source_type")
     assert_equal "info", prune_log.fetch("level")
     assert_equal ["P1-I1"], prune_log.dig("details", "removed_issue_ids")
     assert_documented_status_vocabulary(state)
   end
 
-  def test_completed_and_merged_selector_aliases_run_the_resolved_prune
-    %w[completed merged].each do |alias_selector|
+  def test_legacy_selector_words_are_recorded_but_do_not_change_the_prune
+    %w[all completed merged resolved errored].each do |alias_selector|
       write_state(
         state_fixture(
           projects: [project_record(id: "P1", status: "working")],
@@ -64,13 +63,12 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
       result = apply_command(engine, "Prune", "selector" => alias_selector)
 
       assert_equal "accepted", result.fetch("status")
-      assert_equal "resolved", result.dig("result", "selector")
       assert_equal alias_selector, result.dig("result", "requested_selector")
       assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
     end
   end
 
-  def test_missing_selector_defaults_to_resolved
+  def test_prune_without_a_selector_removes_everything_eligible
     write_state(
       state_fixture(
         projects: [project_record(id: "P1", status: "working")],
@@ -82,11 +80,15 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     result = apply_command(engine, "Prune", {})
 
     assert_equal "accepted", result.fetch("status")
-    assert_equal "resolved", result.dig("result", "selector")
-    assert_equal "resolved", result.dig("result", "requested_selector")
+    assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
+    # No selector is recorded because the command has no options.
+    assert_nil result.dig("result", "requested_selector")
+    assert_empty read_state.fetch("issues")
   end
 
-  def test_unknown_selector_is_rejected_without_mutating_state
+  # The input layer rejects unknown `/prune` arguments (see the slash command parser tests). The
+  # kernel itself never fails on one: it records the word and prunes everything eligible.
+  def test_unknown_selector_value_is_recorded_and_ignored
     write_state(
       state_fixture(
         projects: [project_record(id: "P1", status: "working")],
@@ -97,10 +99,10 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
 
     result = apply_command(engine, "Prune", "selector" => "everything")
 
-    assert_equal "rejected", result.fetch("status")
-    assert_equal "Unknown prune selector: everything", result.fetch("message")
-    assert_includes result.fetch("errors"), "supported selectors: resolved, errored"
-    assert_equal ["P1-I1"], ids(read_state.fetch("issues"))
+    assert_equal "accepted", result.fetch("status")
+    assert_equal "everything", result.dig("result", "requested_selector")
+    assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
+    assert_empty read_state.fetch("issues")
   end
 
   def test_nonterminal_child_issue_retains_completed_parent_subtree
@@ -126,7 +128,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
   end
 
   def test_unresolved_worker_statuses_block_pruning
-    %w[working blocked errored].each do |worker_status|
+    %w[queued working blocked].each do |worker_status|
       write_state(
         state_fixture(
           projects: [project_record(id: "P1", status: "working")],
@@ -146,14 +148,15 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     end
   end
 
-  def test_completed_and_killed_workers_do_not_block_pruning
+  def test_completed_killed_and_errored_workers_do_not_block_pruning
     write_state(
       state_fixture(
         projects: [project_record(id: "P1", status: "working")],
-        issues: [issue_record(id: "P1-I1", project_id: "P1", status: "completed", agent_ids: %w[P1-I1-W1 P1-I1-W2])],
+        issues: [issue_record(id: "P1-I1", project_id: "P1", status: "completed", agent_ids: %w[P1-I1-W1 P1-I1-W2 P1-I1-W3])],
         agents: [
           worker_record(id: "P1-I1-W1", issue_id: "P1-I1", project_id: "P1", status: "completed"),
-          worker_record(id: "P1-I1-W2", issue_id: "P1-I1", project_id: "P1", status: "killed")
+          worker_record(id: "P1-I1-W2", issue_id: "P1-I1", project_id: "P1", status: "killed"),
+          worker_record(id: "P1-I1-W3", issue_id: "P1-I1", project_id: "P1", status: "errored")
         ]
       )
     )
@@ -162,7 +165,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     result = apply_command(engine, "Prune", "selector" => "resolved")
 
     assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
-    assert_equal %w[P1-I1-W1 P1-I1-W2], result.dig("result", "removed_agent_ids").sort
+    assert_equal %w[P1-I1-W1 P1-I1-W2 P1-I1-W3], result.dig("result", "removed_agent_ids").sort
     assert_empty read_state.fetch("agents")
   end
 
@@ -305,7 +308,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
 
     assert_equal ["P1"], result.dig("result", "removed_project_ids")
     assert_equal %w[P1-I1 P2-I1 P3-I1], result.dig("result", "removed_issue_ids").sort
-    assert_equal "Pruned 3 resolved issues and 1 project.", result.fetch("message")
+    assert_equal "Pruned 3 issues, 1 project, and 0 standalone agents.", result.fetch("message")
 
     state = read_state
     assert_equal %w[P2 P3], ids(state.fetch("projects"))
@@ -315,7 +318,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     assert_includes p2.fetch("blockers"), "ineligible_issues"
     assert_equal ["P2-I2"], p2.fetch("ineligible_issue_ids")
     p3 = result.dig("result", "project_decisions").find { |entry| entry.fetch("project_id") == "P3" }
-    assert_includes p3.fetch("blockers"), "project_not_completed_or_killed"
+    assert_includes p3.fetch("blockers"), "project_not_terminal"
   end
 
   def test_prune_never_deletes_worker_workspaces_from_disk
@@ -387,7 +390,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     result = apply_command(engine, "Prune", "selector" => "resolved")
 
     assert_equal "accepted", result.fetch("status")
-    assert_equal "Pruned 0 resolved issues and 0 projects.", result.fetch("message")
+    assert_equal "Pruned 0 issues, 0 projects, and 0 standalone agents.", result.fetch("message")
     assert_empty result.dig("result", "removed_issue_ids")
     assert_equal ["P1-I1"], ids(read_state.fetch("issues"))
   end
