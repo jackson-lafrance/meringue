@@ -132,16 +132,14 @@ silently resets `MERINGUE_STATE_PATH` (or `~/.meringue/state.json`) instead of
 
 ## Cross-slice overlap notes
 
-- **`/prune`**: another worker is concurrently simplifying `/prune` to a
-  no-option command on a different branch. In *this* worktree `/prune`,
-  `/prune resolved`, and `/prune errored` all parse (selector `nil`, `"resolved"`,
-  `"errored"`), `/prune bogus` and two selectors are `InvalidSlashCommand`, and
-  `/prune ` offers `resolved`/`errored` suggestions. `InputSlashCommandParserTest`
-  (`test_documented_commands_map_to_expected_kernel_commands`,
-  `test_missing_arguments_for_strict_commands_return_invalid_slash_command`,
-  `test_prune_selector_suggestions_are_offered`) and
-  `InputKernelConvergenceTest#test_slash_commands_walk_the_whole_lifecycle_against_a_tmp_state_file`
-  will need updating when that change lands.
+- **`/prune`** (resolved during consolidation): the no-option `/prune` landed on `main`,
+  so these tests now assert the shipped surface. `/prune` parses to `Prune` with an empty
+  payload; the legacy words in `SlashCommandParser::PRUNE_COMPATIBILITY_ARGUMENTS`
+  (`all`, `resolved`, `errored`, `completed`, `merged`) still parse and are passed through as
+  an inert `selector`; anything else, or two words, is `InvalidSlashCommand` with the short
+  usage message; and `/prune ` offers no argument suggestions
+  (`test_prune_offers_no_argument_suggestions`,
+  `test_legacy_prune_selector_words_are_accepted_as_no_op_aliases`).
 - **P1-I9 implementation**: when explicit/implicit answer routing is implemented,
   `test_answering_a_question_does_not_yet_drive_follow_up_work`,
   `test_input_layer_never_populates_question_being_answered`,

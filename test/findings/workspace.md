@@ -152,11 +152,10 @@ owns:
 TUI-level scroll-frame timing (pane row composition, wheel/PageUp handling) is
 left to the TUI slice, which owns `TUI::Panes::AgentWorkspacePane`.
 
-Follow-up for whoever owns docs: `docs/agent_workspace_integration.md` step 11
-still tells reviewers to run `ruby scripts/benchmark_workspace_scroll.rb`, and
-the "Manual integration verification" preamble still says repository policy
-forbids automated test files. Both are stale now; this slice is not allowed to
-edit `docs/`.
+Both doc follow-ups are done: `docs/agent_workspace_integration.md` step 11 now
+points at `test/integration/workspace/terminal_scroll_performance_test.rb`, and the
+"Manual integration verification" preamble now starts with `rake test` instead of
+claiming that repository policy forbids automated test files.
 
 ## Test hermeticity notes
 
