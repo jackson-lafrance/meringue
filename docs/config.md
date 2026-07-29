@@ -190,6 +190,17 @@ Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinki
 
 `/defaults` inspects the future Pi pair. `/model` and `/thinking` remain targeted commands for one existing Pi session and never rewrite future defaults. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
 
+### Model catalogs and provider resource flags
+
+`/models`, and the completion list behind `/model` and `/default-model`, come from the harness itself rather than a list maintained in Meringue. For Pi, Meringue starts a short-lived ephemeral RPC probe (`pi --mode rpc --no-session`) and reads `get_available_models`.
+
+That probe reuses the configured provider `command`, `env`, `extra_args`, and role `*_extra_args`, minus `--model`/`--thinking`, because provider availability depends on those flags. Two consequences matter when configuring Pi:
+
+- If `worker_extra_args` contains `--no-extensions` and your models come from a Pi extension, the catalog is legitimately empty, and Meringue reports `unavailable` with Pi's own answer instead of inventing entries. Keep the `--extension <path>` flag that registers your provider in the same array (as in the example above) so probes and real sessions agree.
+- Model/thinking defaults are dropped from the probe on purpose: an unavailable saved default must not stop Pi from reporting which models exist.
+
+Catalogs are cached in Meringue state under `metadata.harness_model_catalogs.<harness>` and refreshed in the background by reconciliation (about every 10 minutes, retried after about 1 minute when a fetch failed). `/models refresh` forces an immediate re-fetch after you log into a provider, install an extension, or edit `~/.pi/agent/models.json`.
+
 Claude Code runs through `claude --print --output-format stream-json --verbose`; Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace. Live steer/follow-up prompting is currently Pi-only.
 
 Do not store API keys or secrets in the config file. Prefer each provider CLI's normal auth flow or environment setup.

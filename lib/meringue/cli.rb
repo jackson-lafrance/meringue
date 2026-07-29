@@ -179,6 +179,7 @@ module Meringue
         session_defaults_updater: lambda do |provider, model: nil, thinking_level: nil|
           registry.update_session_defaults!(provider: provider, model: model, thinking_level: thinking_level)
         end,
+        model_catalog_provider: ->(provider) { registry.model_catalog(provider: provider, cwd: Dir.pwd) },
         workspace_manager: Workspace::Manager.new,
         cwd: Dir.pwd,
         async_heads: true,
