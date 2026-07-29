@@ -44,7 +44,7 @@ module Meringue
           snapshot_loader: lambda {
             SessionView.unavailable_snapshot(
               harness: harness,
-              message: "#{harness} does not provide a native managed session view."
+              message: "This agent session does not provide a native managed session view."
             )
           }
         )

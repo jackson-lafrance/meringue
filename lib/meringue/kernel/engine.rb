@@ -92,7 +92,7 @@ module Meringue
         ["/project add <path> [name]", "Register a project directory."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
-        ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker harness session."],
+        ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker agent session."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "TUI local: open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
@@ -258,7 +258,7 @@ module Meringue
             source_type: "kernel",
             source_id: current.fetch("id"),
             level: "warning",
-            message: "Cancelled the current turn for worker #{current.fetch("id")} without terminating its harness session.",
+            message: "Cancelled the current turn for worker #{current.fetch("id")} without terminating its agent session.",
             details: { "agent_id" => current.fetch("id"), "session_preserved" => true }
           )
           touch_state!(state, now)
@@ -268,7 +268,7 @@ module Meringue
       rescue StandardError => e
         synchronized_state do
           error = error_payload(e)
-          failed_result(nil, "CancelAgentTurn", "Harness failed to cancel agent #{agent_id}: #{error.fetch("message")}", [error.fetch("class"), error.fetch("message")])
+          failed_result(nil, "CancelAgentTurn", "Could not cancel agent #{agent_id}: #{error.fetch("message")}", [error.fetch("class"), error.fetch("message")])
         end
       end
 
@@ -512,7 +512,7 @@ module Meringue
           command_id,
           command_type,
           nil,
-          "Reconciled #{agents.length} harness-backed agent session(s).",
+          "Reconciled #{agents.length} agent session(s).",
           {
             "checked_count" => agents.length,
             "changed_count" => changed_count,
@@ -943,7 +943,7 @@ module Meringue
         agent = find_agent(state, agent_id)
         return rejected_result(command_id, command_type, "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
         return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
-        return rejected_result(command_id, command_type, "Agent #{agent_id} has no harness session.", ["agent_has_no_harness_session"]) if blank?(agent.fetch("harness", nil))
+        return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["agent_has_no_harness_session"]) if blank?(agent.fetch("harness", nil))
         return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"]) if agent.fetch("status", nil) == "killed"
 
         client = harness_client_for_agent(agent)
@@ -2608,7 +2608,7 @@ module Meringue
         return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
         return rejected_result(command_id, command_type, "Agent #{agent_id} cannot be continued because it is #{agent.fetch("status")}.", ["agent_not_resumable"]) if %w[killed errored].include?(agent.fetch("status", nil))
         if blank?(agent.fetch("pid", nil)) && blank?(agent.fetch("harness_session_id", nil)) && blank?(agent.fetch("harness_session_file", nil))
-          return rejected_result(command_id, command_type, "Agent #{agent_id} has no harness session.", ["missing_harness_session"])
+          return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["missing_harness_session"])
         end
 
         pending_prompt_id = present_string(value_at(payload, "_pending_prompt_id", "pending_prompt_id"))
@@ -2634,7 +2634,7 @@ module Meringue
           return failed_result(
             command_id,
             command_type,
-            "Harness failed to prompt agent #{agent_id}: #{e.message}",
+            "Could not prompt agent #{agent_id}: #{e.message}",
             [e.class.name, e.message]
           )
         end
@@ -2994,7 +2994,7 @@ module Meringue
             reservation,
             command_id: command_id,
             command_type: command_type,
-            message: "Harness failed to spawn worker #{reservation.fetch("agent_id")}: #{e.message}",
+            message: "Could not start an agent session for worker #{reservation.fetch("agent_id")}: #{e.message}",
             errors: [e.class.name, e.message],
             workspace: workspace
           )
@@ -4612,7 +4612,7 @@ module Meringue
             source_type: "harness",
             source_id: head_id.to_s,
             level: "info",
-            message: "Opened #{head.fetch("harness", "harness")} session for head #{head_id}.",
+            message: "Started agent session for head #{head_id}.",
             details: {
               "head_id" => head_id.to_s,
               "harness" => head.fetch("harness", nil),
@@ -4918,7 +4918,7 @@ module Meringue
             source_type: "harness",
             source_id: agent.fetch("id", nil),
             level: "info",
-            message: "#{agent.fetch("id", "Agent")} produced #{overflow_count} additional harness event#{overflow_count == 1 ? "" : "s"}.",
+            message: "#{agent.fetch("id", "Agent")} produced #{overflow_count} additional agent event#{overflow_count == 1 ? "" : "s"}.",
             details: {
               "omitted_event_count" => overflow_count,
               "event_types" => visible_events.drop(HARNESS_EVENT_LOG_LIMIT).map { |event| event.fetch("type") }.uniq
@@ -4975,7 +4975,7 @@ module Meringue
       def harness_event_log_message(agent, event)
         label = present_string(event.fetch("label", nil))
         suffix = label ? ": #{label}" : ""
-        "#{agent.fetch("id", "Agent")} harness #{event.fetch("type")}#{suffix}."
+        "#{agent.fetch("id", "Agent")} agent session #{event.fetch("type")}#{suffix}."
       end
 
       def harness_event_error?(event_type)
@@ -5736,7 +5736,7 @@ module Meringue
               source_type: "head",
               source_id: agent.fetch("id"),
               level: "warning",
-              message: "Head #{agent.fetch("id")} had a transient harness reconciliation error; keeping it working during the startup grace window.",
+              message: "Head #{agent.fetch("id")} had a transient agent session reconciliation error; keeping it working during the startup grace window.",
               details: reconcile
             )
           end
@@ -5779,7 +5779,7 @@ module Meringue
             source_type: "worker",
             source_id: agent.fetch("id"),
             level: "warning",
-            message: "Worker #{agent.fetch("id")} could not resume its harness session; will retry reconciliation.",
+            message: "Worker #{agent.fetch("id")} could not resume its agent session; will retry reconciliation.",
             details: reconcile
           )
           touch_state!(state, now)
@@ -5820,7 +5820,7 @@ module Meringue
             source_type: agent.fetch("type", nil) == "head" ? "head" : "worker",
             source_id: agent.fetch("id"),
             level: "error",
-            message: "#{agent.fetch("type", "Agent").capitalize} #{agent.fetch("id")} errored while reconciling its harness session.",
+            message: "#{agent.fetch("type", "Agent").capitalize} #{agent.fetch("id")} errored while reconciling its agent session.",
             details: reconcile
           )
           touch_state!(state, now)
@@ -5879,8 +5879,8 @@ module Meringue
             source_id: agent.fetch("id"),
             level: restarted ? "warning" : "info",
             message: restarted ?
-              "Restarted head #{agent.fetch("id")} because its persisted harness session could not be safely resumed." :
-              "Resumed head #{agent.fetch("id")} from its persisted harness session and requested its HeadResult.",
+              "Restarted agent session for head #{agent.fetch("id")} because its persisted session could not be safely resumed." :
+              "Resumed agent session for head #{agent.fetch("id")} and requested its HeadResult.",
             details: poll_result.fetch("reconcile", {})
           )
         else
@@ -5889,7 +5889,7 @@ module Meringue
             source_type: "worker",
             source_id: agent.fetch("id"),
             level: "info",
-            message: "Resumed worker #{agent.fetch("id")} from its harness session and prompted it to continue.",
+            message: "Resumed agent session for worker #{agent.fetch("id")} and prompted it to continue.",
             details: poll_result.fetch("reconcile", {})
           )
         end
