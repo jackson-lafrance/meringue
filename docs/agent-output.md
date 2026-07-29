@@ -66,6 +66,10 @@ Durable timestamps are written by several layers: the kernel prefers local ISO86
 
 Opening a PR or an agent session is transient UI feedback, not orchestration history, so successful opens no longer append a log entry. `TUI::PullRequestOpener` and `Harness::TerminalSessionOpener` return `{"status" => "opened"}` with no user-visible message, while rejected and failed opens keep their explanatory message and are still logged.
 
+## Harness-neutral log copy
+
+User-visible log lines, status strings, and notices describe the coding agent, never the harness backend that runs it. The kernel logs `Started agent session for head H68.`, `Resumed agent session for worker P1-I9-W3 and prompted it to continue.`, and `Could not start an agent session for worker P1-I9-W3: …` rather than naming Pi, Claude, or Antigravity. `agent session` is the standing vocabulary for the human-readable session noun; `harness` stays in structured data (the `harness` field, log `details`, config keys such as `[harness.pi]`, and the `/harness` selection command, where naming the backend is deliberate).
+
 ## Terminal Markdown
 
 Conversational `head` and `worker` entries are passed to `TUI::Markdown`, a dependency-free renderer that emits styled Canvas segments rather than terminal escape sequences. It handles the structures agents use most often:
