@@ -37,15 +37,10 @@ A legacy oversized file is bounded in memory on its first load and written at th
 
 ## Reproducing the measurement
 
-Run the deterministic persistence benchmark and correctness checks:
+The retention rules and the bounded persistence behavior are covered by the automated suite:
 
 ```bash
-ruby scripts/benchmark_log_retention.rb
+ruby -Ilib -Itest test/integration/state/log_retention_test.rb
 ```
 
-It writes a 5,000-entry legacy snapshot in a temporary directory, measures parse/load and bounded save/load behavior, verifies the 500-entry boundary, saves and reloads it, then appends through the kernel to confirm that the next ID remains monotonic. Override the workload when needed:
-
-```bash
-MERINGUE_BENCHMARK_LOGS=10000 MERINGUE_BENCHMARK_ITERATIONS=50 \
-  ruby scripts/benchmark_log_retention.rb
-```
+It writes an oversized legacy snapshot in a temporary directory, verifies the 500-entry boundary, checks that the bound is applied on load and persisted on the next save, confirms `State::Store#compact!`, and appends through the kernel to confirm that the next ID stays monotonic. It also keeps a generous upper bound on load/save cost so an accidental O(n^2) regression fails the suite.

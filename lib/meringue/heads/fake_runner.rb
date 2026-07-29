@@ -3,6 +3,10 @@
 module Meringue
   module Heads
     class FakeRunner < Runner
+      # Symbolic id for the CreateIssue command in a generated batch. A worker for a
+      # brand-new issue references this command instead of predicting the issue id.
+      ISSUE_COMMAND_ID = "create-issue"
+
       def run(user_message:, snapshot:, context: nil, question_id: nil)
         commands = build_commands(user_message: user_message, snapshot: snapshot, context: context)
 
@@ -41,17 +45,21 @@ module Meringue
             return commands
           end
         else
-          issue_id = next_issue_id(snapshot, project_id)
+          # Never predict the id of an issue this batch creates; point the worker at the
+          # CreateIssue command instead and let the kernel resolve the real id.
+          issue_command_id = ISSUE_COMMAND_ID
           commands << create_issue_command(
             project_id: project_id,
             title: title,
-            user_message: user_message
+            user_message: user_message,
+            command_id: issue_command_id
           )
         end
 
-        prior_worker ||= latest_worker(snapshot, issue_id)
+        prior_worker ||= latest_worker(snapshot, issue_id) if issue_id
         commands << spawn_worker_command(
           issue_id: issue_id,
+          issue_from_command: issue_command_id,
           title: title,
           user_message: user_message,
           follow_up_of_agent_id: follow_up_worker_id(prior_worker),
@@ -72,8 +80,9 @@ module Meringue
         }
       end
 
-      def create_issue_command(project_id:, title:, user_message:)
+      def create_issue_command(project_id:, title:, user_message:, command_id: nil)
         {
+          "command_id" => command_id,
           "type" => "CreateIssue",
           "payload" => {
             "project_id" => project_id,
@@ -81,14 +90,15 @@ module Meringue
             "description" => "Fake issue generated from user prompt:\n\n#{user_message}\n\nThe simple loop will ask the kernel to validate and apply this command before spawning the worker.",
             "parent_issue_id" => nil
           }
-        }
+        }.compact
       end
 
-      def spawn_worker_command(issue_id:, title:, user_message:, follow_up_of_agent_id: nil, replace_agent_id: nil)
+      def spawn_worker_command(issue_id:, title:, user_message:, issue_from_command: nil, follow_up_of_agent_id: nil, replace_agent_id: nil)
         {
           "type" => "SpawnWorker",
           "payload" => {
             "issue_id" => issue_id,
+            "issue_from_command" => issue_from_command,
             "title" => title,
             "prompt" => "Work on issue '#{title}' from this user request:\n\n#{user_message}\n\nKeep the change focused and summarize what you did.",
             "workspace_path" => nil,
@@ -190,11 +200,6 @@ module Meringue
         "P#{next_number}"
       end
 
-      def next_issue_id(snapshot, project_id)
-        issue_counters = snapshot.fetch("counters", {}).fetch("issues_by_project", {})
-        next_number = issue_counters.fetch(project_id, max_issue_number(snapshot, project_id)).to_i + 1
-        "#{project_id}-I#{next_number}"
-      end
 
       def default_project_root(path)
         nearest_git_root(path) || File.expand_path(path)
@@ -220,14 +225,6 @@ module Meringue
         end.max || 0
       end
 
-      def max_issue_number(snapshot, project_id)
-        snapshot.fetch("issues", []).filter_map do |issue|
-          next unless issue.fetch("project_id", nil) == project_id
-
-          match = issue.fetch("id", "").match(/\A#{Regexp.escape(project_id)}-I(\d+)\z/)
-          match && match[1].to_i
-        end.max || 0
-      end
 
       def title_from(user_message)
         words = user_message.to_s.strip.split(/\s+/).first(8)
