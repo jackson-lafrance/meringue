@@ -123,7 +123,56 @@ The referenced `CreateIssue` must appear earlier in `commands` than the command 
 
 When you target an issue that already exists, keep using its real `issue_id` exactly as it appears in the supplied state. That path is unchanged.
 
-A predicted issue id is still accepted only when the kernel can prove it is safe. `SpawnWorker` and `ModifyIssue` must resolve to an issue that existed in the head's spawn snapshot or to an issue the same batch created. If a predicted id points at an issue that appeared after this head was spawned, the kernel reroutes the command to the single issue this batch created and says so out loud, or rejects the command when that would be ambiguous or cross-project. Rejections use `issue_id_not_created_by_this_head_result`, `batch_issue_reference_not_found`, `batch_issue_reference_out_of_order`, or `batch_issue_reference_unresolved`.
+The same applies to a project your batch registers: set `project_from_command` on `CreateIssue` (or `project_id: "@<command_id>"`) to point at the `AddProject` command in the same batch instead of predicting `P<n>`.
+
+## Mixed batches: new issues and existing issues together
+
+One HeadResult may serve several targets at once. Make every worker's target explicit and the kernel will honour all of them:
+
+- a worker for an issue this batch creates: `issue_from_command`
+- a worker for an issue that already exists: its real `issue_id`
+- several new issues, each with their own workers: one `command_id` per `CreateIssue`, and `issue_from_command` on each worker
+
+```json
+{
+  "title": "Split work and keep the current issue moving",
+  "summary": "Two new goals with their own workers, plus one worker on an existing issue.",
+  "commands": [
+    { "command_id": "front", "type": "CreateIssue", "payload": { "project_id": "P1", "title": "Front-end split", "description": "..." } },
+    { "command_id": "back", "type": "CreateIssue", "payload": { "project_id": "P1", "title": "Back-end split", "description": "..." } },
+    { "type": "SpawnWorker", "payload": { "issue_from_command": "front", "title": "Front-end split", "prompt": "..." } },
+    { "type": "SpawnWorker", "payload": { "issue_from_command": "back", "title": "Back-end split", "prompt": "..." } },
+    { "type": "SpawnWorker", "payload": { "issue_id": "P1-I4", "title": "Keep the current issue moving", "prompt": "..." } }
+  ],
+  "questions": []
+}
+```
+
+One rule keeps large fan-out batches honest: **every issue your batch creates must get at least one worker of its own in that batch.** If a batch creates an issue and then points its workers at a different issue, the kernel treats that as a mis-target rather than a deliberate choice, because it is the exact shape that once dumped 13 unrelated workers onto the previous issue while the new issue stayed empty. In that situation the kernel:
+
+- binds those workers to the created issue that has no worker (when there is exactly one such issue in that project) and logs the correction, or
+- rejects them with `ambiguous_batch_issue_target` when more than one created issue is missing a worker.
+
+If you genuinely want to create an issue for later while working only on an existing issue, say so explicitly on the existing-issue worker with any of:
+
+- `follow_up_of_agent_id` (preferred when continuing a previous worker's line of work),
+- `replace_agent_id`, or
+- `existing_issue: true`.
+
+`ModifyIssue` and `AskQuestion` are never subject to that rule; only worker routing is.
+
+A predicted issue id is still accepted, but only after the kernel proves what it means. The kernel recomputes the ids this head would have predicted for its own creations from the counters in the head's spawn snapshot, so a prediction that went stale (because another head created an issue first) binds to the issue this batch actually created — including when the batch creates several issues. Predictions that cannot be resolved that way must either name an issue the head could see in its spawn snapshot, or they are rejected.
+
+Resolution order for `SpawnWorker` and `ModifyIssue`:
+
+1. `issue_from_command` / `"@..."` reference → the issue that command created.
+2. an id this head would have predicted for one of its own creations → that created issue.
+3. an id that literally is one of this batch's created issues → that issue.
+4. `SpawnWorker` only: a created issue in the same project was left without a worker → bind there (or reject if several are).
+5. an id that was visible in the head's spawn snapshot → that pre-existing issue.
+6. anything else → rejected.
+
+Rejection codes: `issue_id_not_created_by_this_head_result`, `ambiguous_batch_issue_target`, `ambiguous_batch_issue_prediction`, `batch_issue_reference_not_found`, `batch_issue_reference_out_of_order`, `batch_issue_reference_unresolved`, `batch_project_reference_unresolved`.
 
 A corrected route is never silent. The kernel appends `Rerouted from predicted issue <id>.` to the worker's spawn log line, adds `rerouted_from_issue_id` to that log's details and to the worker's `harness_metadata`, and emits a separate warning log naming both issues.
 
@@ -281,11 +330,14 @@ Payload:
 ```json
 {
   "project_id": "P1",
+  "project_from_command": "Optional AddProject command id or index in this batch instead of project_id",
   "title": "Short issue title",
   "description": "Detailed issue description and worker context",
   "parent_issue_id": "Optional parent issue id"
 }
 ```
+
+Give each `CreateIssue` a `command_id` when a worker in the same batch belongs to it, so the worker can reference it with `issue_from_command`.
 
 Example:
 
@@ -349,6 +401,7 @@ Payload:
 {
   "issue_id": "P1-I1",
   "issue_from_command": "Optional CreateIssue command id or index in this batch instead of issue_id",
+  "existing_issue": "Optional true to state that issue_id is a deliberate pre-existing target",
   "title": "Short worker title",
   "prompt": "Worker instructions",
   "workspace_path": "Optional preselected workspace path",

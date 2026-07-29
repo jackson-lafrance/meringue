@@ -24,6 +24,8 @@ require "tmpdir"
 require_relative "../lib/meringue"
 
 FAILURES = []
+# Rejection codes the kernel uses when a batch target cannot be resolved without guessing.
+REJECTION_CODES = %w[issue_id_not_created_by_this_head_result ambiguous_batch_issue_target ambiguous_batch_issue_prediction].freeze
 
 def check(description)
   ok, detail = yield
@@ -294,7 +296,7 @@ begin
     [warnings == warnings_before_symbolic, "#{warnings_before_symbolic} -> #{warnings}"]
   end
 
-  puts "Scenario 4: an existing issue id still routes normally"
+  puts "Scenario 4: existing-issue targets still route normally"
   existing_issue_id = health_issue.fetch("id")
   head_g = spawn_head(engine, "Follow up on the health check work")
   follow_up = apply_head_result(
@@ -302,12 +304,15 @@ begin
     head_g,
     head_result([spawn_worker_command(title: "Extend health check coverage", issue_id: existing_issue_id)])
   )
+  # Mixed batch: the created issue gets its own worker, and a second worker deliberately targets
+  # the pre-existing issue. Both must land where the head said.
   head_h = spawn_head(engine, "Start a new goal and also extend the health check")
   mixed = apply_head_result(
     engine,
     head_h,
     head_result([
-      create_issue_command(project_id, "Add metrics endpoint"),
+      create_issue_command(project_id, "Add metrics endpoint", command_id: "#{head_h}-C1"),
+      spawn_worker_command(title: "Add metrics endpoint", extra_payload: { "issue_from_command" => "#{head_h}-C1" }),
       spawn_worker_command(title: "Harden health check", issue_id: existing_issue_id)
     ])
   )
@@ -316,15 +321,36 @@ begin
   check("a worker for a pre-existing issue is accepted") do
     [follow_up.fetch("status") == "accepted", follow_up.fetch("message")]
   end
-  check("a batch that also creates an issue still honours a visible existing issue id") do
+  check("the mixed batch honours the visible existing issue id") do
     titles = worker_titles(state, existing_issue_id)
     [
       mixed.fetch("status") == "accepted" && titles.sort == ["Add health check endpoint", "Extend health check coverage", "Harden health check"],
       titles.inspect
     ]
   end
-  check("the newly created issue is left without a worker") do
-    [workers_for(state, metrics_issue&.fetch("id", nil)).empty?, worker_titles(state, metrics_issue&.fetch("id", nil)).inspect]
+  check("the mixed batch's new issue gets its own worker") do
+    titles = worker_titles(state, metrics_issue&.fetch("id", nil))
+    [titles == ["Add metrics endpoint"], titles.inspect]
+  end
+  # A batch may also create an issue for later and deliberately work only on an existing issue,
+  # as long as it says so explicitly.
+  head_h2 = spawn_head(engine, "Track a backlog goal and keep working the health check")
+  backlog = apply_head_result(
+    engine,
+    head_h2,
+    head_result([
+      create_issue_command(project_id, "Backlog: split health checks"),
+      spawn_worker_command(title: "Health check pass three", issue_id: existing_issue_id, extra_payload: { "existing_issue" => true })
+    ])
+  )
+  state = engine.list_all
+  backlog_issue = issue_by_title(state, "Backlog: split health checks")
+  check("an explicitly marked existing-issue worker is honoured") do
+    titles = worker_titles(state, existing_issue_id)
+    [backlog.fetch("status") == "accepted" && titles.include?("Health check pass three"), titles.inspect]
+  end
+  check("the backlog issue is intentionally left without a worker") do
+    [workers_for(state, backlog_issue&.fetch("id", nil)).empty?, worker_titles(state, backlog_issue&.fetch("id", nil)).inspect]
   end
 
   puts "Scenario 5: an unresolvable predicted id is rejected instead of routed to the wrong issue"
@@ -342,7 +368,7 @@ begin
   check("the ambiguous spawn is rejected") do
     result = command_result(ambiguous, "SpawnWorker")
     [
-      result && result.fetch("status", nil) == "rejected" && Array(result.fetch("errors", [])).include?("issue_id_not_created_by_this_head_result"),
+      result && result.fetch("status", nil) == "rejected" && REJECTION_CODES.intersect?(Array(result.fetch("errors", []))),
       result&.slice("status", "errors").inspect
     ]
   end
@@ -405,7 +431,7 @@ begin
   check("the cross-project spawn is rejected") do
     result = command_result(cross_project, "SpawnWorker")
     [
-      result && result.fetch("status", nil) == "rejected" && Array(result.fetch("errors", [])).include?("issue_id_not_created_by_this_head_result"),
+      result && result.fetch("status", nil) == "rejected" && REJECTION_CODES.intersect?(Array(result.fetch("errors", []))),
       result&.slice("status", "errors").inspect
     ]
   end
@@ -530,6 +556,156 @@ begin
     last_agent_id = issue.fetch("last_agent_id", nil)
     surviving = workers_for(state, rebase_issue_id).map { |agent| agent.fetch("id") }
     [last_agent_id != extra_worker.fetch("id") && (last_agent_id.nil? || surviving.include?(last_agent_id)), "#{last_agent_id.inspect} of #{surviving.inspect}"]
+  end
+
+  puts "Scenario 12: large fan-out batch (13 workers) binds to the issue the batch created"
+  # Reproduces 2026-07-29 11:48 in ~/.meringue/state.json: head H62 created P1-I10 for the test
+  # suite goal, then spawned H62-C2..H62-C14 with issue_id "P1-I9" (the previous, still visible
+  # issue). P1-I10 ended up with zero workers and P1-I9 collected 13 unrelated ones.
+  head_p = spawn_head(engine, "Replace the smoke scripts with a real test suite")
+  previous_issue_id = prune_issue.fetch("id")
+  slice_titles = (1..13).map { |slice| "Test slice #{slice}" }
+  fan_out = apply_head_result(
+    engine,
+    head_p,
+    head_result(
+      [create_issue_command(project_id, "Replace smoke scripts with a test suite")] +
+        slice_titles.map { |title| spawn_worker_command(title: title, issue_id: previous_issue_id) }
+    )
+  )
+  state = engine.list_all
+  suite_issue = issue_by_title(state, "Replace smoke scripts with a test suite")
+  check("all 13 workers land on the issue this batch created") do
+    titles = worker_titles(state, suite_issue&.fetch("id", nil)).sort
+    [titles == slice_titles.sort, "#{titles.length} workers: #{titles.first(3).inspect}"]
+  end
+  check("the previous issue gains no unrelated workers") do
+    titles = worker_titles(state, previous_issue_id)
+    [(titles & slice_titles).empty?, titles.inspect]
+  end
+  check("every rerouted spawn is accepted and logged") do
+    results = Array(fan_out.dig("result", "command_results")).select { |result| result.fetch("command_type", nil) == "SpawnWorker" }
+    warnings = state.fetch("logs").count { |entry| entry.fetch("message", "").to_s.include?("which would otherwise have had no worker") }
+    [results.length == 13 && results.all? { |result| result.fetch("status", nil) == "accepted" } && warnings == 13, "#{results.map { |r| r["status"] }.uniq.inspect} warnings=#{warnings}"]
+  end
+
+  puts "Scenario 13: fan-out across two new issues plus one existing issue"
+  head_q = spawn_head(engine, "Split the work into two new goals and keep the old one moving")
+  multi = apply_head_result(
+    engine,
+    head_q,
+    head_result([
+      create_issue_command(project_id, "Front-end split", command_id: "#{head_q}-front"),
+      create_issue_command(project_id, "Back-end split", command_id: "#{head_q}-back"),
+      spawn_worker_command(title: "Front-end worker A", extra_payload: { "issue_from_command" => "#{head_q}-front" }),
+      spawn_worker_command(title: "Front-end worker B", extra_payload: { "issue_from_command" => "#{head_q}-front" }),
+      spawn_worker_command(title: "Back-end worker A", extra_payload: { "issue_from_command" => "#{head_q}-back" }),
+      spawn_worker_command(title: "Existing issue worker", issue_id: existing_issue_id)
+    ])
+  )
+  state = engine.list_all
+  front_issue = issue_by_title(state, "Front-end split")
+  back_issue = issue_by_title(state, "Back-end split")
+  check("every command in the mixed fan-out batch is accepted") do
+    results = Array(multi.dig("result", "command_results"))
+    [results.all? { |result| result.fetch("status", nil) == "accepted" }, results.map { |r| [r["command_type"], r["status"]] }.inspect]
+  end
+  check("the first new issue keeps both of its workers") do
+    titles = worker_titles(state, front_issue&.fetch("id", nil)).sort
+    [titles == ["Front-end worker A", "Front-end worker B"], titles.inspect]
+  end
+  check("the second new issue keeps its own worker") do
+    titles = worker_titles(state, back_issue&.fetch("id", nil))
+    [titles == ["Back-end worker A"], titles.inspect]
+  end
+  check("the pre-existing issue keeps the worker meant for it") do
+    titles = worker_titles(state, existing_issue_id)
+    [titles.include?("Existing issue worker"), titles.inspect]
+  end
+
+  puts "Scenario 14: predicted ids for two new issues survive a concurrent issue creation"
+  head_r = spawn_head(engine, "Two more goals with predicted ids")
+  interloper = spawn_head(engine, "Unrelated goal that steals the next id")
+  apply_head_result(
+    engine,
+    interloper,
+    head_result([
+      create_issue_command(project_id, "Interloper goal", command_id: "#{interloper}-C1"),
+      spawn_worker_command(title: "Interloper worker", extra_payload: { "issue_from_command" => "#{interloper}-C1" })
+    ])
+  )
+  issue_counter = engine.list_all.fetch("counters").fetch("issues_by_project").fetch(project_id).to_i
+  # head_r was spawned before the interloper applied, so its predictions are now two ids too low.
+  predicted_first = "#{project_id}-I#{issue_counter}"
+  predicted_second = "#{project_id}-I#{issue_counter + 1}"
+  predicted = apply_head_result(
+    engine,
+    head_r,
+    head_result([
+      create_issue_command(project_id, "Predicted goal one"),
+      create_issue_command(project_id, "Predicted goal two"),
+      spawn_worker_command(title: "Predicted worker one", issue_id: predicted_first),
+      spawn_worker_command(title: "Predicted worker two", issue_id: predicted_second)
+    ])
+  )
+  state = engine.list_all
+  first_goal = issue_by_title(state, "Predicted goal one")
+  second_goal = issue_by_title(state, "Predicted goal two")
+  check("both predicted batches are accepted") do
+    results = Array(predicted.dig("result", "command_results"))
+    [results.all? { |result| result.fetch("status", nil) == "accepted" }, results.map { |r| [r["command_type"], r["status"], r["errors"]] }.inspect]
+  end
+  check("each predicted worker lands on its own new issue") do
+    first_titles = worker_titles(state, first_goal&.fetch("id", nil))
+    second_titles = worker_titles(state, second_goal&.fetch("id", nil))
+    [
+      first_titles == ["Predicted worker one"] && second_titles == ["Predicted worker two"],
+      "#{first_goal&.fetch("id", nil)}=#{first_titles.inspect} #{second_goal&.fetch("id", nil)}=#{second_titles.inspect}"
+    ]
+  end
+  check("the interloper's issue keeps only its own worker") do
+    interloper_issue = issue_by_title(state, "Interloper goal")
+    titles = worker_titles(state, interloper_issue&.fetch("id", nil))
+    [titles == ["Interloper worker"], titles.inspect]
+  end
+
+  puts "Scenario 15: AddProject then CreateIssue with a predicted project id"
+  new_project_path = git_repo!(File.join(temp_root, "third-project"))
+  head_s = spawn_head(engine, "Register a new repo and start work in it")
+  competing_path = git_repo!(File.join(temp_root, "competing-project"))
+  competing = engine.apply("type" => "AddProject", "payload" => { "path" => competing_path, "name" => "competing-project" })
+  raise "AddProject was not accepted: #{competing.inspect}" unless competing.fetch("status") == "accepted"
+
+  predicted_project_id = "P#{engine.list_all.fetch("counters").fetch("projects").to_i}"
+  new_project = apply_head_result(
+    engine,
+    head_s,
+    head_result([
+      { "type" => "AddProject", "payload" => { "path" => new_project_path, "name" => "third-project" } },
+      create_issue_command(predicted_project_id, "Bootstrap the third project", command_id: "#{head_s}-C2"),
+      spawn_worker_command(title: "Bootstrap the third project", extra_payload: { "issue_from_command" => "#{head_s}-C2" })
+    ])
+  )
+  state = engine.list_all
+  bootstrap_issue = issue_by_title(state, "Bootstrap the third project")
+  registered = state.fetch("projects").find { |project| File.expand_path(project.fetch("root_path")) == File.expand_path(new_project_path) }
+  check("the whole AddProject batch is accepted") do
+    results = Array(new_project.dig("result", "command_results"))
+    [results.all? { |result| result.fetch("status", nil) == "accepted" }, results.map { |r| [r["command_type"], r["status"], r["message"]] }.inspect]
+  end
+  check("the issue lands in the project this batch registered") do
+    [
+      bootstrap_issue && registered && bootstrap_issue.fetch("project_id") == registered.fetch("id"),
+      "#{bootstrap_issue&.fetch("project_id", nil).inspect} vs #{registered&.fetch("id", nil).inspect}"
+    ]
+  end
+  check("the competing project keeps no issues from this batch") do
+    competing_issues = state.fetch("issues").select { |issue| issue.fetch("project_id") == competing.fetch("target_id") }
+    [competing_issues.empty?, competing_issues.map { |issue| issue.fetch("id") }.inspect]
+  end
+  check("the worker lands on the new project's issue") do
+    titles = worker_titles(state, bootstrap_issue&.fetch("id", nil))
+    [titles == ["Bootstrap the third project"], titles.inspect]
   end
 
   puts
