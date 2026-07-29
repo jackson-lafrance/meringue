@@ -200,6 +200,29 @@ module Meringue
         command.is_a?(Array) ? command.join(" ") : command.to_s
       end
 
+      # Authoritative model catalog for one harness provider, asked of that
+      # provider's client. Providers without catalog support answer with an
+      # explicit unsupported catalog, so callers never need provider branches.
+      def model_catalog(provider: nil, kind: "worker", cwd: nil)
+        # An unsupported provider name is a caller error, not a degraded catalog,
+        # so it still raises before any client is built.
+        provider = normalize_provider!(provider || worker_provider)
+        public_name = self.class.public_provider_name(provider)
+        begin
+          client = client_for(provider: provider, kind: kind)
+          return ModelCatalog.unsupported(harness: public_name) unless catalog_capable?(client)
+
+          client.available_models(cwd: cwd)
+        rescue StandardError => e
+          ModelCatalog.unavailable(
+            harness: public_name,
+            note: "Could not ask #{self.class.provider_label(provider)} for its models: #{e.message}",
+            reason: "fetch_failed",
+            error: e.class.name
+          )
+        end
+      end
+
       # Effective defaults used when the registry next starts a Pi head or
       # worker. Role details stay visible for older configs whose explicit argv
       # values differ; the dedicated scalar defaults make both roles converge.
@@ -249,6 +272,10 @@ module Meringue
       end
 
       private
+
+      def catalog_capable?(client)
+        client.respond_to?(:model_catalog_supported?) && client.model_catalog_supported?
+      end
 
       def build_client(provider:, kind:)
         provider = normalize_provider!(provider)

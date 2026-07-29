@@ -3,6 +3,7 @@
 require "json"
 require "open3"
 require "securerandom"
+require "tmpdir"
 require "thread"
 require "time"
 require "timeout"
@@ -46,6 +47,12 @@ module Meringue
       class SessionSettingsBusyError < Error; end
 
       THINKING_LEVELS = %w[off minimal low medium high xhigh max].freeze
+      # Pi only offers these two levels when a model explicitly maps them.
+      EXPLICIT_THINKING_LEVELS = %w[xhigh max].freeze
+      MODEL_CATALOG_SOURCE = "pi_rpc_get_available_models"
+      # A catalog probe is a throwaway ephemeral Pi process, so it should not
+      # inherit the long event timeout used for real agent turns.
+      DEFAULT_MODEL_CATALOG_TIMEOUT = 30
 
       attr_reader :command, :env, :session_dir, :command_timeout,
                   :event_timeout, :shutdown_timeout
@@ -239,6 +246,39 @@ module Meringue
 
       def session_settings_supported?
         true
+      end
+
+      def model_catalog_supported?
+        true
+      end
+
+      # Authoritative model list straight from Pi. Pi answers
+      # `get_available_models` per process rather than per session, so this uses
+      # a short-lived ephemeral RPC probe instead of borrowing a worker's
+      # transport, which stays owned by whatever is prompting it.
+      def available_models(cwd: nil)
+        probe_cwd = catalog_probe_cwd(cwd)
+        process = start_rpc_process(argv: build_model_catalog_argv, cwd: probe_cwd)
+        begin
+          data = rpc_data(
+            process.request({ "type" => "get_available_models" }, timeout: model_catalog_timeout)
+          )
+          ModelCatalog.available(
+            harness: harness_name,
+            models: Array(data["models"]).filter_map { |model| model_catalog_entry(model) },
+            source: MODEL_CATALOG_SOURCE
+          )
+        ensure
+          process.terminate(timeout: shutdown_timeout)
+        end
+      rescue StandardError => e
+        ModelCatalog.unavailable(
+          harness: harness_name,
+          note: "Could not read Pi's model catalog: #{e.message}",
+          source: MODEL_CATALOG_SOURCE,
+          reason: "fetch_failed",
+          error: e.class.name
+        )
       end
 
       def get_session_settings(session_ref)
@@ -435,6 +475,62 @@ module Meringue
       private
 
       attr_reader :transport_ownership, :takeover_settle_timeout
+
+      def model_catalog_timeout
+        [command_timeout.to_i, DEFAULT_MODEL_CATALOG_TIMEOUT].max
+      end
+
+      # The probe keeps the configured resource flags (extensions, tools) so the
+      # listed models match what a future head/worker could really select, but
+      # drops `--model`/`--thinking` because an unavailable saved default would
+      # otherwise make Pi exit before it can answer. `--no-session` keeps the
+      # probe from writing a session file.
+      def build_model_catalog_argv
+        Array(command).map(&:to_s) + ["--mode", "rpc", "--no-session"] +
+          without_options(extra_args, "--model", "--thinking")
+      end
+
+      def catalog_probe_cwd(cwd)
+        [cwd, Dir.pwd, Dir.tmpdir].compact.each do |candidate|
+          expanded = File.expand_path(candidate.to_s)
+          return expanded if Dir.exist?(expanded)
+        end
+        raise Error, "No usable working directory for a Pi model catalog probe"
+      end
+
+      def model_catalog_entry(model)
+        return nil unless model.is_a?(Hash)
+
+        provider = model["provider"].to_s
+        model_id = (model["id"] || model["modelId"]).to_s
+        return nil if provider.empty? || model_id.empty?
+
+        ModelCatalog.entry(
+          provider: provider,
+          id: model_id,
+          name: model["name"],
+          thinking_levels: supported_thinking_levels(model),
+          reasoning: !!model["reasoning"],
+          context_window: model["contextWindow"],
+          max_tokens: model["maxTokens"]
+        )
+      end
+
+      # Mirrors Pi's own rule (pi-ai `getSupportedThinkingLevels`) so the levels
+      # Meringue offers for a model are the levels `set_thinking_level` accepts.
+      def supported_thinking_levels(model)
+        return ["off"] unless model["reasoning"]
+
+        map = model["thinkingLevelMap"]
+        map = nil unless map.is_a?(Hash)
+        THINKING_LEVELS.select do |level|
+          mapped_present = map&.key?(level)
+          next false if mapped_present && map[level].nil?
+          next !!mapped_present if EXPLICIT_THINKING_LEVELS.include?(level)
+
+          true
+        end
+      end
 
       def parse_model_reference!(model_reference)
         reference = model_reference.to_s.strip

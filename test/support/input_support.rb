@@ -181,6 +181,49 @@ module InputSupport
     slash_parser.parse(input).to_h
   end
 
+  # Models a harness would report, in the shape the kernel persists after asking
+  # it for its catalog. Deliberately unsorted so ordering assertions are real.
+  SAMPLE_CATALOG_MODELS = [
+    { "provider" => "openai", "id" => "gpt-5.6-sol", "name" => "GPT-5.6 Sol",
+      "thinking_levels" => %w[off low medium high xhigh max], "reasoning" => true, "context_window" => 400_000 },
+    { "provider" => "anthropic", "id" => "claude-opus-5", "name" => "Claude Opus 5",
+      "thinking_levels" => %w[off minimal low medium high xhigh max], "reasoning" => true, "context_window" => 1_000_000 },
+    { "provider" => "anthropic-flex", "id" => "claude-opus-5", "name" => "Claude Opus 5",
+      "thinking_levels" => %w[xhigh max], "reasoning" => true, "context_window" => 1_000_000 },
+    { "provider" => "google", "id" => "gemini-3-flash", "name" => "Gemini 3 Flash",
+      "thinking_levels" => ["off"], "reasoning" => false, "context_window" => 1_048_576 }
+  ].freeze
+
+  def model_catalog_snapshot(harness: "pi", models: nil, source: "test_catalog")
+    Meringue::Harness::ModelCatalog.available(
+      harness: harness,
+      models: models || SAMPLE_CATALOG_MODELS,
+      source: source
+    ).to_h
+  end
+
+  # sample_state plus the metadata the kernel maintains for session settings:
+  # the active harness, saved future-session defaults, and per-harness catalogs.
+  def sample_state_with_model_catalog(harness: "pi", catalogs: nil, current_model: "anthropic/claude-opus-5",
+                                      default_model: "anthropic-flex/claude-opus-5")
+    state = sample_state
+    state.fetch("agents").first.merge!(
+      "harness" => harness,
+      "harness_session_id" => "session-1",
+      "session_settings" => {
+        "model" => { "provider" => current_model.split("/").first, "id" => current_model.split("/").last, "reference" => current_model },
+        "thinking_level" => "max",
+        "availability" => "available"
+      }
+    )
+    state["metadata"] = {
+      "active_harness" => harness,
+      "pi_session_defaults" => { "model" => default_model, "thinking_level" => "xhigh" },
+      "harness_model_catalogs" => catalogs || { harness => model_catalog_snapshot(harness: harness) }
+    }
+    state
+  end
+
   def sample_state
     {
       "projects" => [{ "id" => "P1", "name" => "proj", "status" => "working" }],

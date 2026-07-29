@@ -78,6 +78,9 @@ module Meringue
         "set_theme" => "SetTheme",
         "get_state" => "GetState",
         "get_session_defaults" => "GetSessionDefaults",
+        "get_model_catalog" => "GetModelCatalog",
+        "models" => "GetModelCatalog",
+        "list_models" => "GetModelCatalog",
         "set_default_session_model" => "SetDefaultSessionModel",
         "set_default_session_thinking_level" => "SetDefaultSessionThinkingLevel",
         "get_session_settings" => "GetSessionSettings",
@@ -103,6 +106,7 @@ module Meringue
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker agent session."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/defaults", "Show the model and thinking level used for all future Pi heads and workers."],
+        ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
         ["/default-model <provider/model>", "Persist the model used for all future Pi heads and workers; existing sessions are unchanged."],
         ["/default-thinking <level>", "Persist the thinking level used for all future Pi heads and workers: off, minimal, low, medium, high, xhigh, or max."],
         ["/session-settings <agent_id>", "Refresh and show one existing agent's effective Pi session model and thinking level."],
@@ -127,7 +131,7 @@ module Meringue
       # typing mistake back to the person who typed it.
       HEAD_PROPOSABLE_COMMANDS = %w[
         ListAll GetState GetInfo Help ListQuestions
-        GetSessionDefaults SetDefaultSessionModel SetDefaultSessionThinkingLevel
+        GetSessionDefaults GetModelCatalog SetDefaultSessionModel SetDefaultSessionThinkingLevel
         GetSessionSettings SetSessionModel SetSessionThinkingLevel
         AddProject CreateIssue ModifyIssue SpawnWorker PromptAgent SpawnHead
         AskQuestion AnswerQuestion DismissQuestion
@@ -190,6 +194,15 @@ module Meringue
       # I/O. Bound the whole lookup phase so one unreachable forge cannot leave the command pending
       # indefinitely. URLs not resolved inside the budget become `unknown` and retain their issue.
       PRUNE_FORGE_LOOKUP_BUDGET_SECONDS = 5.0
+      # Harness model catalogs change when a user logs into a provider, installs an
+      # extension, or edits models.json, so a persisted snapshot is refreshed
+      # periodically in the background instead of on every completion keystroke.
+      MODEL_CATALOG_REFRESH_INTERVAL_SECONDS = 10 * 60
+      # A catalog that could not be read is retried sooner, but not on every
+      # 2-second reconciliation pass.
+      MODEL_CATALOG_RETRY_INTERVAL_SECONDS = 60
+      # How many catalog entries `/models` prints before summarizing the rest.
+      MODEL_CATALOG_OUTPUT_LIMIT = 30
       RECONCILE_STATE_HEALTHY = "healthy"
       RECONCILE_STATE_RESUMING = "resuming"
       RECONCILE_STATE_RESUME_FAILED = "resume_failed"
@@ -215,6 +228,7 @@ module Meringue
                      default_harness_provider: nil,
                      session_defaults_provider: nil,
                      session_defaults_updater: nil,
+                     model_catalog_provider: nil,
                      workspace_manager: Workspace::Manager.new,
                      cwd: Dir.pwd,
                      async_heads: false,
@@ -232,6 +246,7 @@ module Meringue
         @default_harness_provider = normalize_initial_harness_provider(default_harness_provider || inferred_default_harness_provider)
         @session_defaults_provider = session_defaults_provider
         @session_defaults_updater = session_defaults_updater
+        @model_catalog_provider = model_catalog_provider
         @workspace_manager = workspace_manager
         @cwd = File.expand_path(cwd)
         @async_heads = async_heads
@@ -252,6 +267,7 @@ module Meringue
         @worker_spawn_mutex = Mutex.new
         @prune_mutex = Mutex.new
         @session_reconcile_mutex = Mutex.new
+        @model_catalog_mutex = Mutex.new
       end
 
       def list_all
@@ -346,6 +362,10 @@ module Meringue
           reconcile_sessions(command_id: command_id, command_type: command_type)
         elsif command_type == "Prune"
           @prune_mutex.synchronize { prune(command_id, command_type, payload) }
+        elsif command_type == "GetModelCatalog"
+          # Reading a catalog may start a short-lived harness process, so it must
+          # not hold the state lock while it waits on that process.
+          get_model_catalog(command_id, command_type, payload)
         elsif command_type == "Recount"
           @worker_spawn_mutex.synchronize { synchronized_state { dispatch_command(command_id, command_type, payload) } }
         else
@@ -371,6 +391,8 @@ module Meringue
           get_state(command_id, command_type)
         when "GetSessionDefaults"
           get_session_defaults(command_id, command_type)
+        when "GetModelCatalog"
+          get_model_catalog(command_id, command_type, payload)
         when "SetDefaultSessionModel"
           set_default_session_model(command_id, command_type, payload)
         when "SetDefaultSessionThinkingLevel"
@@ -564,6 +586,7 @@ module Meringue
         recovered_results = reconcile_step("recover_head_results", []) { recover_unapplied_head_results }
         prune_result = reconcile_step("prune_killed_records", { "changed" => false, "log_entry_ids" => [] }) { prune_killed_records }
         delivery_pr_refreshes = reconcile_step("refresh_delivery_pull_requests", []) { refresh_stale_delivery_pull_requests }
+        model_catalog_refresh = reconcile_step("refresh_model_catalog", { "changed" => false }) { refresh_active_model_catalog }
         agents = synchronized_state do
           normalized_state.fetch("agents").select { |agent| reconcile_candidate?(agent) }.map { |agent| deep_copy(agent) }
         end
@@ -577,6 +600,7 @@ module Meringue
         changed_count += 1 if normalized_state_changed
         changed_count += 1 if prune_result.fetch("changed", false)
         changed_count += delivery_pr_refreshes.count { |refresh| refresh.fetch("changed", false) }
+        changed_count += 1 if model_catalog_refresh.fetch("changed", false)
         accepted_result(
           command_id,
           command_type,
@@ -592,6 +616,7 @@ module Meringue
             "pending_prompt_results" => pending_prompt_results,
             "recovered_head_results" => recovered_results,
             "delivery_pull_request_refreshes" => delivery_pr_refreshes,
+            "model_catalog_refresh" => model_catalog_refresh,
             "poll_results" => applied_results
           },
           (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
@@ -780,6 +805,8 @@ module Meringue
           harness ? ["  harness: #{harness}"] : []
         when "Help"
           Array(result).map { |item| "  #{item.fetch("usage", "")} — #{item.fetch("description", "")}" }
+        when "GetModelCatalog"
+          model_catalog_output_lines(result)
         when "ListQuestions"
           questions = Array(result)
           return ["  No questions."] if questions.empty?
@@ -825,6 +852,29 @@ module Meringue
           target_id = result.is_a?(Hash) ? result["id"] : nil
           target_id ? ["  target: #{target_id}"] : []
         end
+      end
+
+      # Bounded, scannable listing: the full catalog can be over a hundred models,
+      # so the chat output shows a window and points at completion for the rest.
+      def model_catalog_output_lines(result)
+        catalog = result.is_a?(Hash) ? result : {}
+        models = Array(catalog["models"])
+        lines = ["  harness: #{catalog.fetch("harness", "unknown")}", "  availability: #{catalog.fetch("availability", "unknown")}"]
+        lines << "  source: #{catalog.fetch("source")}" if catalog["source"]
+        lines << "  fetched: #{catalog.fetch("fetched_at")}" if catalog["fetched_at"]
+        lines << "  note: #{catalog.fetch("note")}" if catalog["note"]
+        return lines if models.empty?
+
+        shown = models.first(MODEL_CATALOG_OUTPUT_LIMIT)
+        lines.concat(
+          shown.map do |model|
+            details = [model["name"], Array(model["thinking_levels"]).empty? ? nil : "thinking: #{Array(model["thinking_levels"]).join(", ")}"].compact
+            "  #{model.fetch("reference", "?")}#{details.empty? ? "" : " — #{details.join(" · ")}"}"
+          end
+        )
+        remaining = models.length - shown.length
+        lines << "  … and #{remaining} more; press Tab after /model or /default-model to search all #{models.length}." if remaining.positive?
+        lines
       end
 
       def prune_killed_records
@@ -885,6 +935,158 @@ module Meringue
         touch_state!(state)
         store.save(state)
         accepted_result(command_id, command_type, "pi", message, defaults.merge("config_path" => config_path), log_ids)
+      end
+
+      # Lists the models the selected harness itself reports. The catalog is
+      # cached in state metadata so completion never has to start a harness
+      # process while the user types.
+      def get_model_catalog(command_id, command_type, payload)
+        requested = value_at(payload, "harness", "provider", "Harness", "Provider")
+        provider =
+          if blank?(requested)
+            synchronized_state { active_harness_provider(normalized_state) }
+          else
+            begin
+              Meringue::Harness::Registry.normalize_provider!(requested)
+            rescue ArgumentError => e
+              return synchronized_state do
+                rejected_result(command_id, command_type, "Model catalog was not loaded.", [e.message])
+              end
+            end
+          end
+
+        force = model_catalog_force_flag?(value_at(payload, "refresh", "force", "Refresh", "Force"))
+        catalog = refresh_model_catalog!(provider: provider, force: force)
+        accepted_result(
+          command_id,
+          command_type,
+          catalog.fetch("harness", nil),
+          model_catalog_message(catalog),
+          catalog,
+          []
+        )
+      rescue StandardError => e
+        synchronized_state do
+          error = error_payload(e)
+          failed_result(
+            command_id,
+            command_type,
+            "Could not load the model catalog: #{error.fetch("message")}",
+            [error.fetch("class"), error.fetch("message")]
+          )
+        end
+      end
+
+      def model_catalog_force_flag?(value)
+        return false if value.nil?
+        return value if value == true || value == false
+
+        %w[true yes 1 refresh reload force].include?(value.to_s.strip.downcase)
+      end
+
+      def model_catalog_message(catalog)
+        harness = catalog.fetch("harness", "harness")
+        case catalog.fetch("availability", nil)
+        when Meringue::Harness::ModelCatalog::AVAILABLE
+          count = catalog.fetch("model_count", Array(catalog["models"]).length)
+          "#{harness} reports #{count} available model#{count == 1 ? "" : "s"}. " \
+            "Use /default-model <provider/model> for future sessions or /model <agent_id> <provider/model> for one session."
+        else
+          note = catalog.fetch("note", nil)
+          blank?(note) ? "No #{harness} model catalog is available." : note.to_s
+        end
+      end
+
+      # Fetching a catalog can start a harness process, so the fetch happens
+      # outside the state lock and only the resulting snapshot is persisted.
+      def refresh_model_catalog!(provider:, force: false)
+        public_name = Meringue::Harness::Registry.public_provider_name(provider)
+        @model_catalog_mutex.synchronize do
+          existing = persisted_model_catalog(public_name)
+          return existing if existing && !force && !model_catalog_stale?(existing)
+
+          snapshot = fetch_model_catalog(provider)
+          persist_model_catalog!(public_name, snapshot)
+          snapshot
+        end
+      end
+
+      def persisted_model_catalog(public_name)
+        synchronized_state do
+          catalog = normalized_state.dig("metadata", "harness_model_catalogs", public_name)
+          catalog.is_a?(Hash) ? deep_copy(catalog) : nil
+        end
+      end
+
+      def persist_model_catalog!(public_name, snapshot)
+        synchronized_state do
+          state = normalized_state
+          catalogs = (state.fetch("metadata")["harness_model_catalogs"] ||= {})
+          catalogs[public_name] = deep_copy(snapshot)
+          touch_state!(state)
+          store.save(state)
+        end
+      end
+
+      def fetch_model_catalog(provider)
+        public_name = Meringue::Harness::Registry.public_provider_name(provider)
+        unless @model_catalog_provider
+          return Meringue::Harness::ModelCatalog.unsupported(
+            harness: public_name,
+            note: "This Meringue instance has no harness model catalog source configured, " \
+                  "so #{public_name} models cannot be listed."
+          ).to_h
+        end
+
+        Meringue::Harness::ModelCatalog.coerce(
+          @model_catalog_provider.call(provider),
+          harness: public_name
+        ).to_h
+      rescue StandardError => e
+        Meringue::Harness::ModelCatalog.unavailable(
+          harness: public_name,
+          note: "Could not read the #{public_name} model catalog: #{sanitized_error_message(e)}",
+          reason: "fetch_failed",
+          error: e.class.name
+        ).to_h
+      end
+
+      def model_catalog_stale?(snapshot)
+        return true unless snapshot.is_a?(Hash)
+
+        age = Meringue::Harness::ModelCatalog.from_h(snapshot).age_seconds
+        return true if age.nil?
+        return false if age.negative?
+
+        available = snapshot.fetch("availability", nil) == Meringue::Harness::ModelCatalog::AVAILABLE
+        age >= (available ? MODEL_CATALOG_REFRESH_INTERVAL_SECONDS : MODEL_CATALOG_RETRY_INTERVAL_SECONDS)
+      end
+
+      # Background refresh for the harness that future sessions will use. Silent
+      # by design: an expected "no catalog yet" state is surfaced in `/models`
+      # and in completion, not as repeated durable log entries.
+      def refresh_active_model_catalog
+        return { "changed" => false, "skipped" => "no_catalog_source" } unless @model_catalog_provider
+
+        provider = synchronized_state { active_harness_provider(normalized_state) }
+        public_name = Meringue::Harness::Registry.public_provider_name(provider)
+        existing = persisted_model_catalog(public_name)
+        if existing && !model_catalog_stale?(existing)
+          return {
+            "changed" => false,
+            "harness" => public_name,
+            "availability" => existing.fetch("availability", nil),
+            "model_count" => existing.fetch("model_count", 0)
+          }
+        end
+
+        snapshot = refresh_model_catalog!(provider: provider)
+        {
+          "changed" => existing.nil? || existing.fetch("fetched_at", nil) != snapshot.fetch("fetched_at", nil),
+          "harness" => public_name,
+          "availability" => snapshot.fetch("availability", nil),
+          "model_count" => snapshot.fetch("model_count", 0)
+        }
       end
 
       def set_default_session_model(command_id, command_type, payload)
@@ -5808,6 +6010,9 @@ module Meringue
         state["metadata"]["active_harness_label"] = Meringue::Harness::Registry.provider_label(internal_harness) if selectable_harness_provider?(internal_harness)
         state["metadata"]["harness_generation"] ||= 0
         state["metadata"]["pi_session_defaults"] = configured_pi_session_defaults
+        # Harness model catalogs are fetched in the background, so state only
+        # guarantees the container exists; an empty map means "not fetched yet".
+        state["metadata"]["harness_model_catalogs"] = {} unless state["metadata"]["harness_model_catalogs"].is_a?(Hash)
       end
 
       def max_numeric_suffix(records, pattern)

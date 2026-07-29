@@ -47,6 +47,20 @@ module Meringue
               "#{session_settings_harness_name} does not support changing a managed session thinking level"
       end
 
+      # Model catalogs are asked of the harness, never hand-maintained here.
+      # Providers that cannot answer yet return an explicit unsupported catalog
+      # so callers can say why the list is missing instead of guessing.
+      def model_catalog_supported?
+        false
+      end
+
+      def available_models(cwd: nil) # rubocop:disable Lint/UnusedMethodArgument
+        ModelCatalog.unsupported(
+          harness: session_settings_harness_name,
+          note: "#{session_settings_harness_name} does not expose a model catalog yet, so Meringue cannot list its models."
+        )
+      end
+
       def read_events(session_ref)
         raise NotImplementedError, "harness clients must implement #read_events"
       end
