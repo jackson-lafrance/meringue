@@ -1,0 +1,131 @@
+# frozen_string_literal: true
+
+require "test_helper"
+require "support/kernel_workers_support"
+
+# Workspace provisioning outcomes: git worktree collisions, non-git fallback, and
+# harness spawn failures must surface as failed commands with clear logs and an
+# honest (never half-written) agent record.
+class KernelWorkersWorkspaceProvisioningTest < Minitest::Test
+  include KernelWorkersSupport
+
+  def test_workspace_allocation_failure_fails_the_command_and_marks_the_worker_errored
+    manager = FailingWorkspaceManager.new(
+      errors: ["git worktree add failed: fatal: 'meringue/fix-the-login-bug' is already checked out"],
+      root_path: workspace_root
+    )
+    engine = build_engine(workspace_manager: manager)
+    context = project_with_issue(engine)
+
+    result = apply_raw(engine, "SpawnWorker", { "issue_id" => context.fetch("issue_id"), "prompt" => "Go." })
+    worker = agent(engine, "P1-I1-W1")
+
+    assert_equal "failed", result.fetch("status")
+    assert_includes result.fetch("message"), "Worker workspace provisioning failed"
+    assert_includes result.fetch("message"), "already checked out"
+    assert_empty @harness_client.spawns, "the harness must not be started without a workspace"
+
+    refute_nil worker, "the reserved worker record should be retained for inspection"
+    assert_equal "errored", worker.fetch("status")
+    assert_equal "failed", worker.fetch("harness_metadata").fetch("provisioning_state")
+    assert_includes worker.fetch("harness_metadata").fetch("provisioning_errors").join(" "), "already checked out"
+    assert_nil worker.fetch("harness_session_id")
+    assert_nil worker.fetch("pid")
+    assert_equal "errored", issue(engine, context.fetch("issue_id")).fetch("status")
+
+    worker_log = state(engine).fetch("logs").find { |entry| entry.fetch("source_id", nil) == "P1-I1-W1" && entry.fetch("level") == "error" }
+    refute_nil worker_log, "expected a worker-scoped provisioning failure log"
+    assert_includes worker_log.fetch("message"), "Worker workspace provisioning failed"
+    assert_includes log_messages(engine), "Failed SpawnWorker: #{result.fetch("message")}"
+  end
+
+  def test_worktree_path_collision_falls_back_to_a_uniquified_branch_and_path
+    engine = build_engine
+    context = project_with_issue(engine)
+    planned = planned_workspace(context)
+    occupy_directory(planned.fetch("workspace_path"))
+
+    result = spawn_worker(engine, context.fetch("issue_id"))
+    worker = agent(engine, result.fetch("target_id"))
+
+    assert_equal "git_worktree", worker.fetch("workspace_strategy")
+    assert_equal "#{planned.fetch("workspace_branch")}-2", worker.fetch("workspace_branch")
+    assert_equal "#{planned.fetch("workspace_path")}-2", worker.fetch("workspace_path")
+    assert_equal worker.fetch("workspace_path"), @harness_client.spawns.fetch(0).fetch("cwd")
+  end
+
+  def test_exhausted_worktree_collisions_fail_the_spawn_with_a_clear_log
+    engine = build_engine
+    context = project_with_issue(engine)
+    planned = planned_workspace(context)
+    occupy_directory(planned.fetch("workspace_path"))
+    occupy_directory("#{planned.fetch("workspace_path")}-2")
+    occupy_directory("#{planned.fetch("workspace_path")}-3")
+
+    result = apply_raw(engine, "SpawnWorker", { "issue_id" => context.fetch("issue_id"), "prompt" => "Go." })
+    worker = agent(engine, "P1-I1-W1")
+
+    assert_equal "failed", result.fetch("status")
+    assert_includes result.fetch("message"), "Worker workspace provisioning failed"
+    assert_includes result.fetch("errors").join(" "), "already exists"
+    assert_empty @harness_client.spawns
+    assert_equal "errored", worker.fetch("status")
+    assert_equal "failed", worker.fetch("harness_metadata").fetch("provisioning_state")
+    refute_empty logs_matching(engine, /Worker workspace provisioning failed.*already exists/)
+  end
+
+  def test_non_git_project_root_falls_back_to_the_project_root_cwd
+    engine = build_engine
+    root = create_plain_directory
+    project_id = add_project(engine, root)
+    issue_id = create_issue(engine, project_id, title: "Draft the onboarding doc")
+
+    result = spawn_worker(engine, issue_id)
+    worker = agent(engine, result.fetch("target_id"))
+
+    assert_equal "accepted", result.fetch("status")
+    assert_equal "project_root", worker.fetch("workspace_strategy")
+    assert_equal File.realpath(root), File.realpath(worker.fetch("workspace_path"))
+    assert_nil worker.fetch("workspace_branch")
+    assert_equal(
+      "project root is not inside a git repository",
+      worker.fetch("harness_metadata").fetch("workspace_note")
+    )
+    assert_equal worker.fetch("workspace_path"), @harness_client.spawns.fetch(0).fetch("cwd")
+  end
+
+  def test_harness_spawn_failure_fails_the_command_and_releases_the_workspace
+    @harness_client.spawn_error = RuntimeError.new("harness refused to start")
+    engine = build_engine
+    context = project_with_issue(engine)
+
+    result = apply_raw(engine, "SpawnWorker", { "issue_id" => context.fetch("issue_id"), "prompt" => "Go." })
+    worker = agent(engine, "P1-I1-W1")
+
+    assert_equal "failed", result.fetch("status")
+    assert_includes result.fetch("message"), "Harness failed to spawn worker P1-I1-W1"
+    assert_includes result.fetch("errors"), "harness refused to start"
+    assert_equal "errored", worker.fetch("status")
+    assert_equal "failed", worker.fetch("harness_metadata").fetch("provisioning_state")
+    assert_nil worker.fetch("harness_session_id")
+    refute Dir.exist?(worker.fetch("workspace_path")), "a failed spawn should release its freshly created worktree"
+    refute_empty logs_matching(engine, /Harness failed to spawn worker P1-I1-W1/)
+  end
+
+  private
+
+  def planned_workspace(context)
+    workspace_manager.plan_worker_workspace(
+      project_root: context.fetch("root"),
+      project_id: context.fetch("project_id"),
+      issue_id: context.fetch("issue_id"),
+      agent_id: "P1-I1-W1",
+      task_title: "Fix the login bug"
+    )
+  end
+
+  def occupy_directory(path)
+    FileUtils.mkdir_p(path)
+    File.write(File.join(path, "leftover.txt"), "occupied\n")
+  end
+end
