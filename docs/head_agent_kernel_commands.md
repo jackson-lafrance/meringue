@@ -737,6 +737,11 @@ Worktree cleanup safety and outcomes:
 - A missing but still-registered worktree is safely deregistered. A worktree already absent from both disk and git's registry is an idempotent success.
 - Dirty, locked, ambiguous, or failed cleanups leave the issue/worker record in state. The worker stores its latest `harness_metadata.workspace_cleanup` result, warning/info logs name each outcome, and the `Prune` result exposes `workspace_cleanup_outcomes` plus blocked agent/issue/project IDs.
 
+PR checks are conservative and bounded. The kernel performs them outside the state lock,
+looks up each URL once, and gives the whole lookup phase five seconds. A timeout or a PR
+introduced after the lookup snapshot is `unknown`, so its issue is retained instead of
+blocking the app indefinitely or being removed unsafely.
+
 Compatibility: a legacy `selector` value (`resolved`, `errored`, `completed`, or `merged`) is still accepted and recorded as `requested_selector` in the log details, but it is a no-op that prunes exactly the same records as a bare `/prune`. Any other `/prune` argument is rejected by the slash-command parser with a short usage message. Do not invent a selector for a head-proposed `Prune`: send an empty payload.
 
 The kernel logs the summary itself (`Pruned 3 issues, 1 project, and 0 standalone agents.`), so the HeadResult summary should not restate the counts.

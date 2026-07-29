@@ -133,6 +133,7 @@ module Meringue
         AskQuestion AnswerQuestion DismissQuestion
         Kill Prune Recount ClearState SetTheme SetHarness ReconcileSessions
       ].freeze
+      HEAD_BLOCKED_COMMANDS = %w[ApplyHeadResult InvalidSlashCommand].freeze
       HEAD_UNPROPOSABLE_COMMAND_REASON = "command_not_proposable_by_head"
       # Destructive commands a head may only propose when the user's own message is an
       # unambiguous instruction and the head marks the command user-confirmed. Everything else
@@ -185,6 +186,10 @@ module Meringue
       HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
       DELIVERY_PULL_REQUEST_REFRESH_INTERVAL_SECONDS = 5 * 60
+      # `/prune` verifies PR state conservatively, but forge discovery/status commands are external
+      # I/O. Bound the whole lookup phase so one unreachable forge cannot leave the command pending
+      # indefinitely. URLs not resolved inside the budget become `unknown` and retain their issue.
+      PRUNE_FORGE_LOOKUP_BUDGET_SECONDS = 5.0
       RECONCILE_STATE_HEALTHY = "healthy"
       RECONCILE_STATE_RESUMING = "resuming"
       RECONCILE_STATE_RESUME_FAILED = "resume_failed"
@@ -200,7 +205,7 @@ module Meringue
       HEAD_SESSION_STATE_UNAVAILABLE = "unavailable"
 
       attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path,
-                  :state_lock, :instance_pid, :instance_id
+                  :state_lock, :instance_pid, :instance_id, :prune_forge_lookup_budget
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
                      head_runner: Heads::FakeRunner.new,
@@ -215,6 +220,7 @@ module Meringue
                      async_heads: false,
                      forge_client: Forge::GitHubClient.new,
                      config_path: Config::DEFAULT_PATH,
+                     prune_forge_lookup_budget: PRUNE_FORGE_LOOKUP_BUDGET_SECONDS,
                      state_lock: nil,
                      instance_pid: Process.pid,
                      instance_id: nil)
@@ -231,6 +237,7 @@ module Meringue
         @async_heads = async_heads
         @forge_client = forge_client
         @config_path = File.expand_path(config_path.to_s)
+        @prune_forge_lookup_budget = Float(prune_forge_lookup_budget)
         @harness_client_resolver = harness_client_resolver
         @instance_pid = Integer(instance_pid)
         # Identifies this engine across processes. The pid alone is not enough:
@@ -243,6 +250,7 @@ module Meringue
         @state_mutex = Monitor.new
         @head_result_mutex = Mutex.new
         @worker_spawn_mutex = Mutex.new
+        @prune_mutex = Mutex.new
         @session_reconcile_mutex = Mutex.new
       end
 
@@ -336,6 +344,8 @@ module Meringue
           @head_result_mutex.synchronize { apply_head_result(command_id, command_type, payload) }
         elsif command_type == "ReconcileSessions"
           reconcile_sessions(command_id: command_id, command_type: command_type)
+        elsif command_type == "Prune"
+          @prune_mutex.synchronize { prune(command_id, command_type, payload) }
         elsif command_type == "Recount"
           @worker_spawn_mutex.synchronize { synchronized_state { dispatch_command(command_id, command_type, payload) } }
         else
@@ -2119,7 +2129,7 @@ module Meringue
         head = {} unless head.is_a?(Hash)
         head_id = head.fetch("id", nil).to_s
 
-        unless HEAD_PROPOSABLE_COMMANDS.include?(command_type)
+        if HEAD_BLOCKED_COMMANDS.include?(command_type)
           return synchronized_state do
             rejected_result(
               command_id,
@@ -2129,6 +2139,9 @@ module Meringue
             )
           end
         end
+        # Unknown command types continue through normal kernel dispatch and keep the established
+        # `unknown_command` validation error. The explicit block above is only for known
+        # kernel/parser internals; user-facing commands are enumerated for the head contract.
 
         guard = case command_type
                 when "ClearState" then clear_state_head_guard(head, payload)
@@ -2143,7 +2156,7 @@ module Meringue
 
       def clear_state_head_guard(head, payload)
         confirmed = head_command_user_confirmed?(payload)
-        user_message = head_request_user_message(head)
+        user_message = head_record_user_message(head)
         explicit = HEAD_CLEAR_STATE_INSTRUCTION_PATTERN.match?(user_message)
         return nil if confirmed && explicit
 
@@ -2173,7 +2186,7 @@ module Meringue
         return nil unless project
 
         confirmed = head_command_user_confirmed?(payload)
-        user_message = head_request_user_message(head)
+        user_message = head_record_user_message(head)
         explicit = HEAD_KILL_INSTRUCTION_PATTERN.match?(user_message) && head_message_names_project?(user_message, project)
         return nil if confirmed && explicit
 
@@ -2196,7 +2209,7 @@ module Meringue
 
       # The user's own words are the authoritative evidence for a destructive command. A head
       # cannot manufacture them: the kernel reads the message it recorded when it spawned the head.
-      def head_request_user_message(head)
+      def head_record_user_message(head)
         metadata = head.is_a?(Hash) ? (head.fetch("harness_metadata", {}) || {}) : {}
         request = metadata.is_a?(Hash) ? (metadata.fetch("head_request", {}) || {}) : {}
         request.is_a?(Hash) ? request.fetch("user_message", "").to_s : ""
@@ -2364,7 +2377,62 @@ module Meringue
       # compatibility and recorded for traceability, but it never changes what is pruned.
       def prune(command_id, command_type, payload)
         requested_selector = present_string(value_at(payload, "selector", "Selector", "kind", "status").to_s.downcase)
-        prune_records(command_id, command_type, requested_selector: requested_selector)
+        # Never hold the global state/file lock while `gh` or another forge client performs
+        # external I/O. First populate a short-lived, per-command cache from a state snapshot.
+        # Then reacquire the lock and apply the prune against current state using only cached
+        # results. A PR introduced after the snapshot is treated as unknown and retained.
+        lookup_context = prepare_prune_forge_lookups
+        synchronized_state do
+          with_prune_forge_lookup_context(lookup_context) do
+            prune_records(command_id, command_type, requested_selector: requested_selector)
+          end
+        end
+      end
+
+      def prepare_prune_forge_lookups
+        snapshot = synchronized_state { deep_copy(normalized_state) }
+        context = {
+          "status_by_url" => {},
+          "urls_by_branch" => {},
+          "branch_lookup_failures" => {},
+          "branch_lookup_blockers_by_issue" => {},
+          "allow_external" => true,
+          "deadline" => monotonic_time + [prune_forge_lookup_budget, 0.0].max
+        }
+        with_prune_forge_lookup_context(context) do
+          # These are the only two prune phases that can consult the forge. Running both on the
+          # snapshot fills one cache, so a URL used for delivery verification and retention is
+          # looked up once instead of once per phase/record.
+          refresh_worker_delivery_pull_requests!(snapshot)
+          prune_pull_request_checks(snapshot)
+        end
+        context["allow_external"] = false
+        context
+      end
+
+      def with_prune_forge_lookup_context(context)
+        key = prune_forge_lookup_thread_key
+        previous = Thread.current[key]
+        Thread.current[key] = context
+        yield
+      ensure
+        Thread.current[key] = previous
+      end
+
+      def prune_forge_lookup_context
+        Thread.current[prune_forge_lookup_thread_key]
+      end
+
+      def prune_forge_lookup_thread_key
+        @prune_forge_lookup_thread_key ||= "meringue-prune-forge-#{object_id}"
+      end
+
+      def prune_forge_lookup_remaining(context)
+        [context.fetch("deadline", monotonic_time) - monotonic_time, 0.0].max
+      end
+
+      def monotonic_time
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
 
       # A head may propose `/recount` for itself. The head that is applying the batch is not an
@@ -2613,7 +2681,10 @@ module Meringue
             question.fetch("status", nil) == "open" && subtree_ids.include?(question.fetch("issue_id", nil))
           end
           statuses = subtree_ids.flat_map { |issue_id| Array(checks_by_issue.dig(issue_id, "statuses")) }
-          pull_request_blockers = statuses.reject do |status|
+          discovery_blockers = subtree_ids.flat_map do |issue_id|
+            Array(prune_forge_lookup_context&.dig("branch_lookup_blockers_by_issue", issue_id))
+          end
+          pull_request_blockers = (statuses + discovery_blockers).reject do |status|
             PRUNE_SETTLED_PULL_REQUEST_STATES.include?(status.fetch("state", nil).to_s)
           end
           nonterminal_issue_ids = subtree_issues.reject do |candidate|
@@ -2724,7 +2795,19 @@ module Meringue
         repository = project_github_repository(project)
         return [] if blank?(branch) || blank?(repository)
 
-        Array(forge_client.pull_request_urls_for_branch(repository: repository, branch: branch))
+        urls = pull_request_urls_for_branch(repository: repository, branch: branch)
+        context = prune_forge_lookup_context
+        failure = context&.dig("branch_lookup_failures", [repository.to_s, branch.to_s])
+        if failure
+          blocker = unavailable_prune_pull_request_status(
+            "github-branch://#{repository}/#{branch}",
+            failure
+          )
+          blockers = context.fetch("branch_lookup_blockers_by_issue")
+          issue_blockers = blockers[agent.fetch("issue_id", nil)] ||= []
+          issue_blockers << blocker unless issue_blockers.any? { |existing| existing.fetch("url", nil) == blocker.fetch("url") }
+        end
+        urls
       rescue StandardError
         []
       end
@@ -2807,15 +2890,83 @@ module Meringue
         match && match[1]
       end
 
-      def pull_request_status(url)
-        forge_client.pull_request_status(url)
+      def pull_request_urls_for_branch(repository:, branch:)
+        context = prune_forge_lookup_context
+        return Array(forge_client.pull_request_urls_for_branch(repository: repository, branch: branch)) unless context
+
+        key = [repository.to_s, branch.to_s]
+        cache = context.fetch("urls_by_branch")
+        return cache.fetch(key) if cache.key?(key)
+        unless context.fetch("allow_external", false)
+          return record_prune_branch_lookup_failure(context, key, "Branch appeared after the prune lookup snapshot")
+        end
+
+        remaining = prune_forge_lookup_remaining(context)
+        unless remaining.positive?
+          return record_prune_branch_lookup_failure(context, key, "Prune forge lookup budget was exhausted")
+        end
+
+        cache[key] = Array(invoke_forge_branch_lookup(repository: repository, branch: branch, timeout: remaining))
       rescue StandardError => e
+        context ? record_prune_branch_lookup_failure(context, key, e.message) : []
+      end
+
+      def record_prune_branch_lookup_failure(context, key, error)
+        context.fetch("branch_lookup_failures")[key] = error.to_s
+        context.fetch("urls_by_branch")[key] = []
+      end
+
+      def pull_request_status(url)
+        context = prune_forge_lookup_context
+        return forge_client.pull_request_status(url) unless context
+
+        key = url.to_s
+        cache = context.fetch("status_by_url")
+        return cache.fetch(key) if cache.key?(key)
+        unless context.fetch("allow_external", false)
+          return cache[key] = unavailable_prune_pull_request_status(key, "PR appeared after the prune lookup snapshot")
+        end
+
+        remaining = prune_forge_lookup_remaining(context)
+        unless remaining.positive?
+          return cache[key] = unavailable_prune_pull_request_status(key, "Prune forge lookup budget was exhausted")
+        end
+
+        cache[key] = invoke_forge_status_lookup(key, timeout: remaining)
+      rescue StandardError => e
+        status = unavailable_prune_pull_request_status(url, e.message)
+        context ? context.fetch("status_by_url")[url.to_s] = status : status
+      end
+
+      def invoke_forge_status_lookup(url, timeout:)
+        method = forge_client.method(:pull_request_status)
+        return method.call(url, timeout: timeout) if forge_method_accepts_timeout?(method)
+
+        method.call(url)
+      end
+
+      def invoke_forge_branch_lookup(repository:, branch:, timeout:)
+        method = forge_client.method(:pull_request_urls_for_branch)
+        if forge_method_accepts_timeout?(method)
+          return method.call(repository: repository, branch: branch, timeout: timeout)
+        end
+
+        method.call(repository: repository, branch: branch)
+      end
+
+      def forge_method_accepts_timeout?(method)
+        method.parameters.any? do |kind, name|
+          kind == :keyrest || (%i[key keyreq].include?(kind) && name == :timeout)
+        end
+      end
+
+      def unavailable_prune_pull_request_status(url, error)
         {
           "provider" => "unknown",
           "url" => url.to_s,
           "state" => "unknown",
           "merged_at" => nil,
-          "error" => e.message
+          "error" => error.to_s
         }
       end
 
