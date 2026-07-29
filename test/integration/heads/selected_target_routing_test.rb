@@ -79,6 +79,46 @@ class HeadsSelectedTargetRoutingTest < Minitest::Test
     assert_empty runner.calls
   end
 
+  # A blank selection carries no destination, so it means "nothing is selected"
+  # rather than a bad request that should drop the user's message.
+  def test_blank_selection_routes_normally_instead_of_being_rejected
+    runner = ScriptedHeadRunner.new(results: [head_result, head_result])
+    environment = build_head_environment(runner: runner, initial_state: head_snapshot)
+
+    [{}, "   "].each do |blank|
+      result = environment.engine.apply(
+        "type" => "SpawnHead",
+        "payload" => { "user_message" => "continue", "selected_target" => blank }
+      )
+
+      assert_equal "accepted", result.fetch("status"), "blank selection #{blank.inspect} should still spawn a head"
+    end
+
+    assert_equal 2, runner.calls.length
+    runner.calls.each do |call|
+      assert_nil call.fetch("context").to_prompt_h.fetch("routing_context").fetch("selected_target", nil)
+    end
+  end
+
+  # Recovered heads read their selection back out of persisted state, where it may
+  # be a bare id string instead of the canonical hash.
+  def test_bare_id_selection_still_resolves_routing_context
+    context = Meringue::Heads::Context.new(
+      head_id: "H9",
+      user_message: "keep going",
+      snapshot: head_snapshot,
+      selected_target: "P1-I1-W1",
+      cwd: head_temp_root,
+      state_path: File.join(head_temp_root, "state.json")
+    )
+
+    target = context.to_prompt_h.dig("routing_context", "selected_target")
+
+    assert_equal "P1-I1", target.fetch("issue_id")
+    assert_equal "agent", target.fetch("selected_type")
+    assert_equal "P1-I1-W1", target.fetch("selected_agent_id")
+  end
+
   def test_fake_head_honors_selected_issue_instead_of_matching_another_issue
     snapshot = head_snapshot
     context = Meringue::Heads::Context.new(

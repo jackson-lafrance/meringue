@@ -2289,8 +2289,11 @@ module Meringue
         return if text.empty?
 
         slash_command = text.start_with?("/")
-        selected_target = slash_command ? nil : LogScope.selected_target(state)
-        selected_target = nil if selected_target.empty?
+        # Slash commands are explicit clutch-path instructions and never carry
+        # dashboard routing context. LogScope.chat_target already normalizes an
+        # absent, cleared, or unbound selection to nil, so both branches produce
+        # the same "Hash or nil" shape the handler call expects.
+        selected_target = slash_command ? nil : LogScope.chat_target(state)
         assistant_message_id = nil
         unless slash_command
           assistant_message_id = append_message(
@@ -2337,9 +2340,41 @@ module Meringue
       # target is a keyword so it cannot be confused with user text or turn into
       # a direct PromptAgent shortcut.
       def submit_to_prompt_handler(on_submit, text, selected_target, &on_event)
-        return on_submit.call(text, &on_event) unless selected_target
+        return on_submit.call(text, &on_event) if blank_selected_target?(selected_target)
+        return on_submit.call(text, &on_event) unless handler_accepts_selected_target?(on_submit)
 
         on_submit.call(text, selected_target: selected_target, &on_event)
+      end
+
+      # nil, "", and {} all mean "nothing is selected". Normalizing here keeps a
+      # stale or partially cleared value from turning a normal prompt into a
+      # keyword call carrying no routing information.
+      def blank_selected_target?(selected_target)
+        return true if selected_target.nil?
+        return selected_target.empty? if selected_target.respond_to?(:empty?)
+
+        false
+      end
+
+      # Older embedders pass a one-argument prompt handler. Routing context is
+      # additive, so degrade to an unscoped prompt instead of failing the whole
+      # message with an ArgumentError only when a target happens to be selected.
+      def handler_accepts_selected_target?(on_submit)
+        parameters = handler_parameters(on_submit)
+        return true unless parameters
+
+        parameters.any? do |kind, name|
+          kind == :keyrest || (%i[key keyreq].include?(kind) && name == :selected_target)
+        end
+      end
+
+      def handler_parameters(on_submit)
+        return on_submit.parameters if on_submit.respond_to?(:parameters)
+        return on_submit.method(:call).parameters if on_submit.respond_to?(:call)
+
+        nil
+      rescue StandardError
+        nil
       end
 
       def unavailable_prompt_handler_result
