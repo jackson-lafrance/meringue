@@ -3,6 +3,7 @@
 require "json"
 require "monitor"
 require "open3"
+require "socket"
 require "time"
 
 require_relative "../config"
@@ -106,6 +107,10 @@ module Meringue
       # Token-overlap ratio above which two clarifications from the same head are treated as
       # one restated question instead of two separate questions.
       DUPLICATE_QUESTION_SIMILARITY_THRESHOLD = 0.6
+      # A head command batch is applied by one kernel instance at a time. The applying instance
+      # refreshes this lease as it works, so another instance (or another Meringue process
+      # sharing the same state file) can tell an in-flight batch from an abandoned one.
+      HEAD_RESULT_APPLY_LEASE_SECONDS = 60
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
       HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
@@ -513,6 +518,9 @@ module Meringue
             next if present_string(metadata.fetch("head_result_applied_at", nil))
             next unless metadata.fetch("head_result_apply_state", nil) == "applying" ||
                         (agent.fetch("status", nil) == "completed" && agent_has_session_reference?(agent))
+            # Another kernel instance is applying this batch right now; recovering it here would
+            # apply every command a second time.
+            next if head_result_apply_lease_held_elsewhere?(agent)
 
             { "head_id" => agent.fetch("id"), "head_result" => deep_copy(head_result) }
           end
@@ -1021,6 +1029,17 @@ module Meringue
           return rejected_result(command_id, command_type, "Head #{head_id} does not exist.", ["head_not_found"]) unless head
           return rejected_result(command_id, command_type, "Agent #{head_id} is not a head.", ["agent_is_not_head"]) unless head.fetch("type", nil) == "head"
 
+          if head_result_apply_lease_held_elsewhere?(head)
+            return accepted_result(
+              command_id,
+              command_type,
+              head_id.to_s,
+              "Head result for #{head_id} is already being applied by another kernel instance.",
+              { "head_id" => head_id.to_s, "skipped" => "head_result_apply_in_progress" },
+              []
+            )
+          end
+
           now = timestamp
           metadata = head.fetch("harness_metadata", {}) || {}
           already_initialized = present_string(metadata.fetch("head_result_initialized_at", nil))
@@ -1032,7 +1051,7 @@ module Meringue
             "head_result" => head_result,
             "head_result_apply_state" => "applying",
             "head_result_initialized_at" => metadata.fetch("head_result_initialized_at", nil) || now
-          )
+          ).merge(head_result_apply_lease(now))
           metadata["head_result_command_journal"] = initialize_head_command_journal(
             state: state,
             head_id: head_id.to_s,
@@ -1054,17 +1073,22 @@ module Meringue
         end
         return initialization if kernel_command_result?(initialization)
 
-        command_results = head_result.fetch("commands").each_with_index.map do |proposed_command, index|
+        command_results = []
+        head_result.fetch("commands").each_with_index do |proposed_command, index|
           command = command_with_default_id(proposed_command, head_id: head_id.to_s, index: index)
           journal_entry = current_head_journal_entry(head_id.to_s, index)
           if journal_entry && terminal_command_status?(journal_entry.fetch("status", nil))
-            command_result_from_journal(journal_entry)
-          else
-            mark_head_command_started!(head_id.to_s, index)
-            result = apply(command)
-            checkpoint_head_command_result!(head_id.to_s, index, result)
-            result
+            command_results << command_result_from_journal(journal_entry)
+            next
           end
+
+          # The head record can disappear mid-batch when another kernel instance finishes and
+          # cleans up the same batch. Stop instead of raising so reconciliation keeps working.
+          break unless mark_head_command_started!(head_id.to_s, index)
+
+          result = apply(command)
+          command_results << result
+          break unless checkpoint_head_command_result!(head_id.to_s, index, result)
         end
 
         synchronized_state do
@@ -3051,20 +3075,22 @@ module Meringue
         synchronized_state do
           state = normalized_state
           head = find_agent(state, head_id)
-          raise "Head #{head_id} disappeared before command #{index + 1} started." unless head
+          next false unless head
 
           metadata = head.fetch("harness_metadata", {}) || {}
           journal = Array(metadata.fetch("head_result_command_journal", []))
           entry = journal[index]
-          raise "Head #{head_id} has no journal entry for command #{index + 1}." unless entry
+          next false unless entry
 
+          now = timestamp
           entry["status"] = "running"
-          entry["started_at"] = timestamp
+          entry["started_at"] = now
           metadata["head_result_command_journal"] = journal
-          head["harness_metadata"] = metadata
-          head["updated_at"] = timestamp
+          head["harness_metadata"] = metadata.merge(head_result_apply_lease(now))
+          head["updated_at"] = now
           touch_state!(state)
           store.save(state)
+          true
         end
       end
 
@@ -3072,12 +3098,12 @@ module Meringue
         synchronized_state do
           state = normalized_state
           head = find_agent(state, head_id)
-          raise "Head #{head_id} disappeared before command #{index + 1} was checkpointed." unless head
+          next false unless head
 
           metadata = head.fetch("harness_metadata", {}) || {}
           journal = Array(metadata.fetch("head_result_command_journal", []))
           entry = journal[index]
-          raise "Head #{head_id} has no journal entry for command #{index + 1}." unless entry
+          next false unless entry
 
           entry.merge!(
             "status" => result.fetch("status", "failed"),
@@ -3089,11 +3115,64 @@ module Meringue
             "completed_at" => timestamp
           )
           metadata["head_result_command_journal"] = journal
-          head["harness_metadata"] = metadata
+          head["harness_metadata"] = metadata.merge(head_result_apply_lease(timestamp))
           head["updated_at"] = timestamp
           touch_state!(state)
           store.save(state)
+          true
         end
+      end
+
+      # Identifies this kernel instance so a head command batch is applied exactly once even when
+      # more than one Meringue process shares the same state file.
+      def kernel_instance_id
+        @kernel_instance_id ||= "#{kernel_host_name}:#{Process.pid}:#{object_id}"
+      end
+
+      def kernel_host_name
+        @kernel_host_name ||= begin
+          Socket.gethostname
+        rescue StandardError
+          "localhost"
+        end
+      end
+
+      def head_result_apply_lease(now = timestamp)
+        {
+          "head_result_apply_owner" => kernel_instance_id,
+          "head_result_apply_owner_host" => kernel_host_name,
+          "head_result_apply_owner_pid" => Process.pid,
+          "head_result_apply_heartbeat" => now
+        }
+      end
+
+      def head_result_apply_lease_held_elsewhere?(head)
+        metadata = head.is_a?(Hash) ? (head.fetch("harness_metadata", {}) || {}) : {}
+        return false unless metadata.is_a?(Hash)
+
+        owner = present_string(metadata.fetch("head_result_apply_owner", nil))
+        return false unless owner
+        return false if owner == kernel_instance_id
+        return false if present_string(metadata.fetch("head_result_applied_at", nil))
+
+        heartbeat = parse_time_or_nil(metadata.fetch("head_result_apply_heartbeat", nil))
+        return false unless heartbeat
+        return false if Time.now - heartbeat > HEAD_RESULT_APPLY_LEASE_SECONDS
+
+        owner_host = present_string(metadata.fetch("head_result_apply_owner_host", nil))
+        owner_pid = metadata.fetch("head_result_apply_owner_pid", nil).to_i
+        return true unless owner_host == kernel_host_name && owner_pid.positive?
+
+        owner_process_alive?(owner_pid)
+      end
+
+      def owner_process_alive?(pid)
+        Process.kill(0, pid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue StandardError
+        true
       end
 
       def command_result_from_journal(entry)
@@ -3118,8 +3197,18 @@ module Meringue
       end
 
       def head_result_fully_applied?(apply_result)
+        return false if head_result_apply_skipped?(apply_result)
+
         command_results = apply_result.dig("result", "command_results")
         Array(command_results).all? { |result| result.fetch("status", nil) == "accepted" }
+      end
+
+      # True when this instance deliberately did nothing because another kernel instance holds the
+      # apply lease for the batch. The owner finishes the batch and owns the head bookkeeping.
+      def head_result_apply_skipped?(apply_result)
+        return false unless apply_result.is_a?(Hash)
+
+        apply_result.dig("result", "skipped").to_s == "head_result_apply_in_progress"
       end
 
       def command_with_default_id(command, head_id:, index:)
@@ -3857,6 +3946,13 @@ module Meringue
 
           now = timestamp
           merge_session_ref_into_agent!(head, poll_result.fetch("session_ref", {}))
+          if head_result_apply_skipped?(apply_result)
+            log_ids = append_harness_event_logs(state, head, poll_result.fetch("events", []))
+            touch_state!(state, now)
+            store.save(state)
+            return log_ids
+          end
+
           fully_applied = head_result_fully_applied?(apply_result)
           head["status"] = if apply_result.fetch("status", nil) != "accepted"
                              "errored"

@@ -192,6 +192,8 @@ Example:
 
 Validates and applies the structured result from a completed head. Head agents should not normally propose this command directly; the kernel uses it after receiving a head result.
 
+The kernel applies each head command batch exactly once. It journals every command with its result and holds a refreshed apply lease on the head while it works, so a retry, a reconciliation pass, or a second Meringue process sharing the same state file resumes only the commands that never completed instead of re-running the batch. Do not resend a batch to force progress, and do not repeat a command that was already accepted.
+
 Payload:
 
 ```json
@@ -283,7 +285,7 @@ Example:
 
 ### SpawnWorker
 
-Spawns a real worker harness session for an issue. The kernel owns workspace allocation before calling the harness. For git-backed projects, the kernel creates a dedicated Meringue-owned worktree/branch and passes that workspace to the harness. Use this directly on an existing issue for follow-up prompts instead of creating nested issues.
+Spawns a real worker harness session for an issue. The kernel owns workspace allocation before calling the harness. For git-backed projects, the kernel creates a dedicated Meringue-owned worktree/branch and passes that workspace to the harness. When the preferred `meringue/<slug>` branch or worktree path already exists, the kernel reuses the existing workspace when it belongs to that worker, and otherwise provisions a uniquified branch/path instead of failing the spawn, so the delivered branch name can carry a short numeric suffix. Use this directly on an existing issue for follow-up prompts instead of creating nested issues.
 
 Workers receive standing guidance that they do not need to ask for user permission before editing files, committing, pushing, or opening/updating a PR when the assigned issue asks for those actions. Do not add worker prompts that tell them to wait for routine git/PR approval; do include requested delivery actions in the prompt, and let the worker report only true blockers such as missing auth, remote setup problems, branch/worktree collisions, unrelated work that would be overwritten, or unsafe/destructive operations. Workers should stay in the kernel-assigned workspace/branch unless it is unusable or the user explicitly asks for a different branch/worktree.
 
