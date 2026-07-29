@@ -6,7 +6,8 @@
 # `/prune` performs one combined cleanup pass: resolved (completed/killed) and errored
 # records are removed together, while retention rules still protect nonterminal issues,
 # queued/working/blocked workers, open questions, unsettled or unknown pull requests, and
-# projects that still contain ineligible issues. Worker workspaces are never deleted.
+# projects that still contain ineligible issues. This legacy smoke fixture uses dedicated
+# directories; managed git-worktree cleanup is covered hermetically by the Minitest suite.
 #
 # Usage:
 #   ruby scripts/prune_smoke.rb
@@ -81,7 +82,7 @@ def worker(id, issue_id, project_id, status, workspace_path: nil)
     "project_id" => project_id,
     "issue_id" => issue_id,
     "workspace_path" => workspace_path,
-    "workspace_strategy" => workspace_path ? "git_worktree" : nil,
+    "workspace_strategy" => workspace_path ? "dedicated_directory" : nil,
     "harness" => "fake",
     "created_at" => NOW,
     "updated_at" => NOW
@@ -276,7 +277,7 @@ begin
   check("emits exactly one prune log entry") do
     [Array(result.fetch("log_entry_ids", [])).length == 1, Array(result.fetch("log_entry_ids", [])).inspect]
   end
-  check("never deletes worker workspaces") do
+  check("never deletes unmanaged dedicated directories") do
     kept = %w[P1-I1-W1 P1-I11-W1].all? { |dir| File.exist?(File.join(workspace_root, dir, "NOTES.md")) }
     [kept, "workspace root: #{workspace_root}"]
   end
