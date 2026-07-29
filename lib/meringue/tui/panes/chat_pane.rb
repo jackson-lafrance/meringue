@@ -125,9 +125,22 @@ module Meringue
 
         def bottom_right_status_line(state)
           label = active_harness_label(state)
-          return [] if label.empty?
+          defaults = (state.fetch("metadata", {}) || {}).fetch("pi_session_defaults", {}) || {}
+          return [] if label.empty? && defaults.empty?
 
-          [["harness: ", Style::DIM], [label, Style::ACCENT_BOLD]]
+          segments = label.empty? ? [] : [["harness: ", Style::DIM], [label, Style::ACCENT_BOLD]]
+          unless defaults.empty?
+            model = defaults.fetch("model", nil) || "mixed"
+            thinking = defaults.fetch("thinking_level", nil) || "mixed"
+            segments << [" · ", Style::DIM] unless segments.empty?
+            segments.concat([
+              ["Pi defaults: ", Style::DIM],
+              [model.to_s, Style::MUTED],
+              [" · ", Style::DIM],
+              [thinking.to_s, Style::MUTED]
+            ])
+          end
+          segments
         end
 
         def slash_suggestions?(state)

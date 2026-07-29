@@ -110,6 +110,27 @@ class InputKernelConvergenceTest < Minitest::Test
     end
   end
 
+  def test_future_pi_default_slash_commands_validate_and_persist_in_the_sandbox
+    input_sandbox do |sandbox|
+      initial = sandbox.submit("/defaults")
+      assert_equal [%w[GetSessionDefaults accepted]], sandbox.command_result_pairs(initial)
+
+      model = sandbox.submit("/default-model openai/gpt-5.6-sol")
+      thinking = sandbox.submit("/default-thinking xhigh")
+      assert_equal [%w[SetDefaultSessionModel accepted]], sandbox.command_result_pairs(model)
+      assert_equal [%w[SetDefaultSessionThinkingLevel accepted]], sandbox.command_result_pairs(thinking)
+      config = Meringue::Config.load(path: sandbox.config_path)
+      assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "model")
+      assert_equal "xhigh", config.value("harness", "pi", "thinking_level")
+
+      rejected = sandbox.submit("/default-thinking ultra")
+      result = sandbox.command_results(rejected).first
+      assert_equal "rejected", result.fetch("status")
+      assert_includes result.fetch("errors").join(" "), "thinking level must be one of"
+      assert_equal "xhigh", Meringue::Config.load(path: sandbox.config_path).value("harness", "pi", "thinking_level")
+    end
+  end
+
   def test_theme_slash_command_writes_only_the_sandbox_config_file
     with_preserved_tui_style do
       input_sandbox do |sandbox|

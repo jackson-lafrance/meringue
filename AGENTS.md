@@ -294,6 +294,12 @@ Do the same thing as coding harnesses for these aswell we want it to be familiar
 /issue create <project_id> "<title>" ["description"]
 /worker spawn <issue_id> "<prompt>"
 /prompt <agent_id> "<message>"
+/defaults
+/default-model <provider/model>
+/default-thinking <level>
+/session-settings <agent_id>
+/model <agent_id> <provider/model>
+/thinking <agent_id> <level>
 /kill <agent_or_issue_id>
 /tree
 /state
@@ -417,8 +423,13 @@ The harness client should expose operations shaped like:
 - `abort_session(session_ref)`
 - `kill_session(session_ref)`
 - `get_state(session_ref)`
+- `get_session_settings(session_ref)`
+- `set_session_model(session_ref, model_reference)`
+- `set_session_thinking_level(session_ref, level)`
 - `read_events(session_ref)`
 - `attach_session(session_ref)`
+
+Future Pi defaults and existing Pi session settings are separate scopes. `/default-model` and `/default-thinking` persist app-wide Pi spawn defaults for all future heads and workers without mutating existing sessions. `/model` and `/thinking` mutate only one targeted existing session without changing defaults. `/session-settings` inspects one existing session's effective values; the old dashboard `/session <agent_id>` is only a compatibility alias. A focused workspace advertises `/open-session` for opening its selected harness UI, with the old argumentless `/session` spelling also retained only as an alias. Default persistence belongs in Meringue config and runtime spawn reconfiguration belongs behind the harness registry/client boundary.
 
 The generic session reference should track:
 - `harness`, such as `pi`
@@ -428,6 +439,7 @@ The generic session reference should track:
 - `session_file`
 - `is_streaming`
 - `last_event_at`
+- `session_settings`: harness-neutral effective model/thinking values when the provider can report them
 
 ### Pi harness rules for MVP
 Use real Pi sessions only.
@@ -493,6 +505,7 @@ Fields should include:
 - `pid`
 - `harness_session_id`: Pi `sessionId` for the MVP
 - `harness_session_file`: Pi `sessionFile` for the MVP
+- `session_settings`: harness-neutral effective model/thinking values, or explicit unknown/unavailable metadata
 - `harness_metadata`: optional harness-specific details
 - `follow_up_of_agent_id`: optional prior worker on the same issue
 - `replaces_agent_id`: optional worker this agent replaced
