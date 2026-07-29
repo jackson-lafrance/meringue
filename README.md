@@ -70,9 +70,11 @@ lib/meringue/state/                # JSON persistence models and store
 docs/config.md                     # config and harness provider reference
 docs/head_agent_kernel_commands.md # compact head-agent command contract
 docs/keybindings.md                # TUI keyboard and jump-mode controls
+docs/kernel-command-application.md # exactly-once command application invariants
 fixtures/config.example.toml       # example local config
 fixtures/demo_state.json           # demo state for the TUI
 scripts/head_session_smoke.rb      # prints the head harness session lifetime without a real harness
+scripts/kernel_exactly_once_smoke.rb # checks exactly-once command application across instances
 ```
 
 ## Setup

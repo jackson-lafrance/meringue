@@ -6,6 +6,7 @@ require "thread"
 require "time"
 
 require_relative "compactor"
+require_relative "file_lock"
 
 module Meringue
   module State
@@ -16,10 +17,15 @@ module Meringue
         File.expand_path(ENV.fetch("MERINGUE_STATE_PATH", DEFAULT_PATH))
       end
 
-      attr_reader :path
+      attr_reader :path, :file_lock
 
-      def initialize(path: self.class.default_path)
+      # +file_lock+ is shared with the kernel so a load -> mutate -> save cycle in
+      # this process cannot be interleaved with one in another Meringue instance.
+      # It is always acquired outside the in-process mutex to keep a single lock
+      # ordering everywhere.
+      def initialize(path: self.class.default_path, file_lock: nil)
         @path = File.expand_path(path)
+        @file_lock = file_lock || FileLock.for_state_path(@path)
         @mutex = Mutex.new
       end
 
@@ -33,7 +39,7 @@ module Meringue
       end
 
       def compact!
-        @mutex.synchronize do
+        exclusive do
           return false unless File.exist?(path)
 
           state = JSON.parse(File.read(path))
@@ -48,7 +54,7 @@ module Meringue
 
       def save(state, preserve_log_buffer: true, preserve_conversation: nil)
         preserve_log_buffer = preserve_conversation unless preserve_conversation.nil?
-        @mutex.synchronize do
+        exclusive do
           save_unlocked(state, preserve_log_buffer: preserve_log_buffer)
         end
       end
@@ -57,7 +63,7 @@ module Meringue
       # state on disk. This avoids a stale TUI snapshot overwriting kernel reconciliation,
       # delivery-PR refreshes, or pruning performed on another thread.
       def save_agent_workspace(workspace)
-        @mutex.synchronize do
+        exclusive do
           state = load_unlocked
           Models.normalize_agent_workspace_state!(state, workspace: deep_copy(workspace || {}))
           state.fetch("ui").fetch("agent_workspace")["updated_at"] = Time.now.utc.iso8601
@@ -68,7 +74,7 @@ module Meringue
       end
 
       def save_log_buffer(messages:, next_message_id: nil)
-        @mutex.synchronize do
+        exclusive do
           state = load_unlocked
           state["conversation"] = {
             "messages" => Array(messages).map { |message| deep_copy(message) },
@@ -82,6 +88,10 @@ module Meringue
       alias save_conversation save_log_buffer
 
       private
+
+      def exclusive(&block)
+        file_lock.synchronize { @mutex.synchronize(&block) }
+      end
 
       def load_unlocked
         return Models.empty_state unless File.exist?(path)
