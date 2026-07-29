@@ -415,7 +415,7 @@ module Meringue
 
           return [+"", 0, NO_SLASH_SELECTION] if handle_local_navigation_command(input_buffer, state)
 
-          submit_prompt(input_buffer, on_submit)
+          submit_prompt(input_buffer, on_submit, state)
           return [+"", 0, NO_SLASH_SELECTION]
         end
 
@@ -1122,7 +1122,13 @@ module Meringue
           return false
         end
 
-        double_click = worker_double_click?(item_id, key)
+        # Only rows that resolve to a worker workspace participate in the
+        # double-click action. In particular, a pending head is still selectable
+        # for focused logs, but repeated clicks never append "no session" chat
+        # messages or attempt to open a worker-only view.
+        workspace_openable = !agent_workspace_agent_for_item(state, item_id).nil?
+        double_click = workspace_openable && worker_double_click?(item_id, key)
+        @last_worker_click = nil unless workspace_openable
         if !double_click && @log_scope_id.to_s == item_id.to_s
           deselect_agent_tree_item
           return false
@@ -1822,9 +1828,9 @@ module Meringue
       def keybinding_help_text
         <<~TEXT.strip
           Keybindings (from [tui.keybindings], with defaults for omitted actions):
-          Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels a selection first, then the AgentTree log filter and jump mode.
-          Focus: click a dashboard section to focus it; double-clicking an issue or agent in the AgentTree opens its focused workspace. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
-          AgentTree selection and log filter: single-click a project, issue, head, or worker row to select it and filter the logs pane to that node (a worker shows its own logs, an issue adds all of its workers and child issues, a project adds its whole subtree). The selection stays highlighted, is scrolled back into view when it changes, and keeps filtering while you work in the logs or chat pane; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} in jump mode retarget it. Click the highlighted row again, click empty space in the AgentTree, or press #{keys_for("cancel_navigation")} to clear it.
+          Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels a selection first, then the AgentTree log/chat target and jump mode.
+          Focus: click a dashboard section to focus it; double-clicking a worker or an issue with a worker opens its focused workspace, while unavailable rows stay quiet. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
+          AgentTree selection and chat target: single-click a project, issue, head, or worker row to select it and filter the logs pane to that node (a worker shows its own logs, an issue adds all of its workers and child issues, a project adds its whole subtree). An issue also targets subsequent natural-language chat to that issue; a worker selection resolves chat to its owning issue. A fresh head still routes every message using that explicit target context. The selection stays highlighted, is scrolled back into view when it changes, and keeps filtering while you work in the logs or chat pane; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} in jump mode retarget it. Click the highlighted row again, click empty space in the AgentTree, or press #{keys_for("cancel_navigation")} to clear it. Heads without an owning issue and projects remain log-only filters, and unavailable rows are a silent no-op when double-clicked.
           Selection: drag with the mouse in the logs pane or the composer to select text; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
           Logs selection (keyboard): focus the logs pane, then #{keys_for("logs_selection_mode")} toggles the selection cursor or any Shift+movement starts it. #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor, #{keys_for("cursor_word_left")}/#{keys_for("cursor_word_right")} move by word, #{keys_for("cursor_home")}/#{keys_for("cursor_end")} jump to the line edges, and #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} move by page. #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")}, #{keys_for("select_home")}/#{keys_for("select_end")}, #{keys_for("select_word_left")}/#{keys_for("select_word_right")}, and #{keys_for("select_page_up")}/#{keys_for("select_page_down")} extend the selection. #{keys_for("copy_selection")} copies the selection (or the cursor line when nothing is extended); #{keys_for("cancel_navigation")} exits.
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
@@ -1873,7 +1879,7 @@ module Meringue
         # Entering jump mode by itself does not retarget the filter; moving the
         # cursor does.
         @selected_agent_id = [@log_scope_id, @selected_agent_id].find { |id| ids.include?(id) } || ids.first
-        append_jump_response("Agent tree navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects issues and agents and filters the logs pane to the selection (kernel events are skipped), Enter opens PRs, #{keys_for("open_agent_workspace")} opens the focused workspace, #{keys_for("cancel_navigation")} cancels and clears the filter.")
+        append_jump_response("Agent tree navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects issues and agents, filters their logs, and targets dashboard chat through a fresh head when an issue can be resolved (kernel events are skipped). Enter opens PRs, #{keys_for("open_agent_workspace")} opens the focused workspace, and #{keys_for("cancel_navigation")} clears the selection.")
       end
 
       def exit_agent_tree_navigation(message = nil)
@@ -1914,7 +1920,10 @@ module Meringue
       def open_agent_workspace_by_id(state, item_id)
         agent = agent_workspace_agent_for_item(state, item_id)
         unless agent
-          append_jump_response("AgentTree item #{item_id} has no agent session to open yet.")
+          # Unavailable is an expected state for pending heads and issues that do
+          # not have a worker yet. Keep it out of durable/visible logs; an
+          # explicit keyboard or /jump attempt gets a short-lived hint instead.
+          set_selection_status("#{item_id} has no focused workspace yet")
           return false
         end
 
@@ -2275,11 +2284,13 @@ module Meringue
         key.is_a?(String) && key.bytes.all? { |byte| byte >= 32 && byte != 127 }
       end
 
-      def submit_prompt(input_buffer, on_submit)
+      def submit_prompt(input_buffer, on_submit, state)
         text = input_buffer.to_s.strip
         return if text.empty?
 
         slash_command = text.start_with?("/")
+        selected_target = slash_command ? nil : LogScope.selected_target(state)
+        selected_target = nil if selected_target.empty?
         assistant_message_id = nil
         unless slash_command
           assistant_message_id = append_message(
@@ -2300,7 +2311,7 @@ module Meringue
               visible: false
             ) if assistant_message_id
             result = if on_submit
-                       on_submit.call(text) do |event|
+                       submit_to_prompt_handler(on_submit, text, selected_target) do |event|
                          update_message_from_event(assistant_message_id, event)
                        end
                      else
@@ -2320,6 +2331,15 @@ module Meringue
             decrement_pending_count
           end
         end
+      end
+
+      # Selected dashboard chat still goes through the normal head callback. The
+      # target is a keyword so it cannot be confused with user text or turn into
+      # a direct PromptAgent shortcut.
+      def submit_to_prompt_handler(on_submit, text, selected_target, &on_event)
+        return on_submit.call(text, &on_event) unless selected_target
+
+        on_submit.call(text, selected_target: selected_target, &on_event)
       end
 
       def unavailable_prompt_handler_result

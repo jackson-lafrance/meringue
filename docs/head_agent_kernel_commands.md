@@ -60,8 +60,11 @@ Use only the command names documented below unless the kernel command model is u
 
 Issue and worker selection rules for the MVP:
 
+- Check `routing_context.selected_target` before semantic matching. It is explicit dashboard context resolved by the kernel: an issue selection targets itself; an agent selection targets its owning issue and includes `selected_agent_id` as a preferred session-context hint.
+- Keep a selected message on `selected_target.issue_id`. Do not create or prompt work on another issue while the target is active. If the user's text explicitly conflicts with the selected issue, ask them to clear/change the selection rather than silently ignoring either signal.
+- Selection does not bypass you. Deliberately choose the healthy worker and `PromptAgent` mode, follow-up/replacement worker, or clarification on that issue. Do not blindly prompt the selected agent when it is stale, killed, errored, or otherwise inappropriate.
 - Treat an issue as the durable user goal and each worker as a stateful harness session for an execution or investigation step. Pi's persisted session is the preferred source of detailed follow-up context; do not duplicate its transcript in Meringue state.
-- First classify the message as a genuinely new goal or a follow-up. Explicit project/issue/worker ids win. Otherwise compare the prompt with issue titles/descriptions, recent routing activity, latest worker results, and active session metadata in `routing_context`.
+- First classify the message as a genuinely new goal or a follow-up. Without a selected target, explicit project/issue/worker ids win. With one, explicit ids must be compatible with its resolved issue or treated as a target conflict. Otherwise compare the prompt with issue titles/descriptions, recent routing activity, latest worker results, and active session metadata in `routing_context`.
 - A refinement, correction, question about findings, or next step for an existing goal should reuse that issue. Use `CreateIssue` only when no existing issue represents the durable goal.
 - On a reused issue, prefer `PromptAgent` when one healthy worker session has the relevant context. Do not spawn another worker merely because the user sent another message.
 - Use `PromptAgent` mode `steer` for an urgent correction that should affect active work, `follow_up` for related work that should wait until the active turn settles, and `normal` for a settled resumable session.
@@ -321,9 +324,14 @@ Payload:
 ```json
 {
   "user_message": "The user prompt",
-  "question_id": "Optional question id when answering a prior question"
+  "question_id": "Optional question id when answering a prior question",
+  "selected_target": {
+    "selected_id": "Optional AgentTree issue or agent id selected for dashboard chat"
+  }
 }
 ```
+
+`selected_target` comes from dashboard natural-language input, not from slash commands. The input layer sends only the selected node id. The kernel resolves it against current state before spawning the head, rejects stale or unbound selections, stores the canonical target on the head request for recovery, and exposes it as `routing_context.selected_target` with `issue_id`, `project_id`, and selected-agent metadata when applicable. An agent id always resolves to its owning issue; it never turns `SpawnHead` into a direct `PromptAgent` call.
 
 Example:
 

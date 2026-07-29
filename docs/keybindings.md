@@ -22,8 +22,8 @@ agent_select_next = ["j", "down", "right"]
 ## Focus and scrolling
 
 - Click a dashboard section: move focus to that section (the active outline follows the focused section). The logs pane includes user-visible prompts, agent output, and important kernel events.
-- Click a project, issue, head, or worker row in the AgentTree: select/highlight it and filter the logs pane to it. See [AgentTree selection and log filtering](#agenttree-selection-and-log-filtering).
-- Double-click an agent (or an issue with a worker): open its focused workspace. This is the primary mouse action; PR opening remains an explicit action.
+- Click a project, issue, head, or worker row in the AgentTree: select/highlight it and filter the logs pane to it. Issue and worker selections also target subsequent natural-language chat through a fresh head. See [AgentTree selection, log filtering, and chat routing](#agenttree-selection-log-filtering-and-chat-routing).
+- Double-click a worker (or an issue with a worker): open its focused workspace. A pending head or issue without a worker is a silent no-op instead of adding an unavailable-session message to chat/log history. This is the primary mouse action; PR opening remains an explicit action.
 - `Tab` / `Ctrl-Tab`: move focus forward.
 - `Shift-Tab`: move focus backward.
 - Arrow keys and `PageUp` / `PageDown`: scroll the focused non-chat pane by a line or a page.
@@ -41,9 +41,9 @@ The AgentTree pane scrolls like any other pane, so a long tree of projects, issu
 - Offsets are clamped to real content, and are re-clamped when the terminal is resized or when the tree shrinks (issues or workers completing, `/prune`, kills), so scrolling past either end never builds up a dead offset.
 - Selecting an item scrolls the minimum amount needed to bring it on screen. This covers jump-mode arrow navigation, clicking a row, opening or closing a focused workspace, and the sticky selection that filters the logs pane (including a selected project, where jump mode is not active), and it uses the same reveal approach as the logs selection cursor. Scrolling by hand is not overridden while the selection stays the same.
 
-## AgentTree selection and log filtering
+## AgentTree selection, log filtering, and chat routing
 
-A single left click on any AgentTree row selects that node. Exactly one node is selected at a time, and while a node is selected the logs pane shows only that node's logs.
+A single left click on any AgentTree row selects that node. Exactly one node is selected at a time, and while a node is selected the logs pane shows only that node's logs. An issue or worker selection is also an explicit target for subsequent natural-language chat; project selections and heads without an owning issue remain log-only filters.
 
 What each node type scopes, mirroring the AgentTree hierarchy:
 
@@ -54,14 +54,23 @@ What each node type scopes, mirroring the AgentTree hierarchy:
 | issue (`P1-I9`) | the issue plus every worker attached to it and to its child issues |
 | project (`P1`) | that project and its whole subtree of issues and workers |
 
-Membership comes from each log record's `source_type`/`source_id` plus the routing ids the kernel already stores in `details` (`project_id`, `issue_id`, `agent_id`, `head_id`, and cascading id lists such as killed/removed ids). Log entries with no attributable node — for example transient status lines — are hidden while a filter is active.
+Membership comes from each log record's `source_type`/`source_id` plus the routing ids the kernel already stores in `details` (`project_id`, `issue_id`, `agent_id`, `head_id`, and cascading id lists such as killed/removed ids). Log entries with no attributable node — for example transient status lines — are hidden while a filter is active. A selected user prompt records the resolved issue id and, for a worker selection, the selected worker id, so the prompt remains visible in that focused log view.
+
+Chat routing uses the same selection without turning the dashboard into a direct worker terminal:
+
+- Selecting `P1-I9` sends its id with the next natural-language `SpawnHead`; the kernel resolves and supplies `P1-I9` as `routing_context.selected_target.issue_id`.
+- Selecting `P1-I9-W3` sends the worker id. The kernel resolves it to owning issue `P1-I9`, includes the selected worker as a context hint, and rejects a stale/unbound selection instead of silently routing elsewhere.
+- The fresh head still chooses `PromptAgent` mode (`normal`, `steer`, or `follow_up`), a healthy worker on that issue, a follow-up/replacement, or a clarification. Selection never emits `PromptAgent` directly.
+- Slash commands bypass the head as usual and do not inherit selection. The focused worker workspace also retains its explicit direct-prompt behavior; this section applies to dashboard natural-language chat.
+- The composer title reads `chat → P1-I9`. The bottom chip reads `target: P1-I9`, includes `via P1-I9-W3` for a worker selection, says `head routes`, and shows the clear gesture.
 
 The selection is sticky and independent of focus:
 
 - The selected row stays highlighted while the logs pane, the chat pane, or the composer is focused, so the filter is always visible. When the selection changes it is scrolled back into view by the minimum amount, exactly like a jump-mode selection.
 - Scrolling the AgentTree (arrows, page keys, `Home` / `End`, or the mouse wheel) never changes or clears the selection, and the offset you chose by hand is not yanked back while the selection stays the same.
-- The logs pane title becomes `logs — <id>` (for example `logs — P1-I9-W3`) and the bottom hint shows `⌖ logs: <id>  Esc clears`.
+- The logs pane title becomes `logs — <id>` (for example `logs — P1-I9-W3`). A log-only selection shows `⌖ logs: <id>  Esc clears`; an issue/worker chat target shows the resolved issue, `head routes`, and the same clear gesture.
 - A filtered pane with nothing to show says so and repeats how to change or clear the filter, so it never looks broken.
+- Double-clicking a pending head or an issue without a worker does not open a focused workspace and does not add or persist repetitive `has no agent session to open yet` messages. Explicit unavailable actions may use a short-lived hint; unexpected workspace/launcher failures remain visible errors.
 
 Clearing or retargeting:
 
@@ -69,7 +78,8 @@ Clearing or retargeting:
 - Click the highlighted row again, or click empty space inside the AgentTree: deselect and show all logs again.
 - `Esc`: clear the selection (and jump mode). A text selection or logs cursor is cleared first, so a second `Esc` clears the filter.
 - Clicking the logs pane, the chat pane, or scrolling never clears the selection. That is the point of the feature.
-- Projects are selectable rows but not jump targets, so selecting a project also leaves jump mode.
+- Projects are selectable rows but not jump targets, so selecting a project also leaves jump mode; it filters logs but does not target chat.
+- A head without `issue_id` can be selected for its logs, but does not target chat. If a selected node cannot be resolved when the message reaches the kernel, head spawn is rejected rather than silently losing the scope.
 - If the selected node disappears (pruned, killed, or renumbered), the filter clears itself instead of hiding every log line.
 
 The filter follows explicit selection actions only: a click, or moving the jump-mode cursor with `agent_select_previous` / `agent_select_next`. Entering jump mode does not retarget the filter by itself; it starts on the already-selected node when that node is a jump target. Scrolling, focus changes, and typing never change it.

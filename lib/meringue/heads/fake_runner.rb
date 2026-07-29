@@ -22,10 +22,20 @@ module Meringue
 
       def build_commands(user_message:, snapshot:, context:)
         commands = []
-        explicit_worker = referenced_worker(snapshot, user_message)
+        selected_target = selected_target_from(context)
+        selected_issue = snapshot.fetch("issues", []).find do |issue|
+          issue.fetch("id", nil).to_s == selected_target.fetch("issue_id", nil).to_s
+        end
+        selected_worker = snapshot.fetch("agents", []).find do |agent|
+          agent.fetch("id", nil).to_s == selected_target.fetch("selected_agent_id", nil).to_s &&
+            agent.fetch("issue_id", nil).to_s == selected_issue&.fetch("id", nil).to_s
+        end
+        return [prompt_worker_command(selected_worker, user_message)] if resumable_worker?(selected_worker)
+
+        explicit_worker = referenced_worker(snapshot, user_message) unless selected_issue
         return [prompt_worker_command(explicit_worker, user_message)] if resumable_worker?(explicit_worker)
 
-        existing_issue = referenced_issue(snapshot, user_message) || matching_issue(snapshot, user_message)
+        existing_issue = selected_issue || referenced_issue(snapshot, user_message) || matching_issue(snapshot, user_message)
         project = project_for_issue(snapshot, existing_issue) || referenced_project(snapshot, user_message) || snapshot.fetch("projects", []).first
 
         unless project
@@ -66,6 +76,13 @@ module Meringue
           replace_agent_id: replacement_worker_id(prior_worker)
         )
         commands
+      end
+
+      def selected_target_from(context)
+        return {} unless context&.respond_to?(:to_prompt_h)
+
+        target = context.to_prompt_h.dig("routing_context", "selected_target")
+        target.is_a?(Hash) ? target : {}
       end
 
       def add_project_command(context)

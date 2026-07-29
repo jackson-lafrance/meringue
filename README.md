@@ -192,7 +192,9 @@ Log rows use compact, color-coded headers so agent output is easy to separate fr
 - `▪ meringue` — kernel, command, and system logs, in the theme accent color.
 - `● you` — your own prompts.
 
-Single-click a project, issue, head, or worker row in the AgentTree to filter the logs pane to that node: a worker shows its own logs, an issue adds its workers and child issues, and a project covers its whole subtree. The selected row stays highlighted and the filter keeps applying while you move focus to the logs or chat pane; the pane title becomes `logs — <id>` and the bottom hint shows how to clear it. Click the highlighted row again, click empty AgentTree space, or press `Esc` to show everything again. See [`docs/keybindings.md`](docs/keybindings.md#agenttree-selection-and-log-filtering) for the exact scoping rules.
+Single-click a project, issue, head, or worker row in the AgentTree to filter the logs pane to that node: a worker shows its own logs, an issue adds its workers and child issues, and a project covers its whole subtree. Issue and worker selections also focus subsequent natural-language chat: an issue targets itself, while a worker resolves to its owning issue and remains a preferred session-context hint. The composer title becomes `chat → <issue_id>` and the bottom chip says that the head routes the message, because every message still spawns a fresh head rather than prompting the worker directly. Selected prompts are tagged to the issue (and the selected worker when applicable), so they remain visible in the focused logs.
+
+The selected row stays highlighted and the filter keeps applying while you move focus to the logs or chat pane; the logs title becomes `logs — <selected_id>`. Click another row to change the target. Click the highlighted row again, click empty AgentTree space, or press `Esc` to clear it and return chat to unscoped routing. Project selections and heads without an owning issue are log-only filters. Pending heads or issues with no focused worker workspace are a silent no-op when double-clicked, so expected unavailability never floods or persists in chat; actual workspace/open failures are still reported. See [`docs/keybindings.md`](docs/keybindings.md#agenttree-selection-log-filtering-and-chat-routing) for the exact scoping and routing rules.
 
 The header owns the agent id and title; the body does not repeat an `<id> output:` label. Agent body lines use a colored `▌` gutter, while kernel and user lines keep a plain indent. Conversational head and worker output renders common Markdown—headings, emphasis, ordered/unordered/task lists, blockquotes, inline and fenced code, and links—with terminal-aware wrapping. Kernel/command rows and warnings/errors retain their semantic log presentation instead of being interpreted as chat Markdown.
 
@@ -238,7 +240,7 @@ Before changing this repository, read `AGENTS.md`. It defines the mission, archi
 Important constraints:
 
 - keep implementation slices small and aligned to the assigned issue;
-- do not add automated test files in this repository;
+- add or extend hermetic Minitest coverage for behavior changes and run it with `rake test`;
 - use task-specific branches/worktrees for worker changes;
 - commit only the assigned issue's changes;
 - include manual verification steps in pull requests.
