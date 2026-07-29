@@ -61,12 +61,15 @@ module Meringue
           }
         )
         payload["apply_head_result"] = apply_result
+        # Head-proposed user commands need the same local side effects as the typed slash path
+        # (clearing the visible chat for ClearState, switching the theme for SetTheme).
         emit(
           on_event,
           "head_result_applied",
           "head_id" => spawn_result.fetch("target_id"),
           "head_result" => head_result,
-          "apply_result" => apply_result
+          "apply_result" => apply_result,
+          "command_results" => command_results_from(apply_result)
         )
         payload["worker_wait_results"] = wait_for_spawned_workers(apply_result, on_event: on_event)
         payload["state_mutated"] = apply_result.fetch("status", nil) == "accepted"
@@ -222,8 +225,12 @@ module Meringue
       end
 
       def worker_results_from(apply_result)
+        worker_results_from_command_results(command_results_from(apply_result))
+      end
+
+      def command_results_from(apply_result)
         result = apply_result.fetch("result", {}) || {}
-        worker_results_from_command_results(result.fetch("command_results", []))
+        Array(result.fetch("command_results", []))
       end
 
       def worker_results_from_command_results(command_results)

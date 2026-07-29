@@ -6,6 +6,58 @@ Heads must return structured JSON only. They must not edit files, mutate Meringu
 
 Heads may inspect local project metadata only to choose the right project, issue, and worker routing. For investigation, implementation, and informational work, create/reuse an issue and spawn or prompt a worker/agent. Use the HeadResult summary to explain orchestration decisions, not to answer the underlying task.
 
+Meringue housekeeping is the exception to "route it to a worker": every user slash command that maps to a kernel command is also proposable by a head. When the user asks for maintenance the kernel already owns, propose that command instead of creating an issue or spawning a worker.
+
+## User commands a head may run
+
+A head-proposed command is applied, validated, journaled, and logged exactly like the typed slash command, and the kernel's own output (for example `Pruned 3 issues, 1 project, and 0 standalone agents.`) is written to the visible log by the kernel. Do not restate that output in the HeadResult summary; use the summary only to explain the decision ("Ran the prune cleanup pass.").
+
+Natural-language mapping:
+
+| The user says | Propose |
+| --- | --- |
+| "prune the merged issues", "prune", "clean up the completed/resolved/errored records" | `Prune` with an empty payload |
+| "renumber the tree", "recount the ids", "compact the ids after cleanup" | `Recount` with an empty payload |
+| "kill P1-I9-W3", "stop that worker", "kill issue P1-I9" | `Kill` with `target_id` |
+| "what is P1-I12", "details on P1-I2-W1", "status of Q3" | `GetInfo` with `target_id` |
+| "show me the tree", "list everything" | `ListAll` |
+| "show the raw state" | `GetState` |
+| "list the questions" | `ListQuestions` |
+| "what commands are there" | `Help` |
+| "answer Q2 with ..." | `AnswerQuestion` |
+| "drop/dismiss Q2", "that question no longer matters" | `DismissQuestion` |
+| "retitle/close/reopen/reparent issue P1-I3" | `ModifyIssue` |
+| "also tell P1-I3-W1 to ..." | `PromptAgent` |
+| "use the gruvbox theme" | `SetTheme` |
+| "switch to claude/pi/antigravity" | `SetHarness` |
+| "show the defaults", "which model will future agents use" | `GetSessionDefaults` |
+| "use provider/model for future Pi agents" | `SetDefaultSessionModel` |
+| "use high thinking for future Pi agents" | `SetDefaultSessionThinkingLevel` |
+| "show P1-I9-W3's model/thinking settings" | `GetSessionSettings` |
+| "change P1-I9-W3 to provider/model" | `SetSessionModel` |
+| "set P1-I9-W3 thinking to high" | `SetSessionThinkingLevel` |
+| "resync/reconcile the sessions" | `ReconcileSessions` |
+| "clear the state", "reset meringue", "wipe everything" | `ClearState`, but only under the confirmation rules below |
+
+`/jump`, `/keybind`, and `/quit` are local TUI commands with no kernel command, and the focused-workspace commands (`/terminal`, `/filter`, `/session`, `/editor`, `/pr`, `/cwd`, `/cancel`) are local to a worker workspace pane. A head cannot run those; explain that in the summary or ask the user to run them directly.
+
+`ApplyHeadResult` and `InvalidSlashCommand` are kernel/parser internals. The kernel rejects them from a head batch with `command_not_proposable_by_head`.
+
+### Destructive command rules
+
+Ordinary housekeeping needs nothing special. Propose `Prune`, `Recount`, `DismissQuestion`, `ModifyIssue`, and `Kill` on a single worker or issue when the user's message clearly asks for it.
+
+Irreversible commands need an unambiguous, explicit instruction from the user, and the kernel enforces this against the message it recorded when it spawned you. You cannot talk your way past it:
+
+- `ClearState` wipes every project, issue, agent, question, log, and counter. Propose it only when the user's own message clearly asks to clear/reset/wipe Meringue state (or they typed `/clear`), and set `"confirmed_by_user": true` in the payload. A vague request such as "start fresh", "clean this up", or "clear out the old issues" is not a ClearState instruction: ask a confirmation question, or propose `Prune` when they mean cleanup.
+- `Kill` on a whole project kills and removes every issue and worker under it. Propose it only when the user names that project (its id or name) and asks to kill/stop/terminate it, and set `"confirmed_by_user": true`.
+- The kernel rejects both commands when either the explicit-instruction check or the confirmation flag is missing. A rejected command shows up in the user's log, so guessing wastes their turn. Ask a confirmation question instead.
+- Never propose `Kill` on your own head id.
+
+When a confirmation is needed, return the question in `questions` and no destructive command. The user's answer spawns a fresh head with that context, and that head can then propose the command.
+
+`ClearState` also ends the batch: it removes the head record and the command journal, so anything proposed after it is skipped. Propose `ClearState` as the only command in the batch.
+
 ## Local project discovery
 
 Project discovery belongs to the head agent. The kernel does not scan git repositories for you.
@@ -299,7 +351,7 @@ Example:
 
 ### GetInfo
 
-Returns detailed information for a project, issue, agent, or question.
+Returns detailed information for a project, issue, agent, or question, plus that record's recent log lines. Use it for read-only "what is P1-I12" or "status of Q3" questions instead of spawning a worker. The kernel writes the loaded record summary to the visible log.
 
 Payload:
 
@@ -625,11 +677,16 @@ Kills an agent, issue, or project subtree.
 
 Killing is an immediate stop-and-remove operation. It cascades lifecycle state downward, stops attached harness sessions, and removes the worker or target subtree from active state in the same command, so killed records do not linger in the AgentTree. It does not force-remove a worktree during the emergency stop; `/prune` remains the lifecycle cleanup command for eligible completed/errored records, and startup reconciliation applies the same safe worktree cleanup to any killed records left by an interrupted command.
 
+This backs the user-facing `/kill <agent_or_issue_id>` command, so "kill P1-I9-W3" or "stop that worker" maps here. Killing one worker or one issue is ordinary housekeeping.
+
+Killing a whole project is destructive: the kernel accepts it from a head only when the user named that project and asked to kill it, and the payload sets `"confirmed_by_user": true`. Otherwise ask a confirmation question. A head may never kill its own head id.
+
 Payload:
 
 ```json
 {
-  "target_id": "P1-I1-W1"
+  "target_id": "P1-I1-W1",
+  "confirmed_by_user": false
 }
 ```
 
@@ -639,9 +696,15 @@ Example:
 { "type": "Kill", "payload": { "target_id": "P1-I1" } }
 ```
 
+Example for an explicitly requested project kill ("kill project P1"):
+
+```json
+{ "type": "Kill", "payload": { "target_id": "P1", "confirmed_by_user": true } }
+```
+
 ### Prune
 
-Removes resolved and errored records from active Meringue state and cleans up their Meringue-managed git worktrees. This is a user slash-command cleanup tool; head agents should not propose it.
+Removes resolved and errored records from active Meringue state and safely cleans up their Meringue-managed git worktrees. This backs the user-facing `/prune` command, and a head may propose it whenever the user asks for that cleanup: "prune", "prune the merged issues", "clean up the completed work", "remove the errored records" all map to one `Prune` with an empty payload.
 
 Prune takes no options. `/prune` is a single no-argument command and one kernel pass removes every eligible record at once, so there is no separate resolved-versus-errored cleanup to remember. Worktree branches are retained after the directory is removed so committed delivery work remains reachable.
 
@@ -674,7 +737,9 @@ Worktree cleanup safety and outcomes:
 - A missing but still-registered worktree is safely deregistered. A worktree already absent from both disk and git's registry is an idempotent success.
 - Dirty, locked, ambiguous, or failed cleanups leave the issue/worker record in state. The worker stores its latest `harness_metadata.workspace_cleanup` result, warning/info logs name each outcome, and the `Prune` result exposes `workspace_cleanup_outcomes` plus blocked agent/issue/project IDs.
 
-Compatibility: a legacy `selector` value (`resolved`, `errored`, `completed`, or `merged`) is still accepted and recorded as `requested_selector` in the log details, but it is a no-op that prunes exactly the same records as a bare `/prune`. Any other `/prune` argument is rejected by the slash-command parser with a short usage message.
+Compatibility: a legacy `selector` value (`resolved`, `errored`, `completed`, or `merged`) is still accepted and recorded as `requested_selector` in the log details, but it is a no-op that prunes exactly the same records as a bare `/prune`. Any other `/prune` argument is rejected by the slash-command parser with a short usage message. Do not invent a selector for a head-proposed `Prune`: send an empty payload.
+
+The kernel logs the summary itself (`Pruned 3 issues, 1 project, and 0 standalone agents.`), so the HeadResult summary should not restate the counts.
 
 Example:
 
@@ -682,9 +747,11 @@ Example:
 { "type": "Prune", "payload": {} }
 ```
 
-### ClearState
+### Recount
 
-Clears all persisted Meringue projects, issues, agents, questions, logs, counters, and visible log buffer messages. This is a user slash-command recovery tool; head agents should not propose it.
+Compacts project, issue, worker, and question ids after records are removed, and backs the user-facing `/recount` command. "renumber the tree", "recount the ids", and "tidy the numbering after that prune" all map here. Head ids are never renamed.
+
+Takes no payload. The kernel rejects the pass while another head's result is still in flight; the head that proposed the command does not block itself. Because Recount renames existing ids, propose it as the only command in the batch, or as the last one, and never mix it with commands that reference ids that are about to change.
 
 Payload:
 
@@ -695,7 +762,83 @@ Payload:
 Example:
 
 ```json
-{ "type": "ClearState", "payload": {} }
+{ "type": "Recount", "payload": {} }
+```
+
+### ClearState
+
+Clears all persisted Meringue projects, issues, agents, questions, logs, counters, and visible log buffer messages. This backs the user-facing `/clear` command.
+
+It is irreversible, so it is the most tightly gated command a head can propose. The kernel accepts it only when both of these hold:
+
+1. The payload sets `"confirmed_by_user": true`.
+2. The user's own recorded message is an explicit instruction to clear/reset/wipe Meringue state (or is literally `/clear`).
+
+Otherwise the command is rejected with `clear_state_requires_explicit_user_instruction` or `clear_state_requires_user_confirmation`, and the rejection is visible to the user. "clean things up", "start fresh", and "clear out the finished issues" are not ClearState instructions; ask a confirmation question, or propose `Prune` when cleanup is what they meant.
+
+ClearState ends the batch: it removes the head record, the command journal, and the visible logs, so any command proposed after it is skipped and reported as skipped. Propose it alone.
+
+Payload:
+
+```json
+{
+  "confirmed_by_user": true
+}
+```
+
+Example:
+
+```json
+{ "type": "ClearState", "payload": { "confirmed_by_user": true } }
+```
+
+### SetTheme
+
+Sets and persists the TUI theme, backing `/theme <name>`. Available names: `catppuccin`, `gruvbox`, `kanagawa`, `meringue`, `rose-pine`, `tokyonight`.
+
+Payload:
+
+```json
+{
+  "theme": "gruvbox"
+}
+```
+
+### SetHarness
+
+Selects the active harness backend for future heads and workers, backing `/harness <pi|claude|antigravity>`.
+
+Payload:
+
+```json
+{
+  "provider": "pi"
+}
+```
+
+### Pi session model and thinking commands
+
+These back the dashboard's user-facing Pi session commands and are proposable by heads just like
+the typed path. They use normal kernel/harness validation: a non-Pi or non-resumable target is
+rejected rather than guessed.
+
+- `GetSessionDefaults` backs `/defaults` and takes `{}`.
+- `SetDefaultSessionModel` backs `/default-model <provider/model>` with `{ "model": "provider/model" }`.
+- `SetDefaultSessionThinkingLevel` backs `/default-thinking <level>` with `{ "level": "high" }`.
+- `GetSessionSettings` backs `/session-settings <agent_id>` with `{ "agent_id": "P1-I1-W1" }`.
+- `SetSessionModel` backs `/model <agent_id> <provider/model>` with `{ "agent_id": "P1-I1-W1", "model": "provider/model" }`.
+- `SetSessionThinkingLevel` backs `/thinking <agent_id> <level>` with `{ "agent_id": "P1-I1-W1", "level": "high" }`.
+
+Default changes affect future Pi sessions only. Per-session changes affect only the named existing
+session. Supported thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and
+`max`.
+
+### GetState, ListQuestions, Help
+
+Read-only commands backing `/state`, `/questions`, and `/help`. They take an empty payload, mutate nothing, and their output is written to the visible log by the kernel.
+
+```json
+{ "type": "ListQuestions", "payload": {} }
 ```
 
 ### ReconcileSessions

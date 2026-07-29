@@ -77,6 +77,7 @@ scripts/head_session_smoke.rb      # prints the head harness session lifetime wi
 scripts/kernel_exactly_once_smoke.rb # checks exactly-once command application across instances
 scripts/question_answer_smoke.rb   # checks that answering a question routes real work, with no harness
 scripts/agent_tree_scroll_smoke.rb # checks AgentTree pane scrolling, clamping, and selection reveal
+scripts/head_user_command_smoke.rb # checks head-proposed user commands, guardrails, and typed-path parity
 ```
 
 ## Setup
@@ -175,7 +176,9 @@ Useful slash commands inside the TUI include:
 - `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together and removes their clean, unlocked Meringue-managed worktrees. Unsafe cleanup (dirty, locked, ambiguous, or failed) retains the bundle and logs why so it can be retried.
 - `/recount` — compact project, issue, worker, and question numbering after records are removed.
 
-See `docs/head_agent_kernel_commands.md#prune` for prune eligibility and worktree cleanup safety, `docs/recount.md` for the renumbering/cross-reference/active-session rules, and `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
+You do not have to type them. Head agents can run the same commands from plain language, so "prune the merged issues", "renumber the tree", "kill P1-I9-W3", or "what is P1-I12" apply the matching kernel command and print the same output as the typed slash command. Irreversible commands are gated: `/clear` and killing a whole project are only run when your own message unambiguously asks for them, and otherwise the head asks you to confirm. `/jump`, `/keybind`, and `/quit` are local TUI commands and stay typed-only.
+
+See `docs/head_agent_kernel_commands.md` for the head command contract, destructive-command rules, prune eligibility, and worktree cleanup safety. See `docs/recount.md` for the renumbering/cross-reference/active-session rules, and `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
 
 ### Answering a head's question
 
