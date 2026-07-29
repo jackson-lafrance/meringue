@@ -89,7 +89,9 @@ module Meringue
         "recount" => "Recount",
         "clear" => "ClearState",
         "clear_state" => "ClearState",
-        "list_all" => "ListAll"
+        "list_all" => "ListAll",
+        "get_info" => "GetInfo",
+        "info" => "GetInfo"
       }.freeze
 
       HELP_COMMANDS = [
@@ -118,6 +120,32 @@ module Meringue
         ["/recount", "Compact project, issue, worker, and question IDs after records are removed."],
         ["/clear", "Reset persisted Meringue state and clear the visible logs."]
       ].freeze
+      # Every user-facing slash command that maps to a kernel command is also proposable by a
+      # head, so "prune the merged issues" is applied, journaled, and logged exactly like a typed
+      # `/prune`. Only the kernel/parser internals stay off limits: `ApplyHeadResult` is how the
+      # kernel applies a head batch in the first place, and `InvalidSlashCommand` only reports a
+      # typing mistake back to the person who typed it.
+      HEAD_PROPOSABLE_COMMANDS = %w[
+        ListAll GetState GetInfo Help ListQuestions
+        GetSessionDefaults SetDefaultSessionModel SetDefaultSessionThinkingLevel
+        GetSessionSettings SetSessionModel SetSessionThinkingLevel
+        AddProject CreateIssue ModifyIssue SpawnWorker PromptAgent SpawnHead
+        AskQuestion AnswerQuestion DismissQuestion
+        Kill Prune Recount ClearState SetTheme SetHarness ReconcileSessions
+      ].freeze
+      HEAD_UNPROPOSABLE_COMMAND_REASON = "command_not_proposable_by_head"
+      # Destructive commands a head may only propose when the user's own message is an
+      # unambiguous instruction and the head marks the command user-confirmed. Everything else
+      # (Prune, Recount, killing one worker/issue, DismissQuestion) is ordinary housekeeping.
+      HEAD_CONFIRMATION_PAYLOAD_KEYS = %w[confirmed_by_user user_confirmed confirmed explicit_user_instruction].freeze
+      # Matches only whole-state wipe language. "prune the merged issues" or "delete the completed
+      # issues" intentionally do not match, so a vague or prune-flavored prompt can never wipe
+      # Meringue state through a head.
+      HEAD_CLEAR_STATE_INSTRUCTION_PATTERN = /
+        (?:\A|\s)\/clear\b
+        |\b(?:clear|reset|wipe|erase|nuke|purge)\b[^.!?\n]{0,40}?\b(?:state|everything|meringue|agent[\s_-]?tree|agenttree|logs|slate|board)\b
+      /xi.freeze
+      HEAD_KILL_INSTRUCTION_PATTERN = /\b(?:kill|stop|terminate|abort|cancel|shut\s*down|shutdown|halt|nuke|end)\b/i.freeze
       TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
       PROMPT_MODES = %w[normal steer follow_up].freeze
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
@@ -345,6 +373,8 @@ module Meringue
           set_session_thinking_level(command_id, command_type, payload)
         when "ListQuestions"
           list_questions(command_id, command_type)
+        when "GetInfo"
+          get_info(command_id, command_type, payload)
         when "Help"
           help(command_id, command_type)
         when "InvalidSlashCommand"
@@ -378,7 +408,7 @@ module Meringue
         when "Prune"
           prune(command_id, command_type, payload)
         when "Recount"
-          recount(command_id, command_type)
+          recount(command_id, command_type, payload)
         when "ClearState"
           clear_state(command_id, command_type)
         else
@@ -763,6 +793,16 @@ module Meringue
         when "Recount"
           mappings = result.is_a?(Hash) ? result.fetch("mappings", {}) : {}
           ["  renamed IDs: #{mappings.values.sum { |mapping| mapping.length }}"]
+        when "ClearState"
+          ["  state: reset"]
+        when "GetInfo"
+          info = result.is_a?(Hash) ? result : {}
+          record = info.fetch("record", {}) || {}
+          [
+            "  #{info.fetch("kind", "record")}: #{record["id"] || info["id"]}",
+            record["status"] ? "  status: #{record["status"]}" : nil,
+            record["title"] || record["name"] || record["question"] ? "  #{record["title"] || record["name"] || record["question"]}" : nil
+          ].compact
         when "ListAll", "GetState"
           state = result || {}
           [
@@ -1217,7 +1257,10 @@ module Meringue
         end
 
         state = normalized_state
-        active_agents = active_harness_selection_blockers(state)
+        # A head may propose `/harness` for itself; it is not its own blocker. The switch only
+        # affects future heads and workers, and this head's session is torn down right after.
+        proposing_head_id = present_string(value_at(payload, "_head_id", "head_id", "HeadID", "headId"))
+        active_agents = active_harness_selection_blockers(state) - [proposing_head_id].compact
         if active_agents.any?
           return rejected_result(
             command_id,
@@ -1623,7 +1666,8 @@ module Meringue
           store.save(state)
           {
             "question_ids" => Array(metadata.fetch("head_result_question_ids", [])),
-            "journal" => deep_copy(metadata.fetch("head_result_command_journal"))
+            "journal" => deep_copy(metadata.fetch("head_result_command_journal")),
+            "head" => deep_copy(head)
           }
         end
         return initialization if kernel_command_result?(initialization)
@@ -1631,8 +1675,16 @@ module Meringue
         command_results = []
         interrupted = false
         claimed_by = nil
+        state_cleared = false
+        skipped_after_clear = 0
+        head_snapshot = initialization.fetch("head", nil)
         head_result.fetch("commands").each_with_index do |proposed_command, index|
           command = command_with_default_id(proposed_command, head_id: head_id.to_s, index: index)
+          if state_cleared
+            skipped_after_clear += 1
+            next
+          end
+
           journal_entry = current_head_journal_entry(head_id.to_s, index)
           if journal_entry && terminal_command_status?(journal_entry.fetch("status", nil))
             command_results << command_result_from_journal(journal_entry)
@@ -1654,7 +1706,8 @@ module Meringue
           end
 
           # Resolve intra-batch issue references (and catch mispredicted issue ids) before the
-          # command can attach work to an issue this head never created.
+          # command can attach work to an issue this head never created. Then apply the
+          # head-command permission/destructive guardrails to the resolved command.
           resolution = resolve_head_batch_issue_reference(
             command: command,
             head_id: head_id.to_s,
@@ -1671,14 +1724,38 @@ module Meringue
                        )
                      end
                    else
-                     log_ids.concat(log_head_batch_issue_remap(head_id.to_s, resolution))
-                     apply(resolution.fetch("command"))
+                     resolved_command = resolution.fetch("command")
+                     guard_result = head_command_guard_result(resolved_command, head: head_snapshot)
+                     unless guard_result
+                       log_ids.concat(log_head_batch_issue_remap(head_id.to_s, resolution))
+                     end
+                     guard_result || apply(resolved_command)
                    end
           command_results << result
+          # ClearState removes the journal along with everything else, so it is the last command
+          # the kernel can honestly journal. Report the batch as applied instead of treating the
+          # deliberate wipe as an interrupted batch.
+          if result.fetch("command_type", nil) == "ClearState" && result.fetch("status", nil) == "accepted"
+            state_cleared = true
+            next
+          end
+
           unless checkpoint_head_command_result!(head_id.to_s, index, result)
             interrupted = true
             break
           end
+        end
+
+        if state_cleared
+          return cleared_state_head_result(
+            command_id,
+            command_type,
+            head_id.to_s,
+            head_result: head_result,
+            head_snapshot: head_snapshot,
+            command_results: command_results,
+            skipped_after_clear: skipped_after_clear
+          )
         end
 
         if claimed_by
@@ -1713,6 +1790,9 @@ module Meringue
               details: { "head_id" => head_id.to_s, "applied_command_count" => command_results.length }
             ))
           end
+          # Same visible output as the typed slash path: the kernel's own command output reaches
+          # the user, so a head summary never has to restate "Pruned N issues, ...".
+          log_ids.concat(append_head_command_output_logs(state, head_id.to_s, command_results))
           summary_log_ids = if rejected_count.positive? || failed_count.positive?
                               append_log(
                                 state,
@@ -1949,6 +2029,222 @@ module Meringue
         end
       end
 
+      # A head-proposed `ClearState` deliberately removes the head record, its journal, and the
+      # visible logs. The batch therefore ends here: the wipe is reported as applied work, the
+      # head's harness session is released, and the kernel's own command output is re-logged into
+      # the fresh state so the user still sees "Cleared Meringue state."
+      def cleared_state_head_result(command_id, command_type, head_id, head_result:, head_snapshot:,
+                                    command_results:, skipped_after_clear: 0)
+        release_head_session!(head_snapshot, reason: "head_result_cleared_state") if head_snapshot.is_a?(Hash)
+
+        synchronized_state do
+          state = normalized_state
+          log_ids = append_head_command_output_logs(state, head_id, command_results)
+          if skipped_after_clear.positive?
+            log_ids.concat(append_log(
+              state,
+              source_type: "kernel",
+              source_id: head_id,
+              level: "warning",
+              message: "Skipped #{skipped_after_clear} command(s) after head #{head_id}'s ClearState reset Meringue state.",
+              details: { "head_id" => head_id, "skipped_command_count" => skipped_after_clear }
+            ))
+          end
+          touch_state!(state)
+          store.save(state)
+
+          accepted_result(
+            command_id,
+            command_type,
+            head_id,
+            "Applied head result for #{head_id}; ClearState reset Meringue state.",
+            {
+              "head_id" => head_id,
+              "title" => head_result.fetch("title", nil),
+              "summary" => head_result.fetch("summary", nil),
+              "question_ids" => [],
+              "command_results" => command_results,
+              "state_cleared" => true,
+              "skipped_command_count" => skipped_after_clear
+            },
+            log_ids.uniq
+          )
+        end
+      end
+
+      # Head-proposed commands must reach the user the way typed slash command output does. This
+      # is the head-side twin of `record_user_kernel_command_output`, and it uses the same
+      # formatter: a command that already logged its own outcome (Prune, Recount, Kill,
+      # SpawnWorker, and every rejection) is not repeated, while read-only commands are surfaced
+      # here instead of staying buried inside the ApplyHeadResult envelope.
+      def append_head_command_output_logs(state, head_id, command_results)
+        Array(command_results).flat_map do |result|
+          next [] unless result.is_a?(Hash)
+
+          kernel_command_output_lines([result]).flat_map do |line|
+            append_log(
+              state,
+              source_type: "kernel",
+              source_id: head_id.to_s,
+              level: result.fetch("status", nil) == "accepted" ? "info" : "warning",
+              message: "Command output: #{line}",
+              details: {
+                "head_id" => head_id.to_s,
+                "command_type" => result.fetch("command_type", nil),
+                "kind" => "kernel_command_output",
+                "presentation" => "cmd"
+              }.compact
+            )
+          end
+        end
+      end
+
+      # Guardrails for head-proposed commands. Returns nil when the command may run, or a rejected
+      # KernelCommandResult that is journaled and logged exactly like any other rejection.
+      #
+      # Policy:
+      # - Ordinary housekeeping (Prune, Recount, DismissQuestion, killing one worker/issue, and
+      #   every read-only command) runs on a clear user request, with no extra ceremony.
+      # - Irreversible commands (ClearState, killing a whole project) additionally require the
+      #   head to mark the command user-confirmed AND require the user's own message to be an
+      #   unambiguous instruction. A vague prompt can therefore never wipe state or a project.
+      # - Kernel-internal commands are never proposable.
+      def head_command_guard_result(command, head:)
+        return nil unless command.is_a?(Hash)
+
+        command_type = canonical_command_type(value_at(command, "type", "command_type").to_s)
+        command_id = value_at(command, "command_id", "id")
+        payload = value_at(command, "payload")
+        payload = {} unless payload.is_a?(Hash)
+        head = {} unless head.is_a?(Hash)
+        head_id = head.fetch("id", nil).to_s
+
+        unless HEAD_PROPOSABLE_COMMANDS.include?(command_type)
+          return synchronized_state do
+            rejected_result(
+              command_id,
+              command_type,
+              "Head #{head_id} may not propose #{command_type}.",
+              [HEAD_UNPROPOSABLE_COMMAND_REASON, "proposable commands: #{HEAD_PROPOSABLE_COMMANDS.join(", ")}"]
+            )
+          end
+        end
+
+        guard = case command_type
+                when "ClearState" then clear_state_head_guard(head, payload)
+                when "Kill" then kill_head_guard(head, payload)
+                end
+        return nil unless guard
+
+        synchronized_state do
+          rejected_result(command_id, command_type, guard.fetch("message"), guard.fetch("errors"))
+        end
+      end
+
+      def clear_state_head_guard(head, payload)
+        confirmed = head_command_user_confirmed?(payload)
+        user_message = head_request_user_message(head)
+        explicit = HEAD_CLEAR_STATE_INSTRUCTION_PATTERN.match?(user_message)
+        return nil if confirmed && explicit
+
+        errors = []
+        errors << "clear_state_requires_user_confirmation" unless confirmed
+        errors << "clear_state_requires_explicit_user_instruction" unless explicit
+        errors << "ask the user a confirmation question, then propose ClearState with \"confirmed_by_user\": true only when they explicitly ask to clear/reset/wipe Meringue state"
+        {
+          "message" => "ClearState was refused because the user did not unambiguously ask to reset Meringue state.",
+          "errors" => errors
+        }
+      end
+
+      def kill_head_guard(head, payload)
+        target_id = present_string(value_at(payload, "target_id", "TargetID", "targetId", "id"))
+        return nil unless target_id
+
+        head_id = head.fetch("id", nil).to_s
+        if target_id == head_id
+          return {
+            "message" => "Head #{head_id} may not kill itself while its own commands are being applied.",
+            "errors" => ["head_cannot_kill_itself"]
+          }
+        end
+
+        project = synchronized_state { find_project(normalized_state, target_id) }
+        return nil unless project
+
+        confirmed = head_command_user_confirmed?(payload)
+        user_message = head_request_user_message(head)
+        explicit = HEAD_KILL_INSTRUCTION_PATTERN.match?(user_message) && head_message_names_project?(user_message, project)
+        return nil if confirmed && explicit
+
+        errors = []
+        errors << "project_kill_requires_user_confirmation" unless confirmed
+        errors << "project_kill_requires_explicit_user_instruction" unless explicit
+        errors << "ask the user a confirmation question, then propose Kill with \"confirmed_by_user\": true only when they explicitly name project #{project.fetch("id", target_id)} and ask to kill it"
+        {
+          "message" => "Kill was refused for project #{project.fetch("id", target_id)} because the user did not unambiguously ask to kill the whole project.",
+          "errors" => errors
+        }
+      end
+
+      def head_command_user_confirmed?(payload)
+        HEAD_CONFIRMATION_PAYLOAD_KEYS.any? do |key|
+          value = value_at(payload, key)
+          value == true || value.to_s.strip.downcase == "true"
+        end
+      end
+
+      # The user's own words are the authoritative evidence for a destructive command. A head
+      # cannot manufacture them: the kernel reads the message it recorded when it spawned the head.
+      def head_request_user_message(head)
+        metadata = head.is_a?(Hash) ? (head.fetch("harness_metadata", {}) || {}) : {}
+        request = metadata.is_a?(Hash) ? (metadata.fetch("head_request", {}) || {}) : {}
+        request.is_a?(Hash) ? request.fetch("user_message", "").to_s : ""
+      end
+
+      def head_message_names_project?(user_message, project)
+        message = user_message.to_s.downcase
+        project_id = project.fetch("id", "").to_s.downcase
+        name = project.fetch("name", "").to_s.downcase
+        return true if !project_id.empty? && message.match?(/\b#{Regexp.escape(project_id)}\b/)
+        return true if name.length >= 3 && message.include?(name)
+
+        false
+      end
+
+      def get_info(command_id, command_type, payload)
+        target_id = present_string(value_at(payload, "target_id", "TargetID", "targetId", "id"))
+        return rejected_result(command_id, command_type, "Info was not loaded.", ["target_id is required"]) unless target_id
+
+        state = normalized_state
+        kind, record = %w[agent issue project question].filter_map do |candidate_kind|
+          found = case candidate_kind
+                  when "agent" then find_agent(state, target_id)
+                  when "issue" then find_issue(state, target_id)
+                  when "project" then find_project(state, target_id)
+                  else find_question(state, target_id)
+                  end
+          [candidate_kind, found] if found
+        end.first
+        unless record
+          return rejected_result(command_id, command_type, "#{target_id} does not exist.", ["target_not_found"])
+        end
+
+        info = {
+          "kind" => kind,
+          "id" => record.fetch("id", target_id),
+          "record" => deep_copy(record),
+          "recent_logs" => state.fetch("logs").select { |log| log.fetch("source_id", nil) == target_id }
+                                .last(5).map { |log| log.slice("id", "timestamp", "level", "message") }
+        }
+        info["issues"] = state.fetch("issues").select { |issue| issue.fetch("project_id", nil) == target_id }
+                              .map { |issue| issue.slice("id", "title", "status") } if kind == "project"
+        info["agents"] = state.fetch("agents").select { |agent| agent.fetch("issue_id", nil) == target_id }
+                              .map { |agent| agent.slice("id", "type", "status") } if kind == "issue"
+
+        accepted_result(command_id, command_type, record.fetch("id", target_id), "Loaded #{kind} #{target_id}.", info, [])
+      end
+
       def answer_question(command_id, command_type, payload)
         record_question_answer(command_id, command_type, payload).fetch("result")
       end
@@ -2071,9 +2367,15 @@ module Meringue
         prune_records(command_id, command_type, requested_selector: requested_selector)
       end
 
-      def recount(command_id, command_type)
+      # A head may propose `/recount` for itself. The head that is applying the batch is not an
+      # "in flight" head for this purpose: its own commands are what asked for the renumber, and
+      # Recount never renames head ids. Any other live head still blocks the pass.
+      def recount(command_id, command_type, payload = {})
         state = normalized_state
-        active_head_ids = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "head" }.map { |agent| agent.fetch("id") }
+        proposing_head_id = present_string(value_at(payload, "_head_id", "head_id", "HeadID", "headId"))
+        active_head_ids = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "head" }
+                               .map { |agent| agent.fetch("id") }
+                               .reject { |head_id| head_id == proposing_head_id }
         if active_head_ids.any?
           return rejected_result(
             command_id,
@@ -2133,7 +2435,9 @@ module Meringue
         project_decisions = project_prune_decisions(state, issue_decisions)
         removable_project_ids = project_decisions.select { |decision| decision.fetch("prunable", false) }.map { |decision| decision.fetch("project_id") }
         removable_issue_ids = issue_prune_roots(issue_decisions, removable_project_ids)
-        errored_head_ids = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "head" && agent.fetch("status", nil) == "errored" }.map { |agent| agent.fetch("id") }
+        errored_head_ids = state.fetch("agents").select do |agent|
+          agent.fetch("type", nil) == "head" && agent.fetch("status", nil) == "errored" && !head_applying_batch?(agent)
+        end.map { |agent| agent.fetch("id") }
         now = timestamp
         prune_result = remove_issue_bundles_and_agents!(
           state,
@@ -2803,8 +3107,18 @@ module Meringue
 
       def pruned_related_head_agent_ids(state, issue_ids_to_remove, removed_project_ids)
         state.fetch("agents").select { |agent| agent.fetch("type", nil) == "head" }
+             .reject { |agent| head_applying_batch?(agent) }
              .select { |agent| head_related_to_pruned_work?(state, agent, issue_ids_to_remove, removed_project_ids) }
              .map { |agent| agent.fetch("id", nil) }
+      end
+
+      # A head that is mid-batch owns the commands still being journaled. Pruning it from inside
+      # its own `Prune` command would drop the journal and abort the rest of the batch.
+      def head_applying_batch?(agent)
+        return false unless agent.is_a?(Hash) && agent.fetch("type", nil) == "head"
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata.is_a?(Hash) && metadata.fetch("head_result_apply_state", nil) == "applying"
       end
 
       def head_related_to_pruned_work?(state, head, issue_ids_to_remove, removed_project_ids)
@@ -2892,7 +3206,7 @@ module Meringue
       end
 
       def ask_question(command_id, command_type, payload)
-        head_id = value_at(payload, "head_id", "HeadID", "headId")
+        head_id = value_at(payload, "head_id", "HeadID", "headId", "_head_id")
         question_text = value_at(payload, "question", "Question")
         context = value_at(payload, "context", "Context")
         project_id = value_at(payload, "project_id", "ProjectID", "projectId")
@@ -5032,14 +5346,17 @@ module Meringue
         apply_result.dig("result", "skipped").to_s == "head_result_apply_in_progress"
       end
 
+      # Head-proposed commands carry the proposing head id so the kernel can attribute the work
+      # (`CreateIssue.originating_head_id`) and so commands like `Recount` can tell their own
+      # proposer apart from an unrelated in-flight head.
       def command_with_default_id(command, head_id:, index:)
         return command unless command.is_a?(Hash)
 
         payload = value_at(command, "payload") || {}
-        # `_head_id` marks a command as head-proposed. CreateIssue uses it for attribution, and
-        # AnswerQuestion uses it to know the head is already returning its own routing commands,
-        # so the kernel must not spawn another head for that answer.
-        enriched_command = if %w[CreateIssue AnswerQuestion answer_question create_issue].include?(value_at(command, "type", "command_type").to_s) && payload.is_a?(Hash)
+        # `_head_id` marks every head-proposed command. CreateIssue uses it for attribution,
+        # AnswerQuestion avoids spawning a redundant routing head, and commands such as Recount
+        # and SetHarness use it to avoid treating the proposer as its own active-head blocker.
+        enriched_command = if payload.is_a?(Hash)
                              command.merge("payload" => payload.merge("_head_id" => head_id.to_s))
                            else
                              command

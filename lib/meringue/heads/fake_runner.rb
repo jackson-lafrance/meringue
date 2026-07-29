@@ -22,6 +22,9 @@ module Meringue
 
       def build_commands(user_message:, snapshot:, context:)
         commands = []
+        maintenance = maintenance_commands(user_message: user_message, snapshot: snapshot)
+        return maintenance if maintenance
+
         selected_target = selected_target_from(context)
         selected_issue = snapshot.fetch("issues", []).find do |issue|
           issue.fetch("id", nil).to_s == selected_target.fetch("issue_id", nil).to_s
@@ -83,6 +86,56 @@ module Meringue
 
         target = context.to_prompt_h.dig("routing_context", "selected_target")
         target.is_a?(Hash) ? target : {}
+      end
+
+      # Housekeeping requests map onto the user slash commands the kernel already owns instead of
+      # creating an issue and spawning a worker. The patterns stay deliberately narrow so ordinary
+      # work prompts ("clean up the signup code") still route to a worker.
+      def maintenance_commands(user_message:, snapshot:)
+        message = user_message.to_s
+        return [command("ClearState", "confirmed_by_user" => true)] if clear_state_request?(message)
+        return [command("Prune")] if prune_request?(message)
+        return [command("Recount")] if message.match?(/\b(recount|renumber)\b/i)
+
+        target = referenced_record_id(snapshot, message)
+        return [command("Kill", "target_id" => target, "confirmed_by_user" => true)] if target && kill_request?(message)
+        return [command("GetInfo", "target_id" => target)] if target && info_request?(message)
+
+        nil
+      end
+
+      def clear_state_request?(message)
+        message.match?(/\b(clear|reset|wipe|erase|nuke|purge)\b[^.!?\n]{0,40}?\b(state|everything|meringue|agent[\s_-]?tree|agenttree|logs|slate|board)\b/i)
+      end
+
+      def prune_request?(message)
+        return true if message.match?(/\bprune\b/i)
+
+        message.match?(/\b(clean\s*up|clear|remove|delete|tidy)\b[^.!?\n]{0,40}?\b(merged|completed|resolved|finished|done|errored|killed|stale|old)\b[^.!?\n]{0,20}?\b(issues?|records?|agents?|workers?|projects?|work)\b/i)
+      end
+
+      def kill_request?(message)
+        message.match?(/\b(kill|terminate|abort|shut\s*down|shutdown|halt)\b/i)
+      end
+
+      def info_request?(message)
+        message.match?(/\b(what\s+is|what's|whats|status\s+of|info\s+(on|about|for)|details?\s+(on|about|for)|tell\s+me\s+about|describe)\b/i)
+      end
+
+      def referenced_record_id(snapshot, message)
+        candidate = message[/\bP\d+(?:-I\d+(?:-W\d+)?)?\b/i]&.upcase
+        candidate ||= message[/\bQ\d+\b/i]&.upcase
+        return nil unless candidate
+
+        known = snapshot.fetch("agents", []).map { |agent| agent.fetch("id", nil) } +
+                snapshot.fetch("issues", []).map { |issue| issue.fetch("id", nil) } +
+                snapshot.fetch("projects", []).map { |project| project.fetch("id", nil) } +
+                snapshot.fetch("questions", []).map { |question| question.fetch("id", nil) }
+        known.compact.include?(candidate) ? candidate : nil
+      end
+
+      def command(type, payload = {})
+        { "type" => type, "payload" => payload }
       end
 
       def add_project_command(context)

@@ -17,7 +17,7 @@ Active worker records may be renumbered. Their PID, harness session ID/file, wor
 
 ## What is not renumbered
 
-- Head IDs are transient command-correlation IDs. They and the head counter are not changed. Recount is refused while any head record is awaiting application, because its result was produced against the pre-recount state snapshot.
+- Head IDs are transient command-correlation IDs. They and the head counter are not changed. Recount is refused while another head record is awaiting application, because that result was produced against the pre-recount state snapshot. The head that proposed the recount is not counted as a blocker: a head may run `/recount` for the user ("renumber the tree"), and the kernel applies it exactly like the typed command. Because renaming happens immediately, a head should propose `Recount` alone or last, never mixed with commands that reference ids which are about to change.
 - Log IDs remain append-only. Existing log messages remain historical text; only structured `source_id` and ID fields in `details` are updated when they refer to a retained record.
 - Conversation message IDs remain unchanged.
 - Harness session IDs/files, PIDs, workspace paths/branches, pull-request identifiers/URLs, and other external identifiers remain unchanged.
@@ -31,5 +31,7 @@ Run this in the interactive TUI:
 ```text
 /recount
 ```
+
+A plain-language request such as "renumber the tree" or "compact the ids after that prune" is routed by a head agent to the same kernel command.
 
 Use `/state` afterward to inspect the mappings and counters, or `/tree` to inspect the compacted hierarchy.

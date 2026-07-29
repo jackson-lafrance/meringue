@@ -2355,6 +2355,9 @@ module Meringue
           remember_log_event(head_completed_key(event.fetch("head_id", nil)))
           update_message_status(message_id, "applying commands")
         when "head_result_applied"
+          # A head may propose user commands such as /clear or /theme. Their local side effects
+          # must match the typed slash path.
+          apply_slash_command_results(event.fetch("command_results", []) || [])
           update_message_status(message_id, worker_wait_status(event))
         when "slash_command_applied"
           apply_slash_command_results(event.fetch("command_results", []) || [])
