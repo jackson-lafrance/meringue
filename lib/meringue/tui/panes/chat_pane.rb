@@ -32,7 +32,7 @@ module Meringue
 
           entries = log_entries(state)
           lines = if entries.empty?
-                    [[["No logs yet. Type a prompt below and press Enter.", Style::MUTED]]]
+                    empty_logs_lines(state, width: width)
                   else
                     selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
                     entries.flat_map do |entry|
@@ -45,6 +45,15 @@ module Meringue
                   end
           @log_lines_cache = { key: cache_key, lines: lines }
           lines
+        end
+
+        # Pane title, so an active AgentTree selection is always visible as the
+        # reason the logs pane is filtered.
+        def log_pane_title(state)
+          label = LogScope.label(state)
+          return "logs" if label.empty?
+
+          "logs — #{label}"
         end
 
         def composer_lines(state, width: nil)
@@ -92,7 +101,10 @@ module Meringue
         def bottom_hint_line(state)
           chat = chat_state(state)
           pending_count = chat.fetch("pending_count", 0).to_i
-          prefix = selection_hint_segments(state)
+          prefix = log_scope_hint_segments(state)
+          selection_segments = selection_hint_segments(state)
+          prefix += [["  ·  ", Style::DIM]] unless prefix.empty? || selection_segments.empty?
+          prefix += selection_segments
           status_segments = compact_status_segments(state, pending_count)
           prefix += [["  ·  ", Style::DIM]] unless prefix.empty? || status_segments.empty?
           prefix += status_segments
@@ -154,6 +166,29 @@ module Meringue
 
         private
 
+        # Filter chip plus its clear affordance, so a filtered-empty logs pane can
+        # never look like a bug.
+        def log_scope_hint_segments(state)
+          label = LogScope.label(state)
+          return [] if label.empty?
+
+          [
+            ["⌖ logs: #{label}", Style::ACCENT],
+            ["  Esc clears", Style::MUTED]
+          ]
+        end
+
+        def empty_logs_lines(state, width: nil)
+          wrap_text_line(empty_logs_text(state), width && [width.to_i, 1].max).map { |line| [[line, Style::MUTED]] }
+        end
+
+        def empty_logs_text(state)
+          label = LogScope.label(state)
+          return "No logs yet. Type a prompt below and press Enter." if label.empty?
+
+          "No logs for #{label} yet. Click another AgentTree row to move this filter, or press Esc to clear it."
+        end
+
         def delivery_pr_hint_segments(state)
           navigation_id = AgentTreeNavigation.selected_agent_id(state)
           workspace = state.fetch("_agent_workspace", {}) || {}
@@ -187,6 +222,7 @@ module Meringue
             Array(state.fetch("agents", [])).hash,
             Array(chat.fetch("messages", [])).hash,
             AgentTreeNavigation.selected_agent_id(state),
+            LogScope.id(state),
             Style.current_colorscheme
           ]
         end
@@ -198,6 +234,8 @@ module Meringue
           durable_log_entries = durable_log_entries.reject { |entry| redundant_lifecycle_log?(entry, message_topics) }
           duplicate_log_texts = duplicate_text_index(durable_log_entries)
           entries = message_entries.filter_map { |entry| deduplicate_message_entry(entry, duplicate_log_texts) } + durable_log_entries
+          # A selected AgentTree node scopes the pane to that node's subtree.
+          entries = LogScope.filter(LogScope.scope(state), entries)
           entries.each_with_index { |entry, sequence| entry["sequence"] = sequence }
           entries.sort_by { |entry| entry_sort_key(entry) }
         end

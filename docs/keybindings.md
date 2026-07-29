@@ -17,12 +17,12 @@ agent_select_next = ["j", "down", "right"]
 - `Ctrl-B`: open the selected worker's kernel-verified delivery pull request. If the PR is missing, malformed, or its status cannot be refreshed, Meringue reports that state without closing the dashboard or changing the worker.
 - `Ctrl-D`: quit.
 - `Ctrl-C`: clear input; quit when input is empty.
-- `Esc`: cancel jump mode when navigation is active.
+- `Esc`: cancel the innermost active thing — a text selection or the logs selection cursor first, then the AgentTree selection (which clears the logs filter) and jump mode.
 
 ## Focus and scrolling
 
 - Click a dashboard section: move focus to that section (the active outline follows the focused section). The logs pane includes user-visible prompts, agent output, and important kernel events.
-- Click an issue or agent in the AgentTree: select/highlight it, matching jump mode selection.
+- Click a project, issue, head, or worker row in the AgentTree: select/highlight it and filter the logs pane to it. See [AgentTree selection and log filtering](#agenttree-selection-and-log-filtering).
 - Double-click an agent (or an issue with a worker): open its focused workspace. This is the primary mouse action; PR opening remains an explicit action.
 - `Tab` / `Ctrl-Tab`: move focus forward.
 - `Shift-Tab`: move focus backward.
@@ -39,7 +39,42 @@ The AgentTree pane scrolls like any other pane, so a long tree of projects, issu
 - The mouse wheel scrolls the tree whenever the pointer is over the pane, including while jump mode is active and while another pane has focus.
 - The pane title shows how much is off screen as `agent tree  ↑<above> ↓<below>`; the counts disappear once the whole tree fits, so a clipped tree cannot be mistaken for missing data.
 - Offsets are clamped to real content, and are re-clamped when the terminal is resized or when the tree shrinks (issues or workers completing, `/prune`, kills), so scrolling past either end never builds up a dead offset.
-- Selecting an item scrolls the minimum amount needed to bring it on screen. This covers jump-mode arrow navigation, clicking a row, and opening or closing a focused workspace, and it uses the same reveal approach as the logs selection cursor. Scrolling by hand is not overridden while the selection stays the same.
+- Selecting an item scrolls the minimum amount needed to bring it on screen. This covers jump-mode arrow navigation, clicking a row, opening or closing a focused workspace, and the sticky selection that filters the logs pane (including a selected project, where jump mode is not active), and it uses the same reveal approach as the logs selection cursor. Scrolling by hand is not overridden while the selection stays the same.
+
+## AgentTree selection and log filtering
+
+A single left click on any AgentTree row selects that node. Exactly one node is selected at a time, and while a node is selected the logs pane shows only that node's logs.
+
+What each node type scopes, mirroring the AgentTree hierarchy:
+
+| selected row | logs shown |
+| --- | --- |
+| worker (`P1-I9-W3`) | that worker's own logs |
+| head (`H2`) | that head's logs, including the user prompt it routed. Heads are top-level rows, so their logs never appear under a project or issue. |
+| issue (`P1-I9`) | the issue plus every worker attached to it and to its child issues |
+| project (`P1`) | that project and its whole subtree of issues and workers |
+
+Membership comes from each log record's `source_type`/`source_id` plus the routing ids the kernel already stores in `details` (`project_id`, `issue_id`, `agent_id`, `head_id`, and cascading id lists such as killed/removed ids). Log entries with no attributable node — for example transient status lines — are hidden while a filter is active.
+
+The selection is sticky and independent of focus:
+
+- The selected row stays highlighted while the logs pane, the chat pane, or the composer is focused, so the filter is always visible. When the selection changes it is scrolled back into view by the minimum amount, exactly like a jump-mode selection.
+- Scrolling the AgentTree (arrows, page keys, `Home` / `End`, or the mouse wheel) never changes or clears the selection, and the offset you chose by hand is not yanked back while the selection stays the same.
+- The logs pane title becomes `logs — <id>` (for example `logs — P1-I9-W3`) and the bottom hint shows `⌖ logs: <id>  Esc clears`.
+- A filtered pane with nothing to show says so and repeats how to change or clear the filter, so it never looks broken.
+
+Clearing or retargeting:
+
+- Click a different row: the selection and the filter move to that row.
+- Click the highlighted row again, or click empty space inside the AgentTree: deselect and show all logs again.
+- `Esc`: clear the selection (and jump mode). A text selection or logs cursor is cleared first, so a second `Esc` clears the filter.
+- Clicking the logs pane, the chat pane, or scrolling never clears the selection. That is the point of the feature.
+- Projects are selectable rows but not jump targets, so selecting a project also leaves jump mode.
+- If the selected node disappears (pruned, killed, or renumbered), the filter clears itself instead of hiding every log line.
+
+The filter follows explicit selection actions only: a click, or moving the jump-mode cursor with `agent_select_previous` / `agent_select_next`. Entering jump mode does not retarget the filter by itself; it starts on the already-selected node when that node is a jump target. Scrolling, focus changes, and typing never change it.
+
+This selection is separate from text selection: it decides which log entries are rendered, not which characters are highlighted, so `Ctrl-C` copy, the logs selection cursor, and composer selection keep working unchanged while a filter is active.
 
 ## Text selection and clipboard
 
@@ -103,12 +138,12 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 
 Start jump mode with `/jump` or by focusing the agent tree or logs pane and pressing `Enter`.
 
-- `Up` / `Down` / `Left` / `Right`: select an issue or agent, auto-scrolling the AgentTree by the minimum amount needed to keep the selected row visible. In the logs pane, only agent titles are selectable; non-agent events are skipped.
+- `Up` / `Down` / `Left` / `Right`: select an issue or agent, which also retargets the logs pane filter to the newly selected node and auto-scrolls the AgentTree by the minimum amount needed to keep the selected row visible. In the logs pane, only agent titles are selectable; non-agent events are skipped.
 - `PageUp` / `PageDown`, `Home` / `End`, and the mouse wheel: scroll the focused pane while a selection is active, since jump mode owns the arrow keys.
 - `Ctrl-B`: open the selected worker's verified delivery pull request. The PR remains easy to open when status refresh is temporarily unavailable.
 - `Enter`: open the selected agent's pull request when a PR is available.
 - `a`: open the selected worker's focused workspace. Selecting an issue opens its newest non-killed worker; heads without a durable worker context stay on the dashboard.
-- `Esc`: cancel jump mode.
+- `Esc`: cancel jump mode and clear the AgentTree selection, including its logs filter.
 
 ## Focused worker workspace
 
