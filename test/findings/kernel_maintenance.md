@@ -3,9 +3,11 @@
 Slice: `kernel_maintenance` — Prune, Kill/ClearState, ReconcileSessions, Recount,
 plus the process-identity evidence those paths rely on.
 
-Files added by this slice:
+Files added by this slice (plus later prune-worktree lifecycle coverage):
 
 - `test/integration/kernel_maintenance/prune_resolved_test.rb`
+- `test/integration/kernel_maintenance/prune_worktree_cleanup_test.rb`
+- `test/integration/workspace/manager_prune_cleanup_test.rb`
 - `test/integration/kernel_maintenance/prune_errored_test.rb`
 - `test/integration/kernel_maintenance/clear_state_test.rb`
 - `test/integration/kernel_maintenance/reconcile_sessions_test.rb`
@@ -58,17 +60,21 @@ tests were updated to the shipped behavior:
    elsewhere (`Engine#cancel_agent_turn`). This is behaviour/doc drift, not a
    crash; the tests assert the statuses the kernel actually writes and additionally
    assert that no undocumented status/level ever appears.
-4. **The killed-record sweep inside ReconcileSessions emits no log entry.**
-   `prune_killed_records` always returns `"log_entry_ids" => []`, so killed issues,
-   workers, and heads disappear from the AgentTree without a logs-pane line. The
-   reconcile result does report `pruned_issue_ids` / `pruned_agent_ids`.
+4. **The killed-record sweep has no generic summary log.** It does emit per-worker
+   worktree cleanup info/warning logs when a managed workspace is present, and returns
+   those IDs from reconciliation. Killed records without a managed worktree still
+   disappear without a separate sweep summary; the reconcile result reports
+   `pruned_issue_ids` / `pruned_agent_ids`.
 5. **Questions are never removed by pruning.** Open questions *block* pruning of
    their issue and project, while `answered`/`dismissed` question records survive
    the removal of the issue they point at (their `issue_id` then dangles). Asserted
    in `test_answered_and_dismissed_questions_do_not_block_pruning`.
-6. **Workspaces are never deleted** by `Prune`, `Kill`, or the killed-record sweep;
-   worker workspace cleanup only happens for failed spawn reservations. Asserted by
-   checking that the workspace directory and a file inside it survive a prune.
+6. **Prune now couples managed worktree cleanup to record removal.** Clean, unlocked,
+   ownership-verified Meringue worktrees are removed before their issue/worker records;
+   dirty, locked, ambiguous, or failed cleanups retain both the worktree and state bundle
+   for retry. Missing/already-removed worktrees are idempotent, project-root/dedicated
+   directories are untouched, and immediate `Kill` retains its existing no-worktree-delete
+   behavior. Covered by the two prune-worktree test files listed above.
 7. **PR retention rules**: only `merged` and `closed` pull requests are treated as
    settled. `open`, draft (`state == "open"` plus `is_draft`), and unresolvable
    (`state == "unknown"`, e.g. `gh` failing) PRs all block pruning of the issue and
@@ -97,4 +103,5 @@ tests were updated to the shipped behavior:
     the persisted visible log buffer (`conversation`), and leaves a valid loadable
     state file with `schema_version` and metadata timestamps.
 
-## No production code was changed by this slice.
+The original maintenance test slice did not change production code. Later prune-worktree
+lifecycle work updated the behavior called out in items 4 and 6.

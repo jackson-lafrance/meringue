@@ -172,10 +172,10 @@ Useful slash commands inside the TUI include:
 - `/model <agent_id> <provider/model>` — change only one active/resumable Pi session's model; future defaults are unchanged.
 - `/thinking <agent_id> <level>` — change only one active/resumable Pi session's thinking level; future defaults are unchanged.
 - `/keybind` — show active TUI keybindings.
-- `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together, keeping anything unresolved work still needs.
+- `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together and removes their clean, unlocked Meringue-managed worktrees. Unsafe cleanup (dirty, locked, ambiguous, or failed) retains the bundle and logs why so it can be retried.
 - `/recount` — compact project, issue, worker, and question numbering after records are removed.
 
-See `docs/session-settings.md` for future-default persistence, exact propagation semantics, authoritative Pi session discovery, targeted updates, and errors. See `docs/recount.md` for the renumbering, cross-reference, and active-session rules. See `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
+See `docs/head_agent_kernel_commands.md#prune` for prune eligibility and worktree cleanup safety, `docs/recount.md` for the renumbering/cross-reference/active-session rules, and `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
 
 ### Answering a head's question
 

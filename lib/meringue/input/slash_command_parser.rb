@@ -30,7 +30,7 @@ module Meringue
         ["/questions", "List questions and their statuses."],
         ["/answer <question_id> \"<answer>\"", "Answer an open question and let a head route the work it unblocks."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
-        ["/prune", "Remove resolved and errored records together unless unresolved work requires retention."],
+        ["/prune", "Remove resolved and errored records plus their safely cleanable managed worktrees."],
         ["/recount", "Compact project, issue, worker, and question IDs after records are removed."],
         ["/clear", "Reset persisted Meringue state and clear the visible logs. Dev/debug helper."]
       ].freeze
