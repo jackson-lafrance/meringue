@@ -1377,6 +1377,7 @@ module Meringue
       def spawn_head(command_id, command_type, payload)
         user_message = value_at(payload, "user_message", "UserMessage", "message")
         question_id = value_at(payload, "question_id", "QuestionID", "questionId")
+        requested_selected_target = value_at(payload, "selected_target", "SelectedTarget", "selectedTarget")
         # Internally routed heads (for example the head spawned for an answered question) carry a
         # long structured prompt. The visible chat log should stay short and human-facing.
         log_message = present_string(value_at(payload, "log_message", "LogMessage"))
@@ -1386,10 +1387,21 @@ module Meringue
         return synchronized_state { rejected_result(command_id, command_type, "Head was not spawned.", errors) } unless errors.empty?
 
         head_id = nil
+        selected_target = nil
         started = synchronized_state do
           state = normalized_state
           if present_string(question_id) && !find_question(state, question_id)
             return rejected_result(command_id, command_type, "Question #{question_id} does not exist.", ["question_not_found"])
+          end
+
+          selected_target, selected_target_error = resolve_selected_head_target(state, requested_selected_target)
+          if selected_target_error
+            return rejected_result(
+              command_id,
+              command_type,
+              "Head was not spawned: #{selected_target_error.fetch("message")}",
+              [selected_target_error.fetch("code")]
+            )
           end
 
           active_provider = active_harness_provider(state)
@@ -1404,6 +1416,7 @@ module Meringue
             harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i,
             user_message: user_message.to_s,
             question_id: present_string(question_id),
+            selected_target: selected_target,
             snapshot_issue_ids: state.fetch("issues").map { |issue| issue.fetch("id", nil) }.compact,
             snapshot_project_ids: state.fetch("projects").map { |project| project.fetch("id", nil) }.compact,
             snapshot_counters: deep_copy(state.fetch("counters", {}))
@@ -1418,7 +1431,8 @@ module Meringue
             message: log_message || user_message.to_s.strip,
             details: {
               "head_id" => head_id,
-              "question_id" => present_string(question_id)
+              "question_id" => present_string(question_id),
+              **selected_target_log_details(selected_target)
             }.compact
           )
           touch_state!(state, now)
@@ -1430,6 +1444,7 @@ module Meringue
             user_message: user_message.to_s,
             snapshot: snapshot,
             question_id: present_string(question_id),
+            selected_target: selected_target,
             cwd: cwd,
             state_path: store.path
           )
@@ -3742,7 +3757,7 @@ module Meringue
       end
 
       def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0, user_message: nil, question_id: nil,
-                           snapshot_issue_ids: [], snapshot_project_ids: [], snapshot_counters: {})
+                           selected_target: nil, snapshot_issue_ids: [], snapshot_project_ids: [], snapshot_counters: {})
         {
           "id" => head_id,
           "type" => "head",
@@ -3770,7 +3785,8 @@ module Meringue
             "snapshot_counters" => (snapshot_counters.is_a?(Hash) ? snapshot_counters : {}),
             "head_request" => {
               "user_message" => user_message,
-              "question_id" => question_id
+              "question_id" => question_id,
+              "selected_target" => selected_target
             }.compact
           },
           "created_at" => now,
@@ -4109,13 +4125,16 @@ module Meringue
         summary = head_result.fetch("summary", "").to_s.strip
         return [] if summary.empty?
 
+        head = find_agent(state, head_id.to_s)
+        request = (head&.fetch("harness_metadata", nil) || {}).fetch("head_request", {}) || {}
+        selected_target = request.fetch("selected_target", nil)
         append_log(
           state,
           source_type: "head",
           source_id: head_id.to_s,
           level: "info",
           message: summary,
-          details: { "kind" => "head_summary" }
+          details: { "kind" => "head_summary", **selected_target_log_details(selected_target) }
         )
       end
 
@@ -5542,6 +5561,85 @@ module Meringue
         state.fetch("metadata")["updated_at"] = now
       end
 
+      # Resolve a UI selection against the kernel's current snapshot. The input
+      # layer intentionally sends only selected_id, so a worker/agent can never
+      # smuggle an arbitrary issue id into head context. Agent selections resolve
+      # to their durable owning issue; issue selections target themselves.
+      def resolve_selected_head_target(state, requested_target)
+        return [nil, nil] if requested_target.nil?
+
+        selected_id = if requested_target.is_a?(Hash)
+                        value_at(requested_target, "selected_id", "SelectedID", "selectedId", "id")
+                      else
+                        requested_target
+                      end
+        selected_id = selected_id.to_s.strip
+        if selected_id.empty?
+          return [nil, { "code" => "selected_target_id_required", "message" => "selected target id is required." }]
+        end
+
+        issue = find_issue(state, selected_id)
+        agent = nil
+        unless issue
+          agent = find_agent(state, selected_id)
+          unless agent
+            return [nil, { "code" => "selected_target_not_found", "message" => "selected target #{selected_id} no longer exists." }]
+          end
+
+          issue_id = present_string(agent.fetch("issue_id", nil))
+          unless issue_id
+            return [nil, { "code" => "selected_target_has_no_issue", "message" => "selected agent #{selected_id} does not own an issue." }]
+          end
+
+          issue = find_issue(state, issue_id)
+          unless issue
+            return [nil, { "code" => "selected_target_issue_not_found", "message" => "owning issue #{issue_id} for selected agent #{selected_id} no longer exists." }]
+          end
+        end
+
+        if issue.fetch("status", nil) == "killed"
+          return [nil, { "code" => "selected_target_issue_unavailable", "message" => "selected issue #{issue.fetch("id")} is no longer available." }]
+        end
+
+        project = find_project(state, issue.fetch("project_id", nil))
+        unless project
+          return [nil, { "code" => "selected_target_project_not_found", "message" => "project for selected issue #{issue.fetch("id")} no longer exists." }]
+        end
+
+        target = {
+          "selected_id" => selected_id,
+          "selected_type" => agent ? "agent" : "issue",
+          "issue_id" => issue.fetch("id"),
+          "project_id" => issue.fetch("project_id", nil),
+          "issue_title" => issue.fetch("title", nil)
+        }
+        if agent
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          target.merge!(
+            "selected_agent_id" => agent.fetch("id"),
+            "selected_agent_type" => agent.fetch("type", nil),
+            "selected_agent_title" => metadata.fetch("title", nil)
+          )
+        end
+        [target.compact, nil]
+      end
+
+      # Scalar ids make the selected prompt visible under both issue and exact
+      # agent log scopes; the nested object preserves the complete audit context.
+      def selected_target_log_details(selected_target)
+        return {} unless selected_target.is_a?(Hash)
+
+        {
+          "selected_target" => deep_copy(selected_target),
+          "selected_target_id" => selected_target.fetch("selected_id", nil),
+          "selected_target_type" => selected_target.fetch("selected_type", nil),
+          "project_id" => selected_target.fetch("project_id", nil),
+          "issue_id" => selected_target.fetch("issue_id", nil),
+          "agent_id" => selected_target.fetch("selected_agent_id", nil),
+          "routing_action" => "selected_target"
+        }.compact
+      end
+
       def find_project(state, project_id)
         state.fetch("projects").find { |project| project.fetch("id", nil) == project_id.to_s }
       end
@@ -6120,6 +6218,7 @@ module Meringue
           user_message: request.fetch("user_message"),
           snapshot: snapshot,
           question_id: request.fetch("question_id", nil),
+          selected_target: request.fetch("selected_target", nil),
           cwd: cwd,
           state_path: store.path
         )
@@ -6135,7 +6234,13 @@ module Meringue
         metadata = agent.fetch("harness_metadata", {}) || {}
         request = metadata.fetch("head_request", {}) || {}
         user_message = present_string(request.fetch("user_message", nil))
-        return { "user_message" => user_message, "question_id" => present_string(request.fetch("question_id", nil)) }.compact if user_message
+        if user_message
+          return {
+            "user_message" => user_message,
+            "question_id" => present_string(request.fetch("question_id", nil)),
+            "selected_target" => request.fetch("selected_target", nil)
+          }.compact
+        end
 
         synchronized_state do
           state = normalized_state
@@ -6145,7 +6250,11 @@ module Meringue
           message = log && present_string(log.fetch("message", nil))
           next nil unless message
 
-          { "user_message" => message, "question_id" => present_string(log.dig("details", "question_id")) }.compact
+          {
+            "user_message" => message,
+            "question_id" => present_string(log.dig("details", "question_id")),
+            "selected_target" => log.dig("details", "selected_target")
+          }.compact
         end
       end
 

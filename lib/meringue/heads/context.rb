@@ -27,16 +27,17 @@ module Meringue
       ROUTING_CANDIDATE_LIMIT = 40
       ROUTING_TEXT_LIMIT = 2_000
 
-      attr_reader :head_id, :user_message, :snapshot, :question_id,
+      attr_reader :head_id, :user_message, :snapshot, :question_id, :selected_target,
                   :kernel_commands_path, :cwd, :state_path
 
-      def initialize(head_id:, user_message:, snapshot:, question_id: nil,
+      def initialize(head_id:, user_message:, snapshot:, question_id: nil, selected_target: nil,
                      kernel_commands_path: DEFAULT_KERNEL_COMMANDS_PATH, cwd: Dir.pwd,
                      state_path: State::Store.default_path)
         @head_id = head_id
         @user_message = user_message
         @snapshot = snapshot
         @question_id = question_id
+        @selected_target = selected_target
         @kernel_commands_path = kernel_commands_path
         @cwd = File.expand_path(cwd)
         @state_path = File.expand_path(state_path)
@@ -71,6 +72,7 @@ module Meringue
           You may use tools to inspect local projects and git repositories before deciding, but discovery must be read-only and limited to routing/orchestration context.
           Do not investigate or answer the user's substantive task directly; create or reuse issues and spawn or prompt workers for investigation, implementation, and informational work.
           Treat the supplied routing context as candidate evidence, not a conversation database. Classify whether this message starts a new goal, follows an existing issue, or answers an open question, then deliberately choose whether to prompt, follow up, or replace an existing worker.
+          When routing_context.selected_target is present, it is explicit UI routing context: keep this message on its resolved issue. An agent selection resolves to that agent's owning issue; use the selected agent as a session-context hint, but still choose the appropriate healthy worker and PromptAgent mode through kernel commands. Never bypass head routing or prompt an agent from another issue.
           When questions are open, check routing_context.open_questions and routing_context.answer_inference first. If this message clearly answers exactly one open question, propose AnswerQuestion for that question id and route the work it unblocks in the same result. If several open questions are plausible, or the message is plainly a new goal, leave every question open and route normally or ask one clarifying question.
           Prefer a healthy existing worker session when its Pi or other harness history contains the context needed for the follow-up. Do not duplicate that harness history in Meringue state.
           Do not mutate files, git state, dependencies, databases, remote services, or Meringue state directly.
@@ -131,7 +133,7 @@ module Meringue
       end
 
       def routing_context
-        {
+        context = {
           "purpose" => "Stateless routing hints assembled from existing issues, logs, and inspectable harness session metadata. These are not a separate conversation history.",
           "explicit_references" => explicit_references,
           "question_being_answered" => question_being_answered,
@@ -141,7 +143,9 @@ module Meringue
           "worker_candidates" => routing_worker_candidates,
           "recent_activity" => recent_routing_activity,
           "decision_rules" => [
-            "Explicit project, issue, worker, or question ids in the user message take precedence when they exist and are compatible.",
+            "When selected_target is present, route within its resolved issue. An agent selection identifies its owning issue and is a preferred session-context hint, not permission to bypass the head or force an unhealthy agent.",
+            "Do not create or prompt work on another issue while selected_target is active. If the message explicitly conflicts with the selected issue, ask the user to clear/change the selection rather than silently ignoring it.",
+            "Explicit project, issue, worker, or question ids in the user message take precedence when they are compatible with selected_target; otherwise surface the conflict instead of guessing.",
             "A refinement, correction, question about findings, or next step for an existing durable goal should reuse that issue.",
             "Prefer PromptAgent when a healthy worker on that issue has useful persisted harness context; do not spawn a new worker merely because this is a new user message.",
             "Use steer for an urgent correction to active work, follow_up for related work that should run after the active turn, and normal for a settled resumable session.",
@@ -151,6 +155,49 @@ module Meringue
             "When this message answers an open question, pair AnswerQuestion with the routing command that acts on the answer in the same HeadResult. Closing a question without routing the unblocked work drops the user's request."
           ]
         }
+        target = selected_target_context
+        context["selected_target"] = target if target
+        context
+      end
+
+      def selected_target_context
+        return @selected_target_context if defined?(@selected_target_context)
+
+        raw = selected_target.is_a?(Hash) ? selected_target : {}
+        selected_id = (raw["selected_id"] || raw[:selected_id] || raw["id"] || raw[:id]).to_s
+        selected_record = snapshot.fetch("agents", []).find { |agent| agent.fetch("id", nil).to_s == selected_id } ||
+          snapshot.fetch("issues", []).find { |issue| issue.fetch("id", nil).to_s == selected_id }
+        issue_id = if selected_record && issue_record?(selected_record)
+                     selected_record.fetch("id", nil)
+                   elsif selected_record
+                     selected_record.fetch("issue_id", nil)
+                   else
+                     raw["issue_id"] || raw[:issue_id]
+                   end
+        issue = snapshot.fetch("issues", []).find { |candidate| candidate.fetch("id", nil).to_s == issue_id.to_s }
+        return @selected_target_context = nil unless issue
+
+        agent = selected_record if selected_record && selected_record.fetch("type", nil).to_s != ""
+        selected_agent_id = agent&.fetch("id", nil) || raw["selected_agent_id"] || raw[:selected_agent_id]
+        selected_agent_id = nil unless present_value?(selected_agent_id)
+        selected_agent_type = agent&.fetch("type", nil) || raw["selected_agent_type"] || raw[:selected_agent_type]
+        @selected_target_context = {
+          "selected_id" => selected_id.empty? ? issue.fetch("id") : selected_id,
+          "selected_type" => selected_agent_id ? "agent" : "issue",
+          "issue_id" => issue.fetch("id"),
+          "project_id" => issue.fetch("project_id", nil),
+          "issue_title" => issue.fetch("title", nil),
+          "selected_agent_id" => selected_agent_id,
+          "selected_agent_type" => selected_agent_type,
+          "selected_agent_title" => (agent&.fetch("harness_metadata", nil) || {}).fetch("title", nil),
+          "instruction" => "Route this message within #{issue.fetch("id")}. A selected agent resolves to this owning issue; keep head-agent routing and choose the appropriate worker/session action on the issue."
+        }.compact
+      end
+
+      # Local shape check avoids a dependency from the head layer back into the
+      # TUI's AgentTree helpers.
+      def issue_record?(record)
+        record.is_a?(Hash) && record.key?("project_id") && record.key?("agent_ids")
       end
 
       def explicit_references
@@ -328,7 +375,10 @@ module Meringue
 
       def routing_candidates(records)
         sorted = records.sort_by { |record| routing_sort_key(record) }.reverse
-        referenced = explicit_references.fetch("known_ids")
+        target = selected_target_context || {}
+        referenced = explicit_references.fetch("known_ids") + [
+          target["selected_id"], target["issue_id"], target["project_id"], target["selected_agent_id"]
+        ].compact
         explicit_records = sorted.select { |record| referenced.include?(record.fetch("id", nil)) }
         (explicit_records + sorted.first(ROUTING_CANDIDATE_LIMIT)).uniq { |record| record.fetch("id", nil) }
       end
@@ -352,7 +402,8 @@ module Meringue
 
         details.slice(
           "head_id", "question_id", "project_id", "issue_id", "agent_id", "target_id",
-          "mode", "routing_action", "follow_up_of_agent_id", "replaces_agent_id", "replaced_by_agent_id"
+          "selected_target_id", "selected_target_type", "mode", "routing_action",
+          "follow_up_of_agent_id", "replaces_agent_id", "replaced_by_agent_id"
         ).compact
       end
 

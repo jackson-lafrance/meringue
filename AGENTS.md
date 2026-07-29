@@ -315,6 +315,8 @@ Otherwise, treat the input as natural language and spawn a fresh stateless head 
 
 Plain natural language should be the default path. Slash commands are a clutch/fallback interface for precise control, debugging, and recovery.
 
+An explicit AgentTree selection may scope a natural-language message without bypassing this flow. Selecting an issue targets that issue; selecting a worker/agent resolves to the agent's owning issue and carries the selected agent only as a session-context hint. The input layer adds the selected node id to `SpawnHead`, the kernel resolves it against current state, and the fresh head receives the canonical issue/project/agent context. The head still decides whether to prompt, steer, follow up, replace, or spawn on that issue through normal kernel commands. Project selections and heads without an owning issue remain log-only filters. Slash commands retain their explicit semantics and do not inherit the dashboard selection.
+
 ## AgentTree
 the agenttree represents the philosphy we organize agents and the way we display them to the user
 we will follow a similar pattern to that of a filesystem, with issues being folders and agents being files (metaphorically)
@@ -382,7 +384,7 @@ The logs pane should show:
 
 Do not persist every streamed token from the harness as a log entry.
 Streaming output can be rendered live in the TUI, while durable logs should store important lifecycle events,
-final summaries, errors, and kernel state changes.
+final summaries, errors, and kernel state changes. Expected TUI unavailability (for example repeatedly clicking a pending head that has no focused worker workspace yet) must not append durable or visible chat/log messages; use a silent no-op or transient UI affordance, while preserving real operation failures.
 
 Logs come from the Ruby kernel, harness process events, and worker final messages. For the MVP, harness process events are Pi RPC events.
 
