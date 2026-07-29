@@ -183,7 +183,7 @@ head_extra_args = []
 worker_extra_args = []
 ```
 
-Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). To use a different model or thinking level, set `head_extra_args` / `worker_extra_args` for `[harness.pi]`; a configured array replaces the default array entirely, so include the other flags you still want.
+Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). To use a different model or thinking level for future sessions, set `head_extra_args` / `worker_extra_args` for `[harness.pi]`; a configured array replaces the default array entirely, so include the other flags you still want. The `/model` and `/thinking` commands update only their targeted existing Pi session and never rewrite these defaults; see [`session-settings.md`](session-settings.md).
 
 Claude Code runs through `claude --print --output-format stream-json --verbose`; Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace. Live steer/follow-up prompting is currently Pi-only.
 

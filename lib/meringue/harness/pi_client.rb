@@ -41,6 +41,11 @@ module Meringue
       class RpcError < Error; end
       class RpcTimeoutError < Error; end
       class InvalidModeError < Error; end
+      class InvalidModelReferenceError < Error; end
+      class InvalidThinkingLevelError < Error; end
+      class SessionSettingsBusyError < Error; end
+
+      THINKING_LEVELS = %w[off minimal low medium high xhigh max].freeze
 
       attr_reader :command, :env, :extra_args, :session_dir, :command_timeout,
                   :event_timeout, :shutdown_timeout
@@ -201,11 +206,15 @@ module Meringue
         end
 
         if unmanaged_process_alive?(session_ref)
-          return session_ref.merge(
+          # RPC state belongs to the process that owns its pipes. Pi persists
+          # model/thinking changes as session entries, so refresh those values
+          # from the durable session instead of returning old spawn metadata.
+          persisted_ref = build_session_ref_from_file(session_ref)
+          return persisted_ref.merge(
             "harness" => "pi",
             "is_streaming" => true,
             "metadata" => metadata_with(
-              session_ref,
+              persisted_ref,
               "transport_available" => false,
               "transport_owner_pid" => transport_owner_pid(session_ref),
               "transport_note" => unowned_transport_note(session_ref)
@@ -214,6 +223,76 @@ module Meringue
         end
 
         build_session_ref_from_file(session_ref)
+      end
+
+      def session_settings_supported?
+        true
+      end
+
+      def get_session_settings(session_ref)
+        state_ref = get_state(session_ref)
+        {
+          "session_ref" => state_ref,
+          "settings" => state_ref.fetch("session_settings", unknown_session_settings("Pi did not report session settings."))
+        }
+      end
+
+      def set_session_model(session_ref, model_reference)
+        provider, model_id = parse_model_reference!(model_reference)
+        state_ref, process, attached = writable_session_state(session_ref)
+        rpc_data(
+          process.request(
+            { "type" => "set_model", "provider" => provider, "modelId" => model_id },
+            timeout: command_timeout
+          )
+        )
+        updated_ref = get_state(state_ref)
+        effective_reference = updated_ref.dig("session_settings", "model", "reference")
+        requested_reference = "#{provider}/#{model_id}"
+        unless effective_reference == requested_reference
+          raise InvalidModelReferenceError,
+                "Pi did not apply model #{requested_reference.inspect}; effective model is #{effective_reference || "unknown"}."
+        end
+
+        { "session_ref" => updated_ref, "settings" => updated_ref.fetch("session_settings") }
+      rescue StandardError
+        release_settings_attachment(process, state_ref) if attached
+        raise
+      end
+
+      def set_session_thinking_level(session_ref, level)
+        requested_level = level.to_s.strip.downcase
+        unless THINKING_LEVELS.include?(requested_level)
+          raise InvalidThinkingLevelError,
+                "Invalid Pi thinking level #{level.inspect}. Valid levels: #{THINKING_LEVELS.join(", ")}"
+        end
+
+        state_ref, process, attached = writable_session_state(session_ref)
+        available = rpc_data(
+          process.request({ "type" => "get_available_thinking_levels" }, timeout: command_timeout)
+        ).fetch("levels", []).map(&:to_s)
+        unless available.include?(requested_level)
+          model = state_ref.dig("session_settings", "model", "reference") || "the current model"
+          raise InvalidThinkingLevelError,
+                "Pi model #{model} does not support thinking level #{requested_level.inspect}. " \
+                "Available levels: #{available.join(", ")}"
+        end
+
+        rpc_data(
+          process.request({ "type" => "set_thinking_level", "level" => requested_level }, timeout: command_timeout),
+          allow_nil_data: true
+        )
+        updated_ref = get_state(state_ref)
+        effective_level = updated_ref.dig("session_settings", "thinking_level")
+        unless effective_level == requested_level
+          raise InvalidThinkingLevelError,
+                "Pi did not apply thinking level #{requested_level.inspect}; effective level is #{effective_level || "unknown"}."
+        end
+
+        { "session_ref" => updated_ref, "settings" => updated_ref.fetch("session_settings") }
+      rescue StandardError
+        release_settings_attachment(process, state_ref) if attached
+        raise
       end
 
       def read_events(session_ref)
@@ -344,6 +423,137 @@ module Meringue
       private
 
       attr_reader :transport_ownership, :takeover_settle_timeout
+
+      def parse_model_reference!(model_reference)
+        reference = model_reference.to_s.strip
+        provider, model_id, extra = reference.split("/", 3)
+        if !present?(provider) || !present?(model_id) || present?(extra)
+          raise InvalidModelReferenceError,
+                "Pi models must use an exact provider/model id, for example openai/gpt-5.6-sol."
+        end
+
+        [provider, model_id]
+      end
+
+      def writable_session_state(session_ref)
+        if unmanaged_process_alive?(session_ref) && !process_for(session_ref, required: false)
+          owner_pid = transport_owner_pid(session_ref)
+          owner = owner_pid ? "Meringue instance #{owner_pid}" : "another Meringue instance"
+          raise SessionTransportUnavailableError,
+                "This Pi session is owned by #{owner}; update it from that window or wait until it is resumable."
+        end
+
+        existing_process = process_for(session_ref, required: false)
+        state_ref = if existing_process
+                      get_state(session_ref)
+                    else
+                      attach_session(session_ref)
+                    end
+        if state_ref.fetch("is_streaming", false)
+          raise SessionSettingsBusyError,
+                "Pi session is currently running; wait for it to settle before changing its model or thinking level."
+        end
+
+        [state_ref, process_for(state_ref), existing_process.nil?]
+      end
+
+      def release_settings_attachment(process, session_ref)
+        return unless process
+
+        process.terminate(timeout: shutdown_timeout)
+        unregister_process(process)
+        release_transport(session_ref || {}, pid: process.pid)
+      rescue StandardError
+        nil
+      end
+
+      def session_settings_from_pi_state(pi_state)
+        model = pi_state["model"]
+        normalized_model = normalize_pi_model(model)
+        thinking_level = present?(pi_state["thinkingLevel"]) ? pi_state["thinkingLevel"].to_s : nil
+        session_settings(
+          model: normalized_model,
+          thinking_level: thinking_level,
+          source: "live_session_state",
+          note: normalized_model || thinking_level ? nil : "Pi get_state did not report a model or thinking level."
+        )
+      end
+
+      def session_settings_from_session_records(records)
+        entries = Array(records).select { |record| record.is_a?(Hash) && present?(record["id"]) }
+        by_id = entries.to_h { |record| [record["id"].to_s, record] }
+        branch = []
+        cursor = entries.last
+        seen = {}
+        while cursor && !seen[cursor["id"].to_s]
+          branch << cursor
+          seen[cursor["id"].to_s] = true
+          parent_id = cursor["parentId"]
+          cursor = present?(parent_id) ? by_id[parent_id.to_s] : nil
+        end
+        branch.reverse!
+
+        model_change = branch.reverse.find { |record| record["type"] == "model_change" }
+        assistant = branch.reverse.find do |record|
+          record["type"] == "message" && record.dig("message", "role") == "assistant"
+        end
+        provider = model_change&.fetch("provider", nil) || assistant&.dig("message", "provider")
+        model_id = model_change&.fetch("modelId", nil) || assistant&.dig("message", "model")
+        normalized_model = if present?(provider) && present?(model_id)
+                             normalize_pi_model("provider" => provider, "id" => model_id)
+                           end
+        thinking_change = branch.reverse.find { |record| record["type"] == "thinking_level_change" }
+        thinking_level = thinking_change&.fetch("thinkingLevel", nil)&.to_s
+
+        session_settings(
+          model: normalized_model,
+          thinking_level: thinking_level,
+          source: "persisted_session",
+          note: normalized_model || thinking_level ? nil : "Pi session metadata does not contain model or thinking settings."
+        )
+      end
+
+      def normalize_pi_model(model)
+        return nil unless model.is_a?(Hash)
+
+        provider = model["provider"].to_s
+        model_id = (model["id"] || model["modelId"]).to_s
+        return nil if provider.empty? || model_id.empty?
+
+        {
+          "provider" => provider,
+          "id" => model_id,
+          "reference" => "#{provider}/#{model_id}",
+          "name" => present?(model["name"]) ? model["name"].to_s : nil
+        }.compact
+      end
+
+      def session_settings(model:, thinking_level:, source:, note: nil)
+        availability = if model && thinking_level
+                         "available"
+                       elsif model || thinking_level
+                         "partial"
+                       else
+                         "unknown"
+                       end
+        {
+          "model" => model,
+          "thinking_level" => thinking_level,
+          "availability" => availability,
+          "source" => source,
+          "note" => note
+        }.compact
+      end
+
+      def unknown_session_settings(note)
+        {
+          "model" => nil,
+          "thinking_level" => nil,
+          "availability" => "unknown",
+          "source" => "pi",
+          "note" => note.to_s
+        }
+      end
 
       # Key that identifies one durable harness session across Meringue
       # instances. The session id is stable across resumes of the same session.
@@ -580,6 +790,7 @@ module Meringue
           "session_file" => pi_state["sessionFile"],
           "is_streaming" => !!pi_state["isStreaming"],
           "last_event_at" => process.last_event_at,
+          "session_settings" => session_settings_from_pi_state(pi_state),
           "metadata" => {
             "kind" => kind.to_s,
             "session_name" => session_name,
@@ -625,6 +836,7 @@ module Meringue
           "session_file" => summary.fetch("session_file", nil),
           "is_streaming" => !summary.fetch("completed", false),
           "last_event_at" => summary.fetch("last_event_at", nil),
+          "session_settings" => summary.fetch("session_settings"),
           "metadata" => metadata_with(
             session_ref,
             "session_name" => summary.fetch("session_name", nil) || metadata_value(session_ref, "session_name"),
@@ -651,9 +863,11 @@ module Meringue
           "session_name" => metadata_value(session_ref, "session_name")
         }
         last_assistant = nil
+        records = []
 
         File.foreach(path) do |line|
           record = JSON.parse(line)
+          records << record
           summary["last_event_at"] = record["timestamp"] if record["timestamp"]
           if record["type"] == "session"
             summary["session_id"] ||= record["id"]
@@ -672,6 +886,7 @@ module Meringue
         end
 
         summary["completed"] = assistant_message_completed?(last_assistant)
+        summary["session_settings"] = session_settings_from_session_records(records)
         summary
       end
 

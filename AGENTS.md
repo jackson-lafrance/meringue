@@ -294,6 +294,9 @@ Do the same thing as coding harnesses for these aswell we want it to be familiar
 /issue create <project_id> "<title>" ["description"]
 /worker spawn <issue_id> "<prompt>"
 /prompt <agent_id> "<message>"
+/session <agent_id>
+/model <agent_id> <provider/model>
+/thinking <agent_id> <level>
 /kill <agent_or_issue_id>
 /tree
 /state
@@ -416,6 +419,9 @@ The harness client should expose operations shaped like:
 - `abort_session(session_ref)`
 - `kill_session(session_ref)`
 - `get_state(session_ref)`
+- `get_session_settings(session_ref)`
+- `set_session_model(session_ref, model_reference)`
+- `set_session_thinking_level(session_ref, level)`
 - `read_events(session_ref)`
 - `attach_session(session_ref)`
 
@@ -427,6 +433,7 @@ The generic session reference should track:
 - `session_file`
 - `is_streaming`
 - `last_event_at`
+- `session_settings`: harness-neutral effective model/thinking values when the provider can report them
 
 ### Pi harness rules for MVP
 Use real Pi sessions only.
@@ -492,6 +499,7 @@ Fields should include:
 - `pid`
 - `harness_session_id`: Pi `sessionId` for the MVP
 - `harness_session_file`: Pi `sessionFile` for the MVP
+- `session_settings`: harness-neutral effective model/thinking values, or explicit unknown/unavailable metadata
 - `harness_metadata`: optional harness-specific details
 - `follow_up_of_agent_id`: optional prior worker on the same issue
 - `replaces_agent_id`: optional worker this agent replaced
