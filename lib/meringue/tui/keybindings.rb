@@ -42,6 +42,9 @@ module Meringue
         "select_end" => ["shift-end"],
         "select_word_left" => ["shift-alt-left", "shift-ctrl-left"],
         "select_word_right" => ["shift-alt-right", "shift-ctrl-right"],
+        "select_page_up" => ["shift-page-up"],
+        "select_page_down" => ["shift-page-down"],
+        "logs_selection_mode" => ["alt-v"],
         "agent_select_previous" => ["up", "left"],
         "agent_select_next" => ["down", "right"],
         "open_agent_workspace" => ["a"],
@@ -111,6 +114,9 @@ module Meringue
         "select_end" => "Extend selection to line end",
         "select_word_left" => "Extend selection by word left",
         "select_word_right" => "Extend selection by word right",
+        "select_page_up" => "Extend selection up one page",
+        "select_page_down" => "Extend selection down one page",
+        "logs_selection_mode" => "Toggle logs selection cursor",
         "agent_select_previous" => "Select previous agent",
         "agent_select_next" => "Select next agent",
         "open_agent_workspace" => "Open optional focused worker workspace",
@@ -136,6 +142,7 @@ module Meringue
         "ctrl-x" => ["\u0018", "\e[120;5u", "\e[27;5;120~"],
         "ctrl-v" => ["\u0016", "\e[118;5u", "\e[27;5;118~"],
         "alt-c" => ["\ec", "\e[99;3u", "\e[27;3;99~"],
+        "alt-v" => ["\ev", "\e[118;3u", "\e[27;3;118~"],
         "enter" => ["\r", "\n"],
         "return" => ["\r", "\n"],
         "shift-enter" => ["\e[13;2u", "\e[10;2u", "\e[27;2;13~", "\e[27;2;10~", "\e[13;2~", "\e[10;2~"],
@@ -170,6 +177,8 @@ module Meringue
         "shift-alt-right" => ["\e[1;4C", "\e[1;10C"],
         "shift-ctrl-left" => ["\e[1;6D"],
         "shift-ctrl-right" => ["\e[1;6C"],
+        "shift-page-up" => ["\e[5;2~"],
+        "shift-page-down" => ["\e[6;2~"],
         "space" => [" "]
       }.freeze
 
