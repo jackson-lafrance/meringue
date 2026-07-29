@@ -58,8 +58,30 @@ module Meringue
         %w[head worker].include?(record["type"]) || issue_record?(record)
       end
 
+      # Projects are clickable AgentTree rows too. They are not jump-mode
+      # targets, but they can carry the sticky selection that scopes the logs.
+      def selectable_node?(record)
+        selectable_agent?(record) || project_record?(record)
+      end
+
+      # Accepts one id or a list of ids so a row can be highlighted by the jump
+      # cursor, by the sticky logs selection, or by both at once.
       def selected_agent?(record, selected_agent_id)
-        selectable_agent?(record) && !selected_agent_id.to_s.empty? && record["id"].to_s == selected_agent_id.to_s
+        return false unless selectable_node?(record)
+
+        highlighted_ids(selected_agent_id).include?(record["id"].to_s)
+      end
+
+      def highlighted_ids(selected)
+        Array(selected).map(&:to_s).reject(&:empty?)
+      end
+
+      # Ids the AgentTree should render as selected: the jump-mode cursor plus the
+      # sticky selection that scopes the logs pane. The sticky id is rendered even
+      # when the AgentTree is not the focused pane, so the user can always see
+      # what the logs are filtered by.
+      def highlighted_ids_for(state)
+        (highlighted_ids(selected_agent_id(state)) + highlighted_ids(LogScope.id(state))).uniq
       end
 
       def records(state, key)
@@ -132,6 +154,10 @@ module Meringue
 
       def issue_record?(record)
         record.is_a?(Hash) && record.key?("project_id") && record.key?("agent_ids")
+      end
+
+      def project_record?(record)
+        record.is_a?(Hash) && record.key?("root_path")
       end
 
       def active_pull_request?(pull_request)
