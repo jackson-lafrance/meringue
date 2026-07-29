@@ -52,7 +52,7 @@ Supported action names:
 - `cancel_navigation`
 - `open_delivery_pr` (defaults to `ctrl-b`)
 - `focus_next`, `focus_previous`
-- `scroll_up`, `scroll_down`, `scroll_page_up`, `scroll_page_down`
+- `scroll_up`, `scroll_down`, `scroll_page_up`, `scroll_page_down`, `scroll_top`, `scroll_bottom`
 - `submit`, `newline`
 - `complete_suggestion`, `suggestion_previous`, `suggestion_next`
 - `cursor_left`, `cursor_right`, `cursor_up`, `cursor_down`, `cursor_home`, `cursor_end`, `cursor_word_left`, `cursor_word_right`
@@ -64,6 +64,8 @@ Supported action names:
 - `workspace_leader`, `workspace_switch_view`, `workspace_cycle_filter`, `workspace_open_agent_session`, `workspace_open_editor`, `workspace_open_pull_request`, `workspace_close`
 
 `copy_selection` defaults to `["ctrl-c", "alt-c"]`. `Ctrl-C` only copies while a selection is active or the logs selection cursor is on, so it keeps clearing the input and quitting an empty prompt otherwise. Mouse drag selection in the logs pane and the composer is always on and is not configurable.
+
+`scroll_top` defaults to `["home"]` and `scroll_bottom` defaults to `["end"]`. They jump the focused non-chat pane to its first or last content line, so the AgentTree and logs panes can be scrolled to either end without paging. While the composer is focused, or while the logs selection cursor is on, `home`/`end` keep their `cursor_home`/`cursor_end` behavior. Mouse wheel scrolling always targets the pane under the pointer and is not configurable.
 
 `logs_selection_mode` defaults to `["alt-v"]` and toggles the keyboard selection cursor while the logs pane is focused. Inside that mode the `cursor_*` and `scroll_page_*` actions move the cursor and the `select_*` actions extend the selection, so rebinding those actions changes both the composer and the logs pane. See `docs/keybindings.md` for the selection and clipboard behavior.
 
