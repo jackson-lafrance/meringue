@@ -163,10 +163,12 @@ module Meringue
       def selected_target_context
         return @selected_target_context if defined?(@selected_target_context)
 
-        raw = selected_target.is_a?(Hash) ? selected_target : {}
-        selected_id = (raw["selected_id"] || raw[:selected_id] || raw["id"] || raw[:id]).to_s
-        selected_record = snapshot.fetch("agents", []).find { |agent| agent.fetch("id", nil).to_s == selected_id } ||
-          snapshot.fetch("issues", []).find { |issue| issue.fetch("id", nil).to_s == selected_id }
+        raw = selected_target_hash
+        selected_id = (raw["selected_id"] || raw[:selected_id] || raw["id"] || raw[:id]).to_s.strip
+        selected_record = unless selected_id.empty?
+                            snapshot_records("agents").find { |agent| agent.fetch("id", nil).to_s == selected_id } ||
+                              snapshot_records("issues").find { |issue| issue.fetch("id", nil).to_s == selected_id }
+                          end
         issue_id = if selected_record && issue_record?(selected_record)
                      selected_record.fetch("id", nil)
                    elsif selected_record
@@ -174,7 +176,7 @@ module Meringue
                    else
                      raw["issue_id"] || raw[:issue_id]
                    end
-        issue = snapshot.fetch("issues", []).find { |candidate| candidate.fetch("id", nil).to_s == issue_id.to_s }
+        issue = snapshot_records("issues").find { |candidate| candidate.fetch("id", nil).to_s == issue_id.to_s }
         return @selected_target_context = nil unless issue
 
         agent = selected_record if selected_record && selected_record.fetch("type", nil).to_s != ""
@@ -189,9 +191,29 @@ module Meringue
           "issue_title" => issue.fetch("title", nil),
           "selected_agent_id" => selected_agent_id,
           "selected_agent_type" => selected_agent_type,
-          "selected_agent_title" => (agent&.fetch("harness_metadata", nil) || {}).fetch("title", nil),
+          "selected_agent_title" => selected_agent_title(agent),
           "instruction" => "Route this message within #{issue.fetch("id")}. A selected agent resolves to this owning issue; keep head-agent routing and choose the appropriate worker/session action on the issue."
         }.compact
+      end
+
+      # Recovered heads read their selection back out of persisted state, so the
+      # value can be the canonical Hash, a bare id String, or missing entirely.
+      # Normalize instead of assuming one shape.
+      def selected_target_hash
+        case selected_target
+        when Hash then selected_target
+        when String, Symbol then { "selected_id" => selected_target.to_s }
+        else {}
+        end
+      end
+
+      def selected_agent_title(agent)
+        metadata = agent.is_a?(Hash) ? agent.fetch("harness_metadata", nil) : nil
+        metadata.is_a?(Hash) ? metadata.fetch("title", nil) : nil
+      end
+
+      def snapshot_records(key)
+        Array(snapshot.is_a?(Hash) ? snapshot.fetch(key, []) : []).select { |record| record.is_a?(Hash) }
       end
 
       # Local shape check avoids a dependency from the head layer back into the
