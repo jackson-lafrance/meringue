@@ -270,7 +270,44 @@ begin
   end
   check("worker gets a usable workspace") { [worker && Dir.exist?(worker.fetch("workspace_path").to_s), worker&.fetch("workspace_path", nil).inspect] }
 
-  puts "Scenario 5: a head removed mid-batch does not raise or fail reconciliation"
+  puts "Scenario 5: a blocked worktree path is retried without leaving a stray branch behind"
+  worker_title = "Fifth goal"
+  planned = manager.plan_worker_workspace(
+    project_root: project_path,
+    project_id: project_id,
+    issue_id: "#{project_id}-I5",
+    agent_id: "#{project_id}-I5-W1",
+    task_title: worker_title
+  )
+  blocked_path = File.expand_path(planned.fetch("workspace_path"))
+  blocked_branch = planned.fetch("workspace_branch")
+  FileUtils.mkdir_p(blocked_path)
+  File.write(File.join(blocked_path, "leftover.txt"), "not a worktree\n")
+  head_id = spawn_head(engine, "Investigate the fifth goal")
+  blocked = engine.apply(
+    "type" => "ApplyHeadResult",
+    "payload" => {
+      "head_id" => head_id,
+      "head_result" => batch(project_id: project_id, issue_id: "#{project_id}-I5", title: worker_title),
+      "_cleanup_head" => false
+    }
+  )
+  state = engine.list_all
+  worker = state.fetch("agents").find { |agent| agent.fetch("issue_id", nil) == "#{project_id}-I5" && agent.fetch("type", nil) == "worker" }
+  check("every command in the batch is accepted") do
+    results = blocked.dig("result", "command_results") || []
+    [results.all? { |result| result.fetch("status", nil) == "accepted" }, results.map { |result| [result["command_type"], result["status"], result["message"]] }.inspect]
+  end
+  check("worker gets a usable workspace outside the blocked path") do
+    path = worker&.fetch("workspace_path", nil)
+    [path && path != blocked_path && Dir.exist?(path.to_s), path.inspect]
+  end
+  check("no stray branch is left for the blocked candidate") do
+    listed = run!("git", "branch", "--list", blocked_branch, chdir: project_path).strip
+    [listed.empty?, listed.inspect]
+  end
+
+  puts "Scenario 6: a head removed mid-batch does not raise or fail reconciliation"
   killing_client = HeadKillingClient.new
   killing_engine = build_engine(
     state_path: state_path,
@@ -280,13 +317,13 @@ begin
     harness_client: killing_client
   )
   killing_client.engine = killing_engine
-  head_id = spawn_head(killing_engine, "Investigate the fifth goal")
+  head_id = spawn_head(killing_engine, "Investigate the sixth goal")
   killing_client.head_id = head_id
   interrupted = killing_engine.apply(
     "type" => "ApplyHeadResult",
     "payload" => {
       "head_id" => head_id,
-      "head_result" => batch(project_id: project_id, issue_id: "#{project_id}-I5", title: "Fifth goal"),
+      "head_result" => batch(project_id: project_id, issue_id: "#{project_id}-I6", title: "Sixth goal"),
       "_cleanup_head" => false
     }
   )

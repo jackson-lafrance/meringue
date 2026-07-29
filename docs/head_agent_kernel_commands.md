@@ -350,6 +350,8 @@ Choose the mode deliberately:
 
 Killed and errored workers are not resumable through this command. Spawn a related or replacement worker on the same issue instead.
 
+A session that is momentarily busy is not a failure. When the worker's harness session is mid-turn under another Meringue instance, the kernel accepts the command, queues the prompt on the worker, and redelivers it during reconciliation; the delivery is logged only once the harness has accepted it. Do not resend the prompt to force delivery.
+
 Example:
 
 ```json
