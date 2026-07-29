@@ -70,9 +70,11 @@ lib/meringue/state/                # JSON persistence models and store
 docs/config.md                     # config and harness provider reference
 docs/head_agent_kernel_commands.md # compact head-agent command contract
 docs/keybindings.md                # TUI keyboard and jump-mode controls
+docs/kernel-command-application.md # exactly-once command application invariants
 fixtures/config.example.toml       # example local config
 fixtures/demo_state.json           # demo state for the TUI
 scripts/head_session_smoke.rb      # prints the head harness session lifetime without a real harness
+scripts/kernel_exactly_once_smoke.rb # checks exactly-once command application across instances
 ```
 
 ## Setup
@@ -159,6 +161,7 @@ Useful slash commands inside the TUI include:
 - `/theme <name>` — persist a TUI colorscheme.
 - `/harness <pi|claude|antigravity>` — select the harness for future agents.
 - `/keybind` — show active TUI keybindings.
+- `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together, keeping anything unresolved work still needs.
 - `/recount` — compact project, issue, worker, and question numbering after records are removed.
 
 See `docs/recount.md` for the renumbering, cross-reference, and active-session rules. See `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.

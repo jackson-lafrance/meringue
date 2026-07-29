@@ -48,6 +48,25 @@ Copy uses a local clipboard command when one is available (`pbcopy` on macOS, th
 
 Paste is composer-only; the logs pane is copy-only.
 
+## Keyboard selection in the logs pane
+
+The logs pane has a keyboard-driven selection cursor, so log text can be selected and copied without a mouse. It is pane-scoped: it only reacts while the logs pane is focused, it never extends into the AgentTree or the composer, and it does not take keys away from jump mode, slash suggestions, or typing.
+
+Focus the logs pane first (`Tab` / `Ctrl-Tab` until the logs outline is active), then:
+
+- `Alt-V`: toggle the logs selection cursor. The cursor is one cell drawn with the colorscheme's `SELECTION` colors plus bold/underline, so it stays visible inside a highlight and on blank lines. Any `Shift`+movement below also turns the cursor on, so `Alt-V` is optional.
+- Arrow keys: move the cursor by character and line while the cursor is on. Moving without `Shift` collapses the selection, exactly like a text editor caret. Vertical movement keeps the column you last chose, and the pane scrolls automatically to keep the cursor visible.
+- `Home` / `Ctrl-A` and `End` / `Ctrl-E`: move the cursor to the start or end of the current log line.
+- `Alt-Left` / `Ctrl-Left` and `Alt-Right` / `Ctrl-Right`: move the cursor by word, continuing onto the previous/next line at the line edges.
+- `PageUp` / `PageDown`: move the cursor a screenful at a time.
+- `Shift-Left` / `Shift-Right` / `Shift-Up` / `Shift-Down`, `Shift-Home` / `Shift-End`, `Shift-Alt-Left` / `Shift-Ctrl-Left`, `Shift-Alt-Right` / `Shift-Ctrl-Right`, and `Shift-PageUp` / `Shift-PageDown`: extend the selection from the anchor. The highlight is the same `SELECTION` style mouse drags use.
+- `Ctrl-C` / `Alt-C`: copy the selection to the system clipboard. With the cursor on but nothing extended, this copies the whole cursor line. `Ctrl-C` never quits while the logs cursor is on.
+- `Esc`: clear the selection and turn the cursor off, which returns arrow keys and `PageUp` / `PageDown` to scrolling the logs pane.
+
+Selection points are stored in logs content coordinates, so a highlight keeps covering the same text while the pane scrolls or new log entries arrive. Moving focus off the logs pane (or entering jump mode) turns the cursor off, and typing a printable character sends it to the composer and clears the highlight.
+
+On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "Use Option as Meta key"). If your terminal does not send Meta, start the selection with any `Shift`+movement key instead, or rebind `logs_selection_mode` under `[tui.keybindings]`.
+
 ## Chat input
 
 - `Enter`: send the prompt as typed, or apply the slash suggestion once one is selected.
