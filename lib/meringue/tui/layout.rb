@@ -29,17 +29,19 @@ module Meringue
 
         metrics = layout_metrics(width, height, state)
         agent_tree_lines = agent_tree_pane.lines(state, width: metrics.fetch(:sidebar_width) - 4)
+        agent_tree_height = metrics.fetch(:top_height) - 2
+        agent_tree_offset = agent_tree_scroll_offset(state, agent_tree_lines, agent_tree_height)
         draw_pane(
           canvas,
           metrics.fetch(:sidebar_x),
           metrics.fetch(:top_y),
           metrics.fetch(:sidebar_width),
           metrics.fetch(:top_height),
-          "agent tree",
+          agent_tree_title(agent_tree_lines.length, agent_tree_height, agent_tree_offset),
           agent_tree_lines,
           active: scroll_pane_active?(state, "agent_tree"),
           overflow: :agent_tree,
-          scroll_offset: agent_tree_scroll_offset(state, agent_tree_lines, metrics.fetch(:top_height) - 2)
+          scroll_offset: agent_tree_offset
         )
         draw_pane(
           canvas,
@@ -222,6 +224,66 @@ module Meringue
         agent_tree_item_at(state, width: width, height: height, x: x, y: y)
       end
 
+      # Which AgentTree content lines are on screen right now, plus how much is
+      # hidden above and below. Callers use it for page steps and to tell the
+      # user that a clipped tree is scrollable rather than missing data.
+      def agent_tree_visible_window(state, width:, height:)
+        dimensions = agent_tree_content_dimensions(state, width: width, height: height)
+        return nil unless dimensions
+
+        lines = dimensions.fetch(:lines)
+        content_height = dimensions.fetch(:content_height)
+        offset = agent_tree_scroll_offset(state, lines, content_height)
+        finish_index = [offset + content_height, lines.length].min
+        {
+          "start_index" => offset,
+          "finish_index" => finish_index,
+          "capacity" => content_height,
+          "line_count" => lines.length,
+          "offset" => offset,
+          "max_offset" => scroll_max(lines.length, content_height),
+          "hidden_above" => offset,
+          "hidden_below" => [lines.length - finish_index, 0].max
+        }
+      end
+
+      # Content line range an AgentTree item occupies, so callers can reveal a
+      # selected issue/agent without duplicating the pane's wrapping rules.
+      def agent_tree_item_line_range(state, width:, height:, item_id:)
+        return nil if item_id.to_s.empty?
+
+        dimensions = agent_tree_content_dimensions(state, width: width, height: height)
+        return nil unless dimensions
+
+        item_ids = agent_tree_pane.line_item_ids(state, width: dimensions.fetch(:content_width))
+        first_index = item_ids.index { |candidate| candidate.to_s == item_id.to_s }
+        return nil unless first_index
+
+        last_index = item_ids.rindex { |candidate| candidate.to_s == item_id.to_s } || first_index
+        [first_index, last_index]
+      end
+
+      # Smallest AgentTree scroll offset change that keeps a content line on
+      # screen. This mirrors logs_scroll_offset_for_line so selection reveal
+      # behaves the same in both panes.
+      def agent_tree_scroll_offset_for_line(state, width:, height:, line_index:, last_line_index: nil)
+        dimensions = agent_tree_content_dimensions(state, width: width, height: height)
+        return nil unless dimensions
+
+        lines = dimensions.fetch(:lines)
+        content_height = dimensions.fetch(:content_height)
+        max_offset = scroll_max(lines.length, content_height)
+        return 0 if max_offset.zero?
+
+        offset = pane_scroll_offset(state, "agent_tree").clamp(0, max_offset)
+        first = line_index.to_i.clamp(0, lines.length - 1)
+        last = (last_line_index || first).to_i.clamp(first, lines.length - 1)
+        # A wrapped item that cannot fit whole still shows its first row.
+        offset = last - content_height + 1 if last >= offset + content_height
+        offset = first if first < offset
+        offset.clamp(0, max_offset)
+      end
+
       # Largest useful scroll offset for the focused workspace pane, using the
       # same geometry the renderer uses. Callers clamp with this so scrolling
       # past the end cannot build up a dead offset.
@@ -352,6 +414,36 @@ module Meringue
 
       def bounded_height(height)
         [height.to_i, MIN_HEIGHT].max
+      end
+
+      # Shared AgentTree geometry so hit-testing, scrolling, reveal, and the
+      # overflow indicator all wrap the same content at the same width.
+      def agent_tree_content_dimensions(state, width:, height:)
+        return nil if agent_workspace_active?(state)
+
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        content_width = metrics.fetch(:sidebar_width) - 4
+        content_height = metrics.fetch(:top_height) - 2
+        return nil if content_width <= 0 || content_height <= 0
+
+        {
+          content_x: metrics.fetch(:sidebar_x) + 2,
+          content_y: metrics.fetch(:top_y) + 1,
+          content_width: content_width,
+          content_height: content_height,
+          lines: agent_tree_pane.lines(state, width: content_width)
+        }
+      end
+
+      # A clipped tree must never read as missing data, so the pane title says
+      # how many rows are hidden above and below the viewport.
+      def agent_tree_title(line_count, content_height, offset)
+        content_height = content_height.to_i
+        return "agent tree" if content_height <= 0 || line_count.to_i <= content_height
+
+        hidden_above = offset.to_i
+        hidden_below = [line_count.to_i - (hidden_above + content_height), 0].max
+        "agent tree  ↑#{hidden_above} ↓#{hidden_below}"
       end
 
       # Shared logs geometry so hit-testing, keyboard selection, and scrolling
@@ -487,17 +579,15 @@ module Meringue
         [desired_height, max_height].min
       end
 
+      # The stored offset is the single source of truth for what the tree shows.
+      # Keeping a selected row visible is a scroll update owned by the app (see
+      # agent_tree_scroll_offset_for_line), not a render-time override, so manual
+      # scrolling is never fought by the renderer.
       def agent_tree_scroll_offset(state, lines, content_height)
         content_height = content_height.to_i
         return 0 if content_height <= 0 || lines.length <= content_height
 
-        max_offset = scroll_max(lines.length, content_height)
-        selected_index = selected_agent_tree_line_index(lines)
-        if AgentTreeNavigation.active?(state) && selected_index
-          return (selected_index - (content_height / 2)).clamp(0, max_offset)
-        end
-
-        pane_scroll_offset(state, "agent_tree").clamp(0, max_offset)
+        pane_scroll_offset(state, "agent_tree").clamp(0, scroll_max(lines.length, content_height))
       end
 
       def pane_scroll_offset(state, pane)
@@ -531,17 +621,6 @@ module Meringue
       def scroll_pane_active?(state, pane)
         scroll = state.fetch("_scroll", {}) || {}
         scroll.fetch("active_pane", nil).to_s == pane.to_s
-      end
-
-      def selected_agent_tree_line_index(lines)
-        selected_styles = [
-          Style::AGENT_TREE_SELECTED,
-          Style::AGENT_TREE_SELECTED_DIM,
-          Style::AGENT_TREE_SELECTED_STATUS
-        ]
-        lines.index do |line|
-          Array(line).any? { |segment| segment.is_a?(Array) && selected_styles.include?(segment[1]) }
-        end
       end
 
       def draw_hint_line(canvas, x, y, width, line, right_line = [])

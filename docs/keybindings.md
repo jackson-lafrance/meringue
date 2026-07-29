@@ -26,8 +26,20 @@ agent_select_next = ["j", "down", "right"]
 - Double-click an agent (or an issue with a worker): open its focused workspace. This is the primary mouse action; PR opening remains an explicit action.
 - `Tab` / `Ctrl-Tab`: move focus forward.
 - `Shift-Tab`: move focus backward.
-- Arrow keys, `PageUp` / `PageDown`, and mouse wheel: scroll the focused non-chat pane.
+- Arrow keys and `PageUp` / `PageDown`: scroll the focused non-chat pane by a line or a page.
+- `Home` / `End`: scroll the focused non-chat pane to its first or last content line. With the logs selection cursor on, `Home` / `End` still move the cursor within its line.
+- Mouse wheel: scroll whichever pane the pointer is over, without changing focus. Hovering a pane that cannot scroll (or the composer) falls back to scrolling the focused pane.
 - When the agent tree or logs pane is focused, `Enter` enters jump mode. Non-agent log entries are skipped during jump navigation.
+
+## AgentTree scrolling
+
+The AgentTree pane scrolls like any other pane, so a long tree of projects, issues, and agents is never silently clipped.
+
+- Focus the AgentTree (`Tab` / `Ctrl-Tab`, or click it), then arrow keys scroll by a line, `PageUp` / `PageDown` by a page, and `Home` / `End` jump to the first or last row.
+- The mouse wheel scrolls the tree whenever the pointer is over the pane, including while jump mode is active and while another pane has focus.
+- The pane title shows how much is off screen as `agent tree  ↑<above> ↓<below>`; the counts disappear once the whole tree fits, so a clipped tree cannot be mistaken for missing data.
+- Offsets are clamped to real content, and are re-clamped when the terminal is resized or when the tree shrinks (issues or workers completing, `/prune`, kills), so scrolling past either end never builds up a dead offset.
+- Selecting an item scrolls the minimum amount needed to bring it on screen. This covers jump-mode arrow navigation, clicking a row, and opening or closing a focused workspace, and it uses the same reveal approach as the logs selection cursor. Scrolling by hand is not overridden while the selection stays the same.
 
 ## Text selection and clipboard
 
@@ -91,7 +103,8 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 
 Start jump mode with `/jump` or by focusing the agent tree or logs pane and pressing `Enter`.
 
-- `Up` / `Down` / `Left` / `Right`: select an issue or agent. In the logs pane, only agent titles are selectable; non-agent events are skipped.
+- `Up` / `Down` / `Left` / `Right`: select an issue or agent, auto-scrolling the AgentTree by the minimum amount needed to keep the selected row visible. In the logs pane, only agent titles are selectable; non-agent events are skipped.
+- `PageUp` / `PageDown`, `Home` / `End`, and the mouse wheel: scroll the focused pane while a selection is active, since jump mode owns the arrow keys.
 - `Ctrl-B`: open the selected worker's verified delivery pull request. The PR remains easy to open when status refresh is temporarily unavailable.
 - `Enter`: open the selected agent's pull request when a PR is available.
 - `a`: open the selected worker's focused workspace. Selecting an issue opens its newest non-killed worker; heads without a durable worker context stay on the dashboard.
