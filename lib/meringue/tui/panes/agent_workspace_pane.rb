@@ -191,6 +191,7 @@ module Meringue
           lines = [
             [[agent_title(agent), Style::TITLE]],
             compact_identity_line(agent),
+            session_settings_line(agent),
             issue_line(issue),
             workspace_path_line(agent),
             pull_request_line(agent, issue),
@@ -215,6 +216,26 @@ module Meringue
             segments << [value, index == 1 ? status_style(value) : Style::MUTED]
             segments
           end
+        end
+
+        def session_settings_line(agent)
+          settings = agent.fetch("session_settings", {}) || {}
+          model = settings.dig("model", "reference")
+          thinking = settings.fetch("thinking_level", nil)
+          availability = settings.fetch("availability", nil)
+          if model.to_s.empty?
+            model = availability == "unsupported" || agent.fetch("harness", nil).to_s != "pi" ? "unavailable" : "unknown"
+          end
+          if thinking.to_s.empty?
+            thinking = availability == "unsupported" || agent.fetch("harness", nil).to_s != "pi" ? "unavailable" : "unknown"
+          end
+
+          [
+            ["session ", Style::DIM],
+            ["model #{model}", Style::MUTED],
+            [" · ", Style::DIM],
+            ["thinking #{thinking}", Style::MUTED]
+          ]
         end
 
         def issue_line(issue)
