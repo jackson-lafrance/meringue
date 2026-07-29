@@ -70,7 +70,8 @@ module Meringue
           Do not assume all state is embedded in the prompt; inspect only the parts of state you need.
           You may use tools to inspect local projects and git repositories before deciding, but discovery must be read-only and limited to routing/orchestration context.
           Do not investigate or answer the user's substantive task directly; create or reuse issues and spawn or prompt workers for investigation, implementation, and informational work.
-          Treat the supplied routing context as candidate evidence, not a conversation database. Classify whether this message starts a new goal or follows an existing issue, then deliberately choose whether to prompt, follow up, or replace an existing worker.
+          Treat the supplied routing context as candidate evidence, not a conversation database. Classify whether this message starts a new goal, follows an existing issue, or answers an open question, then deliberately choose whether to prompt, follow up, or replace an existing worker.
+          When questions are open, check routing_context.open_questions and routing_context.answer_inference first. If this message clearly answers exactly one open question, propose AnswerQuestion for that question id and route the work it unblocks in the same result. If several open questions are plausible, or the message is plainly a new goal, leave every question open and route normally or ask one clarifying question.
           Prefer a healthy existing worker session when its Pi or other harness history contains the context needed for the follow-up. Do not duplicate that harness history in Meringue state.
           Do not mutate files, git state, dependencies, databases, remote services, or Meringue state directly.
           Propose kernel commands using the reference below.
@@ -121,6 +122,7 @@ module Meringue
           "issue_count" => snapshot.fetch("issues", []).length,
           "agent_count" => snapshot.fetch("agents", []).length,
           "open_question_count" => unresolved_questions.length,
+          "open_question_ids" => unresolved_questions.map { |question| question.fetch("id", nil) }.compact,
           "active_head_count" => active_heads.length,
           "active_worker_count" => active_workers.length,
           "status_counts" => status_counts,
@@ -133,6 +135,8 @@ module Meringue
           "purpose" => "Stateless routing hints assembled from existing issues, logs, and inspectable harness session metadata. These are not a separate conversation history.",
           "explicit_references" => explicit_references,
           "question_being_answered" => question_being_answered,
+          "open_questions" => open_question_records,
+          "answer_inference" => answer_inference,
           "issue_candidates" => routing_issue_candidates,
           "worker_candidates" => routing_worker_candidates,
           "recent_activity" => recent_routing_activity,
@@ -143,7 +147,8 @@ module Meringue
             "Use steer for an urgent correction to active work, follow_up for related work that should run after the active turn, and normal for a settled resumable session.",
             "Spawn a follow-up worker on the same issue only when no suitable session is resumable, work should be independent or parallel, context is known to be over 50%, or a delivered workspace should remain immutable.",
             "Use replace_agent_id only when the old worker is stale, unhealthy, pursuing the wrong approach, or must stop before a successor continues. Replacement starts the successor before killing the old session.",
-            "Create a new issue only for a genuinely distinct durable goal. Ask a clarifying question instead of guessing between plausible issues or workers."
+            "Create a new issue only for a genuinely distinct durable goal. Ask a clarifying question instead of guessing between plausible issues or workers.",
+            "When this message answers an open question, pair AnswerQuestion with the routing command that acts on the answer in the same HeadResult. Closing a question without routing the unblocked work drops the user's request."
           ]
         }
       end
@@ -172,11 +177,99 @@ module Meringue
         issue_match ? [issue_match[1]] : []
       end
 
+      # Populated on two paths: the kernel answered a question and spawned this head for it
+      # (question_id is set), or the user message itself names exactly one open question, which is
+      # the "ANSWERING Q4 ..." case that used to leave this field null.
       def question_being_answered
-        return nil unless question_id
+        record = question_id ? snapshot_question(question_id) : nil
+        inference_source = record ? "answer_command" : nil
 
-        question = snapshot.fetch("questions", []).find { |candidate| candidate["id"] == question_id }
-        question&.slice("id", "head_id", "project_id", "issue_id", "question", "context", "status", "answer", "created_at", "updated_at")
+        unless record
+          referenced = referenced_open_question_ids
+          if referenced.length == 1
+            record = snapshot_question(referenced.first)
+            inference_source = "user_message_reference"
+          end
+        end
+        return nil unless record
+
+        record
+          .slice("id", "head_id", "project_id", "issue_id", "question", "context", "status", "answer", "created_at", "updated_at")
+          .merge(
+            "inference_source" => inference_source,
+            "original_user_message" => original_user_message_for(record),
+            "instruction" => question_answer_instruction(record)
+          ).compact
+      end
+
+      def question_answer_instruction(record)
+        if record.fetch("status", nil) == "answered"
+          "The kernel already recorded this answer and closed the question. Do not ask it again and do not propose AnswerQuestion for it; route the work the answer unblocks."
+        else
+          "This message appears to answer this open question. Propose AnswerQuestion for it with the user's answer, then route the work it unblocks in the same HeadResult."
+        end
+      end
+
+      def snapshot_question(id)
+        snapshot.fetch("questions", []).find { |candidate| candidate["id"].to_s.casecmp(id.to_s).zero? }
+      end
+
+      # Full open-question records, not just a count, so a head can recognize a free-form reply as
+      # an answer without the user running /answer.
+      def open_question_records
+        referenced = referenced_open_question_ids
+        unresolved_questions.map do |question|
+          {
+            "id" => question.fetch("id", nil),
+            "head_id" => question.fetch("head_id", nil),
+            "project_id" => question.fetch("project_id", nil),
+            "issue_id" => question.fetch("issue_id", nil),
+            "question" => bounded_text(question.fetch("question", nil)),
+            "context" => bounded_text(question.fetch("context", nil)),
+            "status" => question.fetch("status", nil),
+            "original_user_message" => original_user_message_for(question),
+            "explicitly_referenced_in_user_message" => referenced.include?(question.fetch("id", nil)),
+            "created_at" => question.fetch("created_at", nil),
+            "updated_at" => question.fetch("updated_at", nil)
+          }.compact
+        end
+      end
+
+      def answer_inference
+        candidates = open_question_records
+        referenced = referenced_open_question_ids
+        {
+          "purpose" => "Decide whether this user message answers an open question even though it did not use the /answer command.",
+          "open_question_ids" => candidates.map { |question| question.fetch("id", nil) }.compact,
+          "explicitly_referenced_question_ids" => referenced,
+          "single_referenced_question_id" => referenced.length == 1 ? referenced.first : nil,
+          "only_open_question_id" => candidates.length == 1 ? candidates.first.fetch("id", nil) : nil,
+          "ambiguous" => candidates.length > 1 && referenced.length != 1,
+          "rules" => [
+            "If the message clearly responds to exactly one open question, treat it exactly as if the user had run /answer: propose AnswerQuestion with that question id and the user's message as the answer.",
+            "An explicit mention such as \"answering Q4\", \"re: Q4\", \"for the question above\", or a direct restatement of that question's subject is a strong signal.",
+            "Always pair AnswerQuestion with the command that acts on the answer in the same HeadResult: reuse the question's issue_id/project_id when it still represents the goal, prompt the healthiest existing worker on that issue, and create or spawn only when nothing suitable exists.",
+            "Never propose AnswerQuestion alone. A closed question with no routing or ModifyIssue command silently drops the user's request.",
+            "If several open questions are plausible, do not guess. Leave them open and either route the message as its own request or ask one clarifying question that names the candidate question ids.",
+            "If the message is plainly a new goal, an unrelated request, or a question about status, leave every open question open and route normally.",
+            "Do not re-ask a question that this message answers, and do not answer a question the user only mentioned in passing."
+          ]
+        }
+      end
+
+      def referenced_open_question_ids
+        open_ids = unresolved_questions.map { |question| question.fetch("id", nil) }.compact
+        explicit_references.fetch("mentioned_ids").select { |id| open_ids.include?(id) }
+      end
+
+      def original_user_message_for(question)
+        stored = bounded_text(question.fetch("original_user_message", nil))
+        return stored if stored
+
+        head = snapshot.fetch("agents", []).find do |agent|
+          agent.fetch("type", nil) == "head" && agent.fetch("id", nil) == question.fetch("head_id", nil)
+        end
+        bounded_text((head&.fetch("harness_metadata", nil) || {}).dig("head_request", "user_message"))
       end
 
       def routing_issue_candidates

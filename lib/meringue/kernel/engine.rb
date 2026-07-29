@@ -100,7 +100,7 @@ module Meringue
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
-        ["/answer <question_id> \"<answer>\"", "Answer a pending question."],
+        ["/answer <question_id> \"<answer>\"", "Answer an open question; the kernel records the answer and routes the work it unblocks."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
         ["/prune", "Remove resolved and errored records together unless unresolved work requires retention."],
         ["/recount", "Compact project, issue, worker, and question IDs after records are removed."],
@@ -262,6 +262,8 @@ module Meringue
 
         if command_type == "SpawnHead"
           spawn_head(command_id, command_type, payload)
+        elsif command_type == "AnswerQuestion"
+          answer_question_and_route(command_id, command_type, payload)
         elsif command_type == "SpawnWorker"
           @worker_spawn_mutex.synchronize { spawn_worker(command_id, command_type, payload) }
         elsif command_type == "ApplyHeadResult"
@@ -691,7 +693,12 @@ module Meringue
           questions = Array(result)
           return ["  No questions."] if questions.empty?
 
-          questions.map { |question| "  #{question.fetch("id", "?")} [#{question.fetch("status", "?")}] #{question.fetch("question", "")}" }
+          lines = questions.map { |question| "  #{question.fetch("id", "?")} [#{question.fetch("status", "?")}] #{question.fetch("question", "")}" }
+          open_question = questions.find { |question| question.fetch("status", nil) == "open" }
+          if open_question
+            lines << "  Answer with /answer #{open_question.fetch("id", "Q1")} \"<answer>\", or just reply in chat and a head will match your reply to the question."
+          end
+          lines
         when "Prune"
           prune_result = result || {}
           [
@@ -1007,6 +1014,9 @@ module Meringue
       def spawn_head(command_id, command_type, payload)
         user_message = value_at(payload, "user_message", "UserMessage", "message")
         question_id = value_at(payload, "question_id", "QuestionID", "questionId")
+        # Internally routed heads (for example the head spawned for an answered question) carry a
+        # long structured prompt. The visible chat log should stay short and human-facing.
+        log_message = present_string(value_at(payload, "log_message", "LogMessage"))
         errors = []
 
         errors << "user_message is required" if blank?(user_message)
@@ -1039,7 +1049,7 @@ module Meringue
             source_type: "user",
             source_id: nil,
             level: "info",
-            message: user_message.to_s.strip,
+            message: log_message || user_message.to_s.strip,
             details: {
               "head_id" => head_id,
               "question_id" => present_string(question_id)
@@ -1420,22 +1430,167 @@ module Meringue
         )
       end
 
+      # Answering an open question is not bookkeeping. The answer is the input a head said it
+      # needed, so the kernel records the answer, closes the question, and then spawns a fresh
+      # head carrying the answer plus the original question context (question text, context,
+      # project/issue scope, originating head, and the user message that triggered the question)
+      # so the work the question blocked actually gets routed instead of silently stopping at
+      # "Answered question Q<n>."
+      def answer_question_and_route(command_id, command_type, payload)
+        outcome = synchronized_state { record_question_answer(command_id, command_type, payload) }
+        result = outcome.fetch("result")
+        return result unless result.fetch("status", nil) == "accepted"
+        return result unless outcome.fetch("recorded", false)
+        return result unless answer_routing_enabled?(payload)
+
+        question = outcome.fetch("question")
+        routing = route_answered_question(question)
+        accepted_result(
+          command_id,
+          command_type,
+          question.fetch("id"),
+          answer_routing_message(question, routing),
+          question.merge("routing" => answer_routing_summary(routing)),
+          (Array(result.fetch("log_entry_ids", [])) + answer_routing_log_entry_ids(routing)).uniq
+        )
+      end
+
+      # A head that proposes AnswerQuestion returns its own routing commands in the same batch,
+      # so the kernel must not spawn a second head for that answer. It also must not re-enter the
+      # head-result apply path while that batch still holds the apply lease.
+      def answer_routing_enabled?(payload)
+        return false if present_string(value_at(payload, "_head_id", "head_id", "HeadID"))
+        return false if @head_result_mutex.owned?
+
+        flag = value_at(payload, "route_answer", "spawn_head", "route")
+        return true if flag.nil?
+
+        flag != false && flag.to_s.strip.downcase != "false"
+      end
+
+      def route_answered_question(question)
+        spawn_result = spawn_head(
+          nil,
+          "SpawnHead",
+          "user_message" => answer_routing_prompt(question),
+          "question_id" => question.fetch("id"),
+          "log_message" => "Answered #{question.fetch("id")}: #{question.fetch("answer")}"
+        )
+        routing = { "spawn_head_result" => spawn_result }
+        return routing unless spawn_result.fetch("status", nil) == "accepted"
+
+        head_id = present_string(spawn_result.fetch("target_id", nil))
+        routing["head_id"] = head_id if head_id
+        head_result = (spawn_result.dig("result", "harness_metadata") || {})["head_result"]
+        # Asynchronous head runners hand the result to reconciliation instead, which applies it
+        # through the same ApplyHeadResult path once the session settles.
+        return routing unless head_id && head_result.is_a?(Hash)
+
+        routing["apply_head_result"] = @head_result_mutex.synchronize do
+          apply_head_result(nil, "ApplyHeadResult", "head_id" => head_id, "head_result" => head_result)
+        end
+        routing
+      rescue StandardError => e
+        { "error" => error_payload(e) }
+      end
+
+      def answer_routing_prompt(question)
+        question_id = question.fetch("id")
+        lines = [
+          "The user answered open Meringue question #{question_id}. This is the missing input for the work that question blocked, not a brand-new goal.",
+          "",
+          "Question (#{question_id}): #{question.fetch("question")}"
+        ]
+        context = present_string(question.fetch("context", nil))
+        lines << "Question context: #{context}" if context
+        original_message = present_string(question.fetch("original_user_message", nil))
+        lines << "Original user message that led to the question: #{original_message}" if original_message
+        asking_head = present_string(question.fetch("head_id", nil))
+        lines << "Question was asked by head: #{asking_head}" if asking_head
+        project_id = present_string(question.fetch("project_id", nil))
+        issue_id = present_string(question.fetch("issue_id", nil))
+        scope = [project_id ? "project #{project_id}" : nil, issue_id ? "issue #{issue_id}" : nil].compact
+        lines << "Question scope: #{scope.join(", ")}" unless scope.empty?
+        lines << "User answer: #{question.fetch("answer")}"
+        lines << ""
+        lines << "The question is already recorded as answered, so do not ask it again and do not propose AnswerQuestion for it."
+        lines << "Route the work this answer unblocks: reuse the question's issue when it still represents the durable goal, prompt the healthiest existing worker on that issue when its session context is relevant, and create or spawn only when nothing suitable exists."
+        lines << "Ask a new clarifying question only if the answer still leaves the routing genuinely ambiguous."
+        lines.join("\n")
+      end
+
+      def answer_routing_message(question, routing)
+        question_id = question.fetch("id")
+        if routing.key?("error")
+          return "Answered question #{question_id}, but routing the answer failed: #{routing.dig("error", "message")}"
+        end
+
+        head_id = routing.fetch("head_id", nil)
+        return "Answered question #{question_id}, but no head could be spawned to act on the answer." unless head_id
+
+        "Answered question #{question_id} and spawned head #{head_id} to act on the answer."
+      end
+
+      def answer_routing_summary(routing)
+        {
+          "head_id" => routing.fetch("head_id", nil),
+          "spawn_head_status" => routing.dig("spawn_head_result", "status"),
+          "apply_head_result_status" => routing.dig("apply_head_result", "status"),
+          # Nested results so callers can see (and wait on) the work the answer actually started.
+          "command_results" => routing.dig("apply_head_result", "result", "command_results"),
+          "error" => routing.fetch("error", nil)
+        }.compact
+      end
+
+      def answer_routing_log_entry_ids(routing)
+        [routing.fetch("spawn_head_result", nil), routing.fetch("apply_head_result", nil)].compact.flat_map do |result|
+          Array(result.fetch("log_entry_ids", []))
+        end
+      end
+
       def answer_question(command_id, command_type, payload)
+        record_question_answer(command_id, command_type, payload).fetch("result")
+      end
+
+      def record_question_answer(command_id, command_type, payload)
         question_id = value_at(payload, "question_id", "QuestionID", "questionId")
         answer = value_at(payload, "answer", "Answer")
         errors = []
 
         errors << "question_id is required" if blank?(question_id)
         errors << "answer is required" if blank?(answer)
-        return rejected_result(command_id, command_type, "Question was not answered.", errors) unless errors.empty?
+        unless errors.empty?
+          return { "result" => rejected_result(command_id, command_type, "Question was not answered.", errors), "recorded" => false }
+        end
 
         state = normalized_state
         question = find_question(state, question_id)
-        return rejected_result(command_id, command_type, "Question #{question_id} does not exist.", ["question_not_found"]) unless question
+        unless question
+          return {
+            "result" => rejected_result(command_id, command_type, "Question #{question_id} does not exist.", ["question_not_found"]),
+            "recorded" => false
+          }
+        end
+
+        if question.fetch("status", nil) == "answered" && question.fetch("answer", nil).to_s == answer.to_s
+          return {
+            "result" => accepted_result(
+              command_id,
+              command_type,
+              question.fetch("id"),
+              "Question #{question.fetch("id")} already records this answer.",
+              deep_copy(question),
+              []
+            ),
+            "question" => deep_copy(question),
+            "recorded" => false
+          }
+        end
 
         now = timestamp
         question["status"] = "answered"
         question["answer"] = answer.to_s
+        question["answered_at"] = now
         question["updated_at"] = now
         log_ids = append_log(
           state,
@@ -1446,13 +1601,27 @@ module Meringue
           details: {
             "head_id" => question.fetch("head_id", nil),
             "project_id" => question.fetch("project_id", nil),
-            "issue_id" => question.fetch("issue_id", nil)
-          }
+            "issue_id" => question.fetch("issue_id", nil),
+            "question_id" => question.fetch("id"),
+            "answer" => answer.to_s,
+            "routing_action" => "answer_question"
+          }.compact
         )
         touch_state!(state, now)
         store.save(state)
 
-        accepted_result(command_id, command_type, question.fetch("id"), "Answered question #{question.fetch("id")}.", question, log_ids)
+        {
+          "result" => accepted_result(
+            command_id,
+            command_type,
+            question.fetch("id"),
+            "Answered question #{question.fetch("id")}.",
+            deep_copy(question),
+            log_ids
+          ),
+          "question" => deep_copy(question),
+          "recorded" => true
+        }
       end
 
       def dismiss_question(command_id, command_type, payload)
@@ -3683,7 +3852,10 @@ module Meringue
         return command unless command.is_a?(Hash)
 
         payload = value_at(command, "payload") || {}
-        enriched_command = if value_at(command, "type", "command_type").to_s == "CreateIssue" && payload.is_a?(Hash)
+        # `_head_id` marks a command as head-proposed. CreateIssue uses it for attribution, and
+        # AnswerQuestion uses it to know the head is already returning its own routing commands,
+        # so the kernel must not spawn another head for that answer.
+        enriched_command = if %w[CreateIssue AnswerQuestion answer_question create_issue].include?(value_at(command, "type", "command_type").to_s) && payload.is_a?(Hash)
                              command.merge("payload" => payload.merge("_head_id" => head_id.to_s))
                            else
                              command
@@ -3703,11 +3875,24 @@ module Meringue
           "issue_id" => issue_id,
           "question" => question_text,
           "context" => context,
+          # Head records are removed once their result is applied, so the message that triggered
+          # the question is captured here while it is still recoverable. A later answer needs it
+          # to route the blocked work.
+          "original_user_message" => head_request_user_message(state, head_id),
           "status" => "open",
           "answer" => nil,
           "created_at" => now,
           "updated_at" => now
         }
+      end
+
+      def head_request_user_message(state, head_id)
+        head = find_agent(state, head_id.to_s)
+        return nil unless head && head.fetch("type", nil) == "head"
+
+        metadata = head.fetch("harness_metadata", {}) || {}
+        request = metadata.fetch("head_request", {}) || {}
+        present_string(request.fetch("user_message", nil))
       end
 
       def update_issue_status_from_workers!(state, issue, now)
@@ -4219,7 +4404,9 @@ module Meringue
       end
 
       def find_question(state, question_id)
-        state.fetch("questions").find { |question| question.fetch("id", nil) == question_id.to_s }
+        needle = question_id.to_s.strip
+        state.fetch("questions").find { |question| question.fetch("id", nil) == needle } ||
+          state.fetch("questions").find { |question| question.fetch("id", nil).to_s.casecmp(needle).zero? }
       end
 
       def normalize_command(command)
