@@ -147,6 +147,126 @@ module Meringue
         false
       end
 
+      # Pruning uses a deliberately stricter cleanup path than failed provisioning. It removes
+      # only a registered, clean, unlocked Meringue worktree whose path and branch still match the
+      # persisted ownership record. Branches are retained so delivered commits remain reachable.
+      # A structured result lets the kernel retain the record and explain anything unsafe to
+      # remove instead of forcing or guessing.
+      def cleanup_pruned_worker_workspace(workspace, protected_paths: [])
+        return cleanup_outcome("skipped", "invalid_workspace_record", success: true) unless workspace.is_a?(Hash)
+
+        plan = workspace["plan"].is_a?(Hash) ? workspace.fetch("plan") : {}
+        strategy = workspace["strategy"] || workspace["workspace_strategy"] || plan["strategy"]
+        return cleanup_outcome("skipped", "not_a_managed_worktree", success: true) unless strategy == "git_worktree"
+
+        worktree_root = workspace["worktree_root_path"] || workspace["workspace_root_path"] ||
+                        plan["worktree_root_path"] || plan["workspace_root_path"] ||
+                        workspace["workspace_path"] || plan["workspace_path"]
+        return cleanup_outcome("skipped", "no_worktree_recorded", success: true) if worktree_root.to_s.strip.empty?
+
+        worktree_root = canonical_path(worktree_root)
+        base = {
+          "worktree_root_path" => worktree_root,
+          "workspace_branch" => workspace["workspace_branch"] || plan["workspace_branch"]
+        }.compact
+        unless owned_workspace_path?(worktree_root)
+          return cleanup_outcome("skipped", "outside_managed_workspace_root", success: true, **base)
+        end
+        if Array(protected_paths).compact.any? { |path| paths_overlap?(worktree_root, canonical_path(path)) }
+          return cleanup_outcome("failed", "workspace_owned_by_another_worker", success: false, **base)
+        end
+
+        branch = base["workspace_branch"]
+        unless branch.to_s.start_with?("meringue/")
+          return cleanup_outcome("failed", "branch_not_meringue_managed", success: false, **base)
+        end
+
+        git_root = workspace["git_root"] || plan["git_root"] || workspace["project_root"] || plan["project_root"]
+        if git_root.to_s.strip.empty? || !Dir.exist?(git_root.to_s)
+          return cleanup_outcome("failed", "git_root_missing", success: false, **base)
+        end
+
+        git_root = canonical_path(git_root)
+        base["git_root"] = git_root
+        if paths_overlap?(worktree_root, git_root)
+          return cleanup_outcome("failed", "main_checkout_protected", success: false, **base)
+        end
+
+        listed = run_command("git", "-C", git_root, "worktree", "list", "--porcelain")
+        unless listed.fetch("status").success?
+          return cleanup_outcome(
+            "failed",
+            "worktree_list_failed",
+            success: false,
+            error: present_output(listed.fetch("stderr")) || present_output(listed.fetch("stdout")),
+            **base
+          )
+        end
+
+        record = parse_worktree_records(listed.fetch("stdout")).find do |candidate|
+          same_path?(candidate.fetch("worktree", ""), worktree_root)
+        end
+        unless record
+          if Dir.exist?(worktree_root)
+            return cleanup_outcome("failed", "worktree_not_registered", success: false, **base)
+          end
+
+          return cleanup_outcome("already_removed", "worktree_already_removed", success: true, **base)
+        end
+        unless record.fetch("branch", nil) == "refs/heads/#{branch}"
+          return cleanup_outcome("failed", "worktree_branch_mismatch", success: false, **base)
+        end
+        if record.key?("locked")
+          return cleanup_outcome("failed", "worktree_locked", success: false, **base)
+        end
+
+        if Dir.exist?(worktree_root)
+          dirty = run_command("git", "-C", worktree_root, "status", "--porcelain", "--untracked-files=all")
+          unless dirty.fetch("status").success?
+            return cleanup_outcome(
+              "failed",
+              "worktree_status_failed",
+              success: false,
+              error: present_output(dirty.fetch("stderr")) || present_output(dirty.fetch("stdout")),
+              **base
+            )
+          end
+          unless dirty.fetch("stdout").to_s.empty?
+            return cleanup_outcome("failed", "worktree_dirty", success: false, **base)
+          end
+        end
+
+        removed = run_command("git", "-C", git_root, "worktree", "remove", worktree_root)
+        unless removed.fetch("status").success?
+          output = present_output(removed.fetch("stderr")) || present_output(removed.fetch("stdout"))
+          reason = output.to_s.match?(/locked/i) ? "worktree_locked" : "worktree_remove_failed"
+          return cleanup_outcome("failed", reason, success: false, attempted: true, error: output, **base)
+        end
+
+        cleanup_outcome("removed", "worktree_removed", success: true, attempted: true, **base)
+      rescue CommandTimeout => e
+        cleanup_outcome(
+          "failed",
+          "worktree_cleanup_timed_out",
+          success: false,
+          attempted: true,
+          error: e.message,
+          worktree_root_path: defined?(worktree_root) && worktree_root,
+          workspace_branch: defined?(branch) && branch,
+          git_root: defined?(git_root) && git_root
+        )
+      rescue StandardError => e
+        cleanup_outcome(
+          "failed",
+          "worktree_cleanup_error",
+          success: false,
+          error: e.message,
+          worktree_root_path: defined?(worktree_root) && worktree_root,
+          workspace_branch: defined?(branch) && branch,
+          git_root: defined?(git_root) && git_root
+        )
+      end
+
       private
 
       def git_root_for(project_path)
@@ -174,9 +294,42 @@ module Meringue
         "."
       end
 
+      # Resolve symlinks even when the final worktree path is already gone. This keeps stale
+      # registrations comparable on systems such as macOS where /var and /private/var alias.
       def canonical_path(path)
         expanded = File.expand_path(path.to_s)
-        File.exist?(expanded) ? File.realpath(expanded) : expanded
+        return File.realpath(expanded) if File.exist?(expanded)
+
+        missing_parts = []
+        existing = expanded
+        until File.exist?(existing) || File.dirname(existing) == existing
+          missing_parts.unshift(File.basename(existing))
+          existing = File.dirname(existing)
+        end
+        File.join(File.realpath(existing), *missing_parts)
+      rescue StandardError
+        expanded
+      end
+
+      def same_path?(left, right)
+        canonical_path(left) == canonical_path(right)
+      end
+
+      def paths_overlap?(left, right)
+        left_path = canonical_path(left)
+        right_path = canonical_path(right)
+        left_path == right_path ||
+          left_path.start_with?("#{right_path}#{File::SEPARATOR}") ||
+          right_path.start_with?("#{left_path}#{File::SEPARATOR}")
+      end
+
+      def cleanup_outcome(status, reason, success:, attempted: false, **details)
+        {
+          "status" => status,
+          "reason" => reason,
+          "success" => success,
+          "attempted" => attempted
+        }.merge(details.transform_keys(&:to_s)).compact
       end
 
       def project_root_workspace(project_path, plan, reason)
@@ -337,15 +490,19 @@ module Meringue
         result = run_command("git", "-C", git_root, "worktree", "list", "--porcelain")
         return [] unless result.fetch("status").success?
 
-        result.fetch("stdout").split(/\n\n+/).filter_map do |block|
+        parse_worktree_records(result.fetch("stdout"))
+      rescue StandardError
+        []
+      end
+
+      def parse_worktree_records(output)
+        output.to_s.split(/\n\n+/).filter_map do |block|
           fields = block.lines.each_with_object({}) do |line, record|
             key, value = line.strip.split(" ", 2)
             record[key] = value if key
           end
           fields unless fields.empty?
         end
-      rescue StandardError
-        []
       end
 
       def remove_orphaned_owned_branch(git_root, branch)
@@ -369,8 +526,9 @@ module Meringue
       end
 
       def owned_workspace_path?(path)
-        expanded = File.expand_path(path.to_s)
-        expanded.start_with?("#{root_path}#{File::SEPARATOR}")
+        expanded = canonical_path(path)
+        managed_root = canonical_path(root_path)
+        expanded.start_with?("#{managed_root}#{File::SEPARATOR}")
       end
 
       def run_command(*argv, timeout: command_timeout)

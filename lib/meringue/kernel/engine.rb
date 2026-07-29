@@ -102,7 +102,7 @@ module Meringue
         ["/questions", "List questions and their statuses."],
         ["/answer <question_id> \"<answer>\"", "Answer an open question; the kernel records the answer and routes the work it unblocks."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
-        ["/prune", "Remove resolved and errored records together unless unresolved work requires retention."],
+        ["/prune", "Remove resolved and errored records plus their safely cleanable managed worktrees."],
         ["/recount", "Compact project, issue, worker, and question IDs after records are removed."],
         ["/clear", "Reset persisted Meringue state and clear the visible logs."]
       ].freeze
@@ -723,10 +723,13 @@ module Meringue
           lines
         when "Prune"
           prune_result = result || {}
+          cleanup_outcomes = Array(prune_result["workspace_cleanup_outcomes"])
           [
             "  removed issues: #{Array(prune_result["removed_issue_ids"]).length}",
             "  removed projects: #{Array(prune_result["removed_project_ids"]).length}",
-            "  removed agents: #{Array(prune_result["removed_agent_ids"]).length}"
+            "  removed agents: #{Array(prune_result["removed_agent_ids"]).length}",
+            "  cleaned worktrees: #{cleanup_outcomes.count { |outcome| %w[removed already_removed].include?(outcome["status"]) }}",
+            "  blocked worktree cleanups: #{cleanup_outcomes.count { |outcome| !outcome.fetch("success", false) }}"
           ]
         when "Recount"
           mappings = result.is_a?(Hash) ? result.fetch("mappings", {}) : {}
@@ -770,7 +773,8 @@ module Meringue
             extra_agent_ids: killed_agent_ids,
             reason: "killed",
             now: now,
-            remove_empty_projects: false
+            remove_empty_projects: false,
+            cleanup_worker_workspaces: true
           )
           removed_project_ids = prune_result.fetch("removed_project_ids", [])
           touch_state!(state, now)
@@ -778,7 +782,7 @@ module Meringue
           prune_result.merge(
             "changed" => true,
             "removed_project_ids" => removed_project_ids,
-            "log_entry_ids" => []
+            "log_entry_ids" => prune_result.fetch("workspace_cleanup_log_entry_ids", [])
           )
         end
       end
@@ -1767,7 +1771,8 @@ module Meringue
       # records: an issue subtree must be free of nonterminal issues, queued/working/blocked
       # workers, open questions, and unsettled pull requests, and a project is removed only when
       # it is terminal with every contained issue eligible. Standalone errored heads are removed
-      # in the same pass. Worker workspaces are never deleted here.
+      # in the same pass. A worker bundle leaves state only after its clean, unlocked,
+      # Meringue-managed worktree has been removed (or is confirmed already absent).
       def prune_records(command_id, command_type, requested_selector: nil)
         state = normalized_state
         delivery_refreshes = refresh_worker_delivery_pull_requests!(state)
@@ -1785,8 +1790,10 @@ module Meringue
           extra_agent_ids: errored_head_ids,
           reason: "prune",
           now: now,
-          remove_empty_projects: false
+          remove_empty_projects: false,
+          cleanup_worker_workspaces: true
         )
+        annotate_workspace_cleanup_blockers!(issue_decisions, project_decisions, prune_result)
         checked_urls = pull_request_checks.flat_map { |check| check.fetch("statuses", []).map { |status| status.fetch("url", nil) } }.compact.uniq
         blocked_urls = issue_decisions.flat_map do |decision|
           decision.fetch("pull_request_blockers", []).map { |status| status.fetch("url", nil) }
@@ -1801,14 +1808,15 @@ module Meringue
           "project_decisions" => project_decisions,
           "delivery_pull_request_refreshes" => delivery_refreshes
         ).compact
-        log_ids = append_log(
+        log_ids = prune_result.fetch("workspace_cleanup_log_entry_ids", []).dup
+        log_ids.concat(append_log(
           state,
           source_type: "kernel",
           source_id: nil,
-          level: "info",
+          level: prune_result.fetch("workspace_cleanup_blocked_agent_ids", []).empty? ? "info" : "warning",
           message: message,
           details: details
-        )
+        ))
         touch_state!(state, now)
         store.save(state)
 
@@ -2213,15 +2221,45 @@ module Meringue
         ])
       end
 
-      def remove_issue_bundles_and_agents!(state, issue_ids:, extra_agent_ids:, reason:, now:, remove_empty_projects: true, project_ids: [])
+      def remove_issue_bundles_and_agents!(state, issue_ids:, extra_agent_ids:, reason:, now:, remove_empty_projects: true,
+                                           project_ids: [], cleanup_worker_workspaces: false)
         requested_project_ids = Array(project_ids).compact.uniq
-        project_issue_ids = state.fetch("issues").select do |issue|
-          requested_project_ids.include?(issue.fetch("project_id", nil))
-        end.map { |issue| issue.fetch("id") }
-        root_issue_ids = (Array(issue_ids) + project_issue_ids).compact.uniq
+        requested_issue_ids = Array(issue_ids).compact.uniq
+        initial_project_issue_ids = project_issue_ids(state, requested_project_ids)
+        initial_root_issue_ids = (requested_issue_ids + initial_project_issue_ids).uniq
+        initial_issue_ids = initial_root_issue_ids.flat_map { |issue_id| issue_subtree_ids(state, issue_id) }.uniq
+        initial_worker_ids = state.fetch("agents").filter_map do |agent|
+          next unless agent.fetch("type", nil) == "worker"
+          next unless initial_issue_ids.include?(agent.fetch("issue_id", nil)) || Array(extra_agent_ids).include?(agent.fetch("id", nil))
+
+          agent.fetch("id", nil)
+        end.compact.uniq
+
+        workspace_cleanups = if cleanup_worker_workspaces
+                               cleanup_pruned_worker_workspaces!(state, initial_worker_ids, now)
+                             else
+                               []
+                             end
+        blocked_worker_ids = workspace_cleanups.reject { |outcome| outcome.fetch("success", false) }
+                                                .map { |outcome| outcome.fetch("agent_id") }
+        blocked_workers = state.fetch("agents").select { |agent| blocked_worker_ids.include?(agent.fetch("id", nil)) }
+        blocked_project_ids = requested_project_ids.select do |project_id|
+          blocked_workers.any? { |worker| worker.fetch("project_id", nil) == project_id }
+        end
+        blocked_issue_ids = requested_issue_ids.select do |issue_id|
+          subtree_ids = issue_subtree_ids(state, issue_id)
+          blocked_workers.any? { |worker| subtree_ids.include?(worker.fetch("issue_id", nil)) }
+        end
+
+        effective_project_ids = requested_project_ids - blocked_project_ids
+        effective_issue_ids = (requested_issue_ids - blocked_issue_ids).reject do |issue_id|
+          issue = find_issue(state, issue_id)
+          issue && blocked_project_ids.include?(issue.fetch("project_id", nil))
+        end
+        root_issue_ids = (effective_issue_ids + project_issue_ids(state, effective_project_ids)).uniq
         issue_ids_to_remove = root_issue_ids.flat_map { |issue_id| issue_subtree_ids(state, issue_id) }.uniq
         issues_to_remove = state.fetch("issues").select { |issue| issue_ids_to_remove.include?(issue.fetch("id", nil)) }
-        affected_project_ids = (issues_to_remove.map { |issue| issue.fetch("project_id", nil) } + requested_project_ids).compact.uniq
+        affected_project_ids = (issues_to_remove.map { |issue| issue.fetch("project_id", nil) } + effective_project_ids).compact.uniq
         empty_project_ids = if remove_empty_projects
                               affected_project_ids.select do |project_id|
                                 state.fetch("issues").none? do |issue|
@@ -2231,14 +2269,18 @@ module Meringue
                             else
                               []
                             end
-        removed_project_ids = (requested_project_ids + empty_project_ids).uniq
-        issue_agent_ids = issues_to_remove.flat_map { |issue| Array(issue.fetch("agent_ids", [])) }
-        worker_agent_ids = state.fetch("agents").select { |agent| issue_ids_to_remove.include?(agent.fetch("issue_id", nil)) }.map { |agent| agent.fetch("id", nil) }
+        removed_project_ids = (effective_project_ids + empty_project_ids).uniq
+        # The agent record owns workspace routing. A stale id in issue.agent_ids must never make
+        # pruning one issue remove a worker (and worktree) whose issue_id points at another issue.
+        issue_owned_agent_ids = state.fetch("agents").select do |agent|
+          issue_ids_to_remove.include?(agent.fetch("issue_id", nil))
+        end.map { |agent| agent.fetch("id", nil) }
         originating_head_ids = issues_to_remove.map { |issue| issue.fetch("originating_head_id", nil) }.compact
         related_head_ids = pruned_related_head_agent_ids(state, issue_ids_to_remove, removed_project_ids)
-        bundled_agent_ids = (issue_agent_ids + worker_agent_ids + originating_head_ids + related_head_ids).compact.uniq
-        agent_ids_to_remove = (bundled_agent_ids + Array(extra_agent_ids)).compact.uniq
-        standalone_agent_ids = Array(extra_agent_ids).compact.uniq - bundled_agent_ids
+        bundled_agent_ids = (issue_owned_agent_ids + originating_head_ids + related_head_ids).compact.uniq
+        effective_extra_agent_ids = Array(extra_agent_ids).compact.uniq - blocked_worker_ids
+        agent_ids_to_remove = (bundled_agent_ids + effective_extra_agent_ids).compact.uniq
+        standalone_agent_ids = effective_extra_agent_ids - bundled_agent_ids
 
         released_head_ids = release_head_sessions_for_removed_agents!(state, agent_ids_to_remove, now)
         state["issues"] = state.fetch("issues").reject { |issue| issue_ids_to_remove.include?(issue.fetch("id", nil)) }
@@ -2261,8 +2303,130 @@ module Meringue
           "removed_standalone_agent_ids" => standalone_agent_ids,
           "removed_project_ids" => removed_project_ids,
           "updated_project_ids" => updated_project_ids,
-          "released_head_session_agent_ids" => released_head_ids
+          "released_head_session_agent_ids" => released_head_ids,
+          "workspace_cleanup_outcomes" => workspace_cleanups,
+          "workspace_cleanup_blocked_agent_ids" => blocked_worker_ids,
+          "workspace_cleanup_blocked_issue_ids" => blocked_issue_ids,
+          "workspace_cleanup_blocked_project_ids" => blocked_project_ids,
+          "workspace_cleanup_log_entry_ids" => workspace_cleanups.flat_map { |outcome| Array(outcome.fetch("log_entry_ids", [])) }.uniq
         }
+      end
+
+      def project_issue_ids(state, project_ids)
+        state.fetch("issues").select do |issue|
+          Array(project_ids).include?(issue.fetch("project_id", nil))
+        end.map { |issue| issue.fetch("id") }
+      end
+
+      def cleanup_pruned_worker_workspaces!(state, worker_ids, now)
+        Array(worker_ids).filter_map do |agent_id|
+          worker = find_agent(state, agent_id)
+          next unless worker && worker.fetch("type", nil) == "worker"
+
+          protected_paths = state.fetch("agents").filter_map do |other|
+            next unless other.fetch("type", nil) == "worker" && other.fetch("id", nil) != agent_id
+
+            worker_worktree_root_path(other)
+          end
+          outcome = workspace_manager.cleanup_pruned_worker_workspace(
+            worker_workspace_cleanup_record(state, worker),
+            protected_paths: protected_paths
+          ).merge(
+            "agent_id" => agent_id,
+            "issue_id" => worker.fetch("issue_id", nil),
+            "project_id" => worker.fetch("project_id", nil),
+            "checked_at" => now
+          )
+          worker["harness_metadata"] = (worker.fetch("harness_metadata", {}) || {}).merge("workspace_cleanup" => outcome)
+          log_ids = append_workspace_cleanup_log(state, worker, outcome)
+          outcome.merge("log_entry_ids" => log_ids)
+        rescue StandardError => e
+          outcome = {
+            "agent_id" => agent_id,
+            "issue_id" => worker && worker.fetch("issue_id", nil),
+            "project_id" => worker && worker.fetch("project_id", nil),
+            "status" => "failed",
+            "reason" => "workspace_cleanup_error",
+            "success" => false,
+            "attempted" => false,
+            "error" => sanitized_error_message(e),
+            "checked_at" => now
+          }.compact
+          worker["harness_metadata"] = (worker.fetch("harness_metadata", {}) || {}).merge("workspace_cleanup" => outcome) if worker
+          outcome.merge("log_entry_ids" => worker ? append_workspace_cleanup_log(state, worker, outcome) : [])
+        end
+      end
+
+      def worker_workspace_cleanup_record(state, worker)
+        metadata = worker.fetch("harness_metadata", {}) || {}
+        plan = metadata.fetch("workspace_plan", nil)
+        project = find_project(state, worker.fetch("project_id", nil))
+        {
+          "workspace_strategy" => worker.fetch("workspace_strategy", nil),
+          "workspace_path" => worker.fetch("workspace_path", nil),
+          "workspace_branch" => worker.fetch("workspace_branch", nil),
+          "project_root" => project && project.fetch("root_path", nil),
+          "plan" => plan.is_a?(Hash) ? plan : nil
+        }.compact
+      end
+
+      def worker_worktree_root_path(worker)
+        metadata = worker.fetch("harness_metadata", {}) || {}
+        plan = metadata.fetch("workspace_plan", {})
+        plan = {} unless plan.is_a?(Hash)
+        plan["worktree_root_path"] || plan["workspace_root_path"] || worker.fetch("workspace_path", nil) || plan["workspace_path"]
+      end
+
+      def append_workspace_cleanup_log(state, worker, outcome)
+        status = outcome.fetch("status", "failed")
+        return [] if status == "skipped"
+
+        successful = outcome.fetch("success", false)
+        message = if status == "removed"
+                    "Removed managed worktree for worker #{worker.fetch("id")}."
+                  elsif status == "already_removed"
+                    "Confirmed the managed worktree for worker #{worker.fetch("id")} was already removed."
+                  else
+                    "Retained worker #{worker.fetch("id")} because its managed worktree could not be removed: #{outcome.fetch("reason", "unknown_error")}."
+                  end
+        append_log(
+          state,
+          source_type: "kernel",
+          source_id: worker.fetch("id"),
+          level: successful ? "info" : "warning",
+          message: message,
+          details: outcome.merge(
+            "agent_id" => worker.fetch("id"),
+            "issue_id" => worker.fetch("issue_id", nil),
+            "project_id" => worker.fetch("project_id", nil)
+          ).compact
+        )
+      end
+
+      def annotate_workspace_cleanup_blockers!(issue_decisions, project_decisions, prune_result)
+        blocked_issue_ids = prune_result.fetch("workspace_cleanup_blocked_issue_ids", [])
+        blocked_project_ids = prune_result.fetch("workspace_cleanup_blocked_project_ids", [])
+        failed_outcomes = prune_result.fetch("workspace_cleanup_outcomes", []).reject { |outcome| outcome.fetch("success", false) }
+        Array(issue_decisions).each do |decision|
+          next unless blocked_issue_ids.include?(decision.fetch("issue_id", nil))
+
+          blocking_agent_ids = failed_outcomes.filter_map do |outcome|
+            outcome.fetch("agent_id", nil) if Array(decision.fetch("subtree_issue_ids", [])).include?(outcome.fetch("issue_id", nil))
+          end
+          decision["prunable"] = false
+          decision["blockers"] = (Array(decision.fetch("blockers", [])) + ["workspace_cleanup_failed"]).uniq
+          decision["workspace_cleanup_blocking_agent_ids"] = blocking_agent_ids
+        end
+        Array(project_decisions).each do |decision|
+          next unless blocked_project_ids.include?(decision.fetch("project_id", nil))
+
+          blocking_agent_ids = failed_outcomes.filter_map do |outcome|
+            outcome.fetch("agent_id", nil) if outcome.fetch("project_id", nil) == decision.fetch("project_id", nil)
+          end
+          decision["prunable"] = false
+          decision["blockers"] = (Array(decision.fetch("blockers", [])) + ["workspace_cleanup_failed"]).uniq
+          decision["workspace_cleanup_blocking_agent_ids"] = blocking_agent_ids
+        end
       end
 
       def clear_dangling_issue_routing_pointer!(issue, removed_agent_ids, now)
