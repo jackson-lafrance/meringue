@@ -36,6 +36,16 @@ lose each other's updates. The lock is bounded: if it cannot be acquired within 
 timeout the section still runs, so a stuck instance can never freeze another one's
 TUI.
 
+**External I/O stays outside the state lock.** Commands may need conservative external
+facts before mutation. `/prune`, for example, checks GitHub pull-request state before
+removing a record. It snapshots state under the lock, performs forge discovery/status
+lookups without the lock, then reacquires the lock and applies against current state
+using only the per-command lookup cache. A record/PR introduced after the snapshot is
+`unknown` and retained. The whole prune lookup phase has a five-second budget, each
+`gh` subprocess is terminated at the remaining deadline, and repeated URLs are looked
+up once. Thus an unavailable forge can delay one prune briefly but cannot freeze the
+kernel or cause unsafe removal.
+
 **A batch apply lease.** The instance applying a head result holds a heartbeat lease
 on the head record (`head_result_apply_owner`, `head_result_apply_heartbeat`), so a
 second instance can tell an in-flight batch from an abandoned one and skips it

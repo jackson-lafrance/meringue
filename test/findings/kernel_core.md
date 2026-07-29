@@ -15,30 +15,19 @@ Tests:
 - `test/integration/kernel_core/command_contract_test.rb`
 - `test/support/kernel_core_support.rb`
 
-All tests assert **current actual behaviour**. No production code was changed. The notes below
-record the gaps and surprises found while writing them.
+All tests assert **current actual behaviour**. The notes below record the gaps and surprises found
+while writing them, including resolved findings.
 
-## 1. `GetInfo` is specified but not implemented (real gap)
+## 1. `GetInfo` is implemented (resolved by PR #129)
 
-`AGENTS.md` ("`GetInfo(TargetID) -> Project | Issue | Agent | Question`") and
-`docs/head_agent_kernel_commands.md` ("### GetInfo") both document the command, and the docs even
-show the payload/example. `Engine#dispatch_command` has no `GetInfo` branch and `COMMAND_ALIASES`
-has no `get_info` entry, so every `GetInfo` command is rejected:
+`GetInfo` now matches the `AGENTS.md` and `docs/head_agent_kernel_commands.md` contract. The engine
+accepts canonical `GetInfo` and its `get_info`/`info` aliases, returns a project, issue, agent, or
+question record plus recent target logs and compact related records, and rejects a missing target
+with `target_not_found`. It is read-only: command output is surfaced by the typed/head presentation
+paths without changing domain state.
 
-```
-status: "rejected", message: "Unknown kernel command: GetInfo", errors: ["unknown_command"]
-```
-
-Consequences:
-
-- A head that follows the documented command reference gets a rejection plus a warning log line.
-- The rejection is identical for a valid target id (`P1`, `P1-I1`, `H1`, `Q1`) and for an unknown
-  one (`P99`), so there is no way to distinguish "unimplemented" from "not found".
-- Detail lookups today only work by pulling the whole snapshot (`GetState` / `ListAll`) or
-  `ListQuestions` and filtering client-side.
-
-`get_info_test.rb` pins the rejection and also proves the snapshot fallback path returns the
-project/issue/agent/question detail that `GetInfo` was supposed to return.
+`get_info_test.rb` covers every target kind, aliases, unknown ids, recent logs, and read-only
+behavior.
 
 ## 2. "Rejected commands do not mutate state" is true for domain records only
 
