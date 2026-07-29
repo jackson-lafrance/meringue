@@ -177,4 +177,23 @@ class HarnessForgeGitHubClientTest < HarnessIntegrationTest
     refute_empty status.fetch("error")
     assert_empty invocations, "no forge command should have run"
   end
+
+  def test_hung_gh_commands_are_terminated_with_a_bounded_unknown_result
+    write_executable(@bin_dir, "gh", <<~RUBY)
+      #!#{HarnessSupport::RUBY_BIN}
+      sleep 30
+    RUBY
+    client = Meringue::Forge::GitHubClient.new(command_timeout: 0.05)
+
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    status = client.pull_request_status("https://github.com/acme/app/pull/7")
+    urls = client.pull_request_urls_for_branch(repository: "acme/app", branch: "meringue/task-1")
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+    assert_operator elapsed, :<, 0.75, "two hung gh processes should be terminated promptly"
+    assert_equal "unknown", status.fetch("state")
+    assert_equal true, status.fetch("timed_out")
+    assert_match(/timed out/, status.fetch("error"))
+    assert_empty urls
+  end
 end

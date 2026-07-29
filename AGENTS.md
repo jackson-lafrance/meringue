@@ -271,6 +271,16 @@ The Ruby kernel validates this output before applying it.
 The `commands` array should contain structured kernel commands, not prose instructions.
 The `questions` array should contain clarifying questions only when ambiguity would likely cause bad work.
 
+### Head-proposed user commands
+Every user-facing slash command that maps to a kernel command is also proposable by a head, with the same validation, exactly-once journaling, logging, and user-visible output as the typed path. "prune the merged issues" should become `Prune`, "renumber the tree" `Recount`, "kill P1-I9-W3" `Kill`, "what is P1-I12" `GetInfo`. Only kernel/parser internals (`ApplyHeadResult`, `InvalidSlashCommand`) and local TUI commands (`/jump`, `/keybind`, `/quit`) are not proposable.
+
+The kernel's own command output is what the user reads, so a head summary should explain the decision instead of restating kernel output.
+
+Destructive commands are guarded by the kernel, not by prompt guidance alone:
+- Ordinary housekeeping (`Prune`, `Recount`, `DismissQuestion`, `ModifyIssue`, `Kill` on a worker or issue) needs only a clear user request.
+- Irreversible commands (`ClearState`, `Kill` on a whole project) additionally require the head to set `confirmed_by_user` on the payload **and** require the user's own recorded message to be an unambiguous instruction. The kernel checks the message it stored when it spawned the head, so a vague prompt can never wipe state or a project. Otherwise the head must ask a confirmation question.
+- A head may never kill itself, and a head-proposed `ClearState` ends the batch because it removes the head record and command journal.
+
 ## Workers
 Workers are real harness sessions. For the MVP, that means real Pi sessions.
 They run in a specific workspace decided by the kernel from the head agent's proposed issue/project context.

@@ -61,12 +61,15 @@ module Meringue
           }
         )
         payload["apply_head_result"] = apply_result
+        # Head-proposed user commands need the same local side effects as the typed slash path
+        # (clearing the visible chat for ClearState, switching the theme for SetTheme).
         emit(
           on_event,
           "head_result_applied",
           "head_id" => spawn_result.fetch("target_id"),
           "head_result" => head_result,
-          "apply_result" => apply_result
+          "apply_result" => apply_result,
+          "command_results" => command_results_from(apply_result)
         )
         payload["worker_wait_results"] = wait_for_spawned_workers(apply_result, on_event: on_event)
         payload["state_mutated"] = apply_result.fetch("status", nil) == "accepted"
@@ -141,14 +144,17 @@ module Meringue
       end
 
       def apply_kernel(command)
-        return engine.apply(command) if spawn_head_command?(command)
+        # SpawnHead has always been independently synchronized by the engine. Prune now does the
+        # same and deliberately performs bounded forge I/O outside the state lock; do not hold the
+        # prompt-loop mutex across that I/O or every later submission would queue behind `/prune`.
+        return engine.apply(command) if independently_synchronized_command?(command)
 
         @engine_mutex.synchronize { engine.apply(command) }
       end
 
-      def spawn_head_command?(command)
+      def independently_synchronized_command?(command)
         type = command.respond_to?(:[]) && (command["type"] || command[:type] || command["command_type"] || command[:command_type])
-        type.to_s == "SpawnHead" || type.to_s == "spawn_head"
+        %w[SpawnHead spawn_head Prune prune].include?(type.to_s)
       end
 
       def mark_worker_completed(agent_id:, harness_events:, last_assistant_text:, session_ref: nil)
@@ -222,8 +228,12 @@ module Meringue
       end
 
       def worker_results_from(apply_result)
+        worker_results_from_command_results(command_results_from(apply_result))
+      end
+
+      def command_results_from(apply_result)
         result = apply_result.fetch("result", {}) || {}
-        worker_results_from_command_results(result.fetch("command_results", []))
+        Array(result.fetch("command_results", []))
       end
 
       def worker_results_from_command_results(command_results)
