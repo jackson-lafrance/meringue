@@ -22,6 +22,12 @@ class InputSlashCommandParserTest < Minitest::Test
       "/prune errored" => ["Prune", { "selector" => "errored" }],
       "/theme rose-pine" => ["SetTheme", { "theme" => "rose-pine" }],
       "/harness claude" => ["SetHarness", { "provider" => "claude" }],
+      "/defaults" => ["GetSessionDefaults", {}],
+      "/default-model openai/gpt-5.6-sol" => ["SetDefaultSessionModel", { "model" => "openai/gpt-5.6-sol" }],
+      "/default-thinking xhigh" => ["SetDefaultSessionThinkingLevel", { "level" => "xhigh" }],
+      "/session-settings P1-I1-W1" => ["GetSessionSettings", { "agent_id" => "P1-I1-W1" }],
+      "/model P1-I1-W1 openai/gpt-5.6-sol" => ["SetSessionModel", { "agent_id" => "P1-I1-W1", "model" => "openai/gpt-5.6-sol" }],
+      "/thinking P1-I1-W1 xhigh" => ["SetSessionThinkingLevel", { "agent_id" => "P1-I1-W1", "level" => "xhigh" }],
       "/project add /tmp" => ["AddProject", { "path" => "/tmp", "name" => "" }],
       "/kill P1-I1" => ["Kill", { "target_id" => "P1-I1" }],
       "/dismiss Q1" => ["DismissQuestion", { "question_id" => "Q1" }]
@@ -119,7 +125,9 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   def test_missing_arguments_for_strict_commands_return_invalid_slash_command
-    ["/theme", "/theme a b", "/harness", "/project", "/project list /tmp", "/issue", "/issue delete P1",
+    ["/theme", "/theme a b", "/harness", "/defaults now", "/default-model", "/default-model a b",
+     "/default-thinking", "/default-thinking high extra", "/session-settings", "/session-settings P1 P2",
+     "/model P1", "/thinking P1", "/project", "/project list /tmp", "/issue", "/issue delete P1",
      "/worker", "/worker kill P1-I1", "/dismiss", "/dismiss Q1 Q2", "/recount now", "/prune bogus",
      "/prune resolved errored"].each do |input|
       parsed = parse_slash(input)
@@ -144,6 +152,14 @@ class InputSlashCommandParserTest < Minitest::Test
       assert_equal type, parsed.fetch("type"), "type for #{input.inspect}"
       assert_equal({}, parsed.fetch("payload"), "payload for #{input.inspect}")
     end
+  end
+
+  def test_session_is_a_hidden_compatibility_alias_for_the_clearer_session_settings_command
+    legacy = parse_slash("/session P1-I1-W1")
+
+    assert_equal "GetSessionSettings", legacy.fetch("type")
+    assert_equal({ "agent_id" => "P1-I1-W1" }, legacy.fetch("payload"))
+    refute Meringue::Input::SlashCommandParser::COMMAND_SPECS.any? { |usage, _| usage.start_with?("/session ") }
   end
 
   def test_unknown_command_returns_invalid_slash_command_with_help_usage
@@ -231,6 +247,23 @@ class InputSlashCommandParserTest < Minitest::Test
       state: sample_state
     )
     assert_equal ["Q1"], dismiss.map { |record| record.fetch("usage") }
+  end
+
+  def test_session_setting_and_default_value_suggestions_make_both_scopes_explicit
+    state = sample_state
+    state["metadata"] = { "pi_session_defaults" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "xhigh" } }
+    state.fetch("agents").first["harness_session_id"] = "pi-session-1"
+
+    inspect = Meringue::Input::SlashCommandParser.command_suggestion_records("/session-settings ", limit: 5, state: state)
+    assert_equal ["P1-I1-W1"], inspect.map { |record| record.fetch("usage") }
+    assert_equal "/session-settings P1-I1-W1", inspect.first.fetch("completion")
+
+    models = Meringue::Input::SlashCommandParser.command_suggestion_records("/default-model openai", limit: 5, state: state)
+    assert_includes models.map { |record| record.fetch("completion") }, "/default-model openai/gpt-5.6-sol"
+
+    thinking = Meringue::Input::SlashCommandParser.command_suggestion_records("/default-thinking x", limit: 5, state: state)
+    assert_includes thinking.map { |record| record.fetch("usage") }, "xhigh"
+    assert_includes thinking.map { |record| record.fetch("completion") }, "/default-thinking xhigh"
   end
 
   def test_argument_suggestions_use_state_records

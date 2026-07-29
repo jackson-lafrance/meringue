@@ -3,6 +3,8 @@
 module Meringue
   module Harness
     class Client
+      class UnsupportedSessionSettingsError < StandardError; end
+
       def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:)
         raise NotImplementedError, "harness clients must implement #spawn_session"
       end
@@ -21,6 +23,28 @@ module Meringue
 
       def get_state(session_ref)
         raise NotImplementedError, "harness clients must implement #get_state"
+      end
+
+      # Session settings are intentionally harness-neutral. Providers opt in as
+      # they gain authoritative read/update APIs; unsupported providers fail
+      # explicitly instead of echoing Meringue spawn defaults.
+      def session_settings_supported?
+        false
+      end
+
+      def get_session_settings(_session_ref)
+        raise UnsupportedSessionSettingsError,
+              "#{session_settings_harness_name} does not expose managed session model or thinking settings"
+      end
+
+      def set_session_model(_session_ref, _model_reference)
+        raise UnsupportedSessionSettingsError,
+              "#{session_settings_harness_name} does not support changing a managed session model"
+      end
+
+      def set_session_thinking_level(_session_ref, _level)
+        raise UnsupportedSessionSettingsError,
+              "#{session_settings_harness_name} does not support changing a managed session thinking level"
       end
 
       def read_events(session_ref)
@@ -48,6 +72,12 @@ module Meringue
             )
           }
         )
+      end
+
+      private
+
+      def session_settings_harness_name
+        respond_to?(:harness_name) ? harness_name.to_s : self.class.name
       end
     end
   end

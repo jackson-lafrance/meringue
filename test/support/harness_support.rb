@@ -200,7 +200,9 @@ module HarnessSupport
       "sessionId" => config.fetch("session_id", "stub-session-id"),
       "sessionFile" => config["session_file"],
       "sessionName" => config["session_name"],
-      "isStreaming" => config.fetch("is_streaming", false)
+      "isStreaming" => config.fetch("is_streaming", false),
+      "model" => config.fetch("model", { "provider" => "anthropic", "id" => "claude-opus-5", "name" => "Claude Opus 5" }),
+      "thinkingLevel" => config.fetch("thinking_level", "max")
     }
 
     Array(config["noise"]).each { |line| emit_raw("#{line}\n") }
@@ -245,6 +247,13 @@ module HarnessSupport
             { "messages" => Array(config["messages"]) }
           when "abort"
             state["isStreaming"] = false
+            nil
+          when "set_model"
+            state["model"] = { "provider" => command["provider"], "id" => command["modelId"] }
+          when "get_available_thinking_levels"
+            { "levels" => config.fetch("available_thinking_levels", %w[off minimal low medium high xhigh max]) }
+          when "set_thinking_level"
+            state["thinkingLevel"] = command["level"]
             nil
           when "prompt", "steer", "follow_up"
             nil

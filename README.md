@@ -165,11 +165,17 @@ Useful slash commands inside the TUI include:
 - `/dismiss <question_id>` — close an open question without answering it.
 - `/theme <name>` — persist a TUI colorscheme.
 - `/harness <pi|claude|antigravity>` — select the harness for future agents.
+- `/defaults` — inspect the model and thinking level for all future Pi heads and workers.
+- `/default-model <provider/model>` — persist the model for all future Pi sessions; existing sessions are unchanged.
+- `/default-thinking <level>` — persist the thinking level for all future Pi sessions; existing sessions are unchanged.
+- `/session-settings <agent_id>` — refresh and inspect one existing agent's effective Pi model and thinking level (the old dashboard `/session` spelling remains a compatibility alias; focused workspaces advertise `/open-session` for opening the harness UI).
+- `/model <agent_id> <provider/model>` — change only one active/resumable Pi session's model; future defaults are unchanged.
+- `/thinking <agent_id> <level>` — change only one active/resumable Pi session's thinking level; future defaults are unchanged.
 - `/keybind` — show active TUI keybindings.
 - `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together, keeping anything unresolved work still needs.
 - `/recount` — compact project, issue, worker, and question numbering after records are removed.
 
-See `docs/recount.md` for the renumbering, cross-reference, and active-session rules. See `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
+See `docs/session-settings.md` for future-default persistence, exact propagation semantics, authoritative Pi session discovery, targeted updates, and errors. See `docs/recount.md` for the renumbering, cross-reference, and active-session rules. See `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
 
 ### Answering a head's question
 
