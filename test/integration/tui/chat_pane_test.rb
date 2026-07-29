@@ -176,6 +176,23 @@ class TuiChatPaneTest < Minitest::Test
     assert_equal "harness: Custom Harness", plain_line(@pane.bottom_right_status_line(labelled))
   end
 
+  def test_bottom_right_status_distinguishes_future_pi_defaults_from_the_active_harness
+    state = composed_state(
+      empty_state.merge(
+        "metadata" => {
+          "active_harness" => "pi",
+          "pi_session_defaults" => {
+            "model" => "openai/gpt-5.6-sol",
+            "thinking_level" => "xhigh"
+          }
+        }
+      )
+    )
+
+    text = plain_line(@pane.bottom_right_status_line(state))
+    assert_equal "harness: Pi · Pi defaults: openai/gpt-5.6-sol · xhigh", text
+  end
+
   def test_slash_suggestions_only_activate_for_slash_prompts
     assert @pane.slash_prompt?("  /help")
     refute @pane.slash_prompt?("help")
