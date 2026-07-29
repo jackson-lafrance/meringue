@@ -1,0 +1,255 @@
+# frozen_string_literal: true
+
+require "test_helper"
+require "support/kernel_workers_support"
+
+# PromptAgent: mode selection and bookkeeping, mapping onto the harness client's
+# queued-prompt behavior, transient queueing, and rejection of unroutable agents.
+class KernelWorkersPromptAgentTest < Minitest::Test
+  include KernelWorkersSupport
+
+  def test_normal_prompt_continues_the_existing_session
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+
+    result = apply!(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Also update the changelog." })
+    worker = agent(engine, worker_id)
+    prompt_call = @harness_client.prompts.fetch(0)
+
+    assert_equal "normal", prompt_call.fetch("mode")
+    assert_equal "Also update the changelog.", prompt_call.fetch("prompt")
+    assert_equal worker.fetch("harness_session_id"), prompt_call.fetch("session_id")
+    assert_equal "working", worker.fetch("status")
+    assert_equal 1, worker.fetch("harness_metadata").fetch("prompt_count")
+    assert_equal "normal", worker.fetch("harness_metadata").fetch("last_prompt_mode")
+    assert_equal "resume_session", worker.fetch("harness_metadata").fetch("routing_action")
+    assert_equal "resume_session", issue(engine, "P1-I1").fetch("last_routing_action")
+    assert_equal worker_id, issue(engine, "P1-I1").fetch("last_agent_id")
+    assert_equal "Continued worker #{worker_id} on P1-I1 using its existing session.", result.fetch("message")
+    assert_includes log_messages(engine), result.fetch("message")
+  end
+
+  def test_steer_mode_is_forwarded_to_the_active_session
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+    @harness_client.streaming = true
+
+    result = apply!(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Stop, wrong file.", "mode" => "steer" })
+    worker = agent(engine, worker_id)
+
+    assert_equal "steer", @harness_client.prompts.fetch(0).fetch("mode")
+    assert_equal "steer", worker.fetch("harness_metadata").fetch("last_prompt_mode")
+    assert_equal "steer_active_session", worker.fetch("harness_metadata").fetch("routing_action")
+    assert_equal true, worker.fetch("harness_metadata").fetch("is_streaming")
+    assert_equal "Steered active worker #{worker_id} on P1-I1 with the user's correction.", result.fetch("message")
+  end
+
+  def test_follow_up_mode_maps_to_the_harness_queued_prompt_behavior
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+
+    result = apply!(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Then open the PR.", "mode" => "follow_up" })
+    worker = agent(engine, worker_id)
+
+    assert_equal "follow_up", @harness_client.prompts.fetch(0).fetch("mode")
+    assert_equal ["Then open the PR."], worker.fetch("harness_metadata").fetch("queued_prompts")
+    assert_equal "queue_follow_up", worker.fetch("harness_metadata").fetch("routing_action")
+    assert_equal "Queued a follow-up for worker #{worker_id} on P1-I1.", result.fetch("message")
+  end
+
+  def test_prompt_bookkeeping_accumulates_across_modes
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+
+    apply!(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "One." })
+    apply!(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Two.", "mode" => "follow_up" })
+    apply!(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Three.", "mode" => "steer" })
+    worker = agent(engine, worker_id)
+
+    assert_equal %w[normal follow_up steer], @harness_client.prompt_modes
+    assert_equal 3, worker.fetch("harness_metadata").fetch("prompt_count")
+    assert_equal "steer", worker.fetch("harness_metadata").fetch("last_prompt_mode")
+    refute_nil worker.fetch("harness_metadata").fetch("last_prompted_at")
+  end
+
+  def test_unknown_mode_is_rejected
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+
+    result = apply_raw(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Go.", "mode" => "shout" })
+
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "mode must be one of normal, steer, follow_up"
+    assert_empty @harness_client.prompts
+  end
+
+  def test_missing_agent_id_and_prompt_are_rejected
+    engine = build_engine
+
+    result = apply_raw(engine, "PromptAgent", { "prompt" => "   " })
+
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "agent_id is required"
+    assert_includes result.fetch("errors"), "prompt is required"
+  end
+
+  def test_unknown_agent_is_rejected
+    engine = build_engine
+
+    result = apply_raw(engine, "PromptAgent", { "agent_id" => "P1-I1-W7", "prompt" => "Go." })
+
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "agent_not_found"
+    assert_empty @harness_client.prompts
+  end
+
+  def test_killed_worker_cannot_be_prompted
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+    patch_agent!(worker_id) { |record| record["status"] = "killed" }
+
+    result = apply_raw(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Go." })
+
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "agent_not_resumable"
+    assert_empty @harness_client.prompts
+  end
+
+  def test_errored_worker_cannot_be_prompted
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+    patch_agent!(worker_id) { |record| record["status"] = "errored" }
+
+    result = apply_raw(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Go." })
+
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "agent_not_resumable"
+  end
+
+  def test_head_agents_are_not_promptable_as_workers
+    engine = build_engine
+    spawned_worker(engine)
+    patch_state! do |state|
+      state.fetch("agents") << {
+        "id" => "H1",
+        "type" => "head",
+        "status" => "working",
+        "project_id" => nil,
+        "issue_id" => nil,
+        "harness" => "fake",
+        "pid" => 999,
+        "harness_session_id" => "fake-head-session-1",
+        "harness_session_file" => nil,
+        "harness_metadata" => {},
+        "created_at" => "2026-01-01T00:00:00Z",
+        "updated_at" => "2026-01-01T00:00:00Z"
+      }
+    end
+
+    result = apply_raw(engine, "PromptAgent", { "agent_id" => "H1", "prompt" => "Go." })
+
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "agent_is_not_worker"
+    assert_empty @harness_client.prompts
+  end
+
+  def test_worker_without_a_harness_session_is_rejected
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+    patch_agent!(worker_id) do |record|
+      record["pid"] = nil
+      record["harness_session_id"] = nil
+      record["harness_session_file"] = nil
+    end
+
+    result = apply_raw(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Go." })
+
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "missing_harness_session"
+    assert_empty @harness_client.prompts
+  end
+
+  def test_transient_session_error_queues_the_prompt_for_redelivery
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+    @harness_client.prompt_error = BusySessionError.new("session is owned by another turn")
+
+    queued = apply_raw(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Add the migration." }, command_id: "C-9")
+    pending = agent(engine, worker_id).fetch("harness_metadata").fetch("pending_prompts")
+
+    assert_equal "accepted", queued.fetch("status")
+    assert_equal true, queued.fetch("result").fetch("queued")
+    assert_equal 1, pending.length
+    assert_equal "Add the migration.", pending.fetch(0).fetch("prompt")
+    assert_equal "normal", pending.fetch(0).fetch("mode")
+    assert_equal 1, pending.fetch(0).fetch("attempts")
+    assert_includes log_messages(engine), "Waiting to deliver the prompt for worker #{worker_id} until its current turn settles."
+
+    @harness_client.prompt_error = nil
+    apply!(engine, "ReconcileSessions", {})
+    worker = agent(engine, worker_id)
+
+    assert_empty worker.fetch("harness_metadata").fetch("pending_prompts")
+    assert_equal ["Add the migration.", "Add the migration."], @harness_client.prompts.map { |call| call.fetch("prompt") }
+    assert_equal 1, worker.fetch("harness_metadata").fetch("prompt_count")
+    assert_includes log_messages(engine), "Continued worker #{worker_id} on P1-I1 using its existing session."
+  end
+
+  def test_worker_session_service_picks_normal_for_an_idle_session
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+    @harness_client.session_state = "idle"
+    session = Meringue::Sessions::WorkerSessionService.new(engine: engine).open(worker_id)
+
+    begin
+      result = session.submit("Please continue.")
+    ensure
+      session.close
+    end
+
+    assert_equal "accepted", result.fetch("status")
+    assert_equal "normal", result.fetch("session_prompt_mode")
+    assert_equal "normal", @harness_client.prompts.fetch(0).fetch("mode")
+  end
+
+  def test_worker_session_service_picks_steer_for_a_streaming_session
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+    @harness_client.session_state = "streaming"
+    session = Meringue::Sessions::WorkerSessionService.new(engine: engine).open(worker_id)
+
+    begin
+      result = session.submit("Stop, wrong file.")
+    ensure
+      session.close
+    end
+
+    assert_equal "accepted", result.fetch("status")
+    assert_equal "steer", result.fetch("session_prompt_mode")
+    assert_equal "steer", @harness_client.prompts.fetch(0).fetch("mode")
+    assert_equal "steer_active_session", agent(engine, worker_id).fetch("harness_metadata").fetch("routing_action")
+  end
+
+  def test_worker_session_service_rejects_an_empty_prompt_without_touching_the_harness
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+    session = Meringue::Sessions::WorkerSessionService.new(engine: engine).open(worker_id)
+
+    begin
+      result = session.submit("   ")
+    ensure
+      session.close
+    end
+
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "prompt_required"
+    assert_empty @harness_client.prompts
+  end
+
+  private
+
+  def spawned_worker(engine)
+    context = project_with_issue(engine)
+    spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
+  end
+end

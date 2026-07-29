@@ -76,6 +76,7 @@ fixtures/demo_state.json           # demo state for the TUI
 scripts/head_session_smoke.rb      # prints the head harness session lifetime without a real harness
 scripts/kernel_exactly_once_smoke.rb # checks exactly-once command application across instances
 scripts/question_answer_smoke.rb   # checks that answering a question routes real work, with no harness
+scripts/agent_tree_scroll_smoke.rb # checks AgentTree pane scrolling, clamping, and selection reveal
 ```
 
 ## Setup
