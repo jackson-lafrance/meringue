@@ -221,11 +221,31 @@ module Meringue
       end
 
       def worker_results_from_command_results(command_results)
-        command_results.select do |command_result|
-          command_result.fetch("command_type", nil) == "SpawnWorker" &&
-            command_result.fetch("status", nil) == "accepted" &&
-            command_result.fetch("result", nil).is_a?(Hash)
+        Array(command_results).flat_map do |command_result|
+          next [] unless command_result.is_a?(Hash)
+          next [command_result] if spawned_worker_result?(command_result)
+
+          worker_results_from_command_results(nested_command_results(command_result))
         end
+      end
+
+      def spawned_worker_result?(command_result)
+        command_result.fetch("command_type", nil) == "SpawnWorker" &&
+          command_result.fetch("status", nil) == "accepted" &&
+          command_result.fetch("result", nil).is_a?(Hash)
+      end
+
+      # An accepted AnswerQuestion spawns a head, and that head's applied commands can include
+      # SpawnWorker. Those nested results are the work the answer started, so they must be visible
+      # to worker waiting just like a directly proposed SpawnWorker.
+      def nested_command_results(command_result)
+        result = command_result.fetch("result", nil)
+        return [] unless result.is_a?(Hash)
+
+        [
+          *Array(result.fetch("command_results", [])),
+          *Array(result.dig("routing", "command_results"))
+        ]
       end
 
       def session_ref_from_agent(agent)

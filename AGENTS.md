@@ -190,6 +190,8 @@ If a head is unsure of a users request, they can ask a question to them, but the
 Instead this question and its prior prompt/thought process will be stored in json for a future head agent whenever the user so chooses to answer that question.
 Don't assume the users next prompt will be an answer to that question though
 
+Heads do get the full open-question records in their context and should judge, per message, whether it answers one of them. If exactly one open question clearly matches, the head treats the message as an answer: it proposes `AnswerQuestion` for that question id and routes the unblocked work in the same result. If several questions are plausible, or the message is plainly a new goal, the head leaves the questions open and routes normally or asks one clarifying question. A head must never close a question without routing the work that answer unblocks.
+
 On spawn the head should have access to 
 - the kernel state and commands
 - the agent tree status
@@ -302,8 +304,8 @@ Do the same thing as coding harnesses for these aswell we want it to be familiar
 
 ### User input routing
 If input starts with `/`, parse it as a slash command and bypass the head agent.
-If input explicitly answers a pending question, route it through `AnswerQuestion` and spawn a fresh head with the original question context plus the answer when useful.
-Otherwise, treat the input as natural language and spawn a fresh stateless head agent.
+If input explicitly answers a pending question with `/answer`, route it through `AnswerQuestion`; the kernel then spawns a fresh head with the original question context plus the answer.
+Otherwise, treat the input as natural language and spawn a fresh stateless head agent. Do not assume in the input layer that a plain message answers an open question; the head decides that from the open questions in its context.
 
 Plain natural language should be the default path. Slash commands are a clutch/fallback interface for precise control, debugging, and recovery.
 
@@ -507,8 +509,10 @@ Fields should include:
 - `issue_id`
 - `question`
 - `context`
+- `original_user_message`: the user message that triggered the question, captured while the asking head still exists
 - `status`: `open`, `answered`, or `dismissed`
 - `answer`
+- `answered_at`
 - `created_at`
 - `updated_at`
 
@@ -604,7 +608,9 @@ or the routing logic determines it is an answer.
 ### `AnswerQuestion(QuestionID, Answer) -> Question`
 Marks a question as answered and stores the answer.
 
-Answering a question may spawn a fresh head with the original question context plus the new answer.
+Answering must not be a silent no-op. When the answer comes from the user, the kernel records the answer, marks the question answered, and then spawns a fresh head carrying the answer plus the original question context: question text, context, `project_id`, `issue_id`, the originating `head_id`, and the user message that triggered the question when it is still recoverable. That head reuses the question's issue, prompts the right existing worker, or creates/spawns as appropriate.
+
+When a head proposes `AnswerQuestion` itself (because it inferred that a free-form message answered an open question), it must pair the answer with the routing commands in the same `HeadResult`. The kernel applies the batch in order and does not spawn a second head for a head-proposed answer.
 
 ### `Kill(TargetID) -> Project | Issue | Agent`
 Kills an agent, issue, or project subtree.
