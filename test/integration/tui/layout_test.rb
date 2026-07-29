@@ -193,6 +193,40 @@ class TuiLayoutTest < Minitest::Test
     assert_operator @layout.agent_workspace_scroll_max(workspace_state, width: 100, height: 20), :>=, 0
   end
 
+  def test_focused_workspace_uses_open_session_to_avoid_colliding_with_settings_inspection
+    advertised = Meringue::TUI::WorkspaceCommands::COMMAND_SPECS.map(&:first)
+
+    assert_includes advertised, "/open-session"
+    refute_includes advertised, "/session"
+    assert_equal "workspace_open_agent_session", Meringue::TUI::WorkspaceCommands.resolve("/open-session").fetch("action")
+    assert_equal "workspace_open_agent_session", Meringue::TUI::WorkspaceCommands.resolve("/session").fetch("action")
+  end
+
+  def test_focused_workspace_labels_effective_session_settings
+    state = demo_state
+    worker = state.fetch("agents").find { |agent| agent.fetch("id") == "P1-I1-W1" }
+    worker["harness"] = "pi"
+    worker["session_settings"] = {
+      "model" => { "reference" => "openai/gpt-5.6-sol" },
+      "thinking_level" => "xhigh",
+      "availability" => "available"
+    }
+    workspace_state = composed_state(
+      state,
+      workspace: {
+        "active" => true,
+        "agent_id" => "P1-I1-W1",
+        "view" => "agent",
+        "filter" => "all",
+        "messages" => []
+      }
+    )
+
+    frame = @layout.render(workspace_state, width: 120, height: 20)
+
+    assert_includes frame, "session settings · model openai/gpt-5.6-sol · thinking xhigh"
+  end
+
   def test_rendering_is_deterministic_for_the_same_state
     first = @layout.render(@state, width: 111, height: 29, color: true)
     second = @layout.render(@state, width: 111, height: 29, color: true)

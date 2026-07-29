@@ -8,7 +8,7 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
-The interactive TUI can update this file for theme changes with `/theme <name>`.
+The interactive TUI updates this file with `/theme <name>`, `/default-model <provider/model>`, and `/default-thinking <level>`.
 
 ## Selecting a TUI colorscheme
 
@@ -168,6 +168,9 @@ Each provider can set its executable command and role-specific extra args.
 [harness.pi]
 command = "pi"
 session_dir = "~/.meringue/pi-sessions"
+# Authoritative values for every future Pi head and worker:
+model = "anthropic/claude-opus-5"
+thinking_level = "max"
 head_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls"]
 worker_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls,edit,write"]
 
@@ -183,7 +186,9 @@ head_extra_args = []
 worker_extra_args = []
 ```
 
-Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). To use a different model or thinking level, set `head_extra_args` / `worker_extra_args` for `[harness.pi]`; a configured array replaces the default array entirely, so include the other flags you still want.
+Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/default-model` and `/default-thinking`, or set `model` and `thinking_level` under `[harness.pi]`, to change both future roles without duplicating their tool flags. These scalar values are appended after `head_extra_args` / `worker_extra_args` and therefore win over model/thinking flags in those arrays. A configured role array still replaces that role's default array entirely, so include every other flag you need.
+
+`/defaults` inspects the future Pi pair. `/model` and `/thinking` remain targeted commands for one existing Pi session and never rewrite future defaults. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
 
 Claude Code runs through `claude --print --output-format stream-json --verbose`; Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace. Live steer/follow-up prompting is currently Pi-only.
 

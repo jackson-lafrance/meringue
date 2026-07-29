@@ -77,6 +77,12 @@ module Meringue
         "theme" => "SetTheme",
         "set_theme" => "SetTheme",
         "get_state" => "GetState",
+        "get_session_defaults" => "GetSessionDefaults",
+        "set_default_session_model" => "SetDefaultSessionModel",
+        "set_default_session_thinking_level" => "SetDefaultSessionThinkingLevel",
+        "get_session_settings" => "GetSessionSettings",
+        "set_session_model" => "SetSessionModel",
+        "set_session_thinking_level" => "SetSessionThinkingLevel",
         "list_questions" => "ListQuestions",
         "reconcile_sessions" => "ReconcileSessions",
         "prune" => "Prune",
@@ -94,6 +100,12 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker agent session."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
+        ["/defaults", "Show the model and thinking level used for all future Pi heads and workers."],
+        ["/default-model <provider/model>", "Persist the model used for all future Pi heads and workers; existing sessions are unchanged."],
+        ["/default-thinking <level>", "Persist the thinking level used for all future Pi heads and workers: off, minimal, low, medium, high, xhigh, or max."],
+        ["/session-settings <agent_id>", "Refresh and show one existing agent's effective Pi session model and thinking level."],
+        ["/model <agent_id> <provider/model>", "Change only one existing Pi session's model; future-session defaults are unchanged."],
+        ["/thinking <agent_id> <level>", "Change only one existing Pi session's thinking level: off, minimal, low, medium, high, xhigh, or max."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "TUI local: open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/keybind", "TUI local: show all keybindings."],
@@ -168,6 +180,8 @@ module Meringue
                      harness_client_provider: nil,
                      head_runner_provider: nil,
                      default_harness_provider: nil,
+                     session_defaults_provider: nil,
+                     session_defaults_updater: nil,
                      workspace_manager: Workspace::Manager.new,
                      cwd: Dir.pwd,
                      async_heads: false,
@@ -182,6 +196,8 @@ module Meringue
         @harness_client_provider = harness_client_provider
         @head_runner_provider = head_runner_provider
         @default_harness_provider = normalize_initial_harness_provider(default_harness_provider || inferred_default_harness_provider)
+        @session_defaults_provider = session_defaults_provider
+        @session_defaults_updater = session_defaults_updater
         @workspace_manager = workspace_manager
         @cwd = File.expand_path(cwd)
         @async_heads = async_heads
@@ -315,6 +331,18 @@ module Meringue
           accepted_result(command_id, command_type, nil, "Loaded Meringue state.", store.load, [])
         when "GetState"
           get_state(command_id, command_type)
+        when "GetSessionDefaults"
+          get_session_defaults(command_id, command_type)
+        when "SetDefaultSessionModel"
+          set_default_session_model(command_id, command_type, payload)
+        when "SetDefaultSessionThinkingLevel"
+          set_default_session_thinking_level(command_id, command_type, payload)
+        when "GetSessionSettings"
+          get_session_settings(command_id, command_type, payload)
+        when "SetSessionModel"
+          set_session_model(command_id, command_type, payload)
+        when "SetSessionThinkingLevel"
+          set_session_thinking_level(command_id, command_type, payload)
         when "ListQuestions"
           list_questions(command_id, command_type)
         when "Help"
@@ -381,6 +409,7 @@ module Meringue
             return accepted_result(nil, "MarkWorkerCompleted", agent.fetch("id"), "Worker #{agent.fetch("id")} is already #{agent.fetch("status")}.", agent, [])
           end
 
+          merge_session_ref_into_agent!(agent, session_ref) if session_ref
           now = timestamp
           agent["status"] = "completed"
           agent["updated_at"] = now
@@ -789,6 +818,314 @@ module Meringue
 
       def get_state(command_id, command_type)
         accepted_result(command_id, command_type, nil, "Loaded Meringue state.", store.load, [])
+      end
+
+      def get_session_defaults(command_id, command_type)
+        state = normalized_state
+        defaults = configured_pi_session_defaults
+        message = pi_session_defaults_message(defaults)
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: nil,
+          level: "info",
+          message: message,
+          details: defaults.merge("config_path" => config_path)
+        )
+        touch_state!(state)
+        store.save(state)
+        accepted_result(command_id, command_type, "pi", message, defaults.merge("config_path" => config_path), log_ids)
+      end
+
+      def set_default_session_model(command_id, command_type, payload)
+        model_reference = value_at(payload, "model", "model_reference", "Model", "ModelReference")
+        return rejected_result(command_id, command_type, "Default Pi model was not changed.", ["model is required"]) if blank?(model_reference)
+        unless model_reference.to_s.match?(%r{\A[^/\s]+/[^/\s]+\z})
+          return rejected_result(
+            command_id,
+            command_type,
+            "Default Pi model was not changed.",
+            ["model must use an exact provider/model id, for example openai/gpt-5.6-sol"]
+          )
+        end
+
+        update_pi_session_defaults(
+          command_id,
+          command_type,
+          model: model_reference.to_s,
+          changed_field: "model"
+        )
+      end
+
+      def set_default_session_thinking_level(command_id, command_type, payload)
+        level = value_at(payload, "level", "thinking_level", "Level", "ThinkingLevel").to_s.strip.downcase
+        unless Meringue::Harness::PiClient::THINKING_LEVELS.include?(level)
+          return rejected_result(
+            command_id,
+            command_type,
+            "Default Pi thinking level was not changed.",
+            ["thinking level must be one of: #{Meringue::Harness::PiClient::THINKING_LEVELS.join(", ")}"]
+          )
+        end
+
+        update_pi_session_defaults(
+          command_id,
+          command_type,
+          thinking_level: level,
+          changed_field: "thinking_level"
+        )
+      end
+
+      def update_pi_session_defaults(command_id, command_type, model: nil, thinking_level: nil, changed_field:)
+        previous = configured_pi_session_defaults
+        defaults = if @session_defaults_updater
+                     @session_defaults_updater.call("pi", model: model, thinking_level: thinking_level)
+                   else
+                     saved = Config.save_pi_session_defaults!(
+                       model: model,
+                       thinking_level: thinking_level,
+                       path: config_path
+                     )
+                     Meringue::Harness::Registry.new(config: saved).session_defaults(provider: "pi")
+                   end
+        defaults = Config.deep_stringify(defaults)
+        state = normalized_state
+        state.fetch("metadata")["pi_session_defaults"] = deep_copy(defaults)
+        unchanged_ids = existing_pi_session_ids(state)
+        value = changed_field == "model" ? defaults.fetch("model", model) : defaults.fetch("thinking_level", thinking_level)
+        label = changed_field == "model" ? "model" : "thinking level"
+        message = "Set the default Pi #{label} to #{value} for all future Pi heads and workers. " \
+                  "Existing Pi sessions were not changed#{unchanged_ids.empty? ? "." : ": #{unchanged_ids.join(", ")}."}"
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: nil,
+          level: "info",
+          message: message,
+          details: {
+            "changed_field" => changed_field,
+            "previous_defaults" => previous,
+            "pi_session_defaults" => defaults,
+            "scope" => "future_pi_sessions",
+            "existing_session_ids_unchanged" => unchanged_ids,
+            "config_path" => config_path
+          }
+        )
+        touch_state!(state)
+        store.save(state)
+        accepted_result(
+          command_id,
+          command_type,
+          "pi",
+          message,
+          defaults.merge(
+            "config_path" => config_path,
+            "existing_session_ids_unchanged" => unchanged_ids
+          ),
+          log_ids
+        )
+      rescue Config::ParseError => e
+        rejected_result(command_id, command_type, "Default Pi session settings were not changed because config could not be read.", [e.message])
+      end
+
+      def configured_pi_session_defaults
+        defaults = if @session_defaults_provider
+                     @session_defaults_provider.call("pi")
+                   else
+                     config = Config.load(path: config_path)
+                     Meringue::Harness::Registry.new(config: config).session_defaults(provider: "pi")
+                   end
+        Config.deep_stringify(defaults)
+      rescue Config::ParseError
+        fallback_pi_session_defaults
+      end
+
+      def fallback_pi_session_defaults
+        model = Meringue::Harness::Registry::DEFAULT_PI_MODEL
+        thinking = Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL
+        {
+          "harness" => "pi",
+          "model" => model,
+          "thinking_level" => thinking,
+          "consistency" => "consistent",
+          "roles" => {
+            "head" => { "model" => model, "thinking_level" => thinking },
+            "worker" => { "model" => model, "thinking_level" => thinking }
+          },
+          "scope" => "future_pi_sessions"
+        }
+      end
+
+      def existing_pi_session_ids(state)
+        state.fetch("agents", []).select do |agent|
+          agent.fetch("harness", nil).to_s == "pi" && agent_has_session_reference?(agent)
+        end.map { |agent| agent.fetch("id", nil) }.compact
+      end
+
+      def pi_session_defaults_message(defaults)
+        model = defaults.fetch("model", nil) || "mixed by role"
+        thinking = defaults.fetch("thinking_level", nil) || "mixed by role"
+        "Future Pi heads and workers use #{model} with thinking #{thinking}. Existing sessions keep their own effective settings."
+      end
+
+      def get_session_settings(command_id, command_type, payload)
+        agent_id = value_at(payload, "agent_id", "target_id", "AgentID", "TargetID")
+        state = normalized_state
+        agent, rejection = session_settings_target(state, command_id, command_type, agent_id)
+        return rejection if rejection
+
+        client = harness_client_for_agent(agent)
+        outcome = client.get_session_settings(agent_session_ref(agent))
+        persist_session_settings_result!(agent, outcome)
+        settings = outcome.fetch("settings")
+        message = session_settings_message(agent.fetch("id"), settings)
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: agent.fetch("id"),
+          level: "info",
+          message: message,
+          details: { "agent_id" => agent.fetch("id"), "session_settings" => settings }
+        )
+        touch_state!(state)
+        store.save(state)
+        accepted_result(command_id, command_type, agent.fetch("id"), message, session_settings_result(agent, settings), log_ids)
+      rescue StandardError => e
+        failed_result(
+          command_id,
+          command_type,
+          "Could not inspect session settings for #{agent_id}: #{sanitized_error_message(e)}",
+          [e.class.name, sanitized_error_message(e)]
+        )
+      end
+
+      def set_session_model(command_id, command_type, payload)
+        agent_id = value_at(payload, "agent_id", "target_id", "AgentID", "TargetID")
+        model_reference = value_at(payload, "model", "model_reference", "Model", "ModelReference")
+        return rejected_result(command_id, command_type, "Session model was not changed.", ["model is required"]) if blank?(model_reference)
+        unless model_reference.to_s.match?(%r{\A[^/\s]+/[^/\s]+\z})
+          return rejected_result(
+            command_id,
+            command_type,
+            "Session model was not changed.",
+            ["model must use an exact provider/model id, for example openai/gpt-5.6-sol"]
+          )
+        end
+
+        state = normalized_state
+        agent, rejection = session_settings_target(state, command_id, command_type, agent_id)
+        return rejection if rejection
+
+        previous = deep_copy(agent.fetch("session_settings", {}) || {})
+        client = harness_client_for_agent(agent)
+        outcome = client.set_session_model(agent_session_ref(agent), model_reference.to_s)
+        persist_session_settings_result!(agent, outcome)
+        settings = outcome.fetch("settings")
+        message = "Updated #{agent.fetch("id")} session model to #{settings.dig("model", "reference") || "unknown"}; " \
+                  "effective thinking is #{settings.fetch("thinking_level", nil) || "unknown"}. This session only; defaults were not changed."
+        log_ids = log_session_settings_update(state, agent, message, previous, settings, "model")
+        accepted_result(command_id, command_type, agent.fetch("id"), message, session_settings_result(agent, settings), log_ids)
+      rescue StandardError => e
+        failed_result(
+          command_id,
+          command_type,
+          "Could not update session model for #{agent_id}: #{sanitized_error_message(e)}",
+          [e.class.name, sanitized_error_message(e)]
+        )
+      end
+
+      def set_session_thinking_level(command_id, command_type, payload)
+        agent_id = value_at(payload, "agent_id", "target_id", "AgentID", "TargetID")
+        level = value_at(payload, "level", "thinking_level", "Level", "ThinkingLevel")
+        return rejected_result(command_id, command_type, "Session thinking level was not changed.", ["thinking level is required"]) if blank?(level)
+
+        state = normalized_state
+        agent, rejection = session_settings_target(state, command_id, command_type, agent_id)
+        return rejection if rejection
+
+        previous = deep_copy(agent.fetch("session_settings", {}) || {})
+        client = harness_client_for_agent(agent)
+        outcome = client.set_session_thinking_level(agent_session_ref(agent), level.to_s)
+        persist_session_settings_result!(agent, outcome)
+        settings = outcome.fetch("settings")
+        message = "Updated #{agent.fetch("id")} session thinking level to #{settings.fetch("thinking_level", nil) || "unknown"}; " \
+                  "effective model is #{settings.dig("model", "reference") || "unknown"}. This session only; defaults were not changed."
+        log_ids = log_session_settings_update(state, agent, message, previous, settings, "thinking_level")
+        accepted_result(command_id, command_type, agent.fetch("id"), message, session_settings_result(agent, settings), log_ids)
+      rescue StandardError => e
+        failed_result(
+          command_id,
+          command_type,
+          "Could not update session thinking level for #{agent_id}: #{sanitized_error_message(e)}",
+          [e.class.name, sanitized_error_message(e)]
+        )
+      end
+
+      def session_settings_target(state, command_id, command_type, agent_id)
+        return [nil, rejected_result(command_id, command_type, "A target agent id is required.", ["agent_id is required"])] if blank?(agent_id)
+
+        agent = find_agent(state, agent_id.to_s)
+        return [nil, rejected_result(command_id, command_type, "Agent #{agent_id} does not exist.", ["agent_not_found"])] unless agent
+        return [nil, rejected_result(command_id, command_type, "Agent #{agent_id} has been killed and is not resumable.", ["session_unavailable"])] if agent.fetch("status", nil) == "killed"
+        unless agent_has_session_reference?(agent)
+          return [nil, rejected_result(command_id, command_type, "Agent #{agent_id} has no harness session.", ["missing_harness_session"])]
+        end
+
+        client = harness_client_for_agent(agent)
+        unless client.respond_to?(:session_settings_supported?) && client.session_settings_supported?
+          harness = agent.fetch("harness", "unknown")
+          return [nil, rejected_result(
+            command_id,
+            command_type,
+            "#{harness} session settings are not supported yet; model and thinking controls are currently Pi-only.",
+            ["unsupported_harness"]
+          )]
+        end
+
+        [agent, nil]
+      end
+
+      def persist_session_settings_result!(agent, outcome)
+        session_ref = outcome.fetch("session_ref")
+        merge_session_ref_into_agent!(agent, session_ref)
+        agent["session_settings"] = deep_copy(outcome.fetch("settings"))
+        agent["updated_at"] = timestamp
+      end
+
+      def log_session_settings_update(state, agent, message, previous, settings, field)
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: agent.fetch("id"),
+          level: "info",
+          message: message,
+          details: {
+            "agent_id" => agent.fetch("id"),
+            "changed_field" => field,
+            "previous_session_settings" => previous,
+            "session_settings" => settings,
+            "scope" => "current_session"
+          }
+        )
+        touch_state!(state)
+        store.save(state)
+        log_ids
+      end
+
+      def session_settings_message(agent_id, settings)
+        model = settings.dig("model", "reference") || "unknown"
+        thinking = settings.fetch("thinking_level", nil) || "unknown"
+        source = settings.fetch("source", "harness")
+        "#{agent_id} session uses #{model} with thinking #{thinking} (source: #{source})."
+      end
+
+      def session_settings_result(agent, settings)
+        {
+          "agent_id" => agent.fetch("id"),
+          "harness" => agent.fetch("harness", nil),
+          "scope" => "current_session",
+          "session_settings" => settings
+        }
       end
 
       def list_questions(command_id, command_type)
@@ -2810,6 +3147,7 @@ module Meringue
         agent["pid"] = session_ref.fetch("pid", agent.fetch("pid", nil))
         agent["harness_session_id"] = session_ref.fetch("session_id", agent.fetch("harness_session_id", nil))
         agent["harness_session_file"] = session_ref.fetch("session_file", agent.fetch("harness_session_file", nil))
+        agent["session_settings"] = deep_copy(session_ref.fetch("session_settings")) if session_ref.fetch("session_settings", nil).is_a?(Hash)
         agent["harness_metadata"] = previous_metadata.merge(
           session_metadata,
           "prompt_count" => previous_metadata.fetch("prompt_count", 0).to_i + 1,
@@ -3459,6 +3797,7 @@ module Meringue
           "pid" => session_ref.fetch("pid", nil),
           "harness_session_id" => session_ref.fetch("session_id", nil),
           "harness_session_file" => session_ref.fetch("session_file", nil),
+          "session_settings" => session_ref.fetch("session_settings", nil).is_a?(Hash) ? deep_copy(session_ref.fetch("session_settings")) : nil,
           "harness_metadata" => session_metadata.merge(
             "title" => display_title,
             "cwd" => session_ref.fetch("cwd", workspace.fetch("workspace_path")),
@@ -3485,6 +3824,7 @@ module Meringue
           "session_file" => agent.fetch("harness_session_file", nil),
           "is_streaming" => metadata.fetch("is_streaming", false),
           "last_event_at" => metadata.fetch("last_event_at", nil),
+          "session_settings" => agent.fetch("session_settings", nil),
           "metadata" => metadata
         }
       end
@@ -3494,6 +3834,7 @@ module Meringue
         agent["pid"] = session_ref.fetch("pid", agent.fetch("pid", nil))
         agent["harness_session_id"] = session_ref.fetch("session_id", agent.fetch("harness_session_id", nil))
         agent["harness_session_file"] = session_ref.fetch("session_file", agent.fetch("harness_session_file", nil))
+        agent["session_settings"] = deep_copy(session_ref.fetch("session_settings")) if session_ref.fetch("session_settings", nil).is_a?(Hash)
         agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
           metadata.merge(
             "cwd" => session_ref.fetch("cwd", metadata.fetch("cwd", agent.fetch("workspace_path", nil))),
@@ -4979,6 +5320,7 @@ module Meringue
         state["metadata"]["active_harness"] = selectable_harness_provider?(internal_harness) ? Meringue::Harness::Registry.public_provider_name(internal_harness) : internal_harness
         state["metadata"]["active_harness_label"] = Meringue::Harness::Registry.provider_label(internal_harness) if selectable_harness_provider?(internal_harness)
         state["metadata"]["harness_generation"] ||= 0
+        state["metadata"]["pi_session_defaults"] = configured_pi_session_defaults
       end
 
       def max_numeric_suffix(records, pattern)
@@ -5271,6 +5613,7 @@ module Meringue
           "session_file" => agent.fetch("harness_session_file", nil),
           "is_streaming" => metadata.fetch("is_streaming", false),
           "last_event_at" => metadata.fetch("last_event_at", nil),
+          "session_settings" => agent.fetch("session_settings", nil),
           "metadata" => metadata.merge("kind" => metadata.fetch("kind", agent.fetch("type", nil)))
         }
       end
@@ -6138,6 +6481,7 @@ module Meringue
         agent["harness_session_id"] = session_ref.fetch("session_id", agent.fetch("harness_session_id", nil))
         agent["harness_session_file"] = session_ref.fetch("session_file", agent.fetch("harness_session_file", nil))
         agent["workspace_path"] ||= session_ref.fetch("cwd", nil)
+        agent["session_settings"] = deep_copy(session_ref.fetch("session_settings")) if session_ref.fetch("session_settings", nil).is_a?(Hash)
         agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
           metadata,
           "cwd" => session_ref.fetch("cwd", metadata.fetch("cwd", nil)),

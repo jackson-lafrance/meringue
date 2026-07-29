@@ -28,8 +28,12 @@ provider = "pi"
 [harness.pi]
 command = "pi"
 session_dir = "~/.meringue/pi-sessions"
-# Defaults to Claude Opus 5 at Pi's maximum thinking level. Override these arrays
-# (the whole array replaces the default) to use a different model or level.
+# Defaults for every future Pi head and worker. The TUI persists these with
+# /default-model and /default-thinking.
+model = "anthropic/claude-opus-5"
+thinking_level = "max"
+# Role arrays still own tools and other Pi flags; the scalar defaults above are
+# appended last if these arrays also contain model/thinking flags.
 head_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 worker_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls,edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 
