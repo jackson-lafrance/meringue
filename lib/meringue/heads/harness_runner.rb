@@ -17,6 +17,9 @@ module Meringue
         @timeout = timeout
       end
 
+      # Convenience entrypoint that owns the whole session lifetime itself. The kernel
+      # instead spawns the session, records it on the head agent record, and awaits the
+      # result so a head owns a tracked harness session for as long as it is alive.
       def run(user_message:, snapshot:, context: nil, question_id: nil)
         context ||= build_context(user_message: user_message, snapshot: snapshot, question_id: question_id)
         session_ref = spawn_head_session(
@@ -26,10 +29,25 @@ module Meringue
           question_id: question_id
         )
 
+        await_head_result(session_ref)
+      ensure
+        close_head_session(session_ref) if session_ref
+      end
+
+      # Waits for an already-spawned head session to settle and parses its HeadResult.
+      # The session is left running so its owner decides when to tear it down.
+      def await_head_result(session_ref)
         wait_for_settled(session_ref)
         parse_head_result_text(last_assistant_text(session_ref).to_s)
-      ensure
-        harness_client.kill_session(session_ref) if session_ref && harness_client.respond_to?(:kill_session)
+      end
+
+      def close_head_session(session_ref)
+        return false unless session_ref && harness_client.respond_to?(:kill_session)
+
+        harness_client.kill_session(session_ref)
+        true
+      rescue StandardError
+        false
       end
 
       def spawn_head_session(user_message:, snapshot:, context: nil, question_id: nil)
