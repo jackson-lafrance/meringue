@@ -23,6 +23,7 @@ agent_select_next = ["j", "down", "right"]
 
 - Click a dashboard section: move focus to that section (the active outline follows the focused section). The logs pane includes user-visible prompts, agent output, and important kernel events.
 - Click a project, issue, head, or worker row in the AgentTree: select/highlight it and filter the logs pane to it. Issue and worker selections also target subsequent natural-language chat through a fresh head. See [AgentTree selection, log filtering, and chat routing](#agenttree-selection-log-filtering-and-chat-routing).
+- Double-click text in the logs pane: select the word under the pointer (see [Text selection and clipboard](#text-selection-and-clipboard)). Double-click tracking is per pane, so tree clicks and text clicks never pair up.
 - Double-click a worker (or an issue with a worker): open its focused workspace. A pending head or issue without a worker is a silent no-op instead of adding an unavailable-session message to chat/log history. This is the primary mouse action; PR opening remains an explicit action.
 - `Tab` / `Ctrl-Tab`: move focus forward.
 - `Shift-Tab`: move focus backward.
@@ -133,10 +134,17 @@ This selection is separate from text selection: it decides which log entries are
 
 Selection is rendered by Meringue itself, so it works without holding `Shift` and without switching the host terminal into its own selection mode. A selection is always scoped to the pane the drag started in: a drag that leaves the logs pane clamps to the logs text area instead of highlighting the AgentTree or the composer.
 
-- Drag with the left mouse button in the logs pane: select log text. The highlight uses the active colorscheme's `SELECTION` style and follows the content while you scroll.
+- Double-click a word in the logs pane: select and highlight that word, and copy it to the system clipboard. The bottom hint line echoes what was copied, for example `⧉ copied "P1-I18-W2"`.
+- Drag with the left mouse button in the logs pane: select log text. The highlight uses the active colorscheme's `SELECTION` style and follows the content while you scroll. Releasing the button copies the highlighted text.
+- Double-click, then drag without releasing: extend the selection by whole words in either direction, including onto other (soft-wrapped) rows.
+- Double-click a word in the chat composer: select that word. Drag from a double-click to extend by word there too. The composer stays copy-on-demand (`Ctrl-C` / `Ctrl-X`), so selecting text you are about to retype never overwrites your clipboard.
 - Drag with the left mouse button in the chat composer: select input text. Clicking without dragging just moves the cursor.
 - `Ctrl-C` / `Alt-C`: copy the selection to the system clipboard. While a selection is active, `Ctrl-C` copies instead of clearing the input or quitting.
-- `Esc`: clear the selection.
+- `Esc`, or a single click anywhere else: clear the selection.
+
+Word boundaries are tuned for what actually shows up in logs: agent ids (`P1-I18-W2`), file references (`lib/meringue/tui/app.rb:643`), and URLs (`https://example.com/pull/12?tab=files`) select whole, while trailing prose punctuation does not (double-clicking `done.` selects `done`, `yes,` selects `yes`). Punctuation runs and brackets are their own selection, and double-clicking blank space selects nothing instead of copying whitespace. Double-click detection needs the second press on the same row within half a second; a slower or further-away second click starts a normal caret/drag selection instead.
+
+A word lives on one wrapped row: log text wraps at whitespace, so only a single token longer than the pane is split, and a word drag then covers each row it crosses.
 - `Shift-Left` / `Shift-Right` / `Shift-Up` / `Shift-Down`: extend the composer selection by character or line.
 - `Shift-Home` / `Shift-End`: extend the composer selection to the start or end of the current line.
 - `Shift-Alt-Left` / `Shift-Ctrl-Left` and `Shift-Alt-Right` / `Shift-Ctrl-Right`: extend the composer selection by word.
@@ -147,6 +155,18 @@ Selection is rendered by Meringue itself, so it works without holding `Shift` an
 Copy uses a local clipboard command when one is available (`pbcopy` on macOS, then `wl-copy`, `xclip`, or `xsel` on Linux) and falls back to the OSC 52 terminal escape so remote sessions can still reach the local clipboard. Paste reads `pbpaste`, `wl-paste`, `xclip`, or `xsel`. The bottom hint line confirms a copy or reports `clipboard unavailable`.
 
 Paste is composer-only; the logs pane is copy-only.
+
+### Using your terminal's own selection instead
+
+Meringue asks the terminal for mouse reports (`1000`/`1002`/`1006`), which is what makes in-app double-click, drag highlighting, click-to-focus, AgentTree clicks, and hover scrolling possible. While that is on, a plain drag no longer reaches the terminal's own selection, so terminals provide a modifier to bypass mouse reporting when you want their native selection (for example to select across panes or into the borders):
+
+| terminal | hold while dragging |
+| --- | --- |
+| iTerm2 | `Option` |
+| macOS Terminal.app | `Fn` |
+| xterm, kitty, Alacritty, WezTerm, GNOME Terminal / VTE, Windows Terminal | `Shift` |
+
+Those terminals handle the modified drag locally and never forward it, so Meringue's own selection stays out of the way. If your terminal does forward it instead, Meringue treats it as a normal drag and still highlights the text, so the gesture is never dead.
 
 ## Keyboard selection in the logs pane
 

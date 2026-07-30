@@ -267,6 +267,7 @@ module Meringue
           Ctrl-Space, then B / P    # open the workspace editor / verified delivery PR
           Ctrl-Space, then Q        # only focused-workspace quit; keep worker and terminal alive
           / in a focused workspace  # workspace commands: /help /terminal /filter /session /editor /pr /cwd /cancel /quit
+          logs double-click         # select the word under the pointer and copy it; drag from it to extend by word
           Alt-V with logs focused   # toggle keyboard logs selection; Shift+arrows also start it
           Ctrl-C with a selection   # copy the selection to the system clipboard
           Ctrl-C on an empty prompt # quit the TUI; Esc clears a selection, then the AgentTree log filter and jump mode
