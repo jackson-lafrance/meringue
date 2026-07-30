@@ -3,11 +3,14 @@
 
 # Smoke coverage (and a visual demo) for the chat composer's target cue.
 #
-# The composer border, title, prompt marker, and bottom chip are tinted with the
-# same per-id color the logs pane already assigns that agent/issue, so the box
-# you type into matches the AgentTree row it will prompt. Everything that is not
-# an issue/agent chat target (a project or unbound head, no selection at all, or
-# a slash command that bypasses the selection) stays deliberately untinted.
+# The composer border, title, and prompt marker are tinted with the same per-id
+# color the logs pane already assigns that agent/issue, so the box you type into
+# matches the AgentTree row it will prompt. Everything that is not an issue/agent
+# chat target (a project or unbound head, no selection at all, or a slash command
+# that bypasses the selection) stays deliberately untinted.
+#
+# The target is named once, in the composer title above the chat bar. The bottom
+# hint line carries gestures only, so these checks assert it never repeats the id.
 #
 # Usage:
 #   ruby scripts/chat_target_smoke.rb            # checks + colored preview
@@ -106,13 +109,22 @@ SCENARIOS.each do |label, selection, buffer, expected_kind|
     [kind == expected_kind, kind]
   end
   title = pane.composer_pane_title(state)
-  chip = plain(ChatTarget.chip_segments(state))
+  hint = plain(ChatTarget.hint_segments(state))
+  bottom_line = plain(pane.bottom_hint_line(state))
   tinted = !pane.composer_border_style(state, active: true).nil?
   check("composer title names the destination") { [!title.empty?, title] }
-  check("chip explains routing") { [!chip.empty?, chip] }
+  check("the bottom line never repeats the target id") do
+    ids = %w[P1-I1-W1 P1-I1 H7 P1].select { |id| title.include?(id) }
+    [ids.none? { |id| bottom_line.include?(id) }, "#{ids.inspect} | #{bottom_line}"]
+  end
+  if selection
+    check("the bottom line keeps the clear gesture") { [hint.include?("Esc clears"), hint] }
+  else
+    check("nothing selected contributes nothing to the bottom line") { [hint.empty?, hint] }
+  end
   if expected_kind == "agent" || expected_kind == "issue"
     tint_id = ChatTarget.presentation(state).fetch("tint_id")
-    check("border/title/chip are tinted from the target's own log color") do
+    check("border/title are tinted from the target's own log color") do
       border = pane.composer_border_style(state, active: false)
       [border == Style.agent_body_style(tint_id) &&
         pane.composer_title_style(state) == Style.agent_chrome_style(tint_id, bold: true), tint_id]
@@ -121,7 +133,7 @@ SCENARIOS.each do |label, selection, buffer, expected_kind|
       row = composer_preview(state).find { |line| strip_ansi(line).include?("chat →") }
       [row && (!COLOR || row.include?(Style.agent_chrome_style(tint_id, bold: true))), strip_ansi(row.to_s).strip]
     end
-    check("the clear gesture stays visible") { [chip.include?("Esc clears"), chip] }
+    check("the bottom line says a head still routes the message") { [hint.include?("head routes"), hint] }
   else
     check("composer stays untinted") { [!tinted, "tinted=#{tinted}"] }
     check("composer says a head routes the message or that slash bypasses it") do

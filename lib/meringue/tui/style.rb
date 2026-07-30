@@ -93,7 +93,7 @@ module Meringue
         agent_styles.fetch(WORKER_AGENT_KIND).fetch(agent_palette_index(agent_id))
       end
 
-      # Chrome (composer border, pane title, target chip) tinted to one id's
+      # Chrome (composer border, pane title, `›` prompt marker) tinted to one id's
       # palette entry. This is the same assignment agent log lines use, so the
       # chat box can match the agent/issue it will prompt instead of introducing
       # a second palette. Issue ids hash through the same function, so an issue

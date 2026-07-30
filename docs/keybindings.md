@@ -93,18 +93,23 @@ Chat routing uses the same selection without turning the dashboard into a direct
 
 The chat box itself changes to match the row it will prompt, so a stale selection cannot be missed while typing.
 
-| state | composer title | border / title / `›` / chip | bottom chip |
+The destination is named in exactly one place: the composer's pane title, on the border row directly above the chat bar. The hint line below the chat bar never repeats it and carries gestures only, so the same id is not printed twice one row apart and the delivery-PR indicator and interaction hints keep that width on a narrow terminal.
+
+| state | composer title (above the chat bar) | border / title / `›` | hint line (below the chat bar) |
 | --- | --- | --- | --- |
-| worker or head with an issue (`P1-I9-W3`) | `chat → P1-I9-W3 · <issue title>` | tinted with that agent's own log color | `⌖ target: P1-I9-W3 → P1-I9  head routes · Esc clears` |
-| issue (`P1-I9`) | `chat → P1-I9 · <issue title>` | tinted with that issue id's color | `⌖ target: P1-I9  head routes · Esc clears` |
-| project or unbound head (log-only) | `chat · head routes · P1 logs only` | theme default, never tinted | `⌖ logs: P1  chat → head routes · Esc clears` |
-| nothing selected | `chat · head routes` | theme default, never tinted | `⌖ no target` |
-| buffer starts with `/` | `chat · slash command · P1-I9-W3 not targeted` | theme default, never tinted | `⌖ P1-I9-W3  slash ignores target · Esc clears` |
+| worker or head with an issue (`P1-I9-W3`) | `chat → P1-I9-W3 · <issue title>` | tinted with that agent's own log color | `head routes · Esc clears` |
+| issue (`P1-I9`) | `chat → P1-I9 · <issue title>` | tinted with that issue id's color | `head routes · Esc clears` |
+| project or unbound head (log-only) | `chat · head routes · P1 logs only` | theme default, never tinted | `head routes · Esc clears` |
+| nothing selected | `chat · head routes` | theme default, never tinted | nothing — no target to explain, nothing to clear |
+| buffer starts with `/` | `chat · slash command · P1-I9-W3 not targeted` | theme default, never tinted | `slash ignores target · Esc clears` |
+
+- A worker id already contains its issue id (`P1-I9-W3` → `P1-I9`), so the title does not repeat it. An agent whose id does not encode its issue (a head bound to one) reads `chat → H12 → P1-I9 · <issue title>` instead, so the resolved issue is still named.
+- A slash command with nothing selected also contributes nothing to the hint line; the title already reads `chat · slash command`.
 
 - The tint is the *same* per-id color the logs pane and the AgentTree already give that agent (the active colorscheme's identity palette, `AGENT_PALETTE` in `lib/meringue/tui/style.rb`; see [AgentTree agent colors and harness logos](#agenttree-agent-colors-and-harness-logos)), so a tinted composer visibly belongs to the tree row, the log rows, and the `▌` gutter of the node it prompts. Issue ids hash through the same function, so an issue selection gets a stable color too, and an issue and a worker under it are never the same color.
-- Only the composer chrome is tinted: the border, the pane title, the `›` prompt marker, and the chip. Typed text, the placeholder, and text selection keep their normal semantic styles, so input contrast does not depend on which palette slot the target hashed into. This holds in all shipped colorschemes (`catppuccin`, `gruvbox`, `kanagawa`, `meringue`, `rose-pine`, `tokyonight`).
+- Only the composer chrome is tinted: the border, the pane title, and the `›` prompt marker. Typed text, the placeholder, and text selection keep their normal semantic styles, so input contrast does not depend on which palette slot the target hashed into. This holds in all shipped colorschemes (`catppuccin`, `gruvbox`, `kanagawa`, `meringue`, `rose-pine`, `tokyonight`).
 - A focused composer stays distinguishable from an unfocused one by using the bold weight of the same hue instead of switching back to the focus border color.
-- Color is never the only cue. The title always names the destination, the chip always says who routes the message and how to clear it, and an empty targeted composer's placeholder reads `message P1-I9-W3`. With `NO_COLOR=1`, a 16-color terminal, or a screenshot, the text still says exactly where the prompt is going.
+- Color is never the only cue. The title always names the destination, the hint line always says who routes the message and how to clear the selection, and an empty targeted composer's placeholder reads `message P1-I9-W3`. With `NO_COLOR=1`, a 16-color terminal, or a screenshot, the text still says exactly where the prompt is going.
 - Typing a slash command removes the tint immediately, because slash commands never inherit the selection. The selection itself is untouched: delete the `/` and the tint (and the routing target) come back.
 - A selection the kernel or reconciliation drops (pruned, killed, renumbered) also drops the tint, so a colored composer always refers to a node that still exists.
 
@@ -112,7 +117,7 @@ The selection is sticky and independent of focus:
 
 - The selected row stays highlighted while the logs pane, the chat pane, or the composer is focused, so the filter is always visible. When the selection changes it is scrolled back into view by the minimum amount, exactly like a jump-mode selection.
 - Scrolling the AgentTree (arrows, page keys, `Home` / `End`, or the mouse wheel) never changes or clears the selection, and the offset you chose by hand is not yanked back while the selection stays the same.
-- The logs pane title becomes `logs — <id>` (for example `logs — P1-I9-W3`). The composer title, its tint, and the bottom chip follow the same selection; see [The composer shows its target by color](#the-composer-shows-its-target-by-color).
+- The logs pane title becomes `logs — <id>` (for example `logs — P1-I9-W3`). The composer title, its tint, and the hint line's clear gesture follow the same selection; see [The composer shows its target by color](#the-composer-shows-its-target-by-color).
 - A filtered pane with nothing to show says so and repeats how to change or clear the filter, so it never looks broken.
 - Double-clicking a pending head or an issue without a worker does not open a focused workspace and does not add or persist repetitive `has no agent session to open yet` messages. Explicit unavailable actions may use a short-lived hint; unexpected workspace/launcher failures remain visible errors.
 

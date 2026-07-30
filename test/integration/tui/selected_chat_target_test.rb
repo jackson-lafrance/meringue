@@ -55,13 +55,15 @@ class TuiSelectedChatTargetTest < Minitest::Test
 
     pane = Meringue::TUI::Panes::ChatPane.new
     assert_equal "logs — P1-I1-W1", pane.log_pane_title(composed)
-    # The composer names the clicked agent plus its issue's short title, and the
-    # chip resolves it to the durable issue a fresh head will receive.
+    # The composer title is the one place the target is named: the clicked agent
+    # plus its issue's short title. The worker id already contains the durable
+    # issue id a fresh head will receive.
     assert_equal "chat → P1-I1-W1 · Fix retries", pane.composer_pane_title(composed)
+    # The line below the chat bar carries gestures only, so it does not repeat it.
     hint = plain_line(pane.bottom_hint_line(composed))
-    assert_includes hint, "target: P1-I1-W1 → P1-I1"
     assert_includes hint, "head routes"
     assert_includes hint, "Esc clears"
+    refute_includes hint, "P1-I1-W1"
   end
 
   def test_issue_selection_targets_the_issue_directly_and_can_be_changed_or_cleared
