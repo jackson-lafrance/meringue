@@ -5,18 +5,15 @@ require "support/tui_support"
 
 # Rendering coverage for agent identity in the AgentTree.
 #
-# Every agent row shows its harness logo and its identity color, in every
-# lifecycle status: a working agent and one with a completion check mark are
-# equally identifiable. The color is the same per-id assignment the logs pane
-# and the chat composer use (Style::AGENT_PALETTE via Style.agent_palette_index),
-# so one agent is one color everywhere. Status stays legible next to it, and the
-# logo column is exactly one cell wide for every harness, known or not.
+# Agent rows use the per-id color assignment from the logs pane and chat
+# composer, but they do not render or reserve a harness logo column. Status stays
+# legible next to the id through the status glyph's own semantic color and the
+# muted title of completed rows.
 class TuiAgentTreeIdentityTest < Minitest::Test
   include TUISupport
 
   Pane = Meringue::TUI::Panes::AgentTreePane
   Style = Meringue::TUI::Style
-  Registry = Meringue::Harness::Registry
 
   ALL_STATUSES = Pane::STATUS_DOTS.keys.freeze
 
@@ -24,7 +21,7 @@ class TuiAgentTreeIdentityTest < Minitest::Test
     @pane = Pane.new
   end
 
-  def test_working_and_completed_agents_both_carry_their_color_and_logo
+  def test_working_and_completed_agents_both_carry_their_color_without_a_logo
     state = agent_tree(
       agent_record("P1-I1-W1", "issue_id" => "P1-I1", "status" => "working", "harness" => "pi",
                                "harness_metadata" => { "title" => "live work" }),
@@ -34,9 +31,11 @@ class TuiAgentTreeIdentityTest < Minitest::Test
     live = row(state, "live work")
     done = row(state, "done work")
 
-    assert_includes plain_line(live), "● π W1"
-    assert_includes plain_line(done), "✓ π W2"
-    # Identity color on the logo and the id, for both statuses.
+    assert_includes plain_line(live), "● W1"
+    assert_includes plain_line(done), "✓ W2"
+    refute_includes plain_line(live), "π"
+    refute_includes plain_line(done), "π"
+    # Identity color on the id, for both statuses.
     assert_includes styles_in(live), Style.agent_body_style("P1-I1-W1")
     assert_includes styles_in(done), Style.agent_body_style("P1-I1-W2")
     refute_equal Style.agent_body_style("P1-I1-W1"), Style.agent_body_style("P1-I1-W2")
@@ -48,7 +47,7 @@ class TuiAgentTreeIdentityTest < Minitest::Test
     assert_includes styles_in(done), Style::MUTED
   end
 
-  def test_every_lifecycle_status_keeps_the_identity_color_and_logo
+  def test_every_lifecycle_status_keeps_the_identity_color_without_a_logo
     agents = ALL_STATUSES.each_with_index.map do |status, index|
       agent_record(
         "P1-I1-W#{index + 1}",
@@ -65,13 +64,14 @@ class TuiAgentTreeIdentityTest < Minitest::Test
       line = row(state, "#{status} worker")
       text = plain_line(line)
 
-      assert_includes text, "#{Pane::STATUS_DOTS.fetch(status)} π W#{index + 1}", "#{status} row layout"
+      assert_includes text, "#{Pane::STATUS_DOTS.fetch(status)} W#{index + 1}", "#{status} row layout"
+      refute_includes text, "π", "#{status} row should not render a harness logo"
       assert_includes styles_in(line), Style.agent_body_style(id), "#{status} row identity color"
       assert_includes styles_in(line), Pane::STATUS_STYLES.fetch(status), "#{status} row status color"
     end
   end
 
-  def test_heads_carry_their_identity_color_and_render_their_logo_bold
+  def test_heads_carry_their_identity_color_without_a_harness_mark
     state = agent_tree(
       agent_record("H1", "status" => "working", "harness" => "pi", "harness_metadata" => { "title" => "routing head" }),
       agent_record("H2", "status" => "completed", "harness" => "pi", "harness_metadata" => { "title" => "settled head" })
@@ -79,10 +79,10 @@ class TuiAgentTreeIdentityTest < Minitest::Test
 
     %w[H1 H2].each_with_index do |id, index|
       line = row(state, index.zero? ? "routing head" : "settled head")
+      expected_status = index.zero? ? "●" : "✓"
 
-      assert_includes plain_line(line), "π #{id}"
-      # Bold logo like the head's log header, plain id in the same hue.
-      assert_includes styles_in(line), Style.agent_style(id, kind: "head")
+      assert_includes plain_line(line), "#{expected_status} #{id}"
+      refute_includes plain_line(line), "π"
       assert_includes styles_in(line), Style.agent_body_style(id)
     end
   end
@@ -134,67 +134,26 @@ class TuiAgentTreeIdentityTest < Minitest::Test
     assert_nil workspace_pane.title_style(composed_state(empty_state))
   end
 
-  def test_each_shipped_harness_has_its_own_single_cell_logo
+  def test_harness_providers_do_not_render_or_reserve_symbols_in_the_tree
     state = agent_tree(
       agent_record("P1-I1-W1", "issue_id" => "P1-I1", "harness" => "pi", "harness_metadata" => { "title" => "pi work" }),
       agent_record("P1-I1-W2", "issue_id" => "P1-I1", "harness" => "claude", "harness_metadata" => { "title" => "claude work" }),
-      agent_record("P1-I1-W3", "issue_id" => "P1-I1", "harness" => "cc", "harness_metadata" => { "title" => "aliased work" }),
-      agent_record("P1-I1-W4", "issue_id" => "P1-I1", "harness" => "antigravity", "harness_metadata" => { "title" => "antigravity work" })
+      agent_record("P1-I1-W3", "issue_id" => "P1-I1", "harness" => "antigravity", "harness_metadata" => { "title" => "antigravity work" }),
+      agent_record("P1-I1-W4", "issue_id" => "P1-I1", "harness" => "mystery", "harness_metadata" => { "title" => "unknown harness" })
     )
 
-    assert_includes plain_line(row(state, "pi work")), "π W1"
-    assert_includes plain_line(row(state, "claude work")), "✳ W2"
-    # Provider aliases resolve to the same logo as their canonical name.
-    assert_includes plain_line(row(state, "aliased work")), "✳ W3"
-    assert_includes plain_line(row(state, "antigravity work")), "↑ W4"
-    Registry::PROVIDER_GLYPHS.each_value { |glyph| assert_equal 1, glyph.length }
-    Registry::PROVIDER_ASCII_GLYPHS.each_value { |glyph| assert_equal 1, glyph.length }
+    assert_includes plain_line(row(state, "pi work")), "● W1  pi work"
+    assert_includes plain_line(row(state, "claude work")), "● W2  claude work"
+    assert_includes plain_line(row(state, "antigravity work")), "● W3  antigravity work"
+    assert_includes plain_line(row(state, "unknown harness")), "● W4  unknown harness"
+    rendered = plain_lines(@pane.lines(state, width: 60)).join("\n")
+    %w[π ✳ ↑].each { |glyph| refute_includes rendered, glyph }
+    refute_match(/●\s{2,}W\d/, rendered, "status and id should be separated by one space")
   end
 
-  # An unknown or missing harness must never widen the column or claim to be a
-  # shipped backend.
-  def test_unknown_and_missing_harnesses_fall_back_to_plain_ascii
-    state = agent_tree(
-      agent_record("P1-I1-W1", "issue_id" => "P1-I1", "harness" => "mystery", "harness_metadata" => { "title" => "unknown harness" }),
-      agent_record("P1-I1-W2", "issue_id" => "P1-I1", "harness" => nil, "harness_metadata" => { "title" => "no harness" }),
-      agent_record("P1-I1-W3", "issue_id" => "P1-I1", "harness" => "   ", "harness_metadata" => { "title" => "blank harness" }),
-      agent_record("P1-I1-W4", "issue_id" => "P1-I1", "harness" => "!!", "harness_metadata" => { "title" => "junk harness" })
-    )
-
-    assert_includes plain_line(row(state, "unknown harness")), "m W1"
-    assert_includes plain_line(row(state, "no harness")), "? W2"
-    assert_includes plain_line(row(state, "blank harness")), "? W3"
-    assert_includes plain_line(row(state, "junk harness")), "? W4"
-    assert_equal "?", Registry.provider_glyph(nil)
-    assert_equal "?", Registry.provider_glyph("")
-    # A blank harness must not inherit the default provider's logo.
-    refute_equal Registry::PROVIDER_GLYPHS.fetch("pi"), Registry.provider_glyph("")
-    # An unknown harness still keeps its identity color.
-    assert_includes styles_in(row(state, "unknown harness")), Style.agent_body_style("P1-I1-W1")
-  end
-
-  def test_ascii_glyph_mode_swaps_every_logo_for_its_ascii_twin
-    state = agent_tree(
-      agent_record("P1-I1-W1", "issue_id" => "P1-I1", "harness" => "pi", "harness_metadata" => { "title" => "pi work" }),
-      agent_record("P1-I1-W2", "issue_id" => "P1-I1", "harness" => "claude", "harness_metadata" => { "title" => "claude work" }),
-      agent_record("P1-I1-W3", "issue_id" => "P1-I1", "harness" => "antigravity", "harness_metadata" => { "title" => "antigravity work" })
-    )
-
-    with_env("MERINGUE_ASCII_GLYPHS" => "1") do
-      assert_includes plain_line(row(state, "pi work")), "p W1"
-      assert_includes plain_line(row(state, "claude work")), "c W2"
-      assert_includes plain_line(row(state, "antigravity work")), "a W3"
-      rendered = plain_lines(@pane.lines(state, width: 60)).join("\n")
-      Registry::PROVIDER_GLYPHS.each_value { |glyph| refute_includes rendered, glyph }
-    end
-
-    assert_includes plain_line(row(state, "pi work")), "π W1"
-  end
-
-  # Issue and project rows have no harness of their own, so they reserve the
-  # logo cell instead. Ids therefore stay in one column even when a child issue
-  # and a worker are siblings at the same depth.
-  def test_issue_and_project_rows_reserve_the_logo_cell_so_ids_stay_aligned
+  # Issue and worker rows at the same depth should keep their ids aligned, but
+  # neither row gets the old harness-logo reservation between status and id.
+  def test_issue_and_worker_rows_align_ids_without_a_reserved_logo_cell
     state = agent_tree(
       agent_record("P1-I1-W1", "issue_id" => "P1-I1", "harness" => "pi", "harness_metadata" => { "title" => "sibling worker" }),
       issues: [
@@ -206,8 +165,10 @@ class TuiAgentTreeIdentityTest < Minitest::Test
     child_issue = plain_line(row(state, "sibling issue"))
 
     assert_equal worker.index("W1"), child_issue.index("I2"), "sibling ids share one column"
-    assert_includes plain_line(row(state, "Project P1")), "●   P1"
-    assert_includes child_issue, "●   I2"
+    assert_includes plain_line(row(state, "Project P1")), "● P1"
+    assert_includes child_issue, "● I2"
+    refute_includes child_issue, "●   I2"
+    refute_includes worker, "● π W1"
   end
 
   def test_selected_rows_keep_their_high_contrast_selection_styling
@@ -217,9 +178,8 @@ class TuiAgentTreeIdentityTest < Minitest::Test
     )
     line = row(state, "picked worker")
 
-    # The logo survives selection, but the identity foreground gives way to the
-    # selection palette so contrast on the highlight is guaranteed.
-    assert_includes plain_line(line), "π W1"
+    assert_includes plain_line(line), "● W1"
+    refute_includes plain_line(line), "π"
     assert_includes styles_in(line), Style::AGENT_TREE_SELECTED_STATUS
     refute_includes styles_in(line), Style.agent_body_style("P1-I1-W1")
   end
@@ -238,8 +198,6 @@ class TuiAgentTreeIdentityTest < Minitest::Test
     assert_equal @pane.line_item_ids(base, width: 34), @pane.line_item_ids(selected, width: 34)
   end
 
-  # Wrapped rows hang under the id, so the reserved logo cell has to be part of
-  # the continuation indent too.
   def test_wrapped_agent_rows_stay_aligned_under_their_id
     state = agent_tree(
       agent_record("P1-I1-W1", "issue_id" => "P1-I1", "harness" => "pi",
@@ -279,7 +237,7 @@ class TuiAgentTreeIdentityTest < Minitest::Test
     end
   end
 
-  def test_pane_rows_never_exceed_the_requested_width_with_logos
+  def test_pane_rows_never_exceed_the_requested_width_without_logos
     state = agent_tree(
       agent_record("P1-I1-W1", "issue_id" => "P1-I1", "harness" => "pi", "harness_metadata" => { "title" => "a" * 120 }),
       agent_record("P1-I1-W2", "issue_id" => "P1-I1", "harness" => "mystery", "harness_metadata" => { "title" => "b" * 120 })
