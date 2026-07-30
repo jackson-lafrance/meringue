@@ -103,9 +103,9 @@ class TuiChatPaneTest < Minitest::Test
   def test_bottom_hint_line_reports_active_agents_open_questions_and_pending_prompts
     demo = plain_line(@pane.bottom_hint_line(composed_state(demo_state)))
 
-    assert_includes demo, "● active"
-    assert_includes demo, "1W"
-    assert_includes demo, "1H"
+    # The lit dot plus the counts carry the meaning; the word "active" did not.
+    assert_includes demo, "● 1W 1H"
+    refute_includes demo, "active"
     assert_includes demo, "? 1"
 
     pending = plain_line(@pane.bottom_hint_line(composed_state(empty_state, chat: { "pending_count" => 2 })))
@@ -147,9 +147,9 @@ class TuiChatPaneTest < Minitest::Test
     )
     text = plain_line(@pane.bottom_hint_line(state))
 
-    assert_includes text, "PR #9"
-    assert_includes text, "open"
-    assert_includes text, "Ctrl-B open"
+    assert_includes text, "PR #9 open"
+    # Ctrl-B is a documented keybinding, not an inline label repeated every frame.
+    refute_includes text, "Ctrl-B"
   end
 
   def test_untracked_delivery_pr_reports_its_state_instead_of_an_open_hint
@@ -159,10 +159,10 @@ class TuiChatPaneTest < Minitest::Test
     )
     text = plain_line(@pane.bottom_hint_line(state))
 
-    # No verified delivery PR is tracked for the issue, so the hint reports the
-    # unavailable state instead of an openable link.
-    assert_includes text, "PR unavailable"
-    refute_includes text, "Ctrl-B open"
+    # No verified delivery PR is tracked for the issue, so the hint says that in
+    # plain words instead of reading like a failed lookup ("PR unavailable").
+    assert_includes text, "no PR yet"
+    refute_includes text, "Ctrl-B"
     assert_equal "not tracked", Meringue::TUI::DeliveryPullRequest.status_label(nil)
   end
 

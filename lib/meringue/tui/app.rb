@@ -131,6 +131,10 @@ module Meringue
         # from the jump-mode cursor because projects are selectable here, and it
         # deliberately survives focus changes.
         @log_scope_id = nil
+        # Open-PR picker: only meaningful for unscoped chat, where there is no one
+        # PR to open. It is transient UI, so it is never persisted.
+        @delivery_pr_picker_active = false
+        @delivery_pr_picker_index = 0
         @workspace_draft = ""
         @workspace_agent_scroll_offset = 0
         @workspace_terminal_scroll_offset = 0
@@ -350,6 +354,11 @@ module Meringue
 
         if @agent_workspace_active
           return handle_agent_workspace_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
+
+        if @delivery_pr_picker_active
+          picker_result = handle_delivery_pr_picker_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+          return picker_result if picker_result
         end
 
         if paste_key?(key)
@@ -2065,6 +2074,9 @@ module Meringue
         # The logs caret belongs to the dashboard logs pane, so opening the
         # focused workspace disarms it instead of leaving Ctrl-C bound to copy.
         deactivate_logs_cursor_quietly
+        # The open-PR picker is dashboard chrome, so it must not survive into the
+        # focused workspace and reappear on return.
+        close_delivery_pr_picker
         @agent_workspace_active = true
         @force_full_redraw = true
         @agent_workspace_agent_id = agent.fetch("id")
@@ -2154,14 +2166,20 @@ module Meringue
         end
       end
 
+      # Ctrl-B has two honest meanings. With one node in view it opens that node's
+      # delivery PR. Unscoped, there is no single PR to mean, so it opens the picker
+      # over every PR that is still open instead of guessing.
       def open_workspace_delivery_pr(state)
-        agent_id = if @agent_workspace_active
-                     @agent_workspace_agent_id
-                   elsif @agent_tree_navigation_active
-                     normalized_selected_agent_id(state)
-                   else
-                     @agent_workspace_agent_id
-                   end
+        return open_delivery_pr_for_id(state, @agent_workspace_agent_id) if @agent_workspace_active
+        return open_delivery_pr_for_id(state, normalized_selected_agent_id(state)) if @agent_tree_navigation_active
+
+        scoped_id = DeliveryPullRequest.scoped_id(state)
+        return open_delivery_pr_for_id(state, scoped_id) unless scoped_id.empty?
+
+        open_delivery_pr_picker(state)
+      end
+
+      def open_delivery_pr_for_id(state, agent_id)
         if agent_id.to_s.empty?
           append_jump_response("Select a worker before opening its delivery pull request.")
           return false
@@ -2179,6 +2197,108 @@ module Meringue
         opened
       rescue StandardError => e
         append_jump_response("Could not open delivery pull request for #{agent_id}: #{e.message}")
+        false
+      end
+
+      def delivery_pr_picker_snapshot
+        return nil unless @delivery_pr_picker_active
+
+        { "active" => true, "index" => @delivery_pr_picker_index }
+      end
+
+      def open_delivery_pr_picker(state)
+        entries = OpenPullRequests.entries(state)
+        if entries.empty?
+          # Expected unavailability, so it stays a transient hint rather than a
+          # durable log line or an empty popup.
+          append_jump_response(OpenPullRequests.tracked?(state) ? "No delivery pull requests are open right now." : "No delivery pull requests are tracked yet.")
+          return false
+        end
+
+        @delivery_pr_picker_active = true
+        @delivery_pr_picker_index = @delivery_pr_picker_index.to_i.clamp(0, entries.length - 1)
+        true
+      end
+
+      def close_delivery_pr_picker
+        @delivery_pr_picker_active = false
+      end
+
+      # A small modal list: it owns the arrow keys, Enter, Esc, and clicks while it
+      # is up. Any other key closes it and is then handled normally, so the picker
+      # can never trap the composer.
+      def handle_delivery_pr_picker_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
+        entries = OpenPullRequests.entries(state)
+        return handle_delivery_pr_picker_mouse(key, unchanged, state, entries) if mouse_event?(key)
+
+        if keybinding?("suggestion_previous", key)
+          move_delivery_pr_picker(-1, entries.length)
+          return unchanged
+        end
+        if keybinding?("suggestion_next", key)
+          move_delivery_pr_picker(1, entries.length)
+          return unchanged
+        end
+        if keybinding?("submit", key)
+          open_delivery_pr_entry(selected_delivery_pr_entry(entries))
+          close_delivery_pr_picker
+          return unchanged
+        end
+        if keybinding?("cancel_navigation", key) || keybinding?("open_delivery_pr", key)
+          close_delivery_pr_picker
+          return unchanged
+        end
+
+        close_delivery_pr_picker
+        nil
+      end
+
+      def handle_delivery_pr_picker_mouse(key, unchanged, state, entries)
+        return unchanged unless mouse_button_press?(key) || mouse_wheel?(key)
+
+        hit = layout.delivery_pr_picker_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+        if mouse_wheel?(key)
+          return nil if hit == :outside
+
+          move_delivery_pr_picker(mouse_wheel_up?(key) ? -1 : 1, entries.length)
+          return unchanged
+        end
+
+        # Click-away dismisses; a click on a row opens it.
+        if hit.is_a?(Integer)
+          open_delivery_pr_entry(entries[hit])
+          close_delivery_pr_picker
+        elsif hit == :outside
+          close_delivery_pr_picker
+        end
+        unchanged
+      end
+
+      def move_delivery_pr_picker(step, count)
+        return if count <= 0
+
+        @delivery_pr_picker_index = (@delivery_pr_picker_index.to_i + step) % count
+      end
+
+      # The list is rebuilt from state every frame, so a PR that merged (and left
+      # the list) must not leave the highlight pointing past the end.
+      def selected_delivery_pr_entry(entries)
+        return nil if entries.empty?
+
+        entries[@delivery_pr_picker_index.to_i.clamp(0, entries.length - 1)]
+      end
+
+      def open_delivery_pr_entry(entry)
+        return false unless entry
+
+        result = pull_request_opener.open(entry.fetch("url"))
+        return true if open_succeeded?(result)
+
+        append_jump_response(result.fetch("message", "Could not open pull request ##{entry.fetch("number", "?")}."))
+        false
+      rescue StandardError => e
+        append_jump_response("Could not open pull request ##{entry.fetch("number", "?")}: #{e.message}")
         false
       end
 
@@ -3191,7 +3311,8 @@ module Meringue
             "input_cursor" => clamp_cursor(input_buffer, input_cursor || input_buffer.chars.length),
             "slash_suggestion_index" => slash_suggestion_index,
             "selection" => @chat_selection,
-            "pending_count" => @pending_count
+            "pending_count" => @pending_count,
+            "delivery_pr_picker" => delivery_pr_picker_snapshot
           }
         end
       end
