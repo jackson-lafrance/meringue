@@ -23,6 +23,11 @@ module Meringue
         ["/model <agent_id> <provider/model>", "Change only one existing Pi session's model; defaults are unchanged."],
         ["/thinking <agent_id> <level>", "Change only one existing Pi session's thinking level; defaults are unchanged."],
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
+        ["/goal create <issue_id> \"<success criteria>\" --metric \"<command>\" --target <number> [flags]", "Attach a goal loop to an issue: iterate until the metric hits its target or a budget guard trips."],
+        ["/goal status [goal_id]", "Show goal loops, iteration accounting, and stop reasons."],
+        ["/goal pause <goal_id>", "Pause a goal loop; the current attempt finishes but nothing new is spawned."],
+        ["/goal resume <goal_id>", "Resume a paused goal loop."],
+        ["/goal stop <goal_id>", "Stop a goal loop for good, leaving its current attempt session alone."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/keybind", "Show all TUI keybindings."],
@@ -53,8 +58,44 @@ module Meringue
         { "prefix" => "/theme", "source" => "themes", "append_space" => false },
         { "prefix" => "/jump", "source" => "agents", "append_space" => false },
         { "prefix" => "/answer", "source" => "open_questions", "append_space" => true },
-        { "prefix" => "/dismiss", "source" => "open_questions", "append_space" => false }
+        { "prefix" => "/dismiss", "source" => "open_questions", "append_space" => false },
+        { "prefix" => "/goal create", "source" => "issues", "append_space" => true },
+        { "prefix" => "/goal status", "source" => "goals", "append_space" => false },
+        { "prefix" => "/goal pause", "source" => "goals", "append_space" => false },
+        { "prefix" => "/goal resume", "source" => "goals", "append_space" => false },
+        { "prefix" => "/goal stop", "source" => "goals", "append_space" => false }
       ].freeze
+
+      GOAL_USAGE_MESSAGE = <<~USAGE.strip
+        Usage: /goal create <issue_id> "<success criteria>" --metric "<command>" --target <number> [--comparator gte|lte|gt|lt|eq] [--max-iterations <n>] [--max-workers <n>] [--min-delta <n>] [--no-progress <n>] [--guardrail "<command>"] [--parse last_number|first_number|exit_status|regex|json_path] [--pattern "<regex>"] [--json-path <path>] [--metric-cwd workspace|project_root] [--title "<title>"] [--fresh-attempt] [--paused]
+               /goal status [goal_id] | /goal pause <goal_id> | /goal resume <goal_id> | /goal stop <goal_id>
+      USAGE
+      # Flags that take a following value, so a missing value is reported instead of silently
+      # swallowing the next token.
+      GOAL_VALUE_FLAGS = {
+        "--metric" => "metric_command",
+        "--target" => "target",
+        "--comparator" => "comparator",
+        "--max-iterations" => "max_iterations",
+        "--max-workers" => "max_workers",
+        "--max-seconds" => "max_wall_clock_seconds",
+        "--min-delta" => "min_metric_delta",
+        "--no-progress" => "max_consecutive_no_progress",
+        "--cooldown" => "min_seconds_between_iterations",
+        "--guardrail" => "guardrails",
+        "--parse" => "parse",
+        "--pattern" => "pattern",
+        "--json-path" => "json_path",
+        "--metric-cwd" => "metric_cwd",
+        "--timeout" => "metric_timeout_seconds",
+        "--title" => "title",
+        "--judge" => "judge_mode"
+      }.freeze
+      GOAL_BOOLEAN_FLAGS = {
+        "--paused" => ["paused", true],
+        "--fresh-attempt" => ["continuity", "fresh_attempt"],
+        "--accumulate" => ["continuity", "accumulate"]
+      }.freeze
 
       # `/prune` takes no arguments. These legacy words are still accepted as no-op aliases so
       # existing muscle memory (`/prune resolved`) keeps working and prunes everything eligible.
@@ -172,6 +213,8 @@ module Meringue
                   Array(state["agents"])
                 when "open_questions"
                   Array(state["questions"]).select { |question| question["status"] == "open" }
+                when "goals"
+                  Array(state["goals"])
                 else
                   []
                 end
@@ -462,6 +505,8 @@ module Meringue
           [item["type"] || "agent", item["status"], metadata["title"] || item["issue_id"]].compact.join(" · ")
         when "open_questions"
           ["question", item["question"].to_s[0, 60]].reject(&:empty?).join(" · ")
+        when "goals"
+          ["goal", item["status"], item["issue_id"], item["success_criteria"].to_s[0, 40]].compact.reject(&:empty?).join(" · ")
         else
           ""
         end
@@ -508,6 +553,8 @@ module Meringue
           parse_prompt(arguments)
         when "kill"
           parse_kill(arguments)
+        when "goal", "goals"
+          parse_goal(arguments, bare: command_text == "goals")
         when "jump"
           invalid("/jump is a local TUI command. Run it in the interactive TUI to open an agent session.", usage: "/jump [agent_id]")
         when "keybind"
@@ -652,6 +699,74 @@ module Meringue
       def parse_kill(arguments)
         tokens = split_arguments(arguments)
         kernel_command("Kill", "target_id" => tokens[0])
+      end
+
+      # `/goal` is the user-facing entry point for the goal loop. Every subcommand maps onto
+      # one kernel command, so the typed path and a head-proposed command converge.
+      def parse_goal(arguments, bare: false)
+        tokens = split_arguments(arguments)
+        return kernel_command("ListGoals") if bare && tokens.empty?
+
+        subcommand = tokens.first.to_s.downcase
+        rest = tokens[1..] || []
+        case subcommand
+        when "", "status", "list", "show"
+          return invalid(GOAL_USAGE_MESSAGE) if rest.length > 1
+
+          kernel_command("ListGoals", "goal_id" => rest[0])
+        when "create", "add", "new"
+          parse_goal_create(rest)
+        when "pause"
+          return invalid("Usage: /goal pause <goal_id>") unless rest.length == 1
+
+          kernel_command("ModifyGoal", "goal_id" => rest[0], "paused" => true)
+        when "resume", "unpause"
+          return invalid("Usage: /goal resume <goal_id>") unless rest.length == 1
+
+          kernel_command("ModifyGoal", "goal_id" => rest[0], "paused" => false)
+        when "stop", "cancel"
+          return invalid("Usage: /goal stop <goal_id>") unless rest.length == 1
+
+          kernel_command("StopGoal", "goal_id" => rest[0])
+        else
+          invalid(GOAL_USAGE_MESSAGE)
+        end
+      end
+
+      def parse_goal_create(tokens)
+        positional = []
+        payload = {}
+        guardrails = []
+        index = 0
+        while index < tokens.length
+          token = tokens[index].to_s
+          if (boolean = GOAL_BOOLEAN_FLAGS[token.downcase])
+            payload[boolean[0]] = boolean[1]
+            index += 1
+          elsif (key = GOAL_VALUE_FLAGS[token.downcase])
+            value = tokens[index + 1]
+            return invalid("#{token} needs a value. #{GOAL_USAGE_MESSAGE}") if value.nil? || value.to_s.start_with?("--")
+
+            if key == "guardrails"
+              guardrails << value
+            else
+              payload[key] = value
+            end
+            index += 2
+          elsif token.start_with?("--")
+            return invalid("Unknown /goal create flag #{token}. #{GOAL_USAGE_MESSAGE}")
+          else
+            positional << token
+            index += 1
+          end
+        end
+
+        return invalid(GOAL_USAGE_MESSAGE) unless positional.length == 2
+
+        payload["issue_id"] = positional[0]
+        payload["success_criteria"] = positional[1]
+        payload["guardrails"] = guardrails unless guardrails.empty?
+        kernel_command("CreateGoal", payload)
       end
 
       # Ids are passed through exactly as typed. The kernel canonicalizes them against state, so

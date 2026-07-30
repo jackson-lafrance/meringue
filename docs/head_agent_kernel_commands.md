@@ -18,6 +18,7 @@ Natural-language mapping:
 | --- | --- |
 | "prune the merged issues", "prune", "clean up the completed/resolved/errored records" | `Prune` with an empty payload |
 | "renumber the tree", "recount the ids", "compact the ids after cleanup" | `Recount` with an empty payload |
+| "kill that goal and its worker" | `Kill` with the `G<n>` id |
 | "kill P1-I9-W3", "stop that worker", "kill issue P1-I9" | `Kill` with `target_id` |
 | "what is P1-I12", "details on P1-I2-W1", "status of Q3" | `GetInfo` with `target_id` |
 | "show me the tree", "list everything" | `ListAll` |
@@ -28,6 +29,10 @@ Natural-language mapping:
 | "drop/dismiss Q2", "that question no longer matters" | `DismissQuestion` |
 | "retitle/close/reopen/reparent issue P1-I3" | `ModifyIssue` |
 | "also tell P1-I3-W1 to ..." | `PromptAgent` |
+| "keep working until coverage is 80%", "iterate until the suite is green", "don't stop until X is under Y" | `CreateGoal` on the issue that owns that durable goal |
+| "show the goals", "how is that goal doing" | `ListGoals` |
+| "pause/resume that goal", "raise the goal's iteration budget", "change the goal target to 90" | `ModifyGoal` |
+| "stop that goal", "that goal is done, stop looping" | `StopGoal` |
 | "use the gruvbox theme" | `SetTheme` |
 | "switch to claude/pi/antigravity" | `SetHarness` |
 | "show the defaults", "which model will future agents use" | `GetSessionDefaults` |
@@ -360,7 +365,7 @@ Example:
 
 ### GetInfo
 
-Returns detailed information for a project, issue, agent, or question, plus that record's recent log lines. Use it for read-only "what is P1-I12" or "status of Q3" questions instead of spawning a worker. The kernel writes the loaded record summary to the visible log.
+Returns detailed information for a project, issue, agent, question, or goal, plus that record's recent log lines. Use it for read-only "what is P1-I12", "status of Q3", or "what is G1" questions instead of spawning a worker. An issue also returns the goal loops attached to it. The kernel writes the loaded record summary to the visible log.
 
 Payload:
 
@@ -685,6 +690,129 @@ Example:
 }
 ```
 
+### CreateGoal
+
+Attaches a goal loop to one issue: Meringue keeps producing attempts on that issue until a kernel-measured metric reaches its target, or a budget/no-progress guard stops it. Use it when the user asks for an outcome with a measurable finish line ("keep going until coverage is 80%"), not for ordinary work that one worker can finish.
+
+Rules:
+
+- An issue is still the durable goal. Reuse or create the issue first, then attach the goal to it. One issue may own only one active goal; the kernel rejects a second one.
+- The metric must be a command the kernel can run and read a number from. Meringue runs it itself in the attempt's workspace; the worker never reports the metric.
+- Add `guardrails` for anything that must not regress (usually the test suite). Reaching the target with a red guardrail is recorded as `not_met`, not success.
+- Do not use a goal to get around iteration limits on ordinary work: budgets are clamped (max 20 iterations, 24 h) and cannot be raised past the ceiling.
+- `judge.mode` only supports `"metric_only"` today. Asking for a worker-backed judge is rejected.
+
+Payload:
+
+```json
+{
+  "issue_id": "P1-I7",
+  "success_criteria": "line coverage of lib/meringue/kernel is at least 80% with rake test green",
+  "title": "Optional short display title",
+  "metric": {
+    "command": "bundle exec rake coverage",
+    "cwd": "workspace",
+    "comparator": "gte",
+    "target": 80,
+    "parse": { "type": "last_number" },
+    "guardrails": [{ "command": "bundle exec rake test" }]
+  },
+  "budget": { "max_iterations": 4 },
+  "continuity": "accumulate"
+}
+```
+
+- `comparator`: `gte`, `lte`, `gt`, `lt`, or `eq`. Use `lte`/`lt` for "drive this number down".
+- `parse.type`: `last_number` (default), `first_number`, `regex` (with `pattern`, optional `capture`), `json_path` (with `path`), or `exit_status` (1 when the command exits 0).
+- `metric.cwd`: `workspace` (default, measures the attempt's branch) or `project_root`.
+- `budget`: `max_iterations` (default 5, ceiling 20), `max_wall_clock_seconds` (default 4 h, ceiling 24 h), `max_workers`, `max_consecutive_no_progress` (default 2), `min_metric_delta`, `min_seconds_between_iterations`.
+- `continuity`: `accumulate` (default; re-prompt the same worker and branch each iteration) or `fresh_attempt` (a new worker and worktree per iteration).
+
+Example:
+
+```json
+{
+  "type": "CreateGoal",
+  "payload": {
+    "issue_id": "P1-I7",
+    "success_criteria": "rubocop reports zero offenses and rake test stays green",
+    "metric": {
+      "command": "bundle exec rubocop --format simple | tail -1",
+      "comparator": "lte",
+      "target": 0,
+      "parse": { "type": "regex", "pattern": "(\\d+) offenses", "capture": 1 },
+      "guardrails": [{ "command": "bundle exec rake test" }]
+    },
+    "budget": { "max_iterations": 4 }
+  }
+}
+```
+
+The kernel returns the goal record with a `G<n>` id. It measures a baseline before the first attempt, then drives the loop on its own reconcile tick; the head does not need to spawn the attempt workers.
+
+### ModifyGoal
+
+Updates a live goal: pause/resume it, change its target, criteria, title, or budgets, or restart a guard-stopped goal.
+
+Payload (every field optional except `goal_id`):
+
+```json
+{
+  "goal_id": "G1",
+  "paused": true,
+  "target": 90,
+  "success_criteria": "...",
+  "max_iterations": 8,
+  "max_consecutive_no_progress": 3,
+  "min_metric_delta": 1,
+  "status": "working"
+}
+```
+
+- `paused: true` stops new attempts without ending the loop; the in-flight attempt is left alone.
+- `status` may only be set back to `working` or `queued`, and only for a goal that is not user-stopped or killed. Use it to restart a goal that hit `max_iterations`, `no_progress`, or `oscillation`, and raise the relevant budget in the same command or the guard trips again immediately.
+- Ending a goal is `StopGoal` or `Kill`, never `ModifyGoal`.
+
+Example:
+
+```json
+{ "type": "ModifyGoal", "payload": { "goal_id": "G1", "max_iterations": 8, "status": "working" } }
+```
+
+### StopGoal
+
+Ends a goal loop for good and leaves its current attempt session and branch alone. This is the right command for "stop that goal" or "that's good enough".
+
+Payload:
+
+```json
+{ "goal_id": "G1" }
+```
+
+Example:
+
+```json
+{ "type": "StopGoal", "payload": { "goal_id": "G1" } }
+```
+
+Use `Kill` with the goal id instead when the user wants the running attempt session killed too; killing the goal's issue or project also settles the goal.
+
+### ListGoals
+
+Returns goal loops with their status, iteration accounting, metric progress, and stop reason. With `goal_id` it also returns that goal's recent iterations, verdicts, and directives. Use it for read-only "how is that goal going" questions instead of spawning a worker.
+
+Payload:
+
+```json
+{ "goal_id": "Optional G<n>" }
+```
+
+Example:
+
+```json
+{ "type": "ListGoals", "payload": {} }
+```
+
 ### AskQuestion
 
 Stores a clarifying question from a head agent. Prefer the HeadResult `questions` array; use this command only for a clarification that is not already listed there.
@@ -776,7 +904,9 @@ Example:
 
 ### Kill
 
-Kills an agent, issue, or project subtree.
+Kills an agent, goal, issue, or project subtree.
+
+`Kill` with a goal id (`G1`) ends the goal loop and kills the attempt session it currently owns. Use `StopGoal` instead when the loop should end but the running attempt and its branch should be kept. Killing a goal's issue or project settles that goal too, so a goal is never left driving a record that no longer exists.
 
 Killing is an immediate stop-and-remove operation. It cascades lifecycle state downward, stops attached harness sessions, and removes the worker or target subtree from active state in the same command, so killed records do not linger in the AgentTree. It does not force-remove a worktree during the emergency stop; `/prune` remains the lifecycle cleanup command for eligible completed/errored records, and startup reconciliation applies the same safe worktree cleanup to any killed records left by an interrupted command.
 

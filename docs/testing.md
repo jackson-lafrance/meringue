@@ -38,7 +38,7 @@ Inside a bundle, prefix with `bundle exec` (`bundle exec rake test`).
 Rakefile                       # rake test task (libs: lib, test; glob: test/**/*_test.rb)
 test/test_helper.rb            # load path setup + require "meringue" + minitest/autorun
 test/support/                  # shared, area-scoped helpers (no tests)
-test/integration/<area>/       # component/area tests, e.g. foundation, kernel, heads, state, tui
+test/integration/<area>/       # component/area tests, e.g. foundation, kernel_core, kernel_goals, heads, state, tui
 test/e2e/                      # end-to-end flows across the CLI/kernel/heads boundary
 test/findings/                 # notes about real bugs found while writing tests
 ```
@@ -62,5 +62,7 @@ These need real credentials, real processes, or a real terminal, so they stay ma
 - Interactive terminal behavior that needs a live TTY/PTY: raw-mode key handling, PTY echo timing, decoding real SGR mouse reports off the wire, and true-color rendering fidelity. Rendering logic is tested through the pane/canvas objects instead, and already-parsed mouse events (clicks, double-clicks, drags, wheel) are driven through `TUI::App` in `test/integration/tui/mouse_word_selection_test.rb`.
 - Editor and terminal launches into external applications.
 - Absolute performance numbers and profiling. The suite keeps a few deliberately generous bounded checks (`test/integration/tui/typing_throughput_test.rb`, `test/integration/workspace/terminal_scroll_performance_test.rb`, and the persistence bounds in `test/integration/state/log_retention_test.rb`) so an accidental O(n) regression fails, but real measurement on a specific machine is still a manual exercise.
+
+Goal loops are covered without either of those: `test/integration/kernel_goals/` drives the real reconcile tick with a fake harness and a scripted metric probe, so a whole multi-iteration goal runs in milliseconds. Only `metric_probe_test.rb` runs real commands, and only harmless shell builtins inside `Dir.mktmpdir`. What stays manual there is a goal against a real repository metric (a real coverage or lint run) and its real harness sessions.
 
 Manual verification checklists for these areas live in `docs/agent_workspace_integration.md` and the relevant feature docs.

@@ -176,6 +176,7 @@ State should include:
 - issues
 - agents
 - questions
+- goals
 - logs
 - counters for id generation
 
@@ -420,6 +421,39 @@ Slash command    -> command parser    -> KernelCommand[]
 
 Heads should not directly edit Meringue JSON state or project files. They propose commands. Workers may edit assigned project files through their harness sessions.
 
+## Goal loops
+Some user goals are not "do this task" but "keep working until this measurable criterion is met".
+That is a durable, kernel-owned loop, not a long-lived agent session.
+
+A `goal` record is attached to exactly one issue and adds success criteria, a deterministic metric,
+budgets, and iteration history to it. The issue stays the durable goal and the AgentTree stays
+projects -> issues -> workers: a goal is not an agent, not a new node kind, and introduces no new
+lifecycle status. It is advanced by the existing reconcile tick, so it survives restarts, costs
+nothing while idle, keeps heads stateless, and keeps the kernel the only state mutator.
+
+Non-negotiable properties:
+- **The kernel measures, the agent does not.** The metric command lives on the goal record and is run
+  by the kernel in the attempt's workspace with a hard timeout and capped output. A metric an attempt
+  reports about its own work is not a measurement. Guardrail commands must keep passing, so reaching
+  the target by weakening tests or thresholds is recorded as `not_met`, never as success.
+- **A judge step scores every iteration** against the metric and guardrails and writes the directive
+  the next attempt receives. Reflection is stored on the goal record, outside the agent session.
+- **Single flight.** At most one attempt agent per goal at any time. This invariant lives in the pure
+  decision function, not in prompt guidance, and it is what makes unbounded spawning impossible.
+- **Every loop is bounded.** Iteration count, spawned-session count, wall clock, consecutive
+  no-progress, workspace-fingerprint oscillation, and repeated metric failure each stop the loop with
+  a durable `stop_reason`. Budgets are clamped to hard ceilings on write. Guard stops raise a question
+  so a stalled goal surfaces to the user instead of going quiet.
+- **Always interruptible.** `/goal pause`, `/goal resume`, `/goal stop`, and `Kill` all take effect at
+  the top of the next tick. `StopGoal` keeps the in-flight attempt session; `Kill` on the goal id stops
+  it too.
+- **Exactly once.** Each iteration owns a deterministic command id and its phase is checkpointed before
+  any side effect, so a crash, a duplicated tick, or a second Meringue instance resumes the iteration
+  instead of spawning a second attempt.
+
+Token and cost budgets are intentionally absent until the harness layer reports usage; iterations,
+sessions, and wall clock are what Meringue can honestly count today. See `docs/goal_loops.md`.
+
 ## Workspace management
 Worker isolation is a kernel-owned responsibility.
 
@@ -649,10 +683,10 @@ Answering must not be a silent no-op. When the answer comes from the user, the k
 
 When a head proposes `AnswerQuestion` itself (because it inferred that a free-form message answered an open question), it must pair the answer with the routing commands in the same `HeadResult`. The kernel applies the batch in order and does not spawn a second head for a head-proposed answer.
 
-### `Kill(TargetID) -> Project | Issue | Agent`
-Kills an agent, issue, or project subtree.
+### `Kill(TargetID) -> Project | Issue | Agent | Goal`
+Kills an agent, goal, issue, or project subtree.
 
-Killing should cascade downward. Killing an issue should kill or mark killed all child issues and attached workers. Killing a project should do the same for every issue and worker under it.
+Killing should cascade downward. Killing an issue should kill or mark killed all child issues and attached workers. Killing a project should do the same for every issue and worker under it. Killing a goal ends its loop and kills the attempt session it owns; killing a goal's issue or project settles that goal too, so a goal can never keep driving a record that no longer exists.
 
 ### `ReconcileSessions() -> ReconcileResult`
 Runs at startup and periodically while Meringue is active.
