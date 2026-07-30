@@ -18,6 +18,24 @@ module Meringue
         "claude" => "claude",
         "antigravity" => "antigravity"
       }.freeze
+      # Single-cell display glyphs, so a session's backend is identifiable at a
+      # glance next to its Meringue id. Provider presentation already lives in
+      # this registry (see PROVIDER_LABELS), which keeps panes harness-agnostic:
+      # they ask the registry for a glyph instead of knowing about Pi or Claude.
+      PROVIDER_GLYPHS = {
+        "pi" => "π",
+        "claude" => "✳",
+        "antigravity" => "↑"
+      }.freeze
+      # Same marks in plain ASCII for fonts/terminals that cannot draw the
+      # glyphs above, selected with MERINGUE_ASCII_GLYPHS.
+      PROVIDER_ASCII_GLYPHS = {
+        "pi" => "p",
+        "claude" => "c",
+        "antigravity" => "a"
+      }.freeze
+      # Matches the AgentTree's unknown-status convention.
+      UNKNOWN_PROVIDER_GLYPH = "?"
       PROVIDER_ALIASES = {
         "pi" => "pi",
         "claude" => "claude",
@@ -107,6 +125,35 @@ module Meringue
 
       def self.provider_label(provider)
         PROVIDER_LABELS.fetch(normalize_provider(provider), provider.to_s)
+      end
+
+      # Degrades in three steps, and every branch is exactly one column wide so
+      # a renderer can reserve one cell and never misalign:
+      #
+      # 1. a shipped provider's mark (or its ASCII twin under
+      #    MERINGUE_ASCII_GLYPHS);
+      # 2. a plain ASCII initial for a provider Meringue does not ship, such as
+      #    the `fake` harness used by the demo fixture and the test suite, so an
+      #    unknown backend never masquerades as a shipped one;
+      # 3. "?" when the record carries no harness at all.
+      #
+      # This deliberately does not reuse normalize_provider, which resolves a
+      # blank value to the default provider: "no harness recorded" must not
+      # render as Pi.
+      def self.provider_glyph(provider, ascii: ascii_glyphs?)
+        name = provider.to_s.strip.downcase.gsub(/\s+/, " ")
+        return UNKNOWN_PROVIDER_GLYPH if name.empty?
+
+        normalized = PROVIDER_ALIASES.fetch(name, name)
+        glyphs = ascii ? PROVIDER_ASCII_GLYPHS : PROVIDER_GLYPHS
+        return glyphs.fetch(normalized) if glyphs.key?(normalized)
+
+        initial = normalized[0].to_s
+        initial.match?(/[a-z0-9]/) ? initial : UNKNOWN_PROVIDER_GLYPH
+      end
+
+      def self.ascii_glyphs?
+        !ENV.fetch("MERINGUE_ASCII_GLYPHS", "").to_s.strip.empty?
       end
 
       def self.public_provider_name(provider)
@@ -200,6 +247,29 @@ module Meringue
         command.is_a?(Array) ? command.join(" ") : command.to_s
       end
 
+      # Authoritative model catalog for one harness provider, asked of that
+      # provider's client. Providers without catalog support answer with an
+      # explicit unsupported catalog, so callers never need provider branches.
+      def model_catalog(provider: nil, kind: "worker", cwd: nil)
+        # An unsupported provider name is a caller error, not a degraded catalog,
+        # so it still raises before any client is built.
+        provider = normalize_provider!(provider || worker_provider)
+        public_name = self.class.public_provider_name(provider)
+        begin
+          client = client_for(provider: provider, kind: kind)
+          return ModelCatalog.unsupported(harness: public_name) unless catalog_capable?(client)
+
+          client.available_models(cwd: cwd)
+        rescue StandardError => e
+          ModelCatalog.unavailable(
+            harness: public_name,
+            note: "Could not ask #{self.class.provider_label(provider)} for its models: #{e.message}",
+            reason: "fetch_failed",
+            error: e.class.name
+          )
+        end
+      end
+
       # Effective defaults used when the registry next starts a Pi head or
       # worker. Role details stay visible for older configs whose explicit argv
       # values differ; the dedicated scalar defaults make both roles converge.
@@ -249,6 +319,10 @@ module Meringue
       end
 
       private
+
+      def catalog_capable?(client)
+        client.respond_to?(:model_catalog_supported?) && client.model_catalog_supported?
+      end
 
       def build_client(provider:, kind:)
         provider = normalize_provider!(provider)

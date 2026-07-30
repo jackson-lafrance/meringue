@@ -13,6 +13,7 @@ Test files added by this slice:
 - `test/integration/kernel_workers/prompt_agent_test.rb`
 - `test/integration/kernel_workers/kill_test.rb`
 - `test/integration/kernel_workers/worker_transitions_test.rb`
+- `test/integration/kernel_workers/deferred_worker_chaining_test.rb`
 - `test/support/kernel_workers_support.rb`
 
 All tests assert **current actual behavior**. No production code was changed.
@@ -44,6 +45,13 @@ All tests assert **current actual behavior**. No production code was changed.
   `resume_session|steer_active_session|queue_follow_up`, increments
   `harness_metadata.prompt_count`, records `last_prompt_mode` / `last_prompted_at`, and
   mirrors the routing action onto the issue (`last_routing_action`, `last_agent_id`).
+- The recorded mode is the mode the harness actually delivered. When a client reports a
+  substitution (`metadata["delivered_prompt_mode"]`, with `requested_prompt_mode` and
+  `prompt_mode_note`), the kernel records `last_prompt_mode` / `routing_action` from the
+  delivered mode, keeps `requested_prompt_mode` on the worker, and states the coercion in
+  the same delivery log line. A `normal` prompt into a streaming session is therefore
+  accepted and queued as a follow-up instead of failing, and is delivered exactly once (no
+  `pending_prompts` entry, no redelivery when the session settles).
 - `WorkerSessionService::Session#submit(mode: "auto")` selects `steer` when the session
   view reports `session_state == "streaming"` and `normal` otherwise.
 - Transient harness errors (anything including `Harness::TransientSessionError`) are not
@@ -122,6 +130,31 @@ All tests assert **current actual behavior**. No production code was changed.
     (`reconcile_state = "terminal_error"`), and afterwards the worker is no longer a
     reconcile candidate (`checked_count` drops to 0), so it will never be retried without
     manual intervention.
+
+## Deferred (queued-after) workers
+
+`deferred_worker_chaining_test.rb` covers the `SpawnWorker` `after_agent_id` chaining
+primitive. Unlike the rest of this slice, it asserts behavior added by the same change, so
+these are contract assertions rather than archaeology:
+
+- A dependent is an ordinary `queued` worker record with `after_agent_id` and
+  `harness_metadata.deferred_spawn`, and no harness session is created until it activates.
+- Activation happens on the worker-settle path (`mark_worker_completed`) and in
+  `ReconcileSessions`. The reconcile hook is what recovers a predecessor that settled while
+  Meringue was not running, which the restart test drives with a second engine over the same
+  state file.
+- The handover block is composed at activation time from the predecessor's
+  `harness_metadata.last_assistant_text`, so the dependent's prompt carries the real final
+  report rather than a promise of one.
+- Failure policy: `errored` cancels by default and starts the dependent when
+  `if_predecessor_fails: "run"`; `Kill` cancels the whole queue behind the killed agent in the
+  same command; a replacement re-points the queue at the successor; a removed predecessor
+  cancels with a warning. Cancellation removes the never-started record and leaves a warning
+  log naming both workers.
+- `/prune` gains a `pending_deferred_dependents` retention blocker so a settled predecessor
+  cannot be removed from under a worker that is still queued behind it.
+- `Recount` renames a queued dependent and its predecessor together, and the dependency still
+  activates afterwards.
 
 ## Test hygiene notes
 

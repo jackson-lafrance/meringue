@@ -305,6 +305,7 @@ Do the same thing as coding harnesses for these aswell we want it to be familiar
 /worker spawn <issue_id> "<prompt>"
 /prompt <agent_id> "<message>"
 /defaults
+/models [harness] [refresh]
 /default-model <provider/model>
 /default-thinking <level>
 /session-settings <agent_id>
@@ -438,8 +439,11 @@ The harness client should expose operations shaped like:
 - `get_session_settings(session_ref)`
 - `set_session_model(session_ref, model_reference)`
 - `set_session_thinking_level(session_ref, level)`
+- `available_models()`
 - `read_events(session_ref)`
 - `attach_session(session_ref)`
+
+Model catalogs are asked of the harness, never hand-maintained in Meringue. `available_models` returns a harness-neutral catalog (models plus each model's supported thinking levels) or an explicit unavailable/unsupported result. The kernel caches the snapshot in state metadata so input completion can offer every model for the selected harness without starting a harness process while the user types, and `/models` reports or refreshes it.
 
 Future Pi defaults and existing Pi session settings are separate scopes. `/default-model` and `/default-thinking` persist app-wide Pi spawn defaults for all future heads and workers without mutating existing sessions. `/model` and `/thinking` mutate only one targeted existing session without changing defaults. `/session-settings` inspects one existing session's effective values; the old dashboard `/session <agent_id>` is only a compatibility alias. A focused workspace advertises `/open-session` for opening its selected harness UI, with the old argumentless `/session` spelling also retained only as an alias. Default persistence belongs in Meringue config and runtime spawn reconfiguration belongs behind the harness registry/client boundary.
 
@@ -522,6 +526,7 @@ Fields should include:
 - `follow_up_of_agent_id`: optional prior worker on the same issue
 - `replaces_agent_id`: optional worker this agent replaced
 - `replaced_by_agent_id`: optional successor worker
+- `after_agent_id`: optional worker this agent was queued behind, with the queue state itself in `harness_metadata.deferred_spawn`
 - `created_at`
 - `updated_at`
 
@@ -613,6 +618,8 @@ The harness should receive the allocated workspace as its `cwd`; harness clients
 The returned agent should include a Meringue id like `P1-I1-W1`, workspace metadata, pid, harness session id,
 and harness session file when available. `FollowUpOfAgentID` may identify a prior worker on the same issue when a new session continues its work. `ReplaceAgentID` may identify a stale/unhealthy worker on the same issue; the kernel should spawn the successor successfully before killing the replaced worker, link both records, and emit a clear replacement log.
 
+`AfterAgentID` may identify a worker this one must not start until it settles, which is how sequential work (investigate, then implement) is expressed without blocking a head or the user. The kernel records the dependent immediately as a `queued` worker with no harness session, activates it from the worker-settle path and from reconciliation rather than a waiting thread, augments its prompt with the predecessor's final report when it starts, and always logs the outcome: activated, re-pointed at a replacement, or cancelled with a warning when the predecessor errored, was killed, or disappeared. A worker's issue stays immutable through queueing and activation. See `docs/head_agent_kernel_commands.md` for the full contract, including chain-depth and cycle guardrails.
+
 ### `PromptAgent(AgentID, Prompt, Mode?) -> Agent`
 Sends a prompt to an existing harness session.
 
@@ -649,6 +656,12 @@ Runs at startup and periodically while Meringue is active.
 It should load JSON state, inspect tracked PIDs and harness session files,
 reconnect or mark sessions as resumable when possible,
 and mark missing/crashed processes as `errored` or `idle` depending on evidence.
+
+Because this pass repeats every couple of seconds, a failure it can never repair must be
+recorded exactly once. A record already recorded as terminally errored is not re-polled,
+not re-touched, and not re-logged, and a terminally errored head has its harness session
+released. Terminal records are cleaned up by `Prune`, not by reconciliation. See
+`docs/session-reconciliation.md`.
 
 ## Kernel command results
 Every command should return a result object shaped like:

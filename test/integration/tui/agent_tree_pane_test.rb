@@ -20,15 +20,20 @@ class TuiAgentTreePaneTest < Minitest::Test
     assert_equal [nil], @pane.line_item_ids(composed_state(empty_state), width: 34)
   end
 
+  # Every row reads as status, harness logo, id. Agent rows carry their
+  # harness glyph; issue and project rows reserve the same cell so all ids stay
+  # in one column.
   def test_demo_fixture_renders_a_filesystem_like_tree
     rendered = plain_lines(@pane.lines(composed_state(demo_state), width: 34))
 
     assert_equal "HEADS", rendered.first
-    assert_includes rendered, "  ├─ ● H1  Plan TUI rendering"
-    assert_includes rendered.join("\n"), "● P1  Meringue working"
-    assert_includes rendered.join("\n"), "  ├─ ● I1  Build fake TUI demo"
-    assert_includes rendered.join("\n"), "  │ ├─ ● W1  Draw three-pane"
-    assert_includes rendered.join("\n"), "· P2  dotfiles idle"
+    assert_includes rendered, "  ├─ ● π H1  Plan TUI rendering"
+    assert_includes rendered, "  └─ ✓ ✳ H2  Classify dotfiles"
+    assert_includes rendered.join("\n"), "●   P1  Meringue working"
+    assert_includes rendered.join("\n"), "  ├─ ●   I1  Build fake TUI demo"
+    assert_includes rendered.join("\n"), "    └─ ! ↑ W1  Wait for real"
+    assert_includes rendered.join("\n"), "  │ ├─ ● π W1  Draw three-pane"
+    assert_includes rendered.join("\n"), "·   P2  dotfiles idle"
   end
 
   def test_render_matches_the_plain_text_of_the_segment_lines
@@ -64,7 +69,8 @@ class TuiAgentTreePaneTest < Minitest::Test
     )
     line = @pane.lines(state, width: 40).first
 
-    assert_includes plain_line(line), "? P1"
+    # "?" for the status, then the reserved harness-logo cell before the id.
+    assert_includes plain_line(line), "?   P1"
     assert_includes styles_in(line), Style::MUTED
   end
 
@@ -98,6 +104,24 @@ class TuiAgentTreePaneTest < Minitest::Test
 
     # W1 completed of W1/W3/W4 visible; the replaced W2 is not counted.
     assert_includes rendered, "1/3"
+  end
+
+  # A worker queued behind another agent has not started yet. It must be obvious that it is waiting,
+  # and on whom, so it is not mistaken for a worker whose session is still being provisioned.
+  def test_a_worker_queued_behind_another_agent_shows_what_it_waits_on
+    rendered = plain_lines(@pane.lines(deferred_state, width: 70)).join("\n")
+
+    assert_includes rendered, "waiting on W1"
+    assert_includes rendered, "starting after W1"
+    # A predecessor on another issue needs its whole id to be identifiable.
+    assert_includes rendered, "waiting on P1-I1-W1"
+  end
+
+  def test_a_queued_dependent_still_renders_with_the_queued_status_glyph
+    row = @pane.lines(deferred_state, width: 70).find { |line| plain_line(line).include?("waiting on W1") }
+
+    assert_includes plain_line(row), Pane::STATUS_DOTS.fetch("queued")
+    assert_includes styles_in(row), Pane::STATUS_STYLES.fetch("queued")
   end
 
   def test_nested_child_issues_are_indented_under_their_parent
@@ -278,6 +302,37 @@ class TuiAgentTreePaneTest < Minitest::Test
   end
 
   private
+
+  def deferred_state
+    tree_state(
+      projects: [project_record("P1")],
+      issues: [issue_record("P1-I1"), issue_record("P1-I2")],
+      agents: [
+        agent_record("P1-I1-W1", "issue_id" => "P1-I1", "status" => "working", "harness_metadata" => { "title" => "research" }),
+        agent_record(
+          "P1-I1-W2",
+          "issue_id" => "P1-I1",
+          "status" => "queued",
+          "after_agent_id" => "P1-I1-W1",
+          "harness_metadata" => { "title" => "implement", "deferred_spawn" => { "state" => "waiting", "after_agent_id" => "P1-I1-W1" } }
+        ),
+        agent_record(
+          "P1-I1-W3",
+          "issue_id" => "P1-I1",
+          "status" => "queued",
+          "after_agent_id" => "P1-I1-W1",
+          "harness_metadata" => { "title" => "document", "deferred_spawn" => { "state" => "activating", "after_agent_id" => "P1-I1-W1" } }
+        ),
+        agent_record(
+          "P1-I2-W1",
+          "issue_id" => "P1-I2",
+          "status" => "queued",
+          "after_agent_id" => "P1-I1-W1",
+          "harness_metadata" => { "title" => "cross issue", "deferred_spawn" => { "state" => "waiting", "after_agent_id" => "P1-I1-W1" } }
+        )
+      ]
+    )
+  end
 
   def relationship_state
     tree_state(

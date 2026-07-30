@@ -96,6 +96,7 @@ module Meringue
         state.fetch("agents").each do |agent|
           rewrite_keys!(agent, id_map, %w[
             project_id issue_id follow_up_of_agent_id replaces_agent_id replaced_by_agent_id follow_up_agent_ids
+            after_agent_id
           ])
           rewrite_structured_references!(agent["harness_metadata"], id_map)
         end

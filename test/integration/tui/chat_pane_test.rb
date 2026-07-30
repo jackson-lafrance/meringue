@@ -202,14 +202,41 @@ class TuiChatPaneTest < Minitest::Test
 
   def test_slash_suggestion_lines_are_windowed_and_marked
     lines = @pane.slash_suggestion_lines(chat_state("/"))
+    entries = suggestion_entry_lines(lines)
 
-    assert_operator lines.length, :<=, Pane::VISIBLE_SUGGESTION_LIMIT
-    assert plain_lines(lines).all? { |line| line.include?(" — ") }
-    refute plain_lines(lines).any? { |line| line.start_with?("›") }, "nothing is selected until the user navigates"
+    assert_operator entries.length, :<=, Pane::VISIBLE_SUGGESTION_LIMIT
+    assert plain_lines(entries).all? { |line| line.include?(" — ") }
+    refute plain_lines(entries).any? { |line| line.start_with?("›") }, "nothing is selected until the user navigates"
 
     selected = @pane.slash_suggestion_lines(composed_state(empty_state, chat: { "input_buffer" => "/", "slash_suggestion_index" => 0 }))
     assert plain_lines(selected).first.start_with?("› ")
     assert_includes styles_in(selected.first), Style::ACCENT_BOLD
+  end
+
+  # A three-row window over a long list must say how many entries exist, so a
+  # harness catalog of a hundred models cannot look like a three-item list.
+  def test_a_long_suggestion_list_reports_its_size_and_how_to_scroll
+    records = @pane.slash_suggestion_records(chat_state("/"))
+    skip_unless_enough_commands(records)
+
+    footer = plain_lines(@pane.slash_suggestion_lines(chat_state("/"))).last
+
+    assert_match(/\A\s+1–#{Pane::VISIBLE_SUGGESTION_LIMIT} of #{records.length} commands/, footer)
+    assert_includes footer, "↑↓ to scroll"
+    assert_includes footer, "keep typing to filter"
+
+    # Scrolling moves the reported window, not just the highlight.
+    scrolled = plain_lines(
+      @pane.slash_suggestion_lines(
+        composed_state(empty_state, chat: { "input_buffer" => "/", "slash_suggestion_index" => records.length - 1 })
+      )
+    ).last
+    assert_includes scrolled, "of #{records.length} commands"
+    assert_includes scrolled, "#{records.length - Pane::VISIBLE_SUGGESTION_LIMIT + 1}–#{records.length}"
+
+    # A list that fits the window adds no footer noise.
+    short = @pane.slash_suggestion_lines(chat_state("/recount"))
+    assert_equal short, suggestion_entry_lines(short)
   end
 
   def test_slash_suggestion_window_follows_the_selection
@@ -217,7 +244,11 @@ class TuiChatPaneTest < Minitest::Test
     skip_unless_enough_commands(records)
 
     last_index = records.length - 1
-    lines = plain_lines(@pane.slash_suggestion_lines(composed_state(empty_state, chat: { "input_buffer" => "/", "slash_suggestion_index" => last_index })))
+    lines = plain_lines(
+      suggestion_entry_lines(
+        @pane.slash_suggestion_lines(composed_state(empty_state, chat: { "input_buffer" => "/", "slash_suggestion_index" => last_index }))
+      )
+    )
 
     assert_equal records.last.fetch("usage"), lines.last.sub("› ", "").split(" — ").first
   end
@@ -243,6 +274,15 @@ class TuiChatPaneTest < Minitest::Test
     chat = { "input_buffer" => buffer, "input_cursor" => cursor.nil? ? buffer.length : cursor }
     chat["selection"] = selection if selection
     composed_state(empty_state, chat: chat)
+  end
+
+  # Entry rows only: the trailing "N–M of T" affordance is not a suggestion.
+  def suggestion_entry_lines(lines)
+    lines.reject { |line| plain_text_line(line).match?(/\A\s+\d+–\d+ of \d+ /) }
+  end
+
+  def plain_text_line(line)
+    line.is_a?(Array) ? line.map { |segment| segment.is_a?(Array) ? segment.first.to_s : segment.to_s }.join : line.to_s
   end
 
   def skip_unless_enough_commands(records)

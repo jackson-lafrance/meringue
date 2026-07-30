@@ -2130,14 +2130,17 @@ module Meringue
         persist_agent_workspace
       end
 
+      # `item_id` can come from a typed `/jump <id>`, so it is matched case-insensitively against
+      # canonical Meringue ids. Everything downstream uses the resolved record's canonical id.
       def agent_workspace_agent_for_item(state, item_id)
         agents = Array(state.fetch("agents", []))
-        direct = agents.find do |agent|
-          agent.fetch("type", nil) == "worker" && agent.fetch("id", nil).to_s == item_id.to_s
-        end
+        direct = Meringue::Ids.find_record(
+          agents.select { |agent| agent.fetch("type", nil) == "worker" },
+          item_id
+        )
         return direct if direct
 
-        issue = Array(state.fetch("issues", [])).find { |candidate| candidate.fetch("id", nil).to_s == item_id.to_s }
+        issue = Meringue::Ids.find_record(Array(state.fetch("issues", [])), item_id)
         return nil unless issue
 
         agents.select { |agent| agent.fetch("type", nil) == "worker" && agent.fetch("issue_id", nil).to_s == issue.fetch("id").to_s }
@@ -2384,7 +2387,9 @@ module Meringue
         completion = slash_completion_for(record).strip
         appends_space = record.fetch("append_space", record.fetch("requires_arguments", false))
 
-        return nil if stripped.casecmp?(completion) && !appends_space
+        # A suggestion that differs only by case is still worth applying: it recases a typed id to
+        # its canonical form (/kill h83 -> /kill H83). Only an identical no-op is skipped.
+        return nil if stripped == completion && !appends_space
         unless argument_suggestion_record?(record)
           return nil unless completion.downcase.start_with?(stripped.downcase) || stripped == "/"
         end
