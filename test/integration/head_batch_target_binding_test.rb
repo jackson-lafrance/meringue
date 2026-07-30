@@ -3,23 +3,15 @@
 # Integration coverage for how the kernel binds head batch commands to their intended
 # project/issue targets.
 #
-# Scoped intentionally to this change: it does not add or modify shared test scaffolding, and it
-# runs standalone with either of:
+# Run it with either of:
 #
-#   ruby -Ilib test/integration/head_batch_target_binding_test.rb
-#   rake test            # once the shared suite exists
-helper = File.expand_path("../test_helper.rb", __dir__)
-if File.exist?(helper)
-  require_relative "../test_helper"
-else
-  require "minitest/autorun"
-end
+#   ruby -Ilib -Itest test/integration/head_batch_target_binding_test.rb
+#   rake test
+require "test_helper"
 
 require "fileutils"
 require "json"
 require "tmpdir"
-
-require_relative "../../lib/meringue"
 
 class HeadBatchTargetBindingTest < Minitest::Test
   def setup
@@ -103,6 +95,168 @@ class HeadBatchTargetBindingTest < Minitest::Test
     assert_equal ["Predicted worker one"], worker_titles(issue_by_title("Predicted one").fetch("id"))
     assert_equal ["Predicted worker two"], worker_titles(issue_by_title("Predicted two").fetch("id"))
     assert_equal ["Interloper worker"], worker_titles(issue_by_title("Interloper goal").fetch("id"))
+  end
+
+  # One durable goal that needs research and then implementation is one issue with two workers.
+  # The implementer references the researcher's SpawnWorker command, because the researcher's agent
+  # id only exists after the kernel mints the issue id.
+  def test_one_created_issue_carries_a_researcher_and_a_follow_up_implementer
+    head_id = spawn_head("Research the auto-research loop and then implement it")
+    result = apply_batch(head_id, [
+      create_issue("Goal-driven auto-research loop", command_id: "goal"),
+      spawn_worker("Research looping approaches", issue_from_command: "goal", command_id: "research"),
+      spawn_worker(
+        "Implement the recommended loop",
+        issue_from_command: "goal",
+        extra: { "follow_up_of_command" => "research" }
+      )
+    ])
+
+    assert_all_accepted(result)
+    issue_id = issue_by_title("Goal-driven auto-research loop").fetch("id")
+    assert_equal (["Implement the recommended loop", "Research looping approaches"]), worker_titles(issue_id).sort
+
+    researcher = worker_by_title("Research looping approaches")
+    implementer = worker_by_title("Implement the recommended loop")
+    assert_equal issue_id, researcher.fetch("issue_id")
+    assert_equal issue_id, implementer.fetch("issue_id")
+    assert_equal researcher.fetch("id"), implementer.fetch("follow_up_of_agent_id")
+    assert_nil (implementer.fetch("harness_metadata", {}) || {}).fetch("rerouted_from_issue_id", nil)
+    assert_equal 1, @engine.list_all.fetch("issues").count { |issue| issue.fetch("title") == "Goal-driven auto-research loop" }
+
+    logs = @engine.list_all.fetch("logs").map { |entry| entry.fetch("message", "").to_s }
+    assert(logs.any? { |message| message.include?("Spawned follow-up worker #{implementer.fetch("id")} after #{researcher.fetch("id")}") })
+    refute(logs.any? { |message| message.include?("Rerouted") })
+  end
+
+  # The documented shape now combines both intra-batch references: after_from_command for the
+  # ordering (the kernel holds the implementer until the researcher settles) and
+  # follow_up_of_command for the visible lineage. Both must resolve to the same predecessor.
+  def test_queued_implementer_and_researcher_share_one_created_issue
+    head_id = spawn_head("Research the loop then implement it, in order")
+    result = apply_batch(head_id, [
+      create_issue("Ordered auto-research loop", command_id: "goal"),
+      spawn_worker("Ordered research", issue_from_command: "goal", command_id: "research"),
+      spawn_worker(
+        "Ordered implementation",
+        issue_from_command: "goal",
+        extra: { "after_from_command" => "research", "follow_up_of_command" => "research" }
+      )
+    ])
+
+    assert_all_accepted(result)
+    issue_id = issue_by_title("Ordered auto-research loop").fetch("id")
+    researcher = worker_by_title("Ordered research")
+    implementer = worker_by_title("Ordered implementation")
+
+    assert_equal issue_id, researcher.fetch("issue_id")
+    assert_equal issue_id, implementer.fetch("issue_id")
+    assert_equal researcher.fetch("id"), implementer.fetch("after_agent_id")
+    assert_equal "queued", implementer.fetch("status")
+    # A queued worker carries its lineage as reservation intent; the top-level field is written when
+    # the kernel actually spawns it, so both references must survive activation.
+    assert_equal researcher.fetch("id"), implementer.fetch("harness_metadata").fetch("follow_up_of_agent_id")
+    assert_nil implementer.fetch("harness_metadata").fetch("rerouted_from_issue_id", nil)
+    refute(@engine.list_all.fetch("logs").any? { |entry| entry.fetch("message", "").to_s.include?("Rerouted") })
+
+    @engine.mark_worker_completed(agent_id: researcher.fetch("id"), last_assistant_text: "Recommended design: the smallest loop.")
+
+    started = worker_by_title("Ordered implementation")
+    assert_equal issue_id, started.fetch("issue_id")
+    assert_equal researcher.fetch("id"), started.fetch("follow_up_of_agent_id")
+    assert_equal researcher.fetch("id"), started.fetch("after_agent_id")
+    refute_equal "queued", started.fetch("status")
+  end
+
+  # The whole point of the reference: another head creating an issue first must not break the pair.
+  def test_follow_up_reference_survives_a_concurrent_issue_creation
+    head_id = spawn_head("Research then implement with a concurrent head running")
+    interloper = spawn_head("Unrelated goal")
+    apply_batch(interloper, [
+      create_issue("Interloping goal", command_id: "i1"),
+      spawn_worker("Interloping worker", issue_from_command: "i1")
+    ])
+
+    result = apply_batch(head_id, [
+      create_issue("Paired goal", command_id: "goal"),
+      spawn_worker("Paired research", issue_from_command: "goal", command_id: "research"),
+      spawn_worker(
+        "Paired implementation",
+        issue_from_command: "goal",
+        extra: { "follow_up_of_agent_id" => "@research" }
+      )
+    ])
+
+    assert_all_accepted(result)
+    issue_id = issue_by_title("Paired goal").fetch("id")
+    assert_equal ["Paired implementation", "Paired research"], worker_titles(issue_id).sort
+    assert_equal worker_by_title("Paired research").fetch("id"), worker_by_title("Paired implementation").fetch("follow_up_of_agent_id")
+    assert_equal ["Interloping worker"], worker_titles(issue_by_title("Interloping goal").fetch("id"))
+  end
+
+  def test_follow_up_reference_accepts_a_command_index
+    head_id = spawn_head("Research then implement by index")
+    result = apply_batch(head_id, [
+      create_issue("Indexed goal", command_id: "goal"),
+      spawn_worker("Indexed research", issue_from_command: "goal"),
+      spawn_worker("Indexed implementation", issue_from_command: "goal", extra: { "follow_up_of_agent_id" => "@index:1" })
+    ])
+
+    assert_all_accepted(result)
+    assert_equal worker_by_title("Indexed research").fetch("id"), worker_by_title("Indexed implementation").fetch("follow_up_of_agent_id")
+  end
+
+  def test_follow_up_reference_to_a_later_command_is_rejected
+    head_id = spawn_head("Out of order pair")
+    result = apply_batch(head_id, [
+      create_issue("Out of order goal", command_id: "goal"),
+      spawn_worker("Early implementation", issue_from_command: "goal", extra: { "follow_up_of_command" => "research" }),
+      spawn_worker("Late research", issue_from_command: "goal", command_id: "research")
+    ])
+
+    rejected = command_results(result).find { |entry| entry.fetch("status", nil) == "rejected" }
+    assert_includes rejected.fetch("errors"), "batch_agent_reference_out_of_order"
+    assert_equal ["Late research"], worker_titles(issue_by_title("Out of order goal").fetch("id"))
+  end
+
+  def test_unknown_follow_up_reference_is_rejected
+    head_id = spawn_head("Dangling reference")
+    result = apply_batch(head_id, [
+      create_issue("Dangling goal", command_id: "goal"),
+      spawn_worker("Dangling research", issue_from_command: "goal", command_id: "research"),
+      spawn_worker("Dangling implementation", issue_from_command: "goal", extra: { "follow_up_of_command" => "nope" })
+    ])
+
+    rejected = command_results(result).find { |entry| entry.fetch("status", nil) == "rejected" }
+    assert_includes rejected.fetch("errors"), "batch_agent_reference_not_found"
+    assert_equal ["Dangling research"], worker_titles(issue_by_title("Dangling goal").fetch("id"))
+  end
+
+  # Documents why the reference exists: a predicted worker id goes stale exactly like a predicted
+  # issue id, and the kernel rejects it loudly instead of linking the wrong worker.
+  def test_predicted_related_worker_id_is_rejected_when_the_issue_id_shifted
+    head_id = spawn_head("Predicted worker id pair")
+    predicted_issue = "#{@project_id}-I#{@engine.list_all.fetch("counters").fetch("issues_by_project").fetch(@project_id, 0).to_i + 1}"
+    interloper = spawn_head("Interloping goal for the prediction")
+    apply_batch(interloper, [
+      create_issue("Prediction interloper", command_id: "i1"),
+      spawn_worker("Prediction interloper worker", issue_from_command: "i1")
+    ])
+
+    result = apply_batch(head_id, [
+      create_issue("Predicted pair goal", command_id: "goal"),
+      spawn_worker("Predicted pair research", issue_from_command: "goal"),
+      spawn_worker(
+        "Predicted pair implementation",
+        issue_from_command: "goal",
+        extra: { "follow_up_of_agent_id" => "#{predicted_issue}-W1" }
+      )
+    ])
+
+    rejected = command_results(result).find { |entry| entry.fetch("status", nil) == "rejected" }
+    assert_includes rejected.fetch("errors"), "related_agent_issue_mismatch"
+    assert_includes rejected.fetch("message"), "follow_up_of_command"
+    assert_equal ["Predicted pair research"], worker_titles(issue_by_title("Predicted pair goal").fetch("id"))
   end
 
   # Case 4: no CreateIssue at all; an existing issue id must route untouched.
@@ -281,11 +435,18 @@ class HeadBatchTargetBindingTest < Minitest::Test
     command_id ? command.merge("command_id" => command_id) : command
   end
 
-  def spawn_worker(title, issue_id: nil, issue_from_command: nil, extra: {})
+  def spawn_worker(title, issue_id: nil, issue_from_command: nil, command_id: nil, extra: {})
     payload = { "title" => title, "prompt" => "#{title}: do the work." }
     payload["issue_id"] = issue_id if issue_id
     payload["issue_from_command"] = issue_from_command if issue_from_command
-    { "type" => "SpawnWorker", "payload" => payload.merge(extra) }
+    command = { "type" => "SpawnWorker", "payload" => payload.merge(extra) }
+    command_id ? command.merge("command_id" => command_id) : command
+  end
+
+  def worker_by_title(title)
+    @engine.list_all.fetch("agents").find do |agent|
+      agent.fetch("type", nil) == "worker" && (agent.fetch("harness_metadata", {}) || {}).fetch("title", nil) == title
+    end
   end
 
   def seed_issue_with_worker(issue_title, worker_title)

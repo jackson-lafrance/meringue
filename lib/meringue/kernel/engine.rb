@@ -229,6 +229,35 @@ module Meringue
       DEFERRED_STATE_ACTIVATED = "activated"
       DEFERRED_STATE_CANCELLED = "cancelled"
       DEFERRED_PENDING_STATES = [DEFERRED_STATE_WAITING, DEFERRED_STATE_ACTIVATING].freeze
+      # The lineage fields need the same treatment as `after_agent_id`: when a head puts a research
+      # worker and the implementation worker that follows it on one issue in one batch, the
+      # predecessor's agent id only exists after the kernel mints it, so these fields accept the
+      # same intra-batch reference instead of a predicted `<issue>-W<n>` id.
+      BATCH_AGENT_REFERENCE_FIELDS = [
+        {
+          "field" => "follow_up_of_agent_id",
+          "aliases" => %w[follow_up_of_agent_id FollowUpOfAgentID followUpOfAgentID followUpOfAgentId],
+          "reference_keys" => %w[
+            follow_up_of_command FollowUpOfCommand followUpOfCommand
+            follow_up_of_agent_from_command follow_up_ref followUpRef
+          ]
+        },
+        {
+          "field" => "replace_agent_id",
+          "aliases" => %w[replace_agent_id ReplaceAgentID replaceAgentID replaceAgentId],
+          "reference_keys" => %w[
+            replace_agent_from_command ReplaceAgentFromCommand replaceAgentFromCommand
+            replace_agent_ref replaceAgentRef
+          ]
+        }
+      ].freeze
+      # Predicting a worker id is the failure mode this hint exists for: the predecessor's agent id
+      # depends on the issue id the kernel mints, so a prediction goes stale as soon as another head
+      # creates an issue first.
+      RELATED_AGENT_REFERENCE_HINT = "When the predecessor is spawned by this same head result, " \
+                                     "reference its SpawnWorker command (follow_up_of_command, " \
+                                     "after_from_command, or an \"@<command_id>\" value) instead of " \
+                                     "predicting a worker id."
       # Reconciliation redelivery attempts for a prompt that arrived while the session was busy.
       PENDING_PROMPT_MAX_ATTEMPTS = 20
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
@@ -4488,10 +4517,20 @@ module Meringue
             related_agent_id = present_string(replace_agent_id) || present_string(follow_up_of_agent_id)
             related_agent = find_agent(state, related_agent_id) if related_agent_id
             if related_agent_id && (!related_agent || related_agent.fetch("type", nil) != "worker")
-              return rejected_result(command_id, command_type, "Related worker #{related_agent_id} does not exist.", ["related_agent_not_found"])
+              return rejected_result(
+                command_id,
+                command_type,
+                "Related worker #{related_agent_id} does not exist. #{RELATED_AGENT_REFERENCE_HINT}",
+                ["related_agent_not_found"]
+              )
             end
             if related_agent && related_agent.fetch("issue_id", nil) != issue.fetch("id")
-              return rejected_result(command_id, command_type, "Related worker #{related_agent_id} belongs to another issue.", ["related_agent_issue_mismatch"])
+              return rejected_result(
+                command_id,
+                command_type,
+                "Related worker #{related_agent_id} belongs to another issue. #{RELATED_AGENT_REFERENCE_HINT}",
+                ["related_agent_issue_mismatch"]
+              )
             end
             if present_string(replace_agent_id) && !replaceable_worker?(related_agent)
               return rejected_result(command_id, command_type, "Worker #{related_agent_id} has already been killed or replaced.", ["agent_not_replaceable"])
@@ -6251,6 +6290,16 @@ module Meringue
             command = after_resolution.fetch("command")
             payload = value_at(command, "payload")
           end
+
+          # Same problem for the lineage fields: "this worker follows up on the worker my own batch
+          # spawns" cannot predict the worker id either, so it points at the SpawnWorker command.
+          lineage_resolution = resolve_batch_lineage_agent_target(command: command, payload: payload, plan: plan, index: index)
+          if lineage_resolution
+            return lineage_resolution if lineage_resolution.fetch("rejection", nil)
+
+            command = lineage_resolution.fetch("command")
+            payload = value_at(command, "payload")
+          end
         end
         return { "command" => command } unless BATCH_ISSUE_REFERENCE_COMMANDS.include?(command_type)
 
@@ -6357,8 +6406,9 @@ module Meringue
       end
 
       # A head states that a worker belongs to an already existing issue's session lineage by
-      # setting follow_up_of_agent_id or replace_agent_id. That is an explicit target, so the
-      # batch-consistency check leaves it alone.
+      # setting follow_up_of_agent_id, replace_agent_id, or after_agent_id. That is an explicit
+      # target, so the batch-consistency check leaves it alone. Intra-batch references are already
+      # resolved to real agent ids before this runs, so "@research" never reaches it.
       def batch_target_declared_deliberate?(payload)
         present_string(value_at(payload, "follow_up_of_agent_id", "followUpOfAgentID", "followUpOfAgentId")) ||
           present_string(value_at(payload, "replace_agent_id", "replaceAgentID", "replaceAgentId")) ||
@@ -6643,6 +6693,84 @@ module Meringue
             "issue_id" => entry.fetch("status", nil) == "accepted" ? present_string(entry.fetch("target_id", nil)) : nil
           }
         end
+      end
+
+      # Resolves `follow_up_of_command` / `replace_agent_from_command` (and the equivalent
+      # `"@<command_id>"` value written straight into the lineage field) against the workers this
+      # batch already spawned, the same way `after_from_command` is resolved.
+      def resolve_batch_lineage_agent_target(command:, payload:, plan:, index:)
+        resolved_payload = payload
+        changed = false
+        BATCH_AGENT_REFERENCE_FIELDS.each do |definition|
+          reference = head_batch_agent_reference(resolved_payload, definition)
+          next unless reference
+
+          resolution = resolve_symbolic_batch_agent_reference(
+            payload: resolved_payload,
+            definition: definition,
+            reference: reference,
+            spawned: plan.fetch("spawned_workers"),
+            index: index
+          )
+          return resolution if resolution.fetch("rejection", nil)
+
+          resolved_payload = resolution.fetch("payload")
+          changed = true
+        end
+        return nil unless changed
+
+        { "command" => command.merge("payload" => resolved_payload) }
+      end
+
+      def head_batch_agent_reference(payload, definition)
+        return nil unless payload.is_a?(Hash)
+
+        explicit = value_at(payload, *definition.fetch("reference_keys"))
+        return parse_batch_issue_reference(explicit) unless explicit.nil? || (!explicit.is_a?(Integer) && blank?(explicit))
+
+        agent_id = value_at(payload, *definition.fetch("aliases"))
+        return nil unless batch_issue_reference_value?(agent_id)
+
+        parse_batch_issue_reference(agent_id)
+      end
+
+      def resolve_symbolic_batch_agent_reference(payload:, definition:, reference:, spawned:, index:)
+        field = definition.fetch("field")
+        described = describe_batch_issue_reference(reference)
+        entry = find_batch_issue_reference_entry(reference, spawned)
+        if entry.nil?
+          return {
+            "rejection" => {
+              "message" => "SpawnWorker references #{described} for #{field}, but this head result has no matching SpawnWorker command.",
+              "errors" => ["batch_agent_reference_not_found"]
+            }
+          }
+        end
+        if entry.fetch("index", -1).to_i >= index
+          return {
+            "rejection" => {
+              "message" => "SpawnWorker references #{described} for #{field}, which is not applied before it. List the predecessor SpawnWorker command first.",
+              "errors" => ["batch_agent_reference_out_of_order"]
+            }
+          }
+        end
+
+        agent_id = entry.fetch("agent_id", nil)
+        unless agent_id
+          return {
+            "rejection" => {
+              "message" => "SpawnWorker references #{described} for #{field}, but that command did not spawn a worker (#{entry.fetch("status", "pending")}).",
+              "errors" => ["batch_agent_reference_unresolved"]
+            }
+          }
+        end
+
+        { "payload" => payload_with_related_agent_id(payload, definition, agent_id) }
+      end
+
+      def payload_with_related_agent_id(payload, definition, agent_id)
+        dropped = definition.fetch("reference_keys") + definition.fetch("aliases")
+        payload.reject { |key, _value| dropped.include?(key.to_s) }.merge(definition.fetch("field") => agent_id)
       end
 
       def head_batch_added_projects(journal)

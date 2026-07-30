@@ -221,6 +221,10 @@ For natural-language follow-ups, keep the head stateless and use existing Mering
 - Replace a stale, unhealthy, or wrong-direction worker by spawning with `replace_agent_id`; the kernel should start the successor before killing the old session and preserve the visible relationship.
 - Create a new issue only for a genuinely distinct durable goal, and ask a question rather than guessing between plausible targets.
 
+One durable goal is one issue, even when it needs several sequential steps. An issue is the goal; a worker is one harness session performing one step of it. A research step and the implementation step that consumes its findings therefore belong on the same issue as two workers, not on two issues: both bound with `issue_from_command`, the implementer queued behind the researcher with `AfterAgentID`/`after_from_command` and linked with `follow_up_of_command`/`follow_up_of_agent_id`. Deliverables do not define issues: a findings-only step with no PR and an implementation step with a PR can share one issue. Needing to run second does not make a step its own goal either. A second issue is correct only for a genuinely independent goal that would still stand alone if the first were dropped, such as a missing kernel capability the request revealed.
+
+Heads must not paper over sequencing inside a worker prompt. Never instruct a worker to poll `~/.meringue/state.json`, sleep between checks, or wait hours for another worker to settle; the kernel owns dependent scheduling and hands the predecessor's report to the dependent worker itself.
+
 Do not introduce a parallel conversation-history model merely to route follow-ups. Pi or another harness owns detailed session history; Meringue should expose compact, generic routing metadata and lifecycle logs.
 
 ### Head project discovery
@@ -616,7 +620,7 @@ If `WorkspacePath` is omitted, the kernel should allocate a worker-specific work
 Prefer a dedicated git worktree for git-backed projects so concurrent workers/subagents can edit safely.
 The harness should receive the allocated workspace as its `cwd`; harness clients should not create or mutate worktrees directly.
 The returned agent should include a Meringue id like `P1-I1-W1`, workspace metadata, pid, harness session id,
-and harness session file when available. `FollowUpOfAgentID` may identify a prior worker on the same issue when a new session continues its work. `ReplaceAgentID` may identify a stale/unhealthy worker on the same issue; the kernel should spawn the successor successfully before killing the replaced worker, link both records, and emit a clear replacement log.
+and harness session file when available. `FollowUpOfAgentID` may identify a prior worker on the same issue when a new session continues its work; when that predecessor is spawned by the same head batch, the head references its `SpawnWorker` command instead of predicting the agent id, exactly as `issue_from_command` references a `CreateIssue` in that batch. `ReplaceAgentID` may identify a stale/unhealthy worker on the same issue; the kernel should spawn the successor successfully before killing the replaced worker, link both records, and emit a clear replacement log.
 
 `AfterAgentID` may identify a worker this one must not start until it settles, which is how sequential work (investigate, then implement) is expressed without blocking a head or the user. The kernel records the dependent immediately as a `queued` worker with no harness session, activates it from the worker-settle path and from reconciliation rather than a waiting thread, augments its prompt with the predecessor's final report when it starts, and always logs the outcome: activated, re-pointed at a replacement, or cancelled with a warning when the predecessor errored, was killed, or disappeared. A worker's issue stays immutable through queueing and activation. See `docs/head_agent_kernel_commands.md` for the full contract, including chain-depth and cycle guardrails.
 

@@ -38,6 +38,13 @@ every state/config file lives under a per-test `Dir.mktmpdir`.
   message in `details.user_message`. A batch that recorded a question is not reported as
   unrouted, because the question is already an actionable record.
   See `unrouted_user_message_test.rb`.
+- One batch may put two workers on one issue it just created (research step, then the
+  implementation step that consumes the report). Both bind the issue with `issue_from_command`;
+  the later worker names its predecessor with `follow_up_of_command` for the visible lineage and
+  `after_from_command` for the ordering, and neither worker is rerouted or rejected. A *predicted*
+  predecessor worker id (`P1-I7-W1`) is still rejected once another head shifts the issue number,
+  which is why the reference forms exist. Asserted in
+  `test/integration/head_batch_target_binding_test.rb`.
 - Unknown command types are rejected with `unknown_command`; snake_case aliases
   (`create_issue`) are canonicalized.
 - Re-applying the same head result, recovering an interrupted batch, and a second kernel
