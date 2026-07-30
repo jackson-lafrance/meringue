@@ -67,10 +67,12 @@ lib/meringue/heads/                # head-agent context, runners, and parsing
 lib/meringue/harness/              # Pi and other harness integrations
 lib/meringue/tui/                  # terminal rendering, panes, navigation, styles
 lib/meringue/state/                # JSON persistence models and store
+lib/meringue/goals/                # goal-loop record, decisions, judge, and metric probe
 docs/config.md                     # config and harness provider reference
 docs/head_agent_kernel_commands.md # compact head-agent command contract
 docs/keybindings.md                # TUI keyboard and jump-mode controls
 docs/kernel-command-application.md # exactly-once command application invariants
+docs/goal_loops.md                 # goal loops: metric, judge, budgets, and interruption
 fixtures/config.example.toml       # example local config
 fixtures/demo_state.json           # demo state for the TUI
 scripts/head_session_smoke.rb      # prints the head harness session lifetime without a real harness
@@ -80,6 +82,7 @@ scripts/agent_tree_scroll_smoke.rb # checks AgentTree pane scrolling, clamping, 
 scripts/head_user_command_smoke.rb # checks head-proposed user commands, guardrails, and typed-path parity
 scripts/chat_target_smoke.rb       # previews and checks the composer's colored chat-target cue in every theme
 scripts/agent_identity_smoke.rb    # previews and checks AgentTree agent colors and harness logos in every theme
+scripts/goal_loop_smoke.rb         # runs a real goal loop (real git worktrees + real metric command, fake agent)
 ```
 
 ## Setup
@@ -177,7 +180,11 @@ Useful slash commands inside the TUI include:
 - `/thinking <agent_id> <level>` — change only one active/resumable Pi session's thinking level; future defaults are unchanged.
 - `/keybind` — show active TUI keybindings.
 - `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together and removes their clean, unlocked Meringue-managed worktrees. Unsafe cleanup (dirty, locked, ambiguous, or failed) retains the bundle and logs why so it can be retried.
-- `/recount` — compact project, issue, worker, and question numbering after records are removed.
+- `/recount` — compact project, issue, worker, question, and goal numbering after records are removed.
+- `/goal create <issue_id> "<success criteria>" --metric "<command>" --target <n> [flags]` — attach a goal loop to an issue. Meringue keeps producing attempts on that issue until the metric it measures itself reaches the target, or an iteration/session/wall-clock budget, a no-progress guard, an oscillation guard, or a broken metric stops it. Add `--guardrail "rake test"` for anything that must not regress.
+- `/goal status [goal_id]` — show goal loops, iteration accounting, metric progress, verdicts, and stop reasons.
+- `/goal pause <goal_id>` / `/goal resume <goal_id>` — stop and restart spawning without ending the loop; the in-flight attempt is untouched.
+- `/goal stop <goal_id>` — end the loop for good and keep its current attempt session. `/kill <goal_id>` also stops that session.
 
 Ids are not case sensitive. `/kill h83`, `/kill H83`, `/jump p1-i23-w1`, and `/answer q8 "…"` all
 reach the same record, and Meringue keeps the canonical uppercase id (`H83`, `P1-I23-W1`, `Q8`) in
@@ -190,7 +197,7 @@ You do not have to type them. Head agents can run the same commands from plain l
 
 `/model`, `/default-model`, `/thinking`, and `/default-thinking` complete from the selected harness's own model catalog, so the selector lists every available model rather than only the ones Meringue has seen. See `docs/session-settings.md#authoritative-model-catalog-discovery` for discovery, caching, and unavailable-catalog behavior.
 
-See `docs/head_agent_kernel_commands.md` for the head command contract, destructive-command rules, prune eligibility, and worktree cleanup safety. See `docs/recount.md` for the renumbering/cross-reference/active-session rules, and `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
+See `docs/head_agent_kernel_commands.md` for the head command contract, destructive-command rules, prune eligibility, and worktree cleanup safety. See `docs/goal_loops.md` for how goal loops measure progress, judge each iteration, and stop. See `docs/recount.md` for the renumbering/cross-reference/active-session rules, and `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
 
 ### Answering a head's question
 
