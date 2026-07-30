@@ -650,6 +650,12 @@ It should load JSON state, inspect tracked PIDs and harness session files,
 reconnect or mark sessions as resumable when possible,
 and mark missing/crashed processes as `errored` or `idle` depending on evidence.
 
+Because this pass repeats every couple of seconds, a failure it can never repair must be
+recorded exactly once. A record already recorded as terminally errored is not re-polled,
+not re-touched, and not re-logged, and a terminally errored head has its harness session
+released. Terminal records are cleaned up by `Prune`, not by reconciliation. See
+`docs/session-reconciliation.md`.
+
 ## Kernel command results
 Every command should return a result object shaped like:
 
