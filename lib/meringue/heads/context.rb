@@ -149,7 +149,7 @@ module Meringue
             "Explicit project, issue, worker, or question ids in the user message take precedence when they are compatible with selected_target; otherwise surface the conflict instead of guessing.",
             "A refinement, correction, question about findings, or next step for an existing durable goal should reuse that issue.",
             "Prefer PromptAgent when a healthy worker on that issue has useful persisted harness context; do not spawn a new worker merely because this is a new user message.",
-            "Use steer for an urgent correction to active work, follow_up for related work that should run after the active turn, and normal for a settled resumable session.",
+            "Use steer for an urgent correction to active work, follow_up for related work that should run after the active turn, and normal for a settled resumable session. Read the target's is_streaming/recommended_prompt_mode instead of defaulting to normal; a normal prompt to a mid-turn session is still accepted, but the kernel delivers it as a follow-up.",
             "Spawn a follow-up worker on the same issue only when no suitable session is resumable, work should be independent or parallel, context is known to be over 50%, or a delivered workspace should remain immutable.",
             "Use replace_agent_id only when the old worker is stale, unhealthy, pursuing the wrong approach, or must stop before a successor continues. Replacement starts the successor before killing the old session.",
             "Create a new issue only for a genuinely distinct durable goal. Ask a clarifying question instead of guessing between plausible issues or workers.",
@@ -381,6 +381,7 @@ module Meringue
             "resumable" => session_available && !%w[killed errored].include?(agent.fetch("status", nil)),
             "supported_prompt_modes_now" => supported_prompt_modes(agent, streaming: streaming, session_available: session_available),
             "recommended_prompt_mode" => recommended_prompt_mode(agent, streaming: streaming, session_available: session_available),
+            "prompt_mode_note" => prompt_mode_note(agent, streaming: streaming, session_available: session_available),
             "prompt_count" => metadata.fetch("prompt_count", 0).to_i,
             "last_prompt_mode" => metadata.fetch("last_prompt_mode", nil),
             "context_utilization" => context_utilization(metadata),
@@ -462,6 +463,16 @@ module Meringue
         return nil if modes.empty?
 
         streaming ? "follow_up" : "normal"
+      end
+
+      # Says out loud what happens to the mode a head is most likely to pick by default, so a
+      # mid-turn session reads as "choose deliberately" instead of "do not prompt".
+      def prompt_mode_note(agent, streaming:, session_available:)
+        return nil unless streaming
+        return nil if supported_prompt_modes(agent, streaming: streaming, session_available: session_available).empty?
+
+        "This session is mid-turn. Use steer to interrupt it or follow_up to run after it; " \
+          "a normal prompt is accepted but the kernel delivers it as a follow-up."
       end
 
       def context_utilization(metadata)

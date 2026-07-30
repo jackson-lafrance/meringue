@@ -44,6 +44,13 @@ All tests assert **current actual behavior**. No production code was changed.
   `resume_session|steer_active_session|queue_follow_up`, increments
   `harness_metadata.prompt_count`, records `last_prompt_mode` / `last_prompted_at`, and
   mirrors the routing action onto the issue (`last_routing_action`, `last_agent_id`).
+- The recorded mode is the mode the harness actually delivered. When a client reports a
+  substitution (`metadata["delivered_prompt_mode"]`, with `requested_prompt_mode` and
+  `prompt_mode_note`), the kernel records `last_prompt_mode` / `routing_action` from the
+  delivered mode, keeps `requested_prompt_mode` on the worker, and states the coercion in
+  the same delivery log line. A `normal` prompt into a streaming session is therefore
+  accepted and queued as a follow-up instead of failing, and is delivered exactly once (no
+  `pending_prompts` entry, no redelivery when the session settles).
 - `WorkerSessionService::Session#submit(mode: "auto")` selects `steer` when the session
   view reports `session_state == "streaming"` and `normal` otherwise.
 - Transient harness errors (anything including `Harness::TransientSessionError`) are not

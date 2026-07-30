@@ -12,6 +12,7 @@ Test files:
 - `test/integration/kernel_heads/exactly_once_apply_test.rb`
 - `test/integration/kernel_heads/questions_test.rb`
 - `test/integration/kernel_heads/logging_test.rb`
+- `test/integration/kernel_heads/unrouted_user_message_test.rb`
 - `test/support/kernel_heads_support.rb` (fake head runners, fake harness clients, stub
   workspace manager, stub forge client, tmpdir-scoped engine builder)
 
@@ -31,6 +32,12 @@ every state/config file lives under a per-test `Dir.mktmpdir`.
   with `P1` / `P1-I1`), and a wrong prediction is rejected with `project_not_found` /
   `issue_not_found` without creating records.
 - Commands get default ids `<HeadID>-C<n>` and are applied in the proposed order.
+- A batch that accepts nothing and records no question restates the user's message once as
+  an `unrouted_user_message` log entry (`error` when commands were proposed and none
+  applied, `warning` when the head proposed neither commands nor questions), with the full
+  message in `details.user_message`. A batch that recorded a question is not reported as
+  unrouted, because the question is already an actionable record.
+  See `unrouted_user_message_test.rb`.
 - Unknown command types are rejected with `unknown_command`; snake_case aliases
   (`create_issue`) are canonicalized.
 - Re-applying the same head result, recovering an interrupted batch, and a second kernel
