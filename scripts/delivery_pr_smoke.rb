@@ -158,9 +158,13 @@ picker = app.send(:compose_state, -> { state }, "")
 check("the picker is up in the popup slot") { [pane.delivery_pr_picker?(picker) && pane.popup_pane_title(picker) == "open pull requests", pane.popup_pane_title(picker)] }
 check("every open PR is listed with its number and title") do
   rows = pane.popup_lines(picker).map { |line| plain(line) }
-  [rows.first.include?("#151") && rows.first.include?("Add the open PR picker") && rows[1].include?("#145"), rows.inspect]
+  [rows.length == 2 && rows.first.include?("#151") && rows.first.include?("Add the open PR picker") && rows[1].include?("#145"), rows.inspect]
 end
-check("the list explains its own keys") { [plain(pane.popup_lines(picker).last).include?("Enter opens · Esc closes"), plain(pane.popup_lines(picker).last)] }
+check("the count and keys are captioned below the list, not inside it") do
+  caption = plain(pane.popup_footer_line(picker))
+  rows = pane.popup_lines(picker).map { |line| plain(line) }
+  [caption.include?("2 open PRs") && caption.include?("Enter opens · Esc closes") && rows.none? { |row| row.include?("Esc closes") }, caption]
+end
 frame = Meringue::TUI::Layout.new.render(picker, width: WIDTH, height: HEIGHT, color: COLOR)
 puts frame.split("\n", -1).last(9).map { |line| "       #{line}" }.join("\n")
 check("arrow keys move the highlight") do

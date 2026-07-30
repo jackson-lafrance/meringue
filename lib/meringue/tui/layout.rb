@@ -70,6 +70,18 @@ module Meringue
             chat_pane.popup_lines(state),
             active: false
           )
+          # The counter and key hints are a caption for the box, not a row in it, so
+          # they render on their own reserved line under the border, indented to the
+          # box's content column.
+          if metrics.fetch(:suggestion_footer_height).positive?
+            canvas.write_segments(
+              metrics.fetch(:suggestion_x) + 2,
+              metrics.fetch(:suggestion_footer_y),
+              chat_pane.popup_footer_line(state),
+              max_width: [metrics.fetch(:suggestion_width) - 4, 0].max,
+              default_style: Style::DIM
+            )
+          end
         end
 
         composer_active = scroll_pane_active?(state, "chat")
@@ -216,7 +228,10 @@ module Meringue
         metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
         return :outside unless metrics.fetch(:suggestion_height).positive?
 
+        # The caption line under the box belongs to the picker, so clicking it is not
+        # a click-away dismiss.
         bounds = pane_bounds(metrics, :suggestion_x, :suggestion_y, :suggestion_width, :suggestion_height)
+        bounds = bounds.merge(height: bounds.fetch(:height) + metrics.fetch(:suggestion_footer_height))
         return :outside unless point_in_bounds?(x.to_i, y.to_i, bounds)
 
         row = y.to_i - metrics.fetch(:suggestion_y) - 1
@@ -588,9 +603,11 @@ module Meringue
         composer_content_width = composer_width - 4
         composer_content_height = chat_pane.composer_lines(state, width: composer_content_width).length
         composer_height = composer_height_for(height - BOTTOM_HINT_HEIGHT, composer_content_height)
-        suggestion_height = bounded_slash_suggestion_height(height, composer_height, state)
+        popup = popup_metrics(state, height, composer_height)
+        suggestion_height = popup.fetch(:height)
+        suggestion_footer_height = popup.fetch(:footer_height)
         vertical_gaps = GAP + (suggestion_height.positive? ? GAP : 0)
-        top_height = height - BOTTOM_HINT_HEIGHT - composer_height - suggestion_height - vertical_gaps
+        top_height = height - BOTTOM_HINT_HEIGHT - composer_height - suggestion_height - suggestion_footer_height - vertical_gaps
 
         logs_height = top_height
 
@@ -606,8 +623,10 @@ module Meringue
           suggestion_y: top_y + top_height + GAP,
           suggestion_width: composer_width,
           suggestion_height: suggestion_height,
+          suggestion_footer_height: suggestion_footer_height,
+          suggestion_footer_y: top_y + top_height + GAP + suggestion_height,
           composer_x: composer_x,
-          composer_y: top_y + top_height + GAP + (suggestion_height.positive? ? suggestion_height + GAP : 0),
+          composer_y: top_y + top_height + GAP + (suggestion_height.positive? ? suggestion_height + suggestion_footer_height + GAP : 0),
           composer_width: composer_width,
           composer_height: composer_height,
           composer_content_width: composer_content_width,
@@ -617,22 +636,23 @@ module Meringue
         }
       end
 
-      def bounded_slash_suggestion_height(total_height, composer_height, state)
-        raw_height = slash_suggestion_height(state)
-        return 0 unless raw_height.positive?
-
-        reserved_top_height = MIN_CHAT_HEIGHT
-        max_height = total_height - BOTTOM_HINT_HEIGHT - composer_height - GAP - reserved_top_height - GAP
-        bounded_height = [raw_height, [max_height, 0].max].min
-        bounded_height >= 3 ? bounded_height : 0
-      end
-
       # One popup slot above the composer, shared by the slash-command list and the
       # open-PR picker (see ChatPane#popup?), so both are bounded the same way.
-      def slash_suggestion_height(state)
-        return 0 unless chat_pane.popup?(state)
+      #
+      # The caption under the box gets its own reserved row, so the box keeps every
+      # visible entry row it would otherwise have spent on the counter, and the
+      # caption can never overlap the composer or the bottom hint line. The list
+      # collapses entirely rather than squeezing the logs pane below MIN_CHAT_HEIGHT.
+      def popup_metrics(state, total_height, composer_height)
+        return { height: 0, footer_height: 0 } unless chat_pane.popup?(state)
 
-        [chat_pane.popup_lines(state).length + 2, 7].min
+        footer_height = chat_pane.popup_footer_line(state).empty? ? 0 : 1
+        desired_height = [chat_pane.popup_lines(state).length + 2, 7].min
+        available_height = total_height - BOTTOM_HINT_HEIGHT - composer_height - GAP - MIN_CHAT_HEIGHT - GAP - footer_height
+        height = [desired_height, [available_height, 0].max].min
+        return { height: 0, footer_height: 0 } if height < 3
+
+        { height: height, footer_height: footer_height }
       end
 
       def sidebar_width_for(total_width)

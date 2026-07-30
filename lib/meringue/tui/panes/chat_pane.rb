@@ -193,8 +193,19 @@ module Meringue
           delivery_pr_picker?(state) ? "open pull requests" : "slash commands"
         end
 
+        # Only entries live inside the popup box. The counter and the key hints are
+        # *about* the list rather than members of it, so a row that says "1–15 of
+        # 27 commands" inside the border reads like a 16th command and costs the
+        # list a visible row. The layout draws #popup_footer_line under the box.
         def popup_lines(state)
           delivery_pr_picker?(state) ? delivery_pr_picker_lines(state) : slash_suggestion_lines(state)
+        end
+
+        # Dim line rendered directly below the popup box: where the window sits in
+        # the full list, and the keys that move it. Empty when there is nothing to
+        # say, in which case the layout reserves no row for it.
+        def popup_footer_line(state)
+          delivery_pr_picker?(state) ? delivery_pr_picker_footer_line(state) : slash_suggestion_footer_line(state)
         end
 
         def delivery_pr_picker?(state)
@@ -216,14 +227,13 @@ module Meringue
 
         def delivery_pr_picker_lines(state)
           entries = OpenPullRequests.entries(state)
-          return [[["No open pull requests are tracked yet.", Style::MUTED]], [["  Esc closes", Style::MUTED]]] if entries.empty?
+          return [[["No open pull requests are tracked yet.", Style::MUTED]]] if entries.empty?
 
           selected_index = delivery_pr_picker_index(state)
           window_start = delivery_pr_picker_window_start(state)
-          lines = entries.drop(window_start).first(VISIBLE_SUGGESTION_LIMIT).map.with_index do |entry, offset|
+          entries.drop(window_start).first(VISIBLE_SUGGESTION_LIMIT).map.with_index do |entry, offset|
             delivery_pr_picker_line(entry, selected: window_start + offset == selected_index)
           end
-          lines + [delivery_pr_picker_footer_line(entries.length, window_start)]
         end
 
         def delivery_pr_picker_line(entry, selected:)
@@ -236,13 +246,19 @@ module Meringue
           ]
         end
 
-        def delivery_pr_picker_footer_line(total, window_start)
-          shown = if total > VISIBLE_SUGGESTION_LIMIT
-                    "  #{window_start + 1}–#{[window_start + VISIBLE_SUGGESTION_LIMIT, total].min} of #{total} open PRs"
+        # The picker always explains its own keys, because it is a modal list a user
+        # meets rarely; the count is only interesting once the window hides rows.
+        def delivery_pr_picker_footer_line(state)
+          total = OpenPullRequests.entries(state).length
+          return [["Esc closes", Style::DIM]] if total.zero?
+
+          count = if total > VISIBLE_SUGGESTION_LIMIT
+                    window_start = delivery_pr_picker_window_start(state)
+                    "#{window_start + 1}–#{[window_start + VISIBLE_SUGGESTION_LIMIT, total].min} of #{total} open PRs"
                   else
-                    "  #{total} open PR#{total == 1 ? "" : "s"}"
+                    "#{total} open PR#{total == 1 ? "" : "s"}"
                   end
-          [[shown, Style::ACCENT], ["  ·  ↑↓ to move · Enter opens · Esc closes", Style::MUTED]]
+          [[count, Style::MUTED], ["  ·  ↑↓ move · Enter opens · Esc closes", Style::DIM]]
         end
 
         def delivery_pr_picker_state(state)
@@ -255,8 +271,8 @@ module Meringue
           return [[["No matching slash commands.", Style::MUTED]]] if slash_prompt?(chat_state(state).fetch("input_buffer", "")) && records.empty?
 
           selected_index = selected_slash_suggestion_index(state, records.length)
-          window_start = slash_suggestion_window_start(records.length, selected_index)
-          lines = records.drop(window_start).first(VISIBLE_SUGGESTION_LIMIT).map.with_index do |record, offset|
+          window_start = slash_suggestion_window_start_for(state)
+          records.drop(window_start).first(VISIBLE_SUGGESTION_LIMIT).map.with_index do |record, offset|
             selected = window_start + offset == selected_index
             marker = selected ? "›" : " "
             marker_style = selected ? Style::ACCENT_BOLD : Style::DIM
@@ -267,23 +283,31 @@ module Meringue
               [" — #{record.fetch("description")}", Style::MUTED]
             ]
           end
-          footer = slash_suggestion_footer_line(records, window_start)
-          footer ? lines + [footer] : lines
         end
 
         # A three-row window over a long list reads like a three-item list. A
         # harness can offer a hundred models, so say how many entries exist and
         # how to reach the rest instead of letting the window imply the total.
-        def slash_suggestion_footer_line(records, window_start)
+        # This is a caption under the box, not a list row (see #popup_lines).
+        def slash_suggestion_footer_line(state)
+          records = slash_suggestion_records(state)
           # The trailing catalog-state note is an explanation, not an entry.
           total = records.count { |record| record.fetch("kind", "command") != "session_models_unavailable" }
-          return nil if total <= VISIBLE_SUGGESTION_LIMIT
+          return [] if total <= VISIBLE_SUGGESTION_LIMIT
 
+          # The same window the rows above use, so the caption can never disagree
+          # with what is on screen.
+          window_start = slash_suggestion_window_start_for(state)
           last_shown = [window_start + VISIBLE_SUGGESTION_LIMIT, total].min
           [
-            ["  #{window_start + 1}–#{last_shown} of #{total} #{slash_suggestion_scope_label(records)}", Style::ACCENT],
-            ["  ·  ↑↓ to scroll · keep typing to filter", Style::MUTED]
+            ["#{window_start + 1}–#{last_shown} of #{total} #{slash_suggestion_scope_label(records)}", Style::MUTED],
+            ["  ·  ↑↓ scroll · keep typing to filter", Style::DIM]
           ]
+        end
+
+        def slash_suggestion_window_start_for(state)
+          records = slash_suggestion_records(state)
+          slash_suggestion_window_start(records.length, selected_slash_suggestion_index(state, records.length))
         end
 
         def slash_suggestion_scope_label(records)
