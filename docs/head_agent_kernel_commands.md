@@ -731,6 +731,17 @@ What is retained:
 - An issue with an attached PR that is open (including a draft) or whose status cannot be resolved. Merged and closed-without-merge PRs are settled and do not block pruning.
 - A bundle whose managed worktree cannot be removed safely. Dirty and locked worktrees are never forced; ownership/path/branch mismatches and git failures also retain the record so a later `/prune` can retry.
 
+How a merged PR is resolved:
+
+- A pull request Meringue has already verified as `merged` and persisted on the issue (`delivery_pull_request` / `delivery_pull_requests`) stays authoritative. Merging is terminal on the forge, so prune reuses that record instead of re-verifying it, and a settled bundle is still pruned when `gh` is unavailable, unauthenticated, or slow. `closed` is not trusted from state because a closed PR can be reopened, and anything else is always re-checked live.
+- Branch discovery (`gh pr list --head <branch>`) is skipped for a worker whose exact delivery branch already has a recorded merged PR: it could only re-derive URLs Meringue already has, and a failed discovery used to retain the settled record.
+- Within the bounded lookup phase, retention-critical lookups come first (statuses of PRs already recorded on an issue, then branch discovery for settled workers whose delivery PR is still unknown), and exploratory verification of historical candidate URLs runs last. Exhausting the budget therefore costs discovery, never a known PR status.
+
+Why a record was retained is always reported:
+
+- The prune log details carry `retained_issue_ids`, `retention_reasons` (per-issue blockers, unverified/open PR URLs, blocking workers, questions, worktree blockers), and a `forge_lookup` summary (`budget_seconds`, `elapsed_seconds`, `budget_exhausted`, `status_lookup_count`, `branch_lookup_count`, `trusted_from_state_urls`, `unavailable_urls`).
+- The prune message names the reasons the user cannot see in the AgentTree: `Retained 2 issues because Meringue could not verify their pull request status: P1-I20, P1-I21 (the 5s forge lookup budget was exhausted).` and `Retained 1 worker because their managed worktree could not be removed: P1-I1-W1 (worktree_dirty).` Those retentions are logged at `warning`; nonterminal issues, live workers, and open questions stay `info` because they are visible in the tree.
+
 Worktree cleanup safety and outcomes:
 
 - Only `git_worktree` workspaces under Meringue's configured workspace root are candidates. Project-root and dedicated-directory workspaces are left untouched.
@@ -740,9 +751,10 @@ Worktree cleanup safety and outcomes:
 - Dirty, locked, ambiguous, or failed cleanups leave the issue/worker record in state. The worker stores its latest `harness_metadata.workspace_cleanup` result, warning/info logs name each outcome, and the `Prune` result exposes `workspace_cleanup_outcomes` plus blocked agent/issue/project IDs.
 
 PR checks are conservative and bounded. The kernel performs them outside the state lock,
-looks up each URL once, and gives the whole lookup phase five seconds. A timeout or a PR
-introduced after the lookup snapshot is `unknown`, so its issue is retained instead of
-blocking the app indefinitely or being removed unsafely.
+looks up each URL once, seeds the cache with pull requests already recorded as merged, and
+gives the remaining lookup phase five seconds. A timeout or a PR introduced after the
+lookup snapshot is `unknown`, so its issue is retained instead of blocking the app
+indefinitely or being removed unsafely.
 
 Compatibility: a legacy `selector` value (`resolved`, `errored`, `completed`, or `merged`) is still accepted and recorded as `requested_selector` in the log details, but it is a no-op that prunes exactly the same records as a bare `/prune`. Any other `/prune` argument is rejected by the slash-command parser with a short usage message. Do not invent a selector for a head-proposed `Prune`: send an empty payload.
 
