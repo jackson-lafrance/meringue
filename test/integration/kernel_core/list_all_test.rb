@@ -7,7 +7,7 @@ class KernelCoreListAllTest < Minitest::Test
   include KernelCoreSupport
 
   SNAPSHOT_KEYS = %w[
-    agents conversation counters issues logs metadata projects questions schema_version ui
+    agents conversation counters goals issues logs metadata projects questions schema_version ui
   ].freeze
 
   def test_list_all_returns_the_agent_tree_snapshot_shape
@@ -24,7 +24,7 @@ class KernelCoreListAllTest < Minitest::Test
     %w[projects issues agents questions logs].each do |key|
       assert_kind_of Array, snapshot.fetch(key), "#{key} should be an array"
     end
-    %w[projects heads questions logs issues_by_project workers_by_issue].each do |key|
+    %w[projects heads questions goals logs issues_by_project workers_by_issue].each do |key|
       assert snapshot.fetch("counters").key?(key), "counters should include #{key}"
     end
     assert_iso8601(snapshot.fetch("metadata").fetch("created_at"), "metadata created_at")

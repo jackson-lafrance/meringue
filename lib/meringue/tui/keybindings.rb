@@ -81,7 +81,7 @@ module Meringue
         "quit" => "Quit",
         "clear_or_quit" => "Clear input / quit empty prompt",
         "cancel_navigation" => "Cancel dashboard navigation",
-        "open_delivery_pr" => "Open selected worker delivery PR",
+        "open_delivery_pr" => "Open the selected worker's delivery PR, or pick from the open PRs",
         "focus_next" => "Focus next pane",
         "focus_previous" => "Focus previous pane",
         "scroll_up" => "Scroll up",

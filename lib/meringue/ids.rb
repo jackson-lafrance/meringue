@@ -17,16 +17,17 @@ module Meringue
     WORKER_PATTERN = /\AP\d+-I\d+-W\d+\z/i
     HEAD_PATTERN = /\AH\d+\z/i
     QUESTION_PATTERN = /\AQ\d+\z/i
+    GOAL_PATTERN = /\AG\d+\z/i
     LOG_PATTERN = /\AL\d+\z/i
 
     # "Is this string shaped like a Meringue record id?"
-    RECORD_ID_PATTERN = /\A(?:P\d+(?:-I\d+(?:-W\d+)?)?|H\d+|Q\d+|L\d+)\z/i
+    RECORD_ID_PATTERN = /\A(?:P\d+(?:-I\d+(?:-W\d+)?)?|H\d+|Q\d+|G\d+|L\d+)\z/i
     # The same shapes, unanchored, for pulling ids out of prose such as a user message.
-    RECORD_ID_SCAN_PATTERN = /\b(?:P\d+(?:-I\d+(?:-W\d+)?)?|H\d+|Q\d+)\b/i
+    RECORD_ID_SCAN_PATTERN = /\b(?:P\d+(?:-I\d+(?:-W\d+)?)?|H\d+|Q\d+|G\d+)\b/i
 
     # State sections that hold record ids. Id shapes are disjoint across sections, so scanning
     # them in order cannot resolve one id to two different kinds of record.
-    RECORD_SECTIONS = %w[agents issues projects questions].freeze
+    RECORD_SECTIONS = %w[agents issues projects questions goals].freeze
 
     # Payload keys that carry a user- or head-supplied Meringue record id, in every spelling the
     # kernel accepts. Keys that must stay case-sensitive (path, model, theme, provider, level,
@@ -38,6 +39,7 @@ module Meringue
       issue_id IssueID issueId
       project_id ProjectID projectId
       question_id QuestionID questionId
+      goal_id GoalID goalId
       head_id HeadID headId _head_id
       parent_issue_id ParentIssueID parentIssueId
       follow_up_of_agent_id FollowUpOfAgentID followUpOfAgentID followUpOfAgentId

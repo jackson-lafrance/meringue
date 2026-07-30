@@ -91,9 +91,54 @@ only user-visible evidence that a message was dropped, so it stays in the AgentT
 until the user asks for housekeeping. `/prune` is the supported way to clear leftover
 errored heads.
 
-`PromptAgent` rejects an `errored` agent (`agent_not_resumable`), so skipping terminal
+`PromptAgent` rejects an `errored` agent (`agent_not_resumable`) unless that agent is a
+worker whose turn was cut short by a transport failure (see below), so skipping terminal
 records in reconciliation cannot lose recoverable work: nothing else in Meringue would
 have continued them either.
+
+## Settled is not finished
+
+A harness state call can only report that a session is no longer streaming, and that is
+true both for a turn that finished and for a turn that died mid-flight. Treating the second
+as the first is how a dropped wifi connection produced five `Worker <id> completed.` lines
+with empty results and flipped five in-flight issues to `completed`.
+
+Each pass therefore classifies a settled worker session instead of assuming it finished
+(`Engine#settle_failure_from_evidence`), in order of authority:
+
+1. the harness's own `turn_outcome` (Pi reads the stop reason of the turn's final assistant
+   message, so the failure is still visible after the fact)
+2. a `turn_outcome` a harness attached to the session ref metadata
+3. session events proving the transport died — but only when the settled turn produced no
+   final assistant message at all, so a real result followed by a clean process exit is
+   still a completion
+
+A classified failure settles the worker as `errored` with the reason on the record
+(`harness_metadata.settle_failure`, `settle_state`, `status_reason`), in one `error` log line
+(`Worker <id> errored without finishing: …`), and in the AgentTree and focused pane. No
+`completed_at` is written, so the issue and project cannot roll up to `completed` behind it.
+
+These records deliberately keep `reconcile_state: healthy` and are **not** marked
+`terminal_error`: reconciliation did its job, and the worker is still recoverable. That means
+they stay poll candidates, so the two log-once rules that matter here are its own:
+
+- re-observing the same dead turn is a silent no-op (compared by failure signature, not by
+  the moving `detected_at`), so an already-errored record is never re-logged pass after pass
+- failure evidence older than `harness_metadata.last_prompted_at` is stale, so a worker that
+  was prompted back to work is not re-errored from the persisted evidence of the turn it
+  already recovered from
+
+A settle-failed worker stays recoverable in every direction: its harness session reference,
+workspace, worktree, and branch are untouched, queued `pending_prompts` are still
+redelivered, `PromptAgent` accepts it while it still has a session reference, and a session
+that starts streaming again (for example because the user jumped into it) clears the recorded
+reason on the next pass. A worker whose session reference is gone remains terminal.
+
+The same reasoning applies to a worker queued behind it with `after_agent_id`: an `errored`
+predecessor normally cancels its dependent, but a predecessor that only stopped because its turn
+was cut short keeps the dependent waiting, because prompting that predecessor resumes the chain.
+`if_predecessor_fails: "run"` still activates the dependent immediately, and killing the
+predecessor still cancels the chain.
 
 ## Verifying
 

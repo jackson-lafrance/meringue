@@ -54,6 +54,24 @@ module Meringue
       # inherit the long event timeout used for real agent turns.
       DEFAULT_MODEL_CATALOG_TIMEOUT = 30
 
+      # Pi records why a turn stopped on its final assistant message. "error" is a
+      # provider/transport failure (dropped connection, DNS/TLS failure, 5xx,
+      # exhausted auto-retries): the turn ended without finishing its work.
+      TURN_FAILURE_STOP_REASONS = %w[error].freeze
+      # A settled session whose last assistant message is still waiting on a tool
+      # call never reached a final answer either, but that is not by itself a
+      # transport failure, so it is reported separately.
+      TURN_INCOMPLETE_STOP_REASONS = %w[toolUse].freeze
+      # Reading the tail is enough to find the final assistant message, and keeps
+      # the 2s reconciliation loop from re-parsing multi-megabyte session files.
+      TURN_OUTCOME_TAIL_BYTES = 64 * 1024
+      NETWORK_ERROR_PATTERN = /
+        connection|network|socket|dns|offline|unreachable|refused|reset
+        |econn|etimedout|enotfound|epipe|timeout|timed\s?out
+        |tls|ssl|certificate|handshake|proxy|gateway|fetch\sfailed
+        |overloaded|502|503|504
+      /ix.freeze
+
       attr_reader :command, :env, :session_dir, :command_timeout,
                   :event_timeout, :shutdown_timeout
 
@@ -492,6 +510,26 @@ module Meringue
         end
 
         session_file_summary(session_ref).fetch("last_assistant_text", nil)
+      end
+
+      # Harness-neutral outcome of the session's most recent turn.
+      #
+      # Pi persists the turn's final assistant message - including a failed one -
+      # to the session file, so a wifi drop that killed the turn stays visible even
+      # though the live RPC state only says the session is no longer streaming.
+      def turn_outcome(session_ref)
+        record = last_assistant_record(session_ref)
+        return nil unless record
+
+        stop_reason = assistant_stop_reason(record)
+        text = assistant_text_from_message(record)
+        ended_at = assistant_turn_ended_at(record)
+        return incomplete_turn_outcome(stop_reason, ended_at) if TURN_INCOMPLETE_STOP_REASONS.include?(stop_reason.to_s)
+        return completed_turn_outcome(stop_reason, text, ended_at) unless TURN_FAILURE_STOP_REASONS.include?(stop_reason.to_s)
+
+        failed_turn_outcome(stop_reason, assistant_error_message(record), text, ended_at)
+      rescue StandardError
+        nil
       end
 
       private
@@ -1085,6 +1123,107 @@ module Meringue
         Array(record.dig("message", "content")).filter_map do |part|
           part["text"] if part.is_a?(Hash) && part["type"] == "text"
         end.join("\n").strip
+      end
+
+      def assistant_stop_reason(record)
+        record["stopReason"] || record.dig("message", "stopReason")
+      end
+
+      def assistant_error_message(record)
+        record["errorMessage"] || record.dig("message", "errorMessage") ||
+          record["error"] || record.dig("message", "error")
+      end
+
+      def assistant_turn_ended_at(record)
+        timestamp = record["timestamp"]
+        return timestamp.to_s if present?(timestamp) && timestamp.is_a?(String)
+
+        epoch_ms = record.dig("message", "timestamp")
+        return nil unless epoch_ms.is_a?(Numeric)
+
+        Time.at(epoch_ms / 1000.0).utc.iso8601
+      end
+
+      def completed_turn_outcome(stop_reason, text, ended_at)
+        {
+          "state" => "completed",
+          "stop_reason" => present?(stop_reason) ? stop_reason.to_s : nil,
+          "turn_ended_at" => ended_at,
+          "last_assistant_text" => present?(text) ? text : nil
+        }.compact
+      end
+
+      def incomplete_turn_outcome(stop_reason, ended_at)
+        {
+          "state" => "incomplete",
+          "kind" => "pending_tool_call",
+          "reason" => "its last turn stopped while a tool call was still pending",
+          "stop_reason" => stop_reason.to_s,
+          "turn_ended_at" => ended_at
+        }.compact
+      end
+
+      def failed_turn_outcome(stop_reason, error_message, text, ended_at)
+        network = NETWORK_ERROR_PATTERN.match?(error_message.to_s)
+        {
+          "state" => "failed",
+          "kind" => network ? "network_failure" : "provider_error",
+          "reason" => turn_failure_reason(network, error_message),
+          "stop_reason" => stop_reason.to_s,
+          "error_message" => present?(error_message) ? error_message.to_s : nil,
+          # When the turn ended, so a later prompt can be told apart from stale evidence.
+          "turn_ended_at" => ended_at,
+          "last_assistant_text" => present?(text) ? text : nil
+        }.compact
+      end
+
+      def turn_failure_reason(network, error_message)
+        detail = error_message.to_s.strip
+        if network
+          return "its model request failed mid-turn because the network connection dropped" if detail.empty?
+
+          "its model request failed mid-turn (network error: #{detail})"
+        else
+          return "its model request failed mid-turn" if detail.empty?
+
+          "its model request failed mid-turn (#{detail})"
+        end
+      end
+
+      # Newest-first scan of the session file tail for the last assistant message.
+      def last_assistant_record(session_ref)
+        path = session_file_path(session_ref)
+        return nil unless present?(path) && File.file?(path)
+
+        session_file_tail_lines(path).reverse_each do |line|
+          record = parse_session_line(line)
+          next unless record.is_a?(Hash)
+          next unless record["type"].nil? || record["type"] == "message"
+          next unless record.dig("message", "role") == "assistant"
+
+          return record
+        end
+
+        nil
+      end
+
+      def session_file_tail_lines(path)
+        size = File.size(path)
+        offset = [size - TURN_OUTCOME_TAIL_BYTES, 0].max
+        chunk = File.open(path, "rb") do |file|
+          file.seek(offset)
+          file.read
+        end
+        lines = chunk.to_s.split("\n")
+        # The first line of a mid-file read is almost always truncated.
+        lines.shift if offset.positive?
+        lines.reject { |line| line.strip.empty? }
+      end
+
+      def parse_session_line(line)
+        JSON.parse(line)
+      rescue JSON::ParserError
+        nil
       end
 
       def assistant_message_completed?(record)

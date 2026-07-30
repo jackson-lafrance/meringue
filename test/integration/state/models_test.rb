@@ -25,13 +25,13 @@ class StateModelsShapeTest < Minitest::Test
     state = Models.empty_state(now: "2026-07-11T00:00:00Z")
 
     assert_equal(
-      %w[schema_version projects issues agents questions logs conversation ui counters metadata].sort,
+      %w[schema_version projects issues agents questions goals logs conversation ui counters metadata].sort,
       state.keys.sort
     )
     assert_equal "2026-07-11T00:00:00Z", state.dig("metadata", "created_at")
     assert_equal "2026-07-11T00:00:00Z", state.dig("metadata", "updated_at")
     assert_equal(
-      %w[projects heads questions logs issues_by_project workers_by_issue].sort,
+      %w[projects heads questions goals logs issues_by_project workers_by_issue].sort,
       state.fetch("counters").keys.sort
     )
   end
