@@ -48,6 +48,17 @@ now calls `Engine#release_head_session!` with reason `head_reconcile_error`, mat
 the `AGENTS.md` rule that the kernel closes a head's harness session when the head
 errors. Without that the failed head leaked a live harness process forever.
 
+**A refused head result is terminal too.** There are two ways a polled head fails: its
+answer cannot be parsed as a `HeadResult`, or it parses and the kernel refuses to apply
+it (`Engine#record_polled_head_completion`). The second case used to leave the record
+`errored` with `reconcile_state: healthy`, so it was re-polled, re-applied, re-rejected,
+and re-logged (`Polled head Hn completed but its HeadResult was not applied.`) on every
+pass. It now records the same terminal reconcile details (`reason:
+"head_result_not_applied"`) and releases the head session, so it is logged once and left
+alone. The in-flight batch recovery path (`head_result_apply_state == "applying"`) is
+unaffected: it does not consult `reconcile_state`, so a genuine mid-batch crash is still
+resumed through the command journal.
+
 **An already-errored head does not earn a fresh grace window.** The head startup grace
 window (`HEAD_RECONCILE_ERROR_GRACE_SECONDS`) is measured from when the record
 actually failed (`errored_at`, else `updated_at`) rather than from the moment
@@ -64,7 +75,8 @@ Terminal is the last rung, not the first:
 2. **Head recovery** — up to `HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS` attempts to
    re-attach the persisted session, or restart it from the persisted head request.
 3. **Head result repair** — an unparseable `HeadResult` is challenged up to
-   `HEAD_RESULT_REPAIR_MAX_ATTEMPTS` times before it counts as a failure.
+   `HEAD_RESULT_REPAIR_MAX_ATTEMPTS` times before it counts as a failure. A result the
+   kernel refuses to apply has no retry and is terminal immediately.
 4. **Worker resume** — a worker whose session cannot be polled is re-attached and
    re-prompted up to `WORKER_RECONCILE_RESUME_MAX_ATTEMPTS` times, staying `blocked`
    (with one warning per attempt) rather than `errored` while attempts remain.
@@ -95,9 +107,9 @@ The smoke script drives eleven reconciliation passes over one unrepairable head 
 unrepairable worker and prints the log-line count, so the spam is easy to see or refute by
 hand: two error lines total instead of two per pass.
 
-The first test file covers the log-once/no-churn contract: an unrepairable worker session
-and a head that cannot return a result each log exactly one error across repeated
-passes, the state file is byte-identical after repeat passes, live sessions in the same
-pass still reconcile, an errored record without recorded reconcile details is still
-polled and still reports its failure once, and a settled errored head is retained
-until `/prune` removes it.
+The first test file covers the log-once/no-churn contract: an unrepairable worker session,
+a head that cannot return a result, and a head whose result the kernel refuses each log
+exactly one error across repeated passes, the state file is byte-identical after repeat
+passes, live sessions in the same pass still reconcile, an errored record without recorded
+reconcile details is still polled and still reports its failure once, and a settled errored
+head is retained until `/prune` removes it.

@@ -5482,6 +5482,20 @@ module Meringue
         value.is_a?(Hash) && value.key?("status") && value.key?("command_type")
       end
 
+      # Terminal reconcile details for a polled head whose result the kernel rejected or failed.
+      # Shaped like the other terminal models so the log-once/no-churn guards apply unchanged.
+      def unapplied_head_result_reconcile_model(apply_result, now)
+        {
+          "state" => RECONCILE_STATE_TERMINAL_ERROR,
+          "agent_type" => "head",
+          "reason" => "head_result_not_applied",
+          "last_error_at" => now,
+          "error_message" => present_string(apply_result.fetch("message", nil)) || "Head result was not applied.",
+          "apply_status" => apply_result.fetch("status", nil),
+          "apply_errors" => Array(apply_result.fetch("errors", []))
+        }.compact
+      end
+
       def head_result_fully_applied?(apply_result)
         return false if head_result_apply_skipped?(apply_result)
 
@@ -6458,6 +6472,10 @@ module Meringue
           return [] unless head
 
           now = timestamp
+          # Captured before the session merge, which resets `reconcile_state` to `healthy`, so a
+          # repeated failure can still be recognised as already recorded.
+          previously_terminal = terminal_reconcile_error_recorded?(head)
+          previous_signature = reconcile_error_signature((head.fetch("harness_metadata", {}) || {}).fetch("reconcile", {}))
           merge_session_ref_into_agent!(head, poll_result.fetch("session_ref", {}))
           if head_result_apply_skipped?(apply_result)
             log_ids = append_harness_event_logs(state, head, poll_result.fetch("events", []))
@@ -6467,7 +6485,8 @@ module Meringue
           end
 
           fully_applied = head_result_fully_applied?(apply_result)
-          head["status"] = if apply_result.fetch("status", nil) != "accepted"
+          accepted = apply_result.fetch("status", nil) == "accepted"
+          head["status"] = if !accepted
                              "errored"
                            elsif fully_applied
                              "completed"
@@ -6475,15 +6494,32 @@ module Meringue
                              "blocked"
                            end
           head["updated_at"] = now
-          head["harness_metadata"] = (head.fetch("harness_metadata", {}) || {}).merge(
+          # A head result the kernel refused is terminal for this head: reconciliation has no
+          # retry for it, so it is recorded like any other terminal reconcile failure. Otherwise
+          # the record stays `healthy`, is re-polled every pass, and re-logs the same error every
+          # two seconds. The head's session is closed for the same reason it is on other terminal
+          # head failures: nothing will use it again. Release first, then snapshot the metadata,
+          # so the release markers survive.
+          reconcile = accepted ? nil : unapplied_head_result_reconcile_model(apply_result, now)
+          repeated = !accepted && previously_terminal && previous_signature == reconcile_error_signature(reconcile)
+          release_head_session!(head, reason: "head_result_not_applied", now: now) unless accepted
+          metadata = (head.fetch("harness_metadata", {}) || {}).merge(
             "completed_at" => now,
             "head_result" => head_result,
-            "head_result_applied_at" => apply_result.fetch("status", nil) == "accepted" ? now : nil,
+            "head_result_applied_at" => accepted ? now : nil,
             "head_result_apply_status" => fully_applied ? apply_result.fetch("status", nil) : "partial",
             "is_streaming" => false
           ).compact
+          unless accepted
+            metadata = metadata.merge(
+              "errored_at" => metadata.fetch("errored_at", nil) || now,
+              "reconcile_state" => RECONCILE_STATE_TERMINAL_ERROR,
+              "reconcile" => reconcile
+            ).compact
+          end
+          head["harness_metadata"] = metadata
           log_ids = append_harness_event_logs(state, head, poll_result.fetch("events", []))
-          unless apply_result.fetch("status", nil) == "accepted"
+          if !accepted && !repeated
             log_ids.concat(append_log(
               state,
               source_type: "head",
@@ -6494,7 +6530,7 @@ module Meringue
                 "head_result" => head_result,
                 "apply_status" => apply_result.fetch("status", nil),
                 "apply_message" => apply_result.fetch("message", nil)
-              }
+              }.merge(reconcile || {})
             ))
           end
           touch_state!(state, now)
