@@ -222,6 +222,15 @@ class InputSlashCommandParserTest < Minitest::Test
     end
   end
 
+  def suggestion_records(input, state)
+    Meringue::Input::SlashCommandParser.command_suggestion_records(input, limit: nil, state: state)
+  end
+
+  def parsed_command(input)
+    parsed = parse_slash(input)
+    [parsed.fetch("type"), parsed.fetch("payload")]
+  end
+
   def test_command_suggestions_filter_by_prefix
     assert_equal(
       ['/answer <question_id> "<answer>"'],
@@ -264,6 +273,174 @@ class InputSlashCommandParserTest < Minitest::Test
     thinking = Meringue::Input::SlashCommandParser.command_suggestion_records("/default-thinking x", limit: 5, state: state)
     assert_includes thinking.map { |record| record.fetch("usage") }, "xhigh"
     assert_includes thinking.map { |record| record.fetch("completion") }, "/default-thinking xhigh"
+  end
+
+  # The selector must offer every model the harness reports, not only the values
+  # Meringue happened to observe on existing sessions.
+  def test_model_suggestions_offer_the_whole_harness_catalog
+    state = sample_state_with_model_catalog
+
+    records = suggestion_records("/model P1-I1-W1 ", state)
+    assert_equal(
+      %w[
+        anthropic/claude-opus-5
+        anthropic-flex/claude-opus-5
+        anthropic/claude-opus-5
+        anthropic-flex/claude-opus-5
+        google/gemini-3-flash
+        openai/gpt-5.6-sol
+      ].uniq,
+      records.map { |record| record.fetch("usage") }
+    )
+    assert_equal ["session_models"], records.map { |record| record.fetch("kind") }.uniq
+    assert_equal "/model P1-I1-W1 openai/gpt-5.6-sol", records.last.fetch("completion")
+    # Ordering puts what the user most likely wants first and labels why.
+    assert_includes records.first.fetch("description"), "current session model"
+    assert_includes records[1].fetch("description"), "future-session default"
+    assert_includes records.first.fetch("description"), "thinking: off, minimal, low, medium, high, xhigh, max"
+    assert_includes records.first.fetch("description"), "1M ctx"
+
+    defaults = suggestion_records("/default-model ", state)
+    assert_equal "anthropic-flex/claude-opus-5", defaults.first.fetch("usage")
+    assert_includes defaults.first.fetch("description"), "current default"
+    assert_equal 4, defaults.length
+
+    # Filtering searches the whole catalog by reference, id, and display name.
+    assert_equal ["google/gemini-3-flash"], suggestion_records("/default-model gemini", state).map { |record| record.fetch("usage") }
+    assert_equal ["openai/gpt-5.6-sol"], suggestion_records("/default-model sol", state).map { |record| record.fetch("usage") }
+    assert_equal ["openai/gpt-5.6-sol"], suggestion_records("/default-model GPT-5.6", state).map { |record| record.fetch("usage") }
+  end
+
+  def test_model_suggestions_are_scoped_to_the_selected_targets_harness
+    state = sample_state_with_model_catalog(
+      harness: "claude",
+      catalogs: {
+        "pi" => model_catalog_snapshot(harness: "pi"),
+        "claude" => model_catalog_snapshot(
+          harness: "claude",
+          models: [{ "provider" => "anthropic", "id" => "claude-opus-5-cc", "thinking_levels" => ["high"] }]
+        )
+      }
+    )
+
+    # /model follows the target agent's harness, and the harness catalog stays
+    # authoritative: Pi-only references are not offered for a Claude session.
+    assert_equal(
+      ["anthropic/claude-opus-5-cc"],
+      suggestion_records("/model P1-I1-W1 ", state).map { |record| record.fetch("usage") }
+    )
+
+    # A pi agent in the same state still gets the pi catalog.
+    state.fetch("agents") << {
+      "id" => "P1-I1-W2", "type" => "worker", "status" => "working", "harness" => "pi",
+      "harness_session_id" => "session-2"
+    }
+    pi_records = suggestion_records("/model P1-I1-W2 ", state).map { |record| record.fetch("usage") }
+    assert_includes pi_records, "openai/gpt-5.6-sol"
+    refute_includes pi_records, "anthropic/claude-opus-5-cc"
+  end
+
+  def test_model_suggestions_degrade_clearly_when_no_catalog_is_available
+    state = sample_state_with_model_catalog(catalogs: {})
+
+    records = suggestion_records("/model P1-I1-W1 ", state)
+    usages = records.map { |record| record.fetch("usage") }
+
+    # Known references stay completable so an explicit valid id is never blocked.
+    assert_includes usages, "anthropic/claude-opus-5"
+    assert_includes usages, "anthropic-flex/claude-opus-5"
+    assert_includes records.first.fetch("description"), "catalog unavailable"
+
+    note = records.last
+    assert_equal "session_models_unavailable", note.fetch("kind")
+    assert_includes note.fetch("usage"), "model catalog unavailable"
+    assert_includes note.fetch("description"), "/models"
+    # Selecting the note cannot clobber a typed id: it re-inserts the prefix only.
+    assert_equal "/model P1-I1-W1", note.fetch("completion")
+
+    # A harness that reports no catalog at all explains itself the same way.
+    unsupported = sample_state_with_model_catalog(
+      harness: "antigravity",
+      catalogs: { "antigravity" => Meringue::Harness::ModelCatalog.unsupported(harness: "antigravity").to_h }
+    )
+    unsupported_records = suggestion_records("/model P1-I1-W1 ", unsupported)
+    assert_equal "session_models_unavailable", unsupported_records.last.fetch("kind")
+    assert_includes unsupported_records.last.fetch("description"), "does not expose a model catalog"
+
+    # A typed query hides the note so it can never intercept a completion.
+    refute_includes suggestion_records("/model P1-I1-W1 anthropic/", state).map { |record| record.fetch("kind") },
+                    "session_models_unavailable"
+  end
+
+  # Regression for "the model list only shows Claude Opus 5 and Opus 5 Flex": a
+  # last-confirmed list must stay fully offered when the newest refresh failed,
+  # instead of shrinking to the configured default plus Pi's built-in default.
+  def test_a_last_confirmed_catalog_still_offers_every_model
+    stale = Meringue::Harness::ModelCatalog.retained(
+      previous: Meringue::Harness::ModelCatalog.from_h(model_catalog_snapshot),
+      failure: Meringue::Harness::ModelCatalog.unavailable(
+        harness: "pi",
+        note: "Could not read Pi's model catalog: connection reset",
+        reason: "fetch_failed"
+      ),
+      last_attempt_at: "2026-03-03T00:00:00Z"
+    ).to_h
+    state = sample_state_with_model_catalog(catalogs: { "pi" => stale })
+
+    records = suggestion_records("/default-model ", state)
+    models = records.reject { |record| record.fetch("kind") == "session_models_unavailable" }
+
+    assert_equal 4, models.length, "a stale list must not shrink to remembered references"
+    assert_equal(
+      %w[anthropic-flex/claude-opus-5 anthropic/claude-opus-5 google/gemini-3-flash openai/gpt-5.6-sol],
+      models.map { |record| record.fetch("usage") }
+    )
+    assert_includes models.first.fetch("description"), "last confirmed list"
+    # Non-Anthropic entries stay selectable and keep their own thinking levels.
+    google = models.find { |record| record.fetch("usage") == "google/gemini-3-flash" }
+    assert_equal "/default-model google/gemini-3-flash", google.fetch("completion")
+
+    note = records.last
+    assert_equal "session_models_unavailable", note.fetch("kind")
+    assert_includes note.fetch("usage"), "latest refresh failed"
+    assert_includes note.fetch("description"), "connection reset"
+
+    # Thinking levels still come from the retained per-model data.
+    thinking = suggestion_records("/default-thinking ", state).map { |record| record.fetch("usage") }
+    assert_equal %w[xhigh max], thinking
+  end
+
+  def test_thinking_suggestions_follow_the_models_supported_levels
+    state = sample_state_with_model_catalog
+
+    session_levels = suggestion_records("/thinking P1-I1-W1 ", state)
+    assert_equal Meringue::Harness::PiClient::THINKING_LEVELS, session_levels.map { |record| record.fetch("usage") }
+    assert_includes session_levels.first.fetch("description"), "supported by anthropic/claude-opus-5"
+
+    # The saved default model only supports xhigh/max, so /default-thinking
+    # offers exactly those.
+    default_levels = suggestion_records("/default-thinking ", state)
+    assert_equal %w[xhigh max], default_levels.map { |record| record.fetch("usage") }
+    assert_equal "/default-thinking xhigh", default_levels.first.fetch("completion")
+    assert_includes default_levels.first.fetch("description"), "supported by anthropic-flex/claude-opus-5"
+
+    # A model whose levels are unknown falls back to Pi's full ladder and says so.
+    unknown = sample_state_with_model_catalog(catalogs: {})
+    unknown_levels = suggestion_records("/thinking P1-I1-W1 ", unknown)
+    assert_equal Meringue::Harness::PiClient::THINKING_LEVELS, unknown_levels.map { |record| record.fetch("usage") }
+    assert_includes unknown_levels.first.fetch("description"), "not verified"
+  end
+
+  def test_models_command_lists_catalogs_and_supports_an_explicit_refresh
+    assert_equal ["GetModelCatalog", {}], parsed_command("/models")
+    assert_equal ["GetModelCatalog", { "harness" => "claude" }], parsed_command("/models claude")
+    assert_equal ["GetModelCatalog", { "refresh" => true }], parsed_command("/models refresh")
+    assert_equal ["GetModelCatalog", { "harness" => "pi", "refresh" => true }], parsed_command("/models pi refresh")
+    assert_equal "InvalidSlashCommand", parse_slash("/models pi claude").fetch("type")
+
+    records = suggestion_records("/models ", sample_state_with_model_catalog)
+    assert_equal %w[pi claude antigravity], records.map { |record| record.fetch("usage") }
+    assert_includes records.first.fetch("description"), "List the models Pi reports"
   end
 
   def test_argument_suggestions_use_state_records
