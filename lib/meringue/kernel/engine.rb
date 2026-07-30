@@ -194,6 +194,41 @@ module Meringue
         project_ref ProjectRef projectRef
       ].freeze
       BATCH_PROJECT_REFERENCE_COMMANDS = %w[CreateIssue].freeze
+      # A head can queue a worker that only starts once another agent settles ("spawn B, but start
+      # it after A finishes"). The dependency is durable state on the queued worker record, not an
+      # in-memory timer: the kernel activates it from the worker-settle path and from the
+      # reconciliation pass, so it survives a restart.
+      DEFERRED_WORKER_AFTER_KEYS = %w[
+        after_agent_id AfterAgentID afterAgentId
+        after_agent AfterAgent afterAgent
+      ].freeze
+      # Same intra-batch reference style as issue_from_command: point at the SpawnWorker command in
+      # this batch instead of predicting the worker id the kernel will mint.
+      DEFERRED_WORKER_AFTER_REFERENCE_KEYS = %w[
+        after_from_command AfterFromCommand afterFromCommand
+        after_agent_from_command AfterAgentFromCommand afterAgentFromCommand
+        after_ref AfterRef afterRef
+      ].freeze
+      DEFERRED_WORKER_FAILURE_POLICY_KEYS = %w[
+        if_predecessor_fails IfPredecessorFails ifPredecessorFails
+        on_predecessor_failure OnPredecessorFailure onPredecessorFailure
+      ].freeze
+      DEFERRED_WORKER_HANDOVER_KEYS = %w[
+        include_predecessor_result IncludePredecessorResult includePredecessorResult
+      ].freeze
+      # `cancel` (default) drops the dependent with a warning when its predecessor errors; `run`
+      # starts it anyway and says so in the handover. A killed predecessor always cancels.
+      DEFERRED_WORKER_FAILURE_POLICIES = %w[cancel run].freeze
+      DEFERRED_WORKER_DEFAULT_FAILURE_POLICY = "cancel"
+      # Bounds how long a chain of queued workers may be, so one batch cannot schedule work forever.
+      DEFERRED_WORKER_MAX_CHAIN_DEPTH = 5
+      # The handover is a bounded excerpt of the predecessor's final report, never a transcript.
+      DEFERRED_WORKER_HANDOVER_MAX_CHARS = 4_000
+      DEFERRED_STATE_WAITING = "waiting"
+      DEFERRED_STATE_ACTIVATING = "activating"
+      DEFERRED_STATE_ACTIVATED = "activated"
+      DEFERRED_STATE_CANCELLED = "cancelled"
+      DEFERRED_PENDING_STATES = [DEFERRED_STATE_WAITING, DEFERRED_STATE_ACTIVATING].freeze
       # Reconciliation redelivery attempts for a prompt that arrived while the session was busy.
       PENDING_PROMPT_MAX_ATTEMPTS = 20
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
@@ -470,6 +505,29 @@ module Meringue
       end
 
       def mark_worker_completed(agent_id:, harness_events: [], last_assistant_text: nil, session_ref: nil)
+        result = record_worker_completion(
+          agent_id: agent_id,
+          harness_events: harness_events,
+          last_assistant_text: last_assistant_text,
+          session_ref: session_ref
+        )
+        return result unless result.fetch("status", nil) == "accepted"
+
+        # First of the two activation hooks for queued dependents. Reconciliation is the second, so
+        # a dependent cannot be lost if this process dies between A finishing and B starting.
+        deferred = resolve_deferred_workers(trigger: "predecessor_settled")
+        return result if deferred.empty?
+
+        result.merge(
+          "log_entry_ids" => (
+            Array(result.fetch("log_entry_ids", [])) +
+              deferred.flat_map { |entry| Array(entry.fetch("log_entry_ids", [])) }
+          ).uniq,
+          "deferred_worker_results" => deferred
+        )
+      end
+
+      def record_worker_completion(agent_id:, harness_events: [], last_assistant_text: nil, session_ref: nil)
         synchronized_state do
           state = normalized_state
           agent = find_session_agent(state, agent_id: agent_id, session_ref: session_ref)
@@ -527,6 +585,8 @@ module Meringue
           accepted_result(nil, "MarkWorkerCompleted", agent.fetch("id"), "Marked worker #{agent.fetch("id")} completed.", worker_completion_result(agent, issue), log_ids)
         end
       end
+
+      private :record_worker_completion
 
       def record_user_kernel_command(input:, commands: [])
         synchronized_state do
@@ -603,7 +663,12 @@ module Meringue
 
         poll_results = agents.map { |agent| poll_agent_session(agent) }
         applied_results = poll_results.map { |poll_result| apply_poll_result(poll_result) }
+        # Second activation hook for queued dependents. It runs after the polls so a predecessor
+        # that settled in this same pass is honoured immediately, and it is the hook that recovers
+        # a dependency whose predecessor settled, errored, or disappeared while Meringue was down.
+        deferred_worker_results = reconcile_step("resolve_deferred_workers", []) { resolve_deferred_workers(trigger: "reconcile") }
         changed_count = applied_results.count { |result| result.fetch("changed", false) }
+        changed_count += deferred_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += recovered_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += pending_prompt_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += recovered_results.count { |result| result.fetch("status", nil) == "accepted" }
@@ -627,9 +692,10 @@ module Meringue
             "recovered_head_results" => recovered_results,
             "delivery_pull_request_refreshes" => delivery_pr_refreshes,
             "model_catalog_refresh" => model_catalog_refresh,
+            "deferred_worker_results" => deferred_worker_results,
             "poll_results" => applied_results
           },
-          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) }).uniq
+          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) }).uniq
         )
       rescue StandardError => e
         error = error_payload(e)
@@ -716,6 +782,9 @@ module Meringue
             next unless agent.fetch("type", nil) == "worker" && agent.fetch("status", nil) == "queued"
             next if agent_has_session_reference?(agent)
             next if owned_by_other_live_instance?(agent)
+            # A worker queued behind another agent is not an interrupted provisioning attempt. It is
+            # waiting on purpose, and only resolve_deferred_workers may start it.
+            next if waiting_deferred_worker?(agent)
 
             metadata = agent.fetch("harness_metadata", {}) || {}
             command_id = present_string(metadata.fetch("spawn_command_id", nil))
@@ -731,7 +800,11 @@ module Meringue
                 "prompt" => prompt,
                 "workspace_path" => metadata.fetch("requested_workspace_path", nil),
                 "follow_up_of_agent_id" => metadata.fetch("follow_up_of_agent_id", nil),
-                "replace_agent_id" => metadata.fetch("replace_agent_id", nil)
+                "replace_agent_id" => metadata.fetch("replace_agent_id", nil),
+                # An activation that was interrupted between the flip and the harness spawn resumes
+                # here; it must not be re-evaluated as a fresh deferral request.
+                "after_agent_id" => present_string(agent.fetch("after_agent_id", nil)),
+                "_activate_deferred" => deferred_spawn_metadata(agent).fetch("state", nil) == DEFERRED_STATE_ACTIVATING
               }
             }
           end
@@ -850,10 +923,14 @@ module Meringue
         when "GetInfo"
           info = result.is_a?(Hash) ? result : {}
           record = info.fetch("record", {}) || {}
+          deferred = info["deferred_spawn"].is_a?(Hash) ? info["deferred_spawn"] : nil
+          waiting_dependents = Array(info["waiting_dependent_agent_ids"])
           [
             "  #{info.fetch("kind", "record")}: #{record["id"] || info["id"]}",
             record["status"] ? "  status: #{record["status"]}" : nil,
-            record["title"] || record["name"] || record["question"] ? "  #{record["title"] || record["name"] || record["question"]}" : nil
+            record["title"] || record["name"] || record["question"] ? "  #{record["title"] || record["name"] || record["question"]}" : nil,
+            deferred ? "  #{deferred_info_line(deferred)}" : nil,
+            waiting_dependents.any? ? "  queued after this worker: #{waiting_dependents.join(", ")}" : nil
           ].compact
         when "ListAll", "GetState"
           state = result || {}
@@ -1612,6 +1689,16 @@ module Meringue
 
         now = timestamp
         killed_agent_ids = kill_target_in_state!(state, target_id.to_s, now)
+        # A worker queued behind a killed agent can never settle its predecessor, so it is cancelled
+        # in the same command instead of waiting forever on a record that is being removed.
+        cancelled_dependents = cancel_deferred_dependents_in_state!(
+          state,
+          killed_agent_ids,
+          now: now,
+          reason: "predecessor_killed",
+          trigger: "kill"
+        )
+        killed_agent_ids = (killed_agent_ids + cancelled_dependents.fetch("agent_ids")).uniq
         killed_agent_ids.each do |agent_id|
           agent = find_agent(state, agent_id)
           next unless agent
@@ -1622,7 +1709,8 @@ module Meringue
         result = deep_copy(target)
         removal = remove_killed_target_records!(state, target_id.to_s, killed_agent_ids, now)
 
-        log_ids = append_log(
+        log_ids = cancelled_dependents.fetch("log_entry_ids").dup
+        log_ids.concat(append_log(
           state,
           source_type: "kernel",
           source_id: target_id.to_s,
@@ -1631,11 +1719,12 @@ module Meringue
           details: {
             "target_id" => target_id.to_s,
             "killed_agent_ids" => killed_agent_ids,
+            "cancelled_deferred_agent_ids" => cancelled_dependents.fetch("agent_ids"),
             "removed_issue_ids" => removal.fetch("removed_issue_ids", []),
             "removed_agent_ids" => removal.fetch("removed_agent_ids", []),
             "removed_project_ids" => removal.fetch("removed_project_ids", [])
-          }
-        )
+          }.compact
+        ))
         touch_state!(state, now)
         store.save(state)
 
@@ -2501,6 +2590,17 @@ module Meringue
                               .map { |issue| issue.slice("id", "title", "status") } if kind == "project"
         info["agents"] = state.fetch("agents").select { |agent| agent.fetch("issue_id", nil) == target_id }
                               .map { |agent| agent.slice("id", "type", "status") } if kind == "issue"
+        if kind == "agent" && record.fetch("type", nil) == "worker"
+          deferred = deferred_spawn_metadata(record)
+          unless deferred.empty?
+            predecessor = find_agent(state, deferred_worker_after_agent_id(record))
+            info["deferred_spawn"] = deep_copy(deferred).merge(
+              "after_agent_status" => predecessor ? predecessor.fetch("status", nil) : "missing"
+            ).compact
+          end
+          dependents = waiting_deferred_dependents(state, [record.fetch("id")])
+          info["waiting_dependent_agent_ids"] = dependents.map { |dependent| dependent.fetch("id") } if dependents.any?
+        end
 
         accepted_result(command_id, command_type, record.fetch("id", target_id), "Loaded #{kind} #{target_id}.", info, [])
       end
@@ -3135,11 +3235,15 @@ module Meringue
           nonterminal_issue_ids = subtree_issues.reject do |candidate|
             PRUNE_ELIGIBLE_STATUSES.include?(candidate.fetch("status", nil).to_s)
           end.map { |candidate| candidate.fetch("id") }
+          # A predecessor must outlive its queue: removing it here would leave a queued dependent
+          # (possibly on another issue) with nothing to wait for.
+          deferred_dependents = waiting_deferred_dependents(state, workers.map { |worker| worker.fetch("id", nil) })
           blockers = []
           blockers << "nonterminal_issues" if nonterminal_issue_ids.any?
           blockers << "unresolved_workers" if blocking_workers.any?
           blockers << "open_questions" if open_questions.any?
           blockers << "unsettled_pull_requests" if pull_request_blockers.any?
+          blockers << "pending_deferred_dependents" if deferred_dependents.any?
 
           {
             "issue_id" => issue.fetch("id"),
@@ -3150,6 +3254,7 @@ module Meringue
             "blockers" => blockers,
             "nonterminal_issue_ids" => nonterminal_issue_ids,
             "blocking_worker_ids" => blocking_workers.map { |worker| worker.fetch("id", nil) }.compact,
+            "deferred_dependent_worker_ids" => deferred_dependents.map { |dependent| dependent.fetch("id", nil) }.compact,
             "open_question_ids" => open_questions.map { |question| question.fetch("id", nil) }.compact,
             "pull_request_blockers" => pull_request_blockers,
             "pr_urls" => subtree_ids.flat_map { |issue_id| Array(checks_by_issue.dig(issue_id, "pr_urls")) }.uniq
@@ -4313,6 +4418,13 @@ module Meringue
         worker_title = value_at(payload, "title", "Title", "worker_title", "workerTitle")
         follow_up_of_agent_id = value_at(payload, "follow_up_of_agent_id", "followUpOfAgentID", "followUpOfAgentId")
         replace_agent_id = value_at(payload, "replace_agent_id", "replaceAgentID", "replaceAgentId")
+        after_agent_id = value_at(payload, *DEFERRED_WORKER_AFTER_KEYS)
+        failure_policy = normalized_deferred_failure_policy(payload)
+        include_predecessor_result = deferred_handover_requested?(payload)
+        # Set by the kernel when it starts a worker it had queued behind another agent. It is the
+        # only way past the deferral branch, so a queued worker cannot start itself twice.
+        activating_deferred = !!value_at(payload, "_activate_deferred", "activate_deferred")
+        deferred_agent_id = present_string(value_at(payload, "_deferred_agent_id", "deferred_agent_id"))
         requested_workspace_path = value_at(payload, "workspace_path", "WorkspacePath", "workspacePath")
         # Set by the kernel when it corrected a head's predicted issue id; kept on the worker and
         # in its spawn log so a corrected route is visible instead of silent.
@@ -4324,6 +4436,12 @@ module Meringue
         if present_string(follow_up_of_agent_id) && present_string(replace_agent_id)
           errors << "follow_up_of_agent_id and replace_agent_id are mutually exclusive"
         end
+        if present_string(after_agent_id) && present_string(replace_agent_id)
+          # A replacement takes over now: the kernel spawns the successor and then kills the worker
+          # it replaces. Deferring that would leave the replaced worker running indefinitely.
+          errors << "deferred_after_agent_conflicts_with_replace"
+        end
+        errors << "invalid_if_predecessor_fails" if failure_policy.nil?
         return synchronized_state { rejected_result(command_id, command_type, "Worker was not spawned.", errors) } unless errors.empty?
 
         reservation = synchronized_state do
@@ -4334,7 +4452,11 @@ module Meringue
           project = find_project(state, issue.fetch("project_id"))
           return rejected_result(command_id, command_type, "Project #{issue.fetch("project_id")} does not exist.", ["project_not_found"]) unless project
 
+          # An activation names the queued record directly: its reservation was written by an earlier
+          # command, so resolving it only through spawn_command_id would risk provisioning a second
+          # worker for the same queued record.
           existing = worker_for_spawn_command(state, command_id)
+          existing ||= find_agent(state, deferred_agent_id) if activating_deferred && deferred_agent_id
           if existing && agent_has_session_reference?(existing)
             return accepted_result(command_id, command_type, existing.fetch("id"), "Worker #{existing.fetch("id")} was already spawned.", existing, [])
           end
@@ -4347,6 +4469,18 @@ module Meringue
               command_type,
               "Worker #{existing.fetch("id")} is already being spawned by another Meringue instance.",
               ["worker_spawn_in_progress"]
+            )
+          end
+          # This command already queued its worker behind another agent. Report the queued record
+          # instead of starting a second session for the same logical command.
+          if existing && waiting_deferred_worker?(existing) && !activating_deferred
+            return accepted_result(
+              command_id,
+              command_type,
+              existing.fetch("id"),
+              deferred_queue_message(existing),
+              deep_copy(existing),
+              []
             )
           end
 
@@ -4362,6 +4496,36 @@ module Meringue
             if present_string(replace_agent_id) && !replaceable_worker?(related_agent)
               return rejected_result(command_id, command_type, "Worker #{related_agent_id} has already been killed or replaced.", ["agent_not_replaceable"])
             end
+
+            if present_string(after_agent_id) && !activating_deferred
+              decision = deferred_spawn_decision(state, after_agent_id: after_agent_id, failure_policy: failure_policy)
+              case decision.fetch("kind")
+              when "reject"
+                return rejected_result(command_id, command_type, decision.fetch("message"), decision.fetch("errors"))
+              when "defer"
+                return queue_deferred_worker(
+                  state,
+                  command_id: command_id,
+                  command_type: command_type,
+                  issue: issue,
+                  project: project,
+                  prompt: prompt,
+                  title: worker_title,
+                  requested_workspace_path: requested_workspace_path,
+                  follow_up_of_agent_id: present_string(follow_up_of_agent_id),
+                  predecessor: decision.fetch("predecessor"),
+                  chain_depth: decision.fetch("chain_depth"),
+                  failure_policy: failure_policy,
+                  include_predecessor_result: include_predecessor_result,
+                  rerouted_from_issue_id: rerouted_from_issue_id
+                )
+              else
+                # Nothing left to wait for: the predecessor already settled, so start now and still
+                # hand its final report to this worker.
+                after_agent_id = decision.fetch("predecessor").fetch("id")
+                prompt = deferred_handover_prompt(prompt, decision.fetch("predecessor"), include_predecessor_result)
+              end
+            end
           end
 
           active_provider = active_harness_provider(state)
@@ -4373,6 +4537,9 @@ module Meringue
             existing_metadata = existing.fetch("harness_metadata", {}) || {}
             follow_up_of_agent_id = existing_metadata.fetch("follow_up_of_agent_id", follow_up_of_agent_id)
             replace_agent_id = existing_metadata.fetch("replace_agent_id", replace_agent_id)
+            after_agent_id = present_string(existing.fetch("after_agent_id", nil)) ||
+                             present_string(deferred_spawn_metadata(existing).fetch("after_agent_id", nil)) ||
+                             present_string(after_agent_id)
           else
             agent_id = next_worker_id!(state, issue.fetch("id"))
             workspace = resolve_worker_workspace(
@@ -4397,6 +4564,7 @@ module Meringue
               requested_workspace_path: requested_workspace_path,
               follow_up_of_agent_id: follow_up_of_agent_id,
               replace_agent_id: replace_agent_id,
+              after_agent_id: present_string(after_agent_id),
               now: now,
               harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
             )
@@ -4427,9 +4595,12 @@ module Meringue
             "harness" => active_provider,
             "harness_generation" => state.fetch("metadata").fetch("harness_generation", 0).to_i,
             "follow_up_of_agent_id" => present_string(follow_up_of_agent_id),
-            "replace_agent_id" => present_string(replace_agent_id)
+            "replace_agent_id" => present_string(replace_agent_id),
+            "after_agent_id" => present_string(after_agent_id),
+            "prompt" => prompt.to_s
           }
         end
+        prompt = reservation.fetch("prompt", prompt)
 
         workspace = resolve_worker_workspace(
           project: reservation.fetch("project"),
@@ -4508,6 +4679,8 @@ module Meringue
             )
           end
 
+          after_agent_value = present_string(reservation.fetch("after_agent_id", nil)) ||
+                              present_string(reserved_agent.fetch("after_agent_id", nil))
           agent = build_worker_agent(
             agent_id: reservation.fetch("agent_id"),
             issue: issue,
@@ -4518,14 +4691,16 @@ module Meringue
             title: worker_title,
             harness_generation: reservation.fetch("harness_generation"),
             follow_up_of_agent_id: follow_up_of_id,
-            replaces_agent_id: replaces_id
+            replaces_agent_id: replaces_id,
+            after_agent_id: after_agent_value
           )
           now = timestamp
           agent["harness_metadata"] = (reserved_agent.fetch("harness_metadata", {}) || {}).merge(agent.fetch("harness_metadata", {})).merge(
             "provisioning_state" => "ready",
             "provisioned_at" => now,
             "spawn_command_id" => command_id,
-            "rerouted_from_issue_id" => rerouted_from_issue_id
+            "rerouted_from_issue_id" => rerouted_from_issue_id,
+            "deferred_spawn" => activated_deferred_spawn_metadata(reserved_agent, now)
           ).compact
           state.fetch("agents")[state.fetch("agents").index(reserved_agent)] = agent
           issue.fetch("agent_ids") << reservation.fetch("agent_id") unless issue.fetch("agent_ids").include?(reservation.fetch("agent_id"))
@@ -4533,9 +4708,19 @@ module Meringue
             related_agent["follow_up_agent_ids"] = (Array(related_agent["follow_up_agent_ids"]) + [agent.fetch("id")]).uniq
             related_agent["updated_at"] = now
           end
+          repointed_dependents = { "agent_ids" => [], "log_entry_ids" => [] }
           if related_agent && replaces_id
             mark_agent_killed!(related_agent, now)
             related_agent["replaced_by_agent_id"] = agent.fetch("id")
+            # The successor inherits the replaced worker's queue in the same command. Waiting for
+            # reconciliation would race the pass that removes the replaced record.
+            repointed_dependents = repoint_deferred_dependents_in_state!(
+              state,
+              from_agent_id: replaces_id,
+              to_agent: agent,
+              now: now,
+              trigger: "replacement"
+            )
             kill_session_safely(session_ref_from_agent(related_agent), agent: related_agent) if present_string(related_agent.fetch("harness", nil))
           end
           issue["status"] = "working"
@@ -4547,7 +4732,8 @@ module Meringue
           project["updated_at"] = now
 
           log_message = spawn_worker_log_message(agent, issue)
-          log_ids = append_log(
+          log_ids = repointed_dependents.fetch("log_entry_ids").dup
+          log_ids.concat(append_log(
             state,
             source_type: "kernel",
             source_id: reservation.fetch("agent_id"),
@@ -4560,13 +4746,15 @@ module Meringue
               "routing_action" => spawn_routing_action(follow_up_of_id, replaces_id),
               "follow_up_of_agent_id" => follow_up_of_id,
               "replaces_agent_id" => replaces_id,
+              "after_agent_id" => after_agent_value,
               "workspace_path" => agent.fetch("workspace_path"),
               "workspace_strategy" => agent.fetch("workspace_strategy"),
               "workspace_branch" => agent.fetch("workspace_branch"),
               "title" => agent.fetch("harness_metadata", {}).fetch("title", nil),
-              "rerouted_from_issue_id" => rerouted_from_issue_id
+              "rerouted_from_issue_id" => rerouted_from_issue_id,
+              "repointed_deferred_agent_ids" => repointed_dependents.fetch("agent_ids").empty? ? nil : repointed_dependents.fetch("agent_ids")
             }.compact
-          )
+          ))
           touch_state!(state, now)
           store.save(state)
 
@@ -4602,8 +4790,729 @@ module Meringue
         end
       end
 
+      # --- Deferred (queued-after) workers ------------------------------------------------------
+      #
+      # Dependency model: a dependent is an ordinary queued worker agent record with a top-level
+      # `after_agent_id` plus a `harness_metadata.deferred_spawn` block. The record *is* the whole
+      # dependency, so nothing sleeps or polls for it, the AgentTree/GetInfo/Kill/Prune/Recount
+      # paths already understand it, and any kernel instance can resolve it after a restart.
+      #
+      # Settle policy. Every outcome is logged; a dependent is never silently dropped.
+      #   completed -> activate, handing the predecessor's final report to the dependent
+      #   errored   -> cancel by default, or start anyway with `if_predecessor_fails: "run"`
+      #   killed    -> cancel, unless the kill was a replacement, in which case the dependent is
+      #                re-pointed at the successor that took the predecessor's place
+      #   removed   -> cancel (prune retains a predecessor while a dependent still waits, so this
+      #                only happens after an out-of-band removal)
+      #   queued/working/idle/blocked -> keep waiting
+      def deferred_spawn_metadata(agent)
+        metadata = agent.is_a?(Hash) ? (agent.fetch("harness_metadata", {}) || {}) : {}
+        deferred = metadata.fetch("deferred_spawn", nil)
+        deferred.is_a?(Hash) ? deferred : {}
+      end
+
+      # A worker that is deliberately not started yet. Deliberately narrow: it must still be queued
+      # with no session, so a half-provisioned worker is never mistaken for a queued dependent.
+      def waiting_deferred_worker?(agent)
+        return false unless agent.is_a?(Hash) && agent.fetch("type", nil) == "worker"
+        return false unless agent.fetch("status", nil) == "queued"
+        return false if agent_has_session_reference?(agent)
+
+        deferred_spawn_metadata(agent).fetch("state", nil) == DEFERRED_STATE_WAITING
+      end
+
+      def pending_deferred_worker?(agent)
+        DEFERRED_PENDING_STATES.include?(deferred_spawn_metadata(agent).fetch("state", nil))
+      end
+
+      def deferred_worker_after_agent_id(agent)
+        present_string(agent.fetch("after_agent_id", nil)) ||
+          present_string(deferred_spawn_metadata(agent).fetch("after_agent_id", nil))
+      end
+
+      def waiting_deferred_dependents(state, predecessor_ids)
+        wanted = Array(predecessor_ids).compact.map(&:to_s).reject(&:empty?)
+        return [] if wanted.empty?
+
+        state.fetch("agents").select do |agent|
+          next false unless waiting_deferred_worker?(agent)
+
+          after_agent_id = deferred_worker_after_agent_id(agent)
+          wanted.any? { |candidate| Ids.same?(candidate, after_agent_id) }
+        end
+      end
+
+      def normalized_deferred_failure_policy(payload)
+        raw = present_string(value_at(payload, *DEFERRED_WORKER_FAILURE_POLICY_KEYS))
+        return DEFERRED_WORKER_DEFAULT_FAILURE_POLICY unless raw
+
+        normalized = raw.downcase.tr("-", "_")
+        normalized = "run" if %w[run run_anyway continue proceed start].include?(normalized)
+        normalized = "cancel" if %w[cancel skip drop abort].include?(normalized)
+        DEFERRED_WORKER_FAILURE_POLICIES.include?(normalized) ? normalized : nil
+      end
+
+      def deferred_handover_requested?(payload)
+        raw = value_at(payload, *DEFERRED_WORKER_HANDOVER_KEYS)
+        return true if raw.nil?
+
+        !%w[false 0 no off].include?(raw.to_s.strip.downcase)
+      end
+
+      # Validation for one `after_agent_id` at spawn time. Returns a rejection, a deferral, or
+      # "start now" when there is nothing left to wait for.
+      def deferred_spawn_decision(state, after_agent_id:, failure_policy:)
+        requested = present_string(after_agent_id)
+        predecessor = find_agent(state, requested)
+        unless predecessor
+          return deferred_rejection("SpawnWorker cannot wait for #{requested} because that agent does not exist.", ["after_agent_not_found"])
+        end
+        unless predecessor.fetch("type", nil) == "worker"
+          return deferred_rejection(
+            "SpawnWorker can only wait for a worker; #{requested} is a #{predecessor.fetch("type", "record")}.",
+            ["after_agent_is_not_worker"]
+          )
+        end
+
+        chain = deferred_pending_chain(state, predecessor)
+        if chain.fetch("cycle")
+          return deferred_rejection(
+            "SpawnWorker cannot wait for #{requested} because its queue already loops (#{chain.fetch("ids").join(" -> ")}).",
+            ["deferred_after_agent_cycle"]
+          )
+        end
+        chain_depth = chain.fetch("depth").to_i + 1
+        if chain_depth > DEFERRED_WORKER_MAX_CHAIN_DEPTH
+          return deferred_rejection(
+            "SpawnWorker cannot wait for #{requested} because that would queue #{chain_depth} workers in a row; the limit is #{DEFERRED_WORKER_MAX_CHAIN_DEPTH}.",
+            ["deferred_chain_too_deep"]
+          )
+        end
+
+        status = predecessor.fetch("status", nil).to_s
+        unless TERMINAL_AGENT_STATUSES.include?(status)
+          return { "kind" => "defer", "predecessor" => deep_copy(predecessor), "chain_depth" => chain_depth }
+        end
+        return { "kind" => "start_now", "predecessor" => deep_copy(predecessor) } if status == "completed"
+        return { "kind" => "start_now", "predecessor" => deep_copy(predecessor) } if status == "errored" && failure_policy == "run"
+
+        deferred_rejection(
+          "SpawnWorker cannot wait for #{requested} because it already #{status == "killed" ? "was killed" : "errored"}. " \
+            "Spawn the worker without after_agent_id, or set if_predecessor_fails to \"run\" when the follow-up work should happen anyway.",
+          ["deferred_predecessor_already_#{status}"]
+        )
+      end
+
+      def deferred_rejection(message, errors)
+        { "kind" => "reject", "message" => message, "errors" => errors }
+      end
+
+      # Walks the still-pending part of the chain above `agent`. Only queued/activating links count:
+      # an already-activated dependency is history, not scheduled work.
+      def deferred_pending_chain(state, agent)
+        ids = []
+        current = agent
+        depth = 0
+        while current
+          id = current.fetch("id", nil)
+          return { "cycle" => true, "depth" => depth, "ids" => ids + [id] } if ids.include?(id)
+
+          ids << id
+          break unless pending_deferred_worker?(current)
+
+          next_id = deferred_worker_after_agent_id(current)
+          break unless next_id
+
+          depth += 1
+          break if depth > DEFERRED_WORKER_MAX_CHAIN_DEPTH + 1
+
+          current = find_agent(state, next_id)
+        end
+        { "cycle" => false, "depth" => depth, "ids" => ids }
+      end
+
+      # Records the dependent without starting anything. Called inside the SpawnWorker state
+      # section, so it owns its own log line and save.
+      def queue_deferred_worker(state, command_id:, command_type:, issue:, project:, prompt:, title:,
+                                requested_workspace_path:, follow_up_of_agent_id:, predecessor:,
+                                chain_depth:, failure_policy:, include_predecessor_result:, rerouted_from_issue_id:)
+        now = timestamp
+        agent_id = next_worker_id!(state, issue.fetch("id"))
+        workspace = resolve_worker_workspace(
+          project: project,
+          issue: issue,
+          requested_workspace_path: requested_workspace_path,
+          preview_agent_id: agent_id,
+          task_title: worker_display_title(title, issue),
+          create: false
+        )
+        return rejected_result(command_id, command_type, "Worker workspace is invalid.", workspace.fetch("errors")) unless workspace.fetch("errors").empty?
+
+        # A queued worker is provisioned by a later command, so it needs a stable spawn command id
+        # even when the caller did not supply one. Without it neither activation nor reservation
+        # recovery could recognise this record and both would provision a second worker.
+        spawn_command_id = present_string(command_id) || "deferred-#{agent_id}-#{SecureRandom.hex(4)}"
+        agent = build_worker_reservation(
+          agent_id: agent_id,
+          issue: issue,
+          project: project,
+          workspace: workspace,
+          provider: active_harness_provider(state),
+          command_id: spawn_command_id,
+          prompt: prompt,
+          title: title,
+          requested_workspace_path: requested_workspace_path,
+          follow_up_of_agent_id: follow_up_of_agent_id,
+          replace_agent_id: nil,
+          after_agent_id: predecessor.fetch("id"),
+          now: now,
+          harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
+        )
+        agent["harness_metadata"] = agent.fetch("harness_metadata").merge(
+          "provisioning_state" => "deferred",
+          "rerouted_from_issue_id" => rerouted_from_issue_id,
+          "queue_command_id" => present_string(command_id),
+          "deferred_spawn" => {
+            "state" => DEFERRED_STATE_WAITING,
+            "after_agent_id" => predecessor.fetch("id"),
+            "after_agent_issue_id" => predecessor.fetch("issue_id", nil),
+            "after_agent_title" => (predecessor.fetch("harness_metadata", {}) || {}).fetch("title", nil),
+            "if_predecessor_fails" => failure_policy,
+            "include_predecessor_result" => include_predecessor_result,
+            "chain_depth" => chain_depth,
+            "queued_at" => now,
+            "queued_prompt" => prompt.to_s
+          }.compact
+        ).compact
+        state.fetch("agents") << agent
+        issue.fetch("agent_ids") << agent_id unless issue.fetch("agent_ids").include?(agent_id)
+        issue["updated_at"] = now
+        project["updated_at"] = now
+        message = deferred_queue_message(agent)
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: agent_id,
+          level: "info",
+          message: message,
+          details: {
+            "issue_id" => issue.fetch("id"),
+            "project_id" => project.fetch("id"),
+            "agent_id" => agent_id,
+            "routing_action" => "queue_deferred_worker",
+            "after_agent_id" => predecessor.fetch("id"),
+            "after_agent_status" => predecessor.fetch("status", nil),
+            "if_predecessor_fails" => failure_policy,
+            "include_predecessor_result" => include_predecessor_result,
+            "chain_depth" => chain_depth,
+            "title" => agent.fetch("harness_metadata", {}).fetch("title", nil)
+          }.compact
+        )
+        touch_state!(state, now)
+        store.save(state)
+        accepted_result(command_id, command_type, agent_id, message, deep_copy(agent), log_ids)
+      end
+
+      # One-line summary for GetInfo output, so "what is P1-I1-W2" says what it is waiting on.
+      def deferred_info_line(deferred)
+        after = deferred.fetch("after_agent_id", "an unknown agent")
+        case deferred.fetch("state", nil).to_s
+        when DEFERRED_STATE_WAITING
+          "waiting on: #{after} (#{deferred.fetch("after_agent_status", "unknown")}); if it fails: " \
+            "#{deferred.fetch("if_predecessor_fails", DEFERRED_WORKER_DEFAULT_FAILURE_POLICY)}"
+        when DEFERRED_STATE_ACTIVATING
+          "starting now after: #{after}"
+        when DEFERRED_STATE_CANCELLED
+          "cancelled before starting: #{deferred.fetch("cancel_reason", "predecessor could not settle")} (#{after})"
+        else
+          "started after: #{after}"
+        end
+      end
+
+      def deferred_queue_message(agent)
+        deferred = deferred_spawn_metadata(agent)
+        after_agent_id = deferred.fetch("after_agent_id", "its predecessor")
+        "Queued worker #{agent.fetch("id")} on #{agent.fetch("issue_id")} to start after #{after_agent_id} settles."
+      end
+
+      def activated_deferred_spawn_metadata(reserved_agent, now)
+        deferred = deferred_spawn_metadata(reserved_agent)
+        return nil if deferred.empty?
+
+        deferred.merge("state" => DEFERRED_STATE_ACTIVATED, "started_at" => now)
+      end
+
+      # Handover is automatic prompt augmentation rather than something the head has to template:
+      # the dependent's prompt is composed when it actually starts, so it carries the predecessor's
+      # real final report. Heads can opt out with `include_predecessor_result: false`.
+      def deferred_handover_prompt(prompt, predecessor, include_predecessor_result)
+        return prompt.to_s unless include_predecessor_result && predecessor.is_a?(Hash)
+
+        metadata = predecessor.fetch("harness_metadata", {}) || {}
+        title = present_string(metadata.fetch("title", nil))
+        status = present_string(predecessor.fetch("status", nil)) || "unknown"
+        report = present_string(metadata.fetch("last_assistant_text", nil))
+        body = [
+          "Status when it settled: #{status}",
+          present_string(predecessor.fetch("issue_id", nil)) ? "Issue: #{predecessor.fetch("issue_id")}" : nil,
+          present_string(predecessor.fetch("workspace_branch", nil)) ? "Branch: #{predecessor.fetch("workspace_branch")}" : nil,
+          "",
+          report ? "Final report:" : "Final report: none was captured.",
+          report ? truncate_handover_text(report) : nil,
+          "",
+          if status == "completed"
+            "Use that as input for the work described above. Verify anything you rely on instead of assuming it is still true."
+          else
+            "That agent did not finish cleanly, so treat its output as partial and re-check its conclusions before relying on them."
+          end
+        ].compact.join("\n")
+        header = "--- Handover from #{predecessor.fetch("id")}#{title ? " (#{title})" : ""} ---"
+        [prompt.to_s.rstrip, "#{header}\n#{body}"].join("\n\n")
+      end
+
+      def truncate_handover_text(text)
+        value = text.to_s.strip
+        return value if value.length <= DEFERRED_WORKER_HANDOVER_MAX_CHARS
+
+        "#{value[0, DEFERRED_WORKER_HANDOVER_MAX_CHARS].rstrip}\n… [handover truncated]"
+      end
+
+      # The one resolution path for queued dependents. It is called from the worker-settle path,
+      # from the reconciliation pass, and after a prune, so no dedicated thread is needed. Bounded
+      # iteration lets one call settle a whole chain (a cancelled dependent cancels its own
+      # dependents) without ever looping on a record it cannot change.
+      def resolve_deferred_workers(trigger:)
+        results = []
+        (DEFERRED_WORKER_MAX_CHAIN_DEPTH + 1).times do
+          decisions = synchronized_state do
+            state = normalized_state
+            state.fetch("agents").filter_map do |agent|
+              next unless waiting_deferred_worker?(agent)
+
+              # Deliberately not filtered by instance ownership. Nothing is in flight for a waiting
+              # record, so any instance may resolve it; the atomic waiting -> activating flip below is
+              # what keeps activation exactly-once. Skipping another instance's records here would
+              # instead let a dependency sit forever when that instance never reconciles again.
+              deferred_worker_resolution(state, agent)
+            end
+          end
+          break if decisions.empty?
+
+          applied = decisions.filter_map { |decision| apply_deferred_worker_resolution(decision, trigger: trigger) }
+          results.concat(applied)
+          break if applied.empty?
+        end
+        results
+      end
+
+      def deferred_worker_resolution(state, agent)
+        deferred = deferred_spawn_metadata(agent)
+        recorded_id = deferred_worker_after_agent_id(agent)
+        base = {
+          "agent_id" => agent.fetch("id"),
+          "issue_id" => agent.fetch("issue_id", nil),
+          "after_agent_id" => recorded_id,
+          "if_predecessor_fails" => deferred.fetch("if_predecessor_fails", DEFERRED_WORKER_DEFAULT_FAILURE_POLICY)
+        }
+        unless recorded_id
+          return base.merge(
+            "kind" => "cancel",
+            "reason" => "predecessor_reference_missing",
+            "message" => "Cancelled queued worker #{agent.fetch("id")} because it no longer records which agent it was waiting for."
+          )
+        end
+
+        predecessor = deferred_effective_predecessor(state, recorded_id)
+        unless predecessor
+          return base.merge(
+            "kind" => "cancel",
+            "reason" => "predecessor_missing",
+            "message" => "Cancelled queued worker #{agent.fetch("id")} because #{recorded_id} is no longer in Meringue state."
+          )
+        end
+
+        predecessor_id = predecessor.fetch("id")
+        repointed = !Ids.same?(predecessor_id, recorded_id)
+        status = predecessor.fetch("status", nil).to_s
+        activation = base.merge(
+          "kind" => "activate",
+          "predecessor" => deep_copy(predecessor),
+          "predecessor_status" => status,
+          "repointed_from_agent_id" => repointed ? recorded_id : nil
+        ).compact
+        case status
+        when "completed"
+          activation
+        when "errored"
+          if base.fetch("if_predecessor_fails") == "run"
+            activation
+          else
+            base.merge(
+              "kind" => "cancel",
+              "reason" => "predecessor_errored",
+              "message" => "Cancelled queued worker #{agent.fetch("id")} because #{predecessor_id} errored before it could start."
+            )
+          end
+        when "killed"
+          base.merge(
+            "kind" => "cancel",
+            "reason" => "predecessor_killed",
+            "message" => "Cancelled queued worker #{agent.fetch("id")} because #{predecessor_id} was killed before it could start."
+          )
+        else
+          return nil unless repointed
+
+          base.merge(
+            "kind" => "repoint",
+            "predecessor" => deep_copy(predecessor),
+            "message" => deferred_repoint_message(agent.fetch("id"), recorded_id, predecessor_id)
+          )
+        end
+      end
+
+      # Follows a replacement chain: when the predecessor was killed by a replacement, the successor
+      # is the agent that inherited its work, so the dependent follows it instead of being cancelled.
+      def deferred_effective_predecessor(state, after_agent_id)
+        current = find_agent(state, after_agent_id)
+        seen = []
+        while current && current.fetch("status", nil) == "killed" && present_string(current.fetch("replaced_by_agent_id", nil))
+          break if seen.include?(current.fetch("id"))
+
+          seen << current.fetch("id")
+          successor = find_agent(state, current.fetch("replaced_by_agent_id"))
+          break unless successor && successor.fetch("type", nil) == "worker"
+
+          current = successor
+        end
+        current
+      end
+
+      def apply_deferred_worker_resolution(decision, trigger:)
+        case decision.fetch("kind")
+        when "activate" then activate_deferred_worker(decision, trigger: trigger)
+        when "cancel" then cancel_deferred_worker(decision, trigger: trigger)
+        when "repoint" then repoint_deferred_worker(decision, trigger: trigger)
+        end
+      end
+
+      # Two steps on purpose: the state flip (and its log line) is committed first so a crash before
+      # the harness spawn leaves a normal interrupted reservation that reconciliation resumes.
+      def activate_deferred_worker(decision, trigger:)
+        agent_id = decision.fetch("agent_id")
+        predecessor = decision.fetch("predecessor")
+        activation = synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          next nil unless agent && waiting_deferred_worker?(agent)
+
+          deferred = deferred_spawn_metadata(agent)
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          now = timestamp
+          prompt = deferred_handover_prompt(
+            deferred.fetch("queued_prompt", metadata.fetch("spawn_prompt", "")),
+            predecessor,
+            deferred.fetch("include_predecessor_result", true)
+          )
+          updated = metadata.merge(
+            "spawn_prompt" => prompt,
+            # Claims the record for this instance while the harness session is being started.
+            "provisioning_state" => "allocating_workspace",
+            "deferred_spawn" => deferred.merge(
+              "state" => DEFERRED_STATE_ACTIVATING,
+              "after_agent_id" => predecessor.fetch("id"),
+              "predecessor_status" => decision.fetch("predecessor_status", nil),
+              "activation_trigger" => trigger,
+              "activated_at" => now
+            ).compact
+          ).merge(instance_ownership_metadata)
+          agent["after_agent_id"] = predecessor.fetch("id")
+          agent["harness_metadata"] = updated
+          agent["updated_at"] = now
+          failed_predecessor = decision.fetch("predecessor_status", nil) != "completed"
+          repointed_from = present_string(decision.fetch("repointed_from_agent_id", nil)) ||
+                           present_string(deferred.fetch("repointed_from_agent_id", nil))
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: agent_id,
+            level: failed_predecessor ? "warning" : "info",
+            message: deferred_activation_message(agent_id, predecessor, decision, repointed_from: repointed_from),
+            details: {
+              "agent_id" => agent_id,
+              "issue_id" => agent.fetch("issue_id", nil),
+              "after_agent_id" => predecessor.fetch("id"),
+              "after_agent_status" => decision.fetch("predecessor_status", nil),
+              "repointed_from_agent_id" => repointed_from,
+              "if_predecessor_fails" => decision.fetch("if_predecessor_fails", nil),
+              "include_predecessor_result" => deferred.fetch("include_predecessor_result", true),
+              "trigger" => trigger
+            }.compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+          { "prompt" => prompt, "agent" => deep_copy(agent), "log_entry_ids" => log_ids }
+        end
+        return nil unless activation
+
+        agent = activation.fetch("agent")
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        result = apply(
+          "command_id" => metadata.fetch("spawn_command_id", nil),
+          "type" => "SpawnWorker",
+          "payload" => {
+            "issue_id" => agent.fetch("issue_id"),
+            "title" => metadata.fetch("title", nil),
+            "prompt" => activation.fetch("prompt"),
+            "workspace_path" => metadata.fetch("requested_workspace_path", nil),
+            "follow_up_of_agent_id" => metadata.fetch("follow_up_of_agent_id", nil),
+            "after_agent_id" => predecessor.fetch("id"),
+            "_activate_deferred" => true,
+            "_deferred_agent_id" => agent_id
+          }
+        )
+        result.merge(
+          "log_entry_ids" => (activation.fetch("log_entry_ids") + Array(result.fetch("log_entry_ids", []))).uniq,
+          "deferred_activation" => {
+            "agent_id" => agent_id,
+            "after_agent_id" => predecessor.fetch("id"),
+            "after_agent_status" => decision.fetch("predecessor_status", nil),
+            "trigger" => trigger
+          }
+        )
+      end
+
+      def deferred_activation_message(agent_id, predecessor, decision, repointed_from: nil)
+        status = decision.fetch("predecessor_status", nil).to_s
+        base = "Starting queued worker #{agent_id} because #{predecessor.fetch("id")} settled (#{status.empty? ? "settled" : status})."
+        base = "#{base} It was queued behind #{repointed_from}, which that worker replaced." if present_string(repointed_from)
+        return base if status == "completed"
+
+        "#{base} Its predecessor did not complete, and if_predecessor_fails is \"run\"."
+      end
+
+      # Cancelling removes the dependent the same way Kill does, because it never started and would
+      # otherwise linger in the AgentTree as a worker nobody is waiting for. The warning log is the
+      # durable record of why it never ran.
+      def cancel_deferred_worker(decision, trigger:)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, decision.fetch("agent_id"))
+          next nil unless agent && waiting_deferred_worker?(agent)
+
+          now = timestamp
+          issue_ids = [agent.fetch("issue_id", nil)]
+          log_ids = cancel_deferred_worker_in_state!(
+            state,
+            agent,
+            reason: decision.fetch("reason"),
+            message: decision.fetch("message"),
+            trigger: trigger,
+            now: now
+          )
+          cascade = cancel_deferred_dependents_in_state!(
+            state,
+            [agent.fetch("id")],
+            now: now,
+            reason: "predecessor_cancelled",
+            trigger: trigger
+          )
+          log_ids.concat(cascade.fetch("log_entry_ids"))
+          removed_agent_ids = ([agent.fetch("id")] + cascade.fetch("agent_ids")).uniq
+          issue_ids.concat(cascade.fetch("issue_ids"))
+          remove_issue_bundles_and_agents!(
+            state,
+            issue_ids: [],
+            extra_agent_ids: removed_agent_ids,
+            reason: "deferred_worker_cancelled",
+            now: now,
+            remove_empty_projects: false
+          )
+          issue_ids.compact.uniq.each do |issue_id|
+            issue = find_issue(state, issue_id)
+            next unless issue
+
+            update_issue_status_from_workers!(state, issue, now)
+            project = find_project(state, issue.fetch("project_id", nil))
+            update_project_status_from_issues!(state, project, now) if project
+          end
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(
+            nil,
+            "ResolveDeferredWorker",
+            decision.fetch("agent_id"),
+            decision.fetch("message"),
+            {
+              "resolution" => "cancelled",
+              "reason" => decision.fetch("reason"),
+              "agent_id" => decision.fetch("agent_id"),
+              "after_agent_id" => decision.fetch("after_agent_id", nil),
+              "cancelled_agent_ids" => removed_agent_ids,
+              "trigger" => trigger
+            }.compact,
+            log_ids
+          )
+        end
+      end
+
+      def cancel_deferred_worker_in_state!(state, agent, reason:, message:, trigger:, now:)
+        deferred = deferred_spawn_metadata(agent)
+        mark_agent_killed!(agent, now)
+        agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+          "provisioning_state" => "cancelled",
+          "deferred_spawn" => deferred.merge(
+            "state" => DEFERRED_STATE_CANCELLED,
+            "cancel_reason" => reason,
+            "cancelled_at" => now,
+            "cancel_trigger" => trigger
+          ).compact
+        )
+        append_log(
+          state,
+          source_type: "kernel",
+          source_id: agent.fetch("id"),
+          level: "warning",
+          message: message,
+          details: {
+            "agent_id" => agent.fetch("id"),
+            "issue_id" => agent.fetch("issue_id", nil),
+            "after_agent_id" => deferred_worker_after_agent_id(agent),
+            "reason" => reason,
+            "trigger" => trigger,
+            "resolution" => "cancelled"
+          }.compact
+        )
+      end
+
+      # Transitively cancels dependents of records that are going away, bounded by the same chain
+      # limit that bounds queueing.
+      def cancel_deferred_dependents_in_state!(state, predecessor_ids, now:, reason:, trigger:)
+        cancelled_ids = []
+        issue_ids = []
+        log_ids = []
+        frontier = Array(predecessor_ids).compact.uniq
+        (DEFERRED_WORKER_MAX_CHAIN_DEPTH + 1).times do |level|
+          dependents = waiting_deferred_dependents(state, frontier)
+          break if dependents.empty?
+
+          # Past the first level the predecessor was itself a queued worker this pass cancelled, so
+          # the reason reported to the user follows the chain instead of repeating the original one.
+          level_reason = level.zero? ? reason : "predecessor_cancelled"
+          frontier = dependents.map { |dependent| dependent.fetch("id") }
+          dependents.each do |dependent|
+            predecessor_id = deferred_worker_after_agent_id(dependent)
+            log_ids.concat(cancel_deferred_worker_in_state!(
+              state,
+              dependent,
+              reason: level_reason,
+              message: deferred_cancellation_message(dependent.fetch("id"), predecessor_id, level_reason),
+              trigger: trigger,
+              now: now
+            ))
+            cancelled_ids << dependent.fetch("id")
+            issue_ids << dependent.fetch("issue_id", nil)
+          end
+        end
+        { "agent_ids" => cancelled_ids.uniq, "issue_ids" => issue_ids.compact.uniq, "log_entry_ids" => log_ids }
+      end
+
+      def deferred_cancellation_message(agent_id, predecessor_id, reason)
+        case reason
+        when "predecessor_killed"
+          "Cancelled queued worker #{agent_id} because #{predecessor_id} was killed before it could start."
+        when "predecessor_cancelled"
+          "Cancelled queued worker #{agent_id} because #{predecessor_id} was cancelled before it could start."
+        when "predecessor_errored"
+          "Cancelled queued worker #{agent_id} because #{predecessor_id} errored before it could start."
+        else
+          "Cancelled queued worker #{agent_id} because #{predecessor_id} can no longer settle."
+        end
+      end
+
+      # Moves every worker queued behind `from_agent_id` onto the agent that replaced it. Used by the
+      # replacement path (atomically, in the same command) and by the resolver as a late fallback.
+      def repoint_deferred_dependents_in_state!(state, from_agent_id:, to_agent:, now:, trigger:)
+        dependents = waiting_deferred_dependents(state, [from_agent_id])
+        log_ids = []
+        dependents.each do |dependent|
+          log_ids.concat(repoint_deferred_worker_in_state!(
+            state,
+            dependent,
+            predecessor: to_agent,
+            now: now,
+            trigger: trigger
+          ))
+        end
+        { "agent_ids" => dependents.map { |dependent| dependent.fetch("id") }, "log_entry_ids" => log_ids }
+      end
+
+      def repoint_deferred_worker_in_state!(state, agent, predecessor:, now:, trigger:)
+        deferred = deferred_spawn_metadata(agent)
+        previous_id = deferred_worker_after_agent_id(agent)
+        agent["after_agent_id"] = predecessor.fetch("id")
+        agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+          "deferred_spawn" => deferred.merge(
+            "after_agent_id" => predecessor.fetch("id"),
+            "after_agent_issue_id" => predecessor.fetch("issue_id", nil),
+            "after_agent_title" => (predecessor.fetch("harness_metadata", {}) || {}).fetch("title", nil),
+            "repointed_from_agent_id" => previous_id,
+            "repointed_at" => now
+          ).compact
+        )
+        agent["updated_at"] = now
+        append_log(
+          state,
+          source_type: "kernel",
+          source_id: agent.fetch("id"),
+          level: "warning",
+          message: deferred_repoint_message(agent.fetch("id"), previous_id, predecessor.fetch("id")),
+          details: {
+            "agent_id" => agent.fetch("id"),
+            "issue_id" => agent.fetch("issue_id", nil),
+            "after_agent_id" => predecessor.fetch("id"),
+            "repointed_from_agent_id" => previous_id,
+            "resolution" => "repointed",
+            "trigger" => trigger
+          }.compact
+        )
+      end
+
+      def deferred_repoint_message(agent_id, previous_id, predecessor_id)
+        "Queued worker #{agent_id} now waits for #{predecessor_id} because #{previous_id} was replaced."
+      end
+
+      def repoint_deferred_worker(decision, trigger:)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, decision.fetch("agent_id"))
+          next nil unless agent && waiting_deferred_worker?(agent)
+
+          predecessor = decision.fetch("predecessor")
+          now = timestamp
+          previous_id = deferred_worker_after_agent_id(agent)
+          log_ids = repoint_deferred_worker_in_state!(state, agent, predecessor: predecessor, now: now, trigger: trigger)
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(
+            nil,
+            "ResolveDeferredWorker",
+            agent.fetch("id"),
+            deferred_repoint_message(agent.fetch("id"), previous_id, predecessor.fetch("id")),
+            {
+              "resolution" => "repointed",
+              "agent_id" => agent.fetch("id"),
+              "after_agent_id" => predecessor.fetch("id"),
+              "repointed_from_agent_id" => previous_id,
+              "trigger" => trigger
+            }.compact,
+            log_ids
+          )
+        end
+      end
+
       def build_worker_reservation(agent_id:, issue:, project:, workspace:, provider:, command_id:, prompt:, title:,
-                                   requested_workspace_path:, follow_up_of_agent_id:, replace_agent_id:, now:, harness_generation:)
+                                   requested_workspace_path:, follow_up_of_agent_id:, replace_agent_id:, now:, harness_generation:,
+                                   after_agent_id: nil)
         plan = workspace.fetch("plan", nil) || workspace
         {
           "id" => agent_id,
@@ -4611,6 +5520,7 @@ module Meringue
           "status" => "queued",
           "project_id" => project.fetch("id"),
           "issue_id" => issue.fetch("id"),
+          "after_agent_id" => present_string(after_agent_id),
           "workspace_path" => plan.fetch("workspace_path", workspace.fetch("workspace_path", nil)),
           "workspace_strategy" => plan.fetch("strategy", workspace.fetch("workspace_strategy", nil)),
           "workspace_branch" => plan.fetch("workspace_branch", workspace.fetch("workspace_branch", nil)),
@@ -4751,7 +5661,7 @@ module Meringue
       end
 
       def build_worker_agent(agent_id:, issue:, project:, workspace:, session_ref:, now:, title: nil, harness_generation: 0,
-                             follow_up_of_agent_id: nil, replaces_agent_id: nil)
+                             follow_up_of_agent_id: nil, replaces_agent_id: nil, after_agent_id: nil)
         session_metadata = session_ref.fetch("metadata", {}) || {}
         display_title = worker_display_title(title, issue)
         {
@@ -4762,6 +5672,7 @@ module Meringue
           "issue_id" => issue.fetch("id"),
           "follow_up_of_agent_id" => follow_up_of_agent_id,
           "replaces_agent_id" => replaces_agent_id,
+          "after_agent_id" => present_string(after_agent_id),
           "workspace_path" => workspace.fetch("workspace_path"),
           "workspace_strategy" => workspace.fetch("workspace_strategy"),
           "workspace_branch" => workspace.fetch("workspace_branch"),
@@ -5021,7 +5932,11 @@ module Meringue
       end
 
       def spawn_worker_log_message(agent, issue)
-        base = if present_string(agent.fetch("replaces_agent_id", nil))
+        deferred = deferred_spawn_metadata(agent)
+        base = if deferred.fetch("state", nil) == DEFERRED_STATE_ACTIVATED
+                 "Started queued worker #{agent.fetch("id")} on #{issue.fetch("id")} because " \
+                   "#{deferred.fetch("after_agent_id", "its predecessor")} settled (#{deferred.fetch("predecessor_status", "completed")})."
+               elsif present_string(agent.fetch("replaces_agent_id", nil))
                  "Replaced worker #{agent.fetch("replaces_agent_id")} with #{agent.fetch("id")} on #{issue.fetch("id")}."
                elsif present_string(agent.fetch("follow_up_of_agent_id", nil))
                  "Spawned follow-up worker #{agent.fetch("id")} after #{agent.fetch("follow_up_of_agent_id")} on #{issue.fetch("id")}."
@@ -5326,6 +6241,17 @@ module Meringue
           project_resolution = resolve_batch_project_target(command: command, payload: payload, command_type: command_type, plan: plan)
           return project_resolution if project_resolution
         end
+        if command_type == "SpawnWorker"
+          # "start this worker after the worker my own batch spawns" cannot predict the worker id, so
+          # it points at the SpawnWorker command instead. Resolve that before applying the command.
+          after_resolution = resolve_batch_after_agent_target(command: command, payload: payload, plan: plan, index: index)
+          if after_resolution
+            return after_resolution if after_resolution.fetch("rejection", nil)
+
+            command = after_resolution.fetch("command")
+            payload = value_at(command, "payload")
+          end
+        end
         return { "command" => command } unless BATCH_ISSUE_REFERENCE_COMMANDS.include?(command_type)
 
         reference = head_batch_issue_reference(payload)
@@ -5436,6 +6362,7 @@ module Meringue
       def batch_target_declared_deliberate?(payload)
         present_string(value_at(payload, "follow_up_of_agent_id", "followUpOfAgentID", "followUpOfAgentId")) ||
           present_string(value_at(payload, "replace_agent_id", "replaceAgentID", "replaceAgentId")) ||
+          present_string(value_at(payload, *DEFERRED_WORKER_AFTER_KEYS)) ||
           !!value_at(payload, "existing_issue", "ExistingIssue", "existingIssue")
       end
 
@@ -5501,6 +6428,7 @@ module Meringue
           "created" => created,
           "created_issue_ids" => created_issue_ids,
           "added_projects" => added_projects,
+          "spawned_workers" => head_batch_spawned_workers(journal),
           "issue_aliases" => aliases.fetch("issues"),
           "ambiguous_issue_aliases" => aliases.fetch("ambiguous_issues"),
           "project_aliases" => aliases.fetch("projects"),
@@ -5727,6 +6655,82 @@ module Meringue
             "command_id" => entry.fetch("command_id", nil).to_s,
             "status" => entry.fetch("status", nil),
             "project_id" => entry.fetch("status", nil) == "accepted" ? present_string(entry.fetch("target_id", nil)) : nil
+          }
+        end
+      end
+
+      # Resolves `after_from_command` / `after_agent_id: "@<command_id>"` against the workers this
+      # batch has already spawned. Same ordering and failure rules as issue_from_command.
+      def resolve_batch_after_agent_target(command:, payload:, plan:, index:)
+        reference = head_batch_after_agent_reference(payload)
+        return nil unless reference
+
+        described = describe_batch_issue_reference(reference)
+        entry = find_batch_issue_reference_entry(reference, plan.fetch("spawned_workers"))
+        if entry.nil?
+          return {
+            "rejection" => {
+              "message" => "SpawnWorker references #{described}, but this head result has no matching SpawnWorker command.",
+              "errors" => ["after_agent_reference_not_found"]
+            }
+          }
+        end
+        if entry.fetch("index", -1).to_i >= index
+          return {
+            "rejection" => {
+              "message" => "SpawnWorker references #{described}, which is not applied before it. List the worker it waits for first.",
+              "errors" => ["after_agent_reference_out_of_order"]
+            }
+          }
+        end
+
+        agent_id = entry.fetch("agent_id", nil)
+        unless agent_id
+          return {
+            "rejection" => {
+              "message" => "SpawnWorker references #{described}, but that command did not spawn a worker (#{entry.fetch("status", "pending")}).",
+              "errors" => ["after_agent_reference_unresolved"]
+            }
+          }
+        end
+
+        {
+          "command" => command_with_after_agent_id(command, payload, agent_id),
+          "resolved_reference" => { "reference" => described, "after_agent_id" => agent_id, "command_type" => "SpawnWorker" }
+        }
+      end
+
+      def head_batch_after_agent_reference(payload)
+        return nil unless payload.is_a?(Hash)
+
+        explicit = value_at(payload, *DEFERRED_WORKER_AFTER_REFERENCE_KEYS)
+        return parse_batch_issue_reference(explicit) unless explicit.nil? || (!explicit.is_a?(Integer) && blank?(explicit))
+
+        value = value_at(payload, *DEFERRED_WORKER_AFTER_KEYS)
+        return nil unless batch_issue_reference_value?(value)
+
+        parse_batch_issue_reference(value)
+      end
+
+      def command_with_after_agent_id(command, payload, agent_id)
+        updated_payload = payload.dup
+        DEFERRED_WORKER_AFTER_REFERENCE_KEYS.each { |key| updated_payload.delete(key) }
+        DEFERRED_WORKER_AFTER_KEYS.each { |key| updated_payload.delete(key) }
+        updated_payload["after_agent_id"] = agent_id
+        command.merge("payload" => updated_payload)
+      end
+
+      # Workers this batch has spawned so far, so a later command can wait for one of them.
+      def head_batch_spawned_workers(journal)
+        Array(journal).each_with_index.filter_map do |entry, position|
+          next unless entry.is_a?(Hash)
+          next unless canonical_command_type(entry.fetch("command_type", nil)) == "SpawnWorker"
+
+          {
+            "index" => entry.fetch("index", position).to_i,
+            "command_id" => entry.fetch("command_id", nil).to_s,
+            "status" => entry.fetch("status", nil),
+            "agent_id" => entry.fetch("status", nil) == "accepted" ? present_string(entry.fetch("target_id", nil)) : nil
           }
         end
       end

@@ -42,6 +42,7 @@ module Meringue
       parent_issue_id ParentIssueID parentIssueId
       follow_up_of_agent_id FollowUpOfAgentID followUpOfAgentID followUpOfAgentId
       replace_agent_id ReplaceAgentID replaceAgentID replaceAgentId
+      after_agent_id AfterAgentID afterAgentId after_agent AfterAgent afterAgent
       originating_head_id OriginatingHeadID originatingHeadId
       _rerouted_from_issue_id rerouted_from_issue_id
     ].freeze

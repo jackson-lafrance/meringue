@@ -527,11 +527,35 @@ module Meringue
         end
 
         def worker_relationship_marker(worker)
+          # A worker that has not started yet must say so, and say who it is waiting for; otherwise a
+          # queued dependent looks identical to a worker whose session is still being provisioned.
+          waiting = deferred_wait_marker(worker)
+          return waiting unless waiting.empty?
           return "replaces #{short_id(worker.fetch("replaces_agent_id"))}" if worker["replaces_agent_id"]
           return "after #{short_id(worker.fetch("follow_up_of_agent_id"))}" if worker["follow_up_of_agent_id"]
           return "replaced by #{short_id(worker.fetch("replaced_by_agent_id"))}" if worker["replaced_by_agent_id"]
 
           ""
+        end
+
+        def deferred_wait_marker(worker)
+          metadata = worker["harness_metadata"]
+          deferred = metadata.is_a?(Hash) ? metadata["deferred_spawn"] : nil
+          return "" unless deferred.is_a?(Hash)
+          return "" unless %w[waiting activating].include?(deferred["state"].to_s)
+
+          predecessor_id = deferred["after_agent_id"].to_s
+          verb = deferred["state"].to_s == "activating" ? "starting after" : "waiting on"
+          return verb.split.first if predecessor_id.empty?
+
+          "#{verb} #{relationship_id(worker, predecessor_id)}"
+        end
+
+        # Same-issue relationships stay short; a predecessor on another issue needs its full id to
+        # be identifiable.
+        def relationship_id(worker, id)
+          issue_id = id.to_s.sub(/-W\d+\z/, "")
+          issue_id == worker["issue_id"].to_s ? short_id(id) : id.to_s
         end
 
         def active_pr_marker(record)
