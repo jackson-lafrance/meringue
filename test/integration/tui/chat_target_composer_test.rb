@@ -279,7 +279,7 @@ class TuiChatTargetComposerTest < Minitest::Test
     row = render_frame(select("P1-I1-W1"), width: Meringue::TUI::Layout::MIN_WIDTH, height: 18, color: false).split("\n", -1).last
 
     assert_includes row, "head routes · Esc clears"
-    assert_includes row, "PR unavailable"
+    assert_includes row, "no PR yet"
     assert_includes row, "Enter send"
     refute_includes row, "P1-I1-W1"
   end
