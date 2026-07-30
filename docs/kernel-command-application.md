@@ -92,6 +92,10 @@ duplicating the commands that already ran.
   the worker instead of failing the command. The wait is logged once as info, the
   delivery is logged only when the harness accepts it, and reconciliation retries
   it up to `PENDING_PROMPT_MAX_ATTEMPTS` times before giving up with a warning.
+- **A session can never be repaired.** Once reconciliation records a failure as
+  terminal, the record is logged once, is not re-touched, and is no longer polled, so
+  the periodic pass cannot livelock on it or repeat its error line every two seconds.
+  See `docs/session-reconciliation.md`.
 
 ## Verifying
 
