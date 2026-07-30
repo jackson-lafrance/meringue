@@ -191,7 +191,8 @@ module KernelMaintenanceSupport
   end
 
   def build_engine(forge_client: StubForgeClient.new, harness_client: Meringue::Harness::FakeClient.new,
-                   harness_client_resolver: nil, head_runner: Meringue::Heads::FakeRunner.new)
+                   harness_client_resolver: nil, head_runner: Meringue::Heads::FakeRunner.new,
+                   prune_forge_lookup_budget: Meringue::Kernel::Engine::PRUNE_FORGE_LOOKUP_BUDGET_SECONDS)
     Meringue::Kernel::Engine.new(
       store: Meringue::State::Store.new(path: state_path),
       harness_client: harness_client,
@@ -200,6 +201,7 @@ module KernelMaintenanceSupport
       workspace_manager: Meringue::Workspace::Manager.new(root_path: tmp_path("workspaces")),
       cwd: @kernel_maintenance_tmp,
       forge_client: forge_client,
+      prune_forge_lookup_budget: prune_forge_lookup_budget,
       config_path: tmp_path("config.toml")
     )
   end
@@ -357,6 +359,28 @@ module KernelMaintenanceSupport
       "head_repository" => repository,
       "is_cross_repository" => false,
       "base_repository" => repository
+    }
+  end
+
+  # A delivery pull request Meringue already verified and persisted as merged, exactly as
+  # `MarkWorkerCompleted`/the delivery refresh writes it onto the issue.
+  def merged_delivery_pull_request_record(url:, branch:, repository: "acme/app", verified_at: BASE_TIME)
+    {
+      "provider" => "github",
+      "url" => url,
+      "state" => "merged",
+      "raw_state" => "MERGED",
+      "merged_at" => "2026-01-02T00:00:00Z",
+      "is_draft" => false,
+      "head_branch" => branch,
+      "head_repository" => repository,
+      "is_cross_repository" => false,
+      "base_repository" => repository,
+      "matched_by" => "workspace_branch",
+      "matched_branch" => branch,
+      "verified_at" => verified_at,
+      "last_checked_at" => verified_at,
+      "availability" => "available"
     }
   end
 

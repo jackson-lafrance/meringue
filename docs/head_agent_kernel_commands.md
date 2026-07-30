@@ -31,6 +31,7 @@ Natural-language mapping:
 | "use the gruvbox theme" | `SetTheme` |
 | "switch to claude/pi/antigravity" | `SetHarness` |
 | "show the defaults", "which model will future agents use" | `GetSessionDefaults` |
+| "what models can I use", "list the available models" | `GetModelCatalog` |
 | "use provider/model for future Pi agents" | `SetDefaultSessionModel` |
 | "use high thinking for future Pi agents" | `SetDefaultSessionThinkingLevel` |
 | "show P1-I9-W3's model/thinking settings" | `GetSessionSettings` |
@@ -110,6 +111,13 @@ Each command in `commands` must use this shape:
 
 Use only the command names documented below unless the kernel command model is updated.
 
+Record ids (`P1`, `P1-I23`, `P1-I23-W1`, `H83`, `Q8`) are canonically uppercase, and the kernel
+resolves them case-insensitively: `p1-i23-w1` and `P1-i23-W1` reach the same record as
+`P1-I23-W1`. Always emit canonical uppercase ids anyway; the kernel stores, logs, and journals the
+canonical id no matter which case you sent. An id that names no record is still rejected, and the
+rejection echoes the id exactly as it was written. Nothing else is case-folded: paths, branch
+names, model references, harness/theme names, and harness session ids stay byte-exact.
+
 Issue and worker selection rules for the MVP:
 
 - Check `routing_context.selected_target` before semantic matching. It is explicit dashboard context resolved by the kernel: an issue selection targets itself; an agent selection targets its owning issue and includes `selected_agent_id` as a preferred session-context hint.
@@ -119,9 +127,10 @@ Issue and worker selection rules for the MVP:
 - First classify the message as a genuinely new goal or a follow-up. Without a selected target, explicit project/issue/worker ids win. With one, explicit ids must be compatible with its resolved issue or treated as a target conflict. Otherwise compare the prompt with issue titles/descriptions, recent routing activity, latest worker results, and active session metadata in `routing_context`.
 - A refinement, correction, question about findings, or next step for an existing goal should reuse that issue. Use `CreateIssue` only when no existing issue represents the durable goal.
 - On a reused issue, prefer `PromptAgent` when one healthy worker session has the relevant context. Do not spawn another worker merely because the user sent another message.
-- Use `PromptAgent` mode `steer` for an urgent correction that should affect active work, `follow_up` for related work that should wait until the active turn settles, and `normal` for a settled resumable session.
+- Use `PromptAgent` mode `steer` for an urgent correction that should affect active work, `follow_up` for related work that should wait until the active turn settles, and `normal` for a settled resumable session. Choose from the candidate's `is_streaming`, `supported_prompt_modes_now`, `recommended_prompt_mode`, and `prompt_mode_note` instead of defaulting to `normal`; a `normal` prompt to a mid-turn session is still accepted, but the kernel delivers it as a follow-up.
 - Spawn a new worker on the same issue only when the previous session is unavailable/unhealthy, its context is known to be over 50%, its delivered workspace should remain immutable, the next step is independent, or parallel work is intentional. Set `follow_up_of_agent_id` so that relationship is visible.
 - Replace a worker only when it is stale, unhealthy, pursuing the wrong approach, or must be stopped. Set `replace_agent_id` on `SpawnWorker`; the kernel starts the successor before killing the old session and records both sides of the relationship. Do not separately propose `Kill` for the same replacement.
+- When the next step must not begin until another worker settles (research, then implementation; implementation, then review), set `after_agent_id` on `SpawnWorker` instead of prompting a busy worker or spawning parallel work. The kernel queues that worker and starts it when its predecessor settles. See "Chaining a worker after another agent" below.
 - Before routing anything, check `routing_context.open_questions` and `routing_context.answer_inference`. If this message answers an open question, close that question and route the unblocked work in the same result. See "Answering open questions" below.
 - Never prompt a worker from a different issue. If multiple issues or workers are plausible, ask a clarifying question instead of guessing.
 - Do not create nested/subissues for ordinary follow-up prompts. Set `parent_issue_id` to `null` unless the user explicitly asks for a child issue hierarchy.
@@ -521,7 +530,11 @@ Payload:
   "prompt": "Worker instructions",
   "workspace_path": "Optional preselected workspace path",
   "follow_up_of_agent_id": "Optional prior worker on this issue",
-  "replace_agent_id": "Optional worker on this issue to replace after spawn"
+  "replace_agent_id": "Optional worker on this issue to replace after spawn",
+  "after_agent_id": "Optional worker this one waits for before it starts, or \"@<command_id>\" for a worker this batch spawns",
+  "after_from_command": "Optional SpawnWorker command id or index in this batch instead of after_agent_id",
+  "if_predecessor_fails": "Optional cancel (default) or run",
+  "include_predecessor_result": "Optional false to omit the predecessor's final report from this worker's prompt"
 }
 ```
 
@@ -540,6 +553,86 @@ Example:
   }
 }
 ```
+
+### Chaining a worker after another agent
+
+Some work is genuinely sequential: investigate, then implement; implement, then review the diff. Do not fake that by prompting a busy worker, and do not spawn both workers at once and hope the second one waits. Set `after_agent_id` and the kernel owns the sequencing.
+
+```json
+{
+  "title": "Research the crash, then fix it",
+  "summary": "One issue, a research worker, and an implementation worker queued behind it.",
+  "commands": [
+    {
+      "command_id": "issue",
+      "type": "CreateIssue",
+      "payload": { "project_id": "P1", "title": "Fix the checkout crash", "description": "..." }
+    },
+    {
+      "command_id": "research",
+      "type": "SpawnWorker",
+      "payload": {
+        "issue_from_command": "issue",
+        "title": "Find the crash cause",
+        "prompt": "Reproduce the checkout crash and report the root cause. Do not change code."
+      }
+    },
+    {
+      "type": "SpawnWorker",
+      "payload": {
+        "issue_from_command": "issue",
+        "after_from_command": "research",
+        "title": "Fix the crash",
+        "prompt": "Fix the crash the research worker identified, add a regression test, and open a PR."
+      }
+    }
+  ],
+  "questions": []
+}
+```
+
+What the kernel does with that:
+
+- It creates the dependent worker record immediately, as a `queued` worker with no harness session. It appears in the AgentTree right away, labelled `waiting on <predecessor>`, so the user can see queued work that has not started.
+- Nothing polls or sleeps. The dependency lives on the worker record, so it survives a restart and is resolved from the worker-settle path and from every reconciliation pass.
+- When the predecessor **completes**, the kernel starts the queued worker and logs `Starting queued worker ... because ... settled (completed).`
+
+Naming the predecessor:
+
+- A worker that already exists in the supplied state: use its real id, for example `"after_agent_id": "P1-I2-W1"`.
+- A worker this same batch spawns: never predict its id. Set `after_from_command` to that `SpawnWorker` command's `command_id` (or its 0-based index), or write `"after_agent_id": "@<command_id>"`. The referenced command must appear earlier in `commands`.
+- The predecessor may be on another issue. That is the normal shape for "research issue, then implementation issue".
+- `after_agent_id` also marks the worker as a deliberate existing-issue target, so it is exempt from the created-issue-needs-a-worker rerouting rule described above.
+
+#### Handover context
+
+Handover is automatic, not something you template. When the queued worker starts, the kernel appends a bounded `--- Handover from <predecessor id> ---` block to the prompt you supplied, containing the predecessor's settle status, issue, delivery branch, and its final report text. Write the dependent's `prompt` as the instruction for its own step, and refer to the predecessor's findings freely; they will be in front of it.
+
+Set `"include_predecessor_result": false` when the second worker must not see the first one's output (for example genuinely independent work that only needs to run afterwards for workspace reasons).
+
+#### What happens when the predecessor does not complete
+
+The outcome is always logged, and the queued worker is never silently dropped:
+
+| Predecessor outcome | Default result for the queued worker |
+| --- | --- |
+| `completed` | starts, with the handover block |
+| `errored` | cancelled, with a warning naming both workers. Set `"if_predecessor_fails": "run"` to start it anyway; its handover then says the predecessor did not finish cleanly |
+| killed by `Kill` | cancelled in the same command, with a warning. This is deliberate: an emergency stop stops the queue behind it |
+| replaced through `replace_agent_id` | re-pointed at the replacement worker, with a warning. The successor inherited the work, so the queue follows it |
+| record removed out of band | cancelled with a warning. `/prune` will not remove a settled predecessor while a worker is still queued behind it |
+| still `queued`, `working`, `idle`, or `blocked` | keeps waiting |
+
+A cancelled queued worker is removed like a killed worker; the warning log is the durable record of why it never ran.
+
+#### Limits
+
+- Chains are bounded: at most five queued workers in a row (`deferred_chain_too_deep`).
+- `after_agent_id` and `replace_agent_id` are mutually exclusive. A replacement takes over now; deferring it would leave the replaced worker running.
+- If the named predecessor has already completed, the worker is not queued at all: it starts immediately with the handover block. If it already errored or was killed, the command is rejected unless `if_predecessor_fails` is `run` (errored only).
+- A worker's issue is still immutable. Queueing does not move a worker between issues, and activation keeps the issue it was created on.
+
+Rejection codes: `after_agent_not_found`, `after_agent_is_not_worker`, `deferred_after_agent_conflicts_with_replace`, `invalid_if_predecessor_fails`, `deferred_chain_too_deep`, `deferred_after_agent_cycle`, `deferred_predecessor_already_errored`, `deferred_predecessor_already_killed`, `after_agent_reference_not_found`, `after_agent_reference_out_of_order`, `after_agent_reference_unresolved`.
 
 ### PromptAgent
 
@@ -569,7 +662,12 @@ Choose the mode deliberately:
 
 Killed and errored workers are not resumable through this command. Spawn a related or replacement worker on the same issue instead.
 
-A session that is momentarily busy is not a failure. When the worker's harness session is mid-turn under another Meringue instance, the kernel accepts the command, queues the prompt on the worker, and redelivers it during reconciliation; the delivery is logged only once the harness has accepted it. Do not resend the prompt to force delivery.
+A session that is momentarily busy is not a failure, and a correctly routed message is never dropped because of timing:
+
+- **The target session is mid-turn in this Meringue instance.** `steer` and `follow_up` keep their exact meaning. `normal` is accepted and delivered through the harness's queued-prompt behavior (Pi RPC `follow_up`) instead of being rejected, so it lands after the active turn without interrupting or reordering it. The kernel records the delivered mode on the worker (`last_prompt_mode`, `requested_prompt_mode`, `delivered_prompt_mode`) and states the substitution in the delivery log line, for example `Queued a follow-up for worker P1-I3-W1 on P1-I3. Requested normal, delivered follow_up: The session was mid-turn, ...`.
+- **The target session is mid-turn under another Meringue instance.** The kernel accepts the command, queues the prompt on the worker, and redelivers it during reconciliation; the delivery is logged only once the harness has accepted it.
+
+Either way the prompt is delivered exactly once. Do not resend the prompt to force delivery, and do not switch to `steer` merely to get past a busy session: `steer` interrupts work that the user may not want interrupted.
 
 Example:
 
@@ -727,9 +825,21 @@ What is retained:
 
 - An issue whose subtree still contains a nonterminal issue.
 - An issue whose subtree still has a `queued`, `working`, or `blocked` worker. An `errored` worker is settled and does not retain its issue.
+- An issue whose worker is the predecessor of a worker that is still queued behind it (`pending_deferred_dependents`), so a queued dependent can never lose the agent it is waiting for.
 - An issue whose subtree has an open question.
 - An issue with an attached PR that is open (including a draft) or whose status cannot be resolved. Merged and closed-without-merge PRs are settled and do not block pruning.
 - A bundle whose managed worktree cannot be removed safely. Dirty and locked worktrees are never forced; ownership/path/branch mismatches and git failures also retain the record so a later `/prune` can retry.
+
+How a merged PR is resolved:
+
+- A pull request Meringue has already verified as `merged` and persisted on the issue (`delivery_pull_request` / `delivery_pull_requests`) stays authoritative. Merging is terminal on the forge, so prune reuses that record instead of re-verifying it, and a settled bundle is still pruned when `gh` is unavailable, unauthenticated, or slow. `closed` is not trusted from state because a closed PR can be reopened, and anything else is always re-checked live.
+- Branch discovery (`gh pr list --head <branch>`) is skipped for a worker whose exact delivery branch already has a recorded merged PR: it could only re-derive URLs Meringue already has, and a failed discovery used to retain the settled record.
+- Within the bounded lookup phase, retention-critical lookups come first (statuses of PRs already recorded on an issue, then branch discovery for settled workers whose delivery PR is still unknown), and exploratory verification of historical candidate URLs runs last. Exhausting the budget therefore costs discovery, never a known PR status.
+
+Why a record was retained is always reported:
+
+- The prune log details carry `retained_issue_ids`, `retention_reasons` (per-issue blockers, unverified/open PR URLs, blocking workers, questions, worktree blockers), and a `forge_lookup` summary (`budget_seconds`, `elapsed_seconds`, `budget_exhausted`, `status_lookup_count`, `branch_lookup_count`, `trusted_from_state_urls`, `unavailable_urls`).
+- The prune message names the reasons the user cannot see in the AgentTree: `Retained 2 issues because Meringue could not verify their pull request status: P1-I20, P1-I21 (the 5s forge lookup budget was exhausted).` and `Retained 1 worker because their managed worktree could not be removed: P1-I1-W1 (worktree_dirty).` Those retentions are logged at `warning`; nonterminal issues, live workers, and open questions stay `info` because they are visible in the tree.
 
 Worktree cleanup safety and outcomes:
 
@@ -740,9 +850,10 @@ Worktree cleanup safety and outcomes:
 - Dirty, locked, ambiguous, or failed cleanups leave the issue/worker record in state. The worker stores its latest `harness_metadata.workspace_cleanup` result, warning/info logs name each outcome, and the `Prune` result exposes `workspace_cleanup_outcomes` plus blocked agent/issue/project IDs.
 
 PR checks are conservative and bounded. The kernel performs them outside the state lock,
-looks up each URL once, and gives the whole lookup phase five seconds. A timeout or a PR
-introduced after the lookup snapshot is `unknown`, so its issue is retained instead of
-blocking the app indefinitely or being removed unsafely.
+looks up each URL once, seeds the cache with pull requests already recorded as merged, and
+gives the remaining lookup phase five seconds. A timeout or a PR introduced after the
+lookup snapshot is `unknown`, so its issue is retained instead of blocking the app
+indefinitely or being removed unsafely.
 
 Compatibility: a legacy `selector` value (`resolved`, `errored`, `completed`, or `merged`) is still accepted and recorded as `requested_selector` in the log details, but it is a no-op that prunes exactly the same records as a bare `/prune`. Any other `/prune` argument is rejected by the slash-command parser with a short usage message. Do not invent a selector for a head-proposed `Prune`: send an empty payload.
 
@@ -830,6 +941,7 @@ the typed path. They use normal kernel/harness validation: a non-Pi or non-resum
 rejected rather than guessed.
 
 - `GetSessionDefaults` backs `/defaults` and takes `{}`.
+- `GetModelCatalog` backs `/models [harness] [refresh]` with an optional `{ "harness": "pi", "refresh": true }`. It is read-only: it asks the harness which models exist, reuses the cached snapshot unless `refresh` is set, and reports an explicit unavailable/unsupported state instead of guessing when the harness cannot answer.
 - `SetDefaultSessionModel` backs `/default-model <provider/model>` with `{ "model": "provider/model" }`.
 - `SetDefaultSessionThinkingLevel` backs `/default-thinking <level>` with `{ "level": "high" }`.
 - `GetSessionSettings` backs `/session-settings <agent_id>` with `{ "agent_id": "P1-I1-W1" }`.
@@ -838,7 +950,11 @@ rejected rather than guessed.
 
 Default changes affect future Pi sessions only. Per-session changes affect only the named existing
 session. Supported thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and
-`max`.
+`max`; the levels a specific model actually accepts come from the harness's model catalog, so a
+model that only supports `xhigh`/`max` rejects the lower levels.
+
+See [`session-settings.md`](session-settings.md#authoritative-model-catalog-discovery) for how the
+model catalog is discovered, cached, and degraded.
 
 ### GetState, ListQuestions, Help
 

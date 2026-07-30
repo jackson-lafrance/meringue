@@ -32,6 +32,30 @@ agent_select_next = ["j", "down", "right"]
 - Mouse wheel: scroll whichever pane the pointer is over, without changing focus. Hovering a pane that cannot scroll (or the composer) falls back to scrolling the focused pane.
 - When the agent tree or logs pane is focused, `Enter` enters jump mode. Non-agent log entries are skipped during jump navigation.
 
+## AgentTree agent colors and harness logos
+
+Every agent row is rendered as `<status> <harness logo> <id>  <title>`, so an agent can be identified without reading its title:
+
+```txt
+HEADS
+  └─ ● π H1  Route the request
+
+●   P1  meringue working
+  └─ ●   I1  Fix signup validation 1/3
+    ├─ ● π W1  Add collision check
+    ├─ ✓ ✳ W2  Hide password field
+    └─ · ↑ W3  Check the migration
+```
+
+- **Identity color.** The logo and the id use that agent's deterministic per-id color from the active colorscheme's identity palette (`AGENT_PALETTE` in `lib/meringue/tui/style.rb`, assigned by `Style.agent_palette_index`). It is the same color as that agent's log header, its `▌` log gutter, and the composer tint it produces when selected — one palette, one color per agent, everywhere. Heads draw their logo bold, exactly like their log headers, so two sessions in the same palette slot still separate.
+- **Every status keeps it.** Working agents, completed agents with a `✓`, and idle, queued, blocked, errored, and killed agents all keep their color and logo. Color is additive, never a replacement for status: the status glyph keeps its own semantic color (`○` queued, `●` working, `·` idle, `!` blocked, `✓` completed, `×` errored, `∅` killed) and a completed row still dims its title.
+- **Harness logos.** `π` Pi, `✳` Claude Code, `↑` Antigravity, taken from the agent's own recorded harness (provider aliases such as `cc` or `agy` resolve to the same mark). The glyphs live with the other provider presentation in the harness registry, so panes never hard-code a backend.
+- **Graceful degradation.** A harness Meringue does not ship (for example the `fake` harness used by tests) renders a plain ASCII initial rather than borrowing a shipped mark, and a record with no harness at all renders `?`, matching the unknown-status convention. Every branch is exactly one column wide. `MERINGUE_ASCII_GLYPHS=1` renders `p` / `c` / `a` instead of the marks for fonts that cannot draw them, and `NO_COLOR=1` drops color while keeping glyphs, ids, statuses, and titles.
+- **No reflow.** Issue and project rows have no harness of their own, so they reserve the same logo cell. Every id in the tree therefore starts in one column — including a child issue and a worker that are siblings at the same depth — and wrapped title rows hang under the title column.
+- **Selected rows.** The highlighted row keeps its logo but hands its foreground to the selection palette, which guarantees contrast on the highlight background in every theme. Its identity color is still visible: it is what the composer is tinted with while that row is selected.
+
+`ruby scripts/agent_identity_smoke.rb` prints the tree with every status, every harness, and every theme, which is the manual way to check how the colors and glyphs look in your terminal.
+
 ## AgentTree scrolling
 
 The AgentTree pane scrolls like any other pane, so a long tree of projects, issues, and agents is never silently clipped.
@@ -64,13 +88,31 @@ Chat routing uses the same selection without turning the dashboard into a direct
 - The fresh head still chooses `PromptAgent` mode (`normal`, `steer`, or `follow_up`), a healthy worker on that issue, a follow-up/replacement, or a clarification. Selection never emits `PromptAgent` directly.
 - Slash commands bypass the head as usual and do not inherit selection: `/prune`, `/help`, `/kill`, and the local navigation commands submit identically whether or not a row is selected, and they leave the selection in place. The focused worker workspace also retains its explicit direct-prompt behavior; this section applies to dashboard natural-language chat.
 - Selecting a project, or a head with no owning issue, filters logs only. Chat keeps its unscoped routing rather than sending a half-populated target, and clearing the selection restores unscoped routing.
-- The composer title reads `chat → P1-I9`. The bottom chip reads `target: P1-I9`, includes `via P1-I9-W3` for a worker selection, says `head routes`, and shows the clear gesture.
+
+### The composer shows its target by color
+
+The chat box itself changes to match the row it will prompt, so a stale selection cannot be missed while typing.
+
+| state | composer title | border / title / `›` / chip | bottom chip |
+| --- | --- | --- | --- |
+| worker or head with an issue (`P1-I9-W3`) | `chat → P1-I9-W3 · <issue title>` | tinted with that agent's own log color | `⌖ target: P1-I9-W3 → P1-I9  head routes · Esc clears` |
+| issue (`P1-I9`) | `chat → P1-I9 · <issue title>` | tinted with that issue id's color | `⌖ target: P1-I9  head routes · Esc clears` |
+| project or unbound head (log-only) | `chat · head routes · P1 logs only` | theme default, never tinted | `⌖ logs: P1  chat → head routes · Esc clears` |
+| nothing selected | `chat · head routes` | theme default, never tinted | `⌖ no target` |
+| buffer starts with `/` | `chat · slash command · P1-I9-W3 not targeted` | theme default, never tinted | `⌖ P1-I9-W3  slash ignores target · Esc clears` |
+
+- The tint is the *same* per-id color the logs pane and the AgentTree already give that agent (the active colorscheme's identity palette, `AGENT_PALETTE` in `lib/meringue/tui/style.rb`; see [AgentTree agent colors and harness logos](#agenttree-agent-colors-and-harness-logos)), so a tinted composer visibly belongs to the tree row, the log rows, and the `▌` gutter of the node it prompts. Issue ids hash through the same function, so an issue selection gets a stable color too, and an issue and a worker under it are never the same color.
+- Only the composer chrome is tinted: the border, the pane title, the `›` prompt marker, and the chip. Typed text, the placeholder, and text selection keep their normal semantic styles, so input contrast does not depend on which palette slot the target hashed into. This holds in all shipped colorschemes (`catppuccin`, `gruvbox`, `kanagawa`, `meringue`, `rose-pine`, `tokyonight`).
+- A focused composer stays distinguishable from an unfocused one by using the bold weight of the same hue instead of switching back to the focus border color.
+- Color is never the only cue. The title always names the destination, the chip always says who routes the message and how to clear it, and an empty targeted composer's placeholder reads `message P1-I9-W3`. With `NO_COLOR=1`, a 16-color terminal, or a screenshot, the text still says exactly where the prompt is going.
+- Typing a slash command removes the tint immediately, because slash commands never inherit the selection. The selection itself is untouched: delete the `/` and the tint (and the routing target) come back.
+- A selection the kernel or reconciliation drops (pruned, killed, renumbered) also drops the tint, so a colored composer always refers to a node that still exists.
 
 The selection is sticky and independent of focus:
 
 - The selected row stays highlighted while the logs pane, the chat pane, or the composer is focused, so the filter is always visible. When the selection changes it is scrolled back into view by the minimum amount, exactly like a jump-mode selection.
 - Scrolling the AgentTree (arrows, page keys, `Home` / `End`, or the mouse wheel) never changes or clears the selection, and the offset you chose by hand is not yanked back while the selection stays the same.
-- The logs pane title becomes `logs — <id>` (for example `logs — P1-I9-W3`). A log-only selection shows `⌖ logs: <id>  Esc clears`; an issue/worker chat target shows the resolved issue, `head routes`, and the same clear gesture.
+- The logs pane title becomes `logs — <id>` (for example `logs — P1-I9-W3`). The composer title, its tint, and the bottom chip follow the same selection; see [The composer shows its target by color](#the-composer-shows-its-target-by-color).
 - A filtered pane with nothing to show says so and repeats how to change or clear the filter, so it never looks broken.
 - Double-clicking a pending head or an issue without a worker does not open a focused workspace and does not add or persist repetitive `has no agent session to open yet` messages. Explicit unavailable actions may use a short-lived hint; unexpected workspace/launcher failures remain visible errors.
 
@@ -147,7 +189,7 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 
 ## Chat input
 
-- `Enter`: send the prompt as typed, or apply the slash suggestion once one is selected.
+- `Enter`: send the prompt as typed, or apply the slash suggestion once one is selected. When the composer is tinted, the message is routed by a fresh head with the titled target as `routing_context.selected_target`; see [AgentTree selection, log filtering, and chat routing](#agenttree-selection-log-filtering-and-chat-routing).
 - `Shift-Enter`: insert a newline.
 - Arrow keys: move the cursor.
 - `Home` / `Ctrl-A`: move to the start of the current line.

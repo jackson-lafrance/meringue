@@ -179,6 +179,36 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     refute File.exist?(File.join(tmp_root, "config.toml"))
   end
 
+  # `/session-settings`, `/model`, and `/thinking` are typed with the agent id in whatever case
+  # the user used. The id resolves; the model reference stays byte-exact.
+  def test_targeted_session_commands_accept_lowercase_and_mixed_case_agent_ids
+    add_project!(name: "targeted")
+    create_issue!("P1", title: "Exercise targeted settings")
+    spawn_worker!("P1-I1", workspace_path: make_project_dir("worker"))
+
+    model_result = apply_command("SetSessionModel", "agent_id" => "p1-i1-w1", "model" => "openai/gpt-5.6-sol")
+    thinking_result = apply_command("SetSessionThinkingLevel", "agent_id" => "P1-i1-W1", "level" => "xhigh")
+    inspection = apply_command("GetSessionSettings", "agent_id" => "p1-I1-w1")
+
+    [model_result, thinking_result, inspection].each { |result| assert_accepted(result) }
+    assert_equal %w[P1-I1-W1 P1-I1-W1 P1-I1-W1], [model_result, thinking_result, inspection].map { |result| result.fetch("target_id") }
+    assert_equal "openai/gpt-5.6-sol", inspection.dig("result", "session_settings", "model", "reference")
+    assert_equal "xhigh", inspection.dig("result", "session_settings", "thinking_level")
+    assert_equal "openai/gpt-5.6-sol", persisted_agents.fetch(0).dig("session_settings", "model", "reference")
+    log_entry(model_result.fetch("log_entry_ids").first).then do |entry|
+      assert_equal "P1-I1-W1", entry.fetch("source_id")
+      assert_includes entry.fetch("message"), "P1-I1-W1"
+    end
+    assert_empty @coordinator.calls, "targeted updates must not call the persistent default updater"
+  end
+
+  def test_targeted_session_commands_still_reject_an_unknown_agent_id
+    result = apply_command("GetSessionSettings", "agent_id" => "p1-i9-w9")
+
+    assert_rejected(result, "agent_not_found")
+    assert_equal "Agent p1-i9-w9 does not exist.", result.fetch("message")
+  end
+
   def test_default_commands_validate_values_before_persistence
     bad_models = ["gpt-5.6-sol", "openai/model/extra", "openai/has space"]
     bad_models.each do |model|

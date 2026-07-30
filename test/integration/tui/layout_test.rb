@@ -21,7 +21,9 @@ class TuiLayoutTest < Minitest::Test
     assert_includes frame, "─ agent tree "
     assert_match(/─ agent tree +↑\d+ ↓\d+/, frame)
     assert_includes frame, "─ logs ─"
-    assert_includes frame, "─ chat ─"
+    # With no AgentTree selection the composer says a head routes the message,
+    # which is the untinted counterpart of the tinted `chat → <target>` title.
+    assert_includes frame, "─ chat · head routes ─"
   end
 
   def test_frame_is_exactly_the_requested_rectangle_at_many_sizes
@@ -47,7 +49,7 @@ class TuiLayoutTest < Minitest::Test
 
     assert_includes frame, "─ agent tree "
     assert_includes frame, "─ logs ─"
-    assert_includes frame, "─ chat ─"
+    assert_includes frame, "─ chat · head routes ─"
     assert_includes frame, "Enter send"
   end
 
@@ -97,13 +99,16 @@ class TuiLayoutTest < Minitest::Test
     assert_includes frame, "─ slash commands ─"
     lines = frame.split("\n", -1)
     assert_operator lines.index { |line| line.include?("─ slash commands ─") }, :<,
-                    lines.index { |line| line.include?("─ chat ─") }
+                    lines.index { |line| line.include?("─ chat") }
+    # A slash command bypasses any selection, so the composer says so instead of
+    # advertising a chat target it will not use.
+    assert_includes frame, "─ chat · slash command ─"
   end
 
   def test_slash_suggestion_pane_collapses_when_there_is_no_vertical_room
     frame = @layout.render(state_with_input("/"), width: 100, height: Layout::MIN_HEIGHT)
 
-    assert_includes frame, "─ chat ─"
+    assert_includes frame, "─ chat · slash command ─"
     assert_equal Layout::MIN_HEIGHT, frame.split("\n", -1).length
   end
 
@@ -242,7 +247,7 @@ class TuiLayoutTest < Minitest::Test
 
   def composer_height(frame)
     lines = frame.split("\n", -1)
-    start = lines.index { |line| line.include?("─ chat ─") }
+    start = lines.index { |line| line.include?("─ chat") }
     refute_nil start, "chat pane should be rendered"
     finish = lines[start..].index { |line| line.match?(/╰─+╯/) }
     finish + 1

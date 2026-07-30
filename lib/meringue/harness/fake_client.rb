@@ -48,6 +48,23 @@ module Meringue
         []
       end
 
+      # Deterministic stand-in catalog so tests and the demo state can exercise
+      # catalog-driven UI without spawning a harness process.
+      FAKE_MODELS = [
+        { "provider" => "fake", "id" => "fake-large", "name" => "Fake Large",
+          "thinking_levels" => %w[off low medium high], "reasoning" => true, "context_window" => 200_000 },
+        { "provider" => "fake", "id" => "fake-small", "name" => "Fake Small",
+          "thinking_levels" => ["off"], "reasoning" => false, "context_window" => 32_000 }
+      ].freeze
+
+      def model_catalog_supported?
+        true
+      end
+
+      def available_models(cwd: nil) # rubocop:disable Lint/UnusedMethodArgument
+        ModelCatalog.available(harness: harness_name, models: FAKE_MODELS, source: "fake_client")
+      end
+
       def attach_session(session_ref)
         session_ref
       end

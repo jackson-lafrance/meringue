@@ -6,6 +6,11 @@ module Meringue
       class AgentTreePane
         MAX_ITEM_LINES = 3
         ELLIPSIS = "…"
+        AGENT_TYPES = %w[head worker].freeze
+        # Issue and project rows reserve the harness-logo cell so every id in the
+        # tree starts in the same column and no row reflows when a sibling is an
+        # agent.
+        RESERVED_GLYPH = " "
 
         STATUS_DOTS = {
           "queued" => "○",
@@ -232,12 +237,16 @@ module Meringue
           leader_segments = if selected
                               [
                                 [status_dot(project), Style::AGENT_TREE_SELECTED_STATUS],
+                                [" #{RESERVED_GLYPH}", Style::AGENT_TREE_SELECTED_DIM],
                                 [" #{project.fetch("id")}", Style::AGENT_TREE_SELECTED_DIM],
                                 [" ▸", Style::AGENT_TREE_SELECTED_STATUS]
                               ]
                             else
                               [
                                 [status_dot(project), status_style(project)],
+                                # Projects reserve the harness-logo cell so every
+                                # row in the tree reads as status, logo, id.
+                                [" #{RESERVED_GLYPH}", Style::DIM],
                                 [" #{project.fetch("id")}", Style::MUTED],
                                 ["  ", Style::DIM]
                               ]
@@ -272,7 +281,8 @@ module Meringue
             ["  ", Style::DIM],
             ["#{prefix} ", Style::DIM],
             [status_dot(record), status_style(record)],
-            [" #{id}", Style::MUTED],
+            [" #{harness_glyph(record)}", harness_glyph_style(record)],
+            [" #{id}", identity_style(record) || Style::MUTED],
             ["  ", Style::DIM]
           ]
           wrapped_lines(
@@ -287,11 +297,16 @@ module Meringue
           )
         end
 
+        # The selected row keeps its own high-contrast palette rather than the
+        # agent's identity color: it already owns the highlight, the logo, and
+        # the tinted composer that names it, and an identity foreground on the
+        # selection background is not guaranteed to stay legible in every theme.
         def selected_item_lines(prefix:, record:, id:, content:, suffix_text: "", suffix_style: nil, width: nil)
           leader_segments = [
             ["▸", Style::AGENT_TREE_SELECTED_STATUS],
             [" #{prefix} ", Style::AGENT_TREE_SELECTED_DIM],
             [status_dot(record), Style::AGENT_TREE_SELECTED_STATUS],
+            [" #{harness_glyph(record)}", Style::AGENT_TREE_SELECTED_STATUS],
             [" #{id}", Style::AGENT_TREE_SELECTED_DIM],
             ["  ", Style::AGENT_TREE_SELECTED_DIM]
           ]
@@ -358,6 +373,7 @@ module Meringue
             ["  ", Style::DIM],
             ["#{continuation_prefix(prefix)} ", Style::DIM],
             [" " * status_dot(record).length, Style::DIM],
+            [" " * (harness_glyph(record).length + 1), Style::DIM],
             [" " * (id.to_s.length + 1), Style::DIM],
             ["  ", Style::DIM]
           ]
@@ -368,6 +384,7 @@ module Meringue
             [" ", Style::AGENT_TREE_SELECTED_DIM],
             [" #{continuation_prefix(prefix)} ", Style::AGENT_TREE_SELECTED_DIM],
             [" " * status_dot(record).length, Style::AGENT_TREE_SELECTED_DIM],
+            [" " * (harness_glyph(record).length + 1), Style::AGENT_TREE_SELECTED_DIM],
             [" " * (id.to_s.length + 1), Style::AGENT_TREE_SELECTED_DIM],
             ["  ", Style::AGENT_TREE_SELECTED_DIM]
           ]
@@ -449,6 +466,43 @@ module Meringue
           record["status"] == "completed" ? Style::MUTED : Style::TEXT
         end
 
+        def agent_record?(record)
+          AGENT_TYPES.include?(record["type"].to_s)
+        end
+
+        # The harness backing this session, asked of the harness registry so the
+        # pane never knows about Pi/Claude/Antigravity itself. Non-agent rows
+        # reserve the cell instead of borrowing a logo they do not own.
+        def harness_glyph(record)
+          return RESERVED_GLYPH unless agent_record?(record)
+
+          Meringue::Harness::Registry.provider_glyph(record["harness"])
+        end
+
+        # Identity color for an agent row: the same per-id assignment the logs
+        # pane and the chat composer use (Style::AGENT_PALETTE via
+        # Style.agent_palette_index, lib/meringue/tui/style.rb), so one agent is
+        # the same color in the tree, in its log rows, and in the composer that
+        # prompts it. There is no second palette and no per-status palette.
+        #
+        # Deliberately status-independent: a working agent and a completed,
+        # blocked, errored, or killed one all keep their identity. Status stays
+        # legible next to it through the status glyph's own semantic color and
+        # the muted title of a completed row, so color is additive.
+        def identity_style(record)
+          return nil unless agent_record?(record)
+
+          Style.agent_body_style(record.fetch("id", "").to_s)
+        end
+
+        # Heads render their logo bold, exactly like their log headers, so two
+        # sessions that hash to the same palette slot still separate.
+        def harness_glyph_style(record)
+          return Style::DIM unless agent_record?(record)
+
+          Style.agent_style(record.fetch("id", "").to_s, kind: record["type"].to_s)
+        end
+
         def record_title(record)
           metadata = record.fetch("harness_metadata", {}) || {}
           metadata.fetch("title", "#{record.fetch("type", "item")} session")
@@ -473,11 +527,35 @@ module Meringue
         end
 
         def worker_relationship_marker(worker)
+          # A worker that has not started yet must say so, and say who it is waiting for; otherwise a
+          # queued dependent looks identical to a worker whose session is still being provisioned.
+          waiting = deferred_wait_marker(worker)
+          return waiting unless waiting.empty?
           return "replaces #{short_id(worker.fetch("replaces_agent_id"))}" if worker["replaces_agent_id"]
           return "after #{short_id(worker.fetch("follow_up_of_agent_id"))}" if worker["follow_up_of_agent_id"]
           return "replaced by #{short_id(worker.fetch("replaced_by_agent_id"))}" if worker["replaced_by_agent_id"]
 
           ""
+        end
+
+        def deferred_wait_marker(worker)
+          metadata = worker["harness_metadata"]
+          deferred = metadata.is_a?(Hash) ? metadata["deferred_spawn"] : nil
+          return "" unless deferred.is_a?(Hash)
+          return "" unless %w[waiting activating].include?(deferred["state"].to_s)
+
+          predecessor_id = deferred["after_agent_id"].to_s
+          verb = deferred["state"].to_s == "activating" ? "starting after" : "waiting on"
+          return verb.split.first if predecessor_id.empty?
+
+          "#{verb} #{relationship_id(worker, predecessor_id)}"
+        end
+
+        # Same-issue relationships stay short; a predecessor on another issue needs its full id to
+        # be identifiable.
+        def relationship_id(worker, id)
+          issue_id = id.to_s.sub(/-W\d+\z/, "")
+          issue_id == worker["issue_id"].to_s ? short_id(id) : id.to_s
         end
 
         def active_pr_marker(record)

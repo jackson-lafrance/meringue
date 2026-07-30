@@ -245,21 +245,52 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     refute Meringue::Harness.transient_session_error?(error)
   end
 
-  def test_normal_prompt_is_rejected_mid_turn_and_steering_is_used_instead
+  # Regression: a normal-mode prompt into a mid-turn session used to raise InvalidModeError, which
+  # the kernel reported as a failed PromptAgent and the user's message was lost.
+  def test_normal_prompt_mid_turn_is_queued_as_a_follow_up_instead_of_being_dropped
     client, stub = build_pi_client(
       tmpdir,
       stub_config: { "session_id" => "sess-busy", "is_streaming" => true }
     )
     ref = spawn(client, prompt: "")
 
-    error = assert_raises(PiClient::InvalidModeError) { client.prompt_session(ref, "hi", mode: "normal") }
-    assert_match(/streaming/, error.message)
-    assert_match(/steer/, error.message)
-    assert_empty stub_commands_of_type(stub, "prompt")
+    prompted = client.prompt_session(ref, "hi", mode: "normal")
 
-    streamed = client.prompt_session(ref, "hi", mode: "steer")
-    assert_equal true, streamed.fetch("is_streaming")
-    assert_equal ["hi"], stub_commands_of_type(stub, "steer").map { |command| command.fetch("message") }
+    assert_empty stub_commands_of_type(stub, "prompt"), "a mid-turn session must not receive a blind prompt"
+    assert_equal ["hi"], stub_commands_of_type(stub, "follow_up").map { |command| command.fetch("message") }
+    assert_empty stub_commands_of_type(stub, "steer"), "queueing must never interrupt the active turn"
+    assert_equal true, prompted.fetch("is_streaming")
+    metadata = prompted.fetch("metadata")
+    assert_equal "normal", metadata.fetch("requested_prompt_mode")
+    assert_equal "follow_up", metadata.fetch("delivered_prompt_mode")
+    assert_match(/mid-turn/, metadata.fetch("prompt_mode_note"))
+  end
+
+  def test_steer_and_follow_up_keep_their_semantics_mid_turn
+    client, stub = build_pi_client(
+      tmpdir,
+      stub_config: { "session_id" => "sess-busy-modes", "is_streaming" => true }
+    )
+    ref = spawn(client, prompt: "")
+
+    steered = client.prompt_session(ref, "stop, wrong file", mode: "steer")
+    queued = client.prompt_session(ref, "then open the PR", mode: "follow_up")
+
+    assert_equal ["stop, wrong file"], stub_commands_of_type(stub, "steer").map { |command| command.fetch("message") }
+    assert_equal ["then open the PR"], stub_commands_of_type(stub, "follow_up").map { |command| command.fetch("message") }
+    assert_nil steered.fetch("metadata")["delivered_prompt_mode"], "steer is delivered as requested"
+    assert_nil queued.fetch("metadata")["delivered_prompt_mode"], "follow_up is delivered as requested"
+  end
+
+  def test_normal_prompt_on_a_settled_session_is_still_a_plain_prompt
+    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-settled" })
+    ref = spawn(client, prompt: "")
+
+    prompted = client.prompt_session(ref, "keep going", mode: "normal")
+
+    assert_equal ["keep going"], stub_commands_of_type(stub, "prompt").map { |command| command.fetch("message") }
+    assert_empty stub_commands_of_type(stub, "follow_up")
+    assert_nil prompted.fetch("metadata")["delivered_prompt_mode"]
   end
 
   def test_abort_sends_the_abort_command_and_refreshes_state

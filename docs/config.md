@@ -26,7 +26,9 @@ Supported colorschemes:
 - `catppuccin`
 - `kanagawa`
 
-Every colorscheme also defines an eight-color agent palette used to color agent rows in the logs pane. Each agent id is hashed to one palette slot, so the same head or worker always renders in the same color for a given theme. Heads use a bold `◆`, workers use `✦`, completed results use `✓`, actionable warnings/errors use `!`, and kernel/command logs keep the theme accent with `▪`. Set `NO_COLOR=1` to render the TUI without color; icons, explicit ids, status text, and the `▌` gutter still separate agent output from kernel logs.
+Every colorscheme also defines an eight-color agent palette. Each agent id is hashed to one palette slot, so the same head or worker always renders in the same color for a given theme, and that one assignment is used in three places: its rows in the logs pane, its id and harness logo in the AgentTree (in every status, completed rows included), and the chat composer's border/title/chip while that agent or its issue is the selected chat target. Heads use a bold `◆`, workers use `✦`, completed results use `✓`, actionable warnings/errors use `!`, and kernel/command logs keep the theme accent with `▪`. Set `NO_COLOR=1` to render the TUI without color; icons, explicit ids, harness logos, status text, the composer title, and the `▌` gutter still separate agent output from kernel logs.
+
+AgentTree rows also show which harness backs each session: `π` Pi, `✳` Claude Code, `↑` Antigravity. A harness Meringue does not ship renders a plain ASCII initial and a record with no harness renders `?`, always in exactly one column. Set `MERINGUE_ASCII_GLYPHS=1` to render `p` / `c` / `a` instead of the marks when a font cannot draw them.
 
 `color_scheme` is accepted as a compatibility alias for `colorscheme`. Running `/theme <name>` writes a single `colorscheme` value and removes the older `color_scheme` alias from the `[tui]` section.
 
@@ -189,6 +191,17 @@ worker_extra_args = []
 Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/default-model` and `/default-thinking`, or set `model` and `thinking_level` under `[harness.pi]`, to change both future roles without duplicating their tool flags. These scalar values are appended after `head_extra_args` / `worker_extra_args` and therefore win over model/thinking flags in those arrays. A configured role array still replaces that role's default array entirely, so include every other flag you need.
 
 `/defaults` inspects the future Pi pair. `/model` and `/thinking` remain targeted commands for one existing Pi session and never rewrite future defaults. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
+
+### Model catalogs and provider resource flags
+
+`/models`, and the completion list behind `/model` and `/default-model`, come from the harness itself rather than a list maintained in Meringue. For Pi, Meringue starts a short-lived ephemeral RPC probe (`pi --mode rpc --no-session`) and reads `get_available_models`.
+
+That probe reuses the configured provider `command`, `env`, `extra_args`, and role `*_extra_args`, minus `--model`/`--thinking`, because provider availability depends on those flags. Two consequences matter when configuring Pi:
+
+- If `worker_extra_args` contains `--no-extensions` and your models come from a Pi extension, the catalog is legitimately empty, and Meringue reports `unavailable` with Pi's own answer instead of inventing entries. Keep the `--extension <path>` flag that registers your provider in the same array (as in the example above) so probes and real sessions agree.
+- Model/thinking defaults are dropped from the probe on purpose: an unavailable saved default must not stop Pi from reporting which models exist.
+
+Catalogs are cached in Meringue state under `metadata.harness_model_catalogs.<harness>` and refreshed in the background by reconciliation (about every 10 minutes, retried after about 1 minute when a fetch failed). `/models refresh` forces an immediate re-fetch after you log into a provider, install an extension, or edit `~/.pi/agent/models.json`.
 
 Claude Code runs through `claude --print --output-format stream-json --verbose`; Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace. Live steer/follow-up prompting is currently Pi-only.
 
