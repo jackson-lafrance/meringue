@@ -15,13 +15,18 @@ module Meringue
     # offering a couple of remembered values.
     class ModelCatalog
       AVAILABLE = "available"
+      # A previously confirmed list whose latest refresh failed. The models are
+      # still the harness's own answer, just older than we would like, so they
+      # stay listed instead of collapsing back to whatever Meringue remembers.
+      STALE = "stale"
       UNAVAILABLE = "unavailable"
       UNSUPPORTED = "unsupported"
       EMPTY_CATALOG_REASON = "empty_catalog"
 
       ENTRY_KEYS = %w[reference provider id name thinking_levels reasoning context_window max_tokens].freeze
 
-      attr_reader :harness, :availability, :models, :note, :reason, :source, :fetched_at, :error
+      attr_reader :harness, :availability, :models, :note, :reason, :source, :fetched_at, :error,
+                  :last_attempt_at, :last_error
 
       class << self
         def available(harness:, models:, source: nil, fetched_at: nil)
@@ -70,6 +75,28 @@ module Meringue
           )
         end
 
+        # A failed refresh must never shrink a working model list. This keeps the
+        # last list the harness actually confirmed, records why the newest
+        # attempt failed, and lets callers label the list as last-known.
+        def retained(previous:, failure:, last_attempt_at: nil)
+          previous = coerce(previous)
+          failure = coerce(failure, harness: previous.harness)
+          return failure if previous.models.empty?
+
+          new(
+            harness: previous.harness,
+            availability: STALE,
+            models: previous.models,
+            note: failure.note,
+            reason: failure.reason || "refresh_failed",
+            source: previous.source,
+            error: previous.error,
+            fetched_at: previous.fetched_at,
+            last_attempt_at: last_attempt_at || Time.now.utc.iso8601,
+            last_error: failure.error || failure.reason
+          )
+        end
+
         # Accepts a catalog, a persisted snapshot hash, or nil so callers can
         # treat live and stored catalogs the same way.
         def coerce(value, harness: nil)
@@ -89,7 +116,9 @@ module Meringue
             reason: hash["reason"],
             source: hash["source"],
             error: hash["error"],
-            fetched_at: hash["fetched_at"]
+            fetched_at: hash["fetched_at"],
+            last_attempt_at: hash["last_attempt_at"],
+            last_error: hash["last_error"]
           )
         end
 
@@ -172,7 +201,7 @@ module Meringue
       end
 
       def initialize(harness:, availability:, models: [], note: nil, reason: nil, source: nil,
-                     error: nil, fetched_at: nil)
+                     error: nil, fetched_at: nil, last_attempt_at: nil, last_error: nil)
         @harness = harness.to_s
         @availability = availability.to_s
         @models = self.class.normalize_entries(models)
@@ -181,10 +210,22 @@ module Meringue
         @source = source.nil? ? nil : source.to_s
         @error = error.nil? ? nil : error.to_s
         @fetched_at = fetched_at.nil? ? Time.now.utc.iso8601 : fetched_at.to_s
+        @last_attempt_at = last_attempt_at.nil? ? nil : last_attempt_at.to_s
+        @last_error = last_error.nil? ? nil : last_error.to_s
       end
 
       def available?
         availability == AVAILABLE && !models.empty?
+      end
+
+      # True whenever the harness's own model list can still be offered, which
+      # includes a last-known list whose newest refresh failed.
+      def usable?
+        !models.empty? && [AVAILABLE, STALE].include?(availability)
+      end
+
+      def stale?
+        availability == STALE
       end
 
       def unsupported?
@@ -213,11 +254,14 @@ module Meringue
       # Seconds since this snapshot was taken, or nil when the timestamp is
       # unusable. Refresh policy lives in the kernel, not in the snapshot.
       def age_seconds(now: Time.now.utc)
-        reference = Time.iso8601(fetched_at.to_s)
-        now_time = now.is_a?(Time) ? now : Time.iso8601(now.to_s)
-        (now_time - reference).to_f
-      rescue ArgumentError, TypeError
-        nil
+        seconds_since(fetched_at, now)
+      end
+
+      # Seconds since the last fetch *attempt*, successful or not. Retry policy
+      # uses this so a retained list is retried on the failure cadence instead of
+      # being re-probed on every pass because its confirmed timestamp is old.
+      def attempt_age_seconds(now: Time.now.utc)
+        seconds_since(last_attempt_at || fetched_at, now)
       end
 
       def to_h
@@ -230,11 +274,23 @@ module Meringue
           "reason" => reason,
           "source" => source,
           "error" => error,
-          "fetched_at" => fetched_at
+          "fetched_at" => fetched_at,
+          "last_attempt_at" => last_attempt_at,
+          "last_error" => last_error
         }.compact
       end
 
       alias to_hash to_h
+
+      private
+
+      def seconds_since(timestamp, now)
+        reference = Time.iso8601(timestamp.to_s)
+        now_time = now.is_a?(Time) ? now : Time.iso8601(now.to_s)
+        (now_time - reference).to_f
+      rescue ArgumentError, TypeError
+        nil
+      end
     end
   end
 end

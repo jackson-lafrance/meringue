@@ -52,6 +52,45 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
     assert_empty unsupported.models
   end
 
+  # A harness hiccup must never shrink a working list: that is what makes the
+  # selector look like it only ever knew a couple of models.
+  def test_a_failed_refresh_retains_the_last_confirmed_models_as_stale
+    previous = Catalog.available(
+      harness: "pi",
+      models: [
+        { "provider" => "anthropic", "id" => "claude-opus-5", "thinking_levels" => %w[xhigh max] },
+        { "provider" => "openai", "id" => "gpt-5.6-sol", "thinking_levels" => %w[low high] },
+        { "provider" => "google", "id" => "gemini-3-flash", "thinking_levels" => ["off"] }
+      ],
+      source: "pi_rpc_get_available_models",
+      fetched_at: "2026-01-01T00:00:00Z"
+    )
+    failure = Catalog.unavailable(harness: "pi", note: "connection reset", reason: "fetch_failed", error: "RpcError")
+
+    retained = Catalog.retained(previous: previous, failure: failure, last_attempt_at: "2026-01-01T00:10:00Z")
+
+    assert_equal Catalog::STALE, retained.availability
+    assert retained.stale?
+    assert retained.usable?, "a retained list must still be offerable"
+    refute retained.available?, "a retained list must not claim to be freshly confirmed"
+    assert_equal previous.references, retained.references
+    assert_equal 3, retained.model_count
+    assert_equal %w[xhigh max], retained.thinking_levels_for("anthropic/claude-opus-5")
+    # The confirmed timestamp survives; the failed attempt is recorded separately.
+    assert_equal "2026-01-01T00:00:00Z", retained.fetched_at
+    assert_equal "2026-01-01T00:10:00Z", retained.last_attempt_at
+    assert_equal "connection reset", retained.note
+    assert_equal "fetch_failed", retained.reason
+    assert_equal "RpcError", retained.last_error
+    assert_equal 600.0, retained.age_seconds(now: Time.iso8601("2026-01-01T00:10:00Z"))
+    assert_equal 0.0, retained.attempt_age_seconds(now: Time.iso8601("2026-01-01T00:10:00Z"))
+
+    # Nothing to retain: the failure is reported as-is instead of inventing models.
+    empty_previous = Catalog.unavailable(harness: "pi", note: "never fetched", reason: "fetch_failed")
+    assert_equal failure.to_h, Catalog.retained(previous: empty_previous, failure: failure).to_h
+    refute Catalog.retained(previous: nil, failure: failure).usable?
+  end
+
   def test_catalog_round_trips_through_persisted_snapshots
     original = Catalog.available(
       harness: "pi",
@@ -66,6 +105,17 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
     missing = Catalog.coerce(nil, harness: "pi")
     assert missing.unsupported?
     assert_includes missing.note, "has been fetched yet"
+
+    stale = Catalog.retained(
+      previous: original,
+      failure: Catalog.unavailable(harness: "pi", note: "blip", reason: "fetch_failed"),
+      last_attempt_at: "2026-02-02T00:00:00Z"
+    )
+    restored_stale = Catalog.coerce(JSON.parse(JSON.generate(stale.to_h)))
+    assert restored_stale.stale?
+    assert restored_stale.usable?
+    assert_equal stale.references, restored_stale.references
+    assert_equal "2026-02-02T00:00:00Z", restored_stale.last_attempt_at
   end
 
   def test_catalog_age_is_measured_from_its_fetch_timestamp
