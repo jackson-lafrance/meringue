@@ -95,6 +95,12 @@ module Meringue
         "dismiss_question" => "DismissQuestion",
         "modify_issue" => "ModifyIssue",
         "prompt_agent" => "PromptAgent",
+        "create_goal" => "CreateGoal",
+        "goal" => "CreateGoal",
+        "modify_goal" => "ModifyGoal",
+        "stop_goal" => "StopGoal",
+        "list_goals" => "ListGoals",
+        "goals" => "ListGoals",
         "kill" => "Kill",
         "set_harness" => "SetHarness",
         "harness" => "SetHarness",
@@ -137,6 +143,11 @@ module Meringue
         ["/session-settings <agent_id>", "Refresh and show one existing agent's effective Pi session model and thinking level."],
         ["/model <agent_id> <provider/model>", "Change only one existing Pi session's model; future-session defaults are unchanged."],
         ["/thinking <agent_id> <level>", "Change only one existing Pi session's thinking level: off, minimal, low, medium, high, xhigh, or max."],
+        ["/goal create <issue_id> \"<success criteria>\" --metric \"<command>\" --target <number> [--comparator gte|lte|gt|lt|eq] [--max-iterations <n>] [--guardrail \"<command>\"] [--parse last_number|first_number|exit_status] [--pattern \"<regex>\"] [--title \"<title>\"] [--fresh-attempt] [--paused]", "Attach a goal loop to an issue: the kernel keeps producing attempts until the metric hits its target or a budget/no-progress guard trips."],
+        ["/goal status [goal_id]", "Show goal loops, their iteration accounting, and why a stopped goal stopped."],
+        ["/goal pause <goal_id>", "Pause a goal loop after the current attempt; nothing new is spawned while it is paused."],
+        ["/goal resume <goal_id>", "Resume a paused goal loop."],
+        ["/goal stop <goal_id>", "Stop a goal loop for good, leaving its current attempt session alone."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "TUI local: open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/keybind", "TUI local: show all keybindings."],
@@ -159,6 +170,7 @@ module Meringue
         GetSessionDefaults GetModelCatalog SetDefaultSessionModel SetDefaultSessionThinkingLevel
         GetSessionSettings SetSessionModel SetSessionThinkingLevel
         AddProject CreateIssue ModifyIssue SpawnWorker PromptAgent SpawnHead
+        CreateGoal ModifyGoal StopGoal ListGoals
         AskQuestion AnswerQuestion DismissQuestion
         Kill Prune Recount ClearState SetTheme SetHarness ReconcileSessions
       ].freeze
@@ -178,6 +190,15 @@ module Meringue
       HEAD_KILL_INSTRUCTION_PATTERN = /\b(?:kill|stop|terminate|abort|cancel|shut\s*down|shutdown|halt|nuke|end)\b/i.freeze
       TERMINAL_AGENT_STATUSES = %w[completed errored killed].freeze
       PROMPT_MODES = %w[normal steer follow_up].freeze
+      # A goal loop advances at most this many phases per goal per reconcile pass. One pass can
+      # therefore measure, judge, and start the next attempt, but it can never run away: after a
+      # spawn the goal's own single-flight invariant makes the next decision "wait".
+      GOAL_MAX_STEPS_PER_TICK = 4
+      # Metric commands are external I/O on the reconcile thread, so one pass spends at most this
+      # long advancing goals. Goals that do not fit wait for the next tick instead of delaying
+      # session reconciliation for every goal in the state file. A single metric command can still
+      # exceed this on its own; it is bounded by the goal's own `metric.timeout_seconds`.
+      GOAL_ADVANCE_BUDGET_SECONDS = 30.0
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
       HEAD_RECONCILE_WARNING_DELAY_SECONDS = 5
       # Token-overlap ratio above which two clarifications from the same head are treated as
@@ -278,7 +299,8 @@ module Meringue
       HEAD_SESSION_STATE_UNAVAILABLE = "unavailable"
 
       attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path,
-                  :state_lock, :instance_pid, :instance_id, :prune_forge_lookup_budget
+                  :state_lock, :instance_pid, :instance_id, :prune_forge_lookup_budget, :metric_probe,
+                  :goal_advance_budget
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
                      head_runner: Heads::FakeRunner.new,
@@ -293,8 +315,10 @@ module Meringue
                      cwd: Dir.pwd,
                      async_heads: false,
                      forge_client: Forge::GitHubClient.new,
+                     metric_probe: Goals::MetricProbe.new,
                      config_path: Config::DEFAULT_PATH,
                      prune_forge_lookup_budget: PRUNE_FORGE_LOOKUP_BUDGET_SECONDS,
+                     goal_advance_budget: GOAL_ADVANCE_BUDGET_SECONDS,
                      state_lock: nil,
                      instance_pid: Process.pid,
                      instance_id: nil)
@@ -311,8 +335,10 @@ module Meringue
         @cwd = File.expand_path(cwd)
         @async_heads = async_heads
         @forge_client = forge_client
+        @metric_probe = metric_probe
         @config_path = File.expand_path(config_path.to_s)
         @prune_forge_lookup_budget = Float(prune_forge_lookup_budget)
+        @goal_advance_budget = Float(goal_advance_budget)
         @harness_client_resolver = harness_client_resolver
         @instance_pid = Integer(instance_pid)
         # Identifies this engine across processes. The pid alone is not enough:
@@ -328,6 +354,7 @@ module Meringue
         @prune_mutex = Mutex.new
         @session_reconcile_mutex = Mutex.new
         @model_catalog_mutex = Mutex.new
+        @goal_mutex = Mutex.new
       end
 
       def list_all
@@ -485,6 +512,14 @@ module Meringue
           spawn_worker(command_id, command_type, payload)
         when "PromptAgent"
           prompt_agent(command_id, command_type, payload)
+        when "CreateGoal"
+          create_goal(command_id, command_type, payload)
+        when "ModifyGoal"
+          modify_goal(command_id, command_type, payload)
+        when "StopGoal"
+          stop_goal(command_id, command_type, payload)
+        when "ListGoals"
+          list_goals(command_id, command_type, payload)
         when "Kill"
           kill(command_id, command_type, payload)
         when "ApplyHeadResult"
@@ -812,6 +847,11 @@ module Meringue
         # that settled in this same pass is honoured immediately, and it is the hook that recovers
         # a dependency whose predecessor settled, errored, or disappeared while Meringue was down.
         deferred_worker_results = reconcile_step("resolve_deferred_workers", []) { resolve_deferred_workers(trigger: "reconcile") }
+        # Goal loops run after the poll results are applied so this pass already sees the attempt
+        # worker that just settled, instead of waiting a full tick to notice it. They also run after
+        # deferred activation, so a goal whose attempt was queued behind another agent observes the
+        # activated worker rather than a record that is still waiting.
+        goal_steps = reconcile_step("advance_goal_loops", []) { advance_goal_loops }
         changed_count = applied_results.count { |result| result.fetch("changed", false) }
         changed_count += deferred_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += recovered_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
@@ -821,6 +861,7 @@ module Meringue
         changed_count += 1 if prune_result.fetch("changed", false)
         changed_count += delivery_pr_refreshes.count { |refresh| refresh.fetch("changed", false) }
         changed_count += 1 if model_catalog_refresh.fetch("changed", false)
+        changed_count += goal_steps.count { |step| step.fetch("changed", false) }
         accepted_result(
           command_id,
           command_type,
@@ -838,9 +879,10 @@ module Meringue
             "delivery_pull_request_refreshes" => delivery_pr_refreshes,
             "model_catalog_refresh" => model_catalog_refresh,
             "deferred_worker_results" => deferred_worker_results,
+            "goal_loop_steps" => goal_steps,
             "poll_results" => applied_results
           },
-          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) }).uniq
+          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) }).uniq
         )
       rescue StandardError => e
         error = error_payload(e)
@@ -881,6 +923,16 @@ module Meringue
           metadata.fetch("owner_instance_id", nil),
           metadata.fetch("owner_instance_pid", nil),
           metadata.fetch("owner_instance_started_at", nil)
+        ).nil?
+      end
+
+      # Same question for a goal record. Goals are not agents: their driver ownership lives at
+      # the top level of the record, not in harness metadata.
+      def goal_owned_by_other_live_instance?(goal)
+        !other_live_instance_pid(
+          goal.fetch("owner_instance_id", nil),
+          goal.fetch("owner_instance_pid", nil),
+          goal.fetch("owner_instance_started_at", nil)
         ).nil?
       end
 
@@ -1060,6 +1112,17 @@ module Meringue
               "    #{reason["issue_id"]}: #{Array(reason["blockers"]).join(", ")}"
             end
           ]
+        when "ListGoals"
+          goal_output_lines(result)
+        when "CreateGoal", "ModifyGoal", "StopGoal"
+          goal = result.is_a?(Hash) ? result : {}
+          return [] if goal.empty?
+
+          [
+            "  #{Goals::Record.summary(goal)}",
+            goal["success_criteria"] ? "  criteria: #{goal["success_criteria"]}" : nil,
+            goal.dig("metric", "command") ? "  metric: #{goal.dig("metric", "command")}" : nil
+          ].compact
         when "Recount"
           mappings = result.is_a?(Hash) ? result.fetch("mappings", {}) : {}
           ["  renamed IDs: #{mappings.values.sum { |mapping| mapping.length }}"]
@@ -1829,7 +1892,7 @@ module Meringue
         return rejected_result(command_id, command_type, "Target was not killed.", ["target_id is required"]) if blank?(target_id)
 
         state = normalized_state
-        target = find_agent(state, target_id) || find_issue(state, target_id) || find_project(state, target_id)
+        target = find_agent(state, target_id) || find_goal(state, target_id) || find_issue(state, target_id) || find_project(state, target_id)
         return rejected_result(command_id, command_type, "Target #{target_id} does not exist.", ["target_not_found"]) unless target
 
         now = timestamp
@@ -2711,11 +2774,12 @@ module Meringue
         return rejected_result(command_id, command_type, "Info was not loaded.", ["target_id is required"]) unless target_id
 
         state = normalized_state
-        kind, record = %w[agent issue project question].filter_map do |candidate_kind|
+        kind, record = %w[agent issue project question goal].filter_map do |candidate_kind|
           found = case candidate_kind
                   when "agent" then find_agent(state, target_id)
                   when "issue" then find_issue(state, target_id)
                   when "project" then find_project(state, target_id)
+                  when "goal" then find_goal(state, target_id)
                   else find_question(state, target_id)
                   end
           [candidate_kind, found] if found
@@ -2746,6 +2810,10 @@ module Meringue
           dependents = waiting_deferred_dependents(state, [record.fetch("id")])
           info["waiting_dependent_agent_ids"] = dependents.map { |dependent| dependent.fetch("id") } if dependents.any?
         end
+        if kind == "issue"
+          info["goals"] = goals_for_issue_ids(state, [record.fetch("id", target_id)]).map { |goal| goal_status_summary(goal) }
+        end
+        info["goal_summary"] = goal_status_summary(record) if kind == "goal"
 
         accepted_result(command_id, command_type, record.fetch("id", target_id), "Loaded #{kind} #{target_id}.", info, [])
       end
@@ -3383,12 +3451,16 @@ module Meringue
           # A predecessor must outlive its queue: removing it here would leave a queued dependent
           # (possibly on another issue) with nothing to wait for.
           deferred_dependents = waiting_deferred_dependents(state, workers.map { |worker| worker.fetch("id", nil) })
+          # A live goal loop is retained work: pruning its issue would delete the loop, its
+          # iteration history, and the worktrees it is still measuring.
+          active_goals = goals_for_issue_ids(state, subtree_ids).select { |goal| Goals::Record.loop_active?(goal) }
           blockers = []
           blockers << "nonterminal_issues" if nonterminal_issue_ids.any?
           blockers << "unresolved_workers" if blocking_workers.any?
           blockers << "open_questions" if open_questions.any?
           blockers << "unsettled_pull_requests" if pull_request_blockers.any?
           blockers << "pending_deferred_dependents" if deferred_dependents.any?
+          blockers << "active_goals" if active_goals.any?
 
           {
             "issue_id" => issue.fetch("id"),
@@ -3401,6 +3473,7 @@ module Meringue
             "blocking_worker_ids" => blocking_workers.map { |worker| worker.fetch("id", nil) }.compact,
             "deferred_dependent_worker_ids" => deferred_dependents.map { |dependent| dependent.fetch("id", nil) }.compact,
             "open_question_ids" => open_questions.map { |question| question.fetch("id", nil) }.compact,
+            "active_goal_ids" => active_goals.map { |goal| goal.fetch("id", nil) }.compact,
             "pull_request_blockers" => pull_request_blockers,
             "pr_urls" => subtree_ids.flat_map { |issue_id| Array(checks_by_issue.dig(issue_id, "pr_urls")) }.uniq
           }
@@ -3810,6 +3883,10 @@ module Meringue
         standalone_agent_ids = effective_extra_agent_ids - bundled_agent_ids
 
         released_head_ids = release_head_sessions_for_removed_agents!(state, agent_ids_to_remove, now)
+        # A goal cannot outlive the issue it controls, or it would keep driving a record that
+        # no longer exists.
+        removed_goal_ids = goals_for_issue_ids(state, issue_ids_to_remove).map { |goal| goal.fetch("id", nil) }.compact
+        state["goals"] = state.fetch("goals", []).reject { |goal| removed_goal_ids.include?(goal.fetch("id", nil)) }
         state["issues"] = state.fetch("issues").reject { |issue| issue_ids_to_remove.include?(issue.fetch("id", nil)) }
         state["agents"] = state.fetch("agents").reject { |agent| agent_ids_to_remove.include?(agent.fetch("id", nil)) }
         state["projects"] = state.fetch("projects").reject { |project| removed_project_ids.include?(project.fetch("id", nil)) }
@@ -3827,6 +3904,7 @@ module Meringue
           "root_issue_ids" => root_issue_ids,
           "removed_issue_ids" => issue_ids_to_remove,
           "removed_agent_ids" => agent_ids_to_remove,
+          "removed_goal_ids" => removed_goal_ids,
           "removed_standalone_agent_ids" => standalone_agent_ids,
           "removed_project_ids" => removed_project_ids,
           "updated_project_ids" => updated_project_ids,
@@ -4567,6 +4645,971 @@ module Meringue
             }
           )
         end
+      end
+
+      # --- goal loops ------------------------------------------------------------
+      #
+      # A goal is the durable controller for "keep working until this measurable criterion
+      # is met". It is attached to exactly one issue, owns its own budgets, and is advanced
+      # by the reconcile tick rather than by a long-lived agent session.
+
+      def create_goal(command_id, command_type, payload)
+        issue_id = value_at(payload, "issue_id", "IssueID", "issueId")
+        success_criteria = value_at(payload, "success_criteria", "SuccessCriteria", "successCriteria", "criteria")
+        title = value_at(payload, "title", "Title")
+        metric = goal_metric_from_payload(payload)
+        budget = goal_budget_from_payload(payload)
+        judge_mode = present_string(value_at(payload, "judge_mode", "judgeMode")) || value_at(payload, "judge", "Judge")&.then { |judge| judge.is_a?(Hash) ? value_at(judge, "mode", "Mode") : judge }
+        continuity = present_string(value_at(payload, "continuity", "Continuity"))
+        attempt_prompt_template = present_string(value_at(payload, "attempt_prompt_template", "attemptPromptTemplate"))
+        paused = truthy?(value_at(payload, "paused", "Paused"))
+        errors = []
+
+        errors << "issue_id is required" if blank?(issue_id)
+        errors << "success_criteria is required" if blank?(success_criteria)
+        errors << "metric.command is required" if blank?(metric["command"])
+        errors << "metric.target must be a number" if metric["target"].nil?
+        if present_string(value_at(payload, "comparator", "Comparator")) && !Goals::Record::COMPARATORS.include?(value_at(payload, "comparator", "Comparator").to_s)
+          errors << "comparator must be one of #{Goals::Record::COMPARATORS.join(", ")}"
+        end
+        if present_string(continuity) && !Goals::Record::CONTINUITY_MODES.include?(continuity)
+          errors << "continuity must be one of #{Goals::Record::CONTINUITY_MODES.join(", ")}"
+        end
+        if present_string(judge_mode) && !Goals::Record::JUDGE_MODES.include?(judge_mode.to_s)
+          errors << if Goals::Record::DEFERRED_JUDGE_MODES.include?(judge_mode.to_s)
+                      "judge mode #{judge_mode} is not implemented yet; only #{Goals::Record::JUDGE_MODES.join(", ")} is available"
+                    else
+                      "judge mode must be one of #{Goals::Record::JUDGE_MODES.join(", ")}"
+                    end
+        end
+        return rejected_result(command_id, command_type, "Goal was not created.", errors) unless errors.empty?
+
+        state = normalized_state
+        issue = find_issue(state, issue_id)
+        return rejected_result(command_id, command_type, "Issue #{issue_id} does not exist.", ["issue_not_found"]) unless issue
+
+        project = find_project(state, issue.fetch("project_id"))
+        return rejected_result(command_id, command_type, "Project #{issue.fetch("project_id")} does not exist.", ["project_not_found"]) unless project
+
+        # One loop per issue. Two loops on one issue would race for the same branch and
+        # double the sessions the budgets are supposed to bound.
+        existing = active_goal_for_issue(state, issue.fetch("id"))
+        if existing
+          return rejected_result(
+            command_id,
+            command_type,
+            "Issue #{issue.fetch("id")} already has an active goal (#{existing.fetch("id")}).",
+            ["issue_already_has_active_goal"]
+          )
+        end
+
+        now = timestamp
+        goal = {
+          "id" => next_goal_id!(state),
+          "project_id" => project.fetch("id"),
+          "issue_id" => issue.fetch("id"),
+          "title" => present_string(title) || issue.fetch("title", "Goal"),
+          "success_criteria" => success_criteria.to_s.strip,
+          "kind" => Goals::Record::DEFAULT_KIND,
+          "status" => "queued",
+          "stop_reason" => nil,
+          "paused" => paused,
+          "metric" => metric,
+          "judge" => { "mode" => present_string(judge_mode) || Goals::Record::DEFAULT_JUDGE_MODE },
+          "budget" => budget,
+          "continuity" => continuity || Goals::Record::DEFAULT_CONTINUITY,
+          "attempt_prompt_template" => attempt_prompt_template,
+          "baseline_metric" => nil,
+          "last_metric" => nil,
+          "best_metric" => nil,
+          "current_iteration" => 0,
+          "workers_spawned" => 0,
+          "consecutive_no_progress" => 0,
+          "consecutive_probe_failures" => 0,
+          "iterations" => [],
+          "active_worker_id" => nil,
+          "question_id" => nil,
+          "next_tick_at" => nil,
+          "created_at" => now,
+          "updated_at" => now
+        }
+        Goals::Record.normalize!(goal)
+        state.fetch("goals") << goal
+        issue["status"] = "working" unless TERMINAL_AGENT_STATUSES.include?(issue.fetch("status", nil))
+        issue["updated_at"] = now
+
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: goal.fetch("id"),
+          level: "info",
+          message: "Created goal #{goal.fetch("id")} on #{issue.fetch("id")}: #{goal.fetch("success_criteria")}",
+          details: goal_log_details(goal)
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, goal.fetch("id"), "Created goal #{goal.fetch("id")}. #{Goals::Record.summary(goal)}", goal, log_ids)
+      end
+
+      def modify_goal(command_id, command_type, payload)
+        goal_id = value_at(payload, "goal_id", "GoalID", "goalId", "id")
+        return rejected_result(command_id, command_type, "Goal was not modified.", ["goal_id is required"]) if blank?(goal_id)
+
+        state = normalized_state
+        goal = find_goal(state, goal_id)
+        return rejected_result(command_id, command_type, "Goal #{goal_id} does not exist.", ["goal_not_found"]) unless goal
+        if %w[killed].include?(goal.fetch("status", nil))
+          return rejected_result(command_id, command_type, "Goal #{goal.fetch("id")} was stopped and cannot be modified.", ["goal_not_modifiable"])
+        end
+
+        requested_status = present_string(value_at(payload, "status", "Status"))
+        if requested_status && !Goals::Record::ACTIVE_STATUSES.include?(requested_status)
+          return rejected_result(
+            command_id,
+            command_type,
+            "ModifyGoal can only set a goal back to #{Goals::Record::ACTIVE_STATUSES.join(" or ")}; use StopGoal or Kill to end one.",
+            ["invalid_goal_status"]
+          )
+        end
+
+        now = timestamp
+        changed_fields = []
+        if payload_has?(payload, "paused", "Paused")
+          goal["paused"] = truthy?(value_at(payload, "paused", "Paused"))
+          changed_fields << "paused"
+        end
+        if payload_has?(payload, "success_criteria", "SuccessCriteria", "successCriteria", "criteria")
+          goal["success_criteria"] = value_at(payload, "success_criteria", "SuccessCriteria", "successCriteria", "criteria").to_s.strip
+          changed_fields << "success_criteria"
+        end
+        if payload_has?(payload, "title", "Title")
+          goal["title"] = present_string(value_at(payload, "title", "Title")) || goal.fetch("title")
+          changed_fields << "title"
+        end
+        if payload_has?(payload, "attempt_prompt_template", "attemptPromptTemplate")
+          goal["attempt_prompt_template"] = present_string(value_at(payload, "attempt_prompt_template", "attemptPromptTemplate"))
+          changed_fields << "attempt_prompt_template"
+        end
+        target = Goals::Record.float_or_nil(value_at(payload, "target", "Target", "metric_target", "metricTarget"))
+        if target
+          goal["metric"]["target"] = target
+          changed_fields << "target"
+        end
+        budget_updates = goal_budget_updates_from_payload(payload)
+        unless budget_updates.empty?
+          goal["budget"] = Goals::Record.normalized_budget(goal.fetch("budget").merge(budget_updates))
+          changed_fields.concat(budget_updates.keys)
+        end
+
+        if requested_status
+          # Restarting a guard-stopped goal clears the stop reason and the no-progress
+          # counters, otherwise the same guard would trip again on the next tick.
+          goal["status"] = requested_status
+          goal["stop_reason"] = nil
+          goal["settled_at"] = nil
+          goal["consecutive_no_progress"] = 0
+          goal["consecutive_probe_failures"] = 0
+          goal["next_tick_at"] = nil
+          changed_fields << "status"
+        end
+
+        Goals::Record.normalize!(goal)
+        goal["updated_at"] = now
+        message = "Modified goal #{goal.fetch("id")}: #{changed_fields.empty? ? "no fields changed" : changed_fields.uniq.join(", ")}. #{Goals::Record.summary(goal)}"
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: goal.fetch("id"),
+          level: "info",
+          message: message,
+          details: goal_log_details(goal).merge("changed_fields" => changed_fields.uniq)
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, goal.fetch("id"), message, goal, log_ids)
+      end
+
+      # A user-facing stop. The loop ends for good, but the attempt session that is already
+      # running is left alone: it owns a real branch and worktree, and killing it would throw
+      # that work away. `Kill <goal_id>` is the destructive variant.
+      def stop_goal(command_id, command_type, payload)
+        goal_id = value_at(payload, "goal_id", "GoalID", "goalId", "id", "target_id")
+        return rejected_result(command_id, command_type, "Goal was not stopped.", ["goal_id is required"]) if blank?(goal_id)
+
+        state = normalized_state
+        goal = find_goal(state, goal_id)
+        return rejected_result(command_id, command_type, "Goal #{goal_id} does not exist.", ["goal_not_found"]) unless goal
+
+        if Goals::Record::ACTIVE_STATUSES.include?(goal.fetch("status", nil))
+          now = timestamp
+          settle_goal_record!(goal, status: "killed", stop_reason: "user_stopped", now: now)
+          message = "Stopped goal #{goal.fetch("id")} at the user's request. #{Goals::Record.summary(goal)}"
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: goal.fetch("id"),
+            level: "info",
+            message: message,
+            details: goal_log_details(goal).merge("retained_agent_id" => goal.fetch("last_worker_id", nil)).compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+          return accepted_result(command_id, command_type, goal.fetch("id"), message, goal, log_ids)
+        end
+
+        accepted_result(
+          command_id,
+          command_type,
+          goal.fetch("id"),
+          "Goal #{goal.fetch("id")} is already #{goal.fetch("status")}#{goal.fetch("stop_reason", nil) ? " (#{goal.fetch("stop_reason")})" : ""}.",
+          goal,
+          []
+        )
+      end
+
+      def list_goals(command_id, command_type, payload)
+        goal_id = present_string(value_at(payload, "goal_id", "GoalID", "goalId", "id", "target_id"))
+        state = normalized_state
+        goals = state.fetch("goals")
+        if goal_id
+          goal = find_goal(state, goal_id)
+          return rejected_result(command_id, command_type, "Goal #{goal_id} does not exist.", ["goal_not_found"]) unless goal
+
+          goals = [goal]
+        end
+
+        summaries = goals.map { |record| goal_status_summary(record) }
+        # One log line: the per-goal lines are rendered as command output detail, like
+        # ListQuestions, so a visible log entry stays one scannable line.
+        message = if summaries.empty?
+                    "No goal loops."
+                  elsif summaries.length == 1
+                    summaries.first.fetch("line")
+                  else
+                    "#{summaries.length} goal loops."
+                  end
+        accepted_result(command_id, command_type, goal_id, message, { "goals" => summaries }, [])
+      end
+
+      def goal_output_lines(result)
+        summaries = Array(result.is_a?(Hash) ? result["goals"] : nil)
+        return ["  No goal loops."] if summaries.empty?
+
+        summaries.flat_map do |summary|
+          lines = ["  #{summary.fetch("line", summary.fetch("id", "goal"))}"]
+          next lines unless summaries.length == 1
+
+          lines + Array(summary.fetch("iterations", [])).map do |iteration|
+            "    it#{iteration.fetch("number", 0)}: #{iteration.fetch("verdict", "?")} metric #{Goals::Record.format_number(iteration.fetch("metric", nil))}"
+          end
+        end
+      end
+
+      def goal_status_summary(goal)
+        iterations = Goals::Record.settled_iterations(goal).last(5).map do |iteration|
+          {
+            "number" => iteration.fetch("number", 0),
+            "verdict" => iteration.fetch("verdict", nil),
+            "metric" => Goals::Record.metric_value(iteration.fetch("metric", nil)),
+            "metric_delta" => iteration.fetch("metric_delta", nil),
+            "attempt_worker_id" => iteration.fetch("attempt_worker_id", nil),
+            "next_directive" => iteration.fetch("next_directive", nil)
+          }
+        end
+        {
+          "id" => goal.fetch("id"),
+          "issue_id" => goal.fetch("issue_id", nil),
+          "status" => goal.fetch("status", nil),
+          "stop_reason" => goal.fetch("stop_reason", nil),
+          "paused" => goal.fetch("paused", false),
+          "line" => "#{Goals::Record.summary(goal)} — #{goal.fetch("success_criteria", "")}",
+          "iterations" => iterations
+        }
+      end
+
+      def goal_metric_from_payload(payload)
+        nested = value_at(payload, "metric", "Metric")
+        nested = {} unless nested.is_a?(Hash)
+        parse = value_at(nested, "parse", "Parse")
+        parse = {} unless parse.is_a?(Hash)
+        pattern = present_string(value_at(payload, "pattern", "metric_pattern", "metricPattern")) || present_string(value_at(parse, "pattern", "Pattern"))
+        parse_type = present_string(value_at(payload, "parse", "parse_type", "parseType")) || present_string(value_at(parse, "type", "Type"))
+        parse_type = "regex" if parse_type.nil? && pattern
+
+        Goals::Record.normalized_metric(
+          "command" => present_string(value_at(payload, "metric_command", "metricCommand", "command")) || present_string(value_at(nested, "command", "Command")),
+          "cwd" => present_string(value_at(payload, "metric_cwd", "metricCwd")) || present_string(value_at(nested, "cwd", "Cwd")),
+          "comparator" => present_string(value_at(payload, "comparator", "Comparator")) || present_string(value_at(nested, "comparator", "Comparator")),
+          "target" => Goals::Record.float_or_nil(value_at(payload, "target", "Target", "metric_target", "metricTarget") || value_at(nested, "target", "Target")),
+          "timeout_seconds" => value_at(payload, "metric_timeout_seconds", "metricTimeoutSeconds") || value_at(nested, "timeout_seconds", "timeoutSeconds"),
+          "parse" => {
+            "type" => parse_type,
+            "pattern" => pattern,
+            "capture" => value_at(payload, "capture") || value_at(parse, "capture", "Capture"),
+            "path" => present_string(value_at(payload, "json_path", "jsonPath")) || present_string(value_at(parse, "path", "Path"))
+          },
+          "guardrails" => Array(
+            value_at(payload, "guardrails", "Guardrails") ||
+            value_at(nested, "guardrails", "Guardrails") ||
+            value_at(payload, "guardrail", "Guardrail")
+          )
+        )
+      end
+
+      def goal_budget_from_payload(payload)
+        Goals::Record.normalized_budget(goal_budget_updates_from_payload(payload))
+      end
+
+      def goal_budget_updates_from_payload(payload)
+        nested = value_at(payload, "budget", "Budget")
+        nested = {} unless nested.is_a?(Hash)
+        {
+          "max_iterations" => value_at(payload, "max_iterations", "maxIterations") || value_at(nested, "max_iterations", "maxIterations"),
+          "max_wall_clock_seconds" => value_at(payload, "max_wall_clock_seconds", "maxWallClockSeconds") || value_at(nested, "max_wall_clock_seconds", "maxWallClockSeconds"),
+          "max_workers" => value_at(payload, "max_workers", "maxWorkers") || value_at(nested, "max_workers", "maxWorkers"),
+          "max_consecutive_no_progress" => value_at(payload, "max_consecutive_no_progress", "maxConsecutiveNoProgress") || value_at(nested, "max_consecutive_no_progress", "maxConsecutiveNoProgress"),
+          "min_metric_delta" => value_at(payload, "min_metric_delta", "minMetricDelta") || value_at(nested, "min_metric_delta", "minMetricDelta"),
+          "min_seconds_between_iterations" => value_at(payload, "min_seconds_between_iterations", "minSecondsBetweenIterations") || value_at(nested, "min_seconds_between_iterations", "minSecondsBetweenIterations")
+        }.compact
+      end
+
+      def goal_log_details(goal)
+        {
+          "goal_id" => goal.fetch("id"),
+          "issue_id" => goal.fetch("issue_id", nil),
+          "project_id" => goal.fetch("project_id", nil),
+          "status" => goal.fetch("status", nil),
+          "stop_reason" => goal.fetch("stop_reason", nil),
+          "paused" => goal.fetch("paused", false),
+          "current_iteration" => goal.fetch("current_iteration", 0),
+          "max_iterations" => goal.dig("budget", "max_iterations"),
+          "metric_command" => goal.dig("metric", "command"),
+          "comparator" => goal.dig("metric", "comparator"),
+          "target" => goal.dig("metric", "target"),
+          "last_metric" => Goals::Record.metric_value(goal.fetch("last_metric", nil)),
+          "best_metric" => Goals::Record.metric_value(goal.fetch("best_metric", nil)),
+          "workers_spawned" => goal.fetch("workers_spawned", 0)
+        }.compact
+      end
+
+      def find_goal(state, goal_id)
+        return nil if blank?(goal_id)
+
+        Ids.find_record(state.fetch("goals", []), goal_id)
+      end
+
+      def active_goal_for_issue(state, issue_id)
+        state.fetch("goals", []).find do |goal|
+          goal.fetch("issue_id", nil).to_s == issue_id.to_s && Goals::Record.loop_active?(goal)
+        end
+      end
+
+      def issue_has_active_goal?(state, issue_id)
+        !active_goal_for_issue(state, issue_id).nil?
+      end
+
+      def goals_for_issue_ids(state, issue_ids)
+        ids = Array(issue_ids).compact.map(&:to_s)
+        state.fetch("goals", []).select { |goal| ids.include?(goal.fetch("issue_id", nil).to_s) }
+      end
+
+      def next_goal_id!(state)
+        state.fetch("counters")["goals"] = state.fetch("counters").fetch("goals", 0).to_i + 1
+        "G#{state.fetch("counters").fetch("goals")}"
+      end
+
+      def truthy?(value)
+        return false if value.nil?
+        return value if [true, false].include?(value)
+
+        %w[true yes on 1].include?(value.to_s.strip.downcase)
+      end
+
+      # One reconcile pass over every goal this instance may drive. Each goal advances at
+      # most GOAL_MAX_STEPS_PER_TICK phases, and the loop's own single-flight invariant
+      # means at most one attempt session can exist per goal at any time.
+      def advance_goal_loops
+        steps = []
+        @goal_mutex.synchronize do
+          goal_ids = synchronized_state do
+            normalized_state.fetch("goals").filter_map do |goal|
+              next unless Goals::Record.loop_active?(goal)
+              next if goal.fetch("paused", false)
+              # A goal driven by another live Meringue instance is that instance's to advance.
+              next if goal_owned_by_other_live_instance?(goal)
+
+              goal.fetch("id")
+            end
+          end
+
+          deadline = monotonic_time + goal_advance_budget
+          goal_ids.each do |goal_id|
+            # Out of pass budget: the remaining goals are advanced by the next tick, so a slow
+            # metric on one goal cannot starve session reconciliation.
+            break if monotonic_time > deadline
+
+            GOAL_MAX_STEPS_PER_TICK.times do
+              step = advance_goal_loop_step(goal_id)
+              break unless step
+
+              steps << step
+              break unless step.fetch("continue", false)
+              break if monotonic_time > deadline
+            end
+          end
+        end
+        steps
+      end
+
+      # Performs exactly one phase transition for one goal: it asks the pure decision
+      # function what to do, does it, and writes the outcome back. State is written before
+      # every side effect so an interrupted step resumes instead of repeating.
+      def advance_goal_loop_step(goal_id)
+        context = synchronized_state do
+          state = normalized_state
+          goal = find_goal(state, goal_id)
+          return nil unless goal
+          return nil unless Goals::Record.loop_active?(goal)
+          return nil if goal.fetch("paused", false)
+          return nil if goal_owned_by_other_live_instance?(goal)
+
+          claimed = claim_goal!(state, goal)
+          if claimed
+            touch_state!(state)
+            store.save(state)
+          end
+          {
+            "goal" => deep_copy(goal),
+            "agents" => state.fetch("agents").map { |agent| goal_agent_snapshot(agent) }
+          }
+        end
+        goal = context.fetch("goal")
+        action = Goals::Loop.next_action(goal: goal, agents: context.fetch("agents"), now: Time.now.utc)
+
+        case action.fetch("action")
+        when "measure_baseline" then measure_goal_baseline(goal, action)
+        when "start_iteration" then start_goal_iteration(goal, action)
+        when "measure" then measure_goal_iteration(goal, action)
+        when "judge" then judge_goal_iteration(goal, action)
+        when "stop" then stop_goal_loop(goal, action)
+        else nil
+        end
+      end
+
+      # Records this instance as the goal's driver and flips a freshly created goal to
+      # working. Returns true when state changed so the caller only saves when needed.
+      def claim_goal!(state, goal)
+        changed = false
+        now = timestamp
+        ownership = instance_ownership_metadata
+        if goal.fetch("owner_instance_id", nil).to_s != ownership.fetch("owner_instance_id").to_s
+          goal.merge!(ownership)
+          changed = true
+        end
+        if goal.fetch("status", nil) == "queued"
+          goal["status"] = "working"
+          goal["started_at"] ||= now
+          changed = true
+        end
+        goal["started_at"] ||= goal.fetch("created_at", now)
+        goal["updated_at"] = now if changed
+        changed
+      end
+
+      def goal_agent_snapshot(agent)
+        agent.slice("id", "type", "status", "issue_id", "pid", "harness_session_id", "harness_session_file", "workspace_path", "workspace_branch")
+      end
+
+      # The baseline is measured before the first attempt so "progress" means something.
+      def measure_goal_baseline(goal, _action)
+        cwd = goal_metric_cwd(goal, worker_id: nil)
+        measurement = run_goal_metric(goal, cwd: cwd)
+
+        synchronized_state do
+          state = normalized_state
+          current = find_goal(state, goal.fetch("id"))
+          return nil unless current
+
+          now = timestamp
+          current["baseline_metric"] = measurement
+          current["last_metric"] ||= measurement
+          current["best_metric"] ||= measurement
+          probe_ok = Goals::Evaluator.probe_ok?(current, measurement)
+          current["consecutive_probe_failures"] = probe_ok ? 0 : current.fetch("consecutive_probe_failures", 0).to_i + 1
+          current["updated_at"] = now
+          message = if probe_ok
+                      "Goal #{current.fetch("id")} baseline metric is #{Goals::Record.format_number(Goals::Record.metric_value(measurement))} (target #{current.dig("metric", "comparator")} #{Goals::Record.format_number(current.dig("metric", "target"))})."
+                    else
+                      "Goal #{current.fetch("id")} could not measure its baseline metric: #{goal_measurement_problem(measurement)}"
+                    end
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: current.fetch("id"),
+            level: probe_ok ? "info" : "warning",
+            message: message,
+            details: goal_log_details(current).merge("phase" => "baseline", "measurement" => measurement)
+          )
+          touch_state!(state, now)
+          store.save(state)
+          goal_step(current, "measure_baseline", message, log_ids, continue: probe_ok)
+        end
+      end
+
+      # Starts one attempt: checkpoint the iteration first, then issue the spawn/prompt.
+      # The deterministic command id makes a repeated spawn idempotent, so a crash between
+      # the checkpoint and the spawn resumes the same iteration instead of adding a worker.
+      def start_goal_iteration(goal, action)
+        number = action.fetch("number")
+        mode = action.fetch("mode")
+        command_id = action.fetch("command_id")
+        checkpoint = synchronized_state do
+          state = normalized_state
+          current = find_goal(state, goal.fetch("id"))
+          return nil unless current
+
+          now = timestamp
+          iteration = Goals::Record.iterations(current).find { |entry| entry.fetch("number", nil).to_i == number.to_i }
+          unless iteration
+            iteration = {
+              "number" => number,
+              "phase" => "attempting",
+              "mode" => mode,
+              "attempt_command_id" => command_id,
+              "attempt_worker_id" => mode == "prompt" ? action.fetch("worker_id", nil) : nil,
+              "started_at" => now
+            }
+            current.fetch("iterations") << iteration
+          end
+          iteration["phase"] = "attempting"
+          iteration["attempt_command_id"] ||= command_id
+          current["current_iteration"] = number
+          # Budget is consumed at the attempt, not at success: a spawn that keeps failing
+          # must still exhaust the budget rather than retry forever.
+          current["workers_spawned"] = current.fetch("workers_spawned", 0).to_i + 1 if mode == "spawn"
+          current["active_worker_id"] = iteration.fetch("attempt_worker_id", nil)
+          current["updated_at"] = now
+          touch_state!(state, now)
+          store.save(state)
+          { "goal" => deep_copy(current), "iteration_number" => number }
+        end
+
+        current_goal = checkpoint.fetch("goal")
+        prompt = Goals::AttemptPrompt.render(goal: current_goal, iteration_number: number, mode: mode)
+        result = if mode == "prompt"
+                   apply(
+                     "command_id" => command_id,
+                     "type" => "PromptAgent",
+                     "payload" => { "agent_id" => action.fetch("worker_id"), "prompt" => prompt, "mode" => "normal" }
+                   )
+                 else
+                   apply(
+                     "command_id" => command_id,
+                     "type" => "SpawnWorker",
+                     "payload" => {
+                       "issue_id" => current_goal.fetch("issue_id"),
+                       "prompt" => prompt,
+                       "title" => "#{current_goal.fetch("id")} iteration #{number}",
+                       "follow_up_of_agent_id" => goal_follow_up_agent_id(current_goal)
+                     }.compact
+                   )
+                 end
+
+        record_goal_attempt_result(current_goal.fetch("id"), number, mode, result)
+      end
+
+      def record_goal_attempt_result(goal_id, number, mode, result)
+        synchronized_state do
+          state = normalized_state
+          current = find_goal(state, goal_id)
+          return nil unless current
+
+          iteration = Goals::Record.iterations(current).find { |entry| entry.fetch("number", nil).to_i == number.to_i }
+          return nil unless iteration
+
+          now = timestamp
+          accepted = result.fetch("status", nil) == "accepted"
+          if accepted
+            worker_id = result.fetch("target_id", nil)
+            worker = find_agent(state, worker_id)
+            iteration["attempt_worker_id"] = worker_id
+            iteration["attempt_branch"] = worker && worker.fetch("workspace_branch", nil)
+            iteration["attempt_workspace_path"] = worker && worker.fetch("workspace_path", nil)
+            current["active_worker_id"] = worker_id
+            message = "Goal #{current.fetch("id")} started iteration #{number} of #{current.dig("budget", "max_iterations")} on #{worker_id}."
+            level = "info"
+          else
+            # A failed attempt is settled immediately as inconclusive: the no-progress guard
+            # then stops the goal instead of the kernel retrying a broken spawn forever.
+            iteration["phase"] = "settled"
+            iteration["verdict"] = "inconclusive"
+            iteration["settled_at"] = now
+            iteration["evidence"] = ["attempt could not be started: #{result.fetch("message", "unknown error")}"]
+            iteration["next_directive"] = nil
+            current["consecutive_no_progress"] = current.fetch("consecutive_no_progress", 0).to_i + 1
+            current["active_worker_id"] = nil
+            current["next_tick_at"] = goal_next_tick_at(current, now)
+            message = "Goal #{current.fetch("id")} could not start iteration #{number}: #{result.fetch("message", "unknown error")}"
+            level = "warning"
+          end
+          current["updated_at"] = now
+          trim_goal_iterations!(current)
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: current.fetch("id"),
+            level: level,
+            message: message,
+            details: goal_log_details(current).merge(
+              "phase" => "attempt",
+              "iteration" => number,
+              "mode" => mode,
+              "attempt_worker_id" => iteration.fetch("attempt_worker_id", nil),
+              "attempt_command_id" => iteration.fetch("attempt_command_id", nil)
+            ).compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+          # After a started attempt the only legal next decision is "wait", so this pass stops.
+          goal_step(current, "start_iteration", message, log_ids, continue: !accepted)
+        end
+      end
+
+      # Measures the metric and guardrails on the attempt's own branch, outside the state
+      # lock, with the probe's timeout and output caps.
+      def measure_goal_iteration(goal, action)
+        number = action.fetch("iteration_number")
+        prepared = synchronized_state do
+          state = normalized_state
+          current = find_goal(state, goal.fetch("id"))
+          return nil unless current
+
+          iteration = Goals::Record.iterations(current).find { |entry| entry.fetch("number", nil).to_i == number.to_i }
+          return nil unless iteration
+
+          now = timestamp
+          iteration["phase"] = "measuring"
+          iteration["attempt_worker_status"] = action.fetch("attempt_worker_status", iteration.fetch("attempt_worker_status", nil))
+          worker = find_agent(state, iteration.fetch("attempt_worker_id", nil))
+          iteration["attempt_branch"] ||= worker && worker.fetch("workspace_branch", nil)
+          iteration["attempt_workspace_path"] ||= worker && worker.fetch("workspace_path", nil)
+          current["updated_at"] = now
+          touch_state!(state, now)
+          store.save(state)
+          { "goal" => deep_copy(current), "workspace_path" => iteration.fetch("attempt_workspace_path", nil) }
+        end
+
+        current_goal = prepared.fetch("goal")
+        cwd = goal_metric_cwd(current_goal, workspace_path: prepared.fetch("workspace_path", nil))
+        measurement = run_goal_metric(current_goal, cwd: cwd)
+        guardrails = run_goal_guardrails(current_goal, cwd: cwd)
+        fingerprint = goal_workspace_fingerprint(cwd)
+
+        synchronized_state do
+          state = normalized_state
+          current = find_goal(state, current_goal.fetch("id"))
+          return nil unless current
+
+          iteration = Goals::Record.iterations(current).find { |entry| entry.fetch("number", nil).to_i == number.to_i }
+          return nil unless iteration
+
+          now = timestamp
+          iteration["metric"] = measurement
+          iteration["guardrails"] = guardrails
+          iteration["workspace_fingerprint"] = fingerprint
+          iteration["measured_at"] = now
+          iteration["phase"] = "judging"
+          current["updated_at"] = now
+          message = "Goal #{current.fetch("id")} measured iteration #{number}: #{Goals::Record.format_number(Goals::Record.metric_value(measurement))}#{guardrails.empty? ? "" : ", guardrails #{guardrails.count { |guardrail| guardrail.fetch("passed", false) }}/#{guardrails.length} passing"}."
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: current.fetch("id"),
+            level: "info",
+            message: message,
+            details: goal_log_details(current).merge(
+              "phase" => "measure",
+              "iteration" => number,
+              "measurement" => measurement,
+              "guardrails" => guardrails,
+              "metric_cwd" => cwd
+            ).compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+          goal_step(current, "measure", message, log_ids, continue: true)
+        end
+      end
+
+      # The judge step. Deterministic today: it scores the measurement against the metric
+      # and guardrails, records the verdict, and writes the directive the next attempt gets.
+      def judge_goal_iteration(goal, action)
+        number = action.fetch("iteration_number")
+        synchronized_state do
+          state = normalized_state
+          current = find_goal(state, goal.fetch("id"))
+          return nil unless current
+
+          iteration = Goals::Record.iterations(current).find { |entry| entry.fetch("number", nil).to_i == number.to_i }
+          return nil unless iteration
+
+          judgement = Goals::Evaluator.evaluate(goal: current, iteration: iteration)
+          now = timestamp
+          iteration["verdict"] = judgement.fetch("verdict")
+          iteration["score"] = judgement.fetch("score")
+          iteration["metric_delta"] = judgement.fetch("metric_delta")
+          iteration["evidence"] = judgement.fetch("evidence")
+          iteration["gaming_suspected"] = judgement.fetch("gaming_suspected")
+          iteration["next_directive"] = judgement.fetch("next_directive")
+          iteration["judged_by"] = current.dig("judge", "mode")
+          iteration["phase"] = "settled"
+          iteration["settled_at"] = now
+          iteration["duration_seconds"] = goal_duration_seconds(iteration.fetch("started_at", nil), now)
+
+          measurement = iteration.fetch("metric", nil)
+          if judgement.fetch("probe_ok")
+            current["last_metric"] = measurement
+            current["best_metric"] = Goals::Record.better_measurement(current, current.fetch("best_metric", nil), measurement)
+            current["consecutive_probe_failures"] = 0
+          else
+            current["consecutive_probe_failures"] = current.fetch("consecutive_probe_failures", 0).to_i + 1
+          end
+          current["consecutive_no_progress"] = judgement.fetch("progress") ? 0 : current.fetch("consecutive_no_progress", 0).to_i + 1
+          current["active_worker_id"] = nil
+          current["last_worker_id"] = iteration.fetch("attempt_worker_id", nil)
+          current["next_tick_at"] = goal_next_tick_at(current, now)
+          current["updated_at"] = now
+          trim_goal_iterations!(current)
+
+          message = "Goal #{current.fetch("id")} iteration #{number} verdict #{judgement.fetch("verdict")}: #{judgement.fetch("evidence").first || "no evidence"}."
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: current.fetch("id"),
+            level: judgement.fetch("gaming_suspected") ? "warning" : "info",
+            message: message,
+            details: goal_log_details(current).merge(
+              "phase" => "judge",
+              "iteration" => number,
+              "verdict" => judgement.fetch("verdict"),
+              "score" => judgement.fetch("score"),
+              "metric_delta" => judgement.fetch("metric_delta"),
+              "evidence" => judgement.fetch("evidence"),
+              "gaming_suspected" => judgement.fetch("gaming_suspected"),
+              "next_directive" => judgement.fetch("next_directive"),
+              "judge_mode" => current.dig("judge", "mode")
+            ).compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+          goal_step(current, "judge", message, log_ids, continue: true)
+        end
+      end
+
+      # Terminal transition for a goal loop. Every stop is durable, logged with its reason,
+      # and reflected on the owning issue; a guard stop also asks the user a question so a
+      # stalled goal surfaces in the questions list instead of going quiet.
+      def stop_goal_loop(goal, action)
+        synchronized_state do
+          state = normalized_state
+          current = find_goal(state, goal.fetch("id"))
+          return nil unless current
+          return nil unless Goals::Record.loop_active?(current)
+
+          now = timestamp
+          stop_reason = action.fetch("stop_reason")
+          settle_goal_record!(current, status: action.fetch("status"), stop_reason: stop_reason, now: now)
+          issue = find_issue(state, current.fetch("issue_id", nil))
+          if issue
+            issue["status"] = stop_reason == "goal_met" ? "completed" : "blocked"
+            issue["updated_at"] = now
+            project = find_project(state, issue.fetch("project_id", nil))
+            update_project_status_from_issues!(state, project, now) if project
+          end
+
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: current.fetch("id"),
+            level: stop_reason == "goal_met" ? "info" : "warning",
+            message: action.fetch("message"),
+            details: goal_log_details(current).merge("phase" => "stop", "iterations_settled" => Goals::Record.settled_iterations(current).length)
+          )
+
+          unless %w[goal_met user_stopped killed].include?(stop_reason)
+            question = build_question(
+              state: state,
+              head_id: nil,
+              question_text: goal_stop_question(current, action),
+              context: "#{action.fetch("message")} #{Goals::Record.summary(current)}",
+              project_id: current.fetch("project_id", nil),
+              issue_id: current.fetch("issue_id", nil)
+            )
+            state.fetch("questions") << question
+            current["question_id"] = question.fetch("id")
+            log_ids.concat(append_log(
+              state,
+              source_type: "kernel",
+              source_id: question.fetch("id"),
+              level: "info",
+              message: "Question #{question.fetch("id")}: #{question.fetch("question")}",
+              details: { "goal_id" => current.fetch("id"), "stop_reason" => stop_reason }
+            ))
+          end
+
+          touch_state!(state, now)
+          store.save(state)
+          goal_step(current, "stop", action.fetch("message"), log_ids, continue: false)
+        end
+      end
+
+      def goal_stop_question(goal, action)
+        case goal.fetch("stop_reason", nil)
+        when "no_progress"
+          "Goal #{goal.fetch("id")} stopped after #{goal.fetch("consecutive_no_progress")} iteration(s) with no measurable progress (metric #{Goals::Record.format_number(Goals::Record.metric_value(goal.fetch("last_metric", nil)))} vs target #{Goals::Record.format_number(Goals::Record.target(goal))}). Change the approach, adjust the goal, or stop it?"
+        when "oscillation"
+          "Goal #{goal.fetch("id")} stopped because its attempts started repeating the same workspace state. Should it try a different approach, or stop?"
+        when "probe_unavailable"
+          "Goal #{goal.fetch("id")} stopped because its metric command `#{goal.dig("metric", "command")}` keeps failing. Fix the command, change the metric, or stop the goal?"
+        when "max_iterations"
+          "Goal #{goal.fetch("id")} used its #{goal.dig("budget", "max_iterations")} iteration budget and reached #{Goals::Record.format_number(Goals::Record.metric_value(goal.fetch("last_metric", nil)))} of #{Goals::Record.format_number(Goals::Record.target(goal))}. Raise the budget, accept the result, or stop?"
+        else
+          "#{action.fetch("message")} How should this goal continue?"
+        end
+      end
+
+      def goal_step(goal, phase, message, log_entry_ids, continue:)
+        {
+          "goal_id" => goal.fetch("id"),
+          "phase" => phase,
+          "status" => goal.fetch("status", nil),
+          "stop_reason" => goal.fetch("stop_reason", nil),
+          "iteration" => goal.fetch("current_iteration", 0),
+          "message" => message,
+          "changed" => true,
+          "continue" => continue,
+          "log_entry_ids" => Array(log_entry_ids)
+        }
+      end
+
+      def run_goal_metric(goal, cwd:)
+        metric = goal.fetch("metric", {}) || {}
+        measurement = metric_probe.measure(
+          command: metric.fetch("command", nil),
+          cwd: cwd,
+          parse: metric.fetch("parse", {}),
+          timeout: metric.fetch("timeout_seconds", Goals::Record::DEFAULT_METRIC_TIMEOUT_SECONDS)
+        )
+        (measurement.is_a?(Hash) ? measurement : {}).merge(
+          "measured_at" => timestamp,
+          "cwd" => cwd,
+          "command" => metric.fetch("command", nil)
+        )
+      rescue StandardError => e
+        { "value" => nil, "error" => sanitized_error_message(e), "exit_status" => nil, "timed_out" => false, "measured_at" => timestamp, "cwd" => cwd }
+      end
+
+      def run_goal_guardrails(goal, cwd:)
+        Array(goal.dig("metric", "guardrails")).first(Goals::Record::MAX_GUARDRAILS).map do |guardrail|
+          begin
+            metric_probe.check_guardrail(
+              command: guardrail.fetch("command", nil),
+              cwd: cwd,
+              timeout: goal.dig("metric", "timeout_seconds") || Goals::Record::DEFAULT_METRIC_TIMEOUT_SECONDS
+            )
+          rescue StandardError => e
+            { "command" => guardrail.fetch("command", nil), "passed" => false, "error" => sanitized_error_message(e) }
+          end
+        end
+      end
+
+      def goal_workspace_fingerprint(cwd)
+        metric_probe.workspace_fingerprint(cwd: cwd)
+      rescue StandardError
+        nil
+      end
+
+      # The metric runs on the attempt's own workspace by default, so it measures the branch
+      # the attempt actually produced. `project_root` metrics and the pre-attempt baseline
+      # fall back to the registered project root.
+      def goal_metric_cwd(goal, worker_id: :unset, workspace_path: nil)
+        return project_root_for_goal(goal) if goal.dig("metric", "cwd").to_s == "project_root"
+
+        path = present_string(workspace_path)
+        path ||= synchronized_state do
+          state = normalized_state
+          worker = find_agent(state, worker_id == :unset ? goal.fetch("active_worker_id", nil) : worker_id)
+          worker && present_string(worker.fetch("workspace_path", nil))
+        end
+        return path if path && Dir.exist?(path)
+
+        project_root_for_goal(goal)
+      end
+
+      def project_root_for_goal(goal)
+        synchronized_state do
+          state = normalized_state
+          project = find_project(state, goal.fetch("project_id", nil))
+          project && present_string(project.fetch("root_path", nil))
+        end
+      end
+
+      def goal_follow_up_agent_id(goal)
+        worker_id = Goals::Record.settled_iterations(goal).reverse.filter_map { |iteration| iteration.fetch("attempt_worker_id", nil) }.first
+        return nil unless present_string(worker_id)
+
+        synchronized_state do
+          state = normalized_state
+          worker = find_agent(state, worker_id)
+          next nil unless worker
+          next nil unless worker.fetch("issue_id", nil).to_s == goal.fetch("issue_id", nil).to_s
+
+          worker.fetch("id")
+        end
+      end
+
+      def goal_next_tick_at(goal, now)
+        seconds = goal.dig("budget", "min_seconds_between_iterations").to_i
+        return nil unless seconds.positive?
+
+        (Time.parse(now.to_s) + seconds).utc.iso8601
+      rescue ArgumentError, TypeError
+        nil
+      end
+
+      def goal_duration_seconds(started_at, now)
+        return nil if blank?(started_at)
+
+        (Time.parse(now.to_s) - Time.parse(started_at.to_s)).round
+      rescue ArgumentError, TypeError
+        nil
+      end
+
+      def goal_measurement_problem(measurement)
+        return "the metric command timed out" if measurement.fetch("timed_out", false)
+        return measurement.fetch("error") if present_string(measurement.fetch("error", nil))
+        return measurement.fetch("parse_error") if present_string(measurement.fetch("parse_error", nil))
+
+        "the metric command exited #{measurement.fetch("exit_status", "non-zero")}"
+      end
+
+      def trim_goal_iterations!(goal)
+        iterations = Goals::Record.iterations(goal)
+        return if iterations.length <= Goals::Record::ITERATION_HISTORY_LIMIT
+
+        goal["iterations"] = iterations.last(Goals::Record::ITERATION_HISTORY_LIMIT)
+      end
+
+      def settle_goal_record!(goal, status:, stop_reason:, now:)
+        goal["status"] = status
+        goal["stop_reason"] = stop_reason
+        goal["settled_at"] = now
+        goal["updated_at"] = now
+        goal["last_worker_id"] = goal.fetch("active_worker_id", nil) if present_string(goal.fetch("active_worker_id", nil))
+        goal["active_worker_id"] = nil
+        goal
       end
 
       def spawn_worker(command_id, command_type, payload)
@@ -5901,6 +6944,12 @@ module Meringue
           return [agent.fetch("id")]
         end
 
+        # Killing a goal is the destructive stop: the loop ends and the attempt session it
+        # currently owns is killed with it. `StopGoal` is the variant that keeps the session.
+        if (goal = find_goal(state, target_id))
+          return kill_goal!(state, goal, now)
+        end
+
         if (issue = find_issue(state, target_id))
           return kill_issue_subtree!(state, issue, now)
         end
@@ -5915,9 +6964,29 @@ module Meringue
              .uniq
       end
 
+      def kill_goal!(state, goal, now)
+        settle_goal_record!(goal, status: "killed", stop_reason: "killed", now: now)
+        worker_id = present_string(goal.fetch("last_worker_id", nil))
+        worker = worker_id && find_agent(state, worker_id)
+        return [] unless worker && !TERMINAL_AGENT_STATUSES.include?(worker.fetch("status", nil))
+
+        mark_agent_killed!(worker, now)
+        [worker.fetch("id")]
+      end
+
+      # A killed issue must not leave its goal ticking, so goals settle with the subtree.
+      def kill_goals_for_issues!(state, issue_ids, now)
+        goals_for_issue_ids(state, issue_ids).each do |goal|
+          next unless Goals::Record.loop_active?(goal)
+
+          settle_goal_record!(goal, status: "killed", stop_reason: "killed", now: now)
+        end
+      end
+
       def kill_issue_subtree!(state, issue, now)
         issue["status"] = "killed"
         issue["updated_at"] = now
+        kill_goals_for_issues!(state, [issue.fetch("id")], now)
         child_agent_ids = state.fetch("agents").select { |agent| agent.fetch("issue_id", nil) == issue.fetch("id") }.map do |agent|
           mark_agent_killed!(agent, now)
           agent.fetch("id")
@@ -7277,6 +8346,10 @@ module Meringue
       end
 
       def update_issue_status_from_workers!(state, issue, now)
+        # An issue that owns a live goal loop is not finished just because the workers it has
+        # spawned so far are: the goal decides completion, and a `completed` issue between
+        # iterations would also make the issue prunable mid-goal.
+        active_goal = issue_has_active_goal?(state, issue.fetch("id", nil))
         workers = state.fetch("agents").select do |candidate|
           candidate.fetch("type", nil) == "worker" && candidate.fetch("issue_id", nil) == issue.fetch("id") &&
             candidate.fetch("status", nil) != "killed"
@@ -7284,7 +8357,7 @@ module Meringue
         return if workers.empty?
 
         issue["status"] = if workers.all? { |worker| worker.fetch("status", nil) == "completed" }
-                            "completed"
+                            active_goal ? "working" : "completed"
                           elsif workers.any? { |worker| worker.fetch("status", nil) == "errored" }
                             "errored"
                           elsif workers.any? { |worker| worker.fetch("status", nil) == "blocked" }
@@ -7526,6 +8599,7 @@ module Meringue
         state["counters"]["projects"] ||= max_numeric_suffix(state.fetch("projects"), /^P(\d+)$/)
         state["counters"]["heads"] ||= max_numeric_suffix(state.fetch("agents").select { |agent| agent["type"] == "head" }, /^H(\d+)$/)
         state["counters"]["questions"] ||= max_numeric_suffix(state.fetch("questions"), /^Q(\d+)$/)
+        state["counters"]["goals"] ||= max_numeric_suffix(state.fetch("goals", []), Goals::Record::ID_PATTERN)
         state["counters"]["logs"] ||= max_numeric_suffix(state.fetch("logs"), /^L(\d+)$/)
         state["counters"]["issues_by_project"] ||= {}
         state["counters"]["workers_by_issue"] ||= {}
