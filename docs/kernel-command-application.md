@@ -46,6 +46,15 @@ using only the per-command lookup cache. A record/PR introduced after the snapsh
 up once. Thus an unavailable forge can delay one prune briefly but cannot freeze the
 kernel or cause unsafe removal.
 
+The cache is seeded from state before any external call: a pull request already verified
+as `merged` is terminal on the forge, so prune trusts the persisted record instead of
+spending budget to confirm it (`closed` is excluded because it can be reopened). The
+remaining lookups are ordered by what retention depends on — statuses of PRs recorded on
+an issue, then branch discovery for settled workers with an unknown delivery, then
+exploratory candidate URLs — so an exhausted budget degrades discovery instead of turning
+a known-merged PR into `unknown` and retaining the whole subtree. Each pass reports
+`forge_lookup` counters and every retained record's reason in the prune log details.
+
 **A batch apply lease.** The instance applying a head result holds a heartbeat lease
 on the head record (`head_result_apply_owner`, `head_result_apply_heartbeat`), so a
 second instance can tell an in-flight batch from an abandoned one and skips it
