@@ -813,7 +813,7 @@ module Meringue
             return [["⧉ logs select", Style::ACCENT], ["  arrows move · Shift+arrows extend · Ctrl-C copies · Esc exits", Style::MUTED]]
           end
           return [["⧉ selection", Style::ACCENT], ["  Ctrl-C copies", Style::MUTED]] if selection.fetch("active", false)
-          return [["Alt-V or Shift+arrows select logs", Style::MUTED]] if logs_pane_focused?(state)
+          return [["double-click a word to copy it · Alt-V or Shift+arrows select logs", Style::MUTED]] if logs_pane_focused?(state)
 
           []
         end

@@ -17,8 +17,14 @@ module Meringue
       MOUSE_SCROLL_STEP = 3
       PAGE_SCROLL_STEP = 8
       DOUBLE_CLICK_INTERVAL_SECONDS = 0.5
+      # A double-click has to land on the same row, but a one column wobble
+      # between the two presses is normal on a trackpad and still counts.
+      DOUBLE_CLICK_COLUMN_TOLERANCE = 1
       # How long a copy/cut confirmation stays in the bottom hint line.
       SELECTION_STATUS_SECONDS = 3.0
+      # A short single-line copy is echoed back in the hint line, which reads
+      # better than "copied 1 line" after double-clicking one word.
+      COPY_ECHO_LIMIT = 32
       # Selection-extending keys reuse the composer's cursor movement math.
       SELECTION_MOVEMENTS = {
         "select_left" => :left,
@@ -160,6 +166,12 @@ module Meringue
         @logs_cursor_active = false
         @logs_cursor_column = 0
         @selection_dragging = false
+        # Mouse selection granularity: "character" for a plain drag, "word"
+        # after a double-click, plus the word the double-click anchored on so a
+        # double-click-drag can extend whole words.
+        @selection_granularity = "character"
+        @selection_anchor_word = nil
+        @last_text_click = nil
         @selection_status = nil
         @selection_status_at = nil
         @log_event_keys = {}
@@ -601,7 +613,7 @@ module Meringue
         return handle_mouse_wheel_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_wheel?(key)
         return handle_mouse_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_button_press?(key)
         return handle_mouse_drag_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_drag?(key)
-        return handle_mouse_release_key(input_buffer, input_cursor, slash_suggestion_index) if mouse_button_release?(key)
+        return handle_mouse_release_key(input_buffer, input_cursor, slash_suggestion_index, state) if mouse_button_release?(key)
 
         nil
       end
@@ -614,6 +626,9 @@ module Meringue
         case pane
         when "agent_tree"
           clear_selection
+          # The AgentTree keeps its own double-click tracker, so a text click
+          # before and after a tree click never pair up into a word selection.
+          @last_text_click = nil
           item_id = agent_tree_item_at_mouse_position(key, state)
           opened = handle_agent_tree_item_click(item_id, key, state)
           if opened
@@ -624,12 +639,13 @@ module Meringue
           [input_buffer, input_cursor, slash_suggestion_index]
         when "logs"
           @last_worker_click = nil
-          begin_logs_selection(key, state)
+          begin_logs_selection(key, state, click_count: text_click_count(pane, key))
           [input_buffer, input_cursor, slash_suggestion_index]
         else
           @last_worker_click = nil
           exit_agent_tree_navigation if @agent_tree_navigation_active
-          [input_buffer, begin_chat_selection(key, state, input_cursor), slash_suggestion_index]
+          cursor = begin_chat_selection(key, state, input_buffer, input_cursor, click_count: text_click_count(pane, key))
+          [input_buffer, cursor, slash_suggestion_index]
         end
       end
 
@@ -641,22 +657,30 @@ module Meringue
         case @selection_pane
         when "logs"
           position = logs_text_position(key, state)
-          @logs_selection_focus = position if position
+          extend_logs_selection(state, position) if position
           [input_buffer, input_cursor, slash_suggestion_index]
         when "chat"
           cursor = composer_text_index(key, state)
           return [input_buffer, input_cursor, slash_suggestion_index] unless cursor
 
-          update_chat_selection(@chat_selection_anchor || cursor, cursor)
-          [input_buffer, cursor, slash_suggestion_index]
+          [input_buffer, extend_chat_selection(input_buffer, cursor), slash_suggestion_index]
         else
           [input_buffer, input_cursor, slash_suggestion_index]
         end
       end
 
-      def handle_mouse_release_key(input_buffer, input_cursor, slash_suggestion_index)
+      # Releasing the button finishes a mouse selection. A finished logs
+      # highlight goes straight to the system clipboard, so a double-click is one
+      # gesture end to end; Ctrl-C still copies later, and the composer stays
+      # copy-on-demand so selecting text to retype it cannot clobber a clipboard.
+      def handle_mouse_release_key(input_buffer, input_cursor, slash_suggestion_index, state)
+        completed_drag = @selection_dragging
         @selection_dragging = false
-        clear_selection unless selection_active?
+        if selection_active?
+          copy_selection(state, input_buffer) if completed_drag && @selection_pane == "logs"
+        else
+          clear_selection
+        end
         [input_buffer, input_cursor, slash_suggestion_index]
       end
 
@@ -738,29 +762,127 @@ module Meringue
         layout.composer_text_index(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
       end
 
-      def begin_logs_selection(key, state)
+      def begin_logs_selection(key, state, click_count: 1)
         position = logs_text_position(key, state)
         return clear_selection unless position
 
         clear_chat_selection
         @selection_pane = "logs"
-        @logs_selection_anchor = position
-        @logs_selection_focus = position
         @logs_cursor_active = false
-        @logs_cursor_column = position.fetch("column", 0).to_i
         @selection_dragging = true
         clear_selection_status
+        return true if double_click?(click_count) && select_logs_word(state, position)
+
+        @selection_granularity = "character"
+        @selection_anchor_word = nil
+        @logs_selection_anchor = position
+        @logs_selection_focus = position
+        @logs_cursor_column = position.fetch("column", 0).to_i
       end
 
-      def begin_chat_selection(key, state, input_cursor)
+      def begin_chat_selection(key, state, input_buffer, input_cursor, click_count: 1)
         index = composer_text_index(key, state)
         return input_cursor unless index
 
         clear_logs_selection
-        update_chat_selection(index, index)
         @selection_dragging = true
         clear_selection_status
+        word = double_click?(click_count) ? Selection.word_range(input_buffer, index) : nil
+        if word
+          @selection_granularity = "word"
+          @selection_anchor_word = { "start" => word.begin, "end" => word.end }
+          update_chat_selection(word.begin, word.end)
+          return word.end
+        end
+
+        @selection_granularity = "character"
+        @selection_anchor_word = nil
+        update_chat_selection(index, index)
         index
+      end
+
+      def double_click?(click_count)
+        click_count.to_i >= 2
+      end
+
+      # Click counting is position- and time-bounded, so a slow second click, or
+      # a click on another row, starts a fresh single-click selection instead of
+      # silently selecting a word somewhere else.
+      def text_click_count(pane, key)
+        now = monotonic_time
+        click = { pane: pane.to_s, x: mouse_x(key), y: mouse_y(key), at: now, count: 1 }
+        previous = @last_text_click
+        click[:count] = 2 if previous && consecutive_text_click?(previous, click)
+        @last_text_click = click
+        click.fetch(:count)
+      end
+
+      def consecutive_text_click?(previous, click)
+        return false unless previous.fetch(:pane, nil) == click.fetch(:pane)
+        return false unless previous.fetch(:count, 1) == 1
+        return false unless previous.fetch(:y, nil) == click.fetch(:y)
+        return false unless (previous.fetch(:x, 0) - click.fetch(:x)).abs <= DOUBLE_CLICK_COLUMN_TOLERANCE
+
+        click.fetch(:at) - previous.fetch(:at, 0.0) <= DOUBLE_CLICK_INTERVAL_SECONDS
+      end
+
+      # Word selection uses the same wrapped content coordinates the drag
+      # highlight uses, so it lands on the right text on soft-wrapped rows and on
+      # scrolled-back content.
+      def select_logs_word(state, position)
+        line_index = position.fetch("line", 0).to_i
+        word = logs_word_range(state, line_index, position.fetch("column", 0).to_i)
+        return false unless word
+
+        @selection_granularity = "word"
+        @selection_anchor_word = { "line" => line_index, "start" => word.begin, "end" => word.end }
+        @logs_selection_anchor = Selection.point(line_index, word.begin)
+        @logs_selection_focus = Selection.point(line_index, word.end)
+        @logs_cursor_column = word.end
+        true
+      end
+
+      def logs_word_range(state, line_index, column)
+        lines = logs_selection_lines(state)
+        return nil unless line_index.between?(0, lines.length - 1)
+
+        Selection.word_range(lines.fetch(line_index), column)
+      end
+
+      # A plain drag moves the focus point; a double-click drag grows the
+      # selection to whole words in whichever direction the pointer went.
+      def extend_logs_selection(state, position)
+        anchor_word = @selection_anchor_word
+        unless @selection_granularity == "word" && anchor_word
+          @logs_selection_focus = position
+          return position
+        end
+
+        word = logs_word_range(state, position.fetch("line", 0).to_i, position.fetch("column", 0).to_i)
+        word_start = Selection.point(position.fetch("line", 0).to_i, word ? word.begin : position.fetch("column", 0).to_i)
+        word_end = Selection.point(position.fetch("line", 0).to_i, word ? word.end : position.fetch("column", 0).to_i)
+        anchor_start = Selection.point(anchor_word.fetch("line", 0).to_i, anchor_word.fetch("start", 0).to_i)
+        anchor_end = Selection.point(anchor_word.fetch("line", 0).to_i, anchor_word.fetch("end", 0).to_i)
+        @logs_selection_anchor = [anchor_start, word_start].min_by { |point| selection_point_order(point) }
+        @logs_selection_focus = [anchor_end, word_end].max_by { |point| selection_point_order(point) }
+      end
+
+      def selection_point_order(point)
+        [point.fetch("line", 0).to_i, point.fetch("column", 0).to_i]
+      end
+
+      def extend_chat_selection(input_buffer, cursor)
+        anchor_word = @selection_anchor_word
+        unless @selection_granularity == "word" && anchor_word
+          update_chat_selection(@chat_selection_anchor || cursor, cursor)
+          return cursor
+        end
+
+        word = Selection.word_range(input_buffer, cursor)
+        start_index = [anchor_word.fetch("start", 0).to_i, word ? word.begin : cursor].min
+        finish_index = [anchor_word.fetch("end", 0).to_i, word ? word.end : cursor].max
+        update_chat_selection(start_index, finish_index)
+        finish_index
       end
 
       def update_chat_selection(anchor, cursor)
@@ -799,8 +921,14 @@ module Meringue
         @logs_selection_focus = nil
         @logs_cursor_active = false
         @logs_cursor_column = 0
+        reset_mouse_selection_granularity if @selection_pane == "logs"
         @selection_pane = nil if @selection_pane == "logs"
         nil
+      end
+
+      def reset_mouse_selection_granularity
+        @selection_granularity = "character"
+        @selection_anchor_word = nil
       end
 
       # Keyboard-driven logs selection.
@@ -968,6 +1096,7 @@ module Meringue
       def clear_chat_selection
         @chat_selection_anchor = nil
         @chat_selection = nil
+        reset_mouse_selection_granularity if @selection_pane == "chat"
         @selection_pane = nil if @selection_pane == "chat"
         nil
       end
@@ -1036,12 +1165,17 @@ module Meringue
         return if text.to_s.empty?
 
         transport = Clipboard.copy(text, output: clipboard_output)
-        if transport
-          line_count = text.count("\n") + 1
-          set_selection_status("copied #{line_count} line#{line_count == 1 ? "" : "s"}")
-        else
-          set_selection_status("clipboard unavailable")
-        end
+        set_selection_status(transport ? copy_status_text(text) : "clipboard unavailable")
+      end
+
+      def copy_status_text(text)
+        line_count = text.count("\n") + 1
+        return "copied #{line_count} lines" unless line_count == 1
+
+        stripped = text.strip
+        return "copied 1 line" if stripped.empty? || stripped.length > COPY_ECHO_LIMIT
+
+        %(copied "#{stripped}")
       end
 
       def selection_text(state, input_buffer)
