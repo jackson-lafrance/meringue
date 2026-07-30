@@ -69,6 +69,7 @@ module Meringue
           )
         end
 
+        composer_active = scroll_pane_active?(state, "chat")
         draw_pane(
           canvas,
           metrics.fetch(:composer_x),
@@ -77,8 +78,12 @@ module Meringue
           metrics.fetch(:composer_height),
           composer_pane_title(state),
           chat_pane.composer_lines(state, width: metrics.fetch(:composer_content_width)),
-          active: scroll_pane_active?(state, "chat"),
-          overflow: :tail
+          active: composer_active,
+          overflow: :tail,
+          # The composer is tinted with the selected chat target's own color, so
+          # the box the user types into matches the AgentTree row it prompts.
+          border_style: composer_border_style(state, active: composer_active),
+          title_style: composer_title_style(state)
         )
         draw_hint_line(
           canvas,
@@ -497,6 +502,20 @@ module Meringue
         chat_pane.composer_pane_title(state)
       end
 
+      # nil keeps draw_pane's focus-driven default, which is what the untargeted
+      # "head routes" states render as.
+      def composer_border_style(state, active:)
+        return nil unless chat_pane.respond_to?(:composer_border_style)
+
+        chat_pane.composer_border_style(state, active: active)
+      end
+
+      def composer_title_style(state)
+        return nil unless chat_pane.respond_to?(:composer_title_style)
+
+        chat_pane.composer_title_style(state)
+      end
+
       def pane_selection(state, pane)
         selection = state.fetch("_selection", {}) || {}
         return nil unless selection.fetch("pane", nil).to_s == pane.to_s
@@ -657,9 +676,10 @@ module Meringue
         end
       end
 
-      def draw_pane(canvas, x, y, width, height, title, lines, active: false, overflow: :head, scroll_offset: 0, selection: nil)
-        border_style = active ? Style::BORDER_ACTIVE : Style::BORDER
-        canvas.draw_box(x, y, width, height, title: title, style: border_style, title_style: Style::PANEL_TITLE)
+      def draw_pane(canvas, x, y, width, height, title, lines, active: false, overflow: :head, scroll_offset: 0,
+                    selection: nil, border_style: nil, title_style: nil)
+        border_style ||= active ? Style::BORDER_ACTIVE : Style::BORDER
+        canvas.draw_box(x, y, width, height, title: title, style: border_style, title_style: title_style || Style::PANEL_TITLE)
         content_width = width - 4
         content_height = height - 2
         return if content_width <= 0 || content_height <= 0
