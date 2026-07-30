@@ -299,6 +299,22 @@ class HeadContextTest < Minitest::Test
     assert_includes prompt, File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md")).lines.first.strip
   end
 
+  def test_system_prompt_keeps_a_multi_step_goal_on_one_issue
+    prompt = build_head_context.system_prompt
+
+    assert_includes prompt, "one issue with two workers on it"
+    assert_includes prompt, "after_from_command and follow_up_of_command on the implementer"
+    assert_includes prompt, "Never write a worker prompt that polls Meringue state or sleeps waiting for another worker"
+  end
+
+  def test_routing_rules_pair_research_and_implementation_on_one_issue
+    rules = build_head_context.to_prompt_h.dig("routing_context", "decision_rules")
+
+    assert(rules.any? { |rule| rule.include?("One goal that needs several steps is one issue with several workers") })
+    assert(rules.any? { |rule| rule.include?("follow_up_of_command") })
+    assert(rules.any? { |rule| rule.include?("polling Meringue state") })
+  end
+
   def test_missing_kernel_command_reference_raises
     context = Meringue::Heads::Context.new(
       head_id: "H1",
