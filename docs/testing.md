@@ -59,7 +59,7 @@ These need real credentials, real processes, or a real terminal, so they stay ma
 
 - Real harness backends (Pi, Claude Code, Antigravity): spawning, resuming, or prompting an actual harness process, and anything requiring an authenticated harness CLI.
 - Network calls of any kind, including GitHub/forge API access, PR verification against real repositories, and `gh` invocations.
-- Interactive terminal behavior that needs a live TTY/PTY: raw-mode key handling, PTY echo timing, mouse events, and true-color rendering fidelity. Rendering logic is tested through the pane/canvas objects instead.
+- Interactive terminal behavior that needs a live TTY/PTY: raw-mode key handling, PTY echo timing, decoding real SGR mouse reports off the wire, and true-color rendering fidelity. Rendering logic is tested through the pane/canvas objects instead, and already-parsed mouse events (clicks, double-clicks, drags, wheel) are driven through `TUI::App` in `test/integration/tui/mouse_word_selection_test.rb`.
 - Editor and terminal launches into external applications.
 - Absolute performance numbers and profiling. The suite keeps a few deliberately generous bounded checks (`test/integration/tui/typing_throughput_test.rb`, `test/integration/workspace/terminal_scroll_performance_test.rb`, and the persistence bounds in `test/integration/state/log_retention_test.rb`) so an accidental O(n) regression fails, but real measurement on a specific machine is still a manual exercise.
 
