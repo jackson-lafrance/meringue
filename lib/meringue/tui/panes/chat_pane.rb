@@ -68,9 +68,10 @@ module Meringue
 
         # The composer names the concrete destination of the next prompt: the
         # selected agent (plus its owning issue's short title) or the issue
-        # itself. An agent selection still routes through a fresh head, so the
-        # chip spells the resolved issue out rather than implying a direct line
-        # to the worker. ChatTarget owns the wording for every selection state.
+        # itself. This title is the *only* place the target is named, so it spells
+        # the resolved issue out when the agent id does not already encode it
+        # rather than implying a direct line to the worker. ChatTarget owns the
+        # wording for every selection state.
         def composer_pane_title(state)
           ChatTarget.composer_title(state)
         end
@@ -237,12 +238,13 @@ module Meringue
 
         private
 
-        # Selection chip plus its clear affordance, so both focused logs and the
-        # head-routing target stay visible. The chip is tinted with the same
-        # color as the composer border, and every state (including "nothing is
-        # selected") says who routes the message.
+        # Gestures for the current selection, never its identity: the composer
+        # title one row above already names the target, so this only says that a
+        # fresh head routes the message (or that a slash command ignores the
+        # selection) and that Esc clears it. With nothing selected it is empty,
+        # leaving the width to the status, delivery-PR, and interaction hints.
         def log_scope_hint_segments(state)
-          ChatTarget.chip_segments(state)
+          ChatTarget.hint_segments(state)
         end
 
         def empty_logs_lines(state, width: nil)
