@@ -110,6 +110,13 @@ Each command in `commands` must use this shape:
 
 Use only the command names documented below unless the kernel command model is updated.
 
+Record ids (`P1`, `P1-I23`, `P1-I23-W1`, `H83`, `Q8`) are canonically uppercase, and the kernel
+resolves them case-insensitively: `p1-i23-w1` and `P1-i23-W1` reach the same record as
+`P1-I23-W1`. Always emit canonical uppercase ids anyway; the kernel stores, logs, and journals the
+canonical id no matter which case you sent. An id that names no record is still rejected, and the
+rejection echoes the id exactly as it was written. Nothing else is case-folded: paths, branch
+names, model references, harness/theme names, and harness session ids stay byte-exact.
+
 Issue and worker selection rules for the MVP:
 
 - Check `routing_context.selected_target` before semantic matching. It is explicit dashboard context resolved by the kernel: an issue selection targets itself; an agent selection targets its owning issue and includes `selected_agent_id` as a preferred session-context hint.

@@ -9,6 +9,7 @@ require "socket"
 require "time"
 
 require_relative "../config"
+require_relative "../ids"
 
 module Meringue
   module Kernel
@@ -328,7 +329,7 @@ module Meringue
         normalized = normalize_command(command)
         command_type = normalized.fetch("type", nil)
         command_id = normalized.fetch("command_id", nil)
-        payload = normalized.fetch("payload", {})
+        payload = canonicalize_payload_record_ids(normalized.fetch("payload", {}))
 
         return synchronized_state { rejected_result(command_id, nil, "Kernel command is missing a type.", ["missing_type"]) } if blank?(command_type)
 
@@ -4801,7 +4802,9 @@ module Meringue
 
         return { "command" => command } unless BATCH_ISSUE_GUARDED_COMMANDS.include?(command_type)
 
-        requested = present_string(value_at(payload, "issue_id", "IssueID", "issueId"))
+        # The batch plan, journal, and head snapshot all hold canonical ids, so compare a
+        # head-predicted id in canonical form. Nothing else about the command is rewritten here.
+        requested = Ids.canonical(present_string(value_at(payload, "issue_id", "IssueID", "issueId")))
         return { "command" => command } if requested.nil?
 
         resolve_batch_issue_target(
@@ -4922,7 +4925,7 @@ module Meringue
           return { "command" => command_with_project_id(command, payload, entry.fetch("project_id")) }
         end
 
-        requested = present_string(value_at(payload, "project_id", "ProjectID", "projectId"))
+        requested = Ids.canonical(present_string(value_at(payload, "project_id", "ProjectID", "projectId")))
         return nil unless requested
 
         aliased = plan.fetch("project_aliases")[requested]
@@ -6109,16 +6112,20 @@ module Meringue
         }.compact
       end
 
+      # Ids reach the kernel from typed slash commands, head-proposed command payloads, and TUI
+      # selections. Meringue ids are canonically uppercase, so an id that only differs by case is
+      # resolved to its canonical record here as a defensive second layer for paths that do not go
+      # through `apply`. Lookups still prefer an exact match, so nothing can shadow a real record.
       def find_project(state, project_id)
-        state.fetch("projects").find { |project| project.fetch("id", nil) == project_id.to_s }
+        Ids.find_record(state.fetch("projects"), project_id)
       end
 
       def find_issue(state, issue_id)
-        state.fetch("issues").find { |issue| issue.fetch("id", nil) == issue_id.to_s }
+        Ids.find_record(state.fetch("issues"), issue_id)
       end
 
       def find_agent(state, agent_id)
-        state.fetch("agents").find { |agent| agent.fetch("id", nil) == agent_id.to_s }
+        Ids.find_record(state.fetch("agents"), agent_id)
       end
 
       def find_session_agent(state, agent_id:, session_ref: nil)
@@ -6137,9 +6144,22 @@ module Meringue
       end
 
       def find_question(state, question_id)
-        needle = question_id.to_s.strip
-        state.fetch("questions").find { |question| question.fetch("id", nil) == needle } ||
-          state.fetch("questions").find { |question| question.fetch("id", nil).to_s.casecmp(needle).zero? }
+        Ids.find_record(state.fetch("questions"), question_id)
+      end
+
+      # Rewrites record ids in a command payload to their canonical uppercase spelling so state,
+      # logs, and the head command journal never store `h83` for `H83`. This is the earliest point
+      # where an id can be canonicalized without losing what its author typed: only an id that
+      # already resolves to a record in state is recased, so an unknown or malformed id reaches
+      # validation (and its rejection message) exactly as it was typed. State is loaded only when
+      # the payload actually holds a non-canonical id.
+      def canonicalize_payload_record_ids(payload)
+        return payload unless Ids.payload_needs_canonicalization?(payload)
+
+        state = synchronized_state { normalized_state }
+        Ids.canonicalize_payload(payload, state)
+      rescue StandardError
+        payload
       end
 
       def normalize_command(command)
