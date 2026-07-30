@@ -119,7 +119,7 @@ Issue and worker selection rules for the MVP:
 - First classify the message as a genuinely new goal or a follow-up. Without a selected target, explicit project/issue/worker ids win. With one, explicit ids must be compatible with its resolved issue or treated as a target conflict. Otherwise compare the prompt with issue titles/descriptions, recent routing activity, latest worker results, and active session metadata in `routing_context`.
 - A refinement, correction, question about findings, or next step for an existing goal should reuse that issue. Use `CreateIssue` only when no existing issue represents the durable goal.
 - On a reused issue, prefer `PromptAgent` when one healthy worker session has the relevant context. Do not spawn another worker merely because the user sent another message.
-- Use `PromptAgent` mode `steer` for an urgent correction that should affect active work, `follow_up` for related work that should wait until the active turn settles, and `normal` for a settled resumable session.
+- Use `PromptAgent` mode `steer` for an urgent correction that should affect active work, `follow_up` for related work that should wait until the active turn settles, and `normal` for a settled resumable session. Choose from the candidate's `is_streaming`, `supported_prompt_modes_now`, `recommended_prompt_mode`, and `prompt_mode_note` instead of defaulting to `normal`; a `normal` prompt to a mid-turn session is still accepted, but the kernel delivers it as a follow-up.
 - Spawn a new worker on the same issue only when the previous session is unavailable/unhealthy, its context is known to be over 50%, its delivered workspace should remain immutable, the next step is independent, or parallel work is intentional. Set `follow_up_of_agent_id` so that relationship is visible.
 - Replace a worker only when it is stale, unhealthy, pursuing the wrong approach, or must be stopped. Set `replace_agent_id` on `SpawnWorker`; the kernel starts the successor before killing the old session and records both sides of the relationship. Do not separately propose `Kill` for the same replacement.
 - Before routing anything, check `routing_context.open_questions` and `routing_context.answer_inference`. If this message answers an open question, close that question and route the unblocked work in the same result. See "Answering open questions" below.
@@ -569,7 +569,12 @@ Choose the mode deliberately:
 
 Killed and errored workers are not resumable through this command. Spawn a related or replacement worker on the same issue instead.
 
-A session that is momentarily busy is not a failure. When the worker's harness session is mid-turn under another Meringue instance, the kernel accepts the command, queues the prompt on the worker, and redelivers it during reconciliation; the delivery is logged only once the harness has accepted it. Do not resend the prompt to force delivery.
+A session that is momentarily busy is not a failure, and a correctly routed message is never dropped because of timing:
+
+- **The target session is mid-turn in this Meringue instance.** `steer` and `follow_up` keep their exact meaning. `normal` is accepted and delivered through the harness's queued-prompt behavior (Pi RPC `follow_up`) instead of being rejected, so it lands after the active turn without interrupting or reordering it. The kernel records the delivered mode on the worker (`last_prompt_mode`, `requested_prompt_mode`, `delivered_prompt_mode`) and states the substitution in the delivery log line, for example `Queued a follow-up for worker P1-I3-W1 on P1-I3. Requested normal, delivered follow_up: The session was mid-turn, ...`.
+- **The target session is mid-turn under another Meringue instance.** The kernel accepts the command, queues the prompt on the worker, and redelivers it during reconciliation; the delivery is logged only once the harness has accepted it.
+
+Either way the prompt is delivered exactly once. Do not resend the prompt to force delivery, and do not switch to `steer` merely to get past a busy session: `steer` interrupts work that the user may not want interrupted.
 
 Example:
 

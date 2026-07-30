@@ -58,11 +58,15 @@ receives an explicit `session_dir`, `transport_ownership`, or `claude_home`).
    `PiClient::SessionBusyError` includes `Harness::TransientSessionError`
    (`transient? == true`), so the kernel retries it. Its sibling
    `SessionTransportUnavailableError`, `ProcessNotFoundError`, and
-   `InvalidModeError` are hard errors. A normal-mode prompt during streaming
-   raises `InvalidModeError` telling the caller to use `steer`/`follow_up`; a
-   steer/follow-up against a settled-but-unattached session is silently
-   downgraded to a normal prompt and recorded as
-   `metadata["prompt_mode_downgraded_from"]`.
+   `InvalidModeError` are hard errors. A normal-mode prompt during streaming is
+   **not** an error: it is delivered as Pi RPC `follow_up` so it queues behind the
+   active turn, and the substitution is reported on the returned ref as
+   `metadata["requested_prompt_mode"]`, `metadata["delivered_prompt_mode"]`, and
+   `metadata["prompt_mode_note"]` (the kernel logs those). A steer/follow-up
+   against a settled-but-unattached session is downgraded to a normal prompt and
+   recorded as `metadata["prompt_mode_downgraded_from"]` plus the same three
+   generic keys. `steer` and `follow_up` are never rewritten against a live
+   mid-turn session.
 
 6. **Takeover only signals a process that still looks like the harness.**
    `ProcessIdentity.matches?` compares the `ps` executable basename and, when a
