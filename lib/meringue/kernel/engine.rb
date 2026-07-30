@@ -5801,6 +5801,20 @@ module Meringue
         value.is_a?(Hash) && value.key?("status") && value.key?("command_type")
       end
 
+      # Terminal reconcile details for a polled head whose result the kernel rejected or failed.
+      # Shaped like the other terminal models so the log-once/no-churn guards apply unchanged.
+      def unapplied_head_result_reconcile_model(apply_result, now)
+        {
+          "state" => RECONCILE_STATE_TERMINAL_ERROR,
+          "agent_type" => "head",
+          "reason" => "head_result_not_applied",
+          "last_error_at" => now,
+          "error_message" => present_string(apply_result.fetch("message", nil)) || "Head result was not applied.",
+          "apply_status" => apply_result.fetch("status", nil),
+          "apply_errors" => Array(apply_result.fetch("errors", []))
+        }.compact
+      end
+
       def head_result_fully_applied?(apply_result)
         return false if head_result_apply_skipped?(apply_result)
 
@@ -6530,10 +6544,28 @@ module Meringue
         return false if blank?(agent.fetch("harness", nil)) || agent.fetch("harness", nil) == "fake"
         return false unless agent_has_session_reference?(agent) || recoverable_untracked_head?(agent)
         return false if %w[completed killed].include?(agent.fetch("status", nil))
+        # A record whose failure was already recorded as terminal is settled: `/prompt` refuses
+        # to continue it and reconciliation has no repair left to try. Re-polling it would only
+        # re-observe the same dead session, rewrite state, and append the same error log on
+        # every pass. Recovery resumes only when a command moves the record out of `errored`.
+        return false if terminal_reconcile_error_recorded?(agent)
         return false unless harness_client_available_for_agent?(agent)
         return true unless agent.fetch("status", nil) == "errored"
 
         resumable_worker_reconcile_candidate?(agent) || resumable_head_reconcile_candidate?(agent)
+      end
+
+      # The durable "reconciliation is done trying" marker: an errored record whose persisted
+      # reconcile details already say `terminal_error`.
+      def terminal_reconcile_error_recorded?(agent)
+        return false unless agent.fetch("status", nil) == "errored"
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        reconcile = metadata.fetch("reconcile", {}) || {}
+        reconcile = {} unless reconcile.is_a?(Hash)
+        metadata.fetch("reconcile_state", nil) == RECONCILE_STATE_TERMINAL_ERROR ||
+          reconcile.fetch("state", nil) == RECONCILE_STATE_TERMINAL_ERROR
       end
 
       def harness_client_available_for_agent?(agent)
@@ -6776,6 +6808,10 @@ module Meringue
           return [] unless head
 
           now = timestamp
+          # Captured before the session merge, which resets `reconcile_state` to `healthy`, so a
+          # repeated failure can still be recognised as already recorded.
+          previously_terminal = terminal_reconcile_error_recorded?(head)
+          previous_signature = reconcile_error_signature((head.fetch("harness_metadata", {}) || {}).fetch("reconcile", {}))
           merge_session_ref_into_agent!(head, poll_result.fetch("session_ref", {}))
           if head_result_apply_skipped?(apply_result)
             log_ids = append_harness_event_logs(state, head, poll_result.fetch("events", []))
@@ -6785,7 +6821,8 @@ module Meringue
           end
 
           fully_applied = head_result_fully_applied?(apply_result)
-          head["status"] = if apply_result.fetch("status", nil) != "accepted"
+          accepted = apply_result.fetch("status", nil) == "accepted"
+          head["status"] = if !accepted
                              "errored"
                            elsif fully_applied
                              "completed"
@@ -6793,15 +6830,32 @@ module Meringue
                              "blocked"
                            end
           head["updated_at"] = now
-          head["harness_metadata"] = (head.fetch("harness_metadata", {}) || {}).merge(
+          # A head result the kernel refused is terminal for this head: reconciliation has no
+          # retry for it, so it is recorded like any other terminal reconcile failure. Otherwise
+          # the record stays `healthy`, is re-polled every pass, and re-logs the same error every
+          # two seconds. The head's session is closed for the same reason it is on other terminal
+          # head failures: nothing will use it again. Release first, then snapshot the metadata,
+          # so the release markers survive.
+          reconcile = accepted ? nil : unapplied_head_result_reconcile_model(apply_result, now)
+          repeated = !accepted && previously_terminal && previous_signature == reconcile_error_signature(reconcile)
+          release_head_session!(head, reason: "head_result_not_applied", now: now) unless accepted
+          metadata = (head.fetch("harness_metadata", {}) || {}).merge(
             "completed_at" => now,
             "head_result" => head_result,
-            "head_result_applied_at" => apply_result.fetch("status", nil) == "accepted" ? now : nil,
+            "head_result_applied_at" => accepted ? now : nil,
             "head_result_apply_status" => fully_applied ? apply_result.fetch("status", nil) : "partial",
             "is_streaming" => false
           ).compact
+          unless accepted
+            metadata = metadata.merge(
+              "errored_at" => metadata.fetch("errored_at", nil) || now,
+              "reconcile_state" => RECONCILE_STATE_TERMINAL_ERROR,
+              "reconcile" => reconcile
+            ).compact
+          end
+          head["harness_metadata"] = metadata
           log_ids = append_harness_event_logs(state, head, poll_result.fetch("events", []))
-          unless apply_result.fetch("status", nil) == "accepted"
+          if !accepted && !repeated
             log_ids.concat(append_log(
               state,
               source_type: "head",
@@ -6812,7 +6866,7 @@ module Meringue
                 "head_result" => head_result,
                 "apply_status" => apply_result.fetch("status", nil),
                 "apply_message" => apply_result.fetch("message", nil)
-              }
+              }.merge(reconcile || {})
             ))
           end
           touch_state!(state, now)
@@ -7133,7 +7187,7 @@ module Meringue
           now = timestamp
           metadata = agent.fetch("harness_metadata", {}) || {}
           previous_reconcile = metadata.fetch("reconcile", {}) || {}
-          first_error_at = previous_reconcile.fetch("first_error_at", nil) || now
+          first_error_at = previous_reconcile.fetch("first_error_at", nil) || existing_error_reference_at(agent) || now
           error_count = previous_reconcile.fetch("error_count", 0).to_i + 1
           warning_logged_at = previous_reconcile.fetch("warning_logged_at", nil)
 
@@ -7217,9 +7271,21 @@ module Meringue
           return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if %w[completed killed].include?(agent.fetch("status", nil))
 
           now = timestamp
+          reconcile = terminal_reconcile_error_model(poll_result, now)
+          # Recording the same terminal failure twice is not a state change: it would bump
+          # `updated_at`, rewrite the state file, and append a duplicate error log on every
+          # reconciliation pass. A genuinely different failure still transitions and logs.
+          if repeated_terminal_reconcile_error?(agent, reconcile)
+            return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "already_errored")
+          end
+
           agent["status"] = "errored"
           agent["updated_at"] = now
-          reconcile = terminal_reconcile_error_model(poll_result, now)
+          # AGENTS.md: the kernel closes a head's harness session when the head errors. Without
+          # this a terminally failed head keeps an orphaned harness process alive forever.
+          session_release = if agent.fetch("type", nil) == "head"
+                              release_head_session!(agent, reason: "head_reconcile_error", now: now)
+                            end
           agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
             "is_streaming" => false,
             "error_class" => poll_result.dig("error", "class"),
@@ -7236,18 +7302,42 @@ module Meringue
             update_project_status_from_issues!(state, project, now) if project
           end
 
+          details = if session_release && session_release.fetch("changed", false)
+                      reconcile.merge("head_session_released" => true)
+                    else
+                      reconcile
+                    end
           log_ids = append_log(
             state,
             source_type: agent.fetch("type", nil) == "head" ? "head" : "worker",
             source_id: agent.fetch("id"),
             level: "error",
             message: "#{agent.fetch("type", "Agent").capitalize} #{agent.fetch("id")} errored while reconciling its agent session.",
-            details: reconcile
+            details: details
           )
           touch_state!(state, now)
           store.save(state)
           poll_result.merge("changed" => true, "log_entry_ids" => log_ids)
         end
+      end
+
+      # Same record, same terminal failure: nothing new to persist or tell the user about.
+      # `last_error_at` moves every pass, so identity is the failure itself, not its timestamp.
+      def repeated_terminal_reconcile_error?(agent, reconcile)
+        return false unless terminal_reconcile_error_recorded?(agent)
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        reconcile_error_signature(metadata.fetch("reconcile", {})) == reconcile_error_signature(reconcile)
+      end
+
+      def reconcile_error_signature(reconcile)
+        reconcile = {} unless reconcile.is_a?(Hash)
+        {
+          "state" => reconcile.fetch("state", nil).to_s,
+          "error_class" => reconcile.fetch("error_class", nil).to_s,
+          "error_message" => reconcile.fetch("error_message", nil).to_s
+        }
       end
 
       def terminal_reconcile_error_model(poll_result, now)
@@ -7258,6 +7348,17 @@ module Meringue
           "error_class" => reconcile.fetch("error_class", poll_result.dig("error", "class")),
           "error_message" => reconcile.fetch("error_message", poll_result.dig("error", "message"))
         ).compact
+      end
+
+      # An already-errored head must not earn a fresh startup grace window (and be flipped back
+      # to `working`) just because reconciliation noticed it again. Judge the window from when
+      # the record actually failed instead of from now.
+      def existing_error_reference_at(agent)
+        return nil unless agent.fetch("status", nil) == "errored"
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        present_string(metadata.fetch("errored_at", nil)) || present_string(agent.fetch("updated_at", nil))
       end
 
       def head_reconcile_grace_active?(first_error_at, now)
