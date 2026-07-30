@@ -254,10 +254,12 @@ end
 check("the logs title names the active filter") do
   [logs_title(app, state) == "logs — P1-I1-W1", logs_title(app, state)]
 end
-check("the bottom hint offers a way to clear the filter") do
+check("the composer title names the filter and the bottom hint only offers the gesture") do
   pane = Meringue::TUI::Panes::ChatPane.new
-  hint = pane.bottom_hint_line(composed(app, state)).map { |segment| segment.is_a?(Array) ? segment.first : segment }.join
-  [hint.include?("P1-I1-W1") && hint.include?("Esc clears"), hint]
+  frame_state = composed(app, state)
+  hint = pane.bottom_hint_line(frame_state).map { |segment| segment.is_a?(Array) ? segment.first : segment }.join
+  title = pane.composer_pane_title(frame_state)
+  [title.include?("P1-I1-W1") && hint.include?("Esc clears") && !hint.include?("P1-I1-W1"), "#{title} | #{hint}"]
 end
 
 app = build_app

@@ -8,7 +8,13 @@ module Meringue
     # always returns a Hash for renderers and `chat_target` returns Hash-or-nil
     # for routing. This module turns that one fact into the composer's chrome:
     # its pane title, border/title styles, prompt marker, placeholder, and the
-    # chip on the bottom hint line.
+    # routing hint on the bottom line.
+    #
+    # The destination is named in exactly one place: the composer pane title,
+    # which sits on the border row directly above the chat bar. The bottom hint
+    # line deliberately repeats none of it and carries only the gestures a title
+    # cannot express (a fresh head still routes the message, a slash command
+    # ignores the selection, Esc clears it).
     #
     # The tint is deliberately *not* a new palette. It is the same per-id color
     # the logs pane already uses for that agent's rows (Style::AGENT_PALETTE via
@@ -27,12 +33,13 @@ module Meringue
     #                filters logs but does not scope chat, so it stays untinted
     #                and says the head still routes.
     # - `none`       nothing is selected (including a stale selection the kernel
-    #                or reconciliation already dropped). Quiet, dim, explicitly
-    #                "head routes".
+    #                or reconciliation already dropped). Quiet, untinted,
+    #                explicitly "head routes", and it adds nothing to the bottom
+    #                line because there is no selection to explain or clear.
     #
     # Colors are never the only cue: every state also spells the target out in
-    # the composer title and chip, so `NO_COLOR`, a 16-color terminal, or a
-    # screenshot still says where the prompt is going.
+    # the composer title, so `NO_COLOR`, a 16-color terminal, or a screenshot
+    # still says where the prompt is going.
     module ChatTarget
       AGENT = "agent"
       ISSUE = "issue"
@@ -40,7 +47,13 @@ module Meringue
       NONE = "none"
       SLASH = "slash"
 
-      TARGET_MARKER = "⌖"
+      # What the bottom hint line still owes the user once the title above the
+      # chat bar names the destination: that a fresh head (not the selected row)
+      # receives the message, and how to drop the selection.
+      ROUTING_HINT = "head routes · Esc clears"
+      # A slash command bypasses the selection, so its hint has to warn rather
+      # than promise head routing for the selected node.
+      SLASH_HINT = "slash ignores target · Esc clears"
       # Issue titles are user-written and can be long; the composer title is one
       # border row, so keep it scannable.
       MAX_TITLE_LENGTH = 34
@@ -74,7 +87,7 @@ module Meringue
         target = presentation(state)
         case target.fetch("kind")
         when SLASH then slash_title(target)
-        when AGENT then "chat → #{target.fetch("agent_id")}#{title_suffix(target)}"
+        when AGENT then agent_title(target)
         when ISSUE then "chat → #{target.fetch("issue_id")}#{title_suffix(target)}"
         when LOG_ONLY then "chat · head routes · #{target.fetch("label")} logs only"
         else "chat · head routes"
@@ -116,36 +129,24 @@ module Meringue
         "message #{primary_label(target)}"
       end
 
-      # Bottom-hint chip. Carries the resolved routing destination, that a head
-      # still routes the message, and the clear gesture.
-      def chip_segments(state)
+      # Bottom hint line contribution: gestures only, never the target's
+      # identity. The composer title one row above already names the destination,
+      # so repeating the id here only spent width the interaction hints and the
+      # delivery-PR indicator need on a narrow terminal.
+      #
+      # - agent/issue/log-only: a fresh head routes the message, Esc clears the
+      #   selection.
+      # - slash with a selection: that selection is ignored, Esc clears it.
+      # - nothing selected (or a slash command with nothing selected): no
+      #   segments at all. There is no selection to explain or clear, and the
+      #   title already reads "chat · head routes".
+      def hint_segments(state)
         target = presentation(state)
         case target.fetch("kind")
-        when SLASH then slash_chip_segments(target)
-        when AGENT
-          [
-            ["#{TARGET_MARKER} target: #{target.fetch("agent_id")} → #{target.fetch("issue_id")}", chip_style(target)],
-            ["  head routes · Esc clears", Style::MUTED]
-          ]
-        when ISSUE
-          [
-            ["#{TARGET_MARKER} target: #{target.fetch("issue_id")}", chip_style(target)],
-            ["  head routes · Esc clears", Style::MUTED]
-          ]
-        when LOG_ONLY
-          [
-            ["#{TARGET_MARKER} logs: #{target.fetch("label")}", Style::ACCENT],
-            ["  chat → head routes · Esc clears", Style::MUTED]
-          ]
-        else no_target_chip_segments
+        when SLASH then slash_hint_segments(target)
+        when AGENT, ISSUE, LOG_ONLY then [[ROUTING_HINT, Style::MUTED]]
+        else []
         end
-      end
-
-      # Deliberately the shortest chip on the bar: nothing is selected, the
-      # composer title already says a head routes the message, and the
-      # interaction hints after it matter more at the minimum terminal width.
-      def no_target_chip_segments
-        [["#{TARGET_MARKER} no target", Style::DIM]]
       end
 
       # Palette id the composer is tinted from, or "" when it is untinted.
@@ -184,8 +185,16 @@ module Meringue
         end
       end
 
-      def chip_style(target)
-        Style.agent_chrome_style(target.fetch("tint_id"), bold: true)
+      # The clicked agent row is the id the user is looking for, and chat resolves
+      # it to that agent's owning issue. A worker id already contains its issue id
+      # (`P1-I9-W3` → `P1-I9`), so naming both would only stutter; an agent whose
+      # id does not encode its issue (a head bound to one) names the resolved
+      # issue too, because the bottom line no longer spells it out.
+      def agent_title(target)
+        agent_id = target.fetch("agent_id")
+        issue_id = target.fetch("issue_id")
+        destination = agent_id.start_with?("#{issue_id}-") ? agent_id : "#{agent_id} → #{issue_id}"
+        "chat → #{destination}#{title_suffix(target)}"
       end
 
       def title_suffix(target)
@@ -201,7 +210,7 @@ module Meringue
       end
 
       # A slash command bypasses the selection. Say so with the id, instead of
-      # silently dropping the chip and leaving the user to guess.
+      # silently dropping the target and leaving the user to guess.
       def slash_title(target)
         label = primary_label(target)
         return "chat · slash command" if label.empty?
@@ -209,14 +218,13 @@ module Meringue
         "chat · slash command · #{label} not targeted"
       end
 
-      def slash_chip_segments(target)
-        label = primary_label(target)
-        return no_target_chip_segments if label.empty?
+      # The title already names the ignored selection (`… P1-I9-W3 not
+      # targeted`), so the hint only has to warn that routing drops it. With no
+      # selection there is nothing to ignore and nothing to clear.
+      def slash_hint_segments(target)
+        return [] if primary_label(target).empty?
 
-        [
-          ["#{TARGET_MARKER} #{label}", Style::DIM],
-          ["  slash ignores target · Esc clears", Style::MUTED]
-        ]
+        [[SLASH_HINT, Style::MUTED]]
       end
 
       def truncate(text)
