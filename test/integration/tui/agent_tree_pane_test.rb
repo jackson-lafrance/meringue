@@ -20,15 +20,20 @@ class TuiAgentTreePaneTest < Minitest::Test
     assert_equal [nil], @pane.line_item_ids(composed_state(empty_state), width: 34)
   end
 
+  # Every row reads as status, harness logo, id. Agent rows carry their
+  # harness glyph; issue and project rows reserve the same cell so all ids stay
+  # in one column.
   def test_demo_fixture_renders_a_filesystem_like_tree
     rendered = plain_lines(@pane.lines(composed_state(demo_state), width: 34))
 
     assert_equal "HEADS", rendered.first
-    assert_includes rendered, "  ├─ ● H1  Plan TUI rendering"
-    assert_includes rendered.join("\n"), "● P1  Meringue working"
-    assert_includes rendered.join("\n"), "  ├─ ● I1  Build fake TUI demo"
-    assert_includes rendered.join("\n"), "  │ ├─ ● W1  Draw three-pane"
-    assert_includes rendered.join("\n"), "· P2  dotfiles idle"
+    assert_includes rendered, "  ├─ ● π H1  Plan TUI rendering"
+    assert_includes rendered, "  └─ ✓ ✳ H2  Classify dotfiles"
+    assert_includes rendered.join("\n"), "●   P1  Meringue working"
+    assert_includes rendered.join("\n"), "  ├─ ●   I1  Build fake TUI demo"
+    assert_includes rendered.join("\n"), "    └─ ! ↑ W1  Wait for real"
+    assert_includes rendered.join("\n"), "  │ ├─ ● π W1  Draw three-pane"
+    assert_includes rendered.join("\n"), "·   P2  dotfiles idle"
   end
 
   def test_render_matches_the_plain_text_of_the_segment_lines
@@ -64,7 +69,8 @@ class TuiAgentTreePaneTest < Minitest::Test
     )
     line = @pane.lines(state, width: 40).first
 
-    assert_includes plain_line(line), "? P1"
+    # "?" for the status, then the reserved harness-logo cell before the id.
+    assert_includes plain_line(line), "?   P1"
     assert_includes styles_in(line), Style::MUTED
   end
 

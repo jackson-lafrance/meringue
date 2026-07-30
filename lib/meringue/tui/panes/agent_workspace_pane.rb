@@ -30,6 +30,17 @@ module Meringue
           "#{view} · #{id}"
         end
 
+        # The focused pane title takes the worker's identity color, the same one
+        # its AgentTree row, its log rows, and the dashboard composer use, so a
+        # full-screen workspace still says which agent you are looking at.
+        def title_style(state)
+          agent = workspace_agent(state)
+          id = (agent&.fetch("id", nil) || workspace_state(state).fetch("agent_id", nil)).to_s
+          return nil if id.empty?
+
+          Style.agent_chrome_style(id, bold: true)
+        end
+
         # Scrolling must not re-wrap and re-sort the whole transcript on every
         # step. Composed lines are cached per view until the content signature
         # changes, so a scroll only changes which cached rows are drawn.
