@@ -618,6 +618,7 @@ The outcome is always logged, and the queued worker is never silently dropped:
 | --- | --- |
 | `completed` | starts, with the handover block |
 | `errored` | cancelled, with a warning naming both workers. Set `"if_predecessor_fails": "run"` to start it anyway; its handover then says the predecessor did not finish cleanly |
+| `errored` because its turn was cut short by a transport failure (dropped connection), while its session is still resumable | keeps waiting. That worker did not fail its work and can be continued, so a wifi blip must not cancel the work queued behind it. Prompting the predecessor resumes the chain; killing it cancels the chain as usual. `"if_predecessor_fails": "run"` still starts the dependent immediately |
 | killed by `Kill` | cancelled in the same command, with a warning. This is deliberate: an emergency stop stops the queue behind it |
 | replaced through `replace_agent_id` | re-pointed at the replacement worker, with a warning. The successor inherited the work, so the queue follows it |
 | record removed out of band | cancelled with a warning. `/prune` will not remove a settled predecessor while a worker is still queued behind it |
@@ -629,7 +630,7 @@ A cancelled queued worker is removed like a killed worker; the warning log is th
 
 - Chains are bounded: at most five queued workers in a row (`deferred_chain_too_deep`).
 - `after_agent_id` and `replace_agent_id` are mutually exclusive. A replacement takes over now; deferring it would leave the replaced worker running.
-- If the named predecessor has already completed, the worker is not queued at all: it starts immediately with the handover block. If it already errored or was killed, the command is rejected unless `if_predecessor_fails` is `run` (errored only).
+- If the named predecessor has already completed, the worker is not queued at all: it starts immediately with the handover block. If it already errored or was killed, the command is rejected unless `if_predecessor_fails` is `run` (errored only). The one exception is a predecessor that errored because its turn was cut short by a transport failure and is still resumable: the worker is queued normally, because that predecessor can still finish.
 - A worker's issue is still immutable. Queueing does not move a worker between issues, and activation keeps the issue it was created on.
 
 Rejection codes: `after_agent_not_found`, `after_agent_is_not_worker`, `deferred_after_agent_conflicts_with_replace`, `invalid_if_predecessor_fails`, `deferred_chain_too_deep`, `deferred_after_agent_cycle`, `deferred_predecessor_already_errored`, `deferred_predecessor_already_killed`, `after_agent_reference_not_found`, `after_agent_reference_out_of_order`, `after_agent_reference_unresolved`.
@@ -660,7 +661,9 @@ Choose the mode deliberately:
 - `steer`: inject an urgent correction into active work before its next model call.
 - `follow_up`: queue a related next step until active work settles.
 
-Killed and errored workers are not resumable through this command. Spawn a related or replacement worker on the same issue instead.
+Killed and errored workers are not resumable through this command, with one deliberate exception: a worker that errored because its harness turn was cut short by a transport failure (a dropped wifi connection, a provider request that failed mid-turn, a session that ended before producing a result). Those records carry `harness_metadata.settle_failure`, and the routing context marks them `"stopped_without_finishing": true` with `"resumable": true` and a `status_reason`. Prompting one with `normal` is how its in-progress work is recovered, because its session, worktree, and branch are all still intact. For every other errored or killed worker, spawn a related or replacement worker on the same issue instead.
+
+A prompt queued for a worker whose turn then died from a transport failure is not dropped: reconciliation still redelivers it once the session can accept it, and delivering it clears the recorded dead-turn reason.
 
 A session that is momentarily busy is not a failure, and a correctly routed message is never dropped because of timing:
 
@@ -967,6 +970,14 @@ Read-only commands backing `/state`, `/questions`, and `/help`. They take an emp
 ### ReconcileSessions
 
 Inspects tracked harness sessions and reconciles stored state. This is usually run by the kernel at startup or periodically, not proposed by heads.
+
+Reconciliation classifies a settled session instead of assuming it finished. "No longer streaming" is true both for a turn that finished and for a turn that died mid-flight, so the kernel also asks the harness for the outcome of the last turn and inspects the session events:
+
+- a turn with a real final assistant message settles the worker as `completed`
+- a turn that ended in a transport/provider failure settles it as `errored`, with a human-readable reason in `harness_metadata.settle_failure`, `harness_metadata.status_reason`, the worker's error log line, and the AgentTree/focused pane
+- a session that ended without ever producing a final message settles it as `errored` the same way
+
+An `errored` worker never rolls its issue up to `completed`. Re-observing the same dead turn on a later pass is a silent no-op, and evidence older than the last delivered prompt is treated as stale so a recovered worker is not re-errored.
 
 Payload:
 
