@@ -103,9 +103,9 @@ class TuiChatPaneTest < Minitest::Test
   def test_bottom_hint_line_reports_active_agents_open_questions_and_pending_prompts
     demo = plain_line(@pane.bottom_hint_line(composed_state(demo_state)))
 
-    assert_includes demo, "● active"
-    assert_includes demo, "1W"
-    assert_includes demo, "1H"
+    # The lit dot plus the counts carry the meaning; the word "active" did not.
+    assert_includes demo, "● 1W 1H"
+    refute_includes demo, "active"
     assert_includes demo, "? 1"
 
     pending = plain_line(@pane.bottom_hint_line(composed_state(empty_state, chat: { "pending_count" => 2 })))
@@ -147,9 +147,9 @@ class TuiChatPaneTest < Minitest::Test
     )
     text = plain_line(@pane.bottom_hint_line(state))
 
-    assert_includes text, "PR #9"
-    assert_includes text, "open"
-    assert_includes text, "Ctrl-B open"
+    assert_includes text, "PR #9 open"
+    # Ctrl-B is a documented keybinding, not an inline label repeated every frame.
+    refute_includes text, "Ctrl-B"
   end
 
   def test_untracked_delivery_pr_reports_its_state_instead_of_an_open_hint
@@ -159,10 +159,10 @@ class TuiChatPaneTest < Minitest::Test
     )
     text = plain_line(@pane.bottom_hint_line(state))
 
-    # No verified delivery PR is tracked for the issue, so the hint reports the
-    # unavailable state instead of an openable link.
-    assert_includes text, "PR unavailable"
-    refute_includes text, "Ctrl-B open"
+    # No verified delivery PR is tracked for the issue, so the hint says that in
+    # plain words instead of reading like a failed lookup ("PR unavailable").
+    assert_includes text, "no PR yet"
+    refute_includes text, "Ctrl-B"
     assert_equal "not tracked", Meringue::TUI::DeliveryPullRequest.status_label(nil)
   end
 
@@ -202,11 +202,12 @@ class TuiChatPaneTest < Minitest::Test
 
   def test_slash_suggestion_lines_are_windowed_and_marked
     lines = @pane.slash_suggestion_lines(chat_state("/"))
-    entries = suggestion_entry_lines(lines)
 
-    assert_operator entries.length, :<=, Pane::VISIBLE_SUGGESTION_LIMIT
-    assert plain_lines(entries).all? { |line| line.include?(" — ") }
-    refute plain_lines(entries).any? { |line| line.start_with?("›") }, "nothing is selected until the user navigates"
+    # Only commands live inside the box; the counter/scroll caption is a separate
+    # line the layout draws under it.
+    assert_operator lines.length, :<=, Pane::VISIBLE_SUGGESTION_LIMIT
+    assert plain_lines(lines).all? { |line| line.include?(" — ") }
+    refute plain_lines(lines).any? { |line| line.start_with?("›") }, "nothing is selected until the user navigates"
 
     selected = @pane.slash_suggestion_lines(composed_state(empty_state, chat: { "input_buffer" => "/", "slash_suggestion_index" => 0 }))
     assert plain_lines(selected).first.start_with?("› ")
@@ -214,29 +215,35 @@ class TuiChatPaneTest < Minitest::Test
   end
 
   # A three-row window over a long list must say how many entries exist, so a
-  # harness catalog of a hundred models cannot look like a three-item list.
-  def test_a_long_suggestion_list_reports_its_size_and_how_to_scroll
+  # harness catalog of a hundred models cannot look like a three-item list. That
+  # caption is not a list row: it renders below the box (see the layout test).
+  def test_a_long_suggestion_list_reports_its_size_and_how_to_scroll_below_the_list
     records = @pane.slash_suggestion_records(chat_state("/"))
     skip_unless_enough_commands(records)
 
-    footer = plain_lines(@pane.slash_suggestion_lines(chat_state("/"))).last
+    state = chat_state("/")
+    caption = plain_line(@pane.popup_footer_line(state))
 
-    assert_match(/\A\s+1–#{Pane::VISIBLE_SUGGESTION_LIMIT} of #{records.length} commands/, footer)
-    assert_includes footer, "↑↓ to scroll"
-    assert_includes footer, "keep typing to filter"
+    assert_equal "1–#{Pane::VISIBLE_SUGGESTION_LIMIT} of #{records.length} commands", caption.split("  ·  ").first
+    assert_includes caption, "↑↓ scroll"
+    assert_includes caption, "keep typing to filter"
+    # Dim/muted only: it is a caption, not an entry.
+    assert_equal [Style::MUTED, Style::DIM], styles_in(@pane.popup_footer_line(state))
+    # The list itself is commands only.
+    refute plain_lines(@pane.popup_lines(state)).any? { |line| line.include?("of #{records.length}") }
+    assert_equal Pane::VISIBLE_SUGGESTION_LIMIT, @pane.popup_lines(state).length
 
     # Scrolling moves the reported window, not just the highlight.
-    scrolled = plain_lines(
-      @pane.slash_suggestion_lines(
+    scrolled = plain_line(
+      @pane.popup_footer_line(
         composed_state(empty_state, chat: { "input_buffer" => "/", "slash_suggestion_index" => records.length - 1 })
       )
-    ).last
+    )
     assert_includes scrolled, "of #{records.length} commands"
     assert_includes scrolled, "#{records.length - Pane::VISIBLE_SUGGESTION_LIMIT + 1}–#{records.length}"
 
-    # A list that fits the window adds no footer noise.
-    short = @pane.slash_suggestion_lines(chat_state("/recount"))
-    assert_equal short, suggestion_entry_lines(short)
+    # A list that fits the window has nothing to caption.
+    assert_empty @pane.popup_footer_line(chat_state("/recount"))
   end
 
   def test_slash_suggestion_window_follows_the_selection
@@ -245,9 +252,7 @@ class TuiChatPaneTest < Minitest::Test
 
     last_index = records.length - 1
     lines = plain_lines(
-      suggestion_entry_lines(
-        @pane.slash_suggestion_lines(composed_state(empty_state, chat: { "input_buffer" => "/", "slash_suggestion_index" => last_index }))
-      )
+      @pane.slash_suggestion_lines(composed_state(empty_state, chat: { "input_buffer" => "/", "slash_suggestion_index" => last_index }))
     )
 
     assert_equal records.last.fetch("usage"), lines.last.sub("› ", "").split(" — ").first
@@ -274,11 +279,6 @@ class TuiChatPaneTest < Minitest::Test
     chat = { "input_buffer" => buffer, "input_cursor" => cursor.nil? ? buffer.length : cursor }
     chat["selection"] = selection if selection
     composed_state(empty_state, chat: chat)
-  end
-
-  # Entry rows only: the trailing "N–M of T" affordance is not a suggestion.
-  def suggestion_entry_lines(lines)
-    lines.reject { |line| plain_text_line(line).match?(/\A\s+\d+–\d+ of \d+ /) }
   end
 
   def plain_text_line(line)
