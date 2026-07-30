@@ -89,3 +89,11 @@ every state/config file lives under a per-test `Dir.mktmpdir`.
 7. **`ApplyHeadResult` on a head whose runner has no session** marks the head session
    `unavailable` with note `head_runner_has_no_session` instead of failing — useful seam for
    tests, and the behavior any non-session head runner gets.
+
+8. **Intra-batch worker references reuse the issue-reference machinery.**
+   `deferred_worker_batch_reference_test.rb` covers `after_from_command` /
+   `after_agent_id: "@<command_id>"` on `SpawnWorker`: it resolves against the workers this
+   batch already spawned, is rejected with `after_agent_reference_out_of_order` when it names
+   a later command and `after_agent_reference_not_found` when it names no command in the
+   batch, and marks the worker as a deliberate existing-issue target so the
+   created-issue-needs-a-worker rerouting rule leaves it alone.

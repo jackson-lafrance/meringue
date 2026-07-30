@@ -526,6 +526,7 @@ Fields should include:
 - `follow_up_of_agent_id`: optional prior worker on the same issue
 - `replaces_agent_id`: optional worker this agent replaced
 - `replaced_by_agent_id`: optional successor worker
+- `after_agent_id`: optional worker this agent was queued behind, with the queue state itself in `harness_metadata.deferred_spawn`
 - `created_at`
 - `updated_at`
 
@@ -616,6 +617,8 @@ Prefer a dedicated git worktree for git-backed projects so concurrent workers/su
 The harness should receive the allocated workspace as its `cwd`; harness clients should not create or mutate worktrees directly.
 The returned agent should include a Meringue id like `P1-I1-W1`, workspace metadata, pid, harness session id,
 and harness session file when available. `FollowUpOfAgentID` may identify a prior worker on the same issue when a new session continues its work. `ReplaceAgentID` may identify a stale/unhealthy worker on the same issue; the kernel should spawn the successor successfully before killing the replaced worker, link both records, and emit a clear replacement log.
+
+`AfterAgentID` may identify a worker this one must not start until it settles, which is how sequential work (investigate, then implement) is expressed without blocking a head or the user. The kernel records the dependent immediately as a `queued` worker with no harness session, activates it from the worker-settle path and from reconciliation rather than a waiting thread, augments its prompt with the predecessor's final report when it starts, and always logs the outcome: activated, re-pointed at a replacement, or cancelled with a warning when the predecessor errored, was killed, or disappeared. A worker's issue stays immutable through queueing and activation. See `docs/head_agent_kernel_commands.md` for the full contract, including chain-depth and cycle guardrails.
 
 ### `PromptAgent(AgentID, Prompt, Mode?) -> Agent`
 Sends a prompt to an existing harness session.

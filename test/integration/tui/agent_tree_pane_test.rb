@@ -106,6 +106,24 @@ class TuiAgentTreePaneTest < Minitest::Test
     assert_includes rendered, "1/3"
   end
 
+  # A worker queued behind another agent has not started yet. It must be obvious that it is waiting,
+  # and on whom, so it is not mistaken for a worker whose session is still being provisioned.
+  def test_a_worker_queued_behind_another_agent_shows_what_it_waits_on
+    rendered = plain_lines(@pane.lines(deferred_state, width: 70)).join("\n")
+
+    assert_includes rendered, "waiting on W1"
+    assert_includes rendered, "starting after W1"
+    # A predecessor on another issue needs its whole id to be identifiable.
+    assert_includes rendered, "waiting on P1-I1-W1"
+  end
+
+  def test_a_queued_dependent_still_renders_with_the_queued_status_glyph
+    row = @pane.lines(deferred_state, width: 70).find { |line| plain_line(line).include?("waiting on W1") }
+
+    assert_includes plain_line(row), Pane::STATUS_DOTS.fetch("queued")
+    assert_includes styles_in(row), Pane::STATUS_STYLES.fetch("queued")
+  end
+
   def test_nested_child_issues_are_indented_under_their_parent
     state = tree_state(
       projects: [project_record("P1")],
@@ -284,6 +302,37 @@ class TuiAgentTreePaneTest < Minitest::Test
   end
 
   private
+
+  def deferred_state
+    tree_state(
+      projects: [project_record("P1")],
+      issues: [issue_record("P1-I1"), issue_record("P1-I2")],
+      agents: [
+        agent_record("P1-I1-W1", "issue_id" => "P1-I1", "status" => "working", "harness_metadata" => { "title" => "research" }),
+        agent_record(
+          "P1-I1-W2",
+          "issue_id" => "P1-I1",
+          "status" => "queued",
+          "after_agent_id" => "P1-I1-W1",
+          "harness_metadata" => { "title" => "implement", "deferred_spawn" => { "state" => "waiting", "after_agent_id" => "P1-I1-W1" } }
+        ),
+        agent_record(
+          "P1-I1-W3",
+          "issue_id" => "P1-I1",
+          "status" => "queued",
+          "after_agent_id" => "P1-I1-W1",
+          "harness_metadata" => { "title" => "document", "deferred_spawn" => { "state" => "activating", "after_agent_id" => "P1-I1-W1" } }
+        ),
+        agent_record(
+          "P1-I2-W1",
+          "issue_id" => "P1-I2",
+          "status" => "queued",
+          "after_agent_id" => "P1-I1-W1",
+          "harness_metadata" => { "title" => "cross issue", "deferred_spawn" => { "state" => "waiting", "after_agent_id" => "P1-I1-W1" } }
+        )
+      ]
+    )
+  end
 
   def relationship_state
     tree_state(
