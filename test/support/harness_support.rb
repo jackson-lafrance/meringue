@@ -252,6 +252,15 @@ module HarnessSupport
             state["model"] = { "provider" => command["provider"], "id" => command["modelId"] }
           when "get_available_thinking_levels"
             { "levels" => config.fetch("available_thinking_levels", %w[off minimal low medium high xhigh max]) }
+          when "get_available_models"
+            { "models" => config.fetch("available_models", [
+              { "provider" => "anthropic", "id" => "claude-opus-5", "name" => "Claude Opus 5", "reasoning" => true,
+                "contextWindow" => 1_000_000, "maxTokens" => 128_000, "thinkingLevelMap" => { "xhigh" => "xhigh", "max" => "max" } },
+              { "provider" => "openai", "id" => "gpt-5.6-sol", "name" => "GPT-5.6 Sol", "reasoning" => true,
+                "contextWindow" => 400_000 },
+              { "provider" => "google", "id" => "gemini-3-flash", "name" => "Gemini 3 Flash", "reasoning" => false,
+                "contextWindow" => 1_048_576 }
+            ]) }
           when "set_thinking_level"
             state["thinkingLevel"] = command["level"]
             nil

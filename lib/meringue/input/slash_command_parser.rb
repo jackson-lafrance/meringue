@@ -22,6 +22,7 @@ module Meringue
         ["/session-settings <agent_id>", "Refresh and show one existing agent's effective Pi model and thinking level."],
         ["/model <agent_id> <provider/model>", "Change only one existing Pi session's model; defaults are unchanged."],
         ["/thinking <agent_id> <level>", "Change only one existing Pi session's thinking level; defaults are unchanged."],
+        ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/keybind", "Show all TUI keybindings."],
@@ -37,6 +38,7 @@ module Meringue
 
       ARGUMENT_SUGGESTION_CONTEXTS = [
         { "prefix" => "/harness", "source" => "harness_providers", "append_space" => false },
+        { "prefix" => "/models", "source" => "harness_providers", "append_space" => false },
         { "prefix" => "/issue create", "source" => "projects", "append_space" => true },
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
         { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
@@ -57,6 +59,9 @@ module Meringue
       # `/prune` takes no arguments. These legacy words are still accepted as no-op aliases so
       # existing muscle memory (`/prune resolved`) keeps working and prunes everything eligible.
       PRUNE_COMPATIBILITY_ARGUMENTS = %w[all resolved errored completed merged].freeze
+      # Words that make `/models` force a catalog re-fetch rather than reuse the
+      # cached snapshot the kernel refreshes in the background.
+      MODEL_CATALOG_REFRESH_WORDS = %w[refresh reload force --refresh].freeze
       PRUNE_USAGE_MESSAGE = "Usage: /prune (no arguments; prunes resolved and errored records together)"
 
       def self.command_suggestions(input = nil, limit: nil, state: nil)
@@ -133,7 +138,11 @@ module Meringue
           next unless tokens.length == position
 
           completion_prefix = ([prefix] + tokens[0...-1]).join(" ")
-          return context.merge("query" => tokens.last.to_s, "completion_prefix" => completion_prefix)
+          return context.merge(
+            "query" => tokens.last.to_s,
+            "completion_prefix" => completion_prefix,
+            "previous_tokens" => tokens[0...-1]
+          )
         end
 
         nil
@@ -172,6 +181,7 @@ module Meringue
 
       def self.harness_provider_suggestion_records(context)
         query = context.fetch("query", "").to_s.downcase
+        listing_models = context.fetch("prefix", "") == "/models"
         Meringue::Harness::Registry.provider_choices.filter_map.with_index do |choice, index|
           provider = choice.fetch("provider")
           label = choice.fetch("label")
@@ -179,7 +189,7 @@ module Meringue
 
           {
             "usage" => provider,
-            "description" => choice.fetch("description"),
+            "description" => listing_models ? "List the models #{label} reports." : choice.fetch("description"),
             "completion" => "#{context.fetch("prefix")} #{provider}",
             "requires_arguments" => false,
             "append_space" => false,
@@ -189,38 +199,214 @@ module Meringue
         end
       end
 
+      # Model and thinking suggestions come from the harness's own catalog, which
+      # the kernel refreshes in the background and persists in state metadata.
+      # Completion therefore stays synchronous and never starts a harness process
+      # while the user types.
       def self.session_value_suggestion_records(context, state)
-        source = context.fetch("source")
-        values = if source == "thinking_levels"
-                   Meringue::Harness::PiClient::THINKING_LEVELS
-                 else
-                   configured_default = state.dig("metadata", "pi_session_defaults", "model")
-                   observed = Array(state["agents"]).filter_map do |agent|
-                     agent.dig("session_settings", "model", "reference")
-                   end
-                   ([configured_default, Meringue::Harness::Registry::DEFAULT_PI_MODEL] + observed).compact.uniq
-                 end
+        harness = suggestion_harness(context, state)
+        catalog = harness_model_catalog(state, harness)
+        if context.fetch("source") == "thinking_levels"
+          thinking_level_suggestion_records(context, state, catalog, harness)
+        else
+          model_suggestion_records(context, state, catalog, harness)
+        end
+      end
+
+      # `/model` and `/thinking` target one existing session, so their suggestions
+      # follow that agent's harness. `/default-model` and `/default-thinking`
+      # apply to future sessions, so they follow the active harness.
+      def self.suggestion_harness(context, state)
+        agent = suggestion_target_agent(context, state)
+        harness = agent && agent["harness"]
+        harness = state.dig("metadata", "active_harness") if harness.to_s.strip.empty?
+        harness = Meringue::Harness::Registry::DEFAULT_PROVIDER if harness.to_s.strip.empty?
+        Meringue::Harness::Registry.public_provider_name(harness)
+      end
+
+      def self.suggestion_target_agent(context, state)
+        target_id = Array(context.fetch("previous_tokens", [])).first.to_s.strip
+        return nil if target_id.empty?
+
+        Array(state["agents"]).find { |agent| agent["id"].to_s.casecmp?(target_id) }
+      end
+
+      def self.harness_model_catalog(state, harness)
+        Meringue::Harness::ModelCatalog.coerce(
+          state.dig("metadata", "harness_model_catalogs", harness),
+          harness: harness
+        )
+      end
+
+      def self.model_suggestion_records(context, state, catalog, harness)
+        agent = suggestion_target_agent(context, state)
+        current = agent&.dig("session_settings", "model", "reference")
+        configured_default = state.dig("metadata", "pi_session_defaults", "model")
+        observed = Array(state["agents"]).filter_map { |candidate| candidate.dig("session_settings", "model", "reference") }
+        preferred = ([current, configured_default] + observed).compact.map(&:to_s).reject(&:empty?).uniq
         query = context.fetch("query", "").to_s.downcase
-        values.filter_map.with_index do |value, index|
-          next unless query.empty? || value.downcase.start_with?(query) || value.downcase.include?(query)
+        records = ordered_model_entries(catalog, preferred, harness).filter_map.with_index do |entry, index|
+          next unless model_entry_matches?(entry, query)
 
           {
-            "usage" => value,
-            "description" => session_value_description(context, source),
-            "completion" => "#{context.fetch("completion_prefix")} #{value}",
+            "usage" => entry.fetch("reference"),
+            "description" => model_suggestion_description(
+              entry,
+              context,
+              current: current,
+              configured_default: configured_default,
+              catalog: catalog
+            ),
+            "completion" => "#{context.fetch("completion_prefix")} #{entry.fetch("reference")}",
             "requires_arguments" => false,
             "append_space" => false,
             "index" => index,
-            "kind" => source
+            "kind" => "session_models"
+          }
+        end
+        records + model_catalog_note_records(context, catalog, harness, records.length)
+      end
+
+      # Ordering: the values a user is most likely to want (this session's model,
+      # the saved default, models other sessions already use) first, then the rest
+      # of the harness catalog with providers interleaved.
+      def self.ordered_model_entries(catalog, preferred, harness)
+        # A last-known (stale) list is still the harness's own answer, so it is
+        # offered in full rather than shrinking to the few references Meringue
+        # remembers just because the newest refresh failed.
+        entries = catalog.usable? ? catalog.models : []
+        entries = fallback_model_entries(preferred, harness) if entries.empty?
+        by_reference = entries.to_h { |entry| [entry.fetch("reference").downcase, entry] }
+        head = preferred.filter_map { |reference| by_reference[reference.to_s.downcase] }
+        head + interleaved_by_provider(entries - head)
+      end
+
+      # Only a few rows are visible at once, so a provider-grouped list would fill
+      # the whole first screen with one provider's models and read like that is all
+      # the harness offers. Round-robin across providers instead: the first rows
+      # show the real breadth, and typing still narrows to one provider or model.
+      def self.interleaved_by_provider(entries)
+        grouped = entries
+                  .sort_by { |entry| [entry.fetch("provider"), entry.fetch("id")] }
+                  .group_by { |entry| entry.fetch("provider") }
+        ordered = []
+        until grouped.empty?
+          grouped.keys.sort.each do |provider|
+            models = grouped.fetch(provider)
+            ordered << models.shift
+            grouped.delete(provider) if models.empty?
+          end
+        end
+        ordered
+      end
+
+      # Without a catalog Meringue still completes the references it already knows
+      # so an explicit id remains one keystroke away, and labels them unverified.
+      def self.fallback_model_entries(preferred, harness)
+        references = preferred.dup
+        references << Meringue::Harness::Registry::DEFAULT_PI_MODEL if harness == "pi"
+        references.uniq.filter_map { |reference| Meringue::Harness::ModelCatalog.normalize_entry("reference" => reference) }
+      end
+
+      def self.model_entry_matches?(entry, query)
+        return true if query.empty?
+
+        [entry.fetch("reference"), entry.fetch("id"), entry["name"]].compact.any? do |value|
+          value.to_s.downcase.include?(query)
+        end
+      end
+
+      def self.model_suggestion_description(entry, context, current:, configured_default:, catalog:)
+        future = context.fetch("prefix", "").start_with?("/default-")
+        reference = entry.fetch("reference")
+        parts = []
+        parts << "current session model" if !current.to_s.empty? && reference.casecmp?(current.to_s)
+        parts << (future ? "current default" : "future-session default") if !configured_default.to_s.empty? && reference.casecmp?(configured_default.to_s)
+        parts << entry["name"] if entry["name"]
+        levels = Array(entry["thinking_levels"])
+        parts << "thinking: #{levels.join(", ")}" unless levels.empty?
+        parts << "#{formatted_context_window(entry["context_window"])} ctx" if entry["context_window"]
+        parts << model_suggestion_state_label(catalog)
+        parts.compact.join(" · ")
+      end
+
+      def self.model_suggestion_state_label(catalog)
+        return nil if catalog.available?
+        return "last confirmed list" if catalog.stale?
+
+        "catalog unavailable — id not verified"
+      end
+
+      def self.formatted_context_window(tokens)
+        value = tokens.to_i
+        return "#{(value / 1_000_000.0).round(1).to_s.sub(/\.0\z/, "")}M" if value >= 1_000_000
+        return "#{(value / 1_000.0).round.to_i}K" if value >= 1_000
+
+        value.to_s
+      end
+
+      # One trailing, non-destructive note when the harness could not give us a
+      # catalog. Selecting it re-inserts what the user already typed, so it never
+      # replaces a valid explicit id.
+      def self.model_catalog_note_records(context, catalog, harness, matched_count)
+        return [] if catalog.available?
+        return [] unless context.fetch("query", "").to_s.empty?
+
+        note = catalog.note.to_s.strip
+        note = "Meringue has not fetched #{harness}'s model list yet." if note.empty?
+        note = "#{note}." unless note.end_with?(".", "!", "?")
+        headline = if catalog.stale?
+                     "#{harness} models listed from #{catalog.fetched_at} — latest refresh failed"
+                   else
+                     "#{harness} model catalog unavailable"
+                   end
+        [{
+          "usage" => headline,
+          "description" => "#{note} Run /models to retry; an exact provider/model id still works.",
+          "completion" => context.fetch("completion_prefix"),
+          "requires_arguments" => false,
+          "append_space" => false,
+          "index" => matched_count,
+          "kind" => "session_models_unavailable"
+        }]
+      end
+
+      # Thinking levels follow the model in play, so an unsupported level is never
+      # offered for a model the harness would reject it for.
+      def self.thinking_level_suggestion_records(context, state, catalog, harness)
+        reference = thinking_level_model_reference(context, state, harness)
+        levels = Array(catalog.thinking_levels_for(reference))
+        verified = !levels.empty?
+        levels = Meringue::Harness::PiClient::THINKING_LEVELS unless verified
+        query = context.fetch("query", "").to_s.downcase
+        levels.filter_map.with_index do |level, index|
+          next unless query.empty? || level.downcase.include?(query)
+
+          {
+            "usage" => level,
+            "description" => thinking_level_description(context, reference, verified),
+            "completion" => "#{context.fetch("completion_prefix")} #{level}",
+            "requires_arguments" => false,
+            "append_space" => false,
+            "index" => index,
+            "kind" => "thinking_levels"
           }
         end
       end
 
-      def self.session_value_description(context, source)
-        future = context.fetch("prefix", "").start_with?("/default-")
-        return future ? "thinking level for future Pi sessions" : "Pi thinking level" if source == "thinking_levels"
+      def self.thinking_level_model_reference(context, state, harness)
+        agent = suggestion_target_agent(context, state)
+        reference = agent&.dig("session_settings", "model", "reference")
+        reference = state.dig("metadata", "pi_session_defaults", "model") if reference.to_s.strip.empty?
+        reference = Meringue::Harness::Registry::DEFAULT_PI_MODEL if reference.to_s.strip.empty? && harness == "pi"
+        reference.to_s
+      end
 
-        future ? "model for future Pi sessions" : "observed Pi model"
+      def self.thinking_level_description(context, reference, verified)
+        scope = context.fetch("prefix", "").start_with?("/default-") ? "future sessions" : "this session"
+        return "#{scope} · supported by #{reference}" if verified && !reference.to_s.empty?
+
+        "#{scope} · model support not verified yet"
       end
 
       def self.id_suggestion_records(items, context)
@@ -304,6 +490,8 @@ module Meringue
           parse_default_model(arguments)
         when "default-thinking"
           parse_default_thinking(arguments)
+        when "models"
+          parse_models(arguments)
         when "session-settings", "session"
           parse_session_settings(arguments, legacy: command_text == "session")
         when "model"
@@ -381,6 +569,19 @@ module Meringue
         return invalid("Usage: /default-thinking <off|minimal|low|medium|high|xhigh|max>") unless tokens.length == 1
 
         kernel_command("SetDefaultSessionThinkingLevel", "level" => tokens[0])
+      end
+
+      # `/models` lists the catalog the active harness reports. A trailing
+      # `refresh` word forces a re-fetch instead of reusing the cached snapshot.
+      def parse_models(arguments)
+        tokens = split_arguments(arguments)
+        refresh_words, harness_words = tokens.partition { |token| MODEL_CATALOG_REFRESH_WORDS.include?(token.to_s.downcase) }
+        return invalid("Usage: /models [harness] [refresh]") if harness_words.length > 1 || refresh_words.length > 1
+
+        payload = {}
+        payload["harness"] = harness_words[0] if harness_words[0]
+        payload["refresh"] = true unless refresh_words.empty?
+        kernel_command("GetModelCatalog", payload)
       end
 
       def parse_session_settings(arguments, legacy: false)

@@ -186,7 +186,7 @@ module Meringue
 
           selected_index = selected_slash_suggestion_index(state, records.length)
           window_start = slash_suggestion_window_start(records.length, selected_index)
-          records.drop(window_start).first(VISIBLE_SUGGESTION_LIMIT).map.with_index do |record, offset|
+          lines = records.drop(window_start).first(VISIBLE_SUGGESTION_LIMIT).map.with_index do |record, offset|
             selected = window_start + offset == selected_index
             marker = selected ? "›" : " "
             marker_style = selected ? Style::ACCENT_BOLD : Style::DIM
@@ -197,6 +197,31 @@ module Meringue
               [" — #{record.fetch("description")}", Style::MUTED]
             ]
           end
+          footer = slash_suggestion_footer_line(records, window_start)
+          footer ? lines + [footer] : lines
+        end
+
+        # A three-row window over a long list reads like a three-item list. A
+        # harness can offer a hundred models, so say how many entries exist and
+        # how to reach the rest instead of letting the window imply the total.
+        def slash_suggestion_footer_line(records, window_start)
+          # The trailing catalog-state note is an explanation, not an entry.
+          total = records.count { |record| record.fetch("kind", "command") != "session_models_unavailable" }
+          return nil if total <= VISIBLE_SUGGESTION_LIMIT
+
+          last_shown = [window_start + VISIBLE_SUGGESTION_LIMIT, total].min
+          [
+            ["  #{window_start + 1}–#{last_shown} of #{total} #{slash_suggestion_scope_label(records)}", Style::ACCENT],
+            ["  ·  ↑↓ to scroll · keep typing to filter", Style::MUTED]
+          ]
+        end
+
+        def slash_suggestion_scope_label(records)
+          kinds = records.map { |record| record.fetch("kind", "command") }.uniq
+          return "models" if kinds.include?("session_models")
+          return "thinking levels" if kinds == ["thinking_levels"]
+
+          kinds == ["command"] ? "commands" : "matches"
         end
 
         def slash_suggestion_records(state)

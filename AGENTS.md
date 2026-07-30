@@ -305,6 +305,7 @@ Do the same thing as coding harnesses for these aswell we want it to be familiar
 /worker spawn <issue_id> "<prompt>"
 /prompt <agent_id> "<message>"
 /defaults
+/models [harness] [refresh]
 /default-model <provider/model>
 /default-thinking <level>
 /session-settings <agent_id>
@@ -438,8 +439,11 @@ The harness client should expose operations shaped like:
 - `get_session_settings(session_ref)`
 - `set_session_model(session_ref, model_reference)`
 - `set_session_thinking_level(session_ref, level)`
+- `available_models()`
 - `read_events(session_ref)`
 - `attach_session(session_ref)`
+
+Model catalogs are asked of the harness, never hand-maintained in Meringue. `available_models` returns a harness-neutral catalog (models plus each model's supported thinking levels) or an explicit unavailable/unsupported result. The kernel caches the snapshot in state metadata so input completion can offer every model for the selected harness without starting a harness process while the user types, and `/models` reports or refreshes it.
 
 Future Pi defaults and existing Pi session settings are separate scopes. `/default-model` and `/default-thinking` persist app-wide Pi spawn defaults for all future heads and workers without mutating existing sessions. `/model` and `/thinking` mutate only one targeted existing session without changing defaults. `/session-settings` inspects one existing session's effective values; the old dashboard `/session <agent_id>` is only a compatibility alias. A focused workspace advertises `/open-session` for opening its selected harness UI, with the old argumentless `/session` spelling also retained only as an alias. Default persistence belongs in Meringue config and runtime spawn reconfiguration belongs behind the harness registry/client boundary.
 
