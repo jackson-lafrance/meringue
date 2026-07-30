@@ -1819,6 +1819,13 @@ module Meringue
                             else
                               []
                             end
+          # A batch that accepted nothing routed nothing, so the user's message would otherwise
+          # survive only as command error lines. Surface the message itself so it stays actionable.
+          unrouted_log_ids = if accepted_count.zero? && question_ids.empty?
+                               append_unrouted_user_message_log(state, head_id.to_s, command_results)
+                             else
+                               []
+                             end
           now = timestamp
           metadata = head.fetch("harness_metadata", {}) || {}
           metadata["head_result_apply_state"] = rejected_count.positive? || failed_count.positive? ? "partially_applied" : "applied"
@@ -1830,6 +1837,7 @@ module Meringue
 
           log_ids.concat(command_results.flat_map { |result| result.fetch("log_entry_ids", []) })
           log_ids.concat(summary_log_ids)
+          log_ids.concat(unrouted_log_ids)
           cleanup = if cleanup_head && rejected_count.zero? && failed_count.zero?
                       cleanup_applied_head!(state, head_id.to_s, now: now)
                     elsif cleanup_head
@@ -3623,6 +3631,12 @@ module Meringue
         now = timestamp
         session_metadata = session_ref.fetch("metadata", {}) || {}
         previous_metadata = agent.fetch("harness_metadata", {}) || {}
+        # The harness may have had to deliver the prompt in a different mode than the caller asked
+        # for (a normal prompt into a mid-turn session is queued as a follow-up instead of being
+        # dropped). Record and log what actually happened, not what was requested.
+        delivered_mode = delivered_prompt_mode(session_metadata, mode)
+        coerced = delivered_mode != mode
+        mode_note = coerced ? present_string(session_metadata.fetch("prompt_mode_note", nil)) : nil
         agent["status"] = "working"
         agent["pid"] = session_ref.fetch("pid", agent.fetch("pid", nil))
         agent["harness_session_id"] = session_ref.fetch("session_id", agent.fetch("harness_session_id", nil))
@@ -3631,11 +3645,14 @@ module Meringue
         agent["harness_metadata"] = previous_metadata.merge(
           session_metadata,
           "prompt_count" => previous_metadata.fetch("prompt_count", 0).to_i + 1,
-          "last_prompt_mode" => mode,
+          "last_prompt_mode" => delivered_mode,
+          "requested_prompt_mode" => coerced ? mode : nil,
+          "delivered_prompt_mode" => coerced ? delivered_mode : nil,
+          "prompt_mode_note" => mode_note,
           "last_prompted_at" => now,
           "is_streaming" => session_ref.fetch("is_streaming", false),
           "last_event_at" => session_ref.fetch("last_event_at", nil),
-          "routing_action" => prompt_routing_action(mode)
+          "routing_action" => prompt_routing_action(delivered_mode)
         ).compact
         agent["updated_at"] = now
 
@@ -3644,7 +3661,7 @@ module Meringue
         if issue
           issue["status"] = "working"
           issue["last_agent_id"] = agent.fetch("id")
-          issue["last_routing_action"] = prompt_routing_action(mode)
+          issue["last_routing_action"] = prompt_routing_action(delivered_mode)
           issue["last_routed_at"] = now
           issue["updated_at"] = now
         end
@@ -3655,25 +3672,37 @@ module Meringue
 
         # The harness accepted the prompt, so the delivery is logged exactly once, here.
         remove_pending_prompts!(agent, pending_prompt_id: pending_prompt_id, command_id: command_id)
+        delivery_message = prompt_log_message(agent, delivered_mode, requested_mode: coerced ? mode : nil, note: mode_note)
         log_ids = append_log(
           state,
           source_type: "kernel",
           source_id: agent.fetch("id"),
           level: "info",
-          message: prompt_log_message(agent, mode),
+          message: delivery_message,
           details: {
             "issue_id" => agent.fetch("issue_id", nil),
             "project_id" => agent.fetch("project_id", nil),
             "agent_id" => agent.fetch("id"),
-            "mode" => mode,
-            "routing_action" => prompt_routing_action(mode),
+            "mode" => delivered_mode,
+            "requested_mode" => mode,
+            "prompt_mode_note" => mode_note,
+            "routing_action" => prompt_routing_action(delivered_mode),
             "is_streaming" => session_ref.fetch("is_streaming", false)
-          }
+          }.compact
         )
         touch_state!(state, now)
         store.save(state)
 
-        accepted_result(command_id, command_type, agent.fetch("id"), prompt_log_message(agent, mode), agent, log_ids)
+        accepted_result(command_id, command_type, agent.fetch("id"), delivery_message, agent, log_ids)
+      end
+
+      # Harness clients report a mode they had to substitute through generic session metadata; an
+      # unknown or absent value means the requested mode was used as-is.
+      def delivered_prompt_mode(session_metadata, requested_mode)
+        reported = present_string(session_metadata.fetch("delivered_prompt_mode", nil))
+        return requested_mode.to_s unless reported && PROMPT_MODES.include?(reported)
+
+        reported
       end
 
       # A session that is momentarily owned by another instance mid-turn is not a command failure.
@@ -4500,15 +4529,22 @@ module Meringue
         }.fetch(mode.to_s)
       end
 
-      def prompt_log_message(agent, mode)
-        case mode.to_s
-        when "steer"
-          "Steered active worker #{agent.fetch("id")} on #{agent.fetch("issue_id")} with the user's correction."
-        when "follow_up"
-          "Queued a follow-up for worker #{agent.fetch("id")} on #{agent.fetch("issue_id")}."
-        else
-          "Continued worker #{agent.fetch("id")} on #{agent.fetch("issue_id")} using its existing session."
-        end
+      # `requested_mode` is only present when the harness had to deliver the prompt in another mode;
+      # the coercion is stated in the same user-visible line so a queued delivery is never silent.
+      def prompt_log_message(agent, mode, requested_mode: nil, note: nil)
+        base = case mode.to_s
+               when "steer"
+                 "Steered active worker #{agent.fetch("id")} on #{agent.fetch("issue_id")} with the user's correction."
+               when "follow_up"
+                 "Queued a follow-up for worker #{agent.fetch("id")} on #{agent.fetch("issue_id")}."
+               else
+                 "Continued worker #{agent.fetch("id")} on #{agent.fetch("issue_id")} using its existing session."
+               end
+        return base unless present_string(requested_mode) && requested_mode.to_s != mode.to_s
+
+        explanation = present_string(note) ||
+                      "The session could not take a #{requested_mode} prompt right now."
+        "#{base} Requested #{requested_mode}, delivered #{mode}: #{explanation}"
       end
 
       def replaceable_worker?(agent)
@@ -4601,6 +4637,49 @@ module Meringue
           message: summary,
           details: { "kind" => "head_summary", **selected_target_log_details(selected_target) }
         )
+      end
+
+      # Head batches that accept nothing used to leave only per-command error lines, so a correctly
+      # captured user message could disappear from the conversation. This restates the message the
+      # kernel stored for that head and says what to do with it, so nothing is silently dropped.
+      def append_unrouted_user_message_log(state, head_id, command_results)
+        user_message = head_request_user_message(state, head_id)
+        failures = Array(command_results).reject { |result| result.fetch("status", nil) == "accepted" }
+        quoted = user_message ? ": #{single_line_excerpt(user_message).inspect}" : "."
+        reason = if failures.empty?
+                   "Head #{head_id} routed nothing for this message, so it still needs handling"
+                 else
+                   "No command from head #{head_id} was applied, so this message still needs handling"
+                 end
+        message = "#{reason}#{quoted} Resend it, or route it yourself with /prompt or /worker spawn."
+        append_log(
+          state,
+          source_type: "kernel",
+          source_id: head_id,
+          level: failures.empty? ? "warning" : "error",
+          message: message,
+          details: {
+            "kind" => "unrouted_user_message",
+            "head_id" => head_id,
+            "user_message" => user_message,
+            "accepted_command_count" => 0,
+            "command_count" => Array(command_results).length,
+            "command_results" => failures.map do |result|
+              {
+                "command_type" => result.fetch("command_type", nil),
+                "status" => result.fetch("status", nil),
+                "message" => result.fetch("message", nil)
+              }.compact
+            end
+          }.compact
+        )
+      end
+
+      def single_line_excerpt(text, limit: 160)
+        collapsed = text.to_s.strip.gsub(/\s+/, " ")
+        return collapsed if collapsed.length <= limit
+
+        "#{collapsed[0, limit - 1]}…"
       end
 
       def create_head_questions!(state, head_id, questions, log_ids)

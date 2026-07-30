@@ -105,22 +105,36 @@ module KernelWorkersSupport
     end
 
     def prompt_session(session_ref, prompt, mode: "normal")
+      # Mirrors the harness contract: a normal prompt into a mid-turn session is queued behind the
+      # active turn as a follow-up and the substitution is reported back on the session ref.
+      delivered_mode = mode.to_s == "normal" && streaming ? "follow_up" : mode.to_s
       @prompts << {
         "session_id" => session_ref.fetch("session_id", nil),
         "cwd" => session_ref.fetch("cwd", nil),
         "prompt" => prompt,
-        "mode" => mode
+        "mode" => delivered_mode,
+        "requested_mode" => mode.to_s
       }
-      @calls << { "call" => "prompt_session", "session_id" => session_ref.fetch("session_id", nil), "mode" => mode }
+      @calls << { "call" => "prompt_session", "session_id" => session_ref.fetch("session_id", nil), "mode" => delivered_mode }
       raise @prompt_error if @prompt_error
 
+      coercion = if delivered_mode == mode.to_s
+                   {}
+                 else
+                   {
+                     "requested_prompt_mode" => mode.to_s,
+                     "delivered_prompt_mode" => delivered_mode,
+                     "prompt_mode_note" => "The session was mid-turn, so this prompt was queued as a follow-up " \
+                                           "instead of interrupting the active turn."
+                   }
+                 end
       session_ref.merge(
         "is_streaming" => streaming,
         "metadata" => (session_ref.fetch("metadata", {}) || {}).merge(
           "last_prompt" => prompt,
-          "last_prompt_mode" => mode,
-          "queued_prompts" => queued_prompts_for(session_ref, prompt, mode)
-        )
+          "last_prompt_mode" => delivered_mode,
+          "queued_prompts" => queued_prompts_for(session_ref, prompt, delivered_mode)
+        ).merge(coercion)
       )
     end
 
