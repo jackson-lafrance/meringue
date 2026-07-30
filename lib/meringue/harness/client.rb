@@ -9,6 +9,15 @@ module Meringue
         raise NotImplementedError, "harness clients must implement #spawn_session"
       end
 
+      # Modes are harness neutral: "normal" continues a settled session, "steer" interrupts active
+      # work, and "follow_up" queues behind active work.
+      #
+      # A client that cannot deliver the requested mode right now should still deliver the prompt in
+      # the closest safe mode rather than dropping it, and report the substitution on the returned
+      # session ref's metadata so the kernel can log it:
+      #   metadata["requested_prompt_mode"], metadata["delivered_prompt_mode"], metadata["prompt_mode_note"].
+      # Errors that will succeed once a turn settles should include Harness::TransientSessionError so
+      # the kernel queues and redelivers instead of failing the command.
       def prompt_session(session_ref, prompt, mode: "normal")
         raise NotImplementedError, "harness clients must implement #prompt_session"
       end

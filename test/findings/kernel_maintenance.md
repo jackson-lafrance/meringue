@@ -7,6 +7,8 @@ Files added by this slice (plus later prune-worktree lifecycle coverage):
 
 - `test/integration/kernel_maintenance/prune_resolved_test.rb`
 - `test/integration/kernel_maintenance/prune_worktree_cleanup_test.rb`
+- `test/integration/kernel_maintenance/prune_merged_pull_request_test.rb`
+- `test/integration/kernel_maintenance/prune_responsiveness_test.rb`
 - `test/integration/workspace/manager_prune_cleanup_test.rb`
 - `test/integration/kernel_maintenance/prune_errored_test.rb`
 - `test/integration/kernel_maintenance/clear_state_test.rb`
@@ -78,7 +80,13 @@ tests were updated to the shipped behavior:
 7. **PR retention rules**: only `merged` and `closed` pull requests are treated as
    settled. `open`, draft (`state == "open"` plus `is_draft`), and unresolvable
    (`state == "unknown"`, e.g. `gh` failing) PRs all block pruning of the issue and
-   therefore of its project.
+   therefore of its project. A pull request Meringue already verified and persisted as
+   `merged` is resolved from state instead of the forge (merging is terminal there), so an
+   unreachable or slow `gh` no longer downgrades settled work to `unknown`; `closed` is
+   still re-checked because it can be reopened. The bounded lookup phase runs
+   retention-critical lookups before exploratory candidate URLs, and every retained record's
+   reason plus `forge_lookup` counters are reported in the prune message/log details. Covered
+   by `prune_merged_pull_request_test.rb`.
 8. **Project removal requires both** a terminal (`completed`/`killed`/`errored`) project status
    and every child issue being eligible; otherwise the eligible issues are removed
    and the project record is retained and refreshed.

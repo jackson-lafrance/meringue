@@ -132,17 +132,39 @@ module Meringue
           current_ref = attach_session(current_ref)
           process = process_for(current_ref)
           recovery_metadata = takeover_metadata(takeover)
-          recovery_metadata["prompt_mode_downgraded_from"] = requested_mode if requested_mode != normalized_mode
+          if requested_mode != normalized_mode
+            recovery_metadata["prompt_mode_downgraded_from"] = requested_mode
+            recovery_metadata.merge!(
+              delivered_mode_metadata(
+                requested_mode: requested_mode,
+                delivered_mode: normalized_mode,
+                note: "The session was not live, so it was resumed and this #{prompt_mode_noun(requested_mode)} " \
+                      "was delivered as a normal continuation."
+              )
+            )
+          end
         end
         current_ref = get_state(current_ref)
 
-        command = case normalized_mode
-                  when "normal"
-                    if current_ref.fetch("is_streaming", false)
-                      raise InvalidModeError,
-                            "Pi session is streaming; use mode: \"steer\" or \"follow_up\""
-                    end
+        delivered_mode = normalized_mode
+        # A prompt routed to a session that happens to be mid-turn is a timing condition, not a bad
+        # request. Pi's follow_up queues the message behind the active turn, so it is delivered in
+        # order instead of being dropped on the floor. Only "normal" is coerced: steer and follow_up
+        # already say what they want to do to an active turn.
+        if normalized_mode == "normal" && current_ref.fetch("is_streaming", false)
+          delivered_mode = "follow_up"
+          recovery_metadata.merge!(
+            delivered_mode_metadata(
+              requested_mode: normalized_mode,
+              delivered_mode: delivered_mode,
+              note: "The session was mid-turn, so this prompt was queued as a follow-up instead of " \
+                    "interrupting the active turn."
+            )
+          )
+        end
 
+        command = case delivered_mode
+                  when "normal"
                     { "type" => "prompt", "message" => message }
                   when "steer"
                     { "type" => "steer", "message" => message }
@@ -1051,6 +1073,25 @@ module Meringue
         return normalized if normalized
 
         raise InvalidModeError, "Unknown Pi prompt mode: #{mode.inspect}"
+      end
+
+      # Harness-neutral report of what the harness actually did with a prompt whose requested mode
+      # could not be used as-is. The kernel logs and records the delivered mode from these keys, so
+      # a coerced delivery is visible instead of silently relabelled.
+      def delivered_mode_metadata(requested_mode:, delivered_mode:, note:)
+        {
+          "requested_prompt_mode" => requested_mode,
+          "delivered_prompt_mode" => delivered_mode,
+          "prompt_mode_note" => note
+        }
+      end
+
+      def prompt_mode_noun(mode)
+        case mode.to_s
+        when "steer" then "correction"
+        when "follow_up" then "follow-up"
+        else "prompt"
+        end
       end
 
       def register_process(process)

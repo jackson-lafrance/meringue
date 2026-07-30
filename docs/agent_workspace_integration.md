@@ -38,7 +38,7 @@ The presentation record must not become a second source of harness truth. PIDs, 
 
 Outside a focused workspace, `Ctrl-B` (`open_delivery_pr`) opens the selected worker's verified delivery PR. Inside either focused view, use the configurable workspace leader followed by `workspace_open_pull_request` (`Ctrl-Space`, then `p` by default). The bottom status line keeps the PR number/status and sequence visible. Bare terminal `Ctrl-B` is forwarded to the PTY rather than stolen from shells, multiplexers, or editors.
 
-Reconciliation refreshes old verified PR status at most once every five minutes. A forge/auth/network failure records `availability: unavailable` and an error while preserving the last known PR state and URL. This is intentional: `/prune` still performs fresh conservative checks and will not prune an unknown PR.
+Reconciliation refreshes old verified PR status at most once every five minutes. A forge/auth/network failure records `availability: unavailable` and an error while preserving the last known PR state and URL; a later successful refresh clears that error instead of leaving it attached to a healthy record. This is intentional: `/prune` still performs fresh conservative checks and will not prune an unknown PR. The one status it does not re-check is a record already verified as `merged`, because merging is terminal on the forge — that record stays authoritative even while the forge is unreachable, so settled work is still prunable.
 
 ## Degraded runtime dependencies
 

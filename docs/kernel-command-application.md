@@ -46,6 +46,15 @@ using only the per-command lookup cache. A record/PR introduced after the snapsh
 up once. Thus an unavailable forge can delay one prune briefly but cannot freeze the
 kernel or cause unsafe removal.
 
+The cache is seeded from state before any external call: a pull request already verified
+as `merged` is terminal on the forge, so prune trusts the persisted record instead of
+spending budget to confirm it (`closed` is excluded because it can be reopened). The
+remaining lookups are ordered by what retention depends on — statuses of PRs recorded on
+an issue, then branch discovery for settled workers with an unknown delivery, then
+exploratory candidate URLs — so an exhausted budget degrades discovery instead of turning
+a known-merged PR into `unknown` and retaining the whole subtree. Each pass reports
+`forge_lookup` counters and every retained record's reason in the prune log details.
+
 **A batch apply lease.** The instance applying a head result holds a heartbeat lease
 on the head record (`head_result_apply_owner`, `head_result_apply_heartbeat`), so a
 second instance can tell an in-flight batch from an abandoned one and skips it
@@ -96,6 +105,20 @@ duplicating the commands that already ran.
   terminal, the record is logged once, is not re-touched, and is no longer polled, so
   the periodic pass cannot livelock on it or repeat its error line every two seconds.
   See `docs/session-reconciliation.md`.
+- **The target session is mid-turn here.** A `PromptAgent` with mode `normal`
+  against a streaming session is delivered through the harness's queued-prompt
+  behavior (Pi RPC `follow_up`) rather than rejected, so a correctly routed user
+  message is never lost to timing. The harness reports the substitution on the
+  returned session ref (`requested_prompt_mode`, `delivered_prompt_mode`,
+  `prompt_mode_note`) and the kernel states it in the one delivery log line. This
+  path does not use the pending-prompt queue, so it cannot double deliver: the
+  harness owns the ordering behind the active turn.
+- **A head batch accepts nothing.** The user's message is restated once as an
+  `unrouted_user_message` log entry (error when commands were proposed and none
+  applied, warning when the head proposed neither commands nor questions) with
+  the full message in `details`, so a request cannot vanish into command error
+  lines. A batch that recorded a clarifying question is already actionable and is
+  not reported as unrouted.
 
 ## Verifying
 

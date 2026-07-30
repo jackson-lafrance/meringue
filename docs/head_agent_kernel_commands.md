@@ -110,6 +110,13 @@ Each command in `commands` must use this shape:
 
 Use only the command names documented below unless the kernel command model is updated.
 
+Record ids (`P1`, `P1-I23`, `P1-I23-W1`, `H83`, `Q8`) are canonically uppercase, and the kernel
+resolves them case-insensitively: `p1-i23-w1` and `P1-i23-W1` reach the same record as
+`P1-I23-W1`. Always emit canonical uppercase ids anyway; the kernel stores, logs, and journals the
+canonical id no matter which case you sent. An id that names no record is still rejected, and the
+rejection echoes the id exactly as it was written. Nothing else is case-folded: paths, branch
+names, model references, harness/theme names, and harness session ids stay byte-exact.
+
 Issue and worker selection rules for the MVP:
 
 - Check `routing_context.selected_target` before semantic matching. It is explicit dashboard context resolved by the kernel: an issue selection targets itself; an agent selection targets its owning issue and includes `selected_agent_id` as a preferred session-context hint.
@@ -119,7 +126,7 @@ Issue and worker selection rules for the MVP:
 - First classify the message as a genuinely new goal or a follow-up. Without a selected target, explicit project/issue/worker ids win. With one, explicit ids must be compatible with its resolved issue or treated as a target conflict. Otherwise compare the prompt with issue titles/descriptions, recent routing activity, latest worker results, and active session metadata in `routing_context`.
 - A refinement, correction, question about findings, or next step for an existing goal should reuse that issue. Use `CreateIssue` only when no existing issue represents the durable goal.
 - On a reused issue, prefer `PromptAgent` when one healthy worker session has the relevant context. Do not spawn another worker merely because the user sent another message.
-- Use `PromptAgent` mode `steer` for an urgent correction that should affect active work, `follow_up` for related work that should wait until the active turn settles, and `normal` for a settled resumable session.
+- Use `PromptAgent` mode `steer` for an urgent correction that should affect active work, `follow_up` for related work that should wait until the active turn settles, and `normal` for a settled resumable session. Choose from the candidate's `is_streaming`, `supported_prompt_modes_now`, `recommended_prompt_mode`, and `prompt_mode_note` instead of defaulting to `normal`; a `normal` prompt to a mid-turn session is still accepted, but the kernel delivers it as a follow-up.
 - Spawn a new worker on the same issue only when the previous session is unavailable/unhealthy, its context is known to be over 50%, its delivered workspace should remain immutable, the next step is independent, or parallel work is intentional. Set `follow_up_of_agent_id` so that relationship is visible.
 - Replace a worker only when it is stale, unhealthy, pursuing the wrong approach, or must be stopped. Set `replace_agent_id` on `SpawnWorker`; the kernel starts the successor before killing the old session and records both sides of the relationship. Do not separately propose `Kill` for the same replacement.
 - Before routing anything, check `routing_context.open_questions` and `routing_context.answer_inference`. If this message answers an open question, close that question and route the unblocked work in the same result. See "Answering open questions" below.
@@ -569,7 +576,12 @@ Choose the mode deliberately:
 
 Killed and errored workers are not resumable through this command. Spawn a related or replacement worker on the same issue instead.
 
-A session that is momentarily busy is not a failure. When the worker's harness session is mid-turn under another Meringue instance, the kernel accepts the command, queues the prompt on the worker, and redelivers it during reconciliation; the delivery is logged only once the harness has accepted it. Do not resend the prompt to force delivery.
+A session that is momentarily busy is not a failure, and a correctly routed message is never dropped because of timing:
+
+- **The target session is mid-turn in this Meringue instance.** `steer` and `follow_up` keep their exact meaning. `normal` is accepted and delivered through the harness's queued-prompt behavior (Pi RPC `follow_up`) instead of being rejected, so it lands after the active turn without interrupting or reordering it. The kernel records the delivered mode on the worker (`last_prompt_mode`, `requested_prompt_mode`, `delivered_prompt_mode`) and states the substitution in the delivery log line, for example `Queued a follow-up for worker P1-I3-W1 on P1-I3. Requested normal, delivered follow_up: The session was mid-turn, ...`.
+- **The target session is mid-turn under another Meringue instance.** The kernel accepts the command, queues the prompt on the worker, and redelivers it during reconciliation; the delivery is logged only once the harness has accepted it.
+
+Either way the prompt is delivered exactly once. Do not resend the prompt to force delivery, and do not switch to `steer` merely to get past a busy session: `steer` interrupts work that the user may not want interrupted.
 
 Example:
 
@@ -731,6 +743,17 @@ What is retained:
 - An issue with an attached PR that is open (including a draft) or whose status cannot be resolved. Merged and closed-without-merge PRs are settled and do not block pruning.
 - A bundle whose managed worktree cannot be removed safely. Dirty and locked worktrees are never forced; ownership/path/branch mismatches and git failures also retain the record so a later `/prune` can retry.
 
+How a merged PR is resolved:
+
+- A pull request Meringue has already verified as `merged` and persisted on the issue (`delivery_pull_request` / `delivery_pull_requests`) stays authoritative. Merging is terminal on the forge, so prune reuses that record instead of re-verifying it, and a settled bundle is still pruned when `gh` is unavailable, unauthenticated, or slow. `closed` is not trusted from state because a closed PR can be reopened, and anything else is always re-checked live.
+- Branch discovery (`gh pr list --head <branch>`) is skipped for a worker whose exact delivery branch already has a recorded merged PR: it could only re-derive URLs Meringue already has, and a failed discovery used to retain the settled record.
+- Within the bounded lookup phase, retention-critical lookups come first (statuses of PRs already recorded on an issue, then branch discovery for settled workers whose delivery PR is still unknown), and exploratory verification of historical candidate URLs runs last. Exhausting the budget therefore costs discovery, never a known PR status.
+
+Why a record was retained is always reported:
+
+- The prune log details carry `retained_issue_ids`, `retention_reasons` (per-issue blockers, unverified/open PR URLs, blocking workers, questions, worktree blockers), and a `forge_lookup` summary (`budget_seconds`, `elapsed_seconds`, `budget_exhausted`, `status_lookup_count`, `branch_lookup_count`, `trusted_from_state_urls`, `unavailable_urls`).
+- The prune message names the reasons the user cannot see in the AgentTree: `Retained 2 issues because Meringue could not verify their pull request status: P1-I20, P1-I21 (the 5s forge lookup budget was exhausted).` and `Retained 1 worker because their managed worktree could not be removed: P1-I1-W1 (worktree_dirty).` Those retentions are logged at `warning`; nonterminal issues, live workers, and open questions stay `info` because they are visible in the tree.
+
 Worktree cleanup safety and outcomes:
 
 - Only `git_worktree` workspaces under Meringue's configured workspace root are candidates. Project-root and dedicated-directory workspaces are left untouched.
@@ -740,9 +763,10 @@ Worktree cleanup safety and outcomes:
 - Dirty, locked, ambiguous, or failed cleanups leave the issue/worker record in state. The worker stores its latest `harness_metadata.workspace_cleanup` result, warning/info logs name each outcome, and the `Prune` result exposes `workspace_cleanup_outcomes` plus blocked agent/issue/project IDs.
 
 PR checks are conservative and bounded. The kernel performs them outside the state lock,
-looks up each URL once, and gives the whole lookup phase five seconds. A timeout or a PR
-introduced after the lookup snapshot is `unknown`, so its issue is retained instead of
-blocking the app indefinitely or being removed unsafely.
+looks up each URL once, seeds the cache with pull requests already recorded as merged, and
+gives the remaining lookup phase five seconds. A timeout or a PR introduced after the
+lookup snapshot is `unknown`, so its issue is retained instead of blocking the app
+indefinitely or being removed unsafely.
 
 Compatibility: a legacy `selector` value (`resolved`, `errored`, `completed`, or `merged`) is still accepted and recorded as `requested_selector` in the log details, but it is a no-op that prunes exactly the same records as a bare `/prune`. Any other `/prune` argument is rejected by the slash-command parser with a short usage message. Do not invent a selector for a head-proposed `Prune`: send an empty payload.
 

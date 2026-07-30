@@ -286,6 +286,48 @@ class InputSlashCommandParserTest < Minitest::Test
     refute_includes records.map { |record| record.fetch("kind") }, "prune_selectors"
   end
 
+  # Ids are handed to the kernel exactly as typed. The kernel canonicalizes them against state
+  # (Meringue::Ids), so a lowercase id resolves while an unknown one keeps the typed text in its
+  # rejection message.
+  def test_id_arguments_are_passed_through_as_typed_for_kernel_resolution
+    {
+      "/kill h83" => ["Kill", { "target_id" => "h83" }],
+      "/kill p1-i23-w1" => ["Kill", { "target_id" => "p1-i23-w1" }],
+      "/dismiss q8" => ["DismissQuestion", { "question_id" => "q8" }],
+      '/answer q8 "staging"' => ["AnswerQuestion", { "question_id" => "q8", "answer" => "staging" }],
+      "/session-settings P1-i1-W1" => ["GetSessionSettings", { "agent_id" => "P1-i1-W1" }],
+      "/model p1-i1-w1 openai/gpt-5.6-sol" => ["SetSessionModel", { "agent_id" => "p1-i1-w1", "model" => "openai/gpt-5.6-sol" }],
+      "/thinking p1-i1-w1 xhigh" => ["SetSessionThinkingLevel", { "agent_id" => "p1-i1-w1", "level" => "xhigh" }],
+      '/worker spawn p1-i1 "go"' => ["SpawnWorker", { "issue_id" => "p1-i1", "prompt" => "go" }],
+      '/prompt p1-i1-w1 "hi"' => ["PromptAgent", { "agent_id" => "p1-i1-w1", "prompt" => "hi" }],
+      '/issue create p1 "Title"' => ["CreateIssue", { "project_id" => "p1", "title" => "Title", "description" => "" }]
+    }.each do |input, (type, payload)|
+      parsed = parse_slash(input)
+
+      assert_equal type, parsed.fetch("type"), "type for #{input.inspect}"
+      assert_equal payload, parsed.fetch("payload"), "payload for #{input.inspect}"
+    end
+  end
+
+  # Typing an id in lowercase must still complete, and the completion inserts the canonical id.
+  def test_argument_suggestions_match_lowercase_ids_and_complete_canonical_ones
+    {
+      "/kill p1-i1-w" => ["P1-I1-W1", "/kill P1-I1-W1"],
+      "/kill h" => ["H1", "/kill H1"],
+      "/prompt p1-i1-w1" => ["P1-I1-W1", "/prompt P1-I1-W1"],
+      "/worker spawn p1-i" => ["P1-I1", "/worker spawn P1-I1"],
+      "/issue create p" => ["P1", "/issue create P1"],
+      "/answer q" => ["Q1", "/answer Q1"],
+      "/dismiss q1" => ["Q1", "/dismiss Q1"],
+      "/session-settings p1-i1-w1" => ["P1-I1-W1", "/session-settings P1-I1-W1"]
+    }.each do |input, (usage, completion)|
+      records = Meringue::Input::SlashCommandParser.command_suggestion_records(input, limit: 5, state: suggestion_state)
+
+      assert_includes records.map { |record| record.fetch("usage") }, usage, "usage for #{input.inspect}"
+      assert_includes records.map { |record| record.fetch("completion") }, completion, "completion for #{input.inspect}"
+    end
+  end
+
   # The legacy selector words still parse so existing muscle memory keeps working, but they are
   # inert: the kernel prunes everything eligible either way.
   def test_legacy_prune_selector_words_are_accepted_as_no_op_aliases
@@ -295,5 +337,14 @@ class InputSlashCommandParserTest < Minitest::Test
       assert_equal "Prune", parsed.fetch("type"), "type for /prune #{word}"
       assert_equal({ "selector" => word }, parsed.fetch("payload"), "payload for /prune #{word}")
     end
+  end
+
+  private
+
+  # sample_state plus a session-capable worker so /session-settings has something to offer.
+  def suggestion_state
+    state = sample_state
+    state.fetch("agents").first["harness_session_id"] = "pi-session-1"
+    state
   end
 end

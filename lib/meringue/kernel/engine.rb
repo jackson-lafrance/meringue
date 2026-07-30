@@ -9,6 +9,7 @@ require "socket"
 require "time"
 
 require_relative "../config"
+require_relative "../ids"
 
 module Meringue
   module Kernel
@@ -51,6 +52,15 @@ module Meringue
       # settled; a queued, working, or blocked worker is not.
       PRUNE_BLOCKING_WORKER_STATUSES = %w[queued working blocked].freeze
       PRUNE_SETTLED_PULL_REQUEST_STATES = %w[merged closed].freeze
+      # A merged pull request is terminal on the forge: it can never go back to open. Once Meringue
+      # has verified and persisted a merged status for a URL, prune trusts that record instead of
+      # spending its bounded forge budget (or, on an unreachable forge, downgrading the URL to
+      # `unknown`) to confirm it again. `closed` is deliberately excluded because a closed pull
+      # request can be reopened, so it is always re-verified.
+      PRUNE_TRUSTED_PULL_REQUEST_STATES = %w[merged].freeze
+      # How many retained records the prune message names before it falls back to "and N more". The
+      # full per-record reason set always stays in the log details.
+      PRUNE_RETENTION_REPORT_LIMIT = 5
       ERROR_MESSAGE_MAX_BYTES = 2_000
       HARNESS_EVENT_LOG_LIMIT = 20
       HARNESS_EVENT_IGNORED_TYPES = %w[
@@ -328,7 +338,7 @@ module Meringue
         normalized = normalize_command(command)
         command_type = normalized.fetch("type", nil)
         command_id = normalized.fetch("command_id", nil)
-        payload = normalized.fetch("payload", {})
+        payload = canonicalize_payload_record_ids(normalized.fetch("payload", {}))
 
         return synchronized_state { rejected_result(command_id, nil, "Kernel command is missing a type.", ["missing_type"]) } if blank?(command_type)
 
@@ -793,12 +803,17 @@ module Meringue
         when "Prune"
           prune_result = result || {}
           cleanup_outcomes = Array(prune_result["workspace_cleanup_outcomes"])
+          retained = Array(prune_result["retention_reasons"])
           [
             "  removed issues: #{Array(prune_result["removed_issue_ids"]).length}",
             "  removed projects: #{Array(prune_result["removed_project_ids"]).length}",
             "  removed agents: #{Array(prune_result["removed_agent_ids"]).length}",
             "  cleaned worktrees: #{cleanup_outcomes.count { |outcome| %w[removed already_removed].include?(outcome["status"]) }}",
-            "  blocked worktree cleanups: #{cleanup_outcomes.count { |outcome| !outcome.fetch("success", false) }}"
+            "  blocked worktree cleanups: #{cleanup_outcomes.count { |outcome| !outcome.fetch("success", false) }}",
+            "  retained issues: #{Array(prune_result["retained_issue_ids"]).length}",
+            *retained.first(PRUNE_RETENTION_REPORT_LIMIT).map do |reason|
+              "    #{reason["issue_id"]}: #{Array(reason["blockers"]).join(", ")}"
+            end
           ]
         when "Recount"
           mappings = result.is_a?(Hash) ? result.fetch("mappings", {}) : {}
@@ -1819,6 +1834,13 @@ module Meringue
                             else
                               []
                             end
+          # A batch that accepted nothing routed nothing, so the user's message would otherwise
+          # survive only as command error lines. Surface the message itself so it stays actionable.
+          unrouted_log_ids = if accepted_count.zero? && question_ids.empty?
+                               append_unrouted_user_message_log(state, head_id.to_s, command_results)
+                             else
+                               []
+                             end
           now = timestamp
           metadata = head.fetch("harness_metadata", {}) || {}
           metadata["head_result_apply_state"] = rejected_count.positive? || failed_count.positive? ? "partially_applied" : "applied"
@@ -1830,6 +1852,7 @@ module Meringue
 
           log_ids.concat(command_results.flat_map { |result| result.fetch("log_entry_ids", []) })
           log_ids.concat(summary_log_ids)
+          log_ids.concat(unrouted_log_ids)
           cleanup = if cleanup_head && rejected_count.zero? && failed_count.zero?
                       cleanup_applied_head!(state, head_id.to_s, now: now)
                     elsif cleanup_head
@@ -2391,23 +2414,112 @@ module Meringue
 
       def prepare_prune_forge_lookups
         snapshot = synchronized_state { deep_copy(normalized_state) }
-        context = {
+        context = new_prune_forge_lookup_context
+        seed_trusted_prune_pull_request_statuses!(context, snapshot)
+        with_prune_forge_lookup_context(context) do
+          # These are the only prune phases that can consult the forge, and they share one bounded
+          # budget, so they run in the order retention actually depends on:
+          #   1. the status of every pull request already recorded on an issue,
+          #   2. branch discovery for settled workers whose delivery pull request is still unknown,
+          #   3. exploratory verification of historical candidate URLs.
+          # Running step 3 first (the old order) let a handful of stale candidate URLs, or one
+          # unreachable forge call, exhaust the budget before any retention-critical lookup ran, so
+          # known-merged pull requests came back `unknown` and their whole subtree was retained.
+          # Running all phases on the snapshot still fills one cache, so each URL/branch is looked
+          # up once per pass instead of once per phase/record.
+          prune_pull_request_checks(snapshot)
+          warm_prune_branch_discovery!(snapshot)
+          refresh_worker_delivery_pull_requests!(snapshot)
+        end
+        context["allow_external"] = false
+        context
+      end
+
+      def new_prune_forge_lookup_context
+        budget = [prune_forge_lookup_budget, 0.0].max
+        started_at = monotonic_time
+        {
           "status_by_url" => {},
           "urls_by_branch" => {},
           "branch_lookup_failures" => {},
           "branch_lookup_blockers_by_issue" => {},
+          "trusted_status_urls" => [],
+          "external_status_urls" => [],
+          "external_branch_lookups" => [],
+          "unavailable_status_urls" => [],
+          "budget_exhausted" => false,
           "allow_external" => true,
-          "deadline" => monotonic_time + [prune_forge_lookup_budget, 0.0].max
+          "budget_seconds" => budget,
+          "started_at" => started_at,
+          "deadline" => started_at + budget
         }
-        with_prune_forge_lookup_context(context) do
-          # These are the only two prune phases that can consult the forge. Running both on the
-          # snapshot fills one cache, so a URL used for delivery verification and retention is
-          # looked up once instead of once per phase/record.
-          refresh_worker_delivery_pull_requests!(snapshot)
-          prune_pull_request_checks(snapshot)
+      end
+
+      # Prune's own state is the first source of truth for a merged pull request. Seeding the
+      # per-command cache from persisted merged records means a settled record is prunable even
+      # when `gh` is unavailable, and leaves the whole budget for URLs whose state can still
+      # change.
+      def seed_trusted_prune_pull_request_statuses!(context, state)
+        cache = context.fetch("status_by_url")
+        state.fetch("issues").each do |issue|
+          State::Models.merge_pull_request_records(State::Models.pull_request_records_from(issue)).each do |record|
+            status = trusted_persisted_pull_request_status(record)
+            next unless status
+
+            url = status.fetch("url")
+            next if cache.key?(url)
+
+            cache[url] = status
+            context.fetch("trusted_status_urls") << url
+          end
         end
-        context["allow_external"] = false
         context
+      end
+
+      def trusted_persisted_pull_request_status(record)
+        return nil unless record.is_a?(Hash)
+
+        url = present_string(State::Models.pull_request_record_url(record))
+        return nil if blank?(url)
+        return nil unless record.fetch("provider", nil).to_s == "github"
+        return nil unless PRUNE_TRUSTED_PULL_REQUEST_STATES.include?(record.fetch("state", nil).to_s)
+
+        record.reject { |key, _value| %w[availability last_refresh_error].include?(key) }
+              .merge("url" => url, "lookup_source" => "state")
+      end
+
+      # The merged delivery pull request recorded for exactly this worker branch. Used to skip
+      # forge work that could only re-derive what state already proves.
+      def trusted_delivery_pull_request_for_branch(issue, branch)
+        normalized = normalized_branch_name(branch)
+        return nil if blank?(normalized) || !issue.is_a?(Hash)
+
+        State::Models.merge_pull_request_records(State::Models.pull_request_records_from(issue)).find do |record|
+          next false unless trusted_persisted_pull_request_status(record)
+
+          [record.fetch("matched_branch", nil), record.fetch("head_branch", nil)].any? do |candidate|
+            normalized_branch_name(candidate) == normalized
+          end
+        end
+      end
+
+      # Branch discovery is the only exploratory lookup that can create a retention blocker, so it
+      # gets budget priority over candidate-URL verification.
+      def warm_prune_branch_discovery!(state)
+        worker_agents_by_issue(state).each do |issue_id, workers|
+          issue = find_issue(state, issue_id)
+          next unless issue
+
+          project = find_project(state, issue.fetch("project_id", nil))
+          next unless project
+
+          workers.each { |worker| discovered_worker_candidate_pr_urls(agent: worker, project: project, issue: issue) }
+        end
+      end
+
+      def worker_agents_by_issue(state)
+        state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }
+             .group_by { |worker| worker.fetch("issue_id", nil) }
       end
 
       def with_prune_forge_lookup_context(context)
@@ -2522,7 +2634,9 @@ module Meringue
         blocked_urls = issue_decisions.flat_map do |decision|
           decision.fetch("pull_request_blockers", []).map { |status| status.fetch("url", nil) }
         end.compact.uniq
-        message = prune_summary_message(prune_result)
+        forge_lookup = prune_forge_lookup_summary
+        retention = prune_retention_summary(issue_decisions, prune_result, forge_lookup)
+        message = ([prune_summary_message(prune_result)] + retention.fetch("sentences")).join(" ")
         details = prune_result.merge(
           "requested_selector" => requested_selector,
           "checked_pr_urls" => checked_urls,
@@ -2530,14 +2644,17 @@ module Meringue
           "pull_request_checks" => pull_request_checks,
           "issue_decisions" => issue_decisions,
           "project_decisions" => project_decisions,
-          "delivery_pull_request_refreshes" => delivery_refreshes
+          "delivery_pull_request_refreshes" => delivery_refreshes,
+          "retained_issue_ids" => retention.fetch("retained_issue_ids"),
+          "retention_reasons" => retention.fetch("reasons"),
+          "forge_lookup" => forge_lookup
         ).compact
         log_ids = prune_result.fetch("workspace_cleanup_log_entry_ids", []).dup
         log_ids.concat(append_log(
           state,
           source_type: "kernel",
           source_id: nil,
-          level: prune_result.fetch("workspace_cleanup_blocked_agent_ids", []).empty? ? "info" : "warning",
+          level: retention.fetch("level"),
           message: message,
           details: details
         ))
@@ -2557,6 +2674,103 @@ module Meringue
           "#{standalone_agents} standalone agent#{standalone_agents == 1 ? "" : "s"}"
         ]
         "Pruned #{parts[0]}, #{parts[1]}, and #{parts[2]}."
+      end
+
+      # Retention must never look like a silent no-op. Nonterminal issues, queued/working/blocked
+      # workers, and open questions are all visible in the AgentTree, so the summary only spells out
+      # the reasons the user cannot otherwise see: a pull request status Meringue could not verify,
+      # and a managed worktree it refused to remove. Every retained record and its blockers are
+      # always available in the log details.
+      def prune_retention_summary(issue_decisions, prune_result, forge_lookup)
+        reasons = Array(issue_decisions).reject { |decision| decision.fetch("prunable", false) }.map do |decision|
+          pull_request_blockers = Array(decision.fetch("pull_request_blockers", []))
+          unverified, unsettled = pull_request_blockers.partition { |status| status.fetch("state", nil).to_s == "unknown" }
+          {
+            "issue_id" => decision.fetch("issue_id", nil),
+            "blockers" => Array(decision.fetch("blockers", [])),
+            "unverified_pr_urls" => unverified.filter_map { |status| status.fetch("url", nil) }.uniq,
+            "open_pr_urls" => unsettled.filter_map { |status| status.fetch("url", nil) }.uniq,
+            "nonterminal_issue_ids" => Array(decision.fetch("nonterminal_issue_ids", [])),
+            "blocking_worker_ids" => Array(decision.fetch("blocking_worker_ids", [])),
+            "open_question_ids" => Array(decision.fetch("open_question_ids", [])),
+            "workspace_cleanup_blocking_agent_ids" => Array(decision.fetch("workspace_cleanup_blocking_agent_ids", []))
+          }
+        end
+        unverified_issue_ids = reasons.select { |reason| reason.fetch("unverified_pr_urls").any? }
+                                     .filter_map { |reason| reason.fetch("issue_id") }
+        blocked_cleanups = Array(prune_result.fetch("workspace_cleanup_outcomes", []))
+                           .reject { |outcome| outcome.fetch("success", false) }
+        sentences = []
+        if unverified_issue_ids.any?
+          sentences << "Retained #{count_phrase(unverified_issue_ids.length, "issue")} because Meringue could not " \
+                       "verify their pull request status: #{id_list_phrase(unverified_issue_ids)}" \
+                       "#{prune_forge_lookup_clause(forge_lookup)}."
+        end
+        if blocked_cleanups.any?
+          listed = blocked_cleanups.first(PRUNE_RETENTION_REPORT_LIMIT).map do |outcome|
+            "#{outcome.fetch("agent_id", "worker")} (#{outcome.fetch("reason", "unknown_error")})"
+          end
+          remainder = blocked_cleanups.length - listed.length
+          listed << "and #{remainder} more" if remainder.positive?
+          sentences << "Retained #{count_phrase(blocked_cleanups.length, "worker")} because their managed worktree " \
+                       "could not be removed: #{listed.join(", ")}."
+        end
+
+        {
+          "retained_issue_ids" => reasons.filter_map { |reason| reason.fetch("issue_id") },
+          "reasons" => reasons,
+          "unverified_issue_ids" => unverified_issue_ids,
+          "sentences" => sentences,
+          "level" => unverified_issue_ids.any? || blocked_cleanups.any? ? "warning" : "info"
+        }
+      end
+
+      def prune_forge_lookup_clause(forge_lookup)
+        return "" unless forge_lookup.is_a?(Hash)
+
+        if forge_lookup.fetch("budget_exhausted", false)
+          " (the #{format_seconds(forge_lookup.fetch("budget_seconds", prune_forge_lookup_budget))}s forge lookup " \
+            "budget was exhausted)"
+        else
+          " (the forge lookup was unavailable)"
+        end
+      end
+
+      def format_seconds(value)
+        format("%g", Float(value))
+      rescue ArgumentError, TypeError
+        value.to_s
+      end
+
+      def count_phrase(count, noun)
+        "#{count} #{noun}#{count == 1 ? "" : "s"}"
+      end
+
+      def id_list_phrase(ids)
+        listed = Array(ids).first(PRUNE_RETENTION_REPORT_LIMIT)
+        remainder = Array(ids).length - listed.length
+        listed = listed + ["and #{remainder} more"] if remainder.positive?
+        listed.join(", ")
+      end
+
+      # Observability for the bounded lookup phase: how much of the budget the pass used, how many
+      # external lookups it actually made, which URLs came from state instead of the forge, and
+      # which ones the forge could not answer.
+      def prune_forge_lookup_summary
+        context = prune_forge_lookup_context
+        return nil unless context
+
+        started_at = context.fetch("started_at", monotonic_time)
+        {
+          "budget_seconds" => context.fetch("budget_seconds", prune_forge_lookup_budget),
+          "elapsed_seconds" => (monotonic_time - started_at).round(3),
+          "remaining_seconds" => prune_forge_lookup_remaining(context).round(3),
+          "budget_exhausted" => context.fetch("budget_exhausted", false),
+          "status_lookup_count" => context.fetch("external_status_urls", []).length,
+          "branch_lookup_count" => context.fetch("external_branch_lookups", []).length,
+          "trusted_from_state_urls" => context.fetch("trusted_status_urls", []).uniq,
+          "unavailable_urls" => context.fetch("unavailable_status_urls", []).uniq
+        }
       end
 
       # Refresh only already-verified delivery PRs. Candidate/reported URLs remain inert, and an
@@ -2580,11 +2794,13 @@ module Meringue
                               "last_refresh_error" => present_string(status.fetch("error", nil))
                             ).compact
                           else
+                            # The nil must survive `.compact` and the record merge inside
+                            # `attach_pull_requests_to_issue!`; dropping the key instead left the
+                            # previous failure attached to a record the forge just answered.
                             record.merge(status).merge(
                               "availability" => "available",
-                              "last_checked_at" => now,
-                              "last_refresh_error" => nil
-                            ).compact
+                              "last_checked_at" => now
+                            ).compact.merge("last_refresh_error" => nil)
                           end
               State::Models.attach_pull_requests_to_issue!(issue, delivery_pull_requests: [refreshed])
               {
@@ -2614,7 +2830,7 @@ module Meringue
       end
 
       def refresh_worker_delivery_pull_requests!(state)
-        workers_by_issue = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }.group_by { |worker| worker.fetch("issue_id", nil) }
+        workers_by_issue = worker_agents_by_issue(state)
         state.fetch("issues").flat_map do |issue|
           workers = workers_by_issue.fetch(issue.fetch("id", nil), [])
           project = find_project(state, issue.fetch("project_id", nil))
@@ -2623,11 +2839,16 @@ module Meringue
           candidate_urls = (
             Array(issue.fetch("candidate_pr_urls", nil)) +
             workers.flat_map { |worker| worker_legacy_candidate_pr_urls(worker) } +
-            workers.flat_map { |worker| discovered_worker_candidate_pr_urls(agent: worker, project: project) }
+            workers.flat_map { |worker| discovered_worker_candidate_pr_urls(agent: worker, project: project, issue: issue) }
           ).map(&:to_s).map(&:strip).reject(&:empty?).uniq
           next [] if candidate_urls.empty?
 
           matches = workers.flat_map do |worker|
+            # This worker's branch already has a merged delivery pull request attached to the issue.
+            # Re-verifying every historical candidate URL against it cannot change the record and
+            # would spend forge budget that unknown deliveries need.
+            next [] if trusted_delivery_pull_request_for_branch(issue, persisted_worker_delivery_branch(worker))
+
             verified_worker_pull_requests(agent: worker, project: project, candidate_urls: candidate_urls).map do |pull_request|
               [worker, pull_request]
             end
@@ -2655,7 +2876,7 @@ module Meringue
       end
 
       def prune_pull_request_checks(state)
-        workers_by_issue = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }.group_by { |worker| worker.fetch("issue_id", nil) }
+        workers_by_issue = worker_agents_by_issue(state)
         state.fetch("issues").filter_map do |issue|
           urls = (issue_pr_urls(issue) + workers_by_issue.fetch(issue.fetch("id", nil), []).flat_map { |worker| worker_legacy_pr_urls(worker) }).uniq
           next if urls.empty?
@@ -2785,7 +3006,7 @@ module Meringue
           normalized_branch_name(status.fetch("head_branch", nil)) == normalized_branch_name(branch)
       end
 
-      def discovered_worker_candidate_pr_urls(agent:, project:)
+      def discovered_worker_candidate_pr_urls(agent:, project:, issue: nil)
         # A worker can settle without usable final output, so recover from the durable branch
         # identity rather than treating arbitrary URLs elsewhere in its session as deliveries.
         return [] unless agent.fetch("status", nil) == "completed"
@@ -2794,6 +3015,11 @@ module Meringue
         branch = normalized_branch_name(persisted_worker_delivery_branch(agent))
         repository = project_github_repository(project)
         return [] if blank?(branch) || blank?(repository)
+        # A merged delivery pull request is already recorded for this exact branch, so discovery can
+        # only re-derive URLs Meringue already has. Skipping it stops a slow or unreachable forge
+        # from manufacturing an `unknown` blocker for settled work, and leaves the budget for
+        # branches whose delivery really is unknown.
+        return [] if trusted_delivery_pull_request_for_branch(issue, branch)
 
         urls = pull_request_urls_for_branch(repository: repository, branch: branch)
         context = prune_forge_lookup_context
@@ -2903,9 +3129,11 @@ module Meringue
 
         remaining = prune_forge_lookup_remaining(context)
         unless remaining.positive?
-          return record_prune_branch_lookup_failure(context, key, "Prune forge lookup budget was exhausted")
+          context["budget_exhausted"] = true
+          return record_prune_branch_lookup_failure(context, key, prune_budget_exhausted_error(context))
         end
 
+        context.fetch("external_branch_lookups") << key
         cache[key] = Array(invoke_forge_branch_lookup(repository: repository, branch: branch, timeout: remaining))
       rescue StandardError => e
         context ? record_prune_branch_lookup_failure(context, key, e.message) : []
@@ -2929,13 +3157,31 @@ module Meringue
 
         remaining = prune_forge_lookup_remaining(context)
         unless remaining.positive?
-          return cache[key] = unavailable_prune_pull_request_status(key, "Prune forge lookup budget was exhausted")
+          context["budget_exhausted"] = true
+          return cache[key] = unavailable_prune_pull_request_status(key, prune_budget_exhausted_error(context))
         end
 
-        cache[key] = invoke_forge_status_lookup(key, timeout: remaining)
+        context.fetch("external_status_urls") << key
+        status = invoke_forge_status_lookup(key, timeout: remaining)
+        record_prune_status_availability(context, key, status)
+        cache[key] = status
       rescue StandardError => e
         status = unavailable_prune_pull_request_status(url, e.message)
-        context ? context.fetch("status_by_url")[url.to_s] = status : status
+        return status unless context
+
+        record_prune_status_availability(context, url.to_s, status)
+        context.fetch("status_by_url")[url.to_s] = status
+      end
+
+      def record_prune_status_availability(context, url, status)
+        return unless status.is_a?(Hash) && status.fetch("state", nil).to_s == "unknown"
+
+        context.fetch("unavailable_status_urls") << url
+      end
+
+      def prune_budget_exhausted_error(context)
+        budget = context.is_a?(Hash) ? context.fetch("budget_seconds", prune_forge_lookup_budget) : prune_forge_lookup_budget
+        "Prune forge lookup budget of #{format_seconds(budget)}s was exhausted"
       end
 
       def invoke_forge_status_lookup(url, timeout:)
@@ -3623,6 +3869,12 @@ module Meringue
         now = timestamp
         session_metadata = session_ref.fetch("metadata", {}) || {}
         previous_metadata = agent.fetch("harness_metadata", {}) || {}
+        # The harness may have had to deliver the prompt in a different mode than the caller asked
+        # for (a normal prompt into a mid-turn session is queued as a follow-up instead of being
+        # dropped). Record and log what actually happened, not what was requested.
+        delivered_mode = delivered_prompt_mode(session_metadata, mode)
+        coerced = delivered_mode != mode
+        mode_note = coerced ? present_string(session_metadata.fetch("prompt_mode_note", nil)) : nil
         agent["status"] = "working"
         agent["pid"] = session_ref.fetch("pid", agent.fetch("pid", nil))
         agent["harness_session_id"] = session_ref.fetch("session_id", agent.fetch("harness_session_id", nil))
@@ -3631,11 +3883,14 @@ module Meringue
         agent["harness_metadata"] = previous_metadata.merge(
           session_metadata,
           "prompt_count" => previous_metadata.fetch("prompt_count", 0).to_i + 1,
-          "last_prompt_mode" => mode,
+          "last_prompt_mode" => delivered_mode,
+          "requested_prompt_mode" => coerced ? mode : nil,
+          "delivered_prompt_mode" => coerced ? delivered_mode : nil,
+          "prompt_mode_note" => mode_note,
           "last_prompted_at" => now,
           "is_streaming" => session_ref.fetch("is_streaming", false),
           "last_event_at" => session_ref.fetch("last_event_at", nil),
-          "routing_action" => prompt_routing_action(mode)
+          "routing_action" => prompt_routing_action(delivered_mode)
         ).compact
         agent["updated_at"] = now
 
@@ -3644,7 +3899,7 @@ module Meringue
         if issue
           issue["status"] = "working"
           issue["last_agent_id"] = agent.fetch("id")
-          issue["last_routing_action"] = prompt_routing_action(mode)
+          issue["last_routing_action"] = prompt_routing_action(delivered_mode)
           issue["last_routed_at"] = now
           issue["updated_at"] = now
         end
@@ -3655,25 +3910,37 @@ module Meringue
 
         # The harness accepted the prompt, so the delivery is logged exactly once, here.
         remove_pending_prompts!(agent, pending_prompt_id: pending_prompt_id, command_id: command_id)
+        delivery_message = prompt_log_message(agent, delivered_mode, requested_mode: coerced ? mode : nil, note: mode_note)
         log_ids = append_log(
           state,
           source_type: "kernel",
           source_id: agent.fetch("id"),
           level: "info",
-          message: prompt_log_message(agent, mode),
+          message: delivery_message,
           details: {
             "issue_id" => agent.fetch("issue_id", nil),
             "project_id" => agent.fetch("project_id", nil),
             "agent_id" => agent.fetch("id"),
-            "mode" => mode,
-            "routing_action" => prompt_routing_action(mode),
+            "mode" => delivered_mode,
+            "requested_mode" => mode,
+            "prompt_mode_note" => mode_note,
+            "routing_action" => prompt_routing_action(delivered_mode),
             "is_streaming" => session_ref.fetch("is_streaming", false)
-          }
+          }.compact
         )
         touch_state!(state, now)
         store.save(state)
 
-        accepted_result(command_id, command_type, agent.fetch("id"), prompt_log_message(agent, mode), agent, log_ids)
+        accepted_result(command_id, command_type, agent.fetch("id"), delivery_message, agent, log_ids)
+      end
+
+      # Harness clients report a mode they had to substitute through generic session metadata; an
+      # unknown or absent value means the requested mode was used as-is.
+      def delivered_prompt_mode(session_metadata, requested_mode)
+        reported = present_string(session_metadata.fetch("delivered_prompt_mode", nil))
+        return requested_mode.to_s unless reported && PROMPT_MODES.include?(reported)
+
+        reported
       end
 
       # A session that is momentarily owned by another instance mid-turn is not a command failure.
@@ -4500,15 +4767,22 @@ module Meringue
         }.fetch(mode.to_s)
       end
 
-      def prompt_log_message(agent, mode)
-        case mode.to_s
-        when "steer"
-          "Steered active worker #{agent.fetch("id")} on #{agent.fetch("issue_id")} with the user's correction."
-        when "follow_up"
-          "Queued a follow-up for worker #{agent.fetch("id")} on #{agent.fetch("issue_id")}."
-        else
-          "Continued worker #{agent.fetch("id")} on #{agent.fetch("issue_id")} using its existing session."
-        end
+      # `requested_mode` is only present when the harness had to deliver the prompt in another mode;
+      # the coercion is stated in the same user-visible line so a queued delivery is never silent.
+      def prompt_log_message(agent, mode, requested_mode: nil, note: nil)
+        base = case mode.to_s
+               when "steer"
+                 "Steered active worker #{agent.fetch("id")} on #{agent.fetch("issue_id")} with the user's correction."
+               when "follow_up"
+                 "Queued a follow-up for worker #{agent.fetch("id")} on #{agent.fetch("issue_id")}."
+               else
+                 "Continued worker #{agent.fetch("id")} on #{agent.fetch("issue_id")} using its existing session."
+               end
+        return base unless present_string(requested_mode) && requested_mode.to_s != mode.to_s
+
+        explanation = present_string(note) ||
+                      "The session could not take a #{requested_mode} prompt right now."
+        "#{base} Requested #{requested_mode}, delivered #{mode}: #{explanation}"
       end
 
       def replaceable_worker?(agent)
@@ -4601,6 +4875,49 @@ module Meringue
           message: summary,
           details: { "kind" => "head_summary", **selected_target_log_details(selected_target) }
         )
+      end
+
+      # Head batches that accept nothing used to leave only per-command error lines, so a correctly
+      # captured user message could disappear from the conversation. This restates the message the
+      # kernel stored for that head and says what to do with it, so nothing is silently dropped.
+      def append_unrouted_user_message_log(state, head_id, command_results)
+        user_message = head_request_user_message(state, head_id)
+        failures = Array(command_results).reject { |result| result.fetch("status", nil) == "accepted" }
+        quoted = user_message ? ": #{single_line_excerpt(user_message).inspect}" : "."
+        reason = if failures.empty?
+                   "Head #{head_id} routed nothing for this message, so it still needs handling"
+                 else
+                   "No command from head #{head_id} was applied, so this message still needs handling"
+                 end
+        message = "#{reason}#{quoted} Resend it, or route it yourself with /prompt or /worker spawn."
+        append_log(
+          state,
+          source_type: "kernel",
+          source_id: head_id,
+          level: failures.empty? ? "warning" : "error",
+          message: message,
+          details: {
+            "kind" => "unrouted_user_message",
+            "head_id" => head_id,
+            "user_message" => user_message,
+            "accepted_command_count" => 0,
+            "command_count" => Array(command_results).length,
+            "command_results" => failures.map do |result|
+              {
+                "command_type" => result.fetch("command_type", nil),
+                "status" => result.fetch("status", nil),
+                "message" => result.fetch("message", nil)
+              }.compact
+            end
+          }.compact
+        )
+      end
+
+      def single_line_excerpt(text, limit: 160)
+        collapsed = text.to_s.strip.gsub(/\s+/, " ")
+        return collapsed if collapsed.length <= limit
+
+        "#{collapsed[0, limit - 1]}…"
       end
 
       def create_head_questions!(state, head_id, questions, log_ids)
@@ -4801,7 +5118,9 @@ module Meringue
 
         return { "command" => command } unless BATCH_ISSUE_GUARDED_COMMANDS.include?(command_type)
 
-        requested = present_string(value_at(payload, "issue_id", "IssueID", "issueId"))
+        # The batch plan, journal, and head snapshot all hold canonical ids, so compare a
+        # head-predicted id in canonical form. Nothing else about the command is rewritten here.
+        requested = Ids.canonical(present_string(value_at(payload, "issue_id", "IssueID", "issueId")))
         return { "command" => command } if requested.nil?
 
         resolve_batch_issue_target(
@@ -4922,7 +5241,7 @@ module Meringue
           return { "command" => command_with_project_id(command, payload, entry.fetch("project_id")) }
         end
 
-        requested = present_string(value_at(payload, "project_id", "ProjectID", "projectId"))
+        requested = Ids.canonical(present_string(value_at(payload, "project_id", "ProjectID", "projectId")))
         return nil unless requested
 
         aliased = plan.fetch("project_aliases")[requested]
@@ -6123,16 +6442,20 @@ module Meringue
         }.compact
       end
 
+      # Ids reach the kernel from typed slash commands, head-proposed command payloads, and TUI
+      # selections. Meringue ids are canonically uppercase, so an id that only differs by case is
+      # resolved to its canonical record here as a defensive second layer for paths that do not go
+      # through `apply`. Lookups still prefer an exact match, so nothing can shadow a real record.
       def find_project(state, project_id)
-        state.fetch("projects").find { |project| project.fetch("id", nil) == project_id.to_s }
+        Ids.find_record(state.fetch("projects"), project_id)
       end
 
       def find_issue(state, issue_id)
-        state.fetch("issues").find { |issue| issue.fetch("id", nil) == issue_id.to_s }
+        Ids.find_record(state.fetch("issues"), issue_id)
       end
 
       def find_agent(state, agent_id)
-        state.fetch("agents").find { |agent| agent.fetch("id", nil) == agent_id.to_s }
+        Ids.find_record(state.fetch("agents"), agent_id)
       end
 
       def find_session_agent(state, agent_id:, session_ref: nil)
@@ -6151,9 +6474,22 @@ module Meringue
       end
 
       def find_question(state, question_id)
-        needle = question_id.to_s.strip
-        state.fetch("questions").find { |question| question.fetch("id", nil) == needle } ||
-          state.fetch("questions").find { |question| question.fetch("id", nil).to_s.casecmp(needle).zero? }
+        Ids.find_record(state.fetch("questions"), question_id)
+      end
+
+      # Rewrites record ids in a command payload to their canonical uppercase spelling so state,
+      # logs, and the head command journal never store `h83` for `H83`. This is the earliest point
+      # where an id can be canonicalized without losing what its author typed: only an id that
+      # already resolves to a record in state is recased, so an unknown or malformed id reaches
+      # validation (and its rejection message) exactly as it was typed. State is loaded only when
+      # the payload actually holds a non-canonical id.
+      def canonicalize_payload_record_ids(payload)
+        return payload unless Ids.payload_needs_canonicalization?(payload)
+
+        state = synchronized_state { normalized_state }
+        Ids.canonicalize_payload(payload, state)
+      rescue StandardError
+        payload
       end
 
       def normalize_command(command)

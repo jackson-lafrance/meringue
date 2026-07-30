@@ -9,6 +9,7 @@ module Meringue
 end
 
 require_relative "meringue/version"
+require_relative "meringue/ids"
 require_relative "meringue/config"
 require_relative "meringue/state/models"
 require_relative "meringue/state/compactor"
@@ -62,6 +63,7 @@ require_relative "meringue/tui/selection"
 require_relative "meringue/tui/terminal"
 require_relative "meringue/tui/agent_tree_navigation"
 require_relative "meringue/tui/log_scope"
+require_relative "meringue/tui/chat_target"
 require_relative "meringue/tui/delivery_pull_request"
 require_relative "meringue/tui/workspace_health"
 require_relative "meringue/tui/workspace_commands"
