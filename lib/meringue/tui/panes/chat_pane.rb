@@ -56,15 +56,35 @@ module Meringue
           "logs — #{label}"
         end
 
-        # The composer names the durable issue that a fresh head will receive as
-        # explicit routing context. An agent click therefore reads as its owning
-        # issue rather than implying that chat bypasses the head and talks to the
-        # worker directly.
-        def composer_pane_title(state)
-          issue_id = LogScope.selected_target(state).fetch("issue_id", "").to_s
-          return "chat" if issue_id.empty?
+        # A filtered logs pane takes the identity color of the node it is filtered
+        # to, so the pane, that agent's rows inside it, its AgentTree row, and the
+        # composer all agree. A project filter has no identity color of its own,
+        # and an unfiltered pane keeps the theme's panel title.
+        def log_pane_title_style(state)
+          return nil unless %w[head worker issue].include?(LogScope.kind(state))
 
-          "chat → #{issue_id}"
+          Style.agent_chrome_style(LogScope.id(state), bold: true)
+        end
+
+        # The composer names the concrete destination of the next prompt: the
+        # selected agent (plus its owning issue's short title) or the issue
+        # itself. An agent selection still routes through a fresh head, so the
+        # chip spells the resolved issue out rather than implying a direct line
+        # to the worker. ChatTarget owns the wording for every selection state.
+        def composer_pane_title(state)
+          ChatTarget.composer_title(state)
+        end
+
+        # Composer border/title tinted with the selected node's own log color, so
+        # the box the user types into matches the row it will prompt. nil keeps
+        # the pane default, which is what makes "no target, head routes" read as
+        # plainly unscoped.
+        def composer_border_style(state, active: false)
+          ChatTarget.border_style(state, active: active)
+        end
+
+        def composer_title_style(state)
+          ChatTarget.title_style(state)
         end
 
         def composer_lines(state, width: nil)
@@ -76,7 +96,9 @@ module Meringue
             input_buffer,
             input_cursor: input_cursor,
             width: width,
-            selection: chat.fetch("selection", nil)
+            selection: chat.fetch("selection", nil),
+            prompt_style: ChatTarget.prompt_style(state),
+            placeholder: ChatTarget.placeholder(state)
           )
         end
 
@@ -191,27 +213,11 @@ module Meringue
         private
 
         # Selection chip plus its clear affordance, so both focused logs and the
-        # head-routing target stay visible. Projects and unbound heads keep the
-        # older log-only wording.
+        # head-routing target stay visible. The chip is tinted with the same
+        # color as the composer border, and every state (including "nothing is
+        # selected") says who routes the message.
         def log_scope_hint_segments(state)
-          label = LogScope.label(state)
-          return [] if label.empty?
-
-          target = LogScope.selected_target(state)
-          issue_id = target.fetch("issue_id", "").to_s
-          if !issue_id.empty?
-            selected_agent_id = target.fetch("selected_agent_id", "").to_s
-            via = selected_agent_id.empty? ? "" : " via #{selected_agent_id}"
-            return [
-              ["⌖ target: #{issue_id}#{via}", Style::ACCENT],
-              ["  head routes · Esc clears", Style::MUTED]
-            ]
-          end
-
-          [
-            ["⌖ logs: #{label}", Style::ACCENT],
-            ["  Esc clears", Style::MUTED]
-          ]
+          ChatTarget.chip_segments(state)
         end
 
         def empty_logs_lines(state, width: nil)
@@ -627,11 +633,12 @@ module Meringue
           ]
         end
 
-        def wrapped_input_lines(input_buffer, input_cursor:, width: nil, selection: nil)
+        def wrapped_input_lines(input_buffer, input_cursor:, width: nil, selection: nil,
+                                prompt_style: Style::ACCENT_BOLD, placeholder: "enter a prompt")
           if input_buffer.empty?
             return [[
-              ["›", Style::ACCENT_BOLD],
-              [" enter a prompt", Style::MUTED]
+              ["›", prompt_style],
+              [" #{placeholder}", Style::MUTED]
             ]]
           end
 
@@ -647,7 +654,8 @@ module Meringue
               span,
               first_line: index.zero?,
               cursor_column: index == cursor_row ? cursor_column : nil,
-              selection_range: selection_range
+              selection_range: selection_range,
+              prompt_style: prompt_style
             )
           end
         end
@@ -709,9 +717,12 @@ module Meringue
           (start_index...finish_index)
         end
 
-        def input_line_segments(chars, span, first_line:, cursor_column:, selection_range:)
+        # Input text itself always keeps Style::TEXT (and SELECTION inside a
+        # highlight): the tint only reaches the prompt marker, so typed text
+        # stays at full contrast in every colorscheme.
+        def input_line_segments(chars, span, first_line:, cursor_column:, selection_range:, prompt_style: Style::ACCENT_BOLD)
           prefix = first_line ? "› " : "  "
-          segments = [[prefix, first_line ? Style::ACCENT_BOLD : Style::DIM]]
+          segments = [[prefix, first_line ? prompt_style : Style::DIM]]
           run = +""
           run_style = nil
 
