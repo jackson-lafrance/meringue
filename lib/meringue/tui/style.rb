@@ -93,6 +93,19 @@ module Meringue
         agent_styles.fetch(WORKER_AGENT_KIND).fetch(agent_palette_index(agent_id))
       end
 
+      # Chrome (composer border, pane title, target chip) tinted to one id's
+      # palette entry. This is the same assignment agent log lines use, so the
+      # chat box can match the agent/issue it will prompt instead of introducing
+      # a second palette. Issue ids hash through the same function, so an issue
+      # selection gets a stable color too.
+      #
+      # The two weights are the ones the palette already ships: bold for text
+      # that has to stay legible next to muted hint text (and for the focused
+      # border), plain for the unfocused border.
+      def agent_chrome_style(id, bold: false)
+        agent_styles.fetch(bold ? HEAD_AGENT_KIND : WORKER_AGENT_KIND).fetch(agent_palette_index(id))
+      end
+
       def head_kind?(kind)
         kind.to_s == HEAD_AGENT_KIND
       end

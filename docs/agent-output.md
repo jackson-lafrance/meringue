@@ -88,6 +88,8 @@ Before parsing, the renderer normalizes invalid UTF-8 and strips CSI, OSC, other
 
 Agent identity colors remain deterministic per id and active theme. Markdown headings and structural markers reuse the same agent palette entry as the header and `▌` gutter. The explicit agent id, head/worker/result icon, Markdown markers, status text, and gutter remain present when `NO_COLOR` is set, so identity and document structure do not depend on color alone.
 
+The chat composer reuses that same identity assignment as chrome: while an AgentTree issue/agent is selected, the composer border, pane title, `›` prompt marker, and target chip take the selected node's palette entry, so the box you type into matches the log rows it will prompt. Typed input keeps its normal text style, and the composer title/chip still name the target in plain text, so the cue survives `NO_COLOR` and limited color support. See [`docs/keybindings.md`](keybindings.md#the-composer-shows-its-target-by-color).
+
 ## Manual regression fixture
 
 `fixtures/demo_state.json` includes a completed worker whose stored assistant text contains ANSI styling, a duplicate Meringue header, an `output:` label, a titled box, and representative headings, emphasis, lists, a blockquote, inline code, a fenced code block, and a link. `bin/meringue demo` must show normalized, wrapped terminal Markdown without the transcript artifacts. The fixture exercises the same durable-log rendering path used for real completed workers.

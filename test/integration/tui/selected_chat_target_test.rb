@@ -55,9 +55,11 @@ class TuiSelectedChatTargetTest < Minitest::Test
 
     pane = Meringue::TUI::Panes::ChatPane.new
     assert_equal "logs — P1-I1-W1", pane.log_pane_title(composed)
-    assert_equal "chat → P1-I1", pane.composer_pane_title(composed)
+    # The composer names the clicked agent plus its issue's short title, and the
+    # chip resolves it to the durable issue a fresh head will receive.
+    assert_equal "chat → P1-I1-W1 · Fix retries", pane.composer_pane_title(composed)
     hint = plain_line(pane.bottom_hint_line(composed))
-    assert_includes hint, "target: P1-I1 via P1-I1-W1"
+    assert_includes hint, "target: P1-I1-W1 → P1-I1"
     assert_includes hint, "head routes"
     assert_includes hint, "Esc clears"
   end
@@ -76,7 +78,7 @@ class TuiSelectedChatTargetTest < Minitest::Test
     @app.send(:deselect_agent_tree_item)
     cleared = compose_app_state(@app, @state)
     assert_empty Meringue::TUI::LogScope.selected_target(cleared)
-    assert_equal "chat", Meringue::TUI::Panes::ChatPane.new.composer_pane_title(cleared)
+    assert_equal "chat · head routes", Meringue::TUI::Panes::ChatPane.new.composer_pane_title(cleared)
   end
 
   def test_subsequent_chat_passes_the_selection_to_the_head_callback
@@ -125,6 +127,11 @@ class TuiSelectedChatTargetTest < Minitest::Test
     composed = compose_app_state(@app, @state, "/help")
 
     assert_equal "P1-I1", Meringue::TUI::LogScope.chat_target(composed).fetch("issue_id")
+    # The composer says what routing will actually do: a slash command drops the
+    # target tint and says the selection is not targeted.
+    pane = Meringue::TUI::Panes::ChatPane.new
+    assert_equal "chat · slash command · P1-I1-W1 not targeted", pane.composer_pane_title(composed)
+    assert_nil pane.composer_border_style(composed, active: true)
 
     result = @app.send(:handle_key, "\r", "/help", 5, -1, handler, composed)
 
@@ -171,15 +178,24 @@ class TuiSelectedChatTargetTest < Minitest::Test
   def test_plain_prompt_carries_a_selected_issue_and_stops_after_it_is_cleared
     select_chat_target("P1-I1")
     submissions, handler = recording_prompt_handler
+    pane = Meringue::TUI::Panes::ChatPane.new
 
-    @app.send(:handle_key, "\r", "keep going", 10, -1, handler, compose_app_state(@app, @state, "keep going"))
+    typing = compose_app_state(@app, @state, "keep going")
+    # A tinted composer and a carried target are the same fact rendered twice.
+    assert_equal Meringue::TUI::Style.agent_chrome_style("P1-I1", bold: true), pane.composer_title_style(typing)
+
+    @app.send(:handle_key, "\r", "keep going", 10, -1, handler, typing)
     selected = Timeout.timeout(5) { submissions.pop }
     assert_equal "P1-I1", selected.dig("selected_target", "selected_id")
     assert_equal "issue", selected.dig("selected_target", "selected_type")
     assert_equal "P1-I1", selected.dig("selected_target", "issue_id")
 
     @app.send(:deselect_agent_tree_item)
-    @app.send(:handle_key, "\r", "keep going", 10, -1, handler, compose_app_state(@app, @state, "keep going"))
+    unscoped = compose_app_state(@app, @state, "keep going")
+    assert_nil pane.composer_title_style(unscoped)
+    assert_equal "chat · head routes", pane.composer_pane_title(unscoped)
+
+    @app.send(:handle_key, "\r", "keep going", 10, -1, handler, unscoped)
     cleared = Timeout.timeout(5) { submissions.pop }
     assert_nil cleared.fetch("selected_target")
   end
