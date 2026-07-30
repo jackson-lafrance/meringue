@@ -91,9 +91,9 @@ Agent identity colors remain deterministic per id and active theme. Markdown hea
 Two other surfaces reuse that same identity assignment, so one agent is one color everywhere:
 
 - **The AgentTree.** Each agent row draws its harness logo and its id in the agent's palette entry, in every lifecycle status, including completed rows. Status keeps its own semantic glyph color and completed titles stay muted, so color is additive. See [`docs/keybindings.md`](keybindings.md#agenttree-agent-colors-and-harness-logos).
-- **The chat composer.** While an AgentTree issue/agent is selected, the composer border, pane title, `›` prompt marker, and target chip take the selected node's palette entry, so the box you type into matches the tree row and log rows it will prompt. Typed input keeps its normal text style, and the composer title/chip still name the target in plain text. See [`docs/keybindings.md`](keybindings.md#the-composer-shows-its-target-by-color).
+- **The chat composer.** While an AgentTree issue/agent is selected, the composer border, pane title, and `›` prompt marker take the selected node's palette entry, so the box you type into matches the tree row and log rows it will prompt. Typed input keeps its normal text style, and the composer pane title still names the target in plain text (the hint line below the chat bar carries gestures only, never the id). See [`docs/keybindings.md`](keybindings.md#the-composer-shows-its-target-by-color).
 
-Both cues survive `NO_COLOR` and limited color support: ids, harness glyphs, status glyphs, and the composer title/chip text carry the same information without color.
+Both cues survive `NO_COLOR` and limited color support: ids, harness glyphs, status glyphs, and the composer title text carry the same information without color.
 
 ## Manual regression fixture
 
