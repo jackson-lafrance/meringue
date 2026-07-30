@@ -112,3 +112,22 @@ receives an explicit `session_dir`, `transport_ownership`, or `claude_home`).
 - Helper-spawned placeholder processes are `Process.detach`ed: a zombie child
   still answers `kill(0)`, which would otherwise make liveness assertions (and
   the 5s takeover kill/wait loop) misbehave.
+
+## Turn outcome (added by the network-aborted settle slice)
+
+- `test/integration/harness/pi_client_turn_outcome_test.rb`
+
+`Harness::Client#turn_outcome(session_ref)` is the harness-neutral answer to "did the last
+turn finish, or did it die?". The base client returns `nil` ("no evidence"), which keeps
+every other backend on its existing behavior. `PiClient` implements it by reading the tail
+of the session file (64 KiB) and inspecting the last assistant message:
+
+- `stopReason: "error"` → `state: "failed"`, `kind: "network_failure"` when the error text
+  looks like a connectivity failure, otherwise `provider_error`
+- `stopReason: "toolUse"` → `state: "incomplete"` (not a failure)
+- anything else → `state: "completed"` with the final text
+- unreadable/missing/assistant-free session file → `nil`
+
+`turn_ended_at` is included so the kernel can tell a fresh failure from evidence that
+predates the prompt which already recovered the worker. Only the tail is read because
+reconciliation polls every two seconds and real session files reach megabytes.

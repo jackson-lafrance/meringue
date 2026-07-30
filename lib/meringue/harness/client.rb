@@ -74,6 +74,27 @@ module Meringue
         raise NotImplementedError, "harness clients must implement #read_events"
       end
 
+      # Harness-neutral outcome of the session's most recent turn.
+      #
+      # A session that is no longer streaming has not necessarily finished its
+      # work: the turn can also end because the transport died, the provider
+      # request failed (a dropped wifi connection, DNS/TLS failure, 5xx), or the
+      # process disappeared mid-tool-call. Clients that can tell those apart
+      # return:
+      #
+      #   { "state" => "completed" | "failed" | "incomplete",
+      #     "kind" => "network_failure" | "provider_error" | ...,
+      #     "reason" => human-readable sentence fragment,
+      #     "stop_reason" => harness stop reason,
+      #     "error_message" => harness error text }
+      #
+      # Returning nil means "no evidence available"; the kernel then falls back to
+      # the session events it already has. Only an explicit "failed" state makes
+      # the kernel settle an agent as `errored` instead of `completed`.
+      def turn_outcome(_session_ref)
+        nil
+      end
+
       def attach_session(session_ref)
         raise NotImplementedError, "harness clients must implement #attach_session"
       end

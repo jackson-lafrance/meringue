@@ -18,9 +18,10 @@ module Meringue
         issue_map = issue_id_map(state, project_map)
         worker_map = worker_id_map(state, issue_map)
         question_map = sequential_map(state.fetch("questions"), /^Q(\d+)$/) { |number, _record| "Q#{number}" }
-        id_map = project_map.merge(issue_map).merge(worker_map).merge(question_map)
+        goal_map = sequential_map(goal_records(state), Meringue::Goals::Record::ID_PATTERN) { |number, _record| "G#{number}" }
+        id_map = project_map.merge(issue_map).merge(worker_map).merge(question_map).merge(goal_map)
 
-        rewrite_primary_ids!(state, project_map, issue_map, worker_map, question_map)
+        rewrite_primary_ids!(state, project_map, issue_map, worker_map, question_map, goal_map)
         rewrite_record_references!(state, id_map)
         clean_agent_relationships!(state)
         rebuild_issue_agent_ids!(state)
@@ -31,8 +32,13 @@ module Meringue
           "project_ids" => changed_entries(project_map),
           "issue_ids" => changed_entries(issue_map),
           "worker_ids" => changed_entries(worker_map),
-          "question_ids" => changed_entries(question_map)
+          "question_ids" => changed_entries(question_map),
+          "goal_ids" => changed_entries(goal_map)
         }
+      end
+
+      def goal_records(state)
+        Array(state["goals"]).select { |goal| goal.is_a?(Hash) }
       end
 
       def sequential_map(records, pattern)
@@ -75,7 +81,7 @@ module Meringue
         end.map(&:first)
       end
 
-      def rewrite_primary_ids!(state, project_map, issue_map, worker_map, question_map)
+      def rewrite_primary_ids!(state, project_map, issue_map, worker_map, question_map, goal_map = {})
         state.fetch("projects").each { |project| project["id"] = project_map.fetch(project.fetch("id")) }
         state.fetch("issues").each { |issue| issue["id"] = issue_map.fetch(issue.fetch("id")) }
         state.fetch("agents").each do |agent|
@@ -84,6 +90,7 @@ module Meringue
           agent["id"] = worker_map.fetch(agent.fetch("id"))
         end
         state.fetch("questions").each { |question| question["id"] = question_map.fetch(question.fetch("id")) }
+        goal_records(state).each { |goal| goal["id"] = goal_map.fetch(goal.fetch("id")) }
       end
 
       def rewrite_record_references!(state, id_map)
@@ -103,6 +110,11 @@ module Meringue
 
         state.fetch("questions").each do |question|
           rewrite_keys!(question, id_map, %w[head_id project_id issue_id])
+        end
+
+        goal_records(state).each do |goal|
+          rewrite_keys!(goal, id_map, %w[project_id issue_id active_worker_id question_id])
+          rewrite_structured_references!(goal["iterations"], id_map)
         end
 
         state.fetch("logs").each do |log|
@@ -202,6 +214,7 @@ module Meringue
         counters = state.fetch("counters")
         counters["projects"] = state.fetch("projects").length
         counters["questions"] = state.fetch("questions").length
+        counters["goals"] = goal_records(state).length
         counters["issues_by_project"] = state.fetch("projects").to_h do |project|
           project_id = project.fetch("id")
           [project_id, state.fetch("issues").count { |issue| issue.fetch("project_id", nil) == project_id }]
@@ -217,6 +230,8 @@ module Meringue
         issue_ids = state.fetch("issues").map { |issue| issue.fetch("id") }
         worker_ids = state.fetch("agents").select { |agent| agent.fetch("type", nil) == "worker" }.map { |agent| agent.fetch("id") }
         question_ids = state.fetch("questions").map { |question| question.fetch("id") }
+        goal_ids = goal_records(state).map { |goal| goal.fetch("id") }
+        raise ArgumentError, "Recount produced duplicate goal IDs." unless goal_ids.uniq.length == goal_ids.length
         raise ArgumentError, "Recount produced duplicate project IDs." unless project_ids.uniq.length == project_ids.length
         raise ArgumentError, "Recount produced duplicate issue IDs." unless issue_ids.uniq.length == issue_ids.length
         raise ArgumentError, "Recount produced duplicate worker IDs." unless worker_ids.uniq.length == worker_ids.length
@@ -238,6 +253,12 @@ module Meringue
           issue = state.fetch("issues").find { |candidate| candidate.fetch("id", nil) == agent.fetch("issue_id", nil) }
           unless issue && issue.fetch("project_id", nil) == agent.fetch("project_id", nil)
             raise ArgumentError, "Worker #{agent.fetch("id")} has an invalid issue after recount."
+          end
+        end
+        goal_records(state).each do |goal|
+          issue = state.fetch("issues").find { |candidate| candidate.fetch("id", nil) == goal.fetch("issue_id", nil) }
+          unless issue && issue.fetch("project_id", nil) == goal.fetch("project_id", nil)
+            raise ArgumentError, "Goal #{goal.fetch("id")} has an invalid issue after recount."
           end
         end
         true

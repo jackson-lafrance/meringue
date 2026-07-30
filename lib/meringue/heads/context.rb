@@ -382,7 +382,9 @@ module Meringue
             "harness_session_file" => agent.fetch("harness_session_file", nil),
             "is_streaming" => streaming,
             "session_available" => session_available,
-            "resumable" => session_available && !%w[killed errored].include?(agent.fetch("status", nil)),
+            "resumable" => session_available && !terminal_for_prompting?(agent),
+            "stopped_without_finishing" => stopped_without_finishing?(agent) || nil,
+            "status_reason" => metadata.fetch("status_reason", nil),
             "supported_prompt_modes_now" => supported_prompt_modes(agent, streaming: streaming, session_available: session_available),
             "recommended_prompt_mode" => recommended_prompt_mode(agent, streaming: streaming, session_available: session_available),
             "prompt_mode_note" => prompt_mode_note(agent, streaming: streaming, session_available: session_available),
@@ -465,9 +467,25 @@ module Meringue
         present_value?(issue.fetch("delivery_pull_request", nil)) || Array(issue.fetch("delivery_pull_requests", [])).any?
       end
 
+      # A worker that errored because its turn was cut short by a transport failure (a dropped
+      # wifi connection is the common case) still owns a resumable session, so prompting it to
+      # continue is the right routing choice. Every other errored or killed worker is terminal.
+      def stopped_without_finishing?(agent)
+        return false unless agent.fetch("status", nil) == "errored"
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata.fetch("settle_failure", nil).is_a?(Hash)
+      end
+
+      def terminal_for_prompting?(agent)
+        return false unless %w[killed errored].include?(agent.fetch("status", nil))
+
+        !stopped_without_finishing?(agent)
+      end
+
       def supported_prompt_modes(agent, streaming:, session_available:)
         return [] unless session_available
-        return [] if %w[killed errored].include?(agent.fetch("status", nil))
+        return [] if terminal_for_prompting?(agent)
 
         if streaming
           agent.fetch("harness", nil) == "pi" ? %w[steer follow_up] : []

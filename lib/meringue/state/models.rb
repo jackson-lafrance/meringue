@@ -2,6 +2,8 @@
 
 require "time"
 
+require_relative "../goals/record"
+
 module Meringue
   module State
     module Models
@@ -33,6 +35,9 @@ module Meringue
         state["issues"] ||= []
         state["agents"] ||= []
         state["questions"] ||= []
+        # Goal loop controllers. A goal is attached to exactly one issue and is durable
+        # orchestration state, so it lives beside issues rather than in logs.
+        Goals::Record.normalize_goals!(state)
         state["logs"] ||= []
         state["conversation"] ||= {}
         state["conversation"]["messages"] ||= []
@@ -43,6 +48,7 @@ module Meringue
         state["counters"]["projects"] ||= max_numeric_suffix(state.fetch("projects"), /^P(\d+)$/)
         state["counters"]["heads"] ||= max_numeric_suffix(state.fetch("agents").select { |agent| agent["type"] == "head" }, /^H(\d+)$/)
         state["counters"]["questions"] ||= max_numeric_suffix(state.fetch("questions"), /^Q(\d+)$/)
+        state["counters"]["goals"] ||= max_numeric_suffix(state.fetch("goals"), Goals::Record::ID_PATTERN)
         # Calculate the high-water mark before retention so loading an older,
         # unbounded state without a log counter cannot reuse a discarded ID.
         state["counters"]["logs"] = [

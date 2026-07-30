@@ -14,7 +14,7 @@ agent_select_next = ["j", "down", "right"]
 
 ## Global
 
-- `Ctrl-B`: open the selected worker's kernel-verified delivery pull request. If the PR is missing, malformed, or its status cannot be refreshed, Meringue reports that state without closing the dashboard or changing the worker.
+- `Ctrl-B`: open a delivery pull request. While a worker/issue is selected (or jump mode is on a row) it opens that node's own kernel-verified PR. With nothing selected it opens the **open pull requests** picker instead, because unscoped chat is not about one worker; `↑`/`↓` move, `Enter` opens the highlighted PR in the browser, and `Esc`, another `Ctrl-B`, a click outside the list, or any other key closes it. Clicking a row opens that row. If a PR is missing, malformed, or its status cannot be refreshed, Meringue reports that state without closing the dashboard or changing the worker.
 - `Ctrl-D`: quit.
 - `Ctrl-C`: clear input; quit when input is empty.
 - `Esc`: cancel the innermost active thing — a text selection or the logs selection cursor first, then the AgentTree selection (which clears the logs filter) and jump mode.
@@ -112,6 +112,31 @@ The destination is named in exactly one place: the composer's pane title, on the
 - Color is never the only cue. The title always names the destination, the hint line always says who routes the message and how to clear the selection, and an empty targeted composer's placeholder reads `message P1-I9-W3`. With `NO_COLOR=1`, a 16-color terminal, or a screenshot, the text still says exactly where the prompt is going.
 - Typing a slash command removes the tint immediately, because slash commands never inherit the selection. The selection itself is untouched: delete the `/` and the tint (and the routing target) come back.
 - A selection the kernel or reconciliation drops (pruned, killed, renumbered) also drops the tint, so a colored composer always refers to a node that still exists.
+
+### What the bottom hint line shows
+
+The single row under the chat bar is shared, left to right, and truncated at the terminal width, so every group has to earn its columns. In order:
+
+1. **Routing gestures** for the current selection (`head routes · Esc clears`, or `slash ignores target · Esc clears`). Never the target id, which the composer title above already names.
+2. **Text-selection state** when a selection or the logs cursor is active (`⧉ selection  Ctrl-C copies`, `⧉ copied 3 lines`, or the `Alt-V` hint while the logs pane is focused).
+3. **Work in flight**: `● 2W 1H` (working workers and heads) or `2 prompts running`. There is no `active` label; the lit dot and the counts say it.
+4. **Open questions**: `? 2`.
+5. **Delivery PRs**, which depend on what the dashboard is looking at:
+
+| dashboard state | hint | `Ctrl-B` |
+| --- | --- | --- |
+| a worker/issue is selected, or jump mode is on a row, and it has a verified PR | `PR #145 open` (`· stale` or `status unavailable` when the last refresh could not confirm it) | opens that PR |
+| that node has no verified PR yet | `no PR yet` | reports why it cannot open one |
+| that node's tracked PR metadata is not a usable GitHub URL | `PR link unusable` | reports the same |
+| nothing is selected and the tree has open PRs | `3 open PRs` | opens the open-PR picker |
+| nothing is selected and every tracked PR is merged/closed | `no open PRs` | says nothing is open |
+| nothing is selected and no PR has ever been tracked | *(silent)* | says nothing is tracked yet |
+
+6. **Interaction hints**: `Enter send · Ctrl-C clear/quit · Tab focus · / commands · /keybind keys`.
+
+A selected worker shows the PR for **its own** delivery branch, not merely the first PR ever attached to its issue, so a second worker on an issue no longer displays its predecessor's number. An issue selection shows the newest PR that is still live, falling back to the newest settled one so a finished issue still says what it delivered. Every one of these facts comes from state the kernel already persisted (`delivery_pull_requests` on the issue); rendering never runs `gh`.
+
+The open-PR picker opens in the same popup slot as the slash-command list, above the composer, and lists every PR that is not merged or closed, newest number first: `#145  Fix signup validation  P1-I9 · open`. A PR the kernel has not verified yet is listed as `unverified` rather than hidden. Rows are named by their issue title, because delivery records do not carry a PR title of their own.
 
 The selection is sticky and independent of focus:
 
@@ -211,6 +236,7 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 - `Up` / `Down`: select a suggestion; `Down` starts at the first entry and `Up` starts at the last.
 - `Enter`: insert the selected suggestion into the input. Press `Enter` again to run it.
 - `Tab`: complete the selected suggestion, or the first one when nothing is selected.
+- The box shows a window of three entries and holds **commands only**. When the list is longer than the window, a dim caption renders on its own line *below* the box: `1–3 of 27 commands  ·  ↑↓ scroll · keep typing to filter`. It is a caption about the list, not a row in it, so the window never loses an entry to it; a list that fits the window has no caption at all. The same slot and the same caption placement are used by the `Ctrl-B` open-PR picker (`2 open PRs  ·  ↑↓ move · Enter opens · Esc closes`). The focused-workspace `workspace commands` list is unwindowed and has no caption.
 
 ## Jump mode
 
@@ -218,7 +244,7 @@ Start jump mode with `/jump` or by focusing the agent tree or logs pane and pres
 
 - `Up` / `Down` / `Left` / `Right`: select an issue or agent, which also retargets the logs pane filter to the newly selected node and auto-scrolls the AgentTree by the minimum amount needed to keep the selected row visible. In the logs pane, only agent titles are selectable; non-agent events are skipped.
 - `PageUp` / `PageDown`, `Home` / `End`, and the mouse wheel: scroll the focused pane while a selection is active, since jump mode owns the arrow keys.
-- `Ctrl-B`: open the selected worker's verified delivery pull request. The PR remains easy to open when status refresh is temporarily unavailable.
+- `Ctrl-B`: open the selected worker's verified delivery pull request (jump mode always has a row selected, so it never opens the picker). The PR remains easy to open when status refresh is temporarily unavailable.
 - `Enter`: open the selected agent's pull request when a PR is available.
 - `a`: open the selected worker's focused workspace. Selecting an issue opens its newest non-killed worker; heads without a durable worker context stay on the dashboard.
 - `Esc`: cancel jump mode and clear the AgentTree selection, including its logs filter.

@@ -44,9 +44,11 @@ module Meringue
           # selected row, so the highlight survives focus changes.
           selected_agent_id = AgentTreeNavigation.highlighted_ids_for(state)
 
+          goals = records(state, "goals")
+
           output = []
           append_heads(output, agents, selected_agent_id, width)
-          append_projects(output, projects, issues, agents, selected_agent_id, width)
+          append_projects(output, projects, issues, agents, selected_agent_id, width, goals)
           output.empty? ? [[['No AgentTree data yet.', Style::MUTED]]] : output
         end
 
@@ -56,9 +58,11 @@ module Meringue
           agents = records(state, "agents")
           selected_agent_id = AgentTreeNavigation.highlighted_ids_for(state)
 
+          goals = records(state, "goals")
+
           output = []
           append_head_worker_ids(output, agents, selected_agent_id, width)
-          append_project_worker_ids(output, projects, issues, agents, selected_agent_id, width)
+          append_project_worker_ids(output, projects, issues, agents, selected_agent_id, width, goals)
           output.empty? ? [nil] : output
         end
 
@@ -116,19 +120,19 @@ module Meringue
           output << nil
         end
 
-        def append_projects(output, projects, issues, agents, selected_agent_id, width)
+        def append_projects(output, projects, issues, agents, selected_agent_id, width, goals = [])
           sorted_projects = projects.sort_by { |project| sort_key(project["id"]) }
           sorted_projects.each_with_index do |project, index|
             output.concat(project_lines(project, width: width, selected: AgentTreeNavigation.selected_agent?(project, selected_agent_id)))
 
             project_issues = issues.select { |issue| issue["project_id"] == project["id"] }
             issues_by_parent = project_issues.group_by { |issue| issue["parent_issue_id"] }
-            render_issues(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: nil, prefix: "", width: width)
+            render_issues(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: nil, prefix: "", width: width, goals: goals)
             output << spacer_line unless index == sorted_projects.length - 1
           end
         end
 
-        def render_issues(output, issues_by_parent, agents, selected_agent_id:, parent_id:, prefix:, width:)
+        def render_issues(output, issues_by_parent, agents, selected_agent_id:, parent_id:, prefix:, width:, goals: [])
           child_issues = issues_by_parent.fetch(parent_id, []).sort_by { |issue| sort_key(issue["id"]) }
 
           child_issues.each_with_index do |issue, issue_index|
@@ -142,7 +146,7 @@ module Meringue
               record: issue,
               id: short_id(issue["id"]),
               title: issue.fetch("title", "Untitled issue"),
-              suffix: issue_suffix(issue, workers),
+              suffix: issue_suffix(issue, workers, goals),
               selected: AgentTreeNavigation.selected_agent?(issue, selected_agent_id),
               width: width
             ))
@@ -160,11 +164,11 @@ module Meringue
               ))
             end
 
-            render_issues(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: issue["id"], prefix: next_prefix, width: width)
+            render_issues(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: issue["id"], prefix: next_prefix, width: width, goals: goals)
           end
         end
 
-        def append_project_worker_ids(output, projects, issues, agents, selected_agent_id, width)
+        def append_project_worker_ids(output, projects, issues, agents, selected_agent_id, width, goals = [])
           sorted_projects = projects.sort_by { |project| sort_key(project["id"]) }
           sorted_projects.each_with_index do |project, index|
             # Project rows are clickable, so they carry their own id for hit-testing.
@@ -175,12 +179,12 @@ module Meringue
 
             project_issues = issues.select { |issue| issue["project_id"] == project["id"] }
             issues_by_parent = project_issues.group_by { |issue| issue["parent_issue_id"] }
-            append_issue_worker_ids(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: nil, prefix: "", width: width)
+            append_issue_worker_ids(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: nil, prefix: "", width: width, goals: goals)
             output << nil unless index == sorted_projects.length - 1
           end
         end
 
-        def append_issue_worker_ids(output, issues_by_parent, agents, selected_agent_id:, parent_id:, prefix:, width:)
+        def append_issue_worker_ids(output, issues_by_parent, agents, selected_agent_id:, parent_id:, prefix:, width:, goals: [])
           child_issues = issues_by_parent.fetch(parent_id, []).sort_by { |issue| sort_key(issue["id"]) }
 
           child_issues.each_with_index do |issue, issue_index|
@@ -194,7 +198,7 @@ module Meringue
               record: issue,
               id: short_id(issue["id"]),
               title: issue.fetch("title", "Untitled issue"),
-              suffix: issue_suffix(issue, workers),
+              suffix: issue_suffix(issue, workers, goals),
               selected: AgentTreeNavigation.selected_agent?(issue, selected_agent_id),
               width: width
             ), issue.fetch("id")))
@@ -508,8 +512,33 @@ module Meringue
           metadata.fetch("title", "#{record.fetch("type", "item")} session")
         end
 
-        def issue_suffix(issue, workers)
-          [progress(workers), active_pr_marker(issue)].reject(&:empty?).join(" ")
+        def issue_suffix(issue, workers, goals = [])
+          [goal_marker(issue, goals), progress(workers), active_pr_marker(issue)].reject(&:empty?).join(" ")
+        end
+
+        # A goal loop is rendered as a suffix on the issue it controls, not as a new node kind:
+        # the AgentTree stays projects -> issues -> workers.
+        def goal_marker(issue, goals)
+          goal = Array(goals).find { |candidate| candidate.is_a?(Hash) && candidate["issue_id"] == issue["id"] }
+          return "" unless goal
+
+          budget = goal["budget"].is_a?(Hash) ? goal["budget"] : {}
+          parts = ["◎#{goal["current_iteration"].to_i}/#{budget["max_iterations"].to_i}"]
+          metric = goal["metric"].is_a?(Hash) ? goal["metric"] : {}
+          latest = goal["last_metric"].is_a?(Hash) ? goal["last_metric"]["value"] : nil
+          parts << "#{goal_number(latest)}/#{goal_number(metric["target"])}" if metric["target"]
+          parts << goal["stop_reason"].to_s.tr("_", " ") if goal["stop_reason"]
+          parts << "paused" if goal["paused"]
+          parts.reject { |part| part.to_s.empty? }.join(" ")
+        end
+
+        def goal_number(value)
+          return "?" if value.nil?
+
+          number = Float(value)
+          number == number.round ? number.round.to_s : format("%.1f", number)
+        rescue ArgumentError, TypeError
+          "?"
         end
 
         def progress(workers)
@@ -523,7 +552,20 @@ module Meringue
         def worker_suffix(worker, issue = nil)
           # Delivery PRs are owned by issues so they survive worker replacement and restart.
           # Reflect the issue marker on its worker rows without copying metadata back to workers.
-          [worker_relationship_marker(worker), active_pr_marker(issue || worker)].reject(&:empty?).join(" ")
+          [
+            unfinished_marker(worker),
+            worker_relationship_marker(worker),
+            active_pr_marker(issue || worker)
+          ].reject(&:empty?).join(" ")
+        end
+
+        # An errored worker whose turn died mid-flight reads differently from one that failed its
+        # work, so the row says so instead of only showing the error dot.
+        def unfinished_marker(worker)
+          metadata = worker.is_a?(Hash) ? (worker["harness_metadata"] || {}) : {}
+          return "" unless metadata.is_a?(Hash) && metadata["settle_failure"].is_a?(Hash)
+
+          metadata["settle_failure"]["kind"].to_s == "network_failure" ? "stopped: connection lost" : "stopped mid-turn"
         end
 
         def worker_relationship_marker(worker)

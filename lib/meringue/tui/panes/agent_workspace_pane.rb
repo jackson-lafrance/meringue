@@ -202,6 +202,7 @@ module Meringue
           lines = [
             [[agent_title(agent), Style::TITLE]],
             compact_identity_line(agent),
+            status_reason_line(agent, metadata),
             session_settings_line(agent),
             issue_line(issue),
             workspace_path_line(agent),
@@ -227,6 +228,17 @@ module Meringue
             segments << [value, index == 1 ? status_style(value) : Style::MUTED]
             segments
           end
+        end
+
+        # Why an agent is in its current status, when the kernel recorded one. This is what lets a
+        # worker whose turn died from a dropped connection read as "this died" instead of
+        # "this finished".
+        def status_reason_line(agent, metadata)
+          reason = metadata.fetch("status_reason", nil).to_s.strip
+          return nil if reason.empty?
+
+          style = agent.fetch("status", nil).to_s == "errored" ? Style::ERROR : Style::WARNING
+          [["status ", Style::DIM], [reason, style]]
         end
 
         def session_settings_line(agent)

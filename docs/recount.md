@@ -10,6 +10,7 @@ Records keep their existing numeric creation order within each scope:
 - Issues are compacted independently inside each project (`P1-I2`, `P1-I3` becomes `P1-I1`, `P1-I2`). A project rename also changes the project prefix.
 - Workers are compacted independently inside each issue (`...-W2`, `...-W3` becomes `...-W1`, `...-W2`). Project and issue prefix changes flow into worker IDs.
 - Questions are compacted globally (`Q2`, `Q4` becomes `Q1`, `Q2`).
+- Goals are compacted globally (`G2`, `G4` becomes `G1`, `G2`). A goal's project/issue links, its recorded attempt worker ids, and its iteration history follow the renumbering, and the goal counter is rebuilt with the others.
 
 The command updates issue parent links, issue agent lists and last-agent links, worker follow-up/replacement links, question ownership links, structured log references, and ID-bearing structured harness metadata such as a persisted head result. Worker relationship links whose target was already removed are cleared rather than being allowed to point at a newly reused ID. Project, issue, and worker counters are rebuilt from the resulting tree, so the next created entity receives the number after the compacted range.
 
