@@ -18,6 +18,24 @@ module Meringue
         "claude" => "claude",
         "antigravity" => "antigravity"
       }.freeze
+      # Single-cell display glyphs, so a session's backend is identifiable at a
+      # glance next to its Meringue id. Provider presentation already lives in
+      # this registry (see PROVIDER_LABELS), which keeps panes harness-agnostic:
+      # they ask the registry for a glyph instead of knowing about Pi or Claude.
+      PROVIDER_GLYPHS = {
+        "pi" => "π",
+        "claude" => "✳",
+        "antigravity" => "↑"
+      }.freeze
+      # Same marks in plain ASCII for fonts/terminals that cannot draw the
+      # glyphs above, selected with MERINGUE_ASCII_GLYPHS.
+      PROVIDER_ASCII_GLYPHS = {
+        "pi" => "p",
+        "claude" => "c",
+        "antigravity" => "a"
+      }.freeze
+      # Matches the AgentTree's unknown-status convention.
+      UNKNOWN_PROVIDER_GLYPH = "?"
       PROVIDER_ALIASES = {
         "pi" => "pi",
         "claude" => "claude",
@@ -107,6 +125,35 @@ module Meringue
 
       def self.provider_label(provider)
         PROVIDER_LABELS.fetch(normalize_provider(provider), provider.to_s)
+      end
+
+      # Degrades in three steps, and every branch is exactly one column wide so
+      # a renderer can reserve one cell and never misalign:
+      #
+      # 1. a shipped provider's mark (or its ASCII twin under
+      #    MERINGUE_ASCII_GLYPHS);
+      # 2. a plain ASCII initial for a provider Meringue does not ship, such as
+      #    the `fake` harness used by the demo fixture and the test suite, so an
+      #    unknown backend never masquerades as a shipped one;
+      # 3. "?" when the record carries no harness at all.
+      #
+      # This deliberately does not reuse normalize_provider, which resolves a
+      # blank value to the default provider: "no harness recorded" must not
+      # render as Pi.
+      def self.provider_glyph(provider, ascii: ascii_glyphs?)
+        name = provider.to_s.strip.downcase.gsub(/\s+/, " ")
+        return UNKNOWN_PROVIDER_GLYPH if name.empty?
+
+        normalized = PROVIDER_ALIASES.fetch(name, name)
+        glyphs = ascii ? PROVIDER_ASCII_GLYPHS : PROVIDER_GLYPHS
+        return glyphs.fetch(normalized) if glyphs.key?(normalized)
+
+        initial = normalized[0].to_s
+        initial.match?(/[a-z0-9]/) ? initial : UNKNOWN_PROVIDER_GLYPH
+      end
+
+      def self.ascii_glyphs?
+        !ENV.fetch("MERINGUE_ASCII_GLYPHS", "").to_s.strip.empty?
       end
 
       def self.public_provider_name(provider)

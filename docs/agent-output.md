@@ -88,7 +88,12 @@ Before parsing, the renderer normalizes invalid UTF-8 and strips CSI, OSC, other
 
 Agent identity colors remain deterministic per id and active theme. Markdown headings and structural markers reuse the same agent palette entry as the header and `▌` gutter. The explicit agent id, head/worker/result icon, Markdown markers, status text, and gutter remain present when `NO_COLOR` is set, so identity and document structure do not depend on color alone.
 
-The chat composer reuses that same identity assignment as chrome: while an AgentTree issue/agent is selected, the composer border, pane title, `›` prompt marker, and target chip take the selected node's palette entry, so the box you type into matches the log rows it will prompt. Typed input keeps its normal text style, and the composer title/chip still name the target in plain text, so the cue survives `NO_COLOR` and limited color support. See [`docs/keybindings.md`](keybindings.md#the-composer-shows-its-target-by-color).
+Two other surfaces reuse that same identity assignment, so one agent is one color everywhere:
+
+- **The AgentTree.** Each agent row draws its harness logo and its id in the agent's palette entry, in every lifecycle status, including completed rows. Status keeps its own semantic glyph color and completed titles stay muted, so color is additive. See [`docs/keybindings.md`](keybindings.md#agenttree-agent-colors-and-harness-logos).
+- **The chat composer.** While an AgentTree issue/agent is selected, the composer border, pane title, `›` prompt marker, and target chip take the selected node's palette entry, so the box you type into matches the tree row and log rows it will prompt. Typed input keeps its normal text style, and the composer title/chip still name the target in plain text. See [`docs/keybindings.md`](keybindings.md#the-composer-shows-its-target-by-color).
+
+Both cues survive `NO_COLOR` and limited color support: ids, harness glyphs, status glyphs, and the composer title/chip text carry the same information without color.
 
 ## Manual regression fixture
 
