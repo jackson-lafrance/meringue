@@ -167,3 +167,37 @@ these are contract assertions rather than archaeology:
   `KernelWorkersSupport::RecordingHarnessClient` (and its broken-session subclass).
 - Real `git` is used for worktree provisioning against throwaway repositories, which is
   what makes this slice's runtime (~5s per file) dominated by git rather than Ruby.
+
+## Settle classification (network-aborted turns)
+
+Added by the "mark network-aborted agents errored" slice:
+
+- `test/integration/kernel_workers/settle_classification_test.rb`
+
+This slice changed behavior rather than only recording it. Previously a settled harness
+session was treated as a completion, so a turn killed by a dropped connection was logged
+`Worker <id> completed.` with an empty `last_assistant_text` and rolled its issue up to
+`completed`. `Engine#mark_worker_completed` now classifies the settle first:
+
+- a turn with a real final assistant message still settles as `completed`
+- a harness-reported failed turn, or a transport event with no final message at all,
+  settles as `errored` with `harness_metadata.settle_failure`, `settle_state = "failed"`,
+  `status_reason`, and an `error`-level `Worker <id> errored without finishing: …` log
+- `completed_at` is never written for a failed settle, so an issue cannot roll up to
+  `completed` behind it
+
+Notes for future slices:
+
+- Re-observing an already-recorded dead turn is a silent no-op (`changed => false`, no log),
+  which keeps the 2s reconciliation loop from spamming an already-errored record.
+- Failure evidence older than `harness_metadata.last_prompted_at` is treated as stale, so a
+  recovered worker is not re-errored from the persisted evidence of the turn it recovered from.
+- A worker errored this way stays resumable: `PromptAgent` accepts it while it still has a
+  session reference, queued `pending_prompts` are still redelivered, and delivering a prompt
+  clears `settle_failure` into `previous_settle_failure`.
+- Interaction with deferred workers (`after_agent_id`): a dependent queued behind a worker whose
+  turn died mid-flight **keeps waiting** instead of being cancelled, because that predecessor can
+  still be continued and a wifi blip must not delete queued work. `if_predecessor_fails: "run"`
+  still activates immediately, killing the predecessor still cancels the chain, and an errored
+  predecessor with no resumable session still cancels the dependent exactly as before. Spawning
+  behind an already settle-failed worker is queued rather than rejected.

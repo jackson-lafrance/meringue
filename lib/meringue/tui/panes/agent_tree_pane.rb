@@ -523,7 +523,20 @@ module Meringue
         def worker_suffix(worker, issue = nil)
           # Delivery PRs are owned by issues so they survive worker replacement and restart.
           # Reflect the issue marker on its worker rows without copying metadata back to workers.
-          [worker_relationship_marker(worker), active_pr_marker(issue || worker)].reject(&:empty?).join(" ")
+          [
+            unfinished_marker(worker),
+            worker_relationship_marker(worker),
+            active_pr_marker(issue || worker)
+          ].reject(&:empty?).join(" ")
+        end
+
+        # An errored worker whose turn died mid-flight reads differently from one that failed its
+        # work, so the row says so instead of only showing the error dot.
+        def unfinished_marker(worker)
+          metadata = worker.is_a?(Hash) ? (worker["harness_metadata"] || {}) : {}
+          return "" unless metadata.is_a?(Hash) && metadata["settle_failure"].is_a?(Hash)
+
+          metadata["settle_failure"]["kind"].to_s == "network_failure" ? "stopped: connection lost" : "stopped mid-turn"
         end
 
         def worker_relationship_marker(worker)

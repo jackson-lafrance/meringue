@@ -157,6 +157,10 @@ Log entries do not have lifecycle statuses. They use log levels:
 
 The TUI should never invent new lifecycle statuses, question statuses, or log levels. If a new value is needed, add it here first and update the kernel state model, persistence schema, and TUI rendering.
 
+`completed` means the work really finished. A harness session that merely stopped streaming is not evidence of completion: a turn also ends when the transport or provider request dies (dropped wifi, DNS/TLS failure, provider 5xx, a session that disappears mid-tool-call). The kernel must classify that settle, not assume it: a turn with a real final assistant message settles as `completed`, and a turn that died mid-flight or a session that vanished without producing a result settles as `errored` with a human-readable reason recorded in `harness_metadata` and shown in the log line and the AgentTree/focused pane. An `errored` worker never rolls its issue or project up to `completed`.
+
+That errored state must stay recoverable. A worker whose turn was cut short keeps its harness session reference, workspace, worktree, and branch, keeps any prompt that was queued for it, and can be prompted to continue; only a worker whose session is genuinely gone is terminal for prompting.
+
 ## Persistence
 Store Meringue state in JSON.
 
