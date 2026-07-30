@@ -63,6 +63,56 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert(choices.all? { |choice| choice.fetch("description").start_with?("Use ") })
   end
 
+  # The TUI asks the registry for a harness logo instead of knowing about Pi or
+  # Claude itself, so provider display glyphs live and degrade here.
+  def test_provider_glyphs_are_one_cell_wide_and_resolve_through_aliases
+    assert_equal "π", Registry.provider_glyph("pi")
+    assert_equal "✳", Registry.provider_glyph("claude")
+    assert_equal "✳", Registry.provider_glyph("Claude Code")
+    assert_equal "✳", Registry.provider_glyph("CC")
+    assert_equal "↑", Registry.provider_glyph("antigravity")
+    assert_equal "↑", Registry.provider_glyph("agy")
+
+    glyphs = Registry::PROVIDERS.map { |provider| Registry.provider_glyph(provider) }
+    assert_equal glyphs.uniq, glyphs, "each shipped provider needs its own mark"
+    assert(glyphs.all? { |glyph| glyph.length == 1 }, "a renderer reserves exactly one cell")
+  end
+
+  def test_unknown_and_missing_harnesses_degrade_to_plain_ascii
+    # An unrecognized provider keeps a stable ASCII initial instead of
+    # masquerading as a shipped backend. "fake" is the test/dev harness.
+    assert_equal "f", Registry.provider_glyph("fake")
+    assert_equal "c", Registry.provider_glyph("codex")
+    assert_equal "?", Registry.provider_glyph("!!")
+
+    # Unlike normalize_provider, a blank harness is not the default provider:
+    # "nothing recorded" must not render as Pi.
+    assert_equal "pi", Registry.normalize_provider("")
+    assert_equal "?", Registry.provider_glyph("")
+    assert_equal "?", Registry.provider_glyph(nil)
+    assert_equal "?", Registry.provider_glyph("   ")
+    assert_equal 1, Registry::UNKNOWN_PROVIDER_GLYPH.length
+  end
+
+  def test_ascii_glyph_mode_is_opt_in_through_the_environment
+    refute Registry.ascii_glyphs?
+
+    with_env("MERINGUE_ASCII_GLYPHS" => "1") do
+      assert Registry.ascii_glyphs?
+      assert_equal "p", Registry.provider_glyph("pi")
+      assert_equal "c", Registry.provider_glyph("claude-code")
+      assert_equal "a", Registry.provider_glyph("agy")
+      assert_equal "?", Registry.provider_glyph(nil)
+    end
+
+    with_env("MERINGUE_ASCII_GLYPHS" => "  ") do
+      refute Registry.ascii_glyphs?, "a blank value is not opt-in"
+      assert_equal "π", Registry.provider_glyph("pi")
+    end
+
+    assert_equal "π", Registry.provider_glyph("pi")
+  end
+
   def test_default_provider_is_pi
     subject = registry
 

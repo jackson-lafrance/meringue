@@ -37,7 +37,7 @@ Meringue provides a single control plane for multi-agent development:
 - **Bring your own harness.** Use the coding-agent backend you want while Meringue handles orchestration, state, logs, and navigation.
 - **One chat stream for new work.** Natural-language prompts spawn short-lived head agents that decide what should happen next.
 - **A kernel-owned state model.** The kernel validates commands, mutates JSON state, allocates worker workspaces, and records logs.
-- **An AgentTree view.** Projects, issues, heads, workers, questions, and PR markers are shown in a filesystem-like hierarchy.
+- **An AgentTree view.** Projects, issues, heads, workers, questions, and PR markers are shown in a filesystem-like hierarchy. Every agent row carries its own identity color and its harness logo, in every status, and the same color follows that agent into the logs pane and the chat composer.
 - **Structured logs.** Important lifecycle events are captured without flooding the UI with every streamed token.
 - **Safe parallelism.** For git-backed projects, workers should run in dedicated worktrees and branches so multiple agents can edit safely at once.
 
@@ -78,6 +78,8 @@ scripts/kernel_exactly_once_smoke.rb # checks exactly-once command application a
 scripts/question_answer_smoke.rb   # checks that answering a question routes real work, with no harness
 scripts/agent_tree_scroll_smoke.rb # checks AgentTree pane scrolling, clamping, and selection reveal
 scripts/head_user_command_smoke.rb # checks head-proposed user commands, guardrails, and typed-path parity
+scripts/chat_target_smoke.rb       # previews and checks the composer's colored chat-target cue in every theme
+scripts/agent_identity_smoke.rb    # previews and checks AgentTree agent colors and harness logos in every theme
 ```
 
 ## Setup
@@ -208,7 +210,28 @@ Log rows use compact, color-coded headers so agent output is easy to separate fr
 - `▪ meringue` — kernel, command, and system logs, in the theme accent color.
 - `● you` — your own prompts.
 
-Single-click a project, issue, head, or worker row in the AgentTree to filter the logs pane to that node: a worker shows its own logs, an issue adds its workers and child issues, and a project covers its whole subtree. Issue and worker selections also focus subsequent natural-language chat: an issue targets itself, while a worker resolves to its owning issue and remains a preferred session-context hint. The composer title becomes `chat → <issue_id>` and the bottom chip says that the head routes the message, because every message still spawns a fresh head rather than prompting the worker directly. Selected prompts are tagged to the issue (and the selected worker when applicable), so they remain visible in the focused logs.
+### Identifying agents at a glance
+
+Every agent row in the AgentTree reads as `<status> <harness logo> <id>  <title>`:
+
+```txt
+HEADS
+  └─ ● π H1  Route the request
+
+●   P1  meringue working
+  └─ ●   I1  Fix signup validation 1/3
+    ├─ ● π W1  Add collision check
+    ├─ ✓ ✳ W2  Hide password field
+    └─ · ↑ W3  Check the migration
+```
+
+- The id and logo are drawn in that agent's **identity color** — the same deterministic per-id color its log rows and `▌` gutter already use, and the same color the chat composer takes when the row is selected. One agent is one color in all three places.
+- Color is additive and status-independent: a working agent, a completed agent with its `✓`, and idle/queued/blocked/errored/killed agents all keep their color and logo. Status stays legible through the status glyph's own semantic color and the muted title of a completed row.
+- The logo is the agent's harness: `π` Pi, `✳` Claude Code, `↑` Antigravity. A harness Meringue does not ship shows a plain ASCII initial, and a record with no harness shows `?`. Every variant is exactly one column wide, and issue/project rows reserve the same cell so all ids stay in one column. Set `MERINGUE_ASCII_GLYPHS=1` for `p`/`c`/`a` if your font cannot draw the marks, or `NO_COLOR=1` to drop color while keeping glyphs, ids, and statuses.
+
+Single-click a project, issue, head, or worker row in the AgentTree to filter the logs pane to that node: a worker shows its own logs, an issue adds its workers and child issues, and a project covers its whole subtree. Issue and worker selections also focus subsequent natural-language chat: an issue targets itself, while a worker resolves to its owning issue and remains a preferred session-context hint. Selected prompts are tagged to the issue (and the selected worker when applicable), so they remain visible in the focused logs.
+
+The chat box shows where your next message goes. While an issue or agent is selected, the composer border, title, `›` prompt marker, and bottom chip are tinted with that node's own identity color — the same color the logs pane uses for its rows — and the title reads `chat → P1-I1-W1 · Fix signup validation`. Untargeted states are deliberately plain: no selection reads `chat · head routes` with a dim `⌖ no target` chip, a project or unbound head reads `chat · head routes · P1 logs only`, and typing a slash command drops the tint because slash commands never inherit the selection. Every message still spawns a fresh head rather than prompting the worker directly, so the chip keeps saying `head routes · Esc clears`. Colors are never the only cue, so the target stays readable with `NO_COLOR=1`.
 
 The selected row stays highlighted and the filter keeps applying while you move focus to the logs or chat pane; the logs title becomes `logs — <selected_id>`. Click another row to change the target. Click the highlighted row again, click empty AgentTree space, or press `Esc` to clear it and return chat to unscoped routing. Project selections and heads without an owning issue are log-only filters. Pending heads or issues with no focused worker workspace are a silent no-op when double-clicked, so expected unavailability never floods or persists in chat; actual workspace/open failures are still reported. See [`docs/keybindings.md`](docs/keybindings.md#agenttree-selection-log-filtering-and-chat-routing) for the exact scoping and routing rules.
 
