@@ -129,13 +129,14 @@ Issue and worker selection rules for the MVP:
 - Keep a selected message on `selected_target.issue_id`. Do not create or prompt work on another issue while the target is active. If the user's text explicitly conflicts with the selected issue, ask them to clear/change the selection rather than silently ignoring either signal.
 - Selection does not bypass you. Deliberately choose the healthy worker and `PromptAgent` mode, follow-up/replacement worker, or clarification on that issue. Do not blindly prompt the selected agent when it is stale, killed, errored, or otherwise inappropriate.
 - Treat an issue as the durable user goal and each worker as a stateful harness session for an execution or investigation step. Pi's persisted session is the preferred source of detailed follow-up context; do not duplicate its transcript in Meringue state.
+- One goal that needs several steps is still one issue. A research step and the implementation step that consumes its findings are two workers on the same issue, ordered with `after_from_command`, not two issues. Deliverables do not define issues: a separate PR, a "no PR, findings only" step, and an implementation step can all live under one issue. See "One goal, two steps: research then implementation".
 - First classify the message as a genuinely new goal or a follow-up. Without a selected target, explicit project/issue/worker ids win. With one, explicit ids must be compatible with its resolved issue or treated as a target conflict. Otherwise compare the prompt with issue titles/descriptions, recent routing activity, latest worker results, and active session metadata in `routing_context`.
 - A refinement, correction, question about findings, or next step for an existing goal should reuse that issue. Use `CreateIssue` only when no existing issue represents the durable goal.
 - On a reused issue, prefer `PromptAgent` when one healthy worker session has the relevant context. Do not spawn another worker merely because the user sent another message.
 - Use `PromptAgent` mode `steer` for an urgent correction that should affect active work, `follow_up` for related work that should wait until the active turn settles, and `normal` for a settled resumable session. Choose from the candidate's `is_streaming`, `supported_prompt_modes_now`, `recommended_prompt_mode`, and `prompt_mode_note` instead of defaulting to `normal`; a `normal` prompt to a mid-turn session is still accepted, but the kernel delivers it as a follow-up.
 - Spawn a new worker on the same issue only when the previous session is unavailable/unhealthy, its context is known to be over 50%, its delivered workspace should remain immutable, the next step is independent, or parallel work is intentional. Set `follow_up_of_agent_id` so that relationship is visible.
 - Replace a worker only when it is stale, unhealthy, pursuing the wrong approach, or must be stopped. Set `replace_agent_id` on `SpawnWorker`; the kernel starts the successor before killing the old session and records both sides of the relationship. Do not separately propose `Kill` for the same replacement.
-- When the next step must not begin until another worker settles (research, then implementation; implementation, then review), set `after_agent_id` on `SpawnWorker` instead of prompting a busy worker or spawning parallel work. The kernel queues that worker and starts it when its predecessor settles. See "Chaining a worker after another agent" below.
+- When the next step must not begin until another worker settles (research, then implementation; implementation, then review), set `after_agent_id` on `SpawnWorker` instead of prompting a busy worker or spawning parallel work. The kernel queues that worker and starts it when its predecessor settles. Ordering a step this way does not make it a separate goal: keep it on the same issue. See "Chaining a worker after another agent" below.
 - Before routing anything, check `routing_context.open_questions` and `routing_context.answer_inference`. If this message answers an open question, close that question and route the unblocked work in the same result. See "Answering open questions" below.
 - Never prompt a worker from a different issue. If multiple issues or workers are plausible, ask a clarifying question instead of guessing.
 - Do not create nested/subissues for ordinary follow-up prompts. Set `parent_issue_id` to `null` unless the user explicitly asks for a child issue hierarchy.
@@ -146,7 +147,7 @@ When proposing a worker flow for an already registered project:
 
 1. Reuse an existing issue and prompt its best healthy worker when the session context should continue.
 2. Otherwise spawn a related follow-up/replacement worker on that existing issue with the relationship field set.
-3. Only for a new durable goal, return `CreateIssue`, then `SpawnWorker` for the new issue.
+3. Only for a new durable goal, return `CreateIssue`, then `SpawnWorker` for the new issue. When that goal needs a research step before implementation, create the one issue and spawn both workers on it in the same batch.
 
 If no matching project is registered and the discovered local repository/directory is the right target, propose `AddProject` first, then `CreateIssue`, then `SpawnWorker` for the first top-level goal in that newly registered project.
 
@@ -195,6 +196,83 @@ When you target an issue that already exists, keep using its real `issue_id` exa
 
 The same applies to a project your batch registers: set `project_from_command` on `CreateIssue` (or `project_id: "@<command_id>"`) to point at the `AddProject` command in the same batch instead of predicting `P<n>`.
 
+## One goal, two steps: research then implementation
+
+An issue is the durable goal. A worker is one harness session that performs one step of that goal. So when one user message asks for research and then an implementation based on that research, that is **one issue with two workers**, not two issues.
+
+This is the mis-split the rule exists to prevent: one message asking to research goal-driven auto-research loops and then implement them was routed as a research issue (investigation-only, no PR) plus a separate implementation issue. The AgentTree then showed two goals for one goal, the implementer's issue had to restate the research context by hand, and the user had to reconcile two records for one request.
+
+Deliverables do not define issues. Different steps of one goal may produce different artifacts — a findings-only report with no PR, then a PR — and both still belong to the same issue. "It needs its own PR" is never a reason to create a second issue.
+
+Route the pair in one batch:
+
+- one `CreateIssue` for the goal, with a `command_id`,
+- one `SpawnWorker` for the research step bound with `issue_from_command`, also with a `command_id`,
+- one `SpawnWorker` for the implementation step bound with the same `issue_from_command`, plus `after_from_command` pointing at the research command so the kernel holds it until the researcher settles, and `follow_up_of_command` so the lineage is visible in the AgentTree.
+
+The two fields answer different questions and are both worth setting: `after_from_command` is the *ordering* (the kernel queues the worker and starts it with the predecessor's report in hand — see "Chaining a worker after another agent"), while `follow_up_of_command` is the *lineage* (this session continues that session's line of work).
+
+Never predict the researcher's agent id (`P1-I7-W1`). It depends on the issue id the kernel is about to mint, so another head creating an issue first makes the prediction stale and the dependent worker is rejected. Reference the command instead: `after_from_command`/`follow_up_of_command` with a `command_id`, or an `"@<command_id>"`/`"@index:<position>"` value written straight into `after_agent_id`/`follow_up_of_agent_id`. The kernel resolves it to the worker that command actually spawned.
+
+```json
+{
+  "title": "Auto-research loop: research then implement",
+  "summary": "One issue for the goal, with a researcher and an implementer queued behind it.",
+  "commands": [
+    {
+      "command_id": "goal",
+      "type": "CreateIssue",
+      "payload": {
+        "project_id": "P1",
+        "title": "Goal-driven auto-research loop",
+        "description": "One durable goal with two steps: research the best looping approach, then implement the recommended mechanism in a PR. Verbatim user request plus context here.",
+        "parent_issue_id": null
+      }
+    },
+    {
+      "command_id": "research",
+      "type": "SpawnWorker",
+      "payload": {
+        "issue_from_command": "goal",
+        "title": "Research looping approaches",
+        "prompt": "Investigation only, no PR. Compare goal/auto-research loop designs for coding agents, cite file:line for anything in this repo, and end your session with a self-contained report: findings, the recommended design, risks, and the smallest first increment. Your final message is the input for the implementation step on this same issue."
+      }
+    },
+    {
+      "type": "SpawnWorker",
+      "payload": {
+        "issue_from_command": "goal",
+        "title": "Implement the recommended loop",
+        "prompt": "Implement the mechanism the research step on this issue recommended, following its report, and open a PR.",
+        "after_from_command": "research",
+        "follow_up_of_command": "research"
+      }
+    }
+  ],
+  "questions": []
+}
+```
+
+### Handing off between the two workers
+
+The kernel owns the wait. Never write a prompt that makes a worker wait by polling: a prompt that tells a worker to read `~/.meringue/state.json` in a loop, sleep between checks, or budget "about two hours" for another worker to settle spends a live harness session and its context on sleeping, hides the dependency from the kernel, and fails silently when the predecessor errors, is killed, or finishes late. Workers must not be told to inspect Meringue state or another worker's workspace at all. Use `after_agent_id`/`after_from_command` and let the kernel start the dependent worker when its predecessor settles.
+
+Write the two prompts for the handover the kernel performs:
+
+- The research prompt says the step is investigation-only, whether a PR is expected, and that its **final message must be a self-contained report** (findings, recommendation, `file:line` citations), because that final message is what the kernel hands to the next worker.
+- The implementation prompt is just the instruction for its own step. The predecessor's report is appended automatically as a handover block, so refer to those findings freely instead of telling the worker where to look for them.
+- Both workers stay in their own kernel-assigned workspace. The implementer reads the handover, not the researcher's workspace.
+
+Spawning only the researcher now and attaching the implementer in a later head turn (with `SpawnWorker` on that existing issue plus `follow_up_of_agent_id`) is still valid — for example when the user has not yet decided that implementation should follow. It is no longer the way to express "wait for the report": queue that with `after_from_command` in the same batch.
+
+### When two issues really are correct
+
+Create a second issue only for a genuinely independent durable goal, one that would still make sense on its own if the first goal were dropped. In the case above that was the missing kernel capability: "let heads queue a worker that starts after another agent finishes" was its own goal with its own lifetime, so it belonged on its own issue with its own worker — while the research and implementation steps of the auto-research loop stayed together on one issue.
+
+The queueing mechanism does not change that judgement. `after_agent_id` can point at a worker on another issue, which is what makes "finish that goal, then start this separate one" expressible — but needing to run second is not what makes something a separate goal. Two steps of one goal stay on one issue and are ordered with `after_from_command`.
+
+Signals for a second issue: a different durable outcome, a different project, work the user described as a separate thing, or a capability the first goal merely happens to reveal. Signals against: "the next step", "then implement it", "first investigate, then fix", or anything whose only difference is which artifact the step produces.
+
 ## Mixed batches: new issues and existing issues together
 
 One HeadResult may serve several targets at once. Make every worker's target explicit and the kernel will honour all of them:
@@ -202,6 +280,7 @@ One HeadResult may serve several targets at once. Make every worker's target exp
 - a worker for an issue this batch creates: `issue_from_command`
 - a worker for an issue that already exists: its real `issue_id`
 - several new issues, each with their own workers: one `command_id` per `CreateIssue`, and `issue_from_command` on each worker
+- several workers for one new issue (for example a research step and the implementation step of the same goal): the same `issue_from_command` on each of them, plus `follow_up_of_command` on the later one
 
 ```json
 {
@@ -218,14 +297,14 @@ One HeadResult may serve several targets at once. Make every worker's target exp
 }
 ```
 
-One rule keeps large fan-out batches honest: **every issue your batch creates must get at least one worker of its own in that batch.** If a batch creates an issue and then points its workers at a different issue, the kernel treats that as a mis-target rather than a deliberate choice, because it is the exact shape that once dumped 13 unrelated workers onto the previous issue while the new issue stayed empty. In that situation the kernel:
+One rule keeps large fan-out batches honest: **every issue your batch creates must get at least one worker of its own in that batch.** "At least one" is a floor, not a cap: two or more workers on one issue your batch created is a supported, expected shape (that is how a researcher and an implementer share one goal), and the second worker is neither rerouted nor rejected. If a batch creates an issue and then points its workers at a different issue, the kernel treats that as a mis-target rather than a deliberate choice, because it is the exact shape that once dumped 13 unrelated workers onto the previous issue while the new issue stayed empty. In that situation the kernel:
 
 - binds those workers to the created issue that has no worker (when there is exactly one such issue in that project) and logs the correction, or
 - rejects them with `ambiguous_batch_issue_target` when more than one created issue is missing a worker.
 
 If you genuinely want to create an issue for later while working only on an existing issue, say so explicitly on the existing-issue worker with any of:
 
-- `follow_up_of_agent_id` (preferred when continuing a previous worker's line of work),
+- `follow_up_of_agent_id` naming a real existing worker id (preferred when continuing a previous worker's line of work; an intra-batch `"@<command_id>"` reference does not count here, because it names a worker this batch spawns),
 - `replace_agent_id`, or
 - `existing_issue: true`.
 
@@ -242,7 +321,7 @@ Resolution order for `SpawnWorker` and `ModifyIssue`:
 5. an id that was visible in the head's spawn snapshot → that pre-existing issue.
 6. anything else → rejected.
 
-Rejection codes: `issue_id_not_created_by_this_head_result`, `ambiguous_batch_issue_target`, `ambiguous_batch_issue_prediction`, `batch_issue_reference_not_found`, `batch_issue_reference_out_of_order`, `batch_issue_reference_unresolved`, `batch_project_reference_unresolved`.
+Rejection codes: `issue_id_not_created_by_this_head_result`, `ambiguous_batch_issue_target`, `ambiguous_batch_issue_prediction`, `batch_issue_reference_not_found`, `batch_issue_reference_out_of_order`, `batch_issue_reference_unresolved`, `batch_project_reference_unresolved`, `batch_agent_reference_not_found`, `batch_agent_reference_out_of_order`, `batch_agent_reference_unresolved`.
 
 A corrected route is never silent. The kernel appends `Rerouted from predicted issue <id>.` to the worker's spawn log line, adds `rerouted_from_issue_id` to that log's details and to the worker's `harness_metadata`, and emits a separate warning log naming both issues.
 
@@ -518,9 +597,13 @@ Spawns a real worker harness session for an issue. The kernel owns workspace all
 
 Workers receive standing guidance that they do not need to ask for user permission before editing files, committing, pushing, or opening/updating a PR when the assigned issue asks for those actions. Do not add worker prompts that tell them to wait for routine git/PR approval; do include requested delivery actions in the prompt, and let the worker report only true blockers such as missing auth, remote setup problems, branch/worktree collisions, unrelated work that would be overwritten, or unsafe/destructive operations. Workers should stay in the kernel-assigned workspace/branch unless it is unusable or the user explicitly asks for a different branch/worktree.
 
-Not every worker issue requires a PR. For investigation-only or informational work that does not require repository changes, tell the worker to return findings or an answer without opening a PR unless the user explicitly requested one.
+Not every worker issue requires a PR. For investigation-only or informational work that does not require repository changes, tell the worker to return findings or an answer without opening a PR unless the user explicitly requested one. A step that produces no PR is still a worker on the goal's issue, not a reason to create a second issue.
+
+Never write a prompt that makes a worker wait on another worker by polling: no reading `~/.meringue/state.json` in a loop, no sleeping between checks, no multi-hour wait budgets, and no reading another worker's workspace. The kernel owns sequencing and handover through `after_agent_id`/`after_from_command`. See "Chaining a worker after another agent" and "One goal, two steps: research then implementation".
 
 When the worker belongs to an issue this same HeadResult creates, set `issue_from_command` (or an `"@<command_id>"`/`"@index:<position>"` value in `issue_id`) instead of predicting the new issue id. See "Referencing an issue created in the same HeadResult".
+
+When the predecessor worker is spawned by this same HeadResult, reference its `SpawnWorker` command instead of predicting its agent id: set `follow_up_of_command` (a `command_id` or 0-based position), or write `follow_up_of_agent_id: "@<command_id>"`/`"@index:<position>"`. `replace_agent_id` accepts the same reference form through `replace_agent_from_command`, though a replaced worker almost always already exists. The referenced `SpawnWorker` must appear earlier in `commands`; the kernel resolves it to the worker id it minted and rejects an unresolvable reference with `batch_agent_reference_not_found`, `batch_agent_reference_out_of_order`, or `batch_agent_reference_unresolved`.
 
 Worker delivery names should be human-facing. When a head supplies a worker title or prompt, prefer the issue/task title or requested change that should become the branch/PR name. Do not ask workers to put Meringue agent ids, worker ids, Pi ids, or subagent implementation details in branch names, PR titles, or PR metadata.
 
@@ -534,8 +617,10 @@ Payload:
   "title": "Short worker title",
   "prompt": "Worker instructions",
   "workspace_path": "Optional preselected workspace path",
-  "follow_up_of_agent_id": "Optional prior worker on this issue",
+  "follow_up_of_agent_id": "Optional prior worker on this issue, or \"@<command_id>\" for a worker this batch spawns",
+  "follow_up_of_command": "Optional SpawnWorker command id or index in this batch instead of follow_up_of_agent_id",
   "replace_agent_id": "Optional worker on this issue to replace after spawn",
+  "replace_agent_from_command": "Optional SpawnWorker command id or index in this batch instead of replace_agent_id",
   "after_agent_id": "Optional worker this one waits for before it starts, or \"@<command_id>\" for a worker this batch spawns",
   "after_from_command": "Optional SpawnWorker command id or index in this batch instead of after_agent_id",
   "if_predecessor_fails": "Optional cancel (default) or run",
@@ -562,6 +647,8 @@ Example:
 ### Chaining a worker after another agent
 
 Some work is genuinely sequential: investigate, then implement; implement, then review the diff. Do not fake that by prompting a busy worker, and do not spawn both workers at once and hope the second one waits. Set `after_agent_id` and the kernel owns the sequencing.
+
+Sequencing is not scoping: the ordered steps of one goal stay on one issue, as in the example below. See "One goal, two steps: research then implementation" for that rule, and add `follow_up_of_command` alongside `after_from_command` when the later worker continues the earlier one's line of work.
 
 ```json
 {
@@ -606,7 +693,7 @@ Naming the predecessor:
 
 - A worker that already exists in the supplied state: use its real id, for example `"after_agent_id": "P1-I2-W1"`.
 - A worker this same batch spawns: never predict its id. Set `after_from_command` to that `SpawnWorker` command's `command_id` (or its 0-based index), or write `"after_agent_id": "@<command_id>"`. The referenced command must appear earlier in `commands`.
-- The predecessor may be on another issue. That is the normal shape for "research issue, then implementation issue".
+- The predecessor may be on another issue, which is what makes "finish that goal, then start this separate one" expressible. Do not read that as a licence to split one goal: needing to run second never turns a step into its own durable goal.
 - `after_agent_id` also marks the worker as a deliberate existing-issue target, so it is exempt from the created-issue-needs-a-worker rerouting rule described above.
 
 #### Handover context
