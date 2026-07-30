@@ -18,13 +18,27 @@ class KernelMaintenanceReconcileTerminalErrorsTest < Minitest::Test
     kernel_maintenance_teardown
   end
 
-  def build_stub_engine(sessions, attach_support: true)
+  # A head runner whose parsed result satisfies the parser but fails the kernel's own
+  # `validate_head_result_shape`, so `ApplyHeadResult` rejects the batch. This is the
+  # "HeadResult was not applied" branch of polled head completion.
+  class ShapeBrokenHeadRunner < Meringue::Heads::FakeRunner
+    def parse_head_result_text(_raw_output)
+      { "title" => "Broken", "summary" => "Broken", "commands" => "not-an-array", "questions" => [] }
+    end
+  end
+
+  def build_stub_engine(sessions, attach_support: true, head_runner: nil)
     client = if attach_support
                StubHarnessClient.new(sessions: sessions)
              else
                StubHarnessClientWithoutAttach.new(sessions: sessions)
              end
-    [build_engine(harness_client_resolver: ->(_agent) { client }), client]
+    engine = if head_runner
+               build_engine(harness_client_resolver: ->(_agent) { client }, head_runner: head_runner)
+             else
+               build_engine(harness_client_resolver: ->(_agent) { client })
+             end
+    [engine, client]
   end
 
   def live_session_file
@@ -213,6 +227,50 @@ class KernelMaintenanceReconcileTerminalErrorsTest < Minitest::Test
     assert_equal "healthy", agent_by_id(state, "P1-I1-W2").dig("harness_metadata", "reconcile_state")
     assert_equal "errored", agent_by_id(state, "P1-I1-W1").fetch("status")
     assert_empty reconcile_error_logs(state, "P1-I1-W1")
+  end
+
+  # The other way a polled head becomes terminal: its result parses but the kernel refuses to
+  # apply it. Reconciliation has no retry for that either, so it must also be recorded once.
+  def test_polled_head_whose_result_is_not_applied_errors_once_and_stops_being_polled
+    head_state(
+      status: "working",
+      harness_metadata: { "head_session_state" => "active", "head_session_started_at" => BASE_TIME }
+    )
+    engine, client = build_stub_engine(
+      { "head-sess" => { "streaming" => false, "completed" => true,
+                         "last_assistant_text" => '{"title":"Broken","summary":"Broken","commands":[],"questions":[]}' } },
+      head_runner: ShapeBrokenHeadRunner.new
+    )
+
+    first = apply_command(engine, "ReconcileSessions", {})
+    assert_equal 1, first.dig("result", "checked_count")
+
+    after_first = read_state
+    head = agent_by_id(after_first, "H1")
+    assert_equal "errored", head.fetch("status")
+    assert_equal "terminal_error", head.dig("harness_metadata", "reconcile_state")
+    assert_equal "head_result_not_applied", head.dig("harness_metadata", "reconcile", "reason")
+    assert_equal "released", head.dig("harness_metadata", "head_session_state")
+    assert_includes client.calls, ["kill_session", "head-sess"]
+
+    unapplied_logs = lambda do |state|
+      Array(state.fetch("logs")).select { |log| log.fetch("message", "").include?("HeadResult was not applied") }
+    end
+    assert_equal 1, unapplied_logs.call(after_first).length
+
+    settled_state_json = File.read(state_path)
+    calls_after_first = client.calls.dup
+
+    3.times do
+      repeat = apply_command(engine, "ReconcileSessions", {})
+      assert_equal 0, repeat.dig("result", "checked_count")
+      assert_empty repeat.fetch("log_entry_ids")
+    end
+
+    assert_equal calls_after_first, client.calls
+    assert_equal settled_state_json, File.read(state_path), "repeat reconciliation rewrote state for a rejected head result"
+    assert_equal 1, unapplied_logs.call(read_state).length
+    assert_documented_status_vocabulary(read_state)
   end
 
   # Standalone errored heads are cleared by /prune, not by reconciliation, so the record stays
