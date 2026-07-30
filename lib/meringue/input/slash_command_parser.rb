@@ -269,13 +269,35 @@ module Meringue
 
       # Ordering: the values a user is most likely to want (this session's model,
       # the saved default, models other sessions already use) first, then the rest
-      # of the harness catalog grouped by provider.
+      # of the harness catalog with providers interleaved.
       def self.ordered_model_entries(catalog, preferred, harness)
-        entries = catalog.models
+        # A last-known (stale) list is still the harness's own answer, so it is
+        # offered in full rather than shrinking to the few references Meringue
+        # remembers just because the newest refresh failed.
+        entries = catalog.usable? ? catalog.models : []
         entries = fallback_model_entries(preferred, harness) if entries.empty?
         by_reference = entries.to_h { |entry| [entry.fetch("reference").downcase, entry] }
         head = preferred.filter_map { |reference| by_reference[reference.to_s.downcase] }
-        head + (entries - head).sort_by { |entry| [entry.fetch("provider"), entry.fetch("id")] }
+        head + interleaved_by_provider(entries - head)
+      end
+
+      # Only a few rows are visible at once, so a provider-grouped list would fill
+      # the whole first screen with one provider's models and read like that is all
+      # the harness offers. Round-robin across providers instead: the first rows
+      # show the real breadth, and typing still narrows to one provider or model.
+      def self.interleaved_by_provider(entries)
+        grouped = entries
+                  .sort_by { |entry| [entry.fetch("provider"), entry.fetch("id")] }
+                  .group_by { |entry| entry.fetch("provider") }
+        ordered = []
+        until grouped.empty?
+          grouped.keys.sort.each do |provider|
+            models = grouped.fetch(provider)
+            ordered << models.shift
+            grouped.delete(provider) if models.empty?
+          end
+        end
+        ordered
       end
 
       # Without a catalog Meringue still completes the references it already knows
@@ -304,8 +326,15 @@ module Meringue
         levels = Array(entry["thinking_levels"])
         parts << "thinking: #{levels.join(", ")}" unless levels.empty?
         parts << "#{formatted_context_window(entry["context_window"])} ctx" if entry["context_window"]
-        parts << "catalog unavailable — id not verified" unless catalog.available?
-        parts.join(" · ")
+        parts << model_suggestion_state_label(catalog)
+        parts.compact.join(" · ")
+      end
+
+      def self.model_suggestion_state_label(catalog)
+        return nil if catalog.available?
+        return "last confirmed list" if catalog.stale?
+
+        "catalog unavailable — id not verified"
       end
 
       def self.formatted_context_window(tokens)
@@ -326,8 +355,13 @@ module Meringue
         note = catalog.note.to_s.strip
         note = "Meringue has not fetched #{harness}'s model list yet." if note.empty?
         note = "#{note}." unless note.end_with?(".", "!", "?")
+        headline = if catalog.stale?
+                     "#{harness} models listed from #{catalog.fetched_at} — latest refresh failed"
+                   else
+                     "#{harness} model catalog unavailable"
+                   end
         [{
-          "usage" => "#{harness} model catalog unavailable",
+          "usage" => headline,
           "description" => "#{note} Run /models to retry; an exact provider/model id still works.",
           "completion" => context.fetch("completion_prefix"),
           "requires_arguments" => false,

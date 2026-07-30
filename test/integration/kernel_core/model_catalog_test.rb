@@ -122,6 +122,64 @@ class KernelCoreModelCatalogTest < Minitest::Test
     assert_includes sourceless_result.fetch("message"), "no harness model catalog source"
   end
 
+  # Regression: a single failed probe used to replace a full catalog with an empty
+  # "unavailable" snapshot, so the selector silently collapsed to the couple of
+  # model references Meringue remembered from config and existing sessions.
+  def test_a_failed_or_empty_refresh_keeps_the_last_confirmed_model_list
+    healthy = apply_command("GetModelCatalog")
+    assert_equal 3, healthy.dig("result", "model_count")
+
+    failures = [
+      Meringue::Harness::ModelCatalog.unavailable(harness: "pi", note: "connection reset", reason: "fetch_failed", error: "RpcError"),
+      Meringue::Harness::ModelCatalog.available(harness: "pi", models: [], source: "probe"),
+      ->(_provider) { raise "pi exited while listing models" }
+    ]
+
+    failures.each_with_index do |failure, index|
+      @catalog_source.result = failure
+      result = apply_command("GetModelCatalog", "refresh" => true)
+
+      assert_accepted(result)
+      assert_equal "stale", result.dig("result", "availability"), "failure #{index} should retain the list"
+      assert_equal 3, result.dig("result", "model_count"), "failure #{index} dropped models"
+      assert_equal(
+        %w[anthropic/claude-opus-5 openai/gpt-5.6-sol google/gemini-3-flash],
+        result.dig("result", "models").map { |model| model.fetch("reference") }
+      )
+      assert_includes result.fetch("message"), "Showing the last 3 models"
+      refute_nil result.dig("result", "last_attempt_at"), "the failed attempt must be recorded"
+      persisted = persisted_state.dig("metadata", "harness_model_catalogs", "pi")
+      assert_equal 3, persisted.fetch("model_count"), "persisted snapshot must keep the models"
+    end
+
+    # Recovery clears the stale marker.
+    @catalog_source.result = ->(provider) { pi_catalog(harness: Meringue::Harness::Registry.public_provider_name(provider)) }
+    recovered = apply_command("GetModelCatalog", "refresh" => true)
+    assert_equal "available", recovered.dig("result", "availability")
+    assert_nil recovered.dig("result", "last_attempt_at")
+  end
+
+  # A retained list must not make the background pass re-probe the harness every
+  # two seconds just because its confirmed timestamp is old.
+  def test_a_retained_catalog_is_retried_on_the_failure_cadence_not_every_pass
+    apply_command("GetModelCatalog")
+    @catalog_source.result = Meringue::Harness::ModelCatalog.unavailable(harness: "pi", note: "blip", reason: "fetch_failed")
+    apply_command("GetModelCatalog", "refresh" => true)
+    calls_after_failure = @catalog_source.calls.length
+
+    3.times { engine.reconcile_sessions }
+    assert_equal calls_after_failure, @catalog_source.calls.length, "a just-attempted stale catalog must not be re-probed"
+
+    rewrite_persisted_state do |state|
+      state.dig("metadata", "harness_model_catalogs", "pi")["last_attempt_at"] =
+        (Time.now.utc - (Meringue::Kernel::Engine::MODEL_CATALOG_RETRY_INTERVAL_SECONDS + 5)).iso8601
+    end
+    engine.reconcile_sessions
+
+    assert_equal calls_after_failure + 1, @catalog_source.calls.length
+    assert_equal 3, persisted_state.dig("metadata", "harness_model_catalogs", "pi").fetch("model_count")
+  end
+
   def test_reconciliation_refreshes_a_stale_catalog_in_the_background_without_log_noise
     logs_before = persisted_logs.length
     first = engine.reconcile_sessions

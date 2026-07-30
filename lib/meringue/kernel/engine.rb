@@ -861,7 +861,8 @@ module Meringue
         models = Array(catalog["models"])
         lines = ["  harness: #{catalog.fetch("harness", "unknown")}", "  availability: #{catalog.fetch("availability", "unknown")}"]
         lines << "  source: #{catalog.fetch("source")}" if catalog["source"]
-        lines << "  fetched: #{catalog.fetch("fetched_at")}" if catalog["fetched_at"]
+        lines << "  confirmed: #{catalog.fetch("fetched_at")}" if catalog["fetched_at"]
+        lines << "  last refresh attempt: #{catalog.fetch("last_attempt_at")}" if catalog["last_attempt_at"]
         lines << "  note: #{catalog.fetch("note")}" if catalog["note"]
         return lines if models.empty?
 
@@ -986,11 +987,14 @@ module Meringue
 
       def model_catalog_message(catalog)
         harness = catalog.fetch("harness", "harness")
+        count = catalog.fetch("model_count", Array(catalog["models"]).length)
         case catalog.fetch("availability", nil)
         when Meringue::Harness::ModelCatalog::AVAILABLE
-          count = catalog.fetch("model_count", Array(catalog["models"]).length)
           "#{harness} reports #{count} available model#{count == 1 ? "" : "s"}. " \
             "Use /default-model <provider/model> for future sessions or /model <agent_id> <provider/model> for one session."
+        when Meringue::Harness::ModelCatalog::STALE
+          "Showing the last #{count} model#{count == 1 ? "" : "s"} #{harness} confirmed at #{catalog.fetch("fetched_at", "an earlier time")}; " \
+            "the newest refresh failed: #{catalog.fetch("note", "unknown error")}"
         else
           note = catalog.fetch("note", nil)
           blank?(note) ? "No #{harness} model catalog is available." : note.to_s
@@ -1005,10 +1009,25 @@ module Meringue
           existing = persisted_model_catalog(public_name)
           return existing if existing && !force && !model_catalog_stale?(existing)
 
-          snapshot = fetch_model_catalog(provider)
+          snapshot = merged_model_catalog(fetch_model_catalog(provider), existing)
           persist_model_catalog!(public_name, snapshot)
           snapshot
         end
+      end
+
+      # A failed or empty refresh must never shrink a working model list. A harness
+      # hiccup (restart, provider auth blip, sleeping laptop) would otherwise drop
+      # the selector back to the couple of references Meringue remembers, which
+      # looks exactly like the catalog never worked. Keep the last list the harness
+      # confirmed, marked stale with the failure attached.
+      def merged_model_catalog(fetched, existing)
+        catalog = Meringue::Harness::ModelCatalog.coerce(fetched)
+        return catalog.to_h if catalog.usable?
+
+        previous = Meringue::Harness::ModelCatalog.coerce(existing)
+        return catalog.to_h unless previous.usable?
+
+        Meringue::Harness::ModelCatalog.retained(previous: previous, failure: catalog).to_h
       end
 
       def persisted_model_catalog(public_name)
@@ -1051,15 +1070,18 @@ module Meringue
         ).to_h
       end
 
+      # Refresh cadence is measured from the last fetch *attempt*, so a retained
+      # (stale) list is retried on the failure cadence instead of being re-probed
+      # on every pass just because its confirmed timestamp is old.
       def model_catalog_stale?(snapshot)
         return true unless snapshot.is_a?(Hash)
 
-        age = Meringue::Harness::ModelCatalog.from_h(snapshot).age_seconds
+        catalog = Meringue::Harness::ModelCatalog.from_h(snapshot)
+        age = catalog.attempt_age_seconds
         return true if age.nil?
         return false if age.negative?
 
-        available = snapshot.fetch("availability", nil) == Meringue::Harness::ModelCatalog::AVAILABLE
-        age >= (available ? MODEL_CATALOG_REFRESH_INTERVAL_SECONDS : MODEL_CATALOG_RETRY_INTERVAL_SECONDS)
+        age >= (catalog.available? ? MODEL_CATALOG_REFRESH_INTERVAL_SECONDS : MODEL_CATALOG_RETRY_INTERVAL_SECONDS)
       end
 
       # Background refresh for the harness that future sessions will use. Silent

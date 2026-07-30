@@ -372,6 +372,44 @@ class InputSlashCommandParserTest < Minitest::Test
                     "session_models_unavailable"
   end
 
+  # Regression for "the model list only shows Claude Opus 5 and Opus 5 Flex": a
+  # last-confirmed list must stay fully offered when the newest refresh failed,
+  # instead of shrinking to the configured default plus Pi's built-in default.
+  def test_a_last_confirmed_catalog_still_offers_every_model
+    stale = Meringue::Harness::ModelCatalog.retained(
+      previous: Meringue::Harness::ModelCatalog.from_h(model_catalog_snapshot),
+      failure: Meringue::Harness::ModelCatalog.unavailable(
+        harness: "pi",
+        note: "Could not read Pi's model catalog: connection reset",
+        reason: "fetch_failed"
+      ),
+      last_attempt_at: "2026-03-03T00:00:00Z"
+    ).to_h
+    state = sample_state_with_model_catalog(catalogs: { "pi" => stale })
+
+    records = suggestion_records("/default-model ", state)
+    models = records.reject { |record| record.fetch("kind") == "session_models_unavailable" }
+
+    assert_equal 4, models.length, "a stale list must not shrink to remembered references"
+    assert_equal(
+      %w[anthropic-flex/claude-opus-5 anthropic/claude-opus-5 google/gemini-3-flash openai/gpt-5.6-sol],
+      models.map { |record| record.fetch("usage") }
+    )
+    assert_includes models.first.fetch("description"), "last confirmed list"
+    # Non-Anthropic entries stay selectable and keep their own thinking levels.
+    google = models.find { |record| record.fetch("usage") == "google/gemini-3-flash" }
+    assert_equal "/default-model google/gemini-3-flash", google.fetch("completion")
+
+    note = records.last
+    assert_equal "session_models_unavailable", note.fetch("kind")
+    assert_includes note.fetch("usage"), "latest refresh failed"
+    assert_includes note.fetch("description"), "connection reset"
+
+    # Thinking levels still come from the retained per-model data.
+    thinking = suggestion_records("/default-thinking ", state).map { |record| record.fetch("usage") }
+    assert_equal %w[xhigh max], thinking
+  end
+
   def test_thinking_suggestions_follow_the_models_supported_levels
     state = sample_state_with_model_catalog
 
