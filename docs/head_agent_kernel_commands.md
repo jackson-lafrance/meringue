@@ -130,6 +130,7 @@ Issue and worker selection rules for the MVP:
 - Use `PromptAgent` mode `steer` for an urgent correction that should affect active work, `follow_up` for related work that should wait until the active turn settles, and `normal` for a settled resumable session. Choose from the candidate's `is_streaming`, `supported_prompt_modes_now`, `recommended_prompt_mode`, and `prompt_mode_note` instead of defaulting to `normal`; a `normal` prompt to a mid-turn session is still accepted, but the kernel delivers it as a follow-up.
 - Spawn a new worker on the same issue only when the previous session is unavailable/unhealthy, its context is known to be over 50%, its delivered workspace should remain immutable, the next step is independent, or parallel work is intentional. Set `follow_up_of_agent_id` so that relationship is visible.
 - Replace a worker only when it is stale, unhealthy, pursuing the wrong approach, or must be stopped. Set `replace_agent_id` on `SpawnWorker`; the kernel starts the successor before killing the old session and records both sides of the relationship. Do not separately propose `Kill` for the same replacement.
+- When the next step must not begin until another worker settles (research, then implementation; implementation, then review), set `after_agent_id` on `SpawnWorker` instead of prompting a busy worker or spawning parallel work. The kernel queues that worker and starts it when its predecessor settles. See "Chaining a worker after another agent" below.
 - Before routing anything, check `routing_context.open_questions` and `routing_context.answer_inference`. If this message answers an open question, close that question and route the unblocked work in the same result. See "Answering open questions" below.
 - Never prompt a worker from a different issue. If multiple issues or workers are plausible, ask a clarifying question instead of guessing.
 - Do not create nested/subissues for ordinary follow-up prompts. Set `parent_issue_id` to `null` unless the user explicitly asks for a child issue hierarchy.
@@ -529,7 +530,11 @@ Payload:
   "prompt": "Worker instructions",
   "workspace_path": "Optional preselected workspace path",
   "follow_up_of_agent_id": "Optional prior worker on this issue",
-  "replace_agent_id": "Optional worker on this issue to replace after spawn"
+  "replace_agent_id": "Optional worker on this issue to replace after spawn",
+  "after_agent_id": "Optional worker this one waits for before it starts, or \"@<command_id>\" for a worker this batch spawns",
+  "after_from_command": "Optional SpawnWorker command id or index in this batch instead of after_agent_id",
+  "if_predecessor_fails": "Optional cancel (default) or run",
+  "include_predecessor_result": "Optional false to omit the predecessor's final report from this worker's prompt"
 }
 ```
 
@@ -548,6 +553,86 @@ Example:
   }
 }
 ```
+
+### Chaining a worker after another agent
+
+Some work is genuinely sequential: investigate, then implement; implement, then review the diff. Do not fake that by prompting a busy worker, and do not spawn both workers at once and hope the second one waits. Set `after_agent_id` and the kernel owns the sequencing.
+
+```json
+{
+  "title": "Research the crash, then fix it",
+  "summary": "One issue, a research worker, and an implementation worker queued behind it.",
+  "commands": [
+    {
+      "command_id": "issue",
+      "type": "CreateIssue",
+      "payload": { "project_id": "P1", "title": "Fix the checkout crash", "description": "..." }
+    },
+    {
+      "command_id": "research",
+      "type": "SpawnWorker",
+      "payload": {
+        "issue_from_command": "issue",
+        "title": "Find the crash cause",
+        "prompt": "Reproduce the checkout crash and report the root cause. Do not change code."
+      }
+    },
+    {
+      "type": "SpawnWorker",
+      "payload": {
+        "issue_from_command": "issue",
+        "after_from_command": "research",
+        "title": "Fix the crash",
+        "prompt": "Fix the crash the research worker identified, add a regression test, and open a PR."
+      }
+    }
+  ],
+  "questions": []
+}
+```
+
+What the kernel does with that:
+
+- It creates the dependent worker record immediately, as a `queued` worker with no harness session. It appears in the AgentTree right away, labelled `waiting on <predecessor>`, so the user can see queued work that has not started.
+- Nothing polls or sleeps. The dependency lives on the worker record, so it survives a restart and is resolved from the worker-settle path and from every reconciliation pass.
+- When the predecessor **completes**, the kernel starts the queued worker and logs `Starting queued worker ... because ... settled (completed).`
+
+Naming the predecessor:
+
+- A worker that already exists in the supplied state: use its real id, for example `"after_agent_id": "P1-I2-W1"`.
+- A worker this same batch spawns: never predict its id. Set `after_from_command` to that `SpawnWorker` command's `command_id` (or its 0-based index), or write `"after_agent_id": "@<command_id>"`. The referenced command must appear earlier in `commands`.
+- The predecessor may be on another issue. That is the normal shape for "research issue, then implementation issue".
+- `after_agent_id` also marks the worker as a deliberate existing-issue target, so it is exempt from the created-issue-needs-a-worker rerouting rule described above.
+
+#### Handover context
+
+Handover is automatic, not something you template. When the queued worker starts, the kernel appends a bounded `--- Handover from <predecessor id> ---` block to the prompt you supplied, containing the predecessor's settle status, issue, delivery branch, and its final report text. Write the dependent's `prompt` as the instruction for its own step, and refer to the predecessor's findings freely; they will be in front of it.
+
+Set `"include_predecessor_result": false` when the second worker must not see the first one's output (for example genuinely independent work that only needs to run afterwards for workspace reasons).
+
+#### What happens when the predecessor does not complete
+
+The outcome is always logged, and the queued worker is never silently dropped:
+
+| Predecessor outcome | Default result for the queued worker |
+| --- | --- |
+| `completed` | starts, with the handover block |
+| `errored` | cancelled, with a warning naming both workers. Set `"if_predecessor_fails": "run"` to start it anyway; its handover then says the predecessor did not finish cleanly |
+| killed by `Kill` | cancelled in the same command, with a warning. This is deliberate: an emergency stop stops the queue behind it |
+| replaced through `replace_agent_id` | re-pointed at the replacement worker, with a warning. The successor inherited the work, so the queue follows it |
+| record removed out of band | cancelled with a warning. `/prune` will not remove a settled predecessor while a worker is still queued behind it |
+| still `queued`, `working`, `idle`, or `blocked` | keeps waiting |
+
+A cancelled queued worker is removed like a killed worker; the warning log is the durable record of why it never ran.
+
+#### Limits
+
+- Chains are bounded: at most five queued workers in a row (`deferred_chain_too_deep`).
+- `after_agent_id` and `replace_agent_id` are mutually exclusive. A replacement takes over now; deferring it would leave the replaced worker running.
+- If the named predecessor has already completed, the worker is not queued at all: it starts immediately with the handover block. If it already errored or was killed, the command is rejected unless `if_predecessor_fails` is `run` (errored only).
+- A worker's issue is still immutable. Queueing does not move a worker between issues, and activation keeps the issue it was created on.
+
+Rejection codes: `after_agent_not_found`, `after_agent_is_not_worker`, `deferred_after_agent_conflicts_with_replace`, `invalid_if_predecessor_fails`, `deferred_chain_too_deep`, `deferred_after_agent_cycle`, `deferred_predecessor_already_errored`, `deferred_predecessor_already_killed`, `after_agent_reference_not_found`, `after_agent_reference_out_of_order`, `after_agent_reference_unresolved`.
 
 ### PromptAgent
 
@@ -740,6 +825,7 @@ What is retained:
 
 - An issue whose subtree still contains a nonterminal issue.
 - An issue whose subtree still has a `queued`, `working`, or `blocked` worker. An `errored` worker is settled and does not retain its issue.
+- An issue whose worker is the predecessor of a worker that is still queued behind it (`pending_deferred_dependents`), so a queued dependent can never lose the agent it is waiting for.
 - An issue whose subtree has an open question.
 - An issue with an attached PR that is open (including a draft) or whose status cannot be resolved. Merged and closed-without-merge PRs are settled and do not block pruning.
 - A bundle whose managed worktree cannot be removed safely. Dirty and locked worktrees are never forced; ownership/path/branch mismatches and git failures also retain the record so a later `/prune` can retry.

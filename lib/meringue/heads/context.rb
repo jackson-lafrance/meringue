@@ -152,6 +152,7 @@ module Meringue
             "Use steer for an urgent correction to active work, follow_up for related work that should run after the active turn, and normal for a settled resumable session. Read the target's is_streaming/recommended_prompt_mode instead of defaulting to normal; a normal prompt to a mid-turn session is still accepted, but the kernel delivers it as a follow-up.",
             "Spawn a follow-up worker on the same issue only when no suitable session is resumable, work should be independent or parallel, context is known to be over 50%, or a delivered workspace should remain immutable.",
             "Use replace_agent_id only when the old worker is stale, unhealthy, pursuing the wrong approach, or must stop before a successor continues. Replacement starts the successor before killing the old session.",
+            "Use after_agent_id (or after_from_command for a worker this batch spawns) when the next step must not start until another worker settles, such as research then implementation. The kernel queues that worker, starts it when its predecessor completes, and hands over the predecessor's final report. It cancels it with a warning when the predecessor errors, unless if_predecessor_fails is \"run\".",
             "Create a new issue only for a genuinely distinct durable goal. Ask a clarifying question instead of guessing between plausible issues or workers.",
             "When this message answers an open question, pair AnswerQuestion with the routing command that acts on the answer in the same HeadResult. Closing a question without routing the unblocked work drops the user's request."
           ]
@@ -391,10 +392,24 @@ module Meringue
             "follow_up_of_agent_id" => agent.fetch("follow_up_of_agent_id", nil),
             "replaces_agent_id" => agent.fetch("replaces_agent_id", nil),
             "replaced_by_agent_id" => agent.fetch("replaced_by_agent_id", nil),
+            "after_agent_id" => agent.fetch("after_agent_id", nil),
+            "deferred_spawn" => deferred_spawn_summary(metadata),
             "created_at" => agent.fetch("created_at", nil),
             "updated_at" => agent.fetch("updated_at", nil)
           }.compact
         end
+      end
+
+      # Compact view of a queued-after dependency so a head can see that a worker exists but has not
+      # started, and who it is waiting for, without reading the whole harness metadata blob.
+      def deferred_spawn_summary(metadata)
+        deferred = metadata.is_a?(Hash) ? metadata.fetch("deferred_spawn", nil) : nil
+        return nil unless deferred.is_a?(Hash)
+
+        deferred.slice(
+          "state", "after_agent_id", "after_agent_issue_id", "if_predecessor_fails",
+          "include_predecessor_result", "chain_depth", "queued_at"
+        ).compact
       end
 
       def routing_candidates(records)
@@ -427,7 +442,7 @@ module Meringue
         details.slice(
           "head_id", "question_id", "project_id", "issue_id", "agent_id", "target_id",
           "selected_target_id", "selected_target_type", "mode", "routing_action",
-          "follow_up_of_agent_id", "replaces_agent_id", "replaced_by_agent_id"
+          "follow_up_of_agent_id", "replaces_agent_id", "replaced_by_agent_id", "after_agent_id"
         ).compact
       end
 
