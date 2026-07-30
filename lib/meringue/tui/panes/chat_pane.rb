@@ -56,6 +56,16 @@ module Meringue
           "logs — #{label}"
         end
 
+        # A filtered logs pane takes the identity color of the node it is filtered
+        # to, so the pane, that agent's rows inside it, its AgentTree row, and the
+        # composer all agree. A project filter has no identity color of its own,
+        # and an unfiltered pane keeps the theme's panel title.
+        def log_pane_title_style(state)
+          return nil unless %w[head worker issue].include?(LogScope.kind(state))
+
+          Style.agent_chrome_style(LogScope.id(state), bold: true)
+        end
+
         # The composer names the concrete destination of the next prompt: the
         # selected agent (plus its owning issue's short title) or the issue
         # itself. An agent selection still routes through a fresh head, so the

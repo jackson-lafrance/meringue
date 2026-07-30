@@ -54,7 +54,10 @@ module Meringue
           active: scroll_pane_active?(state, "logs"),
           overflow: :tail,
           scroll_offset: pane_scroll_offset(state, "logs"),
-          selection: pane_selection(state, "logs")
+          selection: pane_selection(state, "logs"),
+          # A filtered logs pane carries the identity color of the node it is
+          # filtered to.
+          title_style: logs_pane_title_style(state)
         )
         if metrics.fetch(:suggestion_height).positive?
           draw_pane(
@@ -352,7 +355,8 @@ module Meringue
             agent_workspace_pane.content_lines(state, width: pane_width - 4),
             active: true,
             overflow: :terminal,
-            scroll_offset: workspace.fetch("scroll_offset", 0)
+            scroll_offset: workspace.fetch("scroll_offset", 0),
+            title_style: agent_workspace_title_style(state)
           )
         else
           composer_width = pane_width
@@ -371,7 +375,9 @@ module Meringue
             agent_workspace_pane.content_lines(state, width: pane_width - 4),
             active: true,
             overflow: :pinned_tail,
-            scroll_offset: workspace.fetch("scroll_offset", 0)
+            scroll_offset: workspace.fetch("scroll_offset", 0),
+            # The focused pane title keeps the worker's identity color.
+            title_style: agent_workspace_title_style(state)
           )
           if suggestion_height.positive?
             draw_pane(
@@ -411,6 +417,12 @@ module Meringue
           status_line
         )
         canvas.render(color: color)
+      end
+
+      def agent_workspace_title_style(state)
+        return nil unless agent_workspace_pane.respond_to?(:title_style)
+
+        agent_workspace_pane.title_style(state)
       end
 
       def bounded_width(width)
@@ -494,6 +506,12 @@ module Meringue
         return "logs" unless chat_pane.respond_to?(:log_pane_title)
 
         chat_pane.log_pane_title(state)
+      end
+
+      def logs_pane_title_style(state)
+        return nil unless chat_pane.respond_to?(:log_pane_title_style)
+
+        chat_pane.log_pane_title_style(state)
       end
 
       def composer_pane_title(state)

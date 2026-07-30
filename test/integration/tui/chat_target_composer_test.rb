@@ -190,7 +190,7 @@ class TuiChatTargetComposerTest < Minitest::Test
     assert_equal [["⌖ no target", Style::DIM]], ChatTarget.chip_segments(composed)
   end
 
-  def test_rendered_frame_tints_the_composer_border_and_title_only
+  def test_rendered_frame_tints_the_composer_box_and_the_filtered_logs_title
     composed = select("P1-I1-W1")
     frame = render_frame(composed, width: 100, height: 32, color: true)
     tint = Style.agent_chrome_style("P1-I1-W1", bold: true)
@@ -198,10 +198,19 @@ class TuiChatTargetComposerTest < Minitest::Test
     composer_row = frame.split("\n", -1).find { |line| strip_ansi(line).include?("chat → P1-I1-W1") }
     refute_nil composer_row, "the composer title row should be rendered"
     assert_includes composer_row, tint
+    # The tint replaces the focus border color on the composer box.
     refute_includes composer_row, Style::BORDER_ACTIVE
 
+    # The filtered logs pane shares the same identity color on its title only;
+    # its box keeps the theme border, so the tint still reads as "this is that
+    # agent" rather than as a second focused pane.
     logs_row = frame.split("\n", -1).find { |line| strip_ansi(line).include?("─ logs") }
-    refute_includes logs_row, tint, "only the composer is tinted"
+    assert_includes logs_row, tint
+    assert_includes logs_row, Style::BORDER
+    assert_includes logs_row, "#{tint} logs — P1-I1-W1 "
+    # The AgentTree pane is not about one agent, so its title stays neutral.
+    # (It shares this physical row with the logs pane title.)
+    assert_includes logs_row, "#{Style::PANEL_TITLE} agent tree "
   end
 
   def test_the_cue_still_reads_without_color

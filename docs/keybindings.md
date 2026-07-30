@@ -31,6 +31,30 @@ agent_select_next = ["j", "down", "right"]
 - Mouse wheel: scroll whichever pane the pointer is over, without changing focus. Hovering a pane that cannot scroll (or the composer) falls back to scrolling the focused pane.
 - When the agent tree or logs pane is focused, `Enter` enters jump mode. Non-agent log entries are skipped during jump navigation.
 
+## AgentTree agent colors and harness logos
+
+Every agent row is rendered as `<status> <harness logo> <id>  <title>`, so an agent can be identified without reading its title:
+
+```txt
+HEADS
+  └─ ● π H1  Route the request
+
+●   P1  meringue working
+  └─ ●   I1  Fix signup validation 1/3
+    ├─ ● π W1  Add collision check
+    ├─ ✓ ✳ W2  Hide password field
+    └─ · ↑ W3  Check the migration
+```
+
+- **Identity color.** The logo and the id use that agent's deterministic per-id color from the active colorscheme's identity palette (`AGENT_PALETTE` in `lib/meringue/tui/style.rb`, assigned by `Style.agent_palette_index`). It is the same color as that agent's log header, its `▌` log gutter, and the composer tint it produces when selected — one palette, one color per agent, everywhere. Heads draw their logo bold, exactly like their log headers, so two sessions in the same palette slot still separate.
+- **Every status keeps it.** Working agents, completed agents with a `✓`, and idle, queued, blocked, errored, and killed agents all keep their color and logo. Color is additive, never a replacement for status: the status glyph keeps its own semantic color (`○` queued, `●` working, `·` idle, `!` blocked, `✓` completed, `×` errored, `∅` killed) and a completed row still dims its title.
+- **Harness logos.** `π` Pi, `✳` Claude Code, `↑` Antigravity, taken from the agent's own recorded harness (provider aliases such as `cc` or `agy` resolve to the same mark). The glyphs live with the other provider presentation in the harness registry, so panes never hard-code a backend.
+- **Graceful degradation.** A harness Meringue does not ship (for example the `fake` harness used by tests) renders a plain ASCII initial rather than borrowing a shipped mark, and a record with no harness at all renders `?`, matching the unknown-status convention. Every branch is exactly one column wide. `MERINGUE_ASCII_GLYPHS=1` renders `p` / `c` / `a` instead of the marks for fonts that cannot draw them, and `NO_COLOR=1` drops color while keeping glyphs, ids, statuses, and titles.
+- **No reflow.** Issue and project rows have no harness of their own, so they reserve the same logo cell. Every id in the tree therefore starts in one column — including a child issue and a worker that are siblings at the same depth — and wrapped title rows hang under the title column.
+- **Selected rows.** The highlighted row keeps its logo but hands its foreground to the selection palette, which guarantees contrast on the highlight background in every theme. Its identity color is still visible: it is what the composer is tinted with while that row is selected.
+
+`ruby scripts/agent_identity_smoke.rb` prints the tree with every status, every harness, and every theme, which is the manual way to check how the colors and glyphs look in your terminal.
+
 ## AgentTree scrolling
 
 The AgentTree pane scrolls like any other pane, so a long tree of projects, issues, and agents is never silently clipped.
@@ -76,7 +100,7 @@ The chat box itself changes to match the row it will prompt, so a stale selectio
 | nothing selected | `chat · head routes` | theme default, never tinted | `⌖ no target` |
 | buffer starts with `/` | `chat · slash command · P1-I9-W3 not targeted` | theme default, never tinted | `⌖ P1-I9-W3  slash ignores target · Esc clears` |
 
-- The tint is the *same* per-id color the logs pane already gives that agent (the active colorscheme's identity palette, `AGENT_PALETTE` in `lib/meringue/tui/style.rb`), so a tinted composer visibly belongs to the log rows and `▌` gutter of the node it prompts. Issue ids hash through the same function, so an issue selection gets a stable color too, and an issue and a worker under it are never the same color.
+- The tint is the *same* per-id color the logs pane and the AgentTree already give that agent (the active colorscheme's identity palette, `AGENT_PALETTE` in `lib/meringue/tui/style.rb`; see [AgentTree agent colors and harness logos](#agenttree-agent-colors-and-harness-logos)), so a tinted composer visibly belongs to the tree row, the log rows, and the `▌` gutter of the node it prompts. Issue ids hash through the same function, so an issue selection gets a stable color too, and an issue and a worker under it are never the same color.
 - Only the composer chrome is tinted: the border, the pane title, the `›` prompt marker, and the chip. Typed text, the placeholder, and text selection keep their normal semantic styles, so input contrast does not depend on which palette slot the target hashed into. This holds in all shipped colorschemes (`catppuccin`, `gruvbox`, `kanagawa`, `meringue`, `rose-pine`, `tokyonight`).
 - A focused composer stays distinguishable from an unfocused one by using the bold weight of the same hue instead of switching back to the focus border color.
 - Color is never the only cue. The title always names the destination, the chip always says who routes the message and how to clear it, and an empty targeted composer's placeholder reads `message P1-I9-W3`. With `NO_COLOR=1`, a 16-color terminal, or a screenshot, the text still says exactly where the prompt is going.
