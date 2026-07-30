@@ -57,6 +57,62 @@ class KernelWorkersPromptAgentTest < Minitest::Test
     assert_equal "Queued a follow-up for worker #{worker_id} on P1-I1.", result.fetch("message")
   end
 
+  # Regression: a head routing a plain user message picks mode "normal". When the target session was
+  # mid-turn the kernel used to fail the command and the user's message was lost.
+  def test_normal_prompt_against_a_streaming_session_is_delivered_as_a_follow_up
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+    @harness_client.streaming = true
+
+    result = apply_raw(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Extend it to completed rows too." })
+    worker = agent(engine, worker_id)
+    metadata = worker.fetch("harness_metadata")
+
+    assert_equal "accepted", result.fetch("status")
+    assert_equal "follow_up", @harness_client.prompts.fetch(0).fetch("mode")
+    assert_equal "normal", @harness_client.prompts.fetch(0).fetch("requested_mode")
+    assert_equal ["Extend it to completed rows too."], metadata.fetch("queued_prompts")
+    assert_equal "follow_up", metadata.fetch("last_prompt_mode")
+    assert_equal "normal", metadata.fetch("requested_prompt_mode")
+    assert_equal "queue_follow_up", metadata.fetch("routing_action")
+    assert_equal "queue_follow_up", issue(engine, "P1-I1").fetch("last_routing_action")
+    # The coercion is stated in the user-visible line instead of being silently relabelled.
+    assert_match(/Queued a follow-up for worker #{worker_id} on P1-I1\./, result.fetch("message"))
+    assert_match(/Requested normal, delivered follow_up: /, result.fetch("message"))
+    assert_includes log_messages(engine), result.fetch("message")
+    assert_empty Array(metadata["pending_prompts"]), "an accepted delivery must not also be queued for redelivery"
+  end
+
+  def test_a_prompt_delivered_mid_turn_is_not_redelivered_once_the_session_settles
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+    @harness_client.streaming = true
+
+    apply!(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Extend it to completed rows too." }, command_id: "C-27")
+    @harness_client.streaming = false
+    apply!(engine, "ReconcileSessions", {})
+    worker = agent(engine, worker_id)
+
+    assert_equal ["Extend it to completed rows too."], @harness_client.prompts.map { |call| call.fetch("prompt") }
+    assert_equal 1, worker.fetch("harness_metadata").fetch("prompt_count")
+    assert_empty Array(worker.fetch("harness_metadata")["pending_prompts"])
+    assert_equal 1, logs_matching(engine, /Queued a follow-up for worker #{worker_id}/).length
+  end
+
+  def test_steer_semantics_are_unchanged_when_a_session_is_streaming
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+    @harness_client.streaming = true
+
+    apply!(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Stop, wrong file.", "mode" => "steer" })
+    apply!(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Then open the PR.", "mode" => "follow_up" })
+    metadata = agent(engine, worker_id).fetch("harness_metadata")
+
+    assert_equal %w[steer follow_up], @harness_client.prompt_modes
+    assert_nil metadata["requested_prompt_mode"], "an as-requested delivery records no coercion"
+    assert_nil metadata["prompt_mode_note"]
+  end
+
   def test_prompt_bookkeeping_accumulates_across_modes
     engine = build_engine
     worker_id = spawned_worker(engine)

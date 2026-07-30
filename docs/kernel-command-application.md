@@ -92,6 +92,20 @@ duplicating the commands that already ran.
   the worker instead of failing the command. The wait is logged once as info, the
   delivery is logged only when the harness accepts it, and reconciliation retries
   it up to `PENDING_PROMPT_MAX_ATTEMPTS` times before giving up with a warning.
+- **The target session is mid-turn here.** A `PromptAgent` with mode `normal`
+  against a streaming session is delivered through the harness's queued-prompt
+  behavior (Pi RPC `follow_up`) rather than rejected, so a correctly routed user
+  message is never lost to timing. The harness reports the substitution on the
+  returned session ref (`requested_prompt_mode`, `delivered_prompt_mode`,
+  `prompt_mode_note`) and the kernel states it in the one delivery log line. This
+  path does not use the pending-prompt queue, so it cannot double deliver: the
+  harness owns the ordering behind the active turn.
+- **A head batch accepts nothing.** The user's message is restated once as an
+  `unrouted_user_message` log entry (error when commands were proposed and none
+  applied, warning when the head proposed neither commands nor questions) with
+  the full message in `details`, so a request cannot vanish into command error
+  lines. A batch that recorded a clarifying question is already actionable and is
+  not reported as unrouted.
 
 ## Verifying
 
