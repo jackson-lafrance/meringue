@@ -68,6 +68,21 @@ module Meringue
         content_delta message_delta thinking_delta stream_delta stream_chunk
       ].freeze
       HARNESS_EVENT_LOG_PATTERN = /(process_(?:exit|error|failed)|rpc_parse_error|error|failed|failure)/i.freeze
+      # A harness turn that ends is not automatically a turn that finished. These are the
+      # harness-reported turn outcomes that mean the work stopped without a result, so the
+      # agent must settle as `errored` with a visible reason instead of as `completed`.
+      SETTLE_FAILURE_TURN_STATES = %w[failed errored].freeze
+      # Session events that prove the turn died rather than finished. Only consulted when the
+      # settled turn produced no final assistant message, so a genuine completion that happens
+      # to be followed by a clean process exit is still a completion.
+      SETTLE_FAILURE_EVENT_STOP_REASONS = %w[error].freeze
+      SETTLE_FAILURE_TRANSPORT_EVENT_TYPES = %w[process_exit process_error process_failed rpc_parse_error].freeze
+      SETTLE_FAILURE_NETWORK_PATTERN = /
+        connection|network|socket|dns|offline|unreachable|refused|reset
+        |econn|etimedout|enotfound|epipe|timeout|timed\s?out
+        |tls|ssl|certificate|handshake|proxy|gateway|fetch\sfailed
+        |overloaded|502|503|504
+      /ix.freeze
 
       COMMAND_ALIASES = {
         "add_project" => "AddProject",
@@ -504,27 +519,55 @@ module Meringue
         Array(commands).map { |command| apply(command) }
       end
 
-      def mark_worker_completed(agent_id:, harness_events: [], last_assistant_text: nil, session_ref: nil)
-        result = record_worker_completion(
+      # Settling a worker is a classification, not a rubber stamp. A turn that ended because the
+      # transport or provider request died (a dropped wifi connection is the common case), or a
+      # session that disappeared without ever producing a final message, settles as `errored`
+      # with a human-readable reason. Only a turn that really finished settles as `completed`.
+      def mark_worker_completed(agent_id:, harness_events: [], last_assistant_text: nil, session_ref: nil, settle_failure: nil)
+        settle_failure ||= worker_settle_failure(
           agent_id: agent_id,
+          session_ref: session_ref,
+          events: harness_events,
+          last_assistant_text: last_assistant_text
+        )
+        result = if settle_failure
+                   record_worker_settle_failure(
+                     agent_id: agent_id,
+                     settle_failure: settle_failure,
+                     harness_events: harness_events,
+                     last_assistant_text: last_assistant_text,
+                     session_ref: session_ref
+                   )
+                 else
+                   record_worker_completion(
+                     agent_id: agent_id,
+                     harness_events: harness_events,
+                     last_assistant_text: last_assistant_text,
+                     session_ref: session_ref
+                   )
+                 end
+        return result unless result.fetch("status", nil) == "accepted"
+
+        # First of the two activation hooks for queued dependents. Reconciliation is the second, so
+        # a dependent cannot be lost if this process dies between A finishing and B starting.
+        # A failed settle resolves dependents too: `if_predecessor_fails: "run"` starts them anyway,
+        # and a dependent behind a still-recoverable dead turn keeps waiting instead of cancelling.
+        with_deferred_worker_resolution(result)
+      end
+
+      # Public settle entry point for a worker whose harness turn ended without finishing. Mirrors
+      # `mark_worker_completed`, including the queued-dependent hook.
+      def mark_worker_settle_failed(agent_id:, settle_failure:, harness_events: [], last_assistant_text: nil, session_ref: nil)
+        result = record_worker_settle_failure(
+          agent_id: agent_id,
+          settle_failure: settle_failure,
           harness_events: harness_events,
           last_assistant_text: last_assistant_text,
           session_ref: session_ref
         )
         return result unless result.fetch("status", nil) == "accepted"
 
-        # First of the two activation hooks for queued dependents. Reconciliation is the second, so
-        # a dependent cannot be lost if this process dies between A finishing and B starting.
-        deferred = resolve_deferred_workers(trigger: "predecessor_settled")
-        return result if deferred.empty?
-
-        result.merge(
-          "log_entry_ids" => (
-            Array(result.fetch("log_entry_ids", [])) +
-              deferred.flat_map { |entry| Array(entry.fetch("log_entry_ids", [])) }
-          ).uniq,
-          "deferred_worker_results" => deferred
-        )
+        with_deferred_worker_resolution(result)
       end
 
       def record_worker_completion(agent_id:, harness_events: [], last_assistant_text: nil, session_ref: nil)
@@ -586,7 +629,109 @@ module Meringue
         end
       end
 
-      private :record_worker_completion
+      # Records a worker whose harness turn ended without finishing. The worker becomes `errored`
+      # with the failure reason on its record, in its log line, and in the UI, and its issue is
+      # never rolled up to `completed` on the back of it. The harness session, worktree, branch,
+      # and any queued prompt are all left intact so the worker stays recoverable.
+      def record_worker_settle_failure(agent_id:, settle_failure:, harness_events: [], last_assistant_text: nil, session_ref: nil)
+        synchronized_state do
+          state = normalized_state
+          agent = find_session_agent(state, agent_id: agent_id, session_ref: session_ref)
+          return rejected_result(nil, "MarkWorkerSettleFailed", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
+          unless agent.fetch("type", nil) == "worker"
+            return rejected_result(nil, "MarkWorkerSettleFailed", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"])
+          end
+          if %w[completed killed].include?(agent.fetch("status", nil))
+            return accepted_result(nil, "MarkWorkerSettleFailed", agent.fetch("id"), "Worker #{agent.fetch("id")} is already #{agent.fetch("status")}.", agent, [])
+          end
+
+          raw_failure = settle_failure.is_a?(Hash) ? stringify_keys(settle_failure) : {}
+          failure = settle_failure_record(raw_failure)
+          # Reconciliation keeps polling a settled session, so re-observing the same dead turn
+          # must be a silent no-op instead of another error log every pass. Evidence older than
+          # the last delivered prompt is stale for the same reason: the user already recovered.
+          if settle_failure_already_recorded?(agent, failure) || stale_settle_failure_evidence?(agent, failure)
+            return accepted_result(
+              nil,
+              "MarkWorkerSettleFailed",
+              agent.fetch("id"),
+              "Worker #{agent.fetch("id")} is already errored: #{failure.fetch("reason")}",
+              agent,
+              []
+            )
+          end
+
+          merge_session_ref_into_agent!(agent, session_ref) if session_ref
+          now = timestamp
+          failure = failure.merge("detected_at" => now)
+          agent["status"] = "errored"
+          agent["updated_at"] = now
+          metadata_updates = {
+            "is_streaming" => false,
+            "errored_at" => now,
+            "settled_event_count" => Array(harness_events).length,
+            "settle_state" => "failed",
+            "settle_failure" => failure,
+            "status_reason" => settle_failure_status_reason(failure),
+            "error_message" => failure.fetch("reason")
+          }
+          # Never overwrite a partial result the worker did manage to produce.
+          partial_text = present_string(last_assistant_text) || present_string(raw_failure.fetch("last_assistant_text", nil))
+          metadata_updates["last_assistant_text"] = partial_text if partial_text
+          agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(metadata_updates).compact
+
+          issue = find_issue(state, agent.fetch("issue_id", nil))
+          refresh_worker_parent_statuses!(state, agent, now)
+
+          details = {
+            "issue_id" => agent.fetch("issue_id", nil),
+            "project_id" => agent.fetch("project_id", nil),
+            "workspace_branch" => agent.fetch("workspace_branch", nil),
+            "settled_event_count" => Array(harness_events).length,
+            "settle_failure" => failure,
+            "recoverable" => worker_resumable_after_settle_failure?(agent)
+          }.compact
+          log_ids = append_harness_event_logs(state, agent, harness_events)
+          log_ids.concat(append_log(
+            state,
+            source_type: "worker",
+            source_id: agent.fetch("id"),
+            level: "error",
+            message: "Worker #{agent.fetch("id")} errored without finishing: #{failure.fetch("reason")}",
+            details: details
+          ))
+          touch_state!(state, now)
+          store.save(state)
+
+          accepted_result(
+            nil,
+            "MarkWorkerSettleFailed",
+            agent.fetch("id"),
+            "Marked worker #{agent.fetch("id")} errored: #{failure.fetch("reason")}",
+            worker_completion_result(agent, issue),
+            log_ids
+          )
+        end
+      end
+
+      private :record_worker_completion, :record_worker_settle_failure
+
+      # Both settle paths share the queued-dependent hook: a dependent must be resolved from the
+      # settle that actually happened, whether the predecessor finished or died mid-turn.
+      def with_deferred_worker_resolution(result)
+        deferred = resolve_deferred_workers(trigger: "predecessor_settled")
+        return result if deferred.empty?
+
+        result.merge(
+          "log_entry_ids" => (
+            Array(result.fetch("log_entry_ids", [])) +
+              deferred.flat_map { |entry| Array(entry.fetch("log_entry_ids", [])) }
+          ).uniq,
+          "deferred_worker_results" => deferred
+        )
+      end
+
+      private :with_deferred_worker_resolution
 
       def record_user_kernel_command(input:, commands: [])
         synchronized_state do
@@ -4162,7 +4307,12 @@ module Meringue
         agent = find_agent(state, agent_id)
         return rejected_result(command_id, command_type, "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
         return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
-        return rejected_result(command_id, command_type, "Agent #{agent_id} cannot be continued because it is #{agent.fetch("status")}.", ["agent_not_resumable"]) if %w[killed errored].include?(agent.fetch("status", nil))
+        # An errored worker is normally not resumable, but a worker whose turn was cut short by a
+        # transport failure still owns its session, worktree, and branch: prompting it is how the
+        # user recovers the work instead of losing it.
+        if %w[killed errored].include?(agent.fetch("status", nil)) && !worker_resumable_after_settle_failure?(agent)
+          return rejected_result(command_id, command_type, "Agent #{agent_id} cannot be continued because it is #{agent.fetch("status")}.", ["agent_not_resumable"])
+        end
         if blank?(agent.fetch("pid", nil)) && blank?(agent.fetch("harness_session_id", nil)) && blank?(agent.fetch("harness_session_file", nil))
           return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["missing_harness_session"])
         end
@@ -4221,6 +4371,9 @@ module Meringue
           "last_event_at" => session_ref.fetch("last_event_at", nil),
           "routing_action" => prompt_routing_action(delivered_mode)
         ).compact
+        # The prompt landed, so a recorded dead-turn reason is history. Cleared after the merge
+        # because the session ref carries the agent's own metadata back in.
+        clear_settle_failure!(agent)
         agent["updated_at"] = now
 
         issue = find_issue(state, agent.fetch("issue_id", nil))
@@ -4386,7 +4539,11 @@ module Meringue
         pending = synchronized_state do
           normalized_state.fetch("agents").flat_map do |agent|
             next [] unless agent.fetch("type", nil) == "worker"
-            next [] if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
+            # A prompt queued while the worker was mid-turn must not be dropped just because that
+            # turn then died from a transport failure; that session is still resumable.
+            if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil)) && !worker_resumable_after_settle_failure?(agent)
+              next []
+            end
 
             metadata = agent.fetch("harness_metadata", {}) || {}
             Array(metadata.fetch("pending_prompts", [])).filter_map do |entry|
@@ -4893,6 +5050,11 @@ module Meringue
         unless TERMINAL_AGENT_STATUSES.include?(status)
           return { "kind" => "defer", "predecessor" => deep_copy(predecessor), "chain_depth" => chain_depth }
         end
+        # A worker whose turn was cut short by a transport failure is `errored` but not finished: it
+        # can still be continued, so queueing work behind it is legitimate rather than a rejection.
+        if status == "errored" && failure_policy != "run" && worker_resumable_after_settle_failure?(predecessor)
+          return { "kind" => "defer", "predecessor" => deep_copy(predecessor), "chain_depth" => chain_depth }
+        end
         return { "kind" => "start_now", "predecessor" => deep_copy(predecessor) } if status == "completed"
         return { "kind" => "start_now", "predecessor" => deep_copy(predecessor) } if status == "errored" && failure_policy == "run"
 
@@ -5140,12 +5302,24 @@ module Meringue
           "predecessor_status" => status,
           "repointed_from_agent_id" => repointed ? recorded_id : nil
         ).compact
+        waiting = if repointed
+                    base.merge(
+                      "kind" => "repoint",
+                      "predecessor" => deep_copy(predecessor),
+                      "message" => deferred_repoint_message(agent.fetch("id"), recorded_id, predecessor_id)
+                    )
+                  end
         case status
         when "completed"
           activation
         when "errored"
           if base.fetch("if_predecessor_fails") == "run"
             activation
+          elsif worker_resumable_after_settle_failure?(predecessor)
+            # The predecessor did not fail its work: its turn was cut short by a transport failure
+            # and can still be continued, so a dropped connection must not permanently cancel the
+            # work queued behind it. Keep waiting; killing the predecessor still cancels the chain.
+            waiting
           else
             base.merge(
               "kind" => "cancel",
@@ -5160,13 +5334,7 @@ module Meringue
             "message" => "Cancelled queued worker #{agent.fetch("id")} because #{predecessor_id} was killed before it could start."
           )
         else
-          return nil unless repointed
-
-          base.merge(
-            "kind" => "repoint",
-            "predecessor" => deep_copy(predecessor),
-            "message" => deferred_repoint_message(agent.fetch("id"), recorded_id, predecessor_id)
-          )
+          waiting
         end
       end
 
@@ -7828,16 +7996,28 @@ module Meringue
         session_ref = agent_session_ref(agent)
         state_ref = client.get_state(session_ref)
         events = client.respond_to?(:read_events) ? client.read_events(state_ref) : []
-        assistant_text = completed_session?(state_ref) ? safe_last_assistant_text(client, state_ref) : nil
+        settled = completed_session?(state_ref)
+        assistant_text = settled ? safe_last_assistant_text(client, state_ref) : nil
+        # A settled session is only a completion when nothing says its turn died.
+        settle_failure = if settled && agent.fetch("type", nil) == "worker"
+                           settle_failure_from_evidence(
+                             session_ref: state_ref,
+                             events: events,
+                             last_assistant_text: assistant_text,
+                             client: client
+                           )
+                         end
 
-        {
+        result = {
           "agent_id" => agent.fetch("id"),
           "agent_type" => agent.fetch("type", nil),
-          "state" => completed_session?(state_ref) ? "completed" : "working",
+          "state" => settle_poll_state(settled: settled, settle_failure: settle_failure),
           "session_ref" => state_ref,
           "events" => events,
           "last_assistant_text" => assistant_text
         }
+        result["settle_failure"] = settle_failure if settle_failure
+        result
       rescue StandardError => e
         return resume_worker_session_from_poll_error(agent, client, session_ref, e) if worker_reconcile_resume_eligible?(agent, client)
         return recover_head_session_from_poll_error(agent, client, session_ref, e) if head_reconcile_recovery_eligible?(agent)
@@ -7870,11 +8050,38 @@ module Meringue
             poll_result.merge("changed" => result.fetch("status", nil) == "accepted", "completion_result" => result,
                               "log_entry_ids" => result.fetch("log_entry_ids", []))
           end
+        when "settle_failed"
+          apply_settle_failure_from_poll(poll_result)
         when "errored"
           apply_reconcile_error_from_poll(poll_result)
         else
           poll_result.merge("changed" => false, "log_entry_ids" => [])
         end
+      end
+
+      def settle_poll_state(settled:, settle_failure: nil)
+        return "working" unless settled
+        return "settle_failed" if settle_failure
+
+        "completed"
+      end
+
+      # A dead turn is recorded once. Re-observing it on the next 2s reconciliation pass changes
+      # nothing and logs nothing.
+      def apply_settle_failure_from_poll(poll_result)
+        result = mark_worker_settle_failed(
+          agent_id: poll_result.fetch("agent_id"),
+          settle_failure: poll_result.fetch("settle_failure", {}),
+          harness_events: poll_result.fetch("events", []),
+          last_assistant_text: poll_result.fetch("last_assistant_text", nil),
+          session_ref: poll_result.fetch("session_ref", nil)
+        )
+        log_entry_ids = result.fetch("log_entry_ids", [])
+        poll_result.merge(
+          "changed" => result.fetch("status", nil) == "accepted" && log_entry_ids.any?,
+          "settle_failure_result" => result,
+          "log_entry_ids" => log_entry_ids
+        )
       end
 
       def poll_result_with_current_agent_id(poll_result)
@@ -7898,6 +8105,8 @@ module Meringue
 
           now = timestamp
           merge_session_ref_into_agent!(agent, poll_result.fetch("session_ref", {}))
+          # The session is streaming again, so a recorded dead-turn reason is stale.
+          clear_settle_failure!(agent)
           agent["status"] = "working"
           agent["updated_at"] = now
           refresh_worker_parent_statuses!(state, agent, now) if agent.fetch("type", nil) == "worker"
@@ -8648,6 +8857,9 @@ module Meringue
         end
       end
 
+      # "Not streaming any more" is the only thing a harness state call can tell us, and it is
+      # true both for a finished turn and for a turn that died mid-flight. Callers must pair this
+      # with `settle_failure_from_evidence` before recording a completion.
       def completed_session?(session_ref)
         metadata = session_ref.fetch("metadata", {}) || {}
         return true if metadata.fetch("completed", false)
@@ -8656,6 +8868,208 @@ module Meringue
         return true if pi_state["completed"]
 
         !session_ref.fetch("is_streaming", false)
+      end
+
+      # Evidence that a settled turn ended without finishing, in order of authority:
+      #   1. the harness's own turn outcome (Pi reads the stop reason of the turn's final
+      #      assistant message, so a dropped connection is still visible after the fact)
+      #   2. a turn outcome a harness already attached to the session ref metadata
+      #   3. session events proving the transport died, but only when the settled turn produced
+      #      no final assistant message at all
+      # Returns nil when there is no failure evidence, which keeps genuine completions intact.
+      def settle_failure_from_evidence(session_ref: nil, events: [], last_assistant_text: nil, client: nil)
+        failure = settle_failure_from_turn_outcome(turn_outcome_evidence(client, session_ref))
+        return failure if failure
+        return nil if present_string(last_assistant_text)
+
+        settle_failure_from_events(events)
+      end
+
+      def worker_settle_failure(agent_id:, session_ref:, events:, last_assistant_text:)
+        settle_failure_from_evidence(
+          session_ref: session_ref,
+          events: events,
+          last_assistant_text: last_assistant_text,
+          client: session_ref ? settle_evidence_client(agent_id) : nil
+        )
+      end
+
+      def settle_evidence_client(agent_id)
+        agent = synchronized_state { find_agent(normalized_state, agent_id.to_s) }
+        return nil unless agent
+
+        harness_client_for_agent(agent)
+      rescue StandardError
+        nil
+      end
+
+      def turn_outcome_evidence(client, session_ref)
+        from_client = safe_turn_outcome(client, session_ref)
+        return from_client if from_client.is_a?(Hash)
+
+        metadata = session_ref.is_a?(Hash) ? (session_ref["metadata"] || session_ref[:metadata] || {}) : {}
+        outcome = metadata.is_a?(Hash) ? (metadata["turn_outcome"] || metadata[:turn_outcome]) : nil
+        outcome.is_a?(Hash) ? stringify_keys(outcome) : nil
+      end
+
+      def safe_turn_outcome(client, session_ref)
+        return nil unless client && session_ref
+        return nil unless client.respond_to?(:turn_outcome)
+
+        outcome = client.turn_outcome(session_ref)
+        outcome.is_a?(Hash) ? stringify_keys(outcome) : nil
+      rescue StandardError
+        nil
+      end
+
+      def settle_failure_from_turn_outcome(outcome)
+        return nil unless outcome.is_a?(Hash)
+        return nil unless SETTLE_FAILURE_TURN_STATES.include?(outcome.fetch("state", nil).to_s)
+
+        error_message = present_string(outcome.fetch("error_message", nil))
+        {
+          "kind" => present_string(outcome.fetch("kind", nil)) || settle_failure_kind(error_message),
+          "reason" => present_string(outcome.fetch("reason", nil)) || settle_failure_reason(error_message),
+          "source" => "harness_turn_outcome",
+          "stop_reason" => present_string(outcome.fetch("stop_reason", nil)),
+          "error_message" => error_message,
+          "last_assistant_text" => present_string(outcome.fetch("last_assistant_text", nil))
+        }.compact
+      end
+
+      def settle_failure_from_events(events)
+        Array(events).each do |event|
+          next unless event.is_a?(Hash)
+
+          failure = settle_failure_from_event(stringify_keys(event))
+          return failure if failure
+        end
+
+        nil
+      end
+
+      def settle_failure_from_event(event)
+        event_type = event.fetch("type", "").to_s
+        message = event.fetch("message", nil)
+        message = message.is_a?(Hash) ? message : {}
+        stop_reason = message["stopReason"] || message["stop_reason"] || event["stopReason"] || event["stop_reason"]
+        error_message = present_string(
+          message["errorMessage"] || message["error_message"] ||
+            event["errorMessage"] || event["error_message"] || event["error"]
+        )
+
+        if SETTLE_FAILURE_EVENT_STOP_REASONS.include?(stop_reason.to_s)
+          return {
+            "kind" => settle_failure_kind(error_message),
+            "reason" => settle_failure_reason(error_message),
+            "source" => "harness_events",
+            "event_type" => event_type,
+            "stop_reason" => stop_reason.to_s,
+            "error_message" => error_message
+          }.compact
+        end
+
+        return nil unless SETTLE_FAILURE_TRANSPORT_EVENT_TYPES.include?(event_type)
+
+        {
+          "kind" => "transport_failure",
+          "reason" => "its agent session ended before it produced a result",
+          "source" => "harness_events",
+          "event_type" => event_type,
+          "error_message" => error_message
+        }.compact
+      end
+
+      def settle_failure_kind(error_message)
+        SETTLE_FAILURE_NETWORK_PATTERN.match?(error_message.to_s) ? "network_failure" : "provider_error"
+      end
+
+      def settle_failure_reason(error_message)
+        detail = error_message.to_s.strip
+        if SETTLE_FAILURE_NETWORK_PATTERN.match?(detail)
+          "its model request failed mid-turn (network error: #{detail})"
+        elsif detail.empty?
+          "its agent turn ended without finishing"
+        else
+          "its agent turn ended without finishing (#{detail})"
+        end
+      end
+
+      def settle_failure_record(settle_failure)
+        failure = settle_failure.is_a?(Hash) ? stringify_keys(settle_failure) : {}
+        reason = present_string(failure.fetch("reason", nil)) || "its agent turn ended without finishing"
+        # The worker's own final text is stored once, on the record; do not duplicate it here.
+        failure.reject { |key, _| key == "last_assistant_text" }.merge(
+          "kind" => present_string(failure.fetch("kind", nil)) || "turn_failed",
+          "reason" => truncate_for_state(reason, ERROR_MESSAGE_MAX_BYTES),
+          "source" => present_string(failure.fetch("source", nil)) || "kernel"
+        ).compact
+      end
+
+      def settle_failure_status_reason(failure)
+        "errored without finishing: #{failure.fetch("reason")}"
+      end
+
+      def settle_failure_signature(failure)
+        return nil unless failure.is_a?(Hash)
+
+        %w[kind reason source stop_reason error_message event_type].map { |key| failure.fetch(key, nil).to_s }.join("|")
+      end
+
+      def settle_failure_already_recorded?(agent, failure)
+        return false unless agent.fetch("status", nil) == "errored"
+
+        existing = (agent.fetch("harness_metadata", {}) || {}).fetch("settle_failure", nil)
+        return false unless existing.is_a?(Hash)
+
+        settle_failure_signature(existing) == settle_failure_signature(failure)
+      end
+
+      # A prompt that landed after the turn died is the recovery. Persisted evidence of that old
+      # turn must not error the worker again while it is working on the new prompt.
+      def stale_settle_failure_evidence?(agent, failure)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        prompted_at = parse_time_or_nil(metadata.fetch("last_prompted_at", nil))
+        return false unless prompted_at
+
+        turn_ended_at = parse_time_or_nil(failure.fetch("turn_ended_at", nil))
+        return turn_ended_at <= prompted_at if turn_ended_at
+
+        # Harnesses that cannot timestamp the turn fall back to "this exact failure was already
+        # recorded and then prompted past".
+        previous = metadata.fetch("previous_settle_failure", nil)
+        return false unless previous.is_a?(Hash) && settle_failure_signature(previous) == settle_failure_signature(failure)
+
+        detected_at = parse_time_or_nil(previous.fetch("detected_at", nil))
+        detected_at ? detected_at <= prompted_at : false
+      end
+
+      # A worker whose turn died still owns a live, resumable harness session, its worktree, and
+      # its branch, so it can be prompted to continue. That is what separates this errored state
+      # from a worker whose session is gone.
+      def worker_resumable_after_settle_failure?(agent)
+        return false unless agent.is_a?(Hash)
+        return false unless agent.fetch("type", nil) == "worker"
+        return false unless agent.fetch("status", nil) == "errored"
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata.fetch("settle_failure", nil).is_a?(Hash) && agent_has_session_reference?(agent)
+      end
+
+      # Once a prompt lands the worker is working again, so the dead-turn reason must not linger
+      # on the record or in the UI.
+      def clear_settle_failure!(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        return unless metadata.is_a?(Hash)
+        return unless metadata.key?("settle_failure") || metadata.key?("settle_state") || metadata.key?("status_reason")
+
+        cleared = metadata.dup
+        previous = cleared.delete("settle_failure")
+        cleared.delete("settle_state")
+        cleared.delete("status_reason")
+        cleared.delete("error_message") if previous.is_a?(Hash) && cleared["error_message"] == previous["reason"]
+        cleared["previous_settle_failure"] = previous if previous.is_a?(Hash)
+        agent["harness_metadata"] = cleared
       end
 
       def safe_last_assistant_text(client, session_ref)
