@@ -111,8 +111,10 @@ class TuiDeliveryPullRequestTest < Minitest::Test
 
     assert_includes frame, "↗"
     assert_includes frame, "PR https://github.com/o/r/pull/9"
+    # The hint line names the selected worker's PR and its status. Ctrl-B opens it
+    # but is no longer spelled out on every frame.
     assert_includes frame, "PR #9"
-    assert_includes frame, "Ctrl-B open"
+    refute_includes frame, "Ctrl-B"
   end
 
   private

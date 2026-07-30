@@ -66,8 +66,8 @@ module Meringue
             metrics.fetch(:suggestion_y),
             metrics.fetch(:suggestion_width),
             metrics.fetch(:suggestion_height),
-            "slash commands",
-            chat_pane.slash_suggestion_lines(state),
+            chat_pane.popup_pane_title(state),
+            chat_pane.popup_lines(state),
             active: false
           )
         end
@@ -205,6 +205,25 @@ module Meringue
           column: x.to_i - content_x - 2,
           width: content_width
         )
+      end
+
+      # Where a click landed relative to the open-PR picker: the entry index for a
+      # row, `:chrome` for the picker's own border/footer, and `:outside` for
+      # anywhere else (which is what dismisses it).
+      def delivery_pr_picker_hit(state, width:, height:, x:, y:)
+        return :outside unless chat_pane.delivery_pr_picker?(state)
+
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        return :outside unless metrics.fetch(:suggestion_height).positive?
+
+        bounds = pane_bounds(metrics, :suggestion_x, :suggestion_y, :suggestion_width, :suggestion_height)
+        return :outside unless point_in_bounds?(x.to_i, y.to_i, bounds)
+
+        row = y.to_i - metrics.fetch(:suggestion_y) - 1
+        return :chrome if row.negative? || row >= Panes::ChatPane::VISIBLE_SUGGESTION_LIMIT
+
+        index = chat_pane.delivery_pr_picker_window_start(state) + row
+        index < OpenPullRequests.entries(state).length ? index : :chrome
       end
 
       def agent_tree_item_at(state, width:, height:, x:, y:)
@@ -608,10 +627,12 @@ module Meringue
         bounded_height >= 3 ? bounded_height : 0
       end
 
+      # One popup slot above the composer, shared by the slash-command list and the
+      # open-PR picker (see ChatPane#popup?), so both are bounded the same way.
       def slash_suggestion_height(state)
-        return 0 unless chat_pane.slash_suggestions?(state)
+        return 0 unless chat_pane.popup?(state)
 
-        [chat_pane.slash_suggestion_lines(state).length + 2, 7].min
+        [chat_pane.popup_lines(state).length + 2, 7].min
       end
 
       def sidebar_width_for(total_width)

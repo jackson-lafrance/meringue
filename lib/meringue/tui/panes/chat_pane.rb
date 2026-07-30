@@ -181,6 +181,75 @@ module Meringue
           slash_suggestion_records(state).any?
         end
 
+        # The popup slot between the logs pane and the composer. The open-PR picker
+        # and the slash-command list are both transient lists over the composer, so
+        # they share one geometry, one border, and one keyboard shape instead of
+        # introducing a second overlay mechanism. The picker wins while it is up.
+        def popup?(state)
+          delivery_pr_picker?(state) || slash_suggestions?(state)
+        end
+
+        def popup_pane_title(state)
+          delivery_pr_picker?(state) ? "open pull requests" : "slash commands"
+        end
+
+        def popup_lines(state)
+          delivery_pr_picker?(state) ? delivery_pr_picker_lines(state) : slash_suggestion_lines(state)
+        end
+
+        def delivery_pr_picker?(state)
+          delivery_pr_picker_state(state).fetch("active", false) == true
+        end
+
+        # Highlighted row, clamped to the list that exists this frame so a PR that
+        # merged (and left the list) cannot leave the cursor pointing past the end.
+        def delivery_pr_picker_index(state)
+          entries = OpenPullRequests.entries(state)
+          return NO_SLASH_SELECTION if entries.empty?
+
+          delivery_pr_picker_state(state).fetch("index", 0).to_i.clamp(0, entries.length - 1)
+        end
+
+        def delivery_pr_picker_window_start(state)
+          slash_suggestion_window_start(OpenPullRequests.entries(state).length, delivery_pr_picker_index(state))
+        end
+
+        def delivery_pr_picker_lines(state)
+          entries = OpenPullRequests.entries(state)
+          return [[["No open pull requests are tracked yet.", Style::MUTED]], [["  Esc closes", Style::MUTED]]] if entries.empty?
+
+          selected_index = delivery_pr_picker_index(state)
+          window_start = delivery_pr_picker_window_start(state)
+          lines = entries.drop(window_start).first(VISIBLE_SUGGESTION_LIMIT).map.with_index do |entry, offset|
+            delivery_pr_picker_line(entry, selected: window_start + offset == selected_index)
+          end
+          lines + [delivery_pr_picker_footer_line(entries.length, window_start)]
+        end
+
+        def delivery_pr_picker_line(entry, selected:)
+          marker = selected ? "›" : " "
+          [
+            ["#{marker} ", selected ? Style::ACCENT_BOLD : Style::DIM],
+            ["##{entry.fetch("number")}", selected ? Style::ACCENT_BOLD : Style::PR_MARKER],
+            ["  #{entry.fetch("title")}", selected ? Style::ACCENT_BOLD : Style::TEXT],
+            ["  #{entry.fetch("issue_id")} · #{entry.fetch("status")}", Style::MUTED]
+          ]
+        end
+
+        def delivery_pr_picker_footer_line(total, window_start)
+          shown = if total > VISIBLE_SUGGESTION_LIMIT
+                    "  #{window_start + 1}–#{[window_start + VISIBLE_SUGGESTION_LIMIT, total].min} of #{total} open PRs"
+                  else
+                    "  #{total} open PR#{total == 1 ? "" : "s"}"
+                  end
+          [[shown, Style::ACCENT], ["  ·  ↑↓ to move · Enter opens · Esc closes", Style::MUTED]]
+        end
+
+        def delivery_pr_picker_state(state)
+          value = chat_state(state).fetch("delivery_pr_picker", nil)
+          value.is_a?(Hash) ? value : {}
+        end
+
         def slash_suggestion_lines(state)
           records = slash_suggestion_records(state)
           return [[["No matching slash commands.", Style::MUTED]]] if slash_prompt?(chat_state(state).fetch("input_buffer", "")) && records.empty?
@@ -258,25 +327,39 @@ module Meringue
           "No logs for #{label} yet. Click another AgentTree row to move this filter, or press Esc to clear it."
         end
 
+        # One PR only when the dashboard is actually looking at one node. Unscoped
+        # chat is not about a single worker, so it reports how many PRs are open
+        # across the tree instead of pinning whichever worker happened to be
+        # focused last. Ctrl-B is not advertised inline: the keybinding still works
+        # and `/keybind` documents it, but repeating it on every frame cost the
+        # width this line needs for everything else.
         def delivery_pr_hint_segments(state)
-          navigation_id = AgentTreeNavigation.selected_agent_id(state)
-          workspace = state.fetch("_agent_workspace", {}) || {}
-          agent_id = navigation_id || workspace["agent_id"]
-          return [] if agent_id.to_s.empty?
+          scoped_id = DeliveryPullRequest.scoped_id(state)
+          return open_pull_requests_hint_segments(state) if scoped_id.empty?
 
-          presentation = DeliveryPullRequest.for_id(state, agent_id)
-          unless DeliveryPullRequest.openable?(presentation)
-            return [["PR", Style::MUTED], [" #{DeliveryPullRequest.status_label(presentation)}", Style::WARNING]]
-          end
+          presentation = DeliveryPullRequest.for_id(state, scoped_id)
+          return scoped_delivery_pr_segments(presentation) if DeliveryPullRequest.openable?(presentation)
+          return [["PR link unusable", Style::WARNING]] if presentation.fetch("state", nil) == "invalid"
 
-          number = presentation.fetch("number", "?")
-          status = DeliveryPullRequest.status_label(presentation)
-          status_style = presentation.fetch("metadata_available", true) && !presentation["stale"] ? Style::SUCCESS : Style::WARNING
+          [["no PR yet", Style::MUTED]]
+        end
+
+        def scoped_delivery_pr_segments(presentation)
+          verified = presentation.fetch("metadata_available", true) && !presentation["stale"]
           [
-            ["PR ##{number}", Style::ACCENT_BOLD],
-            [" #{status}", status_style],
-            ["  Ctrl-B open", Style::MUTED]
+            ["PR ##{presentation.fetch("number", "?")}", Style::ACCENT_BOLD],
+            [" #{DeliveryPullRequest.status_label(presentation)}", verified ? Style::SUCCESS : Style::WARNING]
           ]
+        end
+
+        # Silence when the tree has never had a delivery PR: there is nothing to
+        # count and nothing for Ctrl-B to open. Once PRs exist, "no open PRs" is a
+        # plain fact rather than the old "PR unavailable", which read like a fault.
+        def open_pull_requests_hint_segments(state)
+          return [] unless OpenPullRequests.tracked?(state)
+
+          total = OpenPullRequests.count(state)
+          [[OpenPullRequests.summary_label(state), total.positive? ? Style::ACCENT_BOLD : Style::MUTED]]
         end
 
         # Input editing only changes _chat.input_buffer, but the layout asks for
@@ -858,13 +941,15 @@ module Meringue
           []
         end
 
+        # `● 2W 1H` rather than `● active  2W 1H`: the lit dot and the counts
+        # already say work is running, so the word only spent width.
         def active_status_segments(working_workers, working_heads)
-          segments = [["● active", Style::ACCENT_BOLD]]
+          segments = [["● ", Style::ACCENT_BOLD]]
           metrics = []
           metrics << ["#{working_workers}W", Style::WORKING] if working_workers.positive?
           metrics << ["#{working_heads}H", Style::ACCENT_BOLD] if working_heads.positive?
           metrics.each_with_index do |metric, index|
-            segments << [index.zero? ? "  " : " ", Style::DIM]
+            segments << [" ", Style::DIM] unless index.zero?
             segments << metric
           end
           segments
