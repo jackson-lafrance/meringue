@@ -453,18 +453,16 @@ module Meringue
         kernel_command("Kill", "target_id" => tokens[0])
       end
 
+      # Ids are passed through exactly as typed. The kernel canonicalizes them against state, so
+      # `/answer q8` resolves to Q8 while an unknown id keeps the text the user typed in its
+      # rejection message. See Meringue::Ids.
       def parse_answer(arguments)
         tokens = split_arguments(arguments)
         kernel_command(
           "AnswerQuestion",
-          "question_id" => tokens[0] && normalized_question_id(tokens[0]),
+          "question_id" => tokens[0],
           "answer" => tokens[1..]&.join(" ")
         )
-      end
-
-      def normalized_question_id(token)
-        text = token.to_s.strip
-        text.match?(/\Aq\d+\z/i) ? text.upcase : text
       end
 
       def parse_dismiss(arguments)

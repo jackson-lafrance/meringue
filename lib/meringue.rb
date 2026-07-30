@@ -9,6 +9,7 @@ module Meringue
 end
 
 require_relative "meringue/version"
+require_relative "meringue/ids"
 require_relative "meringue/config"
 require_relative "meringue/state/models"
 require_relative "meringue/state/compactor"

@@ -224,7 +224,7 @@ module Meringue
       end
 
       def explicit_references
-        mentioned_ids = user_message.to_s.scan(/\b(?:P\d+(?:-I\d+(?:-W\d+)?)?|H\d+|Q\d+)\b/i).map(&:upcase).uniq
+        mentioned_ids = user_message.to_s.scan(Meringue::Ids::RECORD_ID_SCAN_PATTERN).map(&:upcase).uniq
         resolved_ids = mentioned_ids.flat_map { |id| [id, *parent_ids_for(id)] }.uniq
         known_state_ids = (
           snapshot.fetch("projects", []).map { |record| record["id"] } +
@@ -281,7 +281,7 @@ module Meringue
       end
 
       def snapshot_question(id)
-        snapshot.fetch("questions", []).find { |candidate| candidate["id"].to_s.casecmp(id.to_s).zero? }
+        Meringue::Ids.find_record(snapshot.fetch("questions", []), id)
       end
 
       # Full open-question records, not just a count, so a head can recognize a free-form reply as
