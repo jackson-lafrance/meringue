@@ -105,6 +105,46 @@ class TuiLayoutTest < Minitest::Test
     assert_includes frame, "─ chat · slash command ─"
   end
 
+  # The counter/scroll caption is about the list, not a member of it, so it renders
+  # on its own reserved row under the box. The box therefore keeps a full window of
+  # commands, and the caption can never overlap the composer or the bottom hint.
+  def test_the_suggestion_counter_renders_below_the_list_box_not_inside_it
+    lines = @layout.render(state_with_input("/"), width: 100, height: 32).split("\n", -1)
+    top_border = lines.index { |line| line.include?("─ slash commands ─") }
+    caption = lines.index { |line| line.match?(/\d+–\d+ of \d+ commands/) }
+    bottom_border = (top_border...caption).reverse_each.find { |index| lines.fetch(index).include?("╰─") }
+    composer = lines.index { |line| line.include?("─ chat · slash command ─") }
+
+    refute_nil caption, "the caption should be rendered"
+    # Box, then its closing border, then the caption, then the composer.
+    assert_operator top_border, :<, bottom_border
+    assert_equal bottom_border + 1, caption
+    assert_operator caption, :<, composer
+    # Nothing was clipped and nothing overlaps: the caption row is blank apart from
+    # the caption, and the composer keeps its own gap.
+    assert_equal 32, lines.length
+    assert_equal [100], lines.map(&:length).uniq
+    assert_equal "", lines.fetch(caption + 1).strip
+
+    # The box holds a full window of commands rather than spending a row on the
+    # caption, and none of those rows repeat it.
+    rows = lines[(top_border + 1)...bottom_border]
+    assert_equal Meringue::TUI::Panes::ChatPane::VISIBLE_SUGGESTION_LIMIT, rows.length
+    assert rows.all? { |row| row.include?(" — ") }, rows.inspect
+  end
+
+  def test_a_short_suggestion_list_reserves_no_caption_row
+    lines = @layout.render(state_with_input("/recount"), width: 100, height: 32).split("\n", -1)
+    box_top = lines.index { |line| line.include?("─ slash commands ─") }
+    composer = lines.index { |line| line.include?("─ chat · slash command ─") }
+    bottom_border = (box_top...composer).reverse_each.find { |index| lines.fetch(index).include?("╰─") }
+
+    refute lines.any? { |line| line.match?(/\d+–\d+ of \d+ commands/) }
+    # Only the usual one-row gap sits between the box and the composer.
+    assert_equal composer - 2, bottom_border
+    assert_equal 32, lines.length
+  end
+
   def test_slash_suggestion_pane_collapses_when_there_is_no_vertical_room
     frame = @layout.render(state_with_input("/"), width: 100, height: Layout::MIN_HEIGHT)
 

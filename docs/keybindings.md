@@ -236,6 +236,7 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 - `Up` / `Down`: select a suggestion; `Down` starts at the first entry and `Up` starts at the last.
 - `Enter`: insert the selected suggestion into the input. Press `Enter` again to run it.
 - `Tab`: complete the selected suggestion, or the first one when nothing is selected.
+- The box shows a window of three entries and holds **commands only**. When the list is longer than the window, a dim caption renders on its own line *below* the box: `1–3 of 27 commands  ·  ↑↓ scroll · keep typing to filter`. It is a caption about the list, not a row in it, so the window never loses an entry to it; a list that fits the window has no caption at all. The same slot and the same caption placement are used by the `Ctrl-B` open-PR picker (`2 open PRs  ·  ↑↓ move · Enter opens · Esc closes`). The focused-workspace `workspace commands` list is unwindowed and has no caption.
 
 ## Jump mode
 

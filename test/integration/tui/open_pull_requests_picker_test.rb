@@ -144,14 +144,40 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
     assert @pane.delivery_pr_picker?(picker)
     assert_equal "open pull requests", @pane.popup_pane_title(picker)
     rows = plain_lines(@pane.popup_lines(picker))
-    assert_equal "› #151  Add the open PR picker  P1-I2 · unverified", rows.fetch(0)
-    assert_equal "  #145  Fix signup validation  P1-I1 · open", rows.fetch(1)
-    assert_includes rows.last, "Enter opens · Esc closes"
+    assert_equal ["› #151  Add the open PR picker  P1-I2 · unverified", "  #145  Fix signup validation  P1-I1 · open"], rows
     assert_empty @opener.opened
 
     frame = render_frame(picker, width: WIDTH, height: HEIGHT)
     assert_includes frame, "open pull requests"
     assert_includes frame, "#151"
+  end
+
+  # The list box holds PRs only; the count and the keys are a caption under it.
+  def test_the_picker_keys_are_captioned_below_the_list_not_inside_it
+    picker = press_ctrl_b
+    caption = plain_line(@pane.popup_footer_line(picker))
+
+    assert_equal "2 open PRs", caption.split("  ·  ").first
+    assert_includes caption, "↑↓ move"
+    assert_includes caption, "Enter opens · Esc closes"
+    refute plain_lines(@pane.popup_lines(picker)).any? { |row| row.include?("Esc closes") }
+
+    lines = render_frame(picker, width: WIDTH, height: HEIGHT).split("\n", -1)
+    caption_row = lines.index { |line| line.include?("Enter opens · Esc closes") }
+    box_bottom = (0...caption_row).reverse_each.find { |index| lines.fetch(index).include?("╰─") }
+    composer_row = lines.index { |line| line.include?("─ chat · head routes ─") }
+
+    assert_equal box_bottom + 1, caption_row, "the caption sits directly under the closed box"
+    assert_operator caption_row, :<, composer_row
+    assert_equal HEIGHT, lines.length
+  end
+
+  def test_an_empty_picker_still_says_how_to_close_it
+    picker = press_ctrl_b
+    emptied = composed_state(empty_state).merge("_chat" => picker.fetch("_chat"))
+
+    assert_equal ["No open pull requests are tracked yet."], plain_lines(@pane.popup_lines(emptied))
+    assert_equal "Esc closes", plain_line(@pane.popup_footer_line(emptied))
   end
 
   def test_arrows_move_the_highlight_and_enter_opens_that_pull_request
