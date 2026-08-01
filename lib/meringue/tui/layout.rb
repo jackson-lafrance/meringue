@@ -555,7 +555,7 @@ module Meringue
       end
 
       # nil keeps draw_pane's focus-driven default, which is what the untargeted
-      # "head routes" states render as.
+      # composer states render as.
       def composer_border_style(state, active:)
         return nil unless chat_pane.respond_to?(:composer_border_style)
 
