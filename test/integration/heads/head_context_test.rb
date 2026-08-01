@@ -315,6 +315,32 @@ class HeadContextTest < Minitest::Test
     assert(rules.any? { |rule| rule.include?("polling Meringue state") })
   end
 
+  # A head that asked to both follow up and replace one worker had its SpawnWorker rejected, so the
+  # user's retry did nothing. The kernel contract has to be stated in the routing rules.
+  def test_routing_rules_forbid_combining_replace_with_follow_up_or_after
+    rules = build_head_context.to_prompt_h.dig("routing_context", "decision_rules")
+
+    assert(rules.any? { |rule| rule.include?("cannot be combined with follow_up_of_agent_id or after_agent_id") })
+    assert(rules.any? { |rule| rule.include?("follow_up_of_agent_id together with after_agent_id is still allowed") })
+  end
+
+  def test_routing_rules_explain_how_to_retry_an_errored_worker
+    rules = build_head_context.to_prompt_h.dig("routing_context", "decision_rules")
+    retry_rule = rules.find { |rule| rule.start_with?("To retry a worker that errored") }
+
+    refute_nil retry_rule, "expected a rule for retrying an errored worker"
+    assert_includes retry_rule, "no replace_agent_id"
+    assert_includes retry_rule, "harness_session_id is null"
+  end
+
+  def test_kernel_command_reference_documents_the_exclusive_relationship_fields
+    reference = File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md"))
+
+    assert_includes reference, "Set at most one takeover relationship per `SpawnWorker`"
+    assert_includes reference, "`follow_up_of_agent_id` and `replace_agent_id` are mutually exclusive"
+    assert_includes build_head_context.system_prompt, "Set at most one takeover relationship per `SpawnWorker`"
+  end
+
   def test_missing_kernel_command_reference_raises
     context = Meringue::Heads::Context.new(
       head_id: "H1",
