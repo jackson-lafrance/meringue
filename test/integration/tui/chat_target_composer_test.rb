@@ -169,11 +169,11 @@ class TuiChatTargetComposerTest < Minitest::Test
     assert_equal [["head routes · Esc clears", Style::MUTED]], ChatTarget.hint_segments(composed)
   end
 
-  def test_no_selection_is_untinted_and_says_a_head_routes_the_message
+  def test_no_selection_is_untinted_and_uses_the_plain_chat_label
     composed = compose_app_state(@app, @state)
 
     assert_equal "none", ChatTarget.presentation(composed).fetch("kind")
-    assert_equal "chat · head routes", @pane.composer_pane_title(composed)
+    assert_equal "chat", @pane.composer_pane_title(composed)
     assert_nil @pane.composer_border_style(composed, active: true)
     assert_nil @pane.composer_title_style(composed)
     # Nothing is selected, so there is no destination to explain and nothing to
@@ -191,7 +191,7 @@ class TuiChatTargetComposerTest < Minitest::Test
       state = composed_state(@state).merge(Meringue::TUI::LogScope::STATE_KEY => scope)
 
       assert_equal "none", ChatTarget.presentation(state).fetch("kind")
-      assert_equal "chat · head routes", @pane.composer_pane_title(state)
+      assert_equal "chat", @pane.composer_pane_title(state)
       assert_nil @pane.composer_border_style(state, active: true)
       assert_equal ["› enter a prompt"], plain_lines(@pane.composer_lines(state, width: 40))
     end
@@ -207,7 +207,7 @@ class TuiChatTargetComposerTest < Minitest::Test
     composed = compose_app_state(@app, pruned)
 
     assert_equal "none", ChatTarget.presentation(composed).fetch("kind")
-    assert_equal "chat · head routes", @pane.composer_pane_title(composed)
+    assert_equal "chat", @pane.composer_pane_title(composed)
     assert_nil @pane.composer_border_style(composed, active: true)
   end
 
