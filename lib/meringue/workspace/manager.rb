@@ -17,6 +17,18 @@ module Meringue
       # otherwise fall back to a uniquified branch/path instead of failing the spawn.
       ALLOCATION_ATTEMPT_LIMIT = 3
       COLLISION_ERROR_PATTERN = /already exists|already used by worktree|is already checked out/i
+      # Some global git configs (Shopify's `dev` config among them) enable core.fsmonitor. Git then
+      # starts a `git fsmonitor--daemon` for every new worktree and blocks on that daemon's answer
+      # before it can read the new index. `git worktree add` runs `git reset --hard` internally, so
+      # a daemon that never answers hangs provisioning until the command timeout kills it and the
+      # worker spawn fails. Meringue's own plumbing never needs a file-system monitor, so every git
+      # command it runs disables one. Git forwards `-c` to child git processes through
+      # GIT_CONFIG_PARAMETERS, so the internal `git branch`/`git reset` inherit the setting too.
+      GIT_ISOLATION_ARGS = ["-c", "core.fsmonitor=false"].freeze
+      # Global git flags that consume the next argv entry, so command_label can skip both.
+      GIT_VALUE_FLAGS = %w[-C -c --git-dir --work-tree --namespace --exec-path].freeze
+      # Git commands whose meaning needs the word after the subcommand (`worktree add`).
+      GIT_SUBCOMMAND_GROUPS = %w[worktree remote submodule stash notes reflog].freeze
 
       class CommandTimeout < StandardError
         attr_reader :argv, :timeout, :stdout, :stderr
@@ -114,7 +126,9 @@ module Meringue
         )
         failed_workspace(
           plan,
-          ["git worktree add timed out after #{e.timeout} seconds"],
+          # Allocation runs several git commands, so name the one that actually hung instead of
+          # always blaming `git worktree add`.
+          ["#{command_label(e.argv)} timed out after #{e.timeout} seconds"],
           git_root: defined?(git_root) && git_root,
           worktree_root: defined?(worktree_root) && worktree_root,
           base_ref: defined?(base_ref) && base_ref,
@@ -531,14 +545,49 @@ module Meringue
         expanded.start_with?("#{managed_root}#{File::SEPARATOR}")
       end
 
+      # Names the command a CommandTimeout came from, such as "git worktree add" or "git rev-parse".
+      def command_label(argv)
+        tokens = Array(argv).map(&:to_s)
+        return "git command" if tokens.empty?
+
+        words = [File.basename(tokens.first)]
+        index = 1
+        while index < tokens.length && words.length < 2
+          token = tokens[index]
+          if GIT_VALUE_FLAGS.include?(token)
+            index += 2
+          elsif token.start_with?("-")
+            index += 1
+          else
+            words << token
+            index += 1
+          end
+        end
+        next_token = tokens[index]
+        if words.length == 2 && GIT_SUBCOMMAND_GROUPS.include?(words.last) && next_token && !next_token.start_with?("-")
+          words << next_token
+        end
+        words.join(" ")
+      end
+
+      def isolated_git_argv(argv)
+        return argv unless File.basename(argv.first.to_s) == "git"
+
+        [argv.first, *GIT_ISOLATION_ARGS, *argv[1..]]
+      end
+
       def run_command(*argv, timeout: command_timeout)
+        requested_argv = argv.map(&:to_s)
+        # Every git command Meringue runs is spawned with the isolation flags, so no call site can
+        # forget them. Timeouts still report the caller's argv, which reads better in logs.
+        effective_argv = isolated_git_argv(requested_argv)
         stdout = +""
         stderr = +""
         status = nil
         stdin = out = err = wait_thread = nil
         readers = []
 
-        Open3.popen3(*argv, pgroup: true) do |child_stdin, child_out, child_err, child_wait|
+        Open3.popen3(*effective_argv, pgroup: true) do |child_stdin, child_out, child_err, child_wait|
           stdin = child_stdin
           out = child_out
           err = child_err
@@ -551,7 +600,7 @@ module Meringue
           rescue Timeout::Error
             terminate_process_group(wait_thread.pid)
             readers.each { |reader| reader.join(TERMINATION_GRACE_SECONDS) }
-            raise CommandTimeout.new(argv: argv, timeout: timeout, stdout: stdout, stderr: stderr)
+            raise CommandTimeout.new(argv: requested_argv, timeout: timeout, stdout: stdout, stderr: stderr)
           ensure
             terminate_process_group(wait_thread.pid) if status.nil? && wait_thread&.alive?
             readers.each(&:join)
@@ -559,7 +608,7 @@ module Meringue
             err.close unless err.closed?
           end
         end
-        { "stdout" => stdout, "stderr" => stderr, "status" => status }
+        { "stdout" => stdout, "stderr" => stderr, "status" => status, "argv" => effective_argv }
       ensure
         stdin.close if stdin && !stdin.closed?
       end
