@@ -165,7 +165,7 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
     lines = render_frame(picker, width: WIDTH, height: HEIGHT).split("\n", -1)
     caption_row = lines.index { |line| line.include?("Enter opens · Esc closes") }
     box_bottom = (0...caption_row).reverse_each.find { |index| lines.fetch(index).include?("╰─") }
-    composer_row = lines.index { |line| line.include?("─ chat · head routes ─") }
+    composer_row = lines.index { |line| line.include?("─ chat ─") }
 
     assert_equal box_bottom + 1, caption_row, "the caption sits directly under the closed box"
     assert_operator caption_row, :<, composer_row

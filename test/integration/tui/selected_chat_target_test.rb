@@ -80,7 +80,7 @@ class TuiSelectedChatTargetTest < Minitest::Test
     @app.send(:deselect_agent_tree_item)
     cleared = compose_app_state(@app, @state)
     assert_empty Meringue::TUI::LogScope.selected_target(cleared)
-    assert_equal "chat · head routes", Meringue::TUI::Panes::ChatPane.new.composer_pane_title(cleared)
+    assert_equal "chat", Meringue::TUI::Panes::ChatPane.new.composer_pane_title(cleared)
   end
 
   def test_subsequent_chat_passes_the_selection_to_the_head_callback
@@ -195,7 +195,7 @@ class TuiSelectedChatTargetTest < Minitest::Test
     @app.send(:deselect_agent_tree_item)
     unscoped = compose_app_state(@app, @state, "keep going")
     assert_nil pane.composer_title_style(unscoped)
-    assert_equal "chat · head routes", pane.composer_pane_title(unscoped)
+    assert_equal "chat", pane.composer_pane_title(unscoped)
 
     @app.send(:handle_key, "\r", "keep going", 10, -1, handler, unscoped)
     cleared = Timeout.timeout(5) { submissions.pop }

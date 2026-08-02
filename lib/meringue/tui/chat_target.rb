@@ -33,9 +33,9 @@ module Meringue
     #                filters logs but does not scope chat, so it stays untinted
     #                and says the head still routes.
     # - `none`       nothing is selected (including a stale selection the kernel
-    #                or reconciliation already dropped). Quiet, untinted,
-    #                explicitly "head routes", and it adds nothing to the bottom
-    #                line because there is no selection to explain or clear.
+    #                or reconciliation already dropped). Quiet, untinted, and it
+    #                adds nothing to the bottom line because there is no selection
+    #                to explain or clear.
     #
     # Colors are never the only cue: every state also spells the target out in
     # the composer title, so `NO_COLOR`, a 16-color terminal, or a screenshot
@@ -90,7 +90,7 @@ module Meringue
         when AGENT then agent_title(target)
         when ISSUE then "chat → #{target.fetch("issue_id")}#{title_suffix(target)}"
         when LOG_ONLY then "chat · head routes · #{target.fetch("label")} logs only"
-        else "chat · head routes"
+        else "chat"
         end
       end
 
@@ -138,8 +138,7 @@ module Meringue
       #   selection.
       # - slash with a selection: that selection is ignored, Esc clears it.
       # - nothing selected (or a slash command with nothing selected): no
-      #   segments at all. There is no selection to explain or clear, and the
-      #   title already reads "chat · head routes".
+      #   segments at all. There is no selection to explain or clear.
       def hint_segments(state)
         target = presentation(state)
         case target.fetch("kind")

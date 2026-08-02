@@ -78,8 +78,8 @@ module Meringue
 
         # Composer border/title tinted with the selected node's own log color, so
         # the box the user types into matches the row it will prompt. nil keeps
-        # the pane default, which is what makes "no target, head routes" read as
-        # plainly unscoped.
+        # the pane default, which is what makes no-target chat read as plainly
+        # unscoped.
         def composer_border_style(state, active: false)
           ChatTarget.border_style(state, active: active)
         end
