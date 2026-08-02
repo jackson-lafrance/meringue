@@ -23,8 +23,8 @@ class HeadContextTest < Minitest::Test
     assert_equal "H8", payload.fetch("head_id")
     assert_equal "keep the existing branch please", payload.fetch("user_message")
     assert_equal(
-      %w[purpose explicit_references question_being_answered issue_candidates
-         worker_candidates recent_activity decision_rules],
+      %w[purpose explicit_references question_being_answered open_questions answer_inference
+         issue_candidates worker_candidates recent_activity decision_rules],
       payload.fetch("routing_context").keys
     )
     refute_empty payload.fetch("routing_context").fetch("decision_rules")
@@ -50,16 +50,16 @@ class HeadContextTest < Minitest::Test
     assert_equal 0, summary.fetch("open_question_count")
   end
 
-  # Current behaviour: heads receive only a count of open questions. Recorded in
-  # test/findings/heads.md because implicit-answer inference needs the records.
-  def test_open_questions_are_only_surfaced_as_a_count
+  def test_open_question_records_are_surfaced_for_answer_inference
     payload = build_head_context.to_prompt_h
+    open_questions = payload.dig("routing_context", "open_questions")
 
     assert_equal 2, payload.dig("current_state_summary", "open_question_count")
-    refute_includes payload.fetch("routing_context").keys, "open_questions"
+    assert_equal %w[Q4 Q5], open_questions.map { |question| question.fetch("id") }
+    assert_equal "Should the worker keep the existing branch or start a new one?", open_questions.first.fetch("question")
+    assert_equal "Two branches already exist for this issue.", open_questions.first.fetch("context")
+    assert_equal "P1-I1", open_questions.first.fetch("issue_id")
     refute_includes payload.fetch("current_state_summary").keys, "open_questions"
-    refute_includes JSON.generate(payload.fetch("current_state_summary")),
-                    "Should the worker keep the existing branch"
   end
 
   def test_issue_candidates_carry_routing_metadata
@@ -192,17 +192,17 @@ class HeadContextTest < Minitest::Test
     assert_equal "Should the worker keep the existing branch or start a new one?", question.fetch("question")
     assert_equal "Two branches already exist for this issue.", question.fetch("context")
     assert_equal "open", question.fetch("status")
-    assert question.key?("answer")
+    refute question.key?("answer")
     assert question.key?("created_at")
   end
 
-  # Current behaviour: prose like "ANSWERING Q4 ..." leaves question_being_answered
-  # null because only an explicit question_id populates it.
-  def test_question_being_answered_is_null_without_an_explicit_question_id
+  def test_question_being_answered_is_inferred_from_a_clear_prose_reference
     payload = build_head_context(user_message: "ANSWERING Q4 keep the existing branch").to_prompt_h
 
     assert_nil payload.fetch("question_id")
-    assert_nil payload.dig("routing_context", "question_being_answered")
+    question = payload.dig("routing_context", "question_being_answered")
+    assert_equal "Q4", question.fetch("id")
+    assert_equal "user_message_reference", question.fetch("inference_source")
     assert_includes payload.dig("routing_context", "explicit_references").fetch("mentioned_ids"), "Q4"
     assert_includes payload.dig("routing_context", "explicit_references").fetch("known_ids"), "Q4"
   end

@@ -299,7 +299,7 @@ class HeadBatchTargetBindingTest < Minitest::Test
     previous_id = seed_issue_with_worker("Previous goal", "Previous worker")
     slice_titles = (1..13).map { |slice| "Slice #{slice}" }
 
-    head_id = spawn_head("Replace the smoke scripts with a real test suite")
+    head_id = spawn_head("Replace the ad-hoc checks with a real test suite")
     result = apply_batch(
       head_id,
       [create_issue("Test suite goal")] + slice_titles.map { |title| spawn_worker(title, issue_id: previous_id) }

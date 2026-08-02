@@ -122,12 +122,17 @@ duplicating the commands that already ran.
 
 ## Verifying
 
+Run the normal test suite, or the focused files for this contract:
+
 ```bash
-ruby scripts/kernel_exactly_once_smoke.rb
+rake test
+ruby -Ilib -Itest test/integration/kernel_heads/exactly_once_apply_test.rb
+ruby -Ilib -Itest test/integration/kernel_workers/prompt_agent_test.rb
+ruby -Ilib -Itest test/integration/state/store_concurrency_test.rb
+ruby -Ilib -Itest test/integration/workspace/manager_collision_test.rb
 ```
 
-The script reproduces each symptom above (duplicate head result delivery, both
-question channels in one result, branch/worktree collisions, a head killed
-mid-batch, a foreign instance reconciling, a mid-turn prompt, and two instances
-applying one head result concurrently) and asserts the resulting state, logs, and
-side effects.
+These tests cover duplicate head result delivery, both question channels in one
+result, branch/worktree collisions, a head removed mid-batch, foreign-instance
+reconciliation, mid-turn prompts, and concurrent state updates through the same
+Rake-driven suite as the rest of the project.

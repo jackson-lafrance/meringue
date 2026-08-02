@@ -140,34 +140,40 @@ class HeadPromptLoopTest < Minitest::Test
     assert_empty env.agents(type: "head")
   end
 
-  # Current behaviour of the explicit answer flow (see test/findings/heads.md):
-  # the question is marked answered and nothing else happens. No head is spawned
-  # with the answer, so no routing follows from it.
-  def test_answering_a_question_marks_it_answered_but_spawns_no_head
-    runner = ScriptedHeadRunner.new(
-      results: [head_result(commands: [], questions: [{ "question" => "Keep the branch?", "context" => "two branches" }])]
-    )
+  def test_answering_a_question_spawns_a_head_to_route_the_unblocked_work
+    runner = ScriptedHeadRunner.new do |call|
+      if call.fetch("question_id", nil) == "Q1"
+        head_result(
+          commands: [
+            { "type" => "AddProject", "payload" => { "path" => call.fetch("context").cwd, "name" => "proj" } },
+            { "type" => "CreateIssue", "payload" => { "project_id" => "P1", "title" => "Keep existing branch" } }
+          ]
+        )
+      else
+        head_result(commands: [], questions: [{ "question" => "Keep the branch?", "context" => "two branches" }])
+      end
+    end
     env = build_head_environment(runner: runner)
     prompt_loop = Meringue::Heads::PromptLoop.new(engine: env.engine)
     prompt_loop.call("which branch should the worker use?")
 
     payload = prompt_loop.call('/answer Q1 keep the existing branch')
+    answer_result = payload.fetch("command_results").first
+    routing = answer_result.dig("result", "routing")
 
     assert_equal "slash_command_applied", payload.fetch("event")
     assert_equal "AnswerQuestion", payload.dig("route", "commands", 0, "type")
     assert_equal "Q1", payload.dig("route", "commands", 0, "payload", "question_id")
     assert_equal "keep the existing branch", payload.dig("route", "commands", 0, "payload", "answer")
     assert_equal ["accepted"], payload.fetch("command_results").map { |result| result.fetch("status") }
-    assert_equal "Answered question Q1.", payload.fetch("summary")
+    assert_equal "Answered question Q1 and spawned head H2 to act on the answer.", payload.fetch("summary")
+    assert_equal %w[AddProject CreateIssue], routing.fetch("command_results").map { |result| result.fetch("command_type") }
 
     question = env.state.fetch("questions").first
     assert_equal "answered", question.fetch("status")
     assert_equal "keep the existing branch", question.fetch("answer")
-
-    # No follow-up head, issue, or worker came out of the answer.
-    assert_equal 1, runner.calls.length
-    assert_empty env.state.fetch("agents")
-    assert_empty env.state.fetch("issues")
+    assert_equal 2, runner.calls.length
+    assert_equal ["Keep existing branch"], env.state.fetch("issues").map { |issue| issue.fetch("title") }
   end
 
   def test_answering_an_unknown_question_is_rejected
