@@ -21,9 +21,8 @@ class TuiLayoutTest < Minitest::Test
     assert_includes frame, "─ agent tree "
     assert_match(/─ agent tree +↑\d+ ↓\d+/, frame)
     assert_includes frame, "─ logs ─"
-    # With no AgentTree selection the composer says a head routes the message,
-    # which is the untinted counterpart of the tinted `chat → <target>` title.
-    assert_includes frame, "─ chat · head routes ─"
+    # With no AgentTree selection the composer uses the plain untargeted title.
+    assert_includes frame, "─ chat ─"
   end
 
   def test_frame_is_exactly_the_requested_rectangle_at_many_sizes
@@ -49,7 +48,7 @@ class TuiLayoutTest < Minitest::Test
 
     assert_includes frame, "─ agent tree "
     assert_includes frame, "─ logs ─"
-    assert_includes frame, "─ chat · head routes ─"
+    assert_includes frame, "─ chat ─"
     assert_includes frame, "Enter send"
   end
 

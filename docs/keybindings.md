@@ -100,7 +100,7 @@ The destination is named in exactly one place: the composer's pane title, on the
 | worker or head with an issue (`P1-I9-W3`) | `chat → P1-I9-W3 · <issue title>` | tinted with that agent's own log color | `head routes · Esc clears` |
 | issue (`P1-I9`) | `chat → P1-I9 · <issue title>` | tinted with that issue id's color | `head routes · Esc clears` |
 | project or unbound head (log-only) | `chat · head routes · P1 logs only` | theme default, never tinted | `head routes · Esc clears` |
-| nothing selected | `chat · head routes` | theme default, never tinted | nothing — no target to explain, nothing to clear |
+| nothing selected | `chat` | theme default, never tinted | nothing — no target to explain, nothing to clear |
 | buffer starts with `/` | `chat · slash command · P1-I9-W3 not targeted` | theme default, never tinted | `slash ignores target · Esc clears` |
 
 - A worker id already contains its issue id (`P1-I9-W3` → `P1-I9`), so the title does not repeat it. An agent whose id does not encode its issue (a head bound to one) reads `chat → H12 → P1-I9 · <issue title>` instead, so the resolved issue is still named.

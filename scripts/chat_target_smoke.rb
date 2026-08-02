@@ -136,8 +136,8 @@ SCENARIOS.each do |label, selection, buffer, expected_kind|
     check("the bottom line says a head still routes the message") { [hint.include?("head routes"), hint] }
   else
     check("composer stays untinted") { [!tinted, "tinted=#{tinted}"] }
-    check("composer says a head routes the message or that slash bypasses it") do
-      [title.include?("head routes") || title.include?("slash command"), title]
+    check("composer stays clear about unscoped or slash routing") do
+      [title == "chat" || title.include?("head routes") || title.include?("slash command"), title]
     end
   end
   puts composer_preview(state).map { |line| "       #{line}" }.join("\n")
@@ -165,7 +165,7 @@ check("a stale selection stops tinting the composer") do
   pruned["agents"] = pruned.fetch("agents").reject { |agent| agent.fetch("id") == "P1-I1-W2" }
   frame_state = app.send(:compose_state, -> { pruned }, "")
   [pane.composer_border_style(frame_state, active: true).nil? &&
-    pane.composer_pane_title(frame_state) == "chat · head routes", pane.composer_pane_title(frame_state)]
+    pane.composer_pane_title(frame_state) == "chat", pane.composer_pane_title(frame_state)]
 end
 puts
 
