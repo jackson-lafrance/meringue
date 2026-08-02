@@ -148,7 +148,10 @@ class KernelHeadsQuestionsTest < KernelHeadsTestCase
 
     assert_equal "accepted", result.fetch("status")
     assert_equal "Q1", result.fetch("target_id")
-    assert_equal "Answered question Q1.", result.fetch("message")
+    assert_equal "Answered question Q1 and spawned head H2 to act on the answer.", result.fetch("message")
+    assert_equal "H2", result.dig("result", "routing", "head_id")
+    assert_equal "accepted", result.dig("result", "routing", "spawn_head_status")
+    assert_equal "accepted", result.dig("result", "routing", "apply_head_result_status")
 
     question = questions.fetch(0)
     assert_equal "answered", question.fetch("status")
@@ -178,19 +181,26 @@ class KernelHeadsQuestionsTest < KernelHeadsTestCase
     assert_equal issue_id, questions.fetch(0).fetch("issue_id")
   end
 
-  # Documents the P1-I9 gap: AnswerQuestion only records the answer today. See
-  # test/findings/kernel_heads.md.
-  def test_answering_a_question_does_not_route_any_work_today
+  def test_answering_a_question_spawns_a_head_and_applies_its_routing_commands
+    project_id = add_project!
     head_id = spawn_head!("Ambiguous request")
-    ask_via_questions_array(head_id)
+    ask_via_questions_array(head_id, project_id: project_id)
+    @head_runner.head_result = head_result(commands: [create_issue_command(project_id: project_id, title: "Answered follow-up")])
     heads_before = state.fetch("counters").fetch("heads")
 
-    apply_command("AnswerQuestion", { "question_id" => "Q1", "answer" => "Use the meringue project." })
+    result = apply_command("AnswerQuestion", { "question_id" => "Q1", "answer" => "Use the meringue project." })
+    routing = result.dig("result", "routing")
 
-    assert_equal heads_before, state.fetch("counters").fetch("heads")
-    assert_empty agents(type: "head")
-    assert_empty issues
-    assert_empty agents(type: "worker")
+    assert_equal heads_before + 1, state.fetch("counters").fetch("heads")
+    assert_equal "accepted", routing.fetch("spawn_head_status")
+    assert_equal "accepted", routing.fetch("apply_head_result_status")
+    assert_equal ["CreateIssue"], routing.fetch("command_results").map { |entry| entry.fetch("command_type") }
+    assert_equal ["Answered follow-up"], issues.map { |issue| issue.fetch("title") }
+
+    routed_call = @head_runner.calls.last
+    assert_equal "Q1", routed_call.fetch("question_id")
+    assert_includes routed_call.fetch("user_message"), "The user answered open Meringue question Q1"
+    assert_includes routed_call.fetch("user_message"), "User answer: Use the meringue project."
   end
 
   def test_answer_question_validation
@@ -213,7 +223,21 @@ class KernelHeadsQuestionsTest < KernelHeadsTestCase
     assert_nil questions.fetch(0).fetch("answer")
   end
 
-  # Current behavior: re-answering is allowed and overwrites the stored answer.
+  def test_answering_the_same_question_with_the_same_answer_is_idempotent
+    head_id = spawn_head!("Ambiguous request")
+    ask_via_questions_array(head_id)
+
+    apply_command("AnswerQuestion", { "question_id" => "Q1", "answer" => "First answer" })
+    heads_after_first_answer = state.fetch("counters").fetch("heads")
+    second = apply_command("AnswerQuestion", { "question_id" => "Q1", "answer" => "First answer" })
+
+    assert_equal "accepted", second.fetch("status")
+    assert_equal "Question Q1 already records this answer.", second.fetch("message")
+    assert_nil second.dig("result", "routing")
+    assert_equal heads_after_first_answer, state.fetch("counters").fetch("heads")
+  end
+
+  # Current behavior: re-answering with a new answer is allowed and overwrites the stored answer.
   def test_answering_twice_overwrites_the_stored_answer
     head_id = spawn_head!("Ambiguous request")
     ask_via_questions_array(head_id)

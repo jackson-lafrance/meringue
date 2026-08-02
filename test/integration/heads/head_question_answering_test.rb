@@ -138,13 +138,16 @@ class HeadQuestionAnsweringTest < Minitest::Test
                            .select { |question| question.fetch("status") == "open" }
     assert_equal %w[Q1 Q2], open_questions.map { |question| question.fetch("id") }
 
-    # Current gap (see test/findings/heads.md): the prompt payload carries no
-    # structured open-question records and no question_being_answered for prose
-    # replies. Question text only shows up incidentally in recent_activity logs.
     assert_nil payload.fetch("question_id")
-    assert_nil payload.dig("routing_context", "question_being_answered")
-    refute_includes payload.fetch("routing_context").keys, "open_questions"
-    refute_includes payload.fetch("current_state_summary").keys, "open_questions"
+    answered = payload.dig("routing_context", "question_being_answered")
+    assert_equal "Q1", answered.fetch("id")
+    assert_equal "P1-I1", answered.fetch("issue_id")
+    assert_equal "This message appears to answer this open question. Propose AnswerQuestion for it with the user's answer, then route the work it unblocks in the same HeadResult.",
+                 answered.fetch("instruction")
+
+    open_questions = payload.dig("routing_context", "open_questions")
+    assert_equal %w[Q1 Q2], open_questions.map { |question| question.fetch("id") }
+    assert_equal 2, payload.dig("current_state_summary", "open_question_count")
   end
 
   def test_question_id_is_passed_through_spawn_head_to_the_head_context
