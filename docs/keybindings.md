@@ -22,7 +22,7 @@ agent_select_next = ["j", "down", "right"]
 ## Focus and scrolling
 
 - Click a dashboard section: move focus to that section (the active outline follows the focused section). The logs pane includes user-visible prompts, agent output, and important kernel events.
-- Click a project, issue, head, or worker row in the AgentTree: select/highlight it and filter the logs pane to it. Issue and worker selections also target subsequent natural-language chat through a fresh head. See [AgentTree selection, log filtering, and chat routing](#agenttree-selection-log-filtering-and-chat-routing).
+- Click a project, issue, head, or worker row in the AgentTree: select/highlight it and filter the logs pane to it. Right-click an agent row to open its associated delivery PR; if none is tracked, Meringue shows a transient notice and leaves the selection unchanged. Issue and worker selections also target subsequent natural-language chat through a fresh head. See [AgentTree selection, log filtering, and chat routing](#agenttree-selection-log-filtering-and-chat-routing).
 - Double-click text in the logs pane: select the word under the pointer (see [Text selection and clipboard](#text-selection-and-clipboard)). Double-click tracking is per pane, so tree clicks and text clicks never pair up.
 - Double-click a worker (or an issue with a worker): open its focused workspace. A pending head or issue without a worker is a silent no-op instead of adding an unavailable-session message to chat/log history. This is the primary mouse action; PR opening remains an explicit action.
 - `Tab` / `Ctrl-Tab`: move focus forward.
@@ -69,7 +69,7 @@ The AgentTree pane scrolls like any other pane, so a long tree of projects, issu
 
 ## AgentTree selection, log filtering, and chat routing
 
-A single left click on any AgentTree row selects that node. Exactly one node is selected at a time, and while a node is selected the logs pane shows only that node's logs. An issue or worker selection is also an explicit target for subsequent natural-language chat; project selections and heads without an owning issue remain log-only filters.
+A single left click on any AgentTree row selects that node. Exactly one node is selected at a time, and while a node is selected the logs pane shows only that node's logs. Right-clicking an agent row opens its associated delivery PR through the configured browser opener; if no PR is tracked, Meringue shows a transient notice and leaves the selection unchanged. An issue or worker selection is also an explicit target for subsequent natural-language chat; project selections and heads without an owning issue remain log-only filters.
 
 What each node type scopes, mirroring the AgentTree hierarchy:
 

@@ -626,11 +626,27 @@ module Meringue
       def handle_mouse_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return nil unless mouse_event?(key)
         return handle_mouse_wheel_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_wheel?(key)
+        return handle_mouse_right_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_right_button_press?(key)
         return handle_mouse_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_button_press?(key)
         return handle_mouse_drag_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_drag?(key)
         return handle_mouse_release_key(input_buffer, input_cursor, slash_suggestion_index, state) if mouse_button_release?(key)
 
         nil
+      end
+
+      # Right-click is a direct AgentTree action rather than a context menu: an
+      # agent row opens its associated delivery PR using the same opener as the
+      # keyboard action. Non-agent rows are intentionally ignored.
+      def handle_mouse_right_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        pane = pane_at_mouse_position(key, state)
+        return nil unless pane == "agent_tree"
+
+        item_id = agent_tree_item_at_mouse_position(key, state)
+        agent = Array(state.fetch("agents", [])).find { |candidate| candidate.is_a?(Hash) && candidate["id"].to_s == item_id.to_s }
+        return [input_buffer, input_cursor, slash_suggestion_index] unless agent && AgentTreeNavigation.selectable_agent?(agent)
+
+        open_pr_by_agent_id(state, item_id)
+        [input_buffer, input_cursor, slash_suggestion_index]
       end
 
       def handle_mouse_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
@@ -735,6 +751,12 @@ module Meringue
         mouse_event?(key) &&
           key.fetch("kind", nil) == "button" && key.fetch("pressed", false) &&
           (key.fetch("button", 0).to_i & 3).zero?
+      end
+
+      def mouse_right_button_press?(key)
+        mouse_event?(key) &&
+          key.fetch("kind", nil) == "button" && key.fetch("pressed", false) &&
+          (key.fetch("button", 0).to_i & 3) == 2
       end
 
       def mouse_drag?(key)
@@ -2020,7 +2042,7 @@ module Meringue
           Keybindings (from [tui.keybindings], with defaults for omitted actions):
           Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels a selection first, then the AgentTree log/chat target and jump mode.
           Focus: click a dashboard section to focus it; double-clicking a worker or an issue with a worker opens its focused workspace, while unavailable rows stay quiet. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
-          AgentTree selection and chat target: single-click a project, issue, head, or worker row to select it and filter the logs pane to that node (a worker shows its own logs, an issue adds all of its workers and child issues, a project adds its whole subtree). An issue also targets subsequent natural-language chat to that issue; a worker selection resolves chat to its owning issue. A fresh head still routes every message using that explicit target context. The selection stays highlighted, is scrolled back into view when it changes, and keeps filtering while you work in the logs or chat pane; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} in jump mode retarget it. Click the highlighted row again, click empty space in the AgentTree, or press #{keys_for("cancel_navigation")} to clear it. Heads without an owning issue and projects remain log-only filters, and unavailable rows are a silent no-op when double-clicked.
+          AgentTree selection and chat target: single-click a project, issue, head, or worker row to select it and filter the logs pane to that node (a worker shows its own logs, an issue adds all of its workers and child issues, a project adds its whole subtree). Right-click an agent to open its associated delivery PR; agents without one show a transient notice and leave the selection unchanged. An issue also targets subsequent natural-language chat to that issue; a worker selection resolves chat to its owning issue. A fresh head still routes every message using that explicit target context. The selection stays highlighted, is scrolled back into view when it changes, and keeps filtering while you work in the logs or chat pane; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} in jump mode retarget it. Click the highlighted row again, click empty space in the AgentTree, or press #{keys_for("cancel_navigation")} to clear it. Heads without an owning issue and projects remain log-only filters, and unavailable rows are a silent no-op when double-clicked.
           Selection: drag with the mouse in the logs pane or the composer to select text; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
           Logs selection (keyboard): focus the logs pane, then #{keys_for("logs_selection_mode")} toggles the selection cursor or any Shift+movement starts it. #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor, #{keys_for("cursor_word_left")}/#{keys_for("cursor_word_right")} move by word, #{keys_for("cursor_home")}/#{keys_for("cursor_end")} jump to the line edges, and #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} move by page. #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")}, #{keys_for("select_home")}/#{keys_for("select_end")}, #{keys_for("select_word_left")}/#{keys_for("select_word_right")}, and #{keys_for("select_page_up")}/#{keys_for("select_page_down")} extend the selection. #{keys_for("copy_selection")} copies the selection (or the cursor line when nothing is extended); #{keys_for("cancel_navigation")} exits.
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
