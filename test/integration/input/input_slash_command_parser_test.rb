@@ -23,11 +23,9 @@ class InputSlashCommandParserTest < Minitest::Test
       "/theme rose-pine" => ["SetTheme", { "theme" => "rose-pine" }],
       "/harness claude" => ["SetHarness", { "provider" => "claude" }],
       "/defaults" => ["GetSessionDefaults", {}],
-      "/default-model openai/gpt-5.6-sol" => ["SetDefaultSessionModel", { "model" => "openai/gpt-5.6-sol" }],
-      "/default-thinking xhigh" => ["SetDefaultSessionThinkingLevel", { "level" => "xhigh" }],
+      "/model openai/gpt-5.6-sol" => ["SetDefaultSessionModel", { "model" => "openai/gpt-5.6-sol" }],
+      "/thinking xhigh" => ["SetDefaultSessionThinkingLevel", { "level" => "xhigh" }],
       "/session-settings P1-I1-W1" => ["GetSessionSettings", { "agent_id" => "P1-I1-W1" }],
-      "/model P1-I1-W1 openai/gpt-5.6-sol" => ["SetSessionModel", { "agent_id" => "P1-I1-W1", "model" => "openai/gpt-5.6-sol" }],
-      "/thinking P1-I1-W1 xhigh" => ["SetSessionThinkingLevel", { "agent_id" => "P1-I1-W1", "level" => "xhigh" }],
       "/project add /tmp" => ["AddProject", { "path" => "/tmp", "name" => "" }],
       "/project rename P1 \"Renamed app\"" => ["ModifyProject", { "project_id" => "P1", "name" => "Renamed app" }],
       "/issue rename P1-I1 \"Renamed issue\"" => ["ModifyIssue", { "issue_id" => "P1-I1", "title" => "Renamed issue" }],
@@ -135,9 +133,9 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   def test_missing_arguments_for_strict_commands_return_invalid_slash_command
-    ["/theme", "/theme a b", "/harness", "/defaults now", "/default-model", "/default-model a b",
-     "/default-thinking", "/default-thinking high extra", "/session-settings", "/session-settings P1 P2",
-     "/model P1", "/thinking P1", "/project", "/project list /tmp", "/issue", "/issue delete P1",
+    ["/theme", "/theme a b", "/harness", "/defaults now", "/model", "/model a b",
+     "/thinking", "/thinking high extra", "/session-settings", "/session-settings P1 P2",
+     "/model P1 extra", "/thinking P1 extra", "/project", "/project list /tmp", "/issue", "/issue delete P1",
      "/worker", "/worker kill P1-I1", "/dismiss", "/dismiss Q1 Q2", "/recount now", "/prune bogus",
      "/prune resolved errored", "/project rename P1", "/issue rename P1-I1"].each do |input|
       parsed = parse_slash(input)
@@ -185,7 +183,7 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   def test_local_tui_commands_are_reported_as_not_kernel_commands
-    %w[/quit /jump /keybind].each do |input|
+    %w[/quit /jump /keybind /config].each do |input|
       parsed = parse_slash(input)
       assert_equal "InvalidSlashCommand", parsed.fetch("type")
       assert_match(/local TUI command/, parsed.fetch("payload").fetch("message"))
@@ -268,7 +266,7 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_equal ["Q1"], dismiss.map { |record| record.fetch("usage") }
   end
 
-  def test_session_setting_and_default_value_suggestions_make_both_scopes_explicit
+  def test_session_inspection_and_future_default_value_suggestions_are_distinct
     state = sample_state
     state["metadata"] = { "pi_session_defaults" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "xhigh" } }
     state.fetch("agents").first["harness_session_id"] = "pi-session-1"
@@ -277,12 +275,12 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_equal ["P1-I1-W1"], inspect.map { |record| record.fetch("usage") }
     assert_equal "/session-settings P1-I1-W1", inspect.first.fetch("completion")
 
-    models = Meringue::Input::SlashCommandParser.command_suggestion_records("/default-model openai", limit: 5, state: state)
-    assert_includes models.map { |record| record.fetch("completion") }, "/default-model openai/gpt-5.6-sol"
+    models = Meringue::Input::SlashCommandParser.command_suggestion_records("/model openai", limit: 5, state: state)
+    assert_includes models.map { |record| record.fetch("completion") }, "/model openai/gpt-5.6-sol"
 
-    thinking = Meringue::Input::SlashCommandParser.command_suggestion_records("/default-thinking x", limit: 5, state: state)
+    thinking = Meringue::Input::SlashCommandParser.command_suggestion_records("/thinking x", limit: 5, state: state)
     assert_includes thinking.map { |record| record.fetch("usage") }, "xhigh"
-    assert_includes thinking.map { |record| record.fetch("completion") }, "/default-thinking xhigh"
+    assert_includes thinking.map { |record| record.fetch("completion") }, "/thinking xhigh"
   end
 
   # The selector must offer every model the harness reports, not only the values
@@ -290,42 +288,41 @@ class InputSlashCommandParserTest < Minitest::Test
   def test_model_suggestions_offer_the_whole_harness_catalog
     state = sample_state_with_model_catalog
 
-    records = suggestion_records("/model P1-I1-W1 ", state)
+    records = suggestion_records("/model ", state)
     assert_equal(
       %w[
-        anthropic/claude-opus-5
         anthropic-flex/claude-opus-5
         anthropic/claude-opus-5
         anthropic-flex/claude-opus-5
+        anthropic/claude-opus-5
         google/gemini-3-flash
         openai/gpt-5.6-sol
       ].uniq,
       records.map { |record| record.fetch("usage") }
     )
     assert_equal ["session_models"], records.map { |record| record.fetch("kind") }.uniq
-    assert_equal "/model P1-I1-W1 openai/gpt-5.6-sol", records.last.fetch("completion")
-    # Ordering puts what the user most likely wants first and labels why.
-    assert_includes records.first.fetch("description"), "current session model"
-    assert_includes records[1].fetch("description"), "future-session default"
-    assert_includes records.first.fetch("description"), "thinking: off, minimal, low, medium, high, xhigh, max"
+    assert_equal "/model openai/gpt-5.6-sol", records.last.fetch("completion")
+    # Ordering puts the saved default first, followed by the rest of the catalog.
+    assert_includes records.first.fetch("description"), "current default"
+    refute_includes records.map { |record| record.fetch("description") }.join(" "), "future-session default"
+    assert_includes records.first.fetch("description"), "thinking: xhigh, max"
     assert_includes records.first.fetch("description"), "1M ctx"
 
-    defaults = suggestion_records("/default-model ", state)
+    defaults = suggestion_records("/model ", state)
     assert_equal "anthropic-flex/claude-opus-5", defaults.first.fetch("usage")
     assert_includes defaults.first.fetch("description"), "current default"
     assert_equal 4, defaults.length
 
     # Filtering searches the whole catalog by reference, id, and display name.
-    assert_equal ["google/gemini-3-flash"], suggestion_records("/default-model gemini", state).map { |record| record.fetch("usage") }
-    assert_equal ["openai/gpt-5.6-sol"], suggestion_records("/default-model sol", state).map { |record| record.fetch("usage") }
-    assert_equal ["openai/gpt-5.6-sol"], suggestion_records("/default-model GPT-5.6", state).map { |record| record.fetch("usage") }
+    assert_equal ["google/gemini-3-flash"], suggestion_records("/model gemini", state).map { |record| record.fetch("usage") }
+    assert_equal ["openai/gpt-5.6-sol"], suggestion_records("/model sol", state).map { |record| record.fetch("usage") }
+    assert_equal ["openai/gpt-5.6-sol"], suggestion_records("/model GPT-5.6", state).map { |record| record.fetch("usage") }
   end
 
-  def test_model_suggestions_are_scoped_to_the_selected_targets_harness
+  def test_model_suggestions_follow_the_active_harness
     state = sample_state_with_model_catalog(
       harness: "claude",
       catalogs: {
-        "pi" => model_catalog_snapshot(harness: "pi"),
         "claude" => model_catalog_snapshot(
           harness: "claude",
           models: [{ "provider" => "anthropic", "id" => "claude-opus-5-cc", "thinking_levels" => ["high"] }]
@@ -333,27 +330,13 @@ class InputSlashCommandParserTest < Minitest::Test
       }
     )
 
-    # /model follows the target agent's harness, and the harness catalog stays
-    # authoritative: Pi-only references are not offered for a Claude session.
-    assert_equal(
-      ["anthropic/claude-opus-5-cc"],
-      suggestion_records("/model P1-I1-W1 ", state).map { |record| record.fetch("usage") }
-    )
-
-    # A pi agent in the same state still gets the pi catalog.
-    state.fetch("agents") << {
-      "id" => "P1-I1-W2", "type" => "worker", "status" => "working", "harness" => "pi",
-      "harness_session_id" => "session-2"
-    }
-    pi_records = suggestion_records("/model P1-I1-W2 ", state).map { |record| record.fetch("usage") }
-    assert_includes pi_records, "openai/gpt-5.6-sol"
-    refute_includes pi_records, "anthropic/claude-opus-5-cc"
+    assert_equal ["anthropic/claude-opus-5-cc"], suggestion_records("/model ", state).map { |record| record.fetch("usage") }
   end
 
   def test_model_suggestions_degrade_clearly_when_no_catalog_is_available
     state = sample_state_with_model_catalog(catalogs: {})
 
-    records = suggestion_records("/model P1-I1-W1 ", state)
+    records = suggestion_records("/model ", state)
     usages = records.map { |record| record.fetch("usage") }
 
     # Known references stay completable so an explicit valid id is never blocked.
@@ -366,19 +349,19 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_includes note.fetch("usage"), "model catalog unavailable"
     assert_includes note.fetch("description"), "/models"
     # Selecting the note cannot clobber a typed id: it re-inserts the prefix only.
-    assert_equal "/model P1-I1-W1", note.fetch("completion")
+    assert_equal "/model", note.fetch("completion")
 
     # A harness that reports no catalog at all explains itself the same way.
     unsupported = sample_state_with_model_catalog(
       harness: "antigravity",
       catalogs: { "antigravity" => Meringue::Harness::ModelCatalog.unsupported(harness: "antigravity").to_h }
     )
-    unsupported_records = suggestion_records("/model P1-I1-W1 ", unsupported)
+    unsupported_records = suggestion_records("/model ", unsupported)
     assert_equal "session_models_unavailable", unsupported_records.last.fetch("kind")
     assert_includes unsupported_records.last.fetch("description"), "does not expose a model catalog"
 
     # A typed query hides the note so it can never intercept a completion.
-    refute_includes suggestion_records("/model P1-I1-W1 anthropic/", state).map { |record| record.fetch("kind") },
+    refute_includes suggestion_records("/model anthropic/", state).map { |record| record.fetch("kind") },
                     "session_models_unavailable"
   end
 
@@ -397,7 +380,7 @@ class InputSlashCommandParserTest < Minitest::Test
     ).to_h
     state = sample_state_with_model_catalog(catalogs: { "pi" => stale })
 
-    records = suggestion_records("/default-model ", state)
+    records = suggestion_records("/model ", state)
     models = records.reject { |record| record.fetch("kind") == "session_models_unavailable" }
 
     assert_equal 4, models.length, "a stale list must not shrink to remembered references"
@@ -408,7 +391,7 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_includes models.first.fetch("description"), "last confirmed list"
     # Non-Anthropic entries stay selectable and keep their own thinking levels.
     google = models.find { |record| record.fetch("usage") == "google/gemini-3-flash" }
-    assert_equal "/default-model google/gemini-3-flash", google.fetch("completion")
+    assert_equal "/model google/gemini-3-flash", google.fetch("completion")
 
     note = records.last
     assert_equal "session_models_unavailable", note.fetch("kind")
@@ -416,27 +399,27 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_includes note.fetch("description"), "connection reset"
 
     # Thinking levels still come from the retained per-model data.
-    thinking = suggestion_records("/default-thinking ", state).map { |record| record.fetch("usage") }
+    thinking = suggestion_records("/thinking ", state).map { |record| record.fetch("usage") }
     assert_equal %w[xhigh max], thinking
   end
 
   def test_thinking_suggestions_follow_the_models_supported_levels
     state = sample_state_with_model_catalog
 
-    session_levels = suggestion_records("/thinking P1-I1-W1 ", state)
-    assert_equal Meringue::Harness::PiClient::THINKING_LEVELS, session_levels.map { |record| record.fetch("usage") }
-    assert_includes session_levels.first.fetch("description"), "supported by anthropic/claude-opus-5"
+    default_levels_for_catalog_model = suggestion_records("/thinking ", state)
+    assert_equal %w[xhigh max], default_levels_for_catalog_model.map { |record| record.fetch("usage") }
+    assert_includes default_levels_for_catalog_model.first.fetch("description"), "supported by anthropic-flex/claude-opus-5"
 
-    # The saved default model only supports xhigh/max, so /default-thinking
+    # The saved default model only supports xhigh/max, so /thinking
     # offers exactly those.
-    default_levels = suggestion_records("/default-thinking ", state)
+    default_levels = suggestion_records("/thinking ", state)
     assert_equal %w[xhigh max], default_levels.map { |record| record.fetch("usage") }
-    assert_equal "/default-thinking xhigh", default_levels.first.fetch("completion")
+    assert_equal "/thinking xhigh", default_levels.first.fetch("completion")
     assert_includes default_levels.first.fetch("description"), "supported by anthropic-flex/claude-opus-5"
 
     # A model whose levels are unknown falls back to Pi's full ladder and says so.
     unknown = sample_state_with_model_catalog(catalogs: {})
-    unknown_levels = suggestion_records("/thinking P1-I1-W1 ", unknown)
+    unknown_levels = suggestion_records("/thinking ", unknown)
     assert_equal Meringue::Harness::PiClient::THINKING_LEVELS, unknown_levels.map { |record| record.fetch("usage") }
     assert_includes unknown_levels.first.fetch("description"), "not verified"
   end
@@ -483,8 +466,8 @@ class InputSlashCommandParserTest < Minitest::Test
       "/dismiss q8" => ["DismissQuestion", { "question_id" => "q8" }],
       '/answer q8 "staging"' => ["AnswerQuestion", { "question_id" => "q8", "answer" => "staging" }],
       "/session-settings P1-i1-W1" => ["GetSessionSettings", { "agent_id" => "P1-i1-W1" }],
-      "/model p1-i1-w1 openai/gpt-5.6-sol" => ["SetSessionModel", { "agent_id" => "p1-i1-w1", "model" => "openai/gpt-5.6-sol" }],
-      "/thinking p1-i1-w1 xhigh" => ["SetSessionThinkingLevel", { "agent_id" => "p1-i1-w1", "level" => "xhigh" }],
+      "/model openai/gpt-5.6-sol" => ["SetDefaultSessionModel", { "model" => "openai/gpt-5.6-sol" }],
+      "/thinking xhigh" => ["SetDefaultSessionThinkingLevel", { "level" => "xhigh" }],
       '/worker spawn p1-i1 "go"' => ["SpawnWorker", { "issue_id" => "p1-i1", "prompt" => "go" }],
       '/prompt p1-i1-w1 "hi"' => ["PromptAgent", { "agent_id" => "p1-i1-w1", "prompt" => "hi" }],
       '/issue create p1 "Title"' => ["CreateIssue", { "project_id" => "p1", "title" => "Title", "description" => "" }]

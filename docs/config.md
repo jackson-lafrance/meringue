@@ -8,7 +8,7 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
-The interactive TUI updates this file with `/theme <name>`, `/default-model <provider/model>`, and `/default-thinking <level>`.
+The interactive TUI updates this file with `/theme <name>`, `/model <provider/model>`, and `/thinking <level>`.
 
 ## Selecting a TUI colorscheme
 
@@ -75,7 +75,24 @@ Supported action names:
 
 Common key names include `enter`, `shift-enter`, `tab`, `shift-tab`, `ctrl-tab`, `escape`, arrow keys (`up`, `down`, `left`, `right`), `shift-left`, `shift-right`, `shift-up`, `shift-down`, `shift-home`, `shift-end`, `shift-alt-left`, `shift-alt-right`, `shift-ctrl-left`, `shift-ctrl-right`, `shift-page-up`, `shift-page-down`, `home`, `end`, `page-up`, `page-down`, `backspace`, `delete`, `ctrl-space`, `ctrl-a` through `ctrl-z`, `alt-c`, `alt-v`, `alt-left`, `alt-right`, `ctrl-left`, `ctrl-right`, `alt-backspace`, `ctrl-backspace`, `alt-delete`, `ctrl-delete`, `space`, and single printable characters like `j` or `p`. Advanced users can bind a raw terminal sequence with `raw:<sequence>`; literal `\\e` inside that string is converted to Escape.
 
-Use `/keybind` in the TUI to show the active keybindings after config has been loaded.
+Use `/keybind` in the TUI to show the active keybindings after config has been loaded. `/config` shows the same keybindings together with the active supported defaults, workspace commands, and conflict policy.
+
+## Supported defaults and conflict policy
+
+The config file is intentionally small and only the settings described here are read by Meringue. Omitted values use built-in defaults. Future Pi session defaults live under `[harness.pi]`:
+
+```toml
+[harness.pi]
+model = "anthropic/claude-opus-5"
+thinking_level = "max"
+
+[conflicts]
+# A worker queued after a predecessor is cancelled when that predecessor fails.
+# Use "run" to start it anyway. Explicit worker-command flags still win.
+predecessor_failure = "cancel"
+```
+
+`[conflicts].predecessor_failure` accepts `cancel` or `run`. It applies only when a dependent worker does not provide its own `if_predecessor_fails` value; it does not change the handling of git merge conflicts or overwrite project files. `/config` reports the effective value and `/keybind` reports only keybindings.
 
 ## Worker workspace terminal and editor
 
@@ -188,13 +205,13 @@ head_extra_args = []
 worker_extra_args = []
 ```
 
-Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/default-model` and `/default-thinking`, or set `model` and `thinking_level` under `[harness.pi]`, to change both future roles without duplicating their tool flags. These scalar values are appended after `head_extra_args` / `worker_extra_args` and therefore win over model/thinking flags in those arrays. A configured role array still replaces that role's default array entirely, so include every other flag you need.
+Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/model` and `/thinking`, or set `model` and `thinking_level` under `[harness.pi]`, to change both future roles without duplicating their tool flags. These scalar values are appended after `head_extra_args` / `worker_extra_args` and therefore win over model/thinking flags in those arrays. A configured role array still replaces that role's default array entirely, so include every other flag you need.
 
-`/defaults` inspects the future Pi pair. `/model` and `/thinking` remain targeted commands for one existing Pi session and never rewrite future defaults. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
+`/defaults` inspects the future Pi pair. `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. Use `/session-settings` to inspect an existing session. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
 
 ### Model catalogs and provider resource flags
 
-`/models`, and the completion list behind `/model` and `/default-model`, come from the harness itself rather than a list maintained in Meringue. For Pi, Meringue starts a short-lived ephemeral RPC probe (`pi --mode rpc --no-session`) and reads `get_available_models`.
+`/models`, and the completion list behind `/model`, come from the harness itself rather than a list maintained in Meringue. For Pi, Meringue starts a short-lived ephemeral RPC probe (`pi --mode rpc --no-session`) and reads `get_available_models`.
 
 That probe reuses the configured provider `command`, `env`, `extra_args`, and role `*_extra_args`, minus `--model`/`--thinking`, because provider availability depends on those flags. Two consequences matter when configuring Pi:
 
