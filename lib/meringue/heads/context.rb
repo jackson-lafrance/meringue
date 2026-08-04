@@ -75,6 +75,7 @@ module Meringue
           Treat the supplied routing context as candidate evidence, not a conversation database. Classify whether this message starts a new goal, follows an existing issue, or answers an open question, then deliberately choose whether to prompt, follow up, or replace an existing worker.
           When routing_context.selected_target is present, it is explicit UI routing context: keep this message on its resolved issue. An agent selection resolves to that agent's owning issue; use the selected agent as a session-context hint, but still choose the appropriate healthy worker and PromptAgent mode through kernel commands. Never bypass head routing or prompt an agent from another issue.
           When questions are open, check routing_context.open_questions and routing_context.answer_inference first. If this message clearly answers exactly one open question, propose AnswerQuestion for that question id and route the work it unblocks in the same result. If several open questions are plausible, or the message is plainly a new goal, leave every question open and route normally or ask one clarifying question.
+          When proposing AddProject, use the concise suggested product name from project_discovery when available. Preserve intentional capitalization exactly, and do not use a worktree suffix, repository path slug, or verbose product description as the name.
           Prefer a healthy existing worker session when its Pi or other harness history contains the context needed for the follow-up. Do not duplicate that harness history in Meringue state.
           An issue is the durable goal and a worker is one session step, so one goal that needs research and then implementation is one issue with two workers on it (issue_from_command on both, plus after_from_command and follow_up_of_command on the implementer), not two issues. Create a second issue only for a genuinely independent goal. Never write a worker prompt that polls Meringue state or sleeps waiting for another worker: the kernel owns that wait.
           Do not mutate files, git state, dependencies, databases, remote services, or Meringue state directly.
@@ -571,6 +572,7 @@ module Meringue
             "Prefer a registered project when the id, name, root_path, git root, or remote clearly matches the request.",
             "For phrases like this project, current project, here, or this repo, prefer the current_directory.git_root when present; otherwise use cwd.",
             "If the preferred local repository is not registered, propose AddProject with its absolute root before CreateIssue or SpawnWorker.",
+            "When proposing AddProject, use current_directory.suggested_project_name when available. Prefer the concise product name from the repository's README heading, preserve its intentional capitalization exactly, and never use a worktree suffix, path slug, or verbose description as the project name. Omit name only when no reliable product name is available.",
             "Before proposing CreateIssue, inspect existing issues in the chosen project. If the prompt is a follow-up, refinement, or next step for an existing issue, reuse that issue and propose SpawnWorker only.",
             "Do not investigate or answer substantive task content yourself. Route implementation, investigation, and informational work through CreateIssue/SpawnWorker or PromptAgent as appropriate.",
             "Use the HeadResult summary to describe routing decisions, not to deliver the worker's substantive answer.",
@@ -599,11 +601,13 @@ module Meringue
       def current_directory_metadata
         git_root = nearest_git_root(cwd)
         default_root = git_root || cwd
+        suggested_project_name = ProjectNaming.name_for(default_root)
         {
           "cwd" => cwd,
           "git_root" => git_root,
           "default_project_root" => default_root,
-          "default_project_name" => File.basename(default_root),
+          "default_project_name" => suggested_project_name,
+          "suggested_project_name" => suggested_project_name,
           "registered_project_id" => registered_project_id_for(default_root),
           "should_propose_add_project_for_current_directory" => registered_project_id_for(default_root).nil?
         }

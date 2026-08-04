@@ -243,7 +243,8 @@ class HeadContextTest < Minitest::Test
 
     assert_equal root, discovery.dig("current_directory", "cwd")
     assert_equal root, discovery.dig("current_directory", "default_project_root")
-    assert_equal File.basename(root), discovery.dig("current_directory", "default_project_name")
+    assert_equal Meringue::ProjectNaming.name_for(root), discovery.dig("current_directory", "default_project_name")
+    assert_equal Meringue::ProjectNaming.name_for(root), discovery.dig("current_directory", "suggested_project_name")
     assert_nil discovery.dig("current_directory", "registered_project_id")
     assert discovery.dig("current_directory", "should_propose_add_project_for_current_directory")
     assert_includes discovery.fetch("candidate_search_roots"), root
@@ -251,6 +252,15 @@ class HeadContextTest < Minitest::Test
                  discovery.fetch("allowed_read_only_discovery")
     assert_equal Meringue::Heads::Context::DISCOVERY_FORBIDDEN_COMMANDS,
                  discovery.fetch("forbidden_discovery")
+  end
+
+  def test_project_discovery_uses_the_readme_heading_as_the_suggested_name
+    root = head_temp_root
+    File.write(File.join(root, "README.md"), "# Meringue — terminal-first control plane\n\nA concise product description.\n")
+
+    discovery = build_head_context(cwd: root).to_prompt_h.fetch("project_discovery")
+
+    assert_equal "Meringue", discovery.dig("current_directory", "suggested_project_name")
   end
 
   def test_project_discovery_detects_the_registered_git_root
@@ -296,6 +306,7 @@ class HeadContextTest < Minitest::Test
     assert_includes prompt, "stateless Meringue head agent"
     assert_includes prompt, "Do not mutate files, git state, dependencies, databases, remote services, or Meringue state directly."
     assert_includes prompt, "HeadResult JSON object only"
+    assert_includes prompt, "Preserve intentional capitalization exactly"
     assert_includes prompt, File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md")).lines.first.strip
   end
 
