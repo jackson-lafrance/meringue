@@ -91,7 +91,7 @@ class KernelHeadsApplyResultTest < KernelHeadsTestCase
     assert_empty issues
   end
 
-  def test_wrong_predicted_issue_id_rejects_only_the_dependent_command
+  def test_wrong_predicted_issue_id_is_remapped_to_the_batch_issue
     project_id = add_project!
     head_id = spawn_head!("File an issue and start a worker on the wrong id")
     result = apply_head_result(
@@ -105,10 +105,9 @@ class KernelHeadsApplyResultTest < KernelHeadsTestCase
       cleanup_head: false
     )
 
-    assert_equal([["CreateIssue", "accepted"], ["SpawnWorker", "rejected"]], command_statuses(result))
-    assert_includes command_results(result).fetch(1).fetch("errors"), "issue_not_found"
+    assert_equal([["CreateIssue", "accepted"], ["SpawnWorker", "accepted"]], command_statuses(result))
     assert_equal ["#{project_id}-I1"], issues.map { |issue| issue.fetch("id") }
-    assert_empty agents(type: "worker")
+    assert_equal ["#{project_id}-I1"], agents(type: "worker").map { |agent| agent.fetch("issue_id") }
   end
 
   def test_commands_are_applied_in_the_proposed_order

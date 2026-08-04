@@ -18,7 +18,8 @@ class TuiAgentTreeNavigationTest < Minitest::Test
     state = composed_state(demo_state)
     rendered_ids = Meringue::TUI::Panes::AgentTreePane.new.line_item_ids(state, width: 34).compact.uniq
 
-    assert_equal rendered_ids, Navigation.selectable_agent_ids(state)
+    project_ids = state.fetch("projects").map { |project| project.fetch("id") }
+    assert_equal rendered_ids.reject { |id| project_ids.include?(id) }, Navigation.selectable_agent_ids(state)
   end
 
   def test_killed_projects_and_issues_are_not_selectable

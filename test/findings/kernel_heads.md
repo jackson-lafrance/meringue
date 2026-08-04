@@ -29,8 +29,8 @@ every state/config file lives under a per-test `Dir.mktmpdir`.
   a batch with any rejected/failed command keeps the head with `status: "blocked"` and
   `head_result_apply_state: "partially_applied"` for inspection.
 - Predicted-id chaining works inside one batch (`AddProject` -> `CreateIssue` -> `SpawnWorker`
-  with `P1` / `P1-I1`), and a wrong prediction is rejected with `project_not_found` /
-  `issue_not_found` without creating records.
+  with `P1` / `P1-I1`); symbolic issue references and unambiguous predicted ids are remapped
+  to the batch-created issue so workers cannot land on another head's issue.
 - Commands get default ids `<HeadID>-C<n>` and are applied in the proposed order.
 - A batch that accepts nothing and records no question restates the user's message once as
   an `unrouted_user_message` log entry (`error` when commands were proposed and none
@@ -58,46 +58,38 @@ every state/config file lives under a per-test `Dir.mktmpdir`.
 
 ## Real-behavior notes / possible bugs (asserted as-is, not fixed here)
 
-1. **`AnswerQuestion` records the answer and nothing else** (matches the P1-I9 report).
-   Answering an open question marks it `answered`, stores the answer, and logs
-   `Answered question Q1.` — it does not spawn a head, does not reuse the question's
-   `project_id`/`issue_id` to route work, and does not prompt or create any worker.
-   Asserted in `questions_test.rb#test_answering_a_question_does_not_route_any_work_today`.
-   If the answer flow starts driving a head, that test is the one to update.
-
-2. **`AnswerQuestion` has no status guard.** `DismissQuestion` rejects a non-open question
+1. **`AnswerQuestion` has no status guard.** `DismissQuestion` rejects a non-open question
    with `question_not_open`, but `AnswerQuestion` accepts an already answered *or already
    dismissed* question and overwrites the stored answer, flipping a dismissed question back
    to `answered`. Asserted in
    `questions_test.rb#test_answering_twice_overwrites_the_stored_answer` and
    `#test_answering_a_dismissed_question_is_currently_accepted`.
 
-3. **A rejected command does not stop the rest of the batch.** `ApplyHeadResult` keeps
-   applying later commands, so a `SpawnWorker` that depended on a rejected `CreateIssue`
-   is rejected with `issue_not_found` rather than skipped as unreachable. That is the
-   current contract (`apply_head_result_test.rb#test_wrong_predicted_issue_id_rejects_only_the_dependent_command`),
-   but it means one bad predicted id produces two rejection log lines.
+2. **A rejected command does not stop the rest of the batch.** `ApplyHeadResult` keeps
+   applying later commands, so a genuinely unreachable worker target is rejected rather
+   than skipped as unreachable. Unambiguous predicted issue ids are remapped to the batch
+   issue (`apply_head_result_test.rb#test_wrong_predicted_issue_id_is_remapped_to_the_batch_issue`).
 
-4. **Head-batch recovery is only reachable through `ReconcileSessions`.**
+3. **Head-batch recovery is only reachable through `ReconcileSessions`.**
    `recover_unapplied_head_results` and `recover_worker_reservations` are private, so the
    exactly-once recovery tests drive them via `apply("type" => "ReconcileSessions")` and read
    `result["result"]["recovered_head_results"]`.
 
-5. **Question dedupe is scoped per head.** Two different heads asking the identical question
+4. **Question dedupe is scoped per head.** Two different heads asking the identical question
    produce `Q1` and `Q2`. That is intended for independent heads, but it means a re-spawned
    head answering/asking the same clarification will add another record.
 
-6. **The head snapshot already contains full open-question records** (`id`, `question`,
-   `context`, `status`, `head_id`, `project_id`, `issue_id`, `created_at`), so the
-   implicit-answer inference described in P1-I9 has the data it needs at the snapshot level;
-   what is missing is the kernel-side follow-through in item 1.
-   Asserted in `spawn_head_test.rb#test_head_runner_snapshot_includes_open_question_records`.
+5. **The head snapshot and prompt context contain full open-question records** (`id`,
+   `question`, `context`, `status`, `head_id`, `project_id`, `issue_id`, `created_at`),
+   allowing implicit-answer inference and follow-up routing. Asserted in
+   `spawn_head_test.rb#test_head_runner_snapshot_includes_open_question_records` and the
+   head/input question-answering integration tests.
 
-7. **`ApplyHeadResult` on a head whose runner has no session** marks the head session
+6. **`ApplyHeadResult` on a head whose runner has no session** marks the head session
    `unavailable` with note `head_runner_has_no_session` instead of failing — useful seam for
    tests, and the behavior any non-session head runner gets.
 
-8. **Intra-batch worker references reuse the issue-reference machinery.**
+7. **Intra-batch worker references reuse the issue-reference machinery.**
    `deferred_worker_batch_reference_test.rb` covers `after_from_command` /
    `after_agent_id: "@<command_id>"` on `SpawnWorker`: it resolves against the workers this
    batch already spawned, is rejected with `after_agent_reference_out_of_order` when it names

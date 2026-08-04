@@ -7,9 +7,9 @@ require "support/input_support"
 # /answer slash command, the AnswerQuestion kernel command, SpawnHead's
 # question_id plumbing, and the head context a question-answering head receives.
 #
-# These tests assert that answering a question is a routing action: the answer is
-# recorded, the question closes, and a fresh head receives enough context to
-# route the work the question blocked.
+# These tests assert the complete answer flow: answers are recorded, follow-up
+# heads receive the question context, and implicit replies expose candidate
+# questions to head routing.
 class InputQuestionAnswerFlowTest < Minitest::Test
   include InputSupport
 
@@ -211,6 +211,7 @@ class InputQuestionAnswerFlowTest < Minitest::Test
       assert_equal ["Q1"], open_questions.map { |question| question.fetch("id") }
       assert_equal QUESTION_TEXT, open_questions.first.fetch("question")
       assert_equal "staging or production", open_questions.first.fetch("context")
+      refute context.fetch("current_state_summary").key?("open_questions")
 
       assert_equal sandbox.state_path, context.fetch("state_access").fetch("state_path")
       commands = context.fetch("state_access").fetch("suggested_commands").map { |entry| entry.values.join(" ") }

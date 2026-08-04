@@ -75,7 +75,7 @@ class HeadRunnerParityTest < Minitest::Test
     assert_equal context.cwd, result.dig("commands", 0, "payload", "path")
     assert_equal "P1", result.dig("commands", 1, "payload", "project_id")
     assert_nil result.dig("commands", 1, "payload", "parent_issue_id")
-    assert_equal "P1-I1", result.dig("commands", 2, "payload", "issue_id")
+    assert_equal "create-issue", result.dig("commands", 2, "payload", "issue_from_command")
     refute_empty result.dig("commands", 2, "payload", "title")
   end
 
@@ -139,7 +139,7 @@ class HeadRunnerParityTest < Minitest::Test
     types = result.fetch("commands").map { |command| command.fetch("type") }
     assert_equal %w[CreateIssue SpawnWorker], types
     assert_equal "P1", result.dig("commands", 0, "payload", "project_id")
-    assert_equal "P1-I3", result.dig("commands", 1, "payload", "issue_id")
+    assert_equal "create-issue", result.dig("commands", 1, "payload", "issue_from_command")
   end
 
   def test_harness_runner_owns_a_session_for_one_run_and_closes_it
