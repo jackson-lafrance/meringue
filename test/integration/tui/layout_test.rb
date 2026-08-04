@@ -34,13 +34,24 @@ class TuiLayoutTest < Minitest::Test
     end
   end
 
-  def test_dimensions_below_the_minimum_are_clamped_instead_of_crashing
+  def test_dimensions_below_the_minimum_stay_inside_the_real_terminal_rectangle
     [[1, 1], [0, 0], [-5, -5], [10, 4], [63, 17]].each do |width, height|
       lines = @layout.render(@state, width: width, height: height).split("\n", -1)
+      expected_width = [width, 1].max
+      expected_height = [height, 1].max
 
-      assert_equal Layout::MIN_HEIGHT, lines.length, "clamped rows at #{width}x#{height}"
-      assert_equal [Layout::MIN_WIDTH], lines.map(&:length).uniq, "clamped widths at #{width}x#{height}"
+      assert_equal expected_height, lines.length, "rows at #{width}x#{height}"
+      assert_equal [expected_width], lines.map(&:length).uniq, "widths at #{width}x#{height}"
     end
+  end
+
+  def test_narrow_chat_content_wraps_instead_of_overflowing_the_viewport
+    state = state_with_input("x" * 120)
+    lines = @layout.render(state, width: 20, height: 8).split("\n", -1)
+
+    assert_equal 8, lines.length
+    assert_equal [20], lines.map(&:length).uniq
+    assert lines.any? { |line| line.include?("chat") }
   end
 
   def test_all_three_panes_survive_the_minimum_size
