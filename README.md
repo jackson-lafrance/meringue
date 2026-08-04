@@ -163,7 +163,10 @@ Useful slash commands inside the TUI include:
 
 - `/help` — show command syntax.
 - `/project add <path> [name]` — register a project.
+- `/project rename <project_id> "<name>"` — rename a project.
 - `/issue create <project_id> "<title>" ["description"]` — create an issue manually.
+- `/issue rename <issue_id> "<title>"` — rename an issue.
+- `/rename <project_or_issue_id> "<name>"` — quickly rename either record; focus/select a tree row and press `r` to prefill it.
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
 - `/prompt <agent_id> "<message>"` — follow up with an existing agent.
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
