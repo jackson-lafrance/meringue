@@ -346,6 +346,33 @@ module Meringue
                 "Pi did not apply model #{requested_reference.inspect}; effective model is #{effective_reference || "unknown"}."
         end
 
+        available_levels = rpc_data(
+          process.request({ "type" => "get_available_thinking_levels" }, timeout: command_timeout)
+        ).fetch("levels", []).filter_map do |available_level|
+          level = available_level.to_s.strip.downcase
+          level if THINKING_LEVELS.include?(level)
+        end
+        effective_level = updated_ref.dig("session_settings", "thinking_level").to_s.strip.downcase
+        if !effective_level.empty? && !available_levels.include?(effective_level)
+          fallback_level = compatible_thinking_level(effective_level, available_levels)
+          unless fallback_level
+            raise InvalidThinkingLevelError,
+                  "Pi model #{requested_reference} does not support thinking level #{effective_level.inspect}, " \
+                  "and reported no compatible fallback."
+          end
+
+          rpc_data(
+            process.request({ "type" => "set_thinking_level", "level" => fallback_level }, timeout: command_timeout),
+            allow_nil_data: true
+          )
+          updated_ref = get_state(state_ref)
+          effective_level = updated_ref.dig("session_settings", "thinking_level")
+          unless effective_level == fallback_level
+            raise InvalidThinkingLevelError,
+                  "Pi did not apply compatible thinking level #{fallback_level.inspect}; effective level is #{effective_level || "unknown"}."
+          end
+        end
+
         { "session_ref" => updated_ref, "settings" => updated_ref.fetch("session_settings") }
       rescue StandardError
         release_settings_attachment(process, state_ref) if attached
@@ -535,6 +562,15 @@ module Meringue
       private
 
       attr_reader :transport_ownership, :takeover_settle_timeout
+
+      def compatible_thinking_level(current_level, available_levels)
+        current_index = THINKING_LEVELS.index(current_level)
+        return nil unless current_index
+
+        THINKING_LEVELS.first(current_index + 1).reverse_each.find do |level|
+          available_levels.include?(level)
+        end || available_levels.first
+      end
 
       def model_catalog_timeout
         [command_timeout.to_i, DEFAULT_MODEL_CATALOG_TIMEOUT].max

@@ -186,6 +186,35 @@ class TuiAppWiringTest < Minitest::Test
     assert_equal "do it", Timeout.timeout(5) { submitted.pop }
   end
 
+  def test_config_overview_includes_supported_settings_and_active_keybindings
+    config = Meringue::Config.new(
+      {
+        "tui" => { "colorscheme" => "gruvbox" },
+        "harness" => { "provider" => "claude", "pi" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "high" } },
+        "conflicts" => { "predecessor_failure" => "run" },
+        "workspace" => { "editor_command" => ["code", "--reuse-window"] }
+      },
+      path: "/tmp/meringue-test-config.toml",
+      loaded: true
+    )
+    app = App.new(
+      layout: Meringue::TUI::Layout.new,
+      out: StringIO.new,
+      terminal: TUISupport::FakeTerminal.new,
+      keybindings: Meringue::TUI::Keybindings.from_config({ "submit" => ["ctrl-x"] }),
+      config: config
+    )
+
+    overview = app.send(:configuration_help_text)
+
+    assert_includes overview, "file: /tmp/meringue-test-config.toml (loaded)"
+    assert_includes overview, "harness: claude"
+    assert_includes overview, "Pi default model: openai/gpt-5.6-sol"
+    assert_includes overview, "conflict policy (predecessor failure): run"
+    assert_includes overview, "Submit / open selected item [submit]: ctrl-x"
+    assert_includes overview, "Keybindings (action: configured keys"
+  end
+
   def test_quit_keys_follow_the_injected_keybindings
     assert @app.send(:quit_key?, "\u0004", "")
     assert @app.send(:quit_key?, "\u0003", "")

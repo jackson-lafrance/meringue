@@ -6,6 +6,8 @@ require "json"
 module Meringue
   class Config
     DEFAULT_PATH = File.expand_path(ENV.fetch("MERINGUE_CONFIG", "~/.meringue/config.toml"))
+    DEFAULT_CONFLICT_PREDECESSOR_FAILURE = "cancel"
+    CONFLICT_PREDECESSOR_FAILURES = %w[cancel run].freeze
 
     class ParseError < StandardError; end
 
@@ -87,6 +89,16 @@ module Meringue
 
     def with_overrides(overrides)
       self.class.new(deep_merge(data, deep_stringify(overrides || {})), path: path, loaded: loaded?)
+    end
+
+    # A dependent worker normally cancels when its predecessor fails. `run` is
+    # useful for independent follow-on work and is the only conflict policy
+    # currently supported by the config file.
+    def conflict_predecessor_failure
+      configured = value("conflicts", "predecessor_failure").to_s.strip.downcase.tr("-", "_")
+      return DEFAULT_CONFLICT_PREDECESSOR_FAILURE unless CONFLICT_PREDECESSOR_FAILURES.include?(configured)
+
+      configured
     end
 
     def to_h

@@ -115,15 +115,15 @@ class InputKernelConvergenceTest < Minitest::Test
       initial = sandbox.submit("/defaults")
       assert_equal [%w[GetSessionDefaults accepted]], sandbox.command_result_pairs(initial)
 
-      model = sandbox.submit("/default-model openai/gpt-5.6-sol")
-      thinking = sandbox.submit("/default-thinking xhigh")
+      model = sandbox.submit("/model openai/gpt-5.6-sol")
+      thinking = sandbox.submit("/thinking xhigh")
       assert_equal [%w[SetDefaultSessionModel accepted]], sandbox.command_result_pairs(model)
       assert_equal [%w[SetDefaultSessionThinkingLevel accepted]], sandbox.command_result_pairs(thinking)
       config = Meringue::Config.load(path: sandbox.config_path)
       assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "model")
       assert_equal "xhigh", config.value("harness", "pi", "thinking_level")
 
-      rejected = sandbox.submit("/default-thinking ultra")
+      rejected = sandbox.submit("/thinking ultra")
       result = sandbox.command_results(rejected).first
       assert_equal "rejected", result.fetch("status")
       assert_includes result.fetch("errors").join(" "), "thinking level must be one of"
