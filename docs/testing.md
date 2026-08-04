@@ -1,6 +1,6 @@
 # Testing
 
-Meringue has one automated suite: Minitest, driven by Rake, with no dependencies beyond `rake` and `minitest` (both ship with Ruby). Tests replaced the old ad-hoc `scripts/*_smoke.rb` workflow for everything that can be checked without a real harness.
+Meringue has one automated suite: Minitest, driven by Rake, with no dependencies beyond `rake` and `minitest` (both ship with Ruby). Focused `scripts/*_smoke.rb` checks remain available for interactive previews and scenarios that are easier to inspect manually; see [`docs/smoke-checks.md`](smoke-checks.md) for the inventory. They complement the suite rather than replacing it.
 
 ## Running the suite
 
