@@ -124,7 +124,7 @@ class KernelHeadsLoggingTest < KernelHeadsTestCase
     )
     failing_state = failing_engine.list_all
 
-    provisioning_error = log_with_message("Harness failed to spawn worker", current_state: failing_state)
+    provisioning_error = log_with_message("Could not start an agent session for worker", current_state: failing_state)
     refute_nil provisioning_error
     assert_equal "kernel", provisioning_error.fetch("source_type")
     assert_equal "#{project_id}-I1-W1", provisioning_error.fetch("source_id")
