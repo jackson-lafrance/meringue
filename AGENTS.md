@@ -315,11 +315,9 @@ Do the same thing as coding harnesses for these aswell we want it to be familiar
 /prompt <agent_id> "<message>"
 /defaults
 /models [harness] [refresh]
-/default-model <provider/model>
-/default-thinking <level>
+/model <provider/model>
+/thinking <level>
 /session-settings <agent_id>
-/model <agent_id> <provider/model>
-/thinking <agent_id> <level>
 /kill <agent_or_issue_id>
 /tree
 /state
@@ -487,7 +485,7 @@ The harness client should expose operations shaped like:
 
 Model catalogs are asked of the harness, never hand-maintained in Meringue. `available_models` returns a harness-neutral catalog (models plus each model's supported thinking levels) or an explicit unavailable/unsupported result. The kernel caches the snapshot in state metadata so input completion can offer every model for the selected harness without starting a harness process while the user types, and `/models` reports or refreshes it.
 
-Future Pi defaults and existing Pi session settings are separate scopes. `/default-model` and `/default-thinking` persist app-wide Pi spawn defaults for all future heads and workers without mutating existing sessions. `/model` and `/thinking` mutate only one targeted existing session without changing defaults. `/session-settings` inspects one existing session's effective values; the old dashboard `/session <agent_id>` is only a compatibility alias. A focused workspace advertises `/open-session` for opening its selected harness UI, with the old argumentless `/session` spelling also retained only as an alias. Default persistence belongs in Meringue config and runtime spawn reconfiguration belongs behind the harness registry/client boundary.
+Future Pi defaults and existing Pi session settings are separate scopes. `/model` and `/thinking` persist app-wide Pi spawn defaults for all future heads and workers without mutating existing sessions. `/session-settings` inspects one existing session's effective values; the old dashboard `/session <agent_id>` is only a compatibility alias. A focused workspace advertises `/open-session` for opening its selected harness UI, with the old argumentless `/session` spelling also retained only as an alias. Default persistence belongs in Meringue config and runtime spawn reconfiguration belongs behind the harness registry/client boundary.
 
 The generic session reference should track:
 - `harness`, such as `pi`

@@ -92,6 +92,24 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     assert_equal ["xhigh"], stub_commands_of_type(stub, "set_thinking_level").map { |command| command.fetch("level") }
   end
 
+  def test_switching_models_downgrades_an_unsupported_thinking_level
+    client, stub = build_pi_client(
+      tmpdir,
+      stub_config: {
+        "session_id" => "sess-compatibility",
+        "thinking_level" => "max",
+        "available_thinking_levels" => ["xhigh"]
+      }
+    )
+    ref = spawn(client)
+
+    updated = client.set_session_model(ref, "openai/gpt-5.6-sol")
+
+    assert_equal "openai/gpt-5.6-sol", updated.dig("settings", "model", "reference")
+    assert_equal "xhigh", updated.dig("settings", "thinking_level")
+    assert_equal ["xhigh"], stub_commands_of_type(stub, "set_thinking_level").map { |command| command.fetch("level") }
+  end
+
   def test_spawn_session_sets_a_human_facing_session_name_without_meringue_or_pi_ids
     client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-42" })
 
