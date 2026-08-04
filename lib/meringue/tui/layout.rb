@@ -22,8 +22,8 @@ module Meringue
       end
 
       def render(state, width:, height:, color: false)
-        width = [width.to_i, MIN_WIDTH].max
-        height = [height.to_i, MIN_HEIGHT].max
+        width = bounded_width(width)
+        height = bounded_height(height)
         canvas = Canvas.new(width: width, height: height)
         return render_agent_workspace(canvas, state, width, height, color: color) if agent_workspace_active?(state)
 
@@ -459,12 +459,17 @@ module Meringue
         agent_workspace_pane.title_style(state)
       end
 
+      # Rendering must stay inside the terminal's real viewport. The old minimum
+      # rectangle made a resized terminal receive a wider/taller frame than it
+      # could display, which clipped the chat pane at the edges. Geometry below
+      # is deliberately defensive for compact terminals instead of expanding the
+      # canvas past the requested dimensions.
       def bounded_width(width)
-        [width.to_i, MIN_WIDTH].max
+        [width.to_i, 1].max
       end
 
       def bounded_height(height)
-        [height.to_i, MIN_HEIGHT].max
+        [height.to_i, 1].max
       end
 
       # Shared AgentTree geometry so hit-testing, scrolling, reveal, and the

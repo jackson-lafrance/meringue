@@ -37,7 +37,7 @@ module Meringue
                     selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
                     entries.flat_map do |entry|
                       gutter = gutter_segment(entry)
-                      entry_lines = [role_line(entry, selected_agent_id: selected_agent_id)]
+                      entry_lines = role_lines(entry, selected_agent_id: selected_agent_id, width: width)
                       entry_lines.concat(body_lines(entry, width: width, gutter: gutter))
                       entry_lines << status_line(entry.fetch("status"), gutter) if entry.fetch("kind", nil) == "message" && entry.fetch("status", nil)
                       entry_lines
@@ -615,6 +615,43 @@ module Meringue
           segments.concat(agent_title_segments(entry, selected_agent_id: selected_agent_id))
           segments.concat(log_level_segments(entry))
           segments
+        end
+
+        # Headers contain agent-written titles and can be wider than the pane even
+        # though message bodies are wrapped. Split them into styled rows too, so a
+        # narrow terminal scrolls through the header instead of losing its suffix
+        # at the right edge.
+        def role_lines(entry, selected_agent_id:, width:)
+          segments = role_line(entry, selected_agent_id: selected_agent_id)
+          return [segments] if width.nil?
+
+          wrap_segments(segments, width)
+        end
+
+        def wrap_segments(segments, width)
+          limit = [width.to_i, 1].max
+          rows = [[]]
+          remaining = limit
+
+          Array(segments).each do |segment|
+            text = segment.is_a?(Array) ? segment.fetch(0, "").to_s : segment.to_s
+            style = segment.is_a?(Array) ? segment.fetch(1, nil) : nil
+            chars = text.chars
+            offset = 0
+            while offset < chars.length
+              if remaining.zero?
+                rows << []
+                remaining = limit
+              end
+              chunk = chars.slice(offset, remaining)
+              rows.last << [chunk.join, style] unless chunk.empty?
+              offset += chunk.length
+              remaining -= chunk.length
+            end
+          end
+
+          rows.pop if rows.length > 1 && rows.last.empty?
+          rows
         end
 
         # Agent lines are colored per agent id; everything else keeps the

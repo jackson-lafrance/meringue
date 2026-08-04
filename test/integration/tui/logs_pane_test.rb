@@ -218,6 +218,19 @@ class TuiLogsPaneTest < Minitest::Test
     assert lines.all? { |line| line.length <= 40 }, "longest: #{lines.map(&:length).max}"
   end
 
+  def test_long_log_headers_wrap_without_losing_the_agent_title_suffix
+    state = composed_state(
+      empty_state.merge(
+        "agents" => [agent_record("P1-I1-W1", "harness_metadata" => { "title" => "A very long worker title with a visible suffix" })],
+        "logs" => [log_record("L1", "source_type" => "worker", "source_id" => "P1-I1-W1", "message" => "working")]
+      )
+    )
+    lines = plain_lines(@pane.log_lines(state, width: 20))
+
+    assert lines.all? { |line| line.length <= 20 }, "longest: #{lines.map(&:length).max}"
+    assert_includes lines.join(" ").gsub(/\s+/, " "), "visible suffix"
+  end
+
   def test_untrusted_escape_sequences_never_reach_the_rendered_frame
     poisoned = "\e[31mred\e]0;title\a text \e[2J"
     logs = [
