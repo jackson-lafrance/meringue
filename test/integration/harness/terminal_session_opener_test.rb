@@ -52,7 +52,7 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
     result = opener.open(agent("harness" => ""))
 
     assert_equal "rejected", result.fetch("status")
-    assert_match(/has no harness to open/, result.fetch("message"))
+    assert_match(/has no agent session to open/, result.fetch("message"))
     assert_empty launches
   end
 
@@ -60,7 +60,7 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
     result = opener.open(agent("harness" => "codex"))
 
     assert_equal "rejected", result.fetch("status")
-    assert_equal 'Opening "codex" sessions is not supported yet.', result.fetch("message")
+    assert_equal "Opening this agent session in a terminal is not supported yet.", result.fetch("message")
     assert_empty launches
   end
 
@@ -92,7 +92,7 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
     result = opener.open(agent)
 
     assert_equal "rejected", result.fetch("status")
-    assert_match(/has no saved Pi session file or session id to open/, result.fetch("message"))
+    assert_match(/has no saved agent session file or session id to open/, result.fetch("message"))
     assert_match(/remain unchanged/, result.fetch("message"))
     assert_empty launches
   end
@@ -128,7 +128,7 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
     File.write(headerless, "#{JSON.generate("type" => "message", "id" => "m1")}\n")
 
     assert_match(/the file is empty/, opener.open(agent("harness_session_file" => empty)).fetch("message"))
-    assert_match(/first record is not a Pi session header/,
+    assert_match(/first record is not an agent session header/,
                  opener.open(agent("harness_session_file" => headerless)).fetch("message"))
     assert_empty launches
   end

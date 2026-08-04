@@ -129,7 +129,7 @@ class HarnessSessionViewTest < HarnessIntegrationTest
     assert_equal "unavailable", snapshot.fetch("availability")
     assert_equal "unknown", snapshot.fetch("session_state")
     assert_empty snapshot.fetch("items")
-    assert_match(/Saved Pi session history is unavailable/, snapshot.fetch("warning"))
+    assert_match(/Saved agent session history is unavailable/, snapshot.fetch("warning"))
   end
 
   def test_history_snapshot_only_renders_the_active_branch

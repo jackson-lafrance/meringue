@@ -19,22 +19,14 @@ tests assert what the code actually does today and the gap is recorded below.
    latent bug rather than a user-visible one. The e2e suite therefore settles workers the way
    the running app does: finish the harness session and call `engine.reconcile_sessions`.
 
-2. Answering an open question does not drive any work (matches issue P1-I9).
-   `/answer Q1 "..."` is parsed, the answer is stored, the question flips to `answered`, and
-   one log line `Answered question Q1.` is written — and nothing else happens. The kernel never
-   spawns a head with the answer plus the question's context, so the question's original
-   `project_id`/`issue_id` scope is dropped on the floor.
-   `test/e2e/clarifying_question_flow_test.rb` asserts the current recording behavior and then
-   *explicitly* applies `SpawnHead` with `question_id: "Q1"` to cover the contract the answer
-   flow is supposed to trigger (head context carries the full `question_being_answered` record,
-   and the head routes back onto the question's issue).
+2. Answering an open question drives follow-up work.
+   `/answer Q1 "..."` records the answer, starts a routing head with the question context,
+   and applies the resulting commands. The clarifying-question flow covers the persisted
+   question scope and resulting head routing.
 
-3. Head context cannot support inferring implicit answers.
-   `Heads::Context#current_state_summary` exposes only `open_question_count`; the full open
-   question records (id/question/context/project_id/issue_id) are never surfaced, and
-   `routing_context.question_being_answered` is `nil` unless `SpawnHead` was given a
-   `question_id`. A head reading a prose reply therefore has nothing in its context to match
-   against open questions.
+3. Head context supports inferring implicit answers.
+   `Heads::Context` exposes open-question records and populates
+   `routing_context.question_being_answered` for explicit ids and uniquely referenced prose.
 
 4. `Prune` reports removed agent ids that no longer exist. Applying a head result cleans the
    head record out of state immediately, but `remove_issue_bundles_and_agents!` still collects

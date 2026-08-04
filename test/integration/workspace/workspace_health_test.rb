@@ -71,7 +71,7 @@ class WorkspaceHealthTest < Minitest::Test
     end
   end
 
-  def test_dead_harness_process_is_reported_for_live_statuses_only
+  def test_dead_agent_process_is_reported_for_live_statuses_only
     with_workspace_tmpdir do |tmp|
       workspace = File.join(tmp, "worktree")
       FileUtils.mkdir_p(workspace)
@@ -82,7 +82,7 @@ class WorkspaceHealthTest < Minitest::Test
         agent = healthy_agent(workspace, session_file).merge("status" => status, "pid" => 0)
         messages = Meringue::TUI::WorkspaceHealth.notices(agent).map { |notice| notice.fetch("message") }
 
-        assert_includes messages, "Worker harness process is not running."
+        assert_includes messages, "Worker agent process is not running."
       end
 
       %w[completed errored killed].each do |status|
@@ -102,7 +102,7 @@ class WorkspaceHealthTest < Minitest::Test
 
       with_session = healthy_agent(workspace, session_file).merge("status" => "working", "pid" => 0)
       process_notice = Meringue::TUI::WorkspaceHealth.notices(with_session).find do |notice|
-        notice.fetch("message") == "Worker harness process is not running."
+        notice.fetch("message") == "Worker agent process is not running."
       end
       assert_equal "Meringue will try non-destructive session recovery during reconciliation.", process_notice.fetch("detail")
 
@@ -110,9 +110,9 @@ class WorkspaceHealthTest < Minitest::Test
         "id" => "P1-I1-W1", "type" => "worker", "status" => "working", "pid" => 0, "workspace_path" => workspace
       }
       messages = Meringue::TUI::WorkspaceHealth.notices(without_session)
-      process_detail = messages.find { |notice| notice.fetch("message") == "Worker harness process is not running." }.fetch("detail")
+      process_detail = messages.find { |notice| notice.fetch("message") == "Worker agent process is not running." }.fetch("detail")
       assert_equal "No resumable session reference is tracked; workspace and PR data remain available.", process_detail
-      assert_includes messages.map { |notice| notice.fetch("message") }, "Worker has no resumable harness history."
+      assert_includes messages.map { |notice| notice.fetch("message") }, "Worker has no resumable agent session history."
     end
   end
 
@@ -125,7 +125,7 @@ class WorkspaceHealthTest < Minitest::Test
       notices = Meringue::TUI::WorkspaceHealth.notices(healthy_agent(workspace, session_file))
 
       assert_equal 1, notices.length
-      assert_equal "Saved harness history is unavailable: #{session_file}", notices.first.fetch("message")
+      assert_equal "Saved agent session history is unavailable: #{session_file}", notices.first.fetch("message")
       assert_includes notices.first.fetch("detail"), "no state was deleted"
     end
   end

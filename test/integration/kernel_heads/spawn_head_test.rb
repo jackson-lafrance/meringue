@@ -182,7 +182,7 @@ class KernelHeadsSpawnHeadTest < KernelHeadsTestCase
     assert_equal "fake-head-session-1", head.fetch("harness_session_id")
     assert_equal "active", head.fetch("harness_metadata").fetch("head_session_state")
 
-    opened = logs(current_state: session_state).find { |log| log.fetch("message", "").start_with?("Opened ") }
+    opened = logs(current_state: session_state).find { |log| log.fetch("message", "").start_with?("Started agent session") }
     refute_nil opened
     assert_equal "harness", opened.fetch("source_type")
     assert_equal head_id, opened.fetch("source_id")
