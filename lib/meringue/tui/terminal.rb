@@ -255,13 +255,24 @@ module Meringue
       end
 
       def write_interactive_frame(frame)
-        if @last_frame.nil? || frame.lines.length != @last_frame.lines.length
+        # A resize can change the viewport width without changing the number of
+        # rows. A row diff is not enough in that case: columns that were outside
+        # the previous frame can retain stale content, while a frame rendered for
+        # a larger viewport can be clipped by the smaller terminal. Repaint the
+        # whole screen whenever either frame dimension changes.
+        dimensions_changed = @last_frame && frame_dimensions(frame) != frame_dimensions(@last_frame)
+        if @last_frame.nil? || dimensions_changed
           output.write(CLEAR_SCREEN)
           output.write(frame.gsub("\n", "\r\n"))
         else
           write_frame_diff(@last_frame, frame)
         end
         @last_frame = frame.dup
+      end
+
+      def frame_dimensions(frame)
+        lines = frame.to_s.lines(chomp: true)
+        [lines.length, lines.map(&:length).max.to_i]
       end
 
       def write_frame_diff(previous_frame, frame)
