@@ -103,13 +103,13 @@ class KernelWorkersWorkspaceProvisioningTest < Minitest::Test
     worker = agent(engine, "P1-I1-W1")
 
     assert_equal "failed", result.fetch("status")
-    assert_includes result.fetch("message"), "Harness failed to spawn worker P1-I1-W1"
+    assert_includes result.fetch("message"), "Could not start an agent session for worker P1-I1-W1"
     assert_includes result.fetch("errors"), "harness refused to start"
     assert_equal "errored", worker.fetch("status")
     assert_equal "failed", worker.fetch("harness_metadata").fetch("provisioning_state")
     assert_nil worker.fetch("harness_session_id")
     refute Dir.exist?(worker.fetch("workspace_path")), "a failed spawn should release its freshly created worktree"
-    refute_empty logs_matching(engine, /Harness failed to spawn worker P1-I1-W1/)
+    refute_empty logs_matching(engine, /Could not start an agent session for worker P1-I1-W1/)
   end
 
   private

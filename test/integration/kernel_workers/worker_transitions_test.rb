@@ -40,7 +40,7 @@ class KernelWorkersTransitionsTest < Minitest::Test
       completion_log.fetch("details").fetch("last_assistant_text")
     )
     assert_equal context.fetch("issue_id"), completion_log.fetch("details").fetch("issue_id")
-    assert_includes log_messages(engine), "#{worker_id} harness process_exit."
+    assert_includes log_messages(engine), "#{worker_id} agent session process_exit."
   end
 
   def test_completing_an_already_completed_worker_is_idempotent
@@ -96,7 +96,7 @@ class KernelWorkersTransitionsTest < Minitest::Test
     assert_equal "resume_failed", blocked.fetch("harness_metadata").fetch("reconcile_state")
     assert_equal 1, blocked.fetch("harness_metadata").fetch("reconcile").fetch("resume_attempt_count")
     assert_equal "blocked", issue(engine, context.fetch("issue_id")).fetch("status")
-    assert_includes log_messages(engine), "Worker #{worker_id} could not resume its harness session; will retry reconciliation."
+    assert_includes log_messages(engine), "Worker #{worker_id} could not resume its agent session; will retry reconciliation."
 
     apply!(engine, "ReconcileSessions", {})
     apply!(engine, "ReconcileSessions", {})

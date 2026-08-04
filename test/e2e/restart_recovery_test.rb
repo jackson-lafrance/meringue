@@ -61,8 +61,8 @@ class E2eRestartRecoveryTest < Minitest::Test
     assert resumed_poll.fetch("resumed"), "P1-I2-W1 should have been resumed from its persisted session"
     assert_equal "blocked", agent(after_first, "P1-I3-W1").fetch("status")
     assert_equal "completed", agent(after_first, "P1-I1-W1").fetch("status")
-    assert_logged(/Resumed worker P1-I2-W1 from its harness session and prompted it to continue\./, after_first)
-    assert_logged(/Worker P1-I3-W1 could not resume its harness session; will retry reconciliation\./, after_first)
+    assert_logged(/Resumed agent session for worker P1-I2-W1 and prompted it to continue\./, after_first)
+    assert_logged(/Worker P1-I3-W1 could not resume its agent session; will retry reconciliation\./, after_first)
     assert_equal(
       [Meringue::Kernel::Engine::WORKER_RESUME_PROMPT],
       restarted_client.prompts_for(resumable_worker.fetch("harness_session_id")).map { |prompt| prompt.fetch("prompt") }
@@ -75,7 +75,7 @@ class E2eRestartRecoveryTest < Minitest::Test
     after_retries = reloaded_state
     assert_equal "errored", agent(after_retries, "P1-I3-W1").fetch("status")
     assert_equal "working", agent(after_retries, "P1-I2-W1").fetch("status")
-    assert_logged(/Worker P1-I3-W1 errored while reconciling its harness session\./, after_retries)
+    assert_logged(/Worker P1-I3-W1 errored while reconciling its agent session\./, after_retries)
 
     # `/prune` takes no options: one pass removes the completed bundle and the errored one, and
     # keeps the work that is still in flight.
