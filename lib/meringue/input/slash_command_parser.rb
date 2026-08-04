@@ -17,11 +17,9 @@ module Meringue
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker session."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/defaults", "Show the model and thinking level for all future Pi sessions."],
-        ["/default-model <provider/model>", "Persist the model for all future Pi sessions; existing sessions are unchanged."],
-        ["/default-thinking <level>", "Persist the thinking level for all future Pi sessions; existing sessions are unchanged."],
+        ["/model <provider/model>", "Persist the model for all future Pi sessions; existing sessions are unchanged."],
+        ["/thinking <level>", "Persist the thinking level for all future Pi sessions; existing sessions are unchanged."],
         ["/session-settings <agent_id>", "Refresh and show one existing agent's effective Pi model and thinking level."],
-        ["/model <agent_id> <provider/model>", "Change only one existing Pi session's model; defaults are unchanged."],
-        ["/thinking <agent_id> <level>", "Change only one existing Pi session's thinking level; defaults are unchanged."],
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
         ["/goal create <issue_id> \"<success criteria>\" --metric \"<command>\" --target <number> [flags]", "Attach a goal loop to an issue: iterate until the metric hits its target or a budget guard trips."],
         ["/goal status [goal_id]", "Show goal loops, iteration accounting, and stop reasons."],
@@ -48,12 +46,8 @@ module Meringue
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
         { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
         { "prefix" => "/session-settings", "source" => "sessions", "append_space" => false },
-        { "prefix" => "/default-model", "source" => "session_models", "append_space" => false },
-        { "prefix" => "/default-thinking", "source" => "thinking_levels", "append_space" => false },
-        { "prefix" => "/model", "source" => "sessions", "append_space" => true, "position" => 1 },
-        { "prefix" => "/model", "source" => "session_models", "append_space" => false, "position" => 2 },
-        { "prefix" => "/thinking", "source" => "sessions", "append_space" => true, "position" => 1 },
-        { "prefix" => "/thinking", "source" => "thinking_levels", "append_space" => false, "position" => 2 },
+        { "prefix" => "/model", "source" => "session_models", "append_space" => false },
+        { "prefix" => "/thinking", "source" => "thinking_levels", "append_space" => false },
         { "prefix" => "/kill", "source" => "targets", "append_space" => false },
         { "prefix" => "/theme", "source" => "themes", "append_space" => false },
         { "prefix" => "/jump", "source" => "agents", "append_space" => false },
@@ -256,22 +250,12 @@ module Meringue
         end
       end
 
-      # `/model` and `/thinking` target one existing session, so their suggestions
-      # follow that agent's harness. `/default-model` and `/default-thinking`
-      # apply to future sessions, so they follow the active harness.
+      # `/model` and `/thinking` apply to future sessions, so their suggestions
+      # follow the active harness.
       def self.suggestion_harness(context, state)
-        agent = suggestion_target_agent(context, state)
-        harness = agent && agent["harness"]
-        harness = state.dig("metadata", "active_harness") if harness.to_s.strip.empty?
+        harness = state.dig("metadata", "active_harness")
         harness = Meringue::Harness::Registry::DEFAULT_PROVIDER if harness.to_s.strip.empty?
         Meringue::Harness::Registry.public_provider_name(harness)
-      end
-
-      def self.suggestion_target_agent(context, state)
-        target_id = Array(context.fetch("previous_tokens", [])).first.to_s.strip
-        return nil if target_id.empty?
-
-        Array(state["agents"]).find { |agent| agent["id"].to_s.casecmp?(target_id) }
       end
 
       def self.harness_model_catalog(state, harness)
@@ -282,11 +266,9 @@ module Meringue
       end
 
       def self.model_suggestion_records(context, state, catalog, harness)
-        agent = suggestion_target_agent(context, state)
-        current = agent&.dig("session_settings", "model", "reference")
         configured_default = state.dig("metadata", "pi_session_defaults", "model")
         observed = Array(state["agents"]).filter_map { |candidate| candidate.dig("session_settings", "model", "reference") }
-        preferred = ([current, configured_default] + observed).compact.map(&:to_s).reject(&:empty?).uniq
+        preferred = ([configured_default] + observed).compact.map(&:to_s).reject(&:empty?).uniq
         query = context.fetch("query", "").to_s.downcase
         records = ordered_model_entries(catalog, preferred, harness).filter_map.with_index do |entry, index|
           next unless model_entry_matches?(entry, query)
@@ -296,7 +278,6 @@ module Meringue
             "description" => model_suggestion_description(
               entry,
               context,
-              current: current,
               configured_default: configured_default,
               catalog: catalog
             ),
@@ -310,8 +291,7 @@ module Meringue
         records + model_catalog_note_records(context, catalog, harness, records.length)
       end
 
-      # Ordering: the values a user is most likely to want (this session's model,
-      # the saved default, models other sessions already use) first, then the rest
+      # Ordering: the saved default and models already in use first, then the rest
       # of the harness catalog with providers interleaved.
       def self.ordered_model_entries(catalog, preferred, harness)
         # A last-known (stale) list is still the harness's own answer, so it is
@@ -359,12 +339,10 @@ module Meringue
         end
       end
 
-      def self.model_suggestion_description(entry, context, current:, configured_default:, catalog:)
-        future = context.fetch("prefix", "").start_with?("/default-")
+      def self.model_suggestion_description(entry, context, configured_default:, catalog:)
         reference = entry.fetch("reference")
         parts = []
-        parts << "current session model" if !current.to_s.empty? && reference.casecmp?(current.to_s)
-        parts << (future ? "current default" : "future-session default") if !configured_default.to_s.empty? && reference.casecmp?(configured_default.to_s)
+        parts << "current default" if !configured_default.to_s.empty? && reference.casecmp?(configured_default.to_s)
         parts << entry["name"] if entry["name"]
         levels = Array(entry["thinking_levels"])
         parts << "thinking: #{levels.join(", ")}" unless levels.empty?
@@ -438,15 +416,13 @@ module Meringue
       end
 
       def self.thinking_level_model_reference(context, state, harness)
-        agent = suggestion_target_agent(context, state)
-        reference = agent&.dig("session_settings", "model", "reference")
-        reference = state.dig("metadata", "pi_session_defaults", "model") if reference.to_s.strip.empty?
+        reference = state.dig("metadata", "pi_session_defaults", "model")
         reference = Meringue::Harness::Registry::DEFAULT_PI_MODEL if reference.to_s.strip.empty? && harness == "pi"
         reference.to_s
       end
 
       def self.thinking_level_description(context, reference, verified)
-        scope = context.fetch("prefix", "").start_with?("/default-") ? "future sessions" : "this session"
+        scope = "future sessions"
         return "#{scope} · supported by #{reference}" if verified && !reference.to_s.empty?
 
         "#{scope} · model support not verified yet"
@@ -531,10 +507,6 @@ module Meringue
           parse_harness(arguments)
         when "defaults"
           parse_defaults(arguments)
-        when "default-model"
-          parse_default_model(arguments)
-        when "default-thinking"
-          parse_default_thinking(arguments)
         when "models"
           parse_models(arguments)
         when "session-settings", "session"
@@ -604,20 +576,6 @@ module Meringue
         kernel_command("GetSessionDefaults")
       end
 
-      def parse_default_model(arguments)
-        tokens = split_arguments(arguments)
-        return invalid("Usage: /default-model <provider/model>") unless tokens.length == 1
-
-        kernel_command("SetDefaultSessionModel", "model" => tokens[0])
-      end
-
-      def parse_default_thinking(arguments)
-        tokens = split_arguments(arguments)
-        return invalid("Usage: /default-thinking <off|minimal|low|medium|high|xhigh|max>") unless tokens.length == 1
-
-        kernel_command("SetDefaultSessionThinkingLevel", "level" => tokens[0])
-      end
-
       # `/models` lists the catalog the active harness reports. A trailing
       # `refresh` word forces a re-fetch instead of reusing the cached snapshot.
       def parse_models(arguments)
@@ -641,16 +599,16 @@ module Meringue
 
       def parse_model(arguments)
         tokens = split_arguments(arguments)
-        return invalid("Usage: /model <agent_id> <provider/model>") unless tokens.length == 2
+        return invalid("Usage: /model <provider/model>") unless tokens.length == 1
 
-        kernel_command("SetSessionModel", "agent_id" => tokens[0], "model" => tokens[1])
+        kernel_command("SetDefaultSessionModel", "model" => tokens[0])
       end
 
       def parse_thinking(arguments)
         tokens = split_arguments(arguments)
-        return invalid("Usage: /thinking <agent_id> <off|minimal|low|medium|high|xhigh|max>") unless tokens.length == 2
+        return invalid("Usage: /thinking <off|minimal|low|medium|high|xhigh|max>") unless tokens.length == 1
 
-        kernel_command("SetSessionThinkingLevel", "agent_id" => tokens[0], "level" => tokens[1])
+        kernel_command("SetDefaultSessionThinkingLevel", "level" => tokens[0])
       end
 
       def parse_project(arguments)

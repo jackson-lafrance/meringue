@@ -115,8 +115,6 @@ module Meringue
         "set_default_session_model" => "SetDefaultSessionModel",
         "set_default_session_thinking_level" => "SetDefaultSessionThinkingLevel",
         "get_session_settings" => "GetSessionSettings",
-        "set_session_model" => "SetSessionModel",
-        "set_session_thinking_level" => "SetSessionThinkingLevel",
         "list_questions" => "ListQuestions",
         "reconcile_sessions" => "ReconcileSessions",
         "prune" => "Prune",
@@ -138,11 +136,9 @@ module Meringue
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/defaults", "Show the model and thinking level used for all future Pi heads and workers."],
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
-        ["/default-model <provider/model>", "Persist the model used for all future Pi heads and workers; existing sessions are unchanged."],
-        ["/default-thinking <level>", "Persist the thinking level used for all future Pi heads and workers: off, minimal, low, medium, high, xhigh, or max."],
+        ["/model <provider/model>", "Persist the model used for all future Pi heads and workers; existing sessions are unchanged."],
+        ["/thinking <level>", "Persist the thinking level used for all future Pi heads and workers: off, minimal, low, medium, high, xhigh, or max."],
         ["/session-settings <agent_id>", "Refresh and show one existing agent's effective Pi session model and thinking level."],
-        ["/model <agent_id> <provider/model>", "Change only one existing Pi session's model; future-session defaults are unchanged."],
-        ["/thinking <agent_id> <level>", "Change only one existing Pi session's thinking level: off, minimal, low, medium, high, xhigh, or max."],
         ["/goal create <issue_id> \"<success criteria>\" --metric \"<command>\" --target <number> [--comparator gte|lte|gt|lt|eq] [--max-iterations <n>] [--guardrail \"<command>\"] [--parse last_number|first_number|exit_status] [--pattern \"<regex>\"] [--title \"<title>\"] [--fresh-attempt] [--paused]", "Attach a goal loop to an issue: the kernel keeps producing attempts until the metric hits its target or a budget/no-progress guard trips."],
         ["/goal status [goal_id]", "Show goal loops, their iteration accounting, and why a stopped goal stopped."],
         ["/goal pause <goal_id>", "Pause a goal loop after the current attempt; nothing new is spawned while it is paused."],
@@ -168,7 +164,7 @@ module Meringue
       HEAD_PROPOSABLE_COMMANDS = %w[
         ListAll GetState GetInfo Help ListQuestions
         GetSessionDefaults GetModelCatalog SetDefaultSessionModel SetDefaultSessionThinkingLevel
-        GetSessionSettings SetSessionModel SetSessionThinkingLevel
+        GetSessionSettings
         AddProject CreateIssue ModifyIssue SpawnWorker PromptAgent SpawnHead
         CreateGoal ModifyGoal StopGoal ListGoals
         AskQuestion AnswerQuestion DismissQuestion
@@ -1203,7 +1199,7 @@ module Meringue
           end
         )
         remaining = models.length - shown.length
-        lines << "  … and #{remaining} more; press Tab after /model or /default-model to search all #{models.length}." if remaining.positive?
+        lines << "  … and #{remaining} more; press Tab after /model to search all #{models.length}." if remaining.positive?
         lines
       end
 
@@ -1320,7 +1316,7 @@ module Meringue
         case catalog.fetch("availability", nil)
         when Meringue::Harness::ModelCatalog::AVAILABLE
           "#{harness} reports #{count} available model#{count == 1 ? "" : "s"}. " \
-            "Use /default-model <provider/model> for future sessions or /model <agent_id> <provider/model> for one session."
+            "Use /model <provider/model> to set the default for future sessions."
         when Meringue::Harness::ModelCatalog::STALE
           "Showing the last #{count} model#{count == 1 ? "" : "s"} #{harness} confirmed at #{catalog.fetch("fetched_at", "an earlier time")}; " \
             "the newest refresh failed: #{catalog.fetch("note", "unknown error")}"
