@@ -1,11 +1,6 @@
 # Pi model and thinking settings
 
-Meringue exposes two deliberately separate scopes:
-
-1. **Future Pi defaults** control how every new Pi head and worker is started.
-2. **Existing session settings** inspect or change one agent's already-created Pi session.
-
-Changing one scope never silently changes the other.
+Meringue exposes future Pi defaults for how every new head and worker is started. Existing sessions retain their effective settings.
 
 ## Commands
 
@@ -29,45 +24,25 @@ Examples:
 
 ```text
 /defaults
-/default-model <provider/model>
-/default-thinking <off|minimal|low|medium|high|xhigh|max>
+/model <provider/model>
+/thinking <off|minimal|low|medium|high|xhigh|max>
 ```
 
 Examples:
 
 ```text
 /defaults
-/default-model openai/gpt-5.6-sol
-/default-thinking xhigh
+/model openai/gpt-5.6-sol
+/thinking xhigh
 ```
 
-`/defaults` shows the current future-session pair. `/default-model` and `/default-thinking` save scalar values under `[harness.pi]` in Meringue's configured TOML file (normally `~/.meringue/config.toml`). The values are applied to both future Pi heads and future Pi workers, including sessions spawned later in the currently running Meringue process.
+`/defaults` shows the current future-session pair. `/model` and `/thinking` save scalar values under `[harness.pi]` in Meringue's configured TOML file (normally `~/.meringue/config.toml`). The values are applied to both future Pi heads and future Pi workers, including sessions spawned later in the currently running Meringue process.
 
-A default change does **not** mutate, reconnect, restart, or terminate an existing Pi session. It also strips spawn-only model/thinking defaults when later resuming an existing session, so a resumable session keeps its persisted effective pair. The result and durable kernel log explicitly list existing Pi agent ids left unchanged. Use the targeted commands below if an existing session should move to the same value.
+A default change does **not** mutate, reconnect, restart, or terminate an existing Pi session. It also strips spawn-only model/thinking defaults when later resuming an existing session, so a resumable session keeps its persisted effective pair. The result and durable kernel log explicitly list existing Pi agent ids left unchanged.
 
 Model defaults must be an exact `provider/model` reference. Thinking defaults must be one of Pi's known levels. A provider extension can add models dynamically, so Meringue validates the model reference shape when saving it; Pi performs model availability validation when the future session starts. Validation is deliberately independent of the catalog: a valid explicit id is still accepted when the catalog is stale, empty, or unavailable.
 
-### One existing Pi session
-
-```text
-/session-settings <agent_id>
-/model <agent_id> <provider/model>
-/thinking <agent_id> <off|minimal|low|medium|high|xhigh|max>
-```
-
-Examples:
-
-```text
-/session-settings P1-I18-W1
-/model P1-I18-W1 openai/gpt-5.6-sol
-/thinking P1-I18-W1 xhigh
-```
-
-`/session-settings` refreshes and displays the effective pair reported by one existing agent's active or resumable Pi session. This clearer name replaces the ambiguous dashboard `/session`; `/session <agent_id>` remains a hidden compatibility alias, but help and completion advertise `/session-settings`. Inside a focused worker workspace, the separate command for opening the selected harness UI is now advertised as `/open-session`; its old argumentless `/session` spelling is also only a compatibility alias.
-
-`/model` and `/thinking` update only that existing session. They do not edit Meringue config or future-session defaults. Updates use Pi RPC `set_model` and `set_thinking_level`, re-read `get_state`, and persist the effective values Pi reports. Thinking changes are checked against Pi's `get_available_thinking_levels`, so an unsupported level is rejected instead of silently clamped. Pi rejects unavailable model ids.
-
-Settings cannot be changed while the target Pi turn is streaming or while another Meringue process owns its RPC transport. A settled persisted Pi session is resumed automatically before applying an update. Missing, killed, and non-Pi sessions return explicit errors.
+`/session-settings <agent_id>` remains available for inspecting the effective settings of an existing active or resumable session. It does not provide per-session model or thinking commands; existing sessions keep their own values. The old dashboard `/session` spelling remains a compatibility alias.
 
 ## Persistence and precedence
 
@@ -161,12 +136,12 @@ The kernel owns catalog state. Snapshots live in `metadata.harness_model_catalog
 
 ### What completion shows
 
-- `/default-model <Tab>` lists the active harness's whole catalog. `/model <agent_id> <Tab>` lists the catalog of that agent's harness, so a Claude worker is never offered Pi-only ids.
+- `/model <Tab>` lists the active harness's whole catalog.
 - Ordering puts the target session's current model first, then the saved future-session default, then models other sessions already use. The rest of the catalog is interleaved across providers rather than grouped, because only a few rows are visible at once and a grouped list would fill the first screen with one provider and imply that is all the harness offers. Labels show why an entry is first (`current session model`, `future-session default`), plus the model name, supported thinking levels, and context window.
 - The suggestion popup shows a window of three rows, so a long list is captioned with `1–3 of 119 models · ↑↓ scroll · keep typing to filter`. Without that line a three-row window over a hundred models reads like a three-item list. The caption renders dim on its own row *below* the popup box, so the box itself lists models only and the window keeps all three of its rows.
 - Queries match the reference, the bare model id, and the display name, so `sol`, `gpt-5.6`, and `openai/` all narrow the same list.
-- `/thinking <agent_id> <Tab>` and `/default-thinking <Tab>` offer only the levels the relevant model supports. When the model is unknown to the catalog, Meringue falls back to Pi's full ladder and labels it `model support not verified yet`.
+- `/thinking <Tab>` offers only the levels the configured default model supports. When the model is unknown to the catalog, Meringue falls back to Pi's full ladder and labels it `model support not verified yet`.
 - A `stale` catalog is offered in full, with every entry labelled `last confirmed list` and a trailing note naming the failed refresh, so a temporary harness problem never hides models that exist.
 - When no catalog has ever been fetched, completion still offers the references Meringue knows (current session model, saved default, models in use) labelled `catalog unavailable — id not verified`, and appends one non-destructive note row explaining the state and pointing at `/models`. Selecting the note re-inserts only what was already typed, so it can never overwrite a valid explicit id.
 
-Validation is unchanged by catalog state: `/model` and `/default-model` still require an exact `provider/model` shape, and Pi still rejects an unavailable model id or an unsupported thinking level.
+Validation is unchanged by catalog state: `/model` requires an exact `provider/model` shape, and Pi still rejects an unavailable model id or an unsupported thinking level.

@@ -8,7 +8,7 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
-The interactive TUI updates this file with `/theme <name>`, `/default-model <provider/model>`, and `/default-thinking <level>`.
+The interactive TUI updates this file with `/theme <name>`, `/model <provider/model>`, and `/thinking <level>`.
 
 ## Selecting a TUI colorscheme
 
@@ -188,13 +188,13 @@ head_extra_args = []
 worker_extra_args = []
 ```
 
-Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/default-model` and `/default-thinking`, or set `model` and `thinking_level` under `[harness.pi]`, to change both future roles without duplicating their tool flags. These scalar values are appended after `head_extra_args` / `worker_extra_args` and therefore win over model/thinking flags in those arrays. A configured role array still replaces that role's default array entirely, so include every other flag you need.
+Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/model` and `/thinking`, or set `model` and `thinking_level` under `[harness.pi]`, to change both future roles without duplicating their tool flags. These scalar values are appended after `head_extra_args` / `worker_extra_args` and therefore win over model/thinking flags in those arrays. A configured role array still replaces that role's default array entirely, so include every other flag you need.
 
-`/defaults` inspects the future Pi pair. `/model` and `/thinking` remain targeted commands for one existing Pi session and never rewrite future defaults. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
+`/defaults` inspects the future Pi pair. `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. Use `/session-settings` to inspect an existing session. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
 
 ### Model catalogs and provider resource flags
 
-`/models`, and the completion list behind `/model` and `/default-model`, come from the harness itself rather than a list maintained in Meringue. For Pi, Meringue starts a short-lived ephemeral RPC probe (`pi --mode rpc --no-session`) and reads `get_available_models`.
+`/models`, and the completion list behind `/model`, come from the harness itself rather than a list maintained in Meringue. For Pi, Meringue starts a short-lived ephemeral RPC probe (`pi --mode rpc --no-session`) and reads `get_available_models`.
 
 That probe reuses the configured provider `command`, `env`, `extra_args`, and role `*_extra_args`, minus `--model`/`--thinking`, because provider availability depends on those flags. Two consequences matter when configuring Pi:
 

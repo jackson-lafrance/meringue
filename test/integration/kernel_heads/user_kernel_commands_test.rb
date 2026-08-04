@@ -20,10 +20,10 @@ class KernelHeadsUserKernelCommandsTest < KernelHeadsTestCase
     { "type" => type, "payload" => payload }
   end
 
-  def test_session_model_and_thinking_commands_are_head_proposable
+  def test_session_defaults_and_inspection_commands_are_head_proposable
     %w[
       GetSessionDefaults SetDefaultSessionModel SetDefaultSessionThinkingLevel
-      GetSessionSettings SetSessionModel SetSessionThinkingLevel
+      GetSessionSettings
     ].each do |command_type|
       assert_includes Meringue::Kernel::Engine::HEAD_PROPOSABLE_COMMANDS, command_type
     end

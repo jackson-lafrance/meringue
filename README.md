@@ -174,11 +174,9 @@ Useful slash commands inside the TUI include:
 - `/harness <pi|claude|antigravity>` — select the harness for future agents.
 - `/defaults` — inspect the model and thinking level for all future Pi heads and workers.
 - `/models [harness] [refresh]` — list every model the selected harness reports, with each model's supported thinking levels; `refresh` re-asks the harness instead of using the cached snapshot.
-- `/default-model <provider/model>` — persist the model for all future Pi sessions; existing sessions are unchanged.
-- `/default-thinking <level>` — persist the thinking level for all future Pi sessions; existing sessions are unchanged.
+- `/model <provider/model>` — persist the model for all future Pi sessions; existing sessions are unchanged.
+- `/thinking <level>` — persist the thinking level for all future Pi sessions; existing sessions are unchanged.
 - `/session-settings <agent_id>` — refresh and inspect one existing agent's effective Pi model and thinking level (the old dashboard `/session` spelling remains a compatibility alias; focused workspaces advertise `/open-session` for opening the harness UI).
-- `/model <agent_id> <provider/model>` — change only one active/resumable Pi session's model; future defaults are unchanged.
-- `/thinking <agent_id> <level>` — change only one active/resumable Pi session's thinking level; future defaults are unchanged.
 - `/keybind` — show active TUI keybindings.
 - `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together and removes their clean, unlocked Meringue-managed worktrees. Unsafe cleanup (dirty, locked, ambiguous, or failed) retains the bundle and logs why so it can be retried.
 - `/recount` — compact project, issue, worker, question, and goal numbering after records are removed.
@@ -196,7 +194,7 @@ and theme/harness names.
 
 You do not have to type them. Head agents can run the same commands from plain language, so "prune the merged issues", "renumber the tree", "kill P1-I9-W3", or "what is P1-I12" apply the matching kernel command and print the same output as the typed slash command. Irreversible commands are gated: `/clear` and killing a whole project are only run when your own message unambiguously asks for them, and otherwise the head asks you to confirm. `/jump`, `/keybind`, and `/quit` are local TUI commands and stay typed-only.
 
-`/model`, `/default-model`, `/thinking`, and `/default-thinking` complete from the selected harness's own model catalog, so the selector lists every available model rather than only the ones Meringue has seen. See `docs/session-settings.md#authoritative-model-catalog-discovery` for discovery, caching, and unavailable-catalog behavior.
+`/model` and `/thinking` complete from the selected harness's own model catalog, so the selector lists every available model rather than only the ones Meringue has seen. See `docs/session-settings.md#authoritative-model-catalog-discovery` for discovery, caching, and unavailable-catalog behavior.
 
 See `docs/head_agent_kernel_commands.md` for the head command contract, destructive-command rules, prune eligibility, and worktree cleanup safety. See `docs/goal_loops.md` for how goal loops measure progress, judge each iteration, and stop. See `docs/recount.md` for the renumbering/cross-reference/active-session rules, and `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
 
