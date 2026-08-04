@@ -119,7 +119,7 @@ module Meringue
       end
     end
 
-    # Used when no state file backs the store, such as in-memory smoke runs.
+    # Used when no state file backs the store, such as in-memory test runs.
     class NullLock
       def synchronize
         yield

@@ -3,8 +3,8 @@
 require "test_helper"
 require "support/foundation_support"
 
-# Smoke replacement for scripts/head_loop_smoke.rb: prove the library loads
-# cleanly and exposes the architectural entrypoints the rest of the suite uses.
+# Proves the library loads cleanly and exposes the architectural entrypoints
+# the rest of the suite uses.
 class FoundationLibraryBootTest < Minitest::Test
   def test_version_is_a_sane_semantic_version
     assert_kind_of String, Meringue::VERSION

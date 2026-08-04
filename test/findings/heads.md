@@ -3,7 +3,7 @@
 Scope: `lib/meringue/heads/*` plus the kernel entry points those loops drive
 (`SpawnHead`, `ApplyHeadResult`, `AnswerQuestion`). Tests live in
 `test/integration/heads/` with shared doubles in `test/support/heads_support.rb`.
-They replace the manual `scripts/head_loop_smoke.rb` walkthrough.
+They replace the manual head-loop walkthrough.
 
 All tests assert **current** behaviour. Where current behaviour looks wrong, the
 test says so in a comment and the bug is recorded below. No production code was
@@ -45,38 +45,25 @@ test-only shim (`HeadsSupport::HarnessAccessibleEngine`) in
 Those two tests should start failing (and can be simplified) once the visibility
 bug is fixed.
 
-### 2. Answering an open question is a dead end (matches issue P1-I9)
+### 2. Question-answer routing is now covered (resolved P1-I9)
 
-`/answer <question_id> <answer>` routes to `AnswerQuestion`, which marks the
-question answered, stores the answer, and logs `Answered question Q1.` — and
-that is all. No head is spawned with the answer plus the question's context, so
-the answer never drives routing (`engine.rb:1187`).
+`/answer <question_id> <answer>` now records the answer and spawns a fresh head
+with a prompt that includes the question, answer, original user message, and
+scope. The prompt loop test asserts that the second head applies its routing
+commands (`HeadPromptLoopTest#test_answering_a_question_spawns_a_head_to_route_the_unblocked_work`).
 
-Observed in `HeadPromptLoopTest#test_answering_a_question_marks_it_answered_but_spawns_no_head`:
-after answering, there are no new heads, issues, or workers, and the head runner
-was never called a second time.
+The head contract now also exposes the data needed for implicit answers:
 
-Related gaps in the head contract, all asserted as current behaviour:
-
-- The head context exposes only `current_state_summary.open_question_count`; the
-  open-question records (id/question/context/project_id/issue_id/head_id/
-  created_at) are not in the prompt payload at all
-  (`HeadContextTest#test_open_questions_are_only_surfaced_as_a_count`,
-  `HeadQuestionAnsweringTest#test_head_context_for_an_implicit_reply_lists_the_question_ids_it_could_answer`).
-  A head cannot reliably infer which open question a prose reply answers from
-  what it is given today; question text only appears incidentally when a
-  `Question Qn: ...` log happens to be inside the 16-entry `recent_activity`
-  window.
-- `routing_context.question_being_answered` is populated only from an explicit
-  `SpawnHead` `question_id`. A prose reply such as `ANSWERING Q4 ...` leaves it
-  `null` even though `explicit_references.known_ids` already contains `Q4`
-  (`HeadContextTest#test_question_being_answered_is_null_without_an_explicit_question_id`).
-- The plumbing that *would* be needed already works: `SpawnHead` accepts
-  `question_id`, validates it, and the resulting context carries the full
-  question record; `AnswerQuestion` can be batched with `PromptAgent` /
-  `SpawnWorker` in one `HeadResult` and both are applied
-  (`HeadQuestionAnsweringTest#test_head_result_can_answer_a_question_and_route_work_in_one_batch`,
-  `#test_question_id_is_passed_through_spawn_head_to_the_head_context`).
+- `routing_context.open_questions` embeds the open question records alongside
+  `current_state_summary.open_question_count`
+  (`HeadContextTest#test_open_question_records_are_surfaced_for_answer_inference`).
+- `routing_context.question_being_answered` is populated for a clear prose
+  reference such as `ANSWERING Q4 ...`, even when the head was not spawned with
+  an explicit `question_id`
+  (`HeadContextTest#test_question_being_answered_is_inferred_from_a_clear_prose_reference`).
+- A single `HeadResult` may still pair `AnswerQuestion` with `PromptAgent` or
+  `SpawnWorker`, and both commands are applied in one batch
+  (`HeadQuestionAnsweringTest#test_head_result_can_answer_a_question_and_route_work_in_one_batch`).
 
 ## Rough edges (not clearly bugs, but surprising)
 
