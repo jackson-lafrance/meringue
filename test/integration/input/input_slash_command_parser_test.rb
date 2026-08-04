@@ -29,6 +29,9 @@ class InputSlashCommandParserTest < Minitest::Test
       "/model P1-I1-W1 openai/gpt-5.6-sol" => ["SetSessionModel", { "agent_id" => "P1-I1-W1", "model" => "openai/gpt-5.6-sol" }],
       "/thinking P1-I1-W1 xhigh" => ["SetSessionThinkingLevel", { "agent_id" => "P1-I1-W1", "level" => "xhigh" }],
       "/project add /tmp" => ["AddProject", { "path" => "/tmp", "name" => "" }],
+      "/project rename P1 \"Renamed app\"" => ["ModifyProject", { "project_id" => "P1", "name" => "Renamed app" }],
+      "/issue rename P1-I1 \"Renamed issue\"" => ["ModifyIssue", { "issue_id" => "P1-I1", "title" => "Renamed issue" }],
+      "/rename P1 \"Renamed app\"" => ["Rename", { "target_id" => "P1", "name" => "Renamed app" }],
       "/kill P1-I1" => ["Kill", { "target_id" => "P1-I1" }],
       "/dismiss Q1" => ["DismissQuestion", { "question_id" => "Q1" }]
     }
@@ -74,6 +77,13 @@ class InputSlashCommandParserTest < Minitest::Test
     parsed = parse_slash("/project add /tmp My Nice Project")
 
     assert_equal({ "path" => "/tmp", "name" => "My Nice Project" }, parsed.fetch("payload"))
+  end
+
+  def test_rename_commands_join_unquoted_name_tokens
+    parsed = parse_slash("/rename P1 New Project Name")
+
+    assert_equal "Rename", parsed.fetch("type")
+    assert_equal({ "target_id" => "P1", "name" => "New Project Name" }, parsed.fetch("payload"))
   end
 
   def test_worker_spawn_and_prompt_arguments
@@ -129,7 +139,7 @@ class InputSlashCommandParserTest < Minitest::Test
      "/default-thinking", "/default-thinking high extra", "/session-settings", "/session-settings P1 P2",
      "/model P1", "/thinking P1", "/project", "/project list /tmp", "/issue", "/issue delete P1",
      "/worker", "/worker kill P1-I1", "/dismiss", "/dismiss Q1 Q2", "/recount now", "/prune bogus",
-     "/prune resolved errored"].each do |input|
+     "/prune resolved errored", "/project rename P1", "/issue rename P1-I1"].each do |input|
       parsed = parse_slash(input)
       assert_equal "InvalidSlashCommand", parsed.fetch("type"), "expected #{input.inspect} to be invalid"
       assert_match(/Usage:/, parsed.fetch("payload").fetch("message"))

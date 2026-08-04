@@ -86,6 +86,8 @@ module Meringue
 
       COMMAND_ALIASES = {
         "add_project" => "AddProject",
+        "modify_project" => "ModifyProject",
+        "rename" => "Rename",
         "create_issue" => "CreateIssue",
         "spawn_worker" => "SpawnWorker",
         "spawn_head" => "SpawnHead",
@@ -132,7 +134,10 @@ module Meringue
         ["/help", "Show slash command help."],
         ["/theme <name>", "Set and persist the TUI theme. Available: catppuccin, gruvbox, kanagawa, meringue, rose-pine, tokyonight."],
         ["/project add <path> [name]", "Register a project directory."],
+        ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
+        ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
+        ["/rename <project_or_issue_id> \"<name>\"", "Quickly rename a project or issue."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker agent session."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
@@ -169,7 +174,7 @@ module Meringue
         ListAll GetState GetInfo Help ListQuestions
         GetSessionDefaults GetModelCatalog SetDefaultSessionModel SetDefaultSessionThinkingLevel
         GetSessionSettings SetSessionModel SetSessionThinkingLevel
-        AddProject CreateIssue ModifyIssue SpawnWorker PromptAgent SpawnHead
+        AddProject ModifyProject CreateIssue ModifyIssue Rename SpawnWorker PromptAgent SpawnHead
         CreateGoal ModifyGoal StopGoal ListGoals
         AskQuestion AnswerQuestion DismissQuestion
         Kill Prune Recount ClearState SetTheme SetHarness ReconcileSessions
@@ -533,6 +538,10 @@ module Meringue
           set_harness(command_id, command_type, payload)
         when "AddProject"
           add_project(command_id, command_type, payload)
+        when "ModifyProject"
+          modify_project(command_id, command_type, payload)
+        when "Rename"
+          rename(command_id, command_type, payload)
         when "CreateIssue"
           create_issue(command_id, command_type, payload)
         when "ModifyIssue"
@@ -4277,6 +4286,60 @@ module Meringue
         store.save(state)
 
         accepted_result(command_id, command_type, project_id, "Added project #{project_id}.", project, log_ids)
+      end
+
+      def rename(command_id, command_type, payload)
+        target_id = value_at(payload, "target_id", "TargetID", "targetId", "id", "ID")
+        name = value_at(payload, "name", "Name", "title", "Title")
+        errors = []
+        errors << "target_id is required" if blank?(target_id)
+        errors << "name is required" if blank?(name)
+        return rejected_result(command_id, command_type, "Record was not renamed.", errors) unless errors.empty?
+
+        state = normalized_state
+        if find_project(state, target_id)
+          return modify_project(command_id, command_type, payload.merge("project_id" => target_id))
+        end
+        if find_issue(state, target_id)
+          return modify_issue(command_id, command_type, payload.merge("issue_id" => target_id, "title" => name))
+        end
+
+        rejected_result(command_id, command_type, "Target #{target_id} does not exist.", ["target_not_found"])
+      end
+
+      def modify_project(command_id, command_type, payload)
+        project_id = value_at(payload, "project_id", "ProjectID", "projectId", "target_id", "TargetID", "targetId")
+        name = value_at(payload, "name", "Name", "title", "Title")
+        errors = []
+
+        errors << "project_id is required" if blank?(project_id)
+        errors << "name is required" if blank?(name)
+        return rejected_result(command_id, command_type, "Project was not renamed.", errors) unless errors.empty?
+
+        state = normalized_state
+        project = find_project(state, project_id)
+        return rejected_result(command_id, command_type, "Project #{project_id} does not exist.", ["project_not_found"]) unless project
+
+        now = timestamp
+        previous_name = project.fetch("name", "")
+        project["name"] = name.to_s.strip
+        project["updated_at"] = now
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: project.fetch("id"),
+          level: "info",
+          message: "Renamed project #{project.fetch("id")}: #{previous_name} -> #{project.fetch("name")}",
+          details: {
+            "changed_fields" => ["name"],
+            "previous_name" => previous_name,
+            "name" => project.fetch("name")
+          }
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, project.fetch("id"), "Renamed project #{project.fetch("id")}.", project, log_ids)
       end
 
       def create_issue(command_id, command_type, payload)

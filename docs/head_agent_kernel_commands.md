@@ -27,6 +27,7 @@ Natural-language mapping:
 | "what commands are there" | `Help` |
 | "answer Q2 with ..." | `AnswerQuestion` |
 | "drop/dismiss Q2", "that question no longer matters" | `DismissQuestion` |
+| "rename project P1" | `ModifyProject` |
 | "retitle/close/reopen/reparent issue P1-I3" | `ModifyIssue` |
 | "also tell P1-I3-W1 to ..." | `PromptAgent` |
 | "keep working until coverage is 80%", "iterate until the suite is green", "don't stop until X is under Y" | `CreateGoal` on the issue that owns that durable goal |
@@ -441,6 +442,19 @@ Example:
     "path": "/Users/example/code/app",
     "name": "app"
   }
+}
+```
+
+### ModifyProject
+
+Renames an existing project without changing its path or lifecycle status.
+
+Payload:
+
+```json
+{
+  "project_id": "P1",
+  "name": "New display name"
 }
 ```
 
