@@ -95,13 +95,17 @@ class FoundationSuiteLayoutTest < Minitest::Test
     assert_empty packaged_tests
   end
 
-  def test_removed_smoke_script_is_gone_and_undocumented
-    refute File.exist?(FoundationSupport.repo_path("scripts", "head_loop_smoke.rb")),
-           "scripts/head_loop_smoke.rb was replaced by test/integration/foundation"
+  def test_one_off_behavior_check_scripts_are_not_tracked
+    ruby_scripts = Dir[FoundationSupport.repo_path("scripts", "*.rb")]
+    assert_empty ruby_scripts, "put repeatable behavior assertions under test/, not scripts/"
 
-    docs = File.read(FoundationSupport.repo_path("docs", "agent_workspace_integration.md"))
+    documented_script_commands = Dir[
+      FoundationSupport.repo_path("README.md"),
+      FoundationSupport.repo_path("docs", "**", "*.md")
+    ].flat_map do |path|
+      File.readlines(path).grep(/ruby\s+scripts\//).map { |line| "#{path.delete_prefix("#{FoundationSupport::REPO_ROOT}/")}: #{line.strip}" }
+    end
 
-    refute_includes docs, "head_loop_smoke"
-    assert_includes docs, "rake test"
+    assert_empty documented_script_commands, "docs should point reviewers at rake test or focused test files"
   end
 end
