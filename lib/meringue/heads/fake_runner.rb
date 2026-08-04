@@ -140,13 +140,14 @@ module Meringue
 
       def add_project_command(context)
         project_root = default_project_root(context&.cwd || Dir.pwd)
+        suggested_name = context&.to_prompt_h&.dig("project_discovery", "current_directory", "suggested_project_name")
 
         {
           "type" => "AddProject",
           "payload" => {
             "path" => project_root,
-            "name" => File.basename(project_root)
-          }
+            "name" => suggested_name
+          }.compact
         }
       end
 
