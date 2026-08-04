@@ -40,8 +40,6 @@ Natural-language mapping:
 | "use provider/model for future Pi agents" | `SetDefaultSessionModel` |
 | "use high thinking for future Pi agents" | `SetDefaultSessionThinkingLevel` |
 | "show P1-I9-W3's model/thinking settings" | `GetSessionSettings` |
-| "change P1-I9-W3 to provider/model" | `SetSessionModel` |
-| "set P1-I9-W3 thinking to high" | `SetSessionThinkingLevel` |
 | "resync/reconcile the sessions" | `ReconcileSessions` |
 | "clear the state", "reset meringue", "wipe everything" | `ClearState`, but only under the confirmation rules below |
 
@@ -1165,16 +1163,13 @@ rejected rather than guessed.
 
 - `GetSessionDefaults` backs `/defaults` and takes `{}`.
 - `GetModelCatalog` backs `/models [harness] [refresh]` with an optional `{ "harness": "pi", "refresh": true }`. It is read-only: it asks the harness which models exist, reuses the cached snapshot unless `refresh` is set, and reports an explicit unavailable/unsupported state instead of guessing when the harness cannot answer.
-- `SetDefaultSessionModel` backs `/default-model <provider/model>` with `{ "model": "provider/model" }`.
-- `SetDefaultSessionThinkingLevel` backs `/default-thinking <level>` with `{ "level": "high" }`.
+- `SetDefaultSessionModel` backs `/model <provider/model>` with `{ "model": "provider/model" }`.
+- `SetDefaultSessionThinkingLevel` backs `/thinking <level>` with `{ "level": "high" }`.
 - `GetSessionSettings` backs `/session-settings <agent_id>` with `{ "agent_id": "P1-I1-W1" }`.
-- `SetSessionModel` backs `/model <agent_id> <provider/model>` with `{ "agent_id": "P1-I1-W1", "model": "provider/model" }`.
-- `SetSessionThinkingLevel` backs `/thinking <agent_id> <level>` with `{ "agent_id": "P1-I1-W1", "level": "high" }`.
 
-Default changes affect future Pi sessions only. Per-session changes affect only the named existing
-session. Supported thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and
-`max`; the levels a specific model actually accepts come from the harness's model catalog, so a
-model that only supports `xhigh`/`max` rejects the lower levels.
+Default changes affect future Pi sessions only; existing sessions retain their effective settings.
+Supported thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; the
+levels a specific model actually accepts come from the harness's model catalog.
 
 See [`session-settings.md`](session-settings.md#authoritative-model-catalog-discovery) for how the
 model catalog is discovered, cached, and degraded.
