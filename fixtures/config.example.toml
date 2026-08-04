@@ -37,6 +37,10 @@ thinking_level = "max"
 head_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 worker_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls,edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 
+[conflicts]
+# Dependent workers cancel if their predecessor fails; "run" starts them anyway.
+predecessor_failure = "cancel"
+
 [harness.claude]
 command = "claude"
 use_json_schema = true
