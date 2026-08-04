@@ -239,6 +239,16 @@ class InputConfigTest < Minitest::Test
     end
   end
 
+  def test_conflict_predecessor_failure_accepts_supported_values_and_defaults_safely
+    assert_equal "cancel", Meringue::Config.new({}, path: "/tmp/config.toml").conflict_predecessor_failure
+    assert_equal "run", Meringue::Config.new(
+      { "conflicts" => { "predecessor_failure" => "run" } }, path: "/tmp/config.toml"
+    ).conflict_predecessor_failure
+    assert_equal "cancel", Meringue::Config.new(
+      { "conflicts" => { "predecessor_failure" => "unexpected" } }, path: "/tmp/config.toml"
+    ).conflict_predecessor_failure
+  end
+
   def test_saving_one_pi_session_default_preserves_the_other
     Dir.mktmpdir("meringue-config-test") do |dir|
       path = File.join(dir, "config.toml")
@@ -260,6 +270,7 @@ class InputConfigTest < Minitest::Test
     assert_equal "pi", config.value("harness", "pi", "command")
     assert_includes config.value("harness", "pi", "head_extra_args"), "--thinking"
     assert_equal ["."], config.value("workspace", "editor_args")
+    assert_equal "cancel", config.conflict_predecessor_failure
     assert_includes Meringue::TUI::Style.colorschemes, config.value("tui", "colorscheme")
   end
 

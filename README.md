@@ -171,6 +171,7 @@ Useful slash commands inside the TUI include:
 - `/answer <question_id> "<answer>"` — answer an open question; the kernel records the answer and routes the work it unblocks.
 - `/dismiss <question_id>` — close an open question without answering it.
 - `/theme <name>` — persist a TUI colorscheme.
+- `/config` — show the active config, supported defaults, conflict policy, and keybindings.
 - `/harness <pi|claude|antigravity>` — select the harness for future agents.
 - `/defaults` — inspect the model and thinking level for all future Pi heads and workers.
 - `/models [harness] [refresh]` — list every model the selected harness reports, with each model's supported thinking levels; `refresh` re-asks the harness instead of using the cached snapshot.

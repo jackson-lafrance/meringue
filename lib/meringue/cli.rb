@@ -57,7 +57,7 @@ module Meringue
 
       registry = Harness::Registry.new(config: config)
       store = state_store(path: options.fetch(:state_path))
-      engine = enable_agents ? tui_engine(store, registry, config_path: options.fetch(:config_path)) : nil
+      engine = enable_agents ? tui_engine(store, registry, config: config, config_path: options.fetch(:config_path)) : nil
       workspace_controller = Workspace::Controller.from_config(config)
       agent_session_service = engine ? Sessions::WorkerSessionService.new(engine: engine) : nil
       App.new(
@@ -73,7 +73,8 @@ module Meringue
           workspace_controller: workspace_controller,
           agent_session_service: agent_session_service,
           log_store: store,
-          keybindings: keybindings
+          keybindings: keybindings,
+          config: config
         ),
         prompt_handler: engine ? Heads::PromptLoop.new(engine: engine, wait_for_workers: false) : nil,
         reconciler: engine ? -> { engine.reconcile_sessions } : nil
@@ -166,7 +167,7 @@ module Meringue
       @state_stores[File.expand_path(path)] ||= State::Store.new(path: path)
     end
 
-    def tui_engine(store, registry, config_path: Config::DEFAULT_PATH)
+    def tui_engine(store, registry, config: nil, config_path: Config::DEFAULT_PATH)
       Kernel::Engine.new(
         store: store,
         harness_client: registry.worker_client,
@@ -183,7 +184,8 @@ module Meringue
         workspace_manager: Workspace::Manager.new,
         cwd: Dir.pwd,
         async_heads: true,
-        config_path: config_path
+        config_path: config_path,
+        config: config
       )
     end
 
@@ -254,6 +256,7 @@ module Meringue
           /theme <name>             # set and persist the TUI theme
           /harness <pi|claude|antigravity> # select the harness backend for future agents
           /keybind                  # show all TUI keybindings
+          /config                   # show active config, supported defaults, conflict policy, and keybindings
           /jump [agent_id]          # open a focused workspace; omit id to navigate the AgentTree
           /recount                  # compact AgentTree numbering after records are removed
           Ctrl-B                    # open the selected worker's verified delivery PR; with nothing selected, pick from the open PRs
