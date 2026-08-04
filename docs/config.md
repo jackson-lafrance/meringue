@@ -75,7 +75,24 @@ Supported action names:
 
 Common key names include `enter`, `shift-enter`, `tab`, `shift-tab`, `ctrl-tab`, `escape`, arrow keys (`up`, `down`, `left`, `right`), `shift-left`, `shift-right`, `shift-up`, `shift-down`, `shift-home`, `shift-end`, `shift-alt-left`, `shift-alt-right`, `shift-ctrl-left`, `shift-ctrl-right`, `shift-page-up`, `shift-page-down`, `home`, `end`, `page-up`, `page-down`, `backspace`, `delete`, `ctrl-space`, `ctrl-a` through `ctrl-z`, `alt-c`, `alt-v`, `alt-left`, `alt-right`, `ctrl-left`, `ctrl-right`, `alt-backspace`, `ctrl-backspace`, `alt-delete`, `ctrl-delete`, `space`, and single printable characters like `j` or `p`. Advanced users can bind a raw terminal sequence with `raw:<sequence>`; literal `\\e` inside that string is converted to Escape.
 
-Use `/keybind` in the TUI to show the active keybindings after config has been loaded.
+Use `/keybind` in the TUI to show the active keybindings after config has been loaded. `/config` shows the same keybindings together with the active supported defaults, workspace commands, and conflict policy.
+
+## Supported defaults and conflict policy
+
+The config file is intentionally small and only the settings described here are read by Meringue. Omitted values use built-in defaults. Future Pi session defaults live under `[harness.pi]`:
+
+```toml
+[harness.pi]
+model = "anthropic/claude-opus-5"
+thinking_level = "max"
+
+[conflicts]
+# A worker queued after a predecessor is cancelled when that predecessor fails.
+# Use "run" to start it anyway. Explicit worker-command flags still win.
+predecessor_failure = "cancel"
+```
+
+`[conflicts].predecessor_failure` accepts `cancel` or `run`. It applies only when a dependent worker does not provide its own `if_predecessor_fails` value; it does not change the handling of git merge conflicts or overwrite project files. `/config` reports the effective value and `/keybind` reports only keybindings.
 
 ## Worker workspace terminal and editor
 

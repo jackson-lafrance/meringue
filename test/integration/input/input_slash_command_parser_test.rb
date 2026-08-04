@@ -175,7 +175,7 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   def test_local_tui_commands_are_reported_as_not_kernel_commands
-    %w[/quit /jump /keybind].each do |input|
+    %w[/quit /jump /keybind /config].each do |input|
       parsed = parse_slash(input)
       assert_equal "InvalidSlashCommand", parsed.fetch("type")
       assert_match(/local TUI command/, parsed.fetch("payload").fetch("message"))

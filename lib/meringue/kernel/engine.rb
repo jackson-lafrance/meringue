@@ -151,6 +151,7 @@ module Meringue
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "TUI local: open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/keybind", "TUI local: show all keybindings."],
+        ["/config", "TUI local: show the active config, supported defaults, conflict policy, and keybindings."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
@@ -328,7 +329,7 @@ module Meringue
       HEAD_SESSION_STATE_UNAVAILABLE = "unavailable"
 
       attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path,
-                  :state_lock, :instance_pid, :instance_id, :prune_forge_lookup_budget, :metric_probe,
+                  :config, :state_lock, :instance_pid, :instance_id, :prune_forge_lookup_budget, :metric_probe,
                   :goal_advance_budget
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
@@ -346,6 +347,7 @@ module Meringue
                      forge_client: Forge::GitHubClient.new,
                      metric_probe: Goals::MetricProbe.new,
                      config_path: Config::DEFAULT_PATH,
+                     config: nil,
                      prune_forge_lookup_budget: PRUNE_FORGE_LOOKUP_BUDGET_SECONDS,
                      goal_advance_budget: GOAL_ADVANCE_BUDGET_SECONDS,
                      state_lock: nil,
@@ -366,6 +368,8 @@ module Meringue
         @forge_client = forge_client
         @metric_probe = metric_probe
         @config_path = File.expand_path(config_path.to_s)
+        @config = config || Config.load(path: @config_path)
+        @deferred_worker_default_failure_policy = @config.conflict_predecessor_failure
         @prune_forge_lookup_budget = Float(prune_forge_lookup_budget)
         @goal_advance_budget = Float(goal_advance_budget)
         @harness_client_resolver = harness_client_resolver
@@ -6081,9 +6085,13 @@ module Meringue
         end
       end
 
+      def deferred_worker_default_failure_policy
+        @deferred_worker_default_failure_policy || DEFERRED_WORKER_DEFAULT_FAILURE_POLICY
+      end
+
       def normalized_deferred_failure_policy(payload)
         raw = present_string(value_at(payload, *DEFERRED_WORKER_FAILURE_POLICY_KEYS))
-        return DEFERRED_WORKER_DEFAULT_FAILURE_POLICY unless raw
+        return deferred_worker_default_failure_policy unless raw
 
         normalized = raw.downcase.tr("-", "_")
         normalized = "run" if %w[run run_anyway continue proceed start].include?(normalized)
@@ -6263,7 +6271,7 @@ module Meringue
         case deferred.fetch("state", nil).to_s
         when DEFERRED_STATE_WAITING
           "waiting on: #{after} (#{deferred.fetch("after_agent_status", "unknown")}); if it fails: " \
-            "#{deferred.fetch("if_predecessor_fails", DEFERRED_WORKER_DEFAULT_FAILURE_POLICY)}"
+            "#{deferred.fetch("if_predecessor_fails", deferred_worker_default_failure_policy)}"
         when DEFERRED_STATE_ACTIVATING
           "starting now after: #{after}"
         when DEFERRED_STATE_CANCELLED
@@ -6356,7 +6364,7 @@ module Meringue
           "agent_id" => agent.fetch("id"),
           "issue_id" => agent.fetch("issue_id", nil),
           "after_agent_id" => recorded_id,
-          "if_predecessor_fails" => deferred.fetch("if_predecessor_fails", DEFERRED_WORKER_DEFAULT_FAILURE_POLICY)
+          "if_predecessor_fails" => deferred.fetch("if_predecessor_fails", deferred_worker_default_failure_policy)
         }
         unless recorded_id
           return base.merge(
