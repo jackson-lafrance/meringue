@@ -48,6 +48,16 @@ class HeadPromptLoopTest < Minitest::Test
     assert_equal "accepted", events.last.dig("apply_result", "status")
   end
 
+  def test_automatic_project_name_preserves_the_product_capitalization
+    env = build_head_environment
+    File.write(File.join(env.project_path, "README.md"), "# Meringue\n\nThe product description is not its name.\n")
+
+    payload = Meringue::Heads::PromptLoop.new(engine: env.engine).call("add a docs cleanup task")
+
+    assert_equal "accepted", payload.dig("apply_head_result", "status")
+    assert_equal "Meringue", env.state.fetch("projects").first.fetch("name")
+  end
+
   def test_head_receives_user_message_snapshot_and_context
     runner = ScriptedHeadRunner.new(results: [head_result(commands: [])])
     env = build_head_environment(runner: runner)
