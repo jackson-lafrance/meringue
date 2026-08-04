@@ -107,7 +107,7 @@ class KernelMaintenanceReconcileSessionsTest < Minitest::Test
     assert_match(/is not alive/, worker.dig("harness_metadata", "error_message"))
     assert_equal "errored", issue_by_id(state, "P1-I1").fetch("status")
     error_log = state.fetch("logs").find { |log| log.fetch("level") == "error" }
-    assert_match(/errored while reconciling its agent session/, error_log.fetch("message"))
+    assert_match(/errored while reconciling its harness session/, error_log.fetch("message"))
     assert_documented_status_vocabulary(state)
   end
 
@@ -130,7 +130,7 @@ class KernelMaintenanceReconcileSessionsTest < Minitest::Test
 
     state = read_state
     assert_equal "working", agent_by_id(state, "P1-I1-W1").fetch("status")
-    resume_log = state.fetch("logs").find { |log| log.fetch("message").include?("Resumed agent session for worker") }
+    resume_log = state.fetch("logs").find { |log| log.fetch("message").include?("Resumed worker") }
     assert_equal "info", resume_log.fetch("level")
   end
 
@@ -165,7 +165,7 @@ class KernelMaintenanceReconcileSessionsTest < Minitest::Test
     assert_equal "blocked", worker.fetch("status")
     assert_equal "resume_failed", worker.dig("harness_metadata", "reconcile_state")
     assert_equal 2, worker.dig("harness_metadata", "reconcile", "resume_attempts_remaining")
-    warning = state.fetch("logs").find { |log| log.fetch("message").include?("could not resume its agent session") }
+    warning = state.fetch("logs").find { |log| log.fetch("message").include?("could not resume its harness session") }
     assert_equal "warning", warning.fetch("level")
     assert_documented_status_vocabulary(state)
   end

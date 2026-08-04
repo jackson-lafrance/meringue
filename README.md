@@ -73,12 +73,17 @@ docs/head_agent_kernel_commands.md # compact head-agent command contract
 docs/keybindings.md                # TUI keyboard and jump-mode controls
 docs/kernel-command-application.md # exactly-once command application invariants
 docs/goal_loops.md                 # goal loops: metric, judge, budgets, and interruption
-docs/testing.md                    # test-suite guide and coverage boundaries
 fixtures/config.example.toml       # example local config
 fixtures/demo_state.json           # demo state for the TUI
-test/integration/                  # hermetic component and area tests
-test/e2e/                          # end-to-end flows across CLI/kernel/heads
-test/support/                      # shared test helpers and fakes
+scripts/head_session_smoke.rb      # prints the head harness session lifetime without a real harness
+scripts/kernel_exactly_once_smoke.rb # checks exactly-once command application across instances
+scripts/question_answer_smoke.rb   # checks that answering a question routes real work, with no harness
+scripts/agent_tree_scroll_smoke.rb # checks AgentTree pane scrolling, clamping, and selection reveal
+scripts/head_user_command_smoke.rb # checks head-proposed user commands, guardrails, and typed-path parity
+scripts/chat_target_smoke.rb       # previews and checks the composer's colored chat-target cue in every theme
+scripts/delivery_pr_smoke.rb       # previews and checks the delivery-PR hint plus the Ctrl-B open-PR picker
+scripts/agent_identity_smoke.rb    # previews and checks AgentTree agent colors and harness logos in every theme
+scripts/goal_loop_smoke.rb         # runs a real goal loop (real git worktrees + real metric command, fake agent)
 ```
 
 ## Setup

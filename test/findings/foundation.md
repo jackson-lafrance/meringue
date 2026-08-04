@@ -26,4 +26,4 @@ Not a bug, but it makes area-scoped testing awkward and is the likely reason the
 ## 3. No-op checks that were intentionally not automated
 
 - `meringue reset-state` and the default `meringue`/`meringue tui`/`meringue demo` commands are not exercised: they write to `~/.meringue/state.json` or boot a TUI against the real terminal. The CLI test only covers `--version`, `--help`, unknown commands, and `demo-state`.
-- The retired head-loop walkthrough script ran a full fake head loop through `Heads::SimpleLoop`. This slice replaced its boot-level value (library loads, CLI answers, entrypoint works); the head/kernel loop behavior itself belongs to the kernel and heads slices.
+- The retired `scripts/head_loop_smoke.rb` ran a full fake head loop through `Heads::SimpleLoop`. This slice replaced its boot-level value (library loads, CLI answers, entrypoint works); the head/kernel loop behavior itself belongs to the kernel and heads slices.

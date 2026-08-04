@@ -91,7 +91,7 @@ The kernel remains the only mutator of orchestration state; the client only repo
 
 ## Manual integration verification
 
-Start with the automated suite: `rake test` covers the parts of this integration that do not need a live terminal, a real harness process, or network access (see `docs/testing.md`). Put any repeatable assertions in `test/` and run the suite rather than a one-off script.
+Start with the automated suite: `rake test` covers the parts of this integration that do not need a live terminal, a real harness process, or network access (see `docs/testing.md`). The retired head-loop smoke script under `scripts/` has been replaced by hermetic tests under `test/`, so run the suite rather than a one-off script.
 
 The checks below still require the interactive TUI, real worktrees, or real harness processes, so verify them by hand:
 

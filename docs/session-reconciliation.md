@@ -145,7 +145,12 @@ predecessor still cancels the chain.
 ```bash
 ruby -Ilib -Itest test/integration/kernel_maintenance/reconcile_terminal_errors_test.rb
 ruby -Ilib -Itest test/integration/kernel_maintenance/reconcile_sessions_test.rb
+ruby scripts/reconcile_terminal_error_smoke.rb
 ```
+
+The smoke script drives eleven reconciliation passes over one unrepairable head and one
+unrepairable worker and prints the log-line count, so the spam is easy to see or refute by
+hand: two error lines total instead of two per pass.
 
 The first test file covers the log-once/no-churn contract: an unrepairable worker session,
 a head that cannot return a result, and a head whose result the kernel refuses each log
