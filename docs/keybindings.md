@@ -31,6 +31,7 @@ agent_select_next = ["j", "down", "right"]
 - `Home` / `End`: scroll the focused non-chat pane to its first or last content line. With the logs selection cursor on, `Home` / `End` still move the cursor within its line.
 - Mouse wheel: scroll whichever pane the pointer is over, without changing focus. Hovering a pane that cannot scroll (or the composer) falls back to scrolling the focused pane.
 - When the agent tree or logs pane is focused, `Enter` enters jump mode. Non-agent log entries are skipped during jump navigation.
+- `r` in the focused AgentTree starts a quick rename for the selected project or issue by pre-filling `/rename <id>` in the composer; type the new name and press Enter. A worker selection resolves to its owning issue.
 
 ## AgentTree agent colors and harness logos
 

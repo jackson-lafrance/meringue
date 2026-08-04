@@ -551,7 +551,12 @@ module Meringue
       end
 
       def handle_focused_action_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
-        return nil unless %w[agent_tree logs].include?(@focused_pane) && keybinding?("submit", key)
+        return nil unless %w[agent_tree logs].include?(@focused_pane)
+
+        if @focused_pane == "agent_tree" && keybinding?("rename_selected", key)
+          return begin_selected_rename(state, input_buffer)
+        end
+        return nil unless keybinding?("submit", key)
 
         enter_agent_tree_navigation(state)
         [input_buffer, input_cursor, slash_suggestion_index]
@@ -1922,6 +1927,10 @@ module Meringue
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
+        if keybinding?("rename_selected", key)
+          return begin_selected_rename(state, input_buffer)
+        end
+
         if agent_session_open_key?(key)
           opened = open_selected_agent(state)
           draft = opened ? @workspace_draft.to_s.dup : ""
@@ -1938,6 +1947,37 @@ module Meringue
 
       def agent_session_open_key?(key)
         keybinding?("open_agent_workspace", key)
+      end
+
+      # Quick rename reuses the normal composer and kernel command path. This keeps
+      # the edit cancellable with Ctrl-C/Esc and means projects and issues get the
+      # same validation and durable log entry as slash commands.
+      def begin_selected_rename(state, input_buffer = "")
+        target_id = rename_target_id(state)
+        unless target_id
+          set_selection_status("Select a project or issue to rename")
+          return [input_buffer, input_buffer.to_s.chars.length, NO_SLASH_SELECTION]
+        end
+
+        exit_agent_tree_navigation if @agent_tree_navigation_active
+        draft = "/rename #{target_id} "
+        set_selection_status("Type a new name and press Enter")
+        [draft, draft.chars.length, NO_SLASH_SELECTION]
+      end
+
+      def rename_target_id(state)
+        candidate_ids = [@selected_agent_id, @log_scope_id].compact
+        candidate_ids.each do |candidate_id|
+          issue = Array(state.fetch("issues", [])).find { |record| record["id"].to_s == candidate_id.to_s }
+          return issue.fetch("id") if issue
+
+          project = Array(state.fetch("projects", [])).find { |record| record["id"].to_s == candidate_id.to_s }
+          return project.fetch("id") if project
+
+          agent = Array(state.fetch("agents", [])).find { |record| record["id"].to_s == candidate_id.to_s }
+          return agent.fetch("issue_id") if agent && agent["issue_id"]
+        end
+        nil
       end
 
       def handle_local_navigation_command(input_buffer, state)
@@ -1986,7 +2026,7 @@ module Meringue
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
           Chat: #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
-          Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode.
+          Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode. In the AgentTree, #{keys_for("rename_selected")} starts a quick rename for the selected project or issue; type its new name in the composer and press Enter.
           Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
           Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.

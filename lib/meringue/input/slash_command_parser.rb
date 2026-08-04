@@ -12,7 +12,10 @@ module Meringue
         ["/quit", "Quit the interactive TUI."],
         ["/theme <name>", "Set and persist the TUI theme."],
         ["/project add <path> [name]", "Register a project directory."],
+        ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
+        ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
+        ["/rename <project_or_issue_id> \"<name>\"", "Quickly rename a project or issue."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker session."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
@@ -44,6 +47,9 @@ module Meringue
         { "prefix" => "/harness", "source" => "harness_providers", "append_space" => false },
         { "prefix" => "/models", "source" => "harness_providers", "append_space" => false },
         { "prefix" => "/issue create", "source" => "projects", "append_space" => true },
+        { "prefix" => "/project rename", "source" => "projects", "append_space" => true },
+        { "prefix" => "/issue rename", "source" => "issues", "append_space" => true },
+        { "prefix" => "/rename", "source" => "targets", "append_space" => true },
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
         { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
         { "prefix" => "/session-settings", "source" => "sessions", "append_space" => false },
@@ -520,6 +526,8 @@ module Meringue
           parse_project(arguments)
         when "issue"
           parse_issue(arguments)
+        when "rename"
+          parse_rename(arguments)
         when "worker"
           parse_worker(arguments)
         when "prompt"
@@ -616,25 +624,46 @@ module Meringue
 
       def parse_project(arguments)
         tokens = split_arguments(arguments)
-        return invalid("Usage: /project add <path> [name]") unless tokens.first == "add"
+        case tokens.first
+        when "add"
+          kernel_command(
+            "AddProject",
+            "path" => tokens[1],
+            "name" => tokens[2..]&.join(" ")
+          )
+        when "rename"
+          return invalid("Usage: /project rename <project_id> \"<name>\"") unless tokens.length >= 3
 
-        kernel_command(
-          "AddProject",
-          "path" => tokens[1],
-          "name" => tokens[2..]&.join(" ")
-        )
+          kernel_command("ModifyProject", "project_id" => tokens[1], "name" => tokens[2..].join(" "))
+        else
+          invalid("Usage: /project add <path> [name] | /project rename <project_id> \"<name>\"")
+        end
       end
 
       def parse_issue(arguments)
         tokens = split_arguments(arguments)
-        return invalid("Usage: /issue create <project_id> \"<title>\" [\"description\"]") unless tokens.first == "create"
+        case tokens.first
+        when "create"
+          kernel_command(
+            "CreateIssue",
+            "project_id" => tokens[1],
+            "title" => tokens[2],
+            "description" => tokens[3..]&.join(" ")
+          )
+        when "rename"
+          return invalid("Usage: /issue rename <issue_id> \"<title>\"") unless tokens.length >= 3
 
-        kernel_command(
-          "CreateIssue",
-          "project_id" => tokens[1],
-          "title" => tokens[2],
-          "description" => tokens[3..]&.join(" ")
-        )
+          kernel_command("ModifyIssue", "issue_id" => tokens[1], "title" => tokens[2..].join(" "))
+        else
+          invalid("Usage: /issue create <project_id> \"<title>\" [\"description\"] | /issue rename <issue_id> \"<title>\"")
+        end
+      end
+
+      def parse_rename(arguments)
+        tokens = split_arguments(arguments)
+        return invalid("Usage: /rename <project_or_issue_id> \"<name>\"") unless tokens.length >= 2
+
+        kernel_command("Rename", "target_id" => tokens[0], "name" => tokens[1..].join(" "))
       end
 
       def parse_worker(arguments)

@@ -47,7 +47,7 @@ class TuiAppWiringTest < Minitest::Test
     provider = TUISupport::RecordingStateProvider.new(demo_state)
     composed = compose_app_state(@app, provider.to_proc, "typed")
 
-    assert_equal %w[_agent_tree_navigation _agent_workspace _chat _scroll _selection], (composed.keys - demo_state.keys).sort
+    assert_equal %w[_agent_tree_navigation _agent_workspace _chat _log_scope _scroll _selection], (composed.keys - demo_state.keys).sort
     demo_state.each_key { |key| assert composed.key?(key), "kernel key #{key} must survive composition" }
     assert_equal demo_state.fetch("agents"), composed.fetch("agents")
     assert_equal demo_state.fetch("questions"), composed.fetch("questions")
@@ -146,6 +146,32 @@ class TuiAppWiringTest < Minitest::Test
     assert_equal ["", 0, -1], @app.send(:handle_key, "\u0003", "clear me", 8, -1, nil, state)
     assert_equal ["/help", 5, -1], @app.send(:handle_key, "\t", "/hel", 4, -1, nil, state)
     assert_equal ["a\nb", 2, -1], @app.send(:handle_key, "\e[13;2u", "ab", 1, -1, nil, state)
+  end
+
+  def test_agent_tree_rename_key_prefills_the_selected_project
+    state = composed_state(empty_state.merge("projects" => [project_record("P1", "name" => "Old app")]))
+    assert @app.send(:select_agent_tree_item, state, "P1")
+    @app.instance_variable_set(:@focused_pane, "agent_tree")
+
+    result = @app.send(:handle_key, "r", "", 0, -1, nil, state)
+
+    assert_equal ["/rename P1 ", "/rename P1 ".length, -1], result
+  end
+
+  def test_agent_tree_rename_key_resolves_a_worker_to_its_issue
+    state = composed_state(
+      empty_state.merge(
+        "projects" => [project_record("P1")],
+        "issues" => [issue_record("P1-I1", "title" => "Old issue")],
+        "agents" => [agent_record("P1-I1-W1", "issue_id" => "P1-I1")]
+      )
+    )
+    assert @app.send(:select_agent_tree_item, state, "P1-I1-W1")
+    @app.instance_variable_set(:@focused_pane, "agent_tree")
+
+    result = @app.send(:handle_key, "r", "", 0, -1, nil, state)
+
+    assert_equal "/rename P1-I1 ", result.first
   end
 
   def test_submitting_a_prompt_hands_the_text_to_the_kernel_callback
