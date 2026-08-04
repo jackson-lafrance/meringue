@@ -29,6 +29,7 @@ module Meringue
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/keybind", "Show all TUI keybindings."],
+        ["/config", "Show the active config, supported defaults, conflict policy, and keybindings."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
@@ -531,6 +532,8 @@ module Meringue
           invalid("/jump is a local TUI command. Run it in the interactive TUI to open an agent session.", usage: "/jump [agent_id]")
         when "keybind"
           invalid("/keybind is a local TUI command. Run it in the interactive TUI to show keybindings.", usage: "/keybind")
+        when "config"
+          invalid("/config is a local TUI command. Run it in the interactive TUI to show the active configuration.", usage: "/config")
         when "tree"
           kernel_command("ListAll", "view" => "tree")
         when "state"

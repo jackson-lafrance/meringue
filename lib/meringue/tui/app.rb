@@ -110,7 +110,7 @@ module Meringue
       # agent_session_service may open the generic live worker-session view.
       # Returning from this TUI workspace closes only that read handle and never
       # calls an abort/kill worker lifecycle operation.
-      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, workspace_controller: nil, agent_session_service: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default)
+      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, workspace_controller: nil, agent_session_service: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default, config: nil)
         @layout = layout
         @out = out
         @terminal = terminal || Terminal.new(input: input, output: out)
@@ -120,6 +120,7 @@ module Meringue
         @agent_session_service = agent_session_service
         @log_store = log_store || conversation_store
         @keybindings = keybindings || Keybindings.default
+        @config = config || Config.new({}, path: Config::DEFAULT_PATH)
         @messages = []
         @next_message_id = 0
         @pending_count = 0
@@ -285,7 +286,7 @@ module Meringue
 
       private
 
-      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :workspace_controller, :agent_session_service, :log_store, :keybindings
+      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :workspace_controller, :agent_session_service, :log_store, :keybindings, :config
 
       def shutdown_workspace_resources
         persist_agent_workspace if @agent_workspace_active
@@ -1943,6 +1944,7 @@ module Meringue
         text = input_buffer.to_s.strip
         return handle_local_jump_command(text, state) if jump_command?(text)
         return handle_local_keybind_command if keybind_command?(text)
+        return handle_local_config_command if config_command?(text)
         return handle_local_quit_command if quit_command?(text)
 
         false
@@ -1960,6 +1962,11 @@ module Meringue
 
       def handle_local_keybind_command
         append_jump_response(keybinding_help_text)
+        true
+      end
+
+      def handle_local_config_command
+        append_jump_response(configuration_help_text)
         true
       end
 
@@ -1986,6 +1993,53 @@ module Meringue
         TEXT
       end
 
+      # `/config` is deliberately a read-only local command. It reports the
+      # supported effective settings rather than dumping arbitrary TOML, which
+      # keeps the overview useful and avoids accidentally echoing secrets.
+      def configuration_help_text
+        pi_model = config.value("harness", "pi", "model") || Harness::Registry::DEFAULT_PI_MODEL
+        pi_thinking = config.value("harness", "pi", "thinking_level") || Harness::Registry::DEFAULT_PI_THINKING_LEVEL
+        provider = ENV["MERINGUE_HARNESS"] || config.value("harness", "provider") || Harness::Registry::DEFAULT_PROVIDER
+        head_provider = ENV["MERINGUE_HEAD_HARNESS"] || config.value("harness", "head_provider") || provider
+        worker_provider = ENV["MERINGUE_WORKER_HARNESS"] || config.value("harness", "worker_provider") || provider
+        colorscheme = config.value("tui", "colorscheme") || config.value("tui", "color_scheme") || TUI::Style::DEFAULT_COLORSCHEME
+        shell = config.value("workspace", "shell_command") || ENV["MERINGUE_SHELL"] || ENV["SHELL"] || "/bin/sh"
+        editor = config.value("workspace", "editor_command") || ENV["MERINGUE_EDITOR"] || ENV["VISUAL"] || ENV["EDITOR"] || "code"
+        editor_args = config.value("workspace", "editor_args") || ["."]
+
+        lines = [
+          "Configuration (read-only)",
+          "  file: #{config.path} (#{config.loaded? ? "loaded" : "not found; built-in defaults"})",
+          "  harness: #{provider}",
+          "  head harness: #{head_provider}",
+          "  worker harness: #{worker_provider}",
+          "  TUI colorscheme: #{colorscheme}",
+          "  Pi default model: #{pi_model}",
+          "  Pi default thinking: #{pi_thinking}",
+          "  conflict policy (predecessor failure): #{config.conflict_predecessor_failure}",
+          "  workspace shell: #{format_config_value(shell)}",
+          "  workspace editor: #{format_config_value(editor)}",
+          "  workspace editor args: #{format_config_value(editor_args)}",
+          "",
+          "Keybindings (action: configured keys; omitted actions use defaults):"
+        ]
+        lines.concat(Keybindings.actions.map do |action|
+          "  #{Keybindings.label_for(action)} [#{action}]: #{format_config_value(keybindings.names_for(action))}"
+        end)
+        lines.join("\n")
+      end
+
+      def format_config_value(value)
+        case value
+        when Array
+          value.empty? ? "(unbound)" : value.join(", ")
+        when Hash
+          value.empty? ? "{}" : value.inspect
+        else
+          value.to_s
+        end
+      end
+
       def keys_for(action)
         names = keybindings.names_for(action)
         names.empty? ? "(unbound)" : names.join("/")
@@ -1997,6 +2051,10 @@ module Meringue
 
       def keybind_command?(text)
         text == "/keybind"
+      end
+
+      def config_command?(text)
+        text == "/config"
       end
 
       def quit_command?(text)

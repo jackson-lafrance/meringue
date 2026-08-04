@@ -11,6 +11,20 @@ class KernelWorkersDeferredChainingTest < Minitest::Test
 
   # --- Queueing -------------------------------------------------------------------------------
 
+  def test_configured_predecessor_failure_policy_is_used_when_command_omits_one
+    File.write(tmp_path("config.toml"), "[conflicts]\npredecessor_failure = \"run\"\n")
+    engine = build_engine
+    context = project_with_issue(engine)
+    predecessor_id = spawn_worker(engine, context.fetch("issue_id"), prompt: "Investigate.").fetch("target_id")
+
+    dependent = agent(
+      engine,
+      spawn_worker(engine, context.fetch("issue_id"), prompt: "Continue.", after_agent_id: predecessor_id).fetch("target_id")
+    )
+
+    assert_equal "run", dependent.fetch("harness_metadata").fetch("deferred_spawn").fetch("if_predecessor_fails")
+  end
+
   def test_worker_queued_behind_a_live_worker_is_recorded_without_a_session
     engine = build_engine
     context = project_with_issue(engine)
