@@ -15,7 +15,6 @@ module Meringue
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
-        ["/rename <project_or_issue_id> \"<name>\"", "Quickly rename a project or issue."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <agent_id> \"<message>\"", "Prompt a worker session, or retry a failed head (H<n>)."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
@@ -48,7 +47,6 @@ module Meringue
         { "prefix" => "/issue create", "source" => "projects", "append_space" => true },
         { "prefix" => "/project rename", "source" => "projects", "append_space" => true },
         { "prefix" => "/issue rename", "source" => "issues", "append_space" => true },
-        { "prefix" => "/rename", "source" => "targets", "append_space" => true },
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
         { "prefix" => "/prompt", "source" => "prompt_targets", "append_space" => true },
         { "prefix" => "/model", "source" => "session_models", "append_space" => false },
@@ -103,6 +101,12 @@ module Meringue
       # cached snapshot the kernel refreshes in the background.
       MODEL_CATALOG_REFRESH_WORDS = %w[refresh reload force --refresh].freeze
       PRUNE_USAGE_MESSAGE = "Usage: /prune (no arguments; prunes resolved and errored records together)"
+      # The bare `/rename <id> "<name>"` shortcut was removed: renaming now always names the
+      # record kind, so the command that runs is obvious from what was typed. The word is still
+      # matched here (instead of falling through to "Unknown slash command") so muscle memory
+      # gets pointed at the namespaced spelling rather than a generic error.
+      RENAME_USAGE_MESSAGE = "Usage: /project rename <project_id> \"<name>\" | /issue rename <issue_id> \"<title>\""
+      RENAME_REMOVED_MESSAGE = "/rename was removed. #{RENAME_USAGE_MESSAGE}"
 
       def self.command_suggestions(input = nil, limit: nil, state: nil)
         command_suggestion_records(input, limit: limit, state: state).map do |record|
@@ -581,7 +585,7 @@ module Meringue
         when "issue"
           parse_issue(arguments)
         when "rename"
-          parse_rename(arguments)
+          invalid(RENAME_REMOVED_MESSAGE, usage: RENAME_USAGE_MESSAGE)
         when "worker"
           parse_worker(arguments)
         when "prompt"
@@ -717,13 +721,6 @@ module Meringue
         else
           invalid("Usage: /issue create <project_id> \"<title>\" [\"description\"] | /issue rename <issue_id> \"<title>\"")
         end
-      end
-
-      def parse_rename(arguments)
-        tokens = split_arguments(arguments)
-        return invalid("Usage: /rename <project_or_issue_id> \"<name>\"") unless tokens.length >= 2
-
-        kernel_command("Rename", "target_id" => tokens[0], "name" => tokens[1..].join(" "))
       end
 
       def parse_worker(arguments)

@@ -1985,31 +1985,36 @@ module Meringue
 
       # Quick rename reuses the normal composer and kernel command path. This keeps
       # the edit cancellable with Ctrl-C/Esc and means projects and issues get the
-      # same validation and durable log entry as slash commands.
+      # same validation and durable log entry as slash commands. The draft is the
+      # namespaced command for the selected row kind (`/project rename` for a project,
+      # `/issue rename` for an issue or the issue that owns the selected worker), so what
+      # lands in the composer is exactly what the user could have typed themselves.
       def begin_selected_rename(state, input_buffer = "")
-        target_id = rename_target_id(state)
+        kind, target_id = rename_target(state)
         unless target_id
           set_selection_status("Select a project or issue to rename")
           return [input_buffer, input_buffer.to_s.chars.length, NO_SLASH_SELECTION]
         end
 
         exit_agent_tree_navigation if @agent_tree_navigation_active
-        draft = "/rename #{target_id} "
+        draft = "/#{kind} rename #{target_id} "
         set_selection_status("Type a new name and press Enter")
         [draft, draft.chars.length, NO_SLASH_SELECTION]
       end
 
-      def rename_target_id(state)
+      # Returns ["project" | "issue", id] for the selected row, or nil when nothing
+      # renameable is selected.
+      def rename_target(state)
         candidate_ids = [@selected_agent_id, @log_scope_id].compact
         candidate_ids.each do |candidate_id|
           issue = Array(state.fetch("issues", [])).find { |record| record["id"].to_s == candidate_id.to_s }
-          return issue.fetch("id") if issue
+          return ["issue", issue.fetch("id")] if issue
 
           project = Array(state.fetch("projects", [])).find { |record| record["id"].to_s == candidate_id.to_s }
-          return project.fetch("id") if project
+          return ["project", project.fetch("id")] if project
 
           agent = Array(state.fetch("agents", [])).find { |record| record["id"].to_s == candidate_id.to_s }
-          return agent.fetch("issue_id") if agent && agent["issue_id"]
+          return ["issue", agent.fetch("issue_id")] if agent && agent["issue_id"]
         end
         nil
       end
@@ -2061,7 +2066,7 @@ module Meringue
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
           Chat: #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
-          Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode. In the AgentTree, #{keys_for("rename_selected")} starts a quick rename for the selected project or issue; type its new name in the composer and press Enter.
+          Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode. In the AgentTree, #{keys_for("rename_selected")} starts a quick rename for the selected project or issue by pre-filling `/project rename` or `/issue rename`; type its new name in the composer and press Enter.
           Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
           Model picker: /models opens a searchable list of the models the harness reports (/models claude scopes it to another harness); type to filter, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} applies the model as the future-session default (same as /model), #{keys_for("refresh_model_catalog")} re-fetches the catalog, #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.

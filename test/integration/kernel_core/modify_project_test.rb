@@ -44,21 +44,43 @@ class KernelCoreModifyProjectTest < Minitest::Test
     assert_equal "Meringue", persisted_project("P1").fetch("name")
     assert_equal "Renamed project P1: Original project -> Meringue", log_entry(result.fetch("log_entry_ids").first).fetch("message")
 
-    renamed = apply_command("Rename", "target_id" => "P1", "name" => "World  working")
+    renamed = apply_command("ModifyProject", "project_id" => "P1", "name" => "World  working")
     assert_accepted(renamed)
     assert_equal "World", persisted_project("P1").fetch("name")
   end
 
-  def test_rename_dispatches_to_projects_and_issues
-    project = apply_command("Rename", "target_id" => "P1", "name" => "New project")
+  # ModifyProject also accepts the generic target_id spelling, which is what the removed
+  # Rename wrapper used to forward.
+  def test_modify_project_accepts_a_generic_target_id
+    result = apply_command("ModifyProject", "target_id" => "P1", "name" => "New project")
+
+    assert_accepted(result)
+    assert_equal "New project", persisted_project("P1").fetch("name")
+  end
+
+  # The Rename wrapper only ever existed to back the removed plain `/rename` slash command.
+  # ModifyProject and ModifyIssue are now the only rename commands, and Rename is not a kernel
+  # command at all: it is neither dispatched nor proposable by a head.
+  def test_the_rename_wrapper_command_is_gone
+    create_issue!("P1", title: "Old issue")
+    before = domain_snapshot
+
+    %w[Rename rename].each do |command_type|
+      result = apply_command(command_type, "target_id" => "P1", "name" => "New project")
+
+      assert_rejected(result, "unknown_command")
+      assert_includes result.fetch("message"), "Unknown kernel command"
+    end
+
+    assert_equal before, domain_snapshot
+    refute_includes Meringue::Kernel::Engine::HEAD_PROPOSABLE_COMMANDS, "Rename"
+
+    project = apply_command("ModifyProject", "project_id" => "P1", "name" => "New project")
     assert_accepted(project)
-    assert_equal "Rename", project.fetch("command_type")
     assert_equal "New project", persisted_project("P1").fetch("name")
 
-    create_issue!("P1", title: "Old issue")
-    issue = apply_command("rename", "target_id" => "P1-I1", "name" => "New issue")
+    issue = apply_command("ModifyIssue", "issue_id" => "P1-I1", "title" => "New issue")
     assert_accepted(issue)
-    assert_equal "Rename", issue.fetch("command_type")
     assert_equal "New issue", persisted_issue("P1-I1").fetch("title")
   end
 end

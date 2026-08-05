@@ -155,7 +155,7 @@ class TuiAppWiringTest < Minitest::Test
 
     result = @app.send(:handle_key, "r", "", 0, -1, nil, state)
 
-    assert_equal ["/rename P1 ", "/rename P1 ".length, -1], result
+    assert_equal ["/project rename P1 ", "/project rename P1 ".length, -1], result
   end
 
   def test_agent_tree_rename_key_resolves_a_worker_to_its_issue
@@ -171,7 +171,28 @@ class TuiAppWiringTest < Minitest::Test
 
     result = @app.send(:handle_key, "r", "", 0, -1, nil, state)
 
-    assert_equal "/rename P1-I1 ", result.first
+    assert_equal "/issue rename P1-I1 ", result.first
+  end
+
+  # The quick-rename draft must be a command the parser still accepts, so the prefilled
+  # text is checked against the real parser rather than only against a literal string.
+  def test_agent_tree_rename_key_prefills_a_command_the_parser_still_accepts
+    state = composed_state(
+      empty_state.merge(
+        "projects" => [project_record("P1", "name" => "Old app")],
+        "issues" => [issue_record("P1-I1", "title" => "Old issue")]
+      )
+    )
+    @app.instance_variable_set(:@focused_pane, "agent_tree")
+    parser = Meringue::Input::SlashCommandParser.new
+
+    assert @app.send(:select_agent_tree_item, state, "P1")
+    project_draft = @app.send(:handle_key, "r", "", 0, -1, nil, state).first
+    assert_equal "ModifyProject", parser.parse("#{project_draft}Renamed app").to_h.fetch("type")
+
+    assert @app.send(:select_agent_tree_item, state, "P1-I1")
+    issue_draft = @app.send(:handle_key, "r", "", 0, -1, nil, state).first
+    assert_equal "ModifyIssue", parser.parse("#{issue_draft}Renamed issue").to_h.fetch("type")
   end
 
   def test_submitting_a_prompt_hands_the_text_to_the_kernel_callback

@@ -160,8 +160,7 @@ Useful slash commands inside the TUI include:
 - `/project add <path> [name]` — register a project.
 - `/project rename <project_id> "<name>"` — rename a project.
 - `/issue create <project_id> "<title>" ["description"]` — create an issue manually.
-- `/issue rename <issue_id> "<title>"` — rename an issue.
-- `/rename <project_or_issue_id> "<name>"` — quickly rename either record; focus/select a tree row and press `r` to prefill it.
+- `/issue rename <issue_id> "<title>"` — rename an issue. For both rename commands, focus the AgentTree, select a row, and press `r` to prefill the one that matches the selected row (a worker resolves to its issue).
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
 - `/prompt <agent_id> "<message>"` — follow up with an existing worker, or retry a head (`H<n>`) that failed before routing your request.
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
