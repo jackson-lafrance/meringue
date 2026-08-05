@@ -58,16 +58,15 @@ Iteration cadence is rate-limited by `min_seconds_between_iterations` (15s defau
 
 ## How a goal reads in the AgentTree
 
-A goal is still rendered on its issue, because the AgentTree stays projects -> issues -> workers. It is not, however, an ordinary issue with an extra glyph: the row is marked as goal driven in a fixed column and carries its own goal-colored chip.
+A goal is still rendered on its issue, because the AgentTree stays projects -> issues -> workers. What it adds to that row is a goal-colored chip: the iteration it is on, and how much of the goal is actually done. There is deliberately no badge glyph beside the issue id — the numbers are the signal, and a goal row keeps the exact leader, and the exact column alignment, of every other row.
 
 ```txt
-  └─ ● I7◎ Raise kernel coverage  3/5 46% ↗
-         │                        │   │   │
-         │                        │   │   └─ the issue's delivery PR, still its own marker
-         │                        │   └───── percent complete: how far the metric travelled
-         │                        │          from its baseline toward its target
-         │                        └───────── iteration 3 of a 5 iteration budget
-         └────────────────────────────────── this issue is driven by a goal loop
+  └─ ● I7  Raise kernel coverage  3/5 46% ↗
+                                  │   │   │
+                                  │   │   └─ the issue's delivery PR, still its own marker
+                                  │   └─── percent complete: how far the metric travelled
+                                  │        from its baseline toward its target
+                                  └─── iteration 3 of a 5 iteration budget
 ```
 
 The two numbers deliberately answer different questions. `3/5` is budget *spent*; the percentage is progress *made*, computed by `Goals::Record.progress_score` from `baseline_metric → target`, so a `lte` goal that drives a number down reads exactly like one that pushes a number up, and only a satisfied comparator reads `100%`.

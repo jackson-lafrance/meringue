@@ -333,6 +333,6 @@ The leader and each suffix are configurable as `workspace_leader`, `workspace_sw
 
 Scrolling either focused view reuses the dashboard's frame-diffed rendering: composed lines are cached until the underlying transcript or terminal screen actually changes, offsets are clamped to what the pane can scroll, and the workspace selection is written to the state file on a slow cadence instead of once per scroll step.
 
-Agents with an open pull request are marked `↗` in the AgentTree. An issue driven by a goal loop is marked `◎` in the column between its id and its title and carries a goal-colored `<iteration>/<budget> <percent complete>` chip beside that PR marker; see [Goal loops](goal_loops.md#how-a-goal-reads-in-the-agenttree). Worker selection and focused-workspace view state are restored from the state file after restart; selections for pruned workers are cleared safely.
+Agents with an open pull request are marked `↗` in the AgentTree. An issue driven by a goal loop carries a goal-colored `<iteration>/<budget> <percent complete>` chip beside that PR marker, and no badge glyph of its own; see [Goal loops](goal_loops.md#how-a-goal-reads-in-the-agenttree). Worker selection and focused-workspace view state are restored from the state file after restart; selections for pruned workers are cleared safely.
 
 See [Agent workspace delivery and recovery integration](agent_workspace_integration.md) for persistence, stale PR metadata, and degraded dependency behavior.
