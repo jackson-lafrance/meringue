@@ -65,6 +65,41 @@ actually failed (`errored_at`, else `updated_at`) rather than from the moment
 reconciliation noticed it again, so a stale errored head is never flipped back to
 `working` pass after pass.
 
+## A background pass must stay in the background
+
+A reconcile tick is work nobody asked for. It runs every two seconds whether or not the
+user is doing anything, so its cost is not paid once: it is paid against every prompt the
+user sends while it is running. Two rules follow, and both were learned from a reported
+"Meringue is slow right now".
+
+**Never hold the state lock across external I/O.** `Engine#refresh_stale_delivery_pull_requests`
+used to run one blocking `gh pr view` per stale delivery PR inside `synchronized_state`,
+which holds both the in-process state mutex and the cross-process `state.json.lock`. With
+eleven tracked PRs one measured tick spent **5.85 s** inside that lock, and every kernel
+command in every Meringue instance queued behind it: submitting a prompt, applying a
+`HeadResult`, settling a worker. The refresh is now three phases, the same shape `/prune`
+already used (`Engine#prepare_prune_forge_lookups`):
+
+1. `Engine#due_delivery_pull_request_urls` — locked, cheap, read-only. Which URLs are due.
+2. `Engine#fetch_delivery_pull_request_statuses` — **unlocked**. Talks to the forge.
+3. `Engine#apply_delivery_pull_request_statuses` — locked again, and against *current*
+   state rather than the snapshot the URLs came from, so an issue pruned or a record
+   replaced during the forge call is simply skipped.
+
+**Bound the tick, and do not let the herd re-synchronize.** One tick starts at most
+`DELIVERY_PULL_REQUEST_REFRESH_BATCH_LIMIT` (3) lookups and shares a single
+`DELIVERY_PULL_REQUEST_REFRESH_BUDGET_SECONDS` (5.0) deadline across the whole batch, so an
+unreachable forge costs one budget rather than one timeout per URL. Whatever is left over
+stays due and is picked up by a later tick: a backlog becomes many cheap ticks instead of
+one long one.
+
+A fixed refresh interval alone was not enough. Every record refreshed in one burst is
+stamped with the same `last_checked_at`, so a fixed interval makes them all fall due again
+on the same later tick, forever. `Engine#delivery_pull_request_refresh_interval` adds a
+deterministic per-URL offset (`Zlib.crc32(url) % DELIVERY_PULL_REQUEST_REFRESH_SPREAD_SECONDS`)
+to the base interval, which spreads the herd without storing any extra scheduling state.
+The spread only ever delays a refresh; it never cancels one.
+
 ## The repair ladder before a failure is terminal
 
 Terminal is the last rung, not the first:
@@ -153,6 +188,7 @@ predecessor still cancels the chain.
 ```bash
 ruby -Ilib -Itest test/integration/kernel_maintenance/reconcile_terminal_errors_test.rb
 ruby -Ilib -Itest test/integration/kernel_maintenance/reconcile_sessions_test.rb
+ruby -Ilib -Itest test/integration/kernel_maintenance/reconcile_delivery_pull_request_test.rb
 ```
 
 The first test file covers the log-once/no-churn contract: an unrepairable worker session,
@@ -161,3 +197,9 @@ exactly one error across repeated passes, the state file is byte-identical after
 passes, live sessions in the same pass still reconcile, an errored record without recorded
 reconcile details is still polled and still reports its failure once, and a settled errored
 head is retained until `/prune` removes it.
+
+The third file covers the background-pass contract: a delivery PR refresh records forge state
+and never lets an unavailable forge overwrite the last known state, a blocked forge lookup does
+not stop another instance from running `ListAll` or `CreateIssue`, one tick honours both the
+batch limit and the shared budget, and refresh schedules are spread so records do not all fall
+due on the same tick.
