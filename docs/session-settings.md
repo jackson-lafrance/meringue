@@ -60,6 +60,32 @@ A default change does **not** mutate, reconnect, restart, or terminate an existi
 
 Model defaults must be an exact `provider/model` reference. Thinking defaults must be one of Pi's known levels. A provider extension can add models dynamically, so Meringue validates the model reference shape when saving it; Pi performs model availability validation when the future session starts. Validation is deliberately independent of the catalog: a valid explicit id is still accepted when the catalog is stale, empty, or unavailable.
 
+### Thinking levels
+
+The accepted ladder is exactly `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, in that order, and it is the same set on every surface: the `/thinking` completion list, kernel validation, and the rejection message all read `Meringue::Harness::PiClient::THINKING_LEVELS`. A completion list that is narrower than what the kernel accepts is a bug — it was the reported one: a proxy provider that omits `max` from its model's `thinkingLevelMap` made `/thinking` hide `max` while `/thinking max` still set the default, so the level in force was missing from its own picker.
+
+The model catalog therefore *labels* levels; it never removes them:
+
+- The saved default is listed first and labelled `current default`, so the three-row popup always shows the level in force.
+- A level the model advertises is labelled `supported by <provider/model>`.
+- A level it does not advertise stays selectable and is labelled `not listed for <provider/model> · Pi clamps it to <level>`, because Pi clamps an unknown level (up the ladder first, then down, mirroring Pi's `clampThinkingLevel`) rather than failing, and a provider extension can under-declare what its model really supports.
+- When the catalog knows nothing about the configured model, every level is labelled `model support not verified yet`.
+
+Setting a level the catalog does not list for the configured default model is accepted and the result says what Pi will actually run:
+
+```text
+Set the default Pi thinking level to max for all future Pi heads and workers. Existing Pi sessions were not changed.
+Pi's catalog does not list max for anthropic-250k-proxy/claude-opus-5, so future Pi sessions run xhigh instead.
+```
+
+`/defaults` repeats that caveat for the saved pair, so an inspected default never reads as honoured when Pi will clamp it.
+
+An invalid level names the valid ones instead of only saying nothing changed, and points at the obvious near-miss:
+
+```text
+Default Pi thinking level was not changed: "xhi" is not a Pi thinking level. Did you mean xhigh? Valid levels: off, minimal, low, medium, high, xhigh, max.
+```
+
 `/session-settings <agent_id>` remains available for inspecting the effective settings of an existing active or resumable session. It does not provide per-session model or thinking commands; existing sessions keep their own values. The old dashboard `/session` spelling remains a compatibility alias.
 
 ## Persistence and precedence
@@ -143,6 +169,8 @@ Pi exposes its catalog per process, not per session, so Meringue starts a short-
 
 Each model's thinking levels are derived with Pi's own rule (`getSupportedThinkingLevels`): a model without reasoning support reports `["off"]`, a level mapped to `null` is excluded, and `xhigh`/`max` appear only when the model explicitly maps them. Meringue keeps no hand-maintained model or level table.
 
+That list is the model's own declaration, so treat it as description, not permission. A proxy or extension provider can wrap Claude Opus 5 and omit `max` from its `thinkingLevelMap`; Pi then clamps `max` to the closest level it does map instead of failing. Meringue mirrors that clamp (`Meringue::Harness::PiClient.clamp_thinking_level`) to explain what a future session will run, and never uses it to filter the `/thinking` list.
+
 ### Caching and refresh
 
 The kernel owns catalog state. Snapshots live in `metadata.harness_model_catalogs.<harness>`, so completion reads a plain hash and never starts a harness process while the user types.
@@ -159,8 +187,8 @@ The kernel owns catalog state. Snapshots live in `metadata.harness_model_catalog
 - Ordering puts the target session's current model first, then the saved future-session default, then models other sessions already use. The rest of the catalog is interleaved across providers rather than grouped, because only a few rows are visible at once and a grouped list would fill the first screen with one provider and imply that is all the harness offers. Labels show why an entry is first (`current session model`, `future-session default`), plus the model name, supported thinking levels, and context window.
 - The suggestion popup shows a window of three rows, so a long list is captioned with `1–3 of 119 models · ↑↓ scroll · keep typing to filter`. Without that line a three-row window over a hundred models reads like a three-item list. The caption renders dim on its own row *below* the popup box, so the box itself lists models only and the window keeps all three of its rows.
 - Queries match the reference, the bare model id, and the display name, so `sol`, `gpt-5.6`, and `openai/` all narrow the same list.
-- `/thinking <Tab>` offers only the levels the configured default model supports. When the model is unknown to the catalog, Meringue falls back to Pi's full ladder and labels it `model support not verified yet`.
+- `/thinking <Tab>` offers every level the kernel accepts, ordered with the saved default first, and uses the configured default model's catalog entry for the per-level labels described in [Thinking levels](#thinking-levels). It never hides a level a user is allowed to set.
 - A `stale` catalog is offered in full, with every entry labelled `last confirmed list` and a trailing note naming the failed refresh, so a temporary harness problem never hides models that exist.
 - When no catalog has ever been fetched, completion still offers the references Meringue knows (current session model, saved default, models in use) labelled `catalog unavailable — id not verified`, and appends one non-destructive note row explaining the state and pointing at `/models refresh`. Selecting the note re-inserts only what was already typed, so it can never overwrite a valid explicit id.
 
-Validation is unchanged by catalog state: `/model` requires an exact `provider/model` shape, and Pi still rejects an unavailable model id or an unsupported thinking level.
+Validation is unchanged by catalog state: `/model` requires an exact `provider/model` shape, and `/thinking` requires one of the seven levels on the ladder. Pi still rejects an unavailable model id at spawn time, and clamps a thinking level the chosen model does not map.

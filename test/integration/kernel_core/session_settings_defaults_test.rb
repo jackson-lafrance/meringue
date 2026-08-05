@@ -220,6 +220,84 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     refute File.exist?(File.join(tmp_root, "config.toml"))
   end
 
+  # A rejected level used to read only "Default Pi thinking level was not
+  # changed.", which never said which words are legal, so the user had to guess
+  # ("xhi", "ten"). The user-visible message now carries the ladder itself and
+  # the obvious near-miss for a truncated level.
+  def test_a_rejected_thinking_level_names_the_valid_levels
+    truncated = apply_command("SetDefaultSessionThinkingLevel", "level" => "xhi")
+
+    assert_rejected(truncated, "thinking level must be one of")
+    assert_includes truncated.fetch("message"), "\"xhi\" is not a Pi thinking level"
+    assert_includes truncated.fetch("message"), "Did you mean xhigh?"
+    assert_includes truncated.fetch("message"), "Valid levels: off, minimal, low, medium, high, xhigh, max."
+    # The visible log line carries the same explanation, not just the details blob.
+    assert_includes log_entry(truncated.fetch("log_entry_ids").first).fetch("message"), "Valid levels:"
+
+    nonsense = apply_command("SetDefaultSessionThinkingLevel", "level" => "ten")
+    assert_includes nonsense.fetch("message"), "\"ten\" is not a Pi thinking level"
+    refute_includes nonsense.fetch("message"), "Did you mean"
+    assert_includes nonsense.fetch("message"), "Valid levels: off, minimal, low, medium, high, xhigh, max."
+
+    missing = apply_command("SetDefaultSessionThinkingLevel", {})
+    assert_includes missing.fetch("message"), "a level is required"
+    assert_includes missing.fetch("message"), "Valid levels: off, minimal, low, medium, high, xhigh, max."
+
+    session_missing = apply_command("SetSessionThinkingLevel", "agent_id" => "P1-I1-W1")
+    assert_includes session_missing.fetch("message"), "Session thinking level was not changed: a level is required."
+
+    assert_empty @coordinator.calls
+    refute File.exist?(File.join(tmp_root, "config.toml"))
+  end
+
+  # Validation stays catalog-independent, so a level a model's catalog entry does
+  # not advertise is still saved: a provider extension can under-declare its
+  # `thinkingLevelMap`, and Pi clamps at spawn time instead of failing. The
+  # accepted message says what Pi will actually run so the pair cannot look
+  # silently honoured.
+  def test_a_level_the_catalog_does_not_list_is_saved_and_reports_pis_clamp
+    proxy = "anthropic-250k-prefer-using-this-one/claude-opus-5"
+    engine = build_engine(
+      store: Meringue::State::Store.new(path: File.join(tmp_root, "clamp.json")),
+      harness_client: @settings_client,
+      harness_client_provider: ->(_provider) { @settings_client },
+      default_harness_provider: "pi",
+      config_path: File.join(tmp_root, "clamp-config.toml"),
+      model_catalog_provider: lambda do |_provider|
+        Meringue::Harness::ModelCatalog.available(
+          harness: "pi",
+          models: [
+            { "provider" => "anthropic-250k-prefer-using-this-one", "id" => "claude-opus-5",
+              "thinking_levels" => %w[off minimal low medium high xhigh], "reasoning" => true }
+          ],
+          source: "test_catalog_source"
+        )
+      end
+    )
+    engine.apply("type" => "GetModelCatalog", "payload" => {})
+    engine.apply("type" => "SetDefaultSessionModel", "payload" => { "model" => proxy })
+
+    result = engine.apply("type" => "SetDefaultSessionThinkingLevel", "payload" => { "level" => "max" })
+
+    assert_equal "accepted", result.fetch("status")
+    assert_equal "max", result.dig("result", "thinking_level")
+    assert_includes result.fetch("message"), "Set the default Pi thinking level to max"
+    assert_includes result.fetch("message"), "Pi's catalog does not list max for #{proxy}"
+    assert_includes result.fetch("message"), "run xhigh instead"
+
+    # `/defaults` repeats the same caveat, so the pair never reads as honoured.
+    defaults = engine.apply("type" => "GetSessionDefaults", "payload" => {})
+    assert_equal "accepted", defaults.fetch("status")
+    assert_includes defaults.fetch("message"), "#{proxy} with thinking max"
+    assert_includes defaults.fetch("message"), "run xhigh instead"
+
+    # A level the model does advertise says nothing extra.
+    quiet = engine.apply("type" => "SetDefaultSessionThinkingLevel", "payload" => { "level" => "xhigh" })
+    assert_equal "accepted", quiet.fetch("status")
+    refute_includes quiet.fetch("message"), "catalog does not list"
+    refute_includes engine.apply("type" => "GetSessionDefaults", "payload" => {}).fetch("message"), "catalog does not list"
+  end
+
   def test_get_defaults_reports_both_future_roles_and_logs_scope
     result = apply_command("GetSessionDefaults")
 
