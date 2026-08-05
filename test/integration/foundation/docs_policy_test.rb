@@ -74,6 +74,18 @@ class FoundationDocsPolicyTest < Minitest::Test
     refute_includes contract, '`judge.mode` only supports `"metric_only"` today'
   end
 
+  # A prune landing mid-flight used to be reported to the head as an invented issue id. The head
+  # contract and the routing rules must describe what the kernel actually does now, in lockstep.
+  def test_head_contract_explains_a_target_removed_while_routing
+    contract = File.read(FoundationSupport.repo_path("docs", "head_agent_kernel_commands.md"))
+
+    assert_includes contract, "### When your target is pruned or killed while you are routing"
+    assert_includes contract, "issue_removed_before_head_result_applied"
+    assert_includes contract, "Visibility is decided from the head's recorded spawn snapshot, never from \"does this issue exist right now\""
+    assert_includes contract, "skipped rather than rejected"
+    assert_includes contract, "Dropped issue update (status → completed, description)."
+  end
+
   def test_head_contract_forbids_polling_handoff_prompts
     contract = File.read(FoundationSupport.repo_path("docs", "head_agent_kernel_commands.md"))
 
