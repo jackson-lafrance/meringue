@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "../../goals/record"
+
 module Meringue
   module TUI
     module Panes
@@ -7,6 +9,24 @@ module Meringue
         MAX_ITEM_LINES = 3
         ELLIPSIS = "…"
         AGENT_TYPES = %w[head worker].freeze
+
+        # A goal issue is a goal loop, not an ordinary issue with an extra glyph, so it is
+        # marked in a fixed column (the gutter between the id and the title) as well as in
+        # its suffix chip. Scanning one column tells the user which issues are goal driven
+        # even when a chip has wrapped onto a later row.
+        GOAL_GLYPH = "◎"
+        # Shown when a goal has a numeric target but nothing measurable to compare against
+        # it yet: honest about the gap instead of implying 0% progress was made.
+        GOAL_UNKNOWN_PERCENT = "?%"
+        # A settled goal says why it settled in words a user can read at a glance.
+        GOAL_STOP_LABELS = {
+          "goal_met" => "goal met",
+          "user_stopped" => "stopped by you",
+          "killed" => "killed",
+          "max_iterations" => "stopped: out of iterations",
+          "budget_exhausted" => "stopped: out of budget",
+          "probe_unavailable" => "stopped: metric unreadable"
+        }.freeze
 
         STATUS_DOTS = {
           "queued" => "○",
@@ -137,15 +157,14 @@ module Meringue
             next_prefix = "#{prefix}#{issue_last ? "  " : "│ "}"
             workers = agents.select { |agent| agent["type"] == "worker" && agent["issue_id"] == issue["id"] }
 
-            output.concat(item_lines(
+            output.concat(item_lines(**issue_row_arguments(
+              issue,
+              workers,
+              goals,
               prefix: "#{prefix}#{connector}",
-              record: issue,
-              id: short_id(issue["id"]),
-              title: issue.fetch("title", "Untitled issue"),
-              suffix: issue_suffix(issue, workers, goals),
               selected: AgentTreeNavigation.selected_agent?(issue, selected_agent_id),
               width: width
-            ))
+            )))
 
             workers.sort_by { |worker| sort_key(worker["id"]) }.each_with_index do |worker, worker_index|
               worker_last = worker_index == workers.length - 1 && issues_by_parent.fetch(issue["id"], []).empty?
@@ -189,15 +208,14 @@ module Meringue
             next_prefix = "#{prefix}#{issue_last ? "  " : "│ "}"
             workers = agents.select { |agent| agent["type"] == "worker" && agent["issue_id"] == issue["id"] }
 
-            output.concat(Array.new(item_line_count(
+            output.concat(Array.new(item_line_count(**issue_row_arguments(
+              issue,
+              workers,
+              goals,
               prefix: "#{prefix}#{connector}",
-              record: issue,
-              id: short_id(issue["id"]),
-              title: issue.fetch("title", "Untitled issue"),
-              suffix: issue_suffix(issue, workers, goals),
               selected: AgentTreeNavigation.selected_agent?(issue, selected_agent_id),
               width: width
-            ), issue.fetch("id")))
+            )), issue.fetch("id")))
 
             workers.sort_by { |worker| sort_key(worker["id"]) }.each_with_index do |worker, worker_index|
               worker_last = worker_index == workers.length - 1 && issues_by_parent.fetch(issue["id"], []).empty?
@@ -213,12 +231,31 @@ module Meringue
               output.concat(Array.new(line_count, worker.fetch("id")))
             end
 
-            append_issue_worker_ids(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: issue["id"], prefix: next_prefix, width: width)
+            # The goals must be carried into nested issues too: a goal chip changes how a row
+            # wraps, so dropping it here would desynchronise the hit-test map from the render.
+            append_issue_worker_ids(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: issue["id"], prefix: next_prefix, width: width, goals: goals)
           end
         end
 
-        def item_line_count(prefix:, record:, id:, title:, suffix: "", selected: false, width: nil)
-          item_lines(prefix: prefix, record: record, id: id, title: title, suffix: suffix, selected: selected, width: width).length
+        # The render path and the id-listing path build issue rows from exactly the same
+        # arguments, so a goal row can never wrap to a different number of lines than the
+        # clickable-row map expects.
+        def issue_row_arguments(issue, workers, goals, prefix:, selected:, width:)
+          goal = goal_for(issue, goals)
+          {
+            prefix: prefix,
+            record: issue,
+            id: short_id(issue["id"]),
+            title: issue.fetch("title", "Untitled issue"),
+            suffix: issue_suffix(issue, workers, goal),
+            gutter: goal ? GOAL_GLYPH : nil,
+            selected: selected,
+            width: width
+          }
+        end
+
+        def item_line_count(prefix:, record:, id:, title:, suffix: "", gutter: nil, selected: false, width: nil)
+          item_lines(prefix: prefix, record: record, id: id, title: title, suffix: suffix, gutter: gutter, selected: selected, width: width).length
         end
 
         def section_line(title)
@@ -268,18 +305,55 @@ module Meringue
           ProjectNaming.without_status_suffix(project.fetch("name", nil)) || "Untitled project"
         end
 
-        def item_lines(prefix:, record:, id:, title:, suffix: "", selected: false, width: nil)
-          suffix_text = suffix.to_s
+        def item_lines(prefix:, record:, id:, title:, suffix: "", gutter: nil, selected: false, width: nil)
+          parts = suffix_parts(suffix)
+          suffix_text = suffix_parts_text(parts)
           content = [title, suffix_text.empty? ? nil : suffix_text].compact.join("  ")
-          suffix_style = suffix_text.empty? ? nil : (selected ? Style::PR_MARKER_SELECTED : Style::PR_MARKER)
           if selected
-            selected_item_lines(prefix: prefix, record: record, id: id, content: content, suffix_text: suffix_text, suffix_style: suffix_style, width: width)
+            selected_item_lines(prefix: prefix, record: record, id: id, content: content, suffix_parts: parts, gutter: gutter, width: width)
           else
-            normal_item_lines(prefix: prefix, record: record, id: id, content: content, suffix_text: suffix_text, suffix_style: suffix_style, width: width)
+            normal_item_lines(prefix: prefix, record: record, id: id, content: content, suffix_parts: parts, gutter: gutter, width: width)
           end
         end
 
-        def normal_item_lines(prefix:, record:, id:, content:, suffix_text: "", suffix_style: nil, width: nil)
+        # A suffix is an ordered list of [text, kind] chips so the goal chip can keep its own
+        # color next to the PR marker instead of the whole suffix sharing one style. Plain
+        # strings (head and worker rows) still work and render as one marker chip.
+        def suffix_parts(suffix)
+          entries = suffix.is_a?(Array) ? suffix : [[suffix.to_s, :marker]]
+          entries.filter_map do |entry|
+            text, kind = entry.is_a?(Array) ? entry : [entry, :marker]
+            text = text.to_s
+            next nil if text.empty?
+
+            [text, kind || :marker]
+          end
+        end
+
+        def suffix_parts_text(parts)
+          parts.map { |part| part.fetch(0) }.join(" ")
+        end
+
+        def suffix_style(kind, selected)
+          if kind == :goal
+            selected ? Style::GOAL_MARKER_SELECTED : Style::GOAL_MARKER
+          else
+            selected ? Style::PR_MARKER_SELECTED : Style::PR_MARKER
+          end
+        end
+
+        # The gutter takes over the two separator columns between the id and the title, so a
+        # goal marker costs no extra width and can never reflow a row: the leader keeps the
+        # exact length it has on every other row, selected or not.
+        def gutter_segment(gutter, selected)
+          marker = gutter.to_s
+          dim_style = selected ? Style::AGENT_TREE_SELECTED_DIM : Style::DIM
+          return ["  ", dim_style] if marker.empty?
+
+          ["#{marker[0, 1]} ", selected ? Style::GOAL_MARKER_SELECTED : Style::GOAL_MARKER]
+        end
+
+        def normal_item_lines(prefix:, record:, id:, content:, suffix_parts: [], gutter: nil, width: nil)
           # Reserve the same two columns used by the selected-row marker so
           # selecting an item cannot reflow wrapped rows under the mouse.
           leader_segments = [
@@ -287,7 +361,7 @@ module Meringue
             ["#{prefix} ", Style::DIM],
             [status_dot(record), status_style(record)],
             [" #{id}", identity_style(record) || Style::MUTED],
-            ["  ", Style::DIM]
+            gutter_segment(gutter, false)
           ]
           wrapped_lines(
             leader_segments,
@@ -296,8 +370,7 @@ module Meringue
             continuation_style: title_style(record),
             width: width,
             continuation_segments: normal_continuation_segments(prefix, record, id),
-            suffix_text: suffix_text,
-            suffix_style: suffix_style
+            suffix_parts: suffix_parts
           )
         end
 
@@ -305,13 +378,13 @@ module Meringue
         # agent's identity color: it already owns the highlight and explicit
         # selection marker, and an identity foreground on the selection
         # background is not guaranteed to stay legible in every theme.
-        def selected_item_lines(prefix:, record:, id:, content:, suffix_text: "", suffix_style: nil, width: nil)
+        def selected_item_lines(prefix:, record:, id:, content:, suffix_parts: [], gutter: nil, width: nil)
           leader_segments = [
             ["▸", Style::AGENT_TREE_SELECTED_STATUS],
             [" #{prefix} ", Style::AGENT_TREE_SELECTED_DIM],
             [status_dot(record), Style::AGENT_TREE_SELECTED_STATUS],
             [" #{id}", Style::AGENT_TREE_SELECTED_DIM],
-            ["  ", Style::AGENT_TREE_SELECTED_DIM]
+            gutter_segment(gutter, true)
           ]
           wrapped_lines(
             leader_segments,
@@ -321,17 +394,16 @@ module Meringue
             width: width,
             selected: true,
             continuation_segments: selected_continuation_segments(prefix, record, id),
-            suffix_text: suffix_text,
-            suffix_style: suffix_style
+            suffix_parts: suffix_parts
           )
         end
 
         def wrapped_lines(leader_segments, content, title_style:, continuation_style:, width:, selected: false,
-                          continuation_segments: nil, suffix_text: "", suffix_style: nil)
+                          continuation_segments: nil, suffix_parts: [])
           leader_text = plain_text(leader_segments)
           continuation_segments ||= [[" " * leader_text.length, selected ? Style::AGENT_TREE_SELECTED_DIM : Style::DIM]]
           content_width = wrapped_content_width(width, leader_text.length)
-          chunks = wrap_content(content, content_width)
+          chunks = wrap_content(content, content_width, suffix_parts_text(suffix_parts))
 
           lines = []
           chunks.each_with_index do |chunk, index|
@@ -340,7 +412,7 @@ module Meringue
                        else
                          continuation_segments + [[chunk, continuation_style]]
                        end
-            segments = style_suffix_marker(segments, suffix_text, suffix_style)
+            segments = style_suffix_marker(segments, suffix_parts, selected)
             lines << (selected ? pad_selected_line(segments, width) : segments)
           end
           lines
@@ -352,23 +424,44 @@ module Meringue
           [width.to_i - leader_length, 1].max
         end
 
-        def style_suffix_marker(segments, suffix_text, suffix_style)
-          return segments if suffix_text.to_s.empty? || suffix_style.nil?
+        def style_suffix_marker(segments, suffix_parts, selected)
+          return segments if suffix_parts.empty?
 
           segments.each_with_index.reverse_each do |segment, index|
             next unless segment.is_a?(Array)
 
             text = segment.fetch(0, "").to_s
-            next unless text.end_with?(suffix_text)
+            run = matching_suffix_run(text, suffix_parts)
+            next unless run
 
-            base_text = text[0...-suffix_text.length]
+            run_text = suffix_parts_text(run)
+            base_text = text[0...-run_text.length]
             styled_suffix = []
             styled_suffix << [base_text, segment.fetch(1, nil)] unless base_text.empty?
-            styled_suffix << [suffix_text, suffix_style]
+            run.each_with_index do |(part_text, kind), part_index|
+              style = suffix_style(kind, selected)
+              styled_suffix << [" ", style] if part_index.positive?
+              styled_suffix << [part_text, style]
+            end
             return segments[0...index] + styled_suffix + segments[(index + 1)..]
           end
 
           segments
+        end
+
+        # A wrapped row can end with only some of the suffix chips, so the longest run of
+        # chips this line actually ends with is what gets marker styling. Without this a goal
+        # chip pushed onto its own continuation line would silently lose its color.
+        def matching_suffix_run(text, suffix_parts)
+          (suffix_parts.length - 1).downto(0) do |finish|
+            0.upto(finish) do |start|
+              run = suffix_parts[start..finish]
+              joined = suffix_parts_text(run)
+              return run if !joined.empty? && text.end_with?(joined)
+            end
+          end
+
+          nil
         end
 
         def normal_continuation_segments(prefix, record, id)
@@ -402,16 +495,52 @@ module Meringue
           end
         end
 
-        def wrap_content(content, width)
+        def wrap_content(content, width, suffix_text = "")
           text = normalized_content(content)
           return [text] unless width
 
           lines = split_wrapped_lines(text, width)
           return lines if lines.length <= MAX_ITEM_LINES
 
+          fitted = fit_lines_keeping_suffix(text, normalized_content(suffix_text).strip, width)
+          return fitted if fitted
+
           visible = lines.first(MAX_ITEM_LINES)
           visible[-1] = ellipsize(visible.last, width)
           visible
+        end
+
+        # The goal chip and the PR marker are the row's status, not decoration, so an
+        # over-long title is ellipsized until they fit rather than allowed to push them off
+        # the row. Line count only grows with the title, so a binary search finds the longest
+        # title that still leaves the markers visible in a handful of cheap wraps.
+        def fit_lines_keeping_suffix(text, suffix, width)
+          return nil if suffix.empty? || !text.end_with?(suffix)
+
+          head = text[0...-suffix.length].rstrip
+          return nil if head.empty?
+
+          low = 0
+          high = head.length
+          best = nil
+          while low <= high
+            middle = (low + high) / 2
+            lines = split_wrapped_lines(content_keeping_suffix(head, middle, suffix), width)
+            if lines.length <= MAX_ITEM_LINES
+              best = lines
+              low = middle + 1
+            else
+              high = middle - 1
+            end
+          end
+
+          best
+        end
+
+        def content_keeping_suffix(head, length, suffix)
+          truncated = head[0, length].to_s.rstrip
+          truncated = "#{truncated}#{ELLIPSIS}" unless truncated.empty?
+          [truncated, suffix].reject(&:empty?).join("  ")
         end
 
         def normalized_content(content)
@@ -492,33 +621,105 @@ module Meringue
           metadata.fetch("title", "#{record.fetch("type", "item")} session")
         end
 
-        def issue_suffix(issue, workers, goals = [])
-          [goal_marker(issue, goals), progress(workers), active_pr_marker(issue)].reject(&:empty?).join(" ")
+        # A goal loop is rendered on the issue it controls, not as a new node kind: the
+        # AgentTree stays projects -> issues -> workers. The goal chip is its own suffix
+        # element with its own color, so it reads as goal state rather than as more issue
+        # text, and it never displaces the delivery PR marker beside it.
+        def issue_suffix(issue, workers, goal = nil)
+          [
+            [goal_marker(goal), :goal],
+            # A goal issue already reports progress as iteration and percent complete; the
+            # worker ratio beside that reads as a second, conflicting fraction, so the goal
+            # chip stands in for it. Every other issue keeps the ordinary worker ratio.
+            [goal ? "" : progress(workers), :marker],
+            [active_pr_marker(issue), :marker]
+          ].reject { |text, _kind| text.to_s.empty? }
         end
 
-        # A goal loop is rendered as a suffix on the issue it controls, not as a new node kind:
-        # the AgentTree stays projects -> issues -> workers.
-        def goal_marker(issue, goals)
-          goal = Array(goals).find { |candidate| candidate.is_a?(Hash) && candidate["issue_id"] == issue["id"] }
-          return "" unless goal
+        def goal_for(issue, goals)
+          Array(goals).find { |candidate| candidate.is_a?(Hash) && candidate["issue_id"] == issue["id"] }
+        end
+
+        # "<iteration>/<budget> <percent complete>" plus the goal's paused/stopped state.
+        # The two numbers answer different questions on purpose: the ratio is budget spent,
+        # the percentage is progress actually made toward the target.
+        def goal_marker(goal)
+          return "" unless goal.is_a?(Hash)
 
           budget = goal["budget"].is_a?(Hash) ? goal["budget"] : {}
-          parts = ["◎#{goal["current_iteration"].to_i}/#{budget["max_iterations"].to_i}"]
-          metric = goal["metric"].is_a?(Hash) ? goal["metric"] : {}
-          latest = goal["last_metric"].is_a?(Hash) ? goal["last_metric"]["value"] : nil
-          parts << "#{goal_number(latest)}/#{goal_number(metric["target"])}" if metric["target"]
-          parts << goal["stop_reason"].to_s.tr("_", " ") if goal["stop_reason"]
+          parts = ["#{goal["current_iteration"].to_i}/#{budget["max_iterations"].to_i}"]
+          parts << goal_percent_label(goal)
           parts << "paused" if goal["paused"]
+          parts << goal_stop_label(goal["stop_reason"])
           parts.reject { |part| part.to_s.empty? }.join(" ")
         end
 
-        def goal_number(value)
-          return "?" if value.nil?
+        # The progress reading, in order of how much the record can honestly support:
+        # a percentage when the metric has a baseline to have travelled from, the raw
+        # "where it is now -> where it needs to be" pair when it does not, and an explicit
+        # unknown when nothing numeric has been measured at all. A goal with no numeric
+        # target (a reviewer-judged loop) has nothing to be a percentage of, so it shows its
+        # iteration alone rather than a fabricated reading.
+        def goal_percent_label(goal)
+          view = goal_metric_view(goal)
+          target = Goals::Record.target(view)
+          return "" if target.nil?
 
-          number = Float(value)
+          percent = goal_percent(goal)
+          return "#{percent}%" if percent
+
+          latest = Goals::Record.metric_value(view["last_metric"])
+          return GOAL_UNKNOWN_PERCENT if latest.nil?
+
+          "#{goal_number(latest)}→#{goal_number(target)}"
+        end
+
+        def goal_number(value)
+          number = Goals::Record.float_or_nil(value)
+          return "?" if number.nil?
+
           number == number.round ? number.round.to_s : format("%.1f", number)
-        rescue ArgumentError, TypeError
-          "?"
+        end
+
+        # Percent complete is progress *made*, not budget *spent*: how far the metric has
+        # travelled from the baseline the goal started at toward its target.
+        # Meringue::Goals::Record owns that formula and the kernel scores every iteration
+        # with it, so the tree reuses it rather than inventing a second reading of the same
+        # numbers. It is comparator aware, so an `lte` goal driving a number down reads the
+        # same way an increasing one does. Returns nil whenever the honest answer is
+        # "unknown": nothing measured yet, a non-numeric measurement, or no baseline to
+        # measure travel from.
+        def goal_percent(goal)
+          view = goal_metric_view(goal)
+          baseline = Goals::Record.metric_value(view["baseline_metric"])
+          measured = Goals::Record.metric_value(view["last_metric"])
+          value = measured.nil? ? baseline : measured
+          return nil if value.nil?
+          return 100 if Goals::Record.target_satisfied?(view, value)
+          return nil if baseline.nil?
+
+          score = Goals::Record.progress_score(view, value)
+          return nil if score.nil?
+
+          # Only a satisfied target may read 100%, and an unmeasurable step never reads below 0%.
+          (score * 100).round.clamp(0, 99)
+        end
+
+        # Hand-edited or older state can hold anything, and Goals::Record digs through these
+        # keys, so the pane hands it a shape it can always read.
+        def goal_metric_view(goal)
+          {
+            "metric" => goal["metric"].is_a?(Hash) ? goal["metric"] : {},
+            "baseline_metric" => goal["baseline_metric"].is_a?(Hash) ? goal["baseline_metric"] : nil,
+            "last_metric" => goal["last_metric"].is_a?(Hash) ? goal["last_metric"] : nil
+          }
+        end
+
+        def goal_stop_label(stop_reason)
+          reason = stop_reason.to_s
+          return "" if reason.strip.empty?
+
+          GOAL_STOP_LABELS.fetch(reason, "stopped: #{reason.tr("_", " ")}")
         end
 
         def progress(workers)

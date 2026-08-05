@@ -220,6 +220,52 @@
       "updated_at": "2026-07-11T00:08:00Z"
     }
   ],
+  "goals": [
+    {
+      "id": "G1",
+      "project_id": "P1",
+      "issue_id": "P1-I2",
+      "title": "Validate kernel commands",
+      "success_criteria": "command validation coverage of lib/meringue/kernel is at least 80%",
+      "kind": "metric",
+      "status": "working",
+      "stop_reason": null,
+      "paused": false,
+      "question_id": null,
+      "metric": {
+        "command": "rake coverage",
+        "cwd": "workspace",
+        "comparator": "gte",
+        "target": 80.0,
+        "timeout_seconds": 600,
+        "parse": { "type": "last_number", "capture": 1 },
+        "guardrails": [{ "command": "rake test", "expect": "exit_zero" }]
+      },
+      "judge": { "mode": "metric_only" },
+      "budget": {
+        "max_iterations": 4,
+        "max_wall_clock_seconds": 14400,
+        "max_workers": 10,
+        "max_consecutive_no_progress": 2,
+        "min_metric_delta": 0.0,
+        "min_seconds_between_iterations": 15
+      },
+      "continuity": "accumulate",
+      "baseline_metric": { "value": 52.0, "exit_status": 0, "timed_out": false },
+      "last_metric": { "value": 64.75, "exit_status": 0, "timed_out": false },
+      "best_metric": { "value": 64.75, "exit_status": 0, "timed_out": false },
+      "current_iteration": 2,
+      "workers_spawned": 1,
+      "consecutive_no_progress": 0,
+      "consecutive_probe_failures": 0,
+      "active_worker_id": "P1-I2-W1",
+      "last_worker_id": "P1-I2-W1",
+      "next_tick_at": null,
+      "iterations": [],
+      "created_at": "2026-07-11T00:03:00Z",
+      "updated_at": "2026-07-11T00:09:00Z"
+    }
+  ],
   "logs": [
     {
       "id": "L1",
@@ -277,6 +323,7 @@
     "projects": 2,
     "heads": 2,
     "questions": 1,
+    "goals": 1,
     "logs": 5,
     "issues_by_project": {
       "P1": 3,
