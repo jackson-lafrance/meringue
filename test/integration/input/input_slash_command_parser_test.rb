@@ -28,7 +28,9 @@ class InputSlashCommandParserTest < Minitest::Test
       "/project rename P1 \"Renamed app\"" => ["ModifyProject", { "project_id" => "P1", "name" => "Renamed app" }],
       "/issue rename P1-I1 \"Renamed issue\"" => ["ModifyIssue", { "issue_id" => "P1-I1", "title" => "Renamed issue" }],
       "/kill P1-I1" => ["Kill", { "target_id" => "P1-I1" }],
-      "/dismiss Q1" => ["DismissQuestion", { "question_id" => "Q1" }]
+      "/dismiss Q1" => ["DismissQuestion", { "question_id" => "Q1" }],
+      "/setup complete" => ["CompleteOnboarding", { "outcome" => "completed" }],
+      "/setup skip" => ["CompleteOnboarding", { "outcome" => "skipped" }]
     }
 
     expected.each do |input, (type, payload)|
@@ -261,8 +263,18 @@ class InputSlashCommandParserTest < Minitest::Test
     )
   end
 
+  # Bare `/setup` opens the local first-run flow; only its two outcome words are
+  # a kernel command, so the completion marker is still journaled and logged.
+  def test_setup_outcomes_are_validated
+    parsed = parse_slash("/setup halfway")
+
+    assert_equal "InvalidSlashCommand", parsed.fetch("type")
+    assert_equal "Usage: /setup [complete|skip]", parsed.fetch("payload").fetch("message")
+    assert_equal "CompleteOnboarding", parse_slash("/SETUP Skip").fetch("type")
+  end
+
   def test_local_tui_commands_are_reported_as_not_kernel_commands
-    %w[/quit /jump /keybind /config].each do |input|
+    %w[/quit /jump /keybind /config /setup].each do |input|
       parsed = parse_slash(input)
       assert_equal "InvalidSlashCommand", parsed.fetch("type")
       assert_match(/local TUI command/, parsed.fetch("payload").fetch("message"))

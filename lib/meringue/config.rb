@@ -2,12 +2,21 @@
 
 require "fileutils"
 require "json"
+require "time"
 
 module Meringue
   class Config
     DEFAULT_PATH = File.expand_path(ENV.fetch("MERINGUE_CONFIG", "~/.meringue/config.toml"))
     DEFAULT_CONFLICT_PREDECESSOR_FAILURE = "cancel"
     CONFLICT_PREDECESSOR_FAILURES = %w[cancel run].freeze
+    # First-run setup marker. It lives in the config file rather than in
+    # `state.json` because `meringue reset-state` and `/clear` legitimately wipe
+    # state, and re-running setup after every state reset would be a nag. The
+    # version leaves room to replay setup for a future revision of the flow
+    # without inventing a second key.
+    ONBOARDING_SECTION = "onboarding"
+    ONBOARDING_VERSION = 1
+    ONBOARDING_OUTCOMES = %w[completed skipped].freeze
 
     class ParseError < StandardError; end
 
@@ -48,6 +57,22 @@ module Meringue
       pi = data.fetch("harness").fetch("pi")
       pi["model"] = model.to_s unless model.nil?
       pi["thinking_level"] = thinking_level.to_s unless thinking_level.nil?
+      write_toml(expanded_path, data)
+      new(data, path: expanded_path, loaded: true)
+    end
+
+    # Records that the user has been through (or dismissed) first-run setup, so
+    # the flow opens once instead of on every launch. Written by the kernel's
+    # CompleteOnboarding command, never by the TUI.
+    def self.save_onboarding!(outcome:, version: ONBOARDING_VERSION, completed_at: nil, path: DEFAULT_PATH)
+      expanded_path = File.expand_path(path.to_s)
+      config = load(path: expanded_path)
+      data = config.to_h
+      data[ONBOARDING_SECTION] = {} unless data[ONBOARDING_SECTION].is_a?(Hash)
+      section = data.fetch(ONBOARDING_SECTION)
+      section["completed_version"] = version.to_i
+      section["completed_at"] = (completed_at || Time.now.utc.iso8601).to_s
+      section["outcome"] = outcome.to_s
       write_toml(expanded_path, data)
       new(data, path: expanded_path, loaded: true)
     end
@@ -99,6 +124,16 @@ module Meringue
       return DEFAULT_CONFLICT_PREDECESSOR_FAILURE unless CONFLICT_PREDECESSOR_FAILURES.include?(configured)
 
       configured
+    end
+
+    # Which revision of the first-run flow this user finished, or 0 when setup
+    # has never run. A hand-deleted `[onboarding]` section replays setup.
+    def onboarding_version
+      value(ONBOARDING_SECTION, "completed_version").to_i
+    end
+
+    def onboarding_outcome
+      value(ONBOARDING_SECTION, "outcome").to_s
     end
 
     def to_h

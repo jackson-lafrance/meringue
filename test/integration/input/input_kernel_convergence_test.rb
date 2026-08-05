@@ -176,6 +176,23 @@ class InputKernelConvergenceTest < Minitest::Test
     end
   end
 
+  # First-run setup ends by typing its own slash command, so the completion
+  # marker takes the same validated, journaled path as every other config write
+  # and lands only in the sandbox config file.
+  def test_setup_completion_marker_is_written_through_the_typed_slash_path
+    input_sandbox do |sandbox|
+      payload = sandbox.submit("/setup skip")
+
+      assert_equal [%w[CompleteOnboarding accepted]], sandbox.command_result_pairs(payload)
+      config = Meringue::Config.load(path: sandbox.config_path)
+      assert_equal "skipped", config.onboarding_outcome
+      assert Meringue::TUI::Onboarding.completed?(config)
+
+      assert_equal [%w[CompleteOnboarding accepted]], sandbox.command_result_pairs(sandbox.submit("/setup complete"))
+      assert_equal "completed", Meringue::Config.load(path: sandbox.config_path).onboarding_outcome
+    end
+  end
+
   def test_head_proposed_and_user_typed_commands_produce_identical_result_shapes
     input_sandbox do |sandbox|
       sandbox.submit("/project add #{sandbox.project_path} My Proj")

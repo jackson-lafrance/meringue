@@ -110,7 +110,7 @@ module Meringue
       # agent_session_service may open the generic live worker-session view.
       # Returning from this TUI workspace closes only that read handle and never
       # calls an abort/kill worker lifecycle operation.
-      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, workspace_controller: nil, agent_session_service: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default, config: nil)
+      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, workspace_controller: nil, agent_session_service: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default, config: nil, onboarding_enabled: false)
         @layout = layout
         @out = out
         @terminal = terminal || Terminal.new(input: input, output: out)
@@ -143,6 +143,17 @@ module Meringue
         @model_picker_index = 0
         @model_picker_query = +""
         @model_picker_harness = nil
+        # First-run setup. Off unless the launcher says a kernel is behind the UI
+        # (`meringue demo` has none), and transient like the pickers: the only
+        # thing it persists is the completion marker, and only through the kernel.
+        @onboarding_enabled = onboarding_enabled ? true : false
+        @onboarding_active = false
+        @onboarding_step_index = 0
+        @onboarding_index = 0
+        @onboarding_query = +""
+        @onboarding_harness = nil
+        @onboarding_saved_theme = nil
+        @onboarding_applied = {}
         @workspace_draft = ""
         @workspace_agent_scroll_offset = 0
         @workspace_terminal_scroll_offset = 0
@@ -230,6 +241,7 @@ module Meringue
         return render_once(compose_state(state_provider, "")) unless terminal.interactive?
 
         @quit_requested = false
+        maybe_open_onboarding(state_provider)
         input_buffer = +""
         input_cursor = 0
         slash_suggestion_index = NO_SLASH_SELECTION
@@ -362,6 +374,14 @@ module Meringue
 
         if @agent_workspace_active
           return handle_agent_workspace_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
+
+        # First-run setup is the only modal that opens by itself, so it takes keys
+        # ahead of both pickers and the slash list. It still passes unowned keys
+        # through, so Ctrl-C and Ctrl-D behave normally while it is up.
+        if @onboarding_active
+          onboarding_result = handle_onboarding_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+          return onboarding_result if onboarding_result
         end
 
         if @model_picker_active
@@ -2023,6 +2043,7 @@ module Meringue
         text = input_buffer.to_s.strip
         return handle_local_jump_command(text, state) if jump_command?(text)
         return handle_local_models_command(text, state) if models_picker_command?(text)
+        return handle_local_setup_command(state) if setup_command?(text)
         return handle_local_keybind_command if keybind_command?(text)
         return handle_local_config_command if config_command?(text)
         return handle_local_quit_command if quit_command?(text)
@@ -2163,7 +2184,7 @@ module Meringue
       end
 
       def local_navigation_command_without_id?(input_buffer)
-        ["/jump", "/models"].include?(input_buffer.to_s.strip.downcase)
+        ["/jump", "/models", "/setup"].include?(input_buffer.to_s.strip.downcase)
       end
 
       def enter_agent_tree_navigation(state)
@@ -2237,6 +2258,7 @@ module Meringue
         # survive into the focused workspace and reappear on return.
         close_delivery_pr_picker
         close_model_picker
+        close_onboarding if @onboarding_active
         @agent_workspace_active = true
         @force_full_redraw = true
         @agent_workspace_agent_id = agent.fetch("id")
@@ -2364,6 +2386,327 @@ module Meringue
         return nil unless @delivery_pr_picker_active
 
         { "active" => true, "index" => @delivery_pr_picker_index }
+      end
+
+      # --- first-run setup --------------------------------------------------
+
+      def onboarding_snapshot
+        return nil unless @onboarding_active
+
+        {
+          "active" => true,
+          "step" => onboarding_step,
+          "plan" => onboarding_plan,
+          "index" => @onboarding_index,
+          "query" => @onboarding_query.to_s,
+          "harness" => @onboarding_harness,
+          "theme" => @onboarding_saved_theme
+        }.compact
+      end
+
+      def onboarding_plan
+        Onboarding.plan(@onboarding_harness)
+      end
+
+      def onboarding_step
+        steps = onboarding_plan
+        steps[@onboarding_step_index.to_i.clamp(0, steps.length - 1)]
+      end
+
+      # Auto-open decision, made once per launch. It never opens when the config
+      # already carries the marker, when there is no kernel behind the UI, or when
+      # the terminal is too small to draw the popup at all.
+      def maybe_open_onboarding(state_provider)
+        return false unless onboarding_autostart?
+
+        state = state_provider.call || State::Models.empty_state
+        open_onboarding(state)
+      end
+
+      def onboarding_autostart?
+        return false unless @onboarding_enabled
+        return false if Onboarding.completed?(config)
+
+        width, height = terminal.dimensions
+        width.to_i >= Layout::MIN_WIDTH && height.to_i >= Onboarding::MIN_TERMINAL_HEIGHT
+      end
+
+      # Setup reads persisted state and the theme only, so opening it starts no
+      # harness process and writes nothing. Every choice is applied later as the
+      # ordinary slash command for it.
+      def open_onboarding(state)
+        @onboarding_active = true
+        @onboarding_step_index = 0
+        @onboarding_query = +""
+        @onboarding_harness = nil
+        @onboarding_applied = {}
+        @onboarding_saved_theme = Style.current_colorscheme.to_s
+        @onboarding_index = onboarding_default_index(state)
+        close_delivery_pr_picker
+        close_model_picker
+        true
+      end
+
+      def close_onboarding
+        restore_onboarding_theme
+        @onboarding_active = false
+        @onboarding_step_index = 0
+        @onboarding_index = 0
+        @onboarding_query = +""
+        @onboarding_harness = nil
+        @onboarding_applied = {}
+        @onboarding_saved_theme = nil
+      end
+
+      # The theme step previews live by reconfiguring the running Style, so leaving
+      # without pressing Enter has to put the saved theme back.
+      def restore_onboarding_theme
+        theme = @onboarding_saved_theme
+        return if theme.to_s.empty?
+        return if Style.current_colorscheme.to_s == theme.to_s
+
+        Style.configure!(theme)
+      rescue StandardError
+        nil
+      end
+
+      def onboarding_rows(state)
+        Onboarding.rows(
+          state,
+          step: onboarding_step,
+          harness: @onboarding_harness,
+          query: @onboarding_query,
+          saved_theme: @onboarding_saved_theme
+        )
+      end
+
+      def onboarding_default_index(state)
+        Onboarding.default_index(
+          state,
+          step: onboarding_step,
+          harness: @onboarding_harness,
+          query: @onboarding_query,
+          saved_theme: @onboarding_saved_theme
+        )
+      end
+
+      # A modal step flow that owns the keys it needs and passes everything else
+      # through, so Ctrl-C still quits and setup is never a trap.
+      def handle_onboarding_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
+        return handle_onboarding_mouse(key, unchanged, on_submit, state) if mouse_event?(key)
+        return unchanged if close_collapsed_onboarding(state)
+
+        rows = onboarding_rows(state)
+        step = onboarding_step
+
+        if keybinding?("suggestion_previous", key)
+          move_onboarding(-1, rows.length, state)
+          return unchanged
+        end
+        if keybinding?("suggestion_next", key)
+          move_onboarding(1, rows.length, state)
+          return unchanged
+        end
+        if keybinding?("submit", key)
+          advance_onboarding(rows, on_submit, state)
+          return unchanged
+        end
+        if keybinding?("cancel_navigation", key)
+          skip_onboarding(on_submit, state)
+          return unchanged
+        end
+        if keybinding?("cursor_left", key)
+          back_onboarding(state)
+          return unchanged
+        end
+        if step == Onboarding::MODEL
+          if keybinding?("refresh_model_catalog", key)
+            refresh_onboarding_catalog(on_submit, state)
+            return unchanged
+          end
+          if keybinding?("delete_word_backward", key)
+            set_onboarding_query(+"", state)
+            return unchanged
+          end
+          if keybinding?("delete_backward", key)
+            set_onboarding_query(@onboarding_query.to_s.chars[0...-1].join, state)
+            return unchanged
+          end
+          if printable_key?(key)
+            set_onboarding_query("#{@onboarding_query}#{key}", state)
+            return unchanged
+          end
+        elsif printable_key?(key)
+          # Steps without a filter are pure choices: typing must not leak into the
+          # composer behind the modal.
+          return unchanged
+        end
+
+        nil
+      end
+
+      def handle_onboarding_mouse(key, unchanged, on_submit, state)
+        return unchanged unless mouse_button_press?(key) || mouse_wheel?(key)
+
+        hit = layout.onboarding_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+        if mouse_wheel?(key)
+          return nil if hit == :outside
+
+          move_onboarding(mouse_wheel_up?(key) ? -1 : 1, onboarding_rows(state).length, state)
+          return unchanged
+        end
+
+        if hit.is_a?(Integer)
+          @onboarding_index = hit
+          preview_onboarding_theme(state)
+          advance_onboarding(onboarding_rows(state), on_submit, state)
+        elsif hit == :outside
+          skip_onboarding(on_submit, state)
+        end
+        unchanged
+      end
+
+      def move_onboarding(step, count, state)
+        return if count <= 0
+
+        @onboarding_index = (@onboarding_index.to_i + step) % count
+        preview_onboarding_theme(state)
+      end
+
+      def set_onboarding_query(query, state)
+        @onboarding_query = +query.to_s
+        @onboarding_index = onboarding_default_index(state)
+      end
+
+      # Moving the highlight on the theme step repaints the whole dashboard in that
+      # theme. Nothing is persisted until Enter, and leaving restores the saved one.
+      def preview_onboarding_theme(state)
+        return unless onboarding_step == Onboarding::THEME
+
+        row = onboarding_rows(state)[@onboarding_index.to_i]
+        return unless row
+
+        Style.configure!(row.fetch("value"))
+      rescue StandardError
+        nil
+      end
+
+      # Enter applies the highlighted row and moves on. Re-applying a value that is
+      # already in effect is accepted by the kernel, so holding Enter through the
+      # flow accepts every current default and changes nothing.
+      def advance_onboarding(rows, on_submit, state)
+        apply_onboarding_row(rows[@onboarding_index.to_i], on_submit, state)
+        steps = onboarding_plan
+        if @onboarding_step_index >= steps.length - 1
+          finish_onboarding(on_submit, state)
+          return true
+        end
+
+        @onboarding_step_index += 1
+        enter_onboarding_step(state)
+        true
+      end
+
+      # Back is deliberately non-destructive: it returns to the step without
+      # un-applying anything (there are no inverse kernel commands), and the finish
+      # card reports what is actually in effect.
+      def back_onboarding(state)
+        return false if @onboarding_step_index.to_i <= 0
+
+        @onboarding_step_index -= 1
+        enter_onboarding_step(state)
+        true
+      end
+
+      # Arriving at a step also ends the previous step's theme preview, so walking
+      # back off the theme list puts the saved theme back on screen.
+      def enter_onboarding_step(state)
+        @onboarding_query = +""
+        restore_onboarding_theme
+        @onboarding_index = onboarding_default_index(state)
+        preview_onboarding_theme(state)
+      end
+
+      def apply_onboarding_row(row, on_submit, state)
+        return false unless row
+
+        command = row.fetch("command", nil)
+        return false if command.to_s.empty?
+
+        kind = row.fetch("kind", nil)
+        @onboarding_harness = row.fetch("value") if kind == Onboarding::HARNESS
+        @onboarding_saved_theme = row.fetch("value") if kind == Onboarding::THEME
+        @onboarding_applied[kind] = row.fetch("value")
+        submit_prompt(command, on_submit, state)
+        true
+      end
+
+      def refresh_onboarding_catalog(on_submit, state)
+        harness = Onboarding.harness_for(state, @onboarding_harness)
+        submit_prompt("/models #{harness} refresh", on_submit, state)
+        true
+      end
+
+      def finish_onboarding(on_submit, state)
+        record_onboarding_outcome("complete", on_submit, state)
+      end
+
+      # Esc is an exit, not a cancel: everything already applied stays, and the
+      # marker is still written so setup never opens by itself again.
+      def skip_onboarding(on_submit, state)
+        record_onboarding_outcome("skip", on_submit, state)
+      end
+
+      # The card is written after the flow closes, so it reports the theme that is
+      # really in effect rather than a preview the exit just rolled back.
+      def record_onboarding_outcome(outcome, on_submit, state)
+        applied = @onboarding_applied.dup
+        harness = @onboarding_harness
+        close_onboarding
+        settings = Onboarding.settings(state, applied: applied, harness: harness)
+        card = outcome == "skip" ? Onboarding.skip_card(settings) : Onboarding.completion_card(settings)
+        append_jump_response(card)
+        submit_prompt("/setup #{outcome}", on_submit, state)
+        true
+      end
+
+      # A popup that collapsed to zero rows would be an invisible modal eating
+      # keys, which is the one real trap in this flow.
+      def close_collapsed_onboarding(state)
+        return false if layout.popup_visible?(state, width: render_width, height: render_height)
+
+        close_onboarding
+        append_jump_response(Onboarding.collapsed_message)
+        true
+      rescue StandardError
+        false
+      end
+
+      def setup_command?(text)
+        text.to_s.strip.downcase == "/setup"
+      end
+
+      # Bare `/setup` is local UI, exactly like `/jump` and `/models`; the kernel
+      # spellings `/setup complete` and `/setup skip` stay kernel commands so the
+      # marker is validated, journaled, and logged.
+      def handle_local_setup_command(state)
+        unless @onboarding_enabled
+          append_jump_response(Onboarding.unavailable_message)
+          return true
+        end
+
+        unless onboarding_fits?
+          append_jump_response(Onboarding.collapsed_message)
+          return true
+        end
+
+        open_onboarding(state)
+        true
+      end
+
+      def onboarding_fits?
+        render_width >= Layout::MIN_WIDTH && render_height >= Onboarding::MIN_TERMINAL_HEIGHT
       end
 
       def model_picker_snapshot
@@ -3613,7 +3956,8 @@ module Meringue
             "selection" => @chat_selection,
             "pending_count" => @pending_count,
             "delivery_pr_picker" => delivery_pr_picker_snapshot,
-            "model_picker" => model_picker_snapshot
+            "model_picker" => model_picker_snapshot,
+            "onboarding" => onboarding_snapshot
           }
         end
       end

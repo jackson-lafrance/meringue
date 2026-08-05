@@ -8,7 +8,26 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
-The interactive TUI updates this file with `/theme <name>`, `/model <provider/model>`, and `/thinking <level>`.
+The interactive TUI updates this file with `/theme <name>`, `/model <provider/model>`, `/thinking <level>`, and the first-run setup flow (`/setup`), which applies those same commands.
+
+## First-run setup marker
+
+The first launch on a machine opens a short setup flow for the harness, model,
+thinking level, and theme. Finishing or skipping it records one marker here:
+
+```toml
+[onboarding]
+completed_version = 1
+completed_at = "2026-08-06T14:02:11Z"
+outcome = "completed"   # or "skipped"
+```
+
+The marker lives in the config file rather than in `state.json` so that
+`meringue reset-state` and `/clear` do not replay setup. Delete the `[onboarding]`
+section to see the flow again on the next launch, or run `/setup` any time. It is
+written by the `CompleteOnboarding` kernel command, so it honors `--config PATH`
+like every other config write. See [`onboarding.md`](onboarding.md) for the steps,
+keys, and degraded behavior.
 
 ## Selecting a TUI colorscheme
 

@@ -242,6 +242,21 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 - `Tab`: complete the selected suggestion, or the first one when nothing is selected.
 - The box shows a window of three entries and holds **commands only**. When the list is longer than the window, a dim caption renders on its own line *below* the box: `1–3 of 27 commands  ·  ↑↓ scroll · keep typing to filter`. It is a caption about the list, not a row in it, so the window never loses an entry to it; a list that fits the window has no caption at all. The same slot and the same caption placement are used by the `Ctrl-B` open-PR picker (`2 open PRs  ·  ↑↓ move · Enter opens · Esc closes`) and by the `/models` model picker. The focused-workspace `workspace commands` list is unwindowed and has no caption.
 
+## First-run setup
+
+The first launch on a machine opens a short setup flow in the same popup slot,
+and `/setup` reopens it any time. It adds no new keybindings.
+
+- `Enter`: apply the highlighted row and continue; the last step finishes the flow.
+- `↑` / `↓`: move the highlight; it wraps. The mouse wheel scrolls it and clicking a row picks that row.
+- `←`: go back one step. This is the `cursor_left` action, so rebinding `cursor_left` changes it.
+- `Esc` or a click outside the box: exit setup, keeping everything already applied. It does not open by itself again.
+- On the model step only: printable characters filter, `Backspace` / `Ctrl-W` clear the filter, and `Ctrl-R` re-fetches the catalog.
+- Every step starts on the value already in effect, so holding `Enter` accepts every default and changes nothing.
+- Keys the flow does not own still work, so `Ctrl-C` and `Ctrl-D` behave normally while it is up.
+
+See [`onboarding.md`](onboarding.md) for the steps, the completion marker, and what happens when the model catalog is unavailable.
+
 ## Model picker
 
 Open it with `/models` (optionally `/models claude` to scope it to another harness). It is a modal list in the same popup slot as the slash-command suggestions, but it is browsed rather than glanced at, so it shows up to ten rows and captions them with `1–10 of 122 models  ·  type to filter · ↑↓ move · Enter sets the default · Ctrl-R refreshes · Esc closes`.
