@@ -167,20 +167,19 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
       "agent_id" => "P1-I1-W1",
       "level" => "xhigh"
     )
-    inspection = apply_command("GetSessionSettings", "agent_id" => "P1-I1-W1")
 
-    [model_result, thinking_result, inspection].each { |result| assert_accepted(result) }
-    assert_equal "current_session", inspection.dig("result", "scope")
-    assert_equal "openai/gpt-5.6-sol", inspection.dig("result", "session_settings", "model", "reference")
-    assert_equal "xhigh", inspection.dig("result", "session_settings", "thinking_level")
+    [model_result, thinking_result].each { |result| assert_accepted(result) }
+    assert_equal "current_session", thinking_result.dig("result", "scope")
+    assert_equal "openai/gpt-5.6-sol", thinking_result.dig("result", "session_settings", "model", "reference")
+    assert_equal "xhigh", thinking_result.dig("result", "session_settings", "thinking_level")
     assert_empty @coordinator.calls, "targeted updates must not call the persistent default updater"
     assert_equal "anthropic/claude-opus-5", @coordinator.defaults("pi").fetch("model")
     assert_equal "max", @coordinator.defaults("pi").fetch("thinking_level")
     refute File.exist?(File.join(tmp_root, "config.toml"))
   end
 
-  # `/session-settings`, `/model`, and `/thinking` are typed with the agent id in whatever case
-  # the user used. The id resolves; the model reference stays byte-exact.
+  # `/model` and `/thinking` are typed with the agent id in whatever case the user used. The id
+  # resolves; the model reference stays byte-exact.
   def test_targeted_session_commands_accept_lowercase_and_mixed_case_agent_ids
     add_project!(name: "targeted")
     create_issue!("P1", title: "Exercise targeted settings")
@@ -188,12 +187,11 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
 
     model_result = apply_command("SetSessionModel", "agent_id" => "p1-i1-w1", "model" => "openai/gpt-5.6-sol")
     thinking_result = apply_command("SetSessionThinkingLevel", "agent_id" => "P1-i1-W1", "level" => "xhigh")
-    inspection = apply_command("GetSessionSettings", "agent_id" => "p1-I1-w1")
 
-    [model_result, thinking_result, inspection].each { |result| assert_accepted(result) }
-    assert_equal %w[P1-I1-W1 P1-I1-W1 P1-I1-W1], [model_result, thinking_result, inspection].map { |result| result.fetch("target_id") }
-    assert_equal "openai/gpt-5.6-sol", inspection.dig("result", "session_settings", "model", "reference")
-    assert_equal "xhigh", inspection.dig("result", "session_settings", "thinking_level")
+    [model_result, thinking_result].each { |result| assert_accepted(result) }
+    assert_equal %w[P1-I1-W1 P1-I1-W1], [model_result, thinking_result].map { |result| result.fetch("target_id") }
+    assert_equal "openai/gpt-5.6-sol", thinking_result.dig("result", "session_settings", "model", "reference")
+    assert_equal "xhigh", thinking_result.dig("result", "session_settings", "thinking_level")
     assert_equal "openai/gpt-5.6-sol", persisted_agents.fetch(0).dig("session_settings", "model", "reference")
     log_entry(model_result.fetch("log_entry_ids").first).then do |entry|
       assert_equal "P1-I1-W1", entry.fetch("source_id")
@@ -203,10 +201,34 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
   end
 
   def test_targeted_session_commands_still_reject_an_unknown_agent_id
-    result = apply_command("GetSessionSettings", "agent_id" => "p1-i9-w9")
+    result = apply_command("SetSessionModel", "agent_id" => "p1-i9-w9", "model" => "openai/gpt-5.6-sol")
 
     assert_rejected(result, "agent_not_found")
     assert_equal "Agent p1-i9-w9 does not exist.", result.fetch("message")
+  end
+
+  # `/session-settings` and its `GetSessionSettings` kernel command were removed. The command type
+  # is no longer dispatchable, no longer head-proposable, and no longer advertised by `/help`; a
+  # session's effective pair is still recorded on the agent record and readable through `GetInfo`.
+  def test_get_session_settings_is_no_longer_a_kernel_command
+    add_project!(name: "removed")
+    create_issue!("P1", title: "Exercise removed inspection")
+    spawn_worker!("P1-I1", workspace_path: make_project_dir("worker"))
+
+    removed = apply_command("GetSessionSettings", "agent_id" => "P1-I1-W1")
+
+    assert_rejected(removed, "unknown_command")
+    assert_equal "Unknown kernel command: GetSessionSettings", removed.fetch("message")
+    refute_includes Meringue::Kernel::Engine::HEAD_PROPOSABLE_COMMANDS, "GetSessionSettings"
+    refute Meringue::Kernel::Engine::HELP_COMMANDS.any? { |usage, _| usage.start_with?("/session") }
+
+    info = apply_command("GetInfo", "target_id" => "P1-I1-W1")
+    assert_accepted(info)
+    assert_equal(
+      "anthropic/claude-opus-5",
+      info.dig("result", "record", "session_settings", "model", "reference")
+    )
+    assert_equal "max", info.dig("result", "record", "session_settings", "thinking_level")
   end
 
   def test_default_commands_validate_values_before_persistence
