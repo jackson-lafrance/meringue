@@ -109,6 +109,39 @@ class HeadContextTest < Minitest::Test
     assert_equal "follow_up", candidate.fetch("recommended_prompt_mode")
   end
 
+  # A head must be able to see that a queued worker is held by a script condition, not just by
+  # another agent, or it will re-route work that is already scheduled.
+  def test_worker_candidates_expose_a_command_gated_queued_worker
+    snapshot = head_snapshot
+    worker = snapshot.fetch("agents").first
+    worker["status"] = "queued"
+    worker.fetch("harness_metadata")["deferred_spawn"] = {
+      "state" => "waiting",
+      "after_agent_id" => "P1-I1-W1",
+      "if_predecessor_fails" => "cancel",
+      "command_gate" => {
+        "command" => "gh pr view --json reviewDecision",
+        "label" => "pair review",
+        "expect" => "exit_zero",
+        "state" => "pending",
+        "checks" => 3,
+        "if_gate_expires" => "cancel",
+        "last_check" => { "stdout_tail" => "SECRET_TRANSCRIPT_LINE" }
+      }
+    }
+
+    candidate = build_head_context(snapshot: snapshot)
+                  .to_prompt_h.dig("routing_context", "worker_candidates").first
+    gate = candidate.fetch("deferred_spawn").fetch("command_gate")
+
+    assert_equal "gh pr view --json reviewDecision", gate.fetch("command")
+    assert_equal "pair review", gate.fetch("label")
+    assert_equal "pending", gate.fetch("state")
+    assert_equal 3, gate.fetch("checks")
+    # The condition's captured output is not routing context; it stays out of the head prompt.
+    refute gate.key?("last_check")
+  end
+
   def test_killed_worker_is_not_resumable_and_has_no_prompt_modes
     snapshot = head_snapshot
     snapshot.fetch("agents").first["status"] = "killed"
@@ -347,6 +380,20 @@ class HeadContextTest < Minitest::Test
 
   # A head that asked to both follow up and replace one worker had its SpawnWorker rejected, so the
   # user's retry did nothing. The kernel contract has to be stated in the routing rules.
+  # Heads are prompted from docs/head_agent_kernel_commands.md plus these rules; if neither
+  # mentions after_command, no head will ever use it.
+  def test_routing_rules_and_command_reference_describe_script_gated_waits
+    context = build_head_context
+    rules = context.to_prompt_h.dig("routing_context", "decision_rules")
+    reference = context.system_prompt
+
+    assert(rules.any? { |rule| rule.include?("Use after_command when the next step must wait for something outside Meringue") })
+    assert(rules.any? { |rule| rule.include?("after_command composes with after_agent_id as AND") })
+    assert_includes reference, "### Chaining a worker after a script or command"
+    assert_includes reference, "\"after_command\":"
+    assert_includes reference, "if_gate_expires"
+  end
+
   def test_routing_rules_forbid_combining_replace_with_follow_up_or_after
     rules = build_head_context.to_prompt_h.dig("routing_context", "decision_rules")
 
