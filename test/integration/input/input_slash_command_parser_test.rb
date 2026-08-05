@@ -29,7 +29,6 @@ class InputSlashCommandParserTest < Minitest::Test
       "/project add /tmp" => ["AddProject", { "path" => "/tmp", "name" => "" }],
       "/project rename P1 \"Renamed app\"" => ["ModifyProject", { "project_id" => "P1", "name" => "Renamed app" }],
       "/issue rename P1-I1 \"Renamed issue\"" => ["ModifyIssue", { "issue_id" => "P1-I1", "title" => "Renamed issue" }],
-      "/rename P1 \"Renamed app\"" => ["Rename", { "target_id" => "P1", "name" => "Renamed app" }],
       "/kill P1-I1" => ["Kill", { "target_id" => "P1-I1" }],
       "/dismiss Q1" => ["DismissQuestion", { "question_id" => "Q1" }]
     }
@@ -78,10 +77,46 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   def test_rename_commands_join_unquoted_name_tokens
-    parsed = parse_slash("/rename P1 New Project Name")
+    project = parse_slash("/project rename P1 New Project Name")
 
-    assert_equal "Rename", parsed.fetch("type")
-    assert_equal({ "target_id" => "P1", "name" => "New Project Name" }, parsed.fetch("payload"))
+    assert_equal "ModifyProject", project.fetch("type")
+    assert_equal({ "project_id" => "P1", "name" => "New Project Name" }, project.fetch("payload"))
+
+    issue = parse_slash("/issue rename P1-I1 New Issue Title")
+
+    assert_equal "ModifyIssue", issue.fetch("type")
+    assert_equal({ "issue_id" => "P1-I1", "title" => "New Issue Title" }, issue.fetch("payload"))
+  end
+
+  # The bare `/rename <id> "<name>"` shortcut was removed. It is still recognised as a word so
+  # the rejection names the namespaced replacements instead of a generic "Unknown slash command".
+  def test_plain_rename_is_rejected_and_points_at_the_namespaced_commands
+    ["/rename", "/rename P1", "/rename P1 \"Renamed app\"", "/RENAME P1-I1 New title"].each do |input|
+      parsed = parse_slash(input)
+
+      assert_equal "InvalidSlashCommand", parsed.fetch("type"), "expected #{input.inspect} to be rejected"
+      message = parsed.fetch("payload").fetch("message")
+      assert_includes message, "/rename was removed."
+      assert_includes message, "/project rename <project_id> \"<name>\""
+      assert_includes message, "/issue rename <issue_id> \"<title>\""
+      assert_equal(
+        "Usage: /project rename <project_id> \"<name>\" | /issue rename <issue_id> \"<title>\"",
+        parsed.fetch("payload").fetch("usage")
+      )
+    end
+  end
+
+  # It must also be untypeable by autocomplete: neither the command list nor the argument
+  # completion contexts may still offer it.
+  def test_plain_rename_is_not_suggested_or_completable
+    usages = Meringue::Input::SlashCommandParser::COMMAND_SPECS.map(&:first)
+    refute_includes usages.map { |usage| usage.split.first }, "/rename"
+
+    prefixes = Meringue::Input::SlashCommandParser::ARGUMENT_SUGGESTION_CONTEXTS.map { |entry| entry.fetch("prefix") }
+    refute_includes prefixes, "/rename"
+
+    suggested = Meringue::Input::SlashCommandParser.command_suggestions("/rename", limit: nil)
+    refute_includes suggested.map(&:first), "/rename <project_or_issue_id> \"<name>\""
   end
 
   def test_worker_spawn_and_prompt_arguments
