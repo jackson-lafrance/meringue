@@ -7,12 +7,28 @@ module Meringue
   module ProjectNaming
     README_FILENAMES = %w[README.md README.markdown README.rdoc README].freeze
     MAX_NAME_LENGTH = 80
+    # These words describe a task, lifecycle state, or repository facet rather
+    # than the product itself. They must not become part of a project label.
+    NON_PRODUCT_SUFFIXES = %w[
+      add change clean cleanup complete completed done fix fixed improve implement
+      integration storefront update updated work
+    ].freeze
 
     module_function
 
     def name_for(path)
       root = File.expand_path(path.to_s)
-      readme_name(root) || humanize_basename(File.basename(root))
+      canonical_name(readme_name(root) || humanize_basename(File.basename(root)))
+    end
+
+    def canonical_name(value)
+      text = value.to_s.strip
+      return nil if text.empty?
+
+      words = text.split
+      trimmed = words.dup
+      trimmed.pop while trimmed.length > 1 && NON_PRODUCT_SUFFIXES.include?(trimmed.last.downcase)
+      trimmed.join(" ")
     end
 
     def readme_name(root)
