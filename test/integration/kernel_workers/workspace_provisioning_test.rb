@@ -33,9 +33,12 @@ class KernelWorkersWorkspaceProvisioningTest < Minitest::Test
     assert_nil worker.fetch("pid")
     assert_equal "errored", issue(engine, context.fetch("issue_id")).fetch("status")
 
-    worker_log = state(engine).fetch("logs").find { |entry| entry.fetch("source_id", nil) == "P1-I1-W1" && entry.fetch("level") == "error" }
-    refute_nil worker_log, "expected a worker-scoped provisioning failure log"
-    assert_includes worker_log.fetch("message"), "Worker workspace provisioning failed"
+    worker_logs = worker_scoped_logs(engine, "P1-I1-W1")
+    refute_empty worker_logs, "expected a worker-scoped provisioning failure log"
+    # The success path is silent until the session exists, so the failure must not be:
+    # this error is the only visible line the worker ever gets.
+    assert_equal ["error"], worker_logs.map { |entry| entry.fetch("level") }.uniq
+    assert_includes worker_logs.fetch(0).fetch("message"), "Worker workspace provisioning failed"
     assert_includes log_messages(engine), "Failed SpawnWorker: #{result.fetch("message")}"
   end
 
@@ -52,6 +55,13 @@ class KernelWorkersWorkspaceProvisioningTest < Minitest::Test
     assert_equal "#{planned.fetch("workspace_branch")}-2", worker.fetch("workspace_branch")
     assert_equal "#{planned.fetch("workspace_path")}-2", worker.fetch("workspace_path")
     assert_equal worker.fetch("workspace_path"), @harness_client.spawns.fetch(0).fetch("cwd")
+
+    # The single spawn log is written after allocation, so it reports the branch and path the
+    # worker really got rather than the planned names a pre-allocation line would have shown.
+    spawn_log = worker_scoped_logs(engine, worker.fetch("id")).fetch(0)
+    assert_equal "Spawned worker P1-I1-W1 for P1-I1.", spawn_log.fetch("message")
+    assert_equal worker.fetch("workspace_branch"), spawn_log.fetch("details").fetch("workspace_branch")
+    assert_equal worker.fetch("workspace_path"), spawn_log.fetch("details").fetch("workspace_path")
   end
 
   def test_exhausted_worktree_collisions_fail_the_spawn_with_a_clear_log
