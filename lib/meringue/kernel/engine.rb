@@ -115,7 +115,6 @@ module Meringue
         "list_models" => "GetModelCatalog",
         "set_default_session_model" => "SetDefaultSessionModel",
         "set_default_session_thinking_level" => "SetDefaultSessionThinkingLevel",
-        "get_session_settings" => "GetSessionSettings",
         "list_questions" => "ListQuestions",
         "reconcile_sessions" => "ReconcileSessions",
         "prune" => "Prune",
@@ -141,7 +140,6 @@ module Meringue
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
         ["/model <provider/model>", "Persist the model used for all future Pi heads and workers; existing sessions are unchanged."],
         ["/thinking <level>", "Persist the thinking level used for all future Pi heads and workers: off, minimal, low, medium, high, xhigh, or max."],
-        ["/session-settings <agent_id>", "Refresh and show one existing agent's effective Pi session model and thinking level."],
         ["/goal create <issue_id> \"<success criteria>\" --metric \"<command>\" --target <number> [--comparator gte|lte|gt|lt|eq] [--max-iterations <n>] [--guardrail \"<command>\"] [--parse last_number|first_number|exit_status] [--pattern \"<regex>\"] [--title \"<title>\"] [--fresh-attempt] [--paused]", "Attach a goal loop to an issue: the kernel keeps producing attempts until the metric hits its target or a budget/no-progress guard trips."],
         ["/goal status [goal_id]", "Show goal loops, their iteration accounting, and why a stopped goal stopped."],
         ["/goal pause <goal_id>", "Pause a goal loop after the current attempt; nothing new is spawned while it is paused."],
@@ -168,7 +166,6 @@ module Meringue
       HEAD_PROPOSABLE_COMMANDS = %w[
         ListAll GetState GetInfo Help ListQuestions
         GetSessionDefaults GetModelCatalog SetDefaultSessionModel SetDefaultSessionThinkingLevel
-        GetSessionSettings
         AddProject ModifyProject CreateIssue ModifyIssue SpawnWorker PromptAgent SpawnHead
         CreateGoal ModifyGoal StopGoal ListGoals
         AskQuestion AnswerQuestion DismissQuestion
@@ -521,8 +518,6 @@ module Meringue
           set_default_session_model(command_id, command_type, payload)
         when "SetDefaultSessionThinkingLevel"
           set_default_session_thinking_level(command_id, command_type, payload)
-        when "GetSessionSettings"
-          get_session_settings(command_id, command_type, payload)
         when "SetSessionModel"
           set_session_model(command_id, command_type, payload)
         when "SetSessionThinkingLevel"
@@ -1637,37 +1632,6 @@ module Meringue
         ].compact.join(" ")
       end
 
-      def get_session_settings(command_id, command_type, payload)
-        agent_id = value_at(payload, "agent_id", "target_id", "AgentID", "TargetID")
-        state = normalized_state
-        agent, rejection = session_settings_target(state, command_id, command_type, agent_id)
-        return rejection if rejection
-
-        client = harness_client_for_agent(agent)
-        outcome = client.get_session_settings(agent_session_ref(agent))
-        persist_session_settings_result!(agent, outcome)
-        settings = outcome.fetch("settings")
-        message = session_settings_message(agent.fetch("id"), settings)
-        log_ids = append_log(
-          state,
-          source_type: "kernel",
-          source_id: agent.fetch("id"),
-          level: "info",
-          message: message,
-          details: { "agent_id" => agent.fetch("id"), "session_settings" => settings }
-        )
-        touch_state!(state)
-        store.save(state)
-        accepted_result(command_id, command_type, agent.fetch("id"), message, session_settings_result(agent, settings), log_ids)
-      rescue StandardError => e
-        failed_result(
-          command_id,
-          command_type,
-          "Could not inspect session settings for #{agent_id}: #{sanitized_error_message(e)}",
-          [e.class.name, sanitized_error_message(e)]
-        )
-      end
-
       def set_session_model(command_id, command_type, payload)
         agent_id = value_at(payload, "agent_id", "target_id", "AgentID", "TargetID")
         model_reference = value_at(payload, "model", "model_reference", "Model", "ModelReference")
@@ -1786,13 +1750,6 @@ module Meringue
         touch_state!(state)
         store.save(state)
         log_ids
-      end
-
-      def session_settings_message(agent_id, settings)
-        model = settings.dig("model", "reference") || "unknown"
-        thinking = settings.fetch("thinking_level", nil) || "unknown"
-        source = settings.fetch("source", "harness")
-        "#{agent_id} session uses #{model} with thinking #{thinking} (source: #{source})."
       end
 
       def session_settings_result(agent, settings)
