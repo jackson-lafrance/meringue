@@ -218,7 +218,10 @@ class KernelCoreModelCatalogTest < Minitest::Test
     assert_equal "no_catalog_source", result.dig("result", "model_catalog_refresh", "skipped")
   end
 
-  def test_models_command_output_is_bounded_and_points_at_completion
+  # The catalog is a status in the log, not a listing. Dumping 100+ models into
+  # the visible log buried every other event, so the browsable list is the TUI
+  # model picker and this output only reports what the harness answered.
+  def test_models_command_output_reports_status_instead_of_dumping_the_catalog
     many = (1..40).map { |index| { "provider" => "openai", "id" => "model-#{index}" } }
     @catalog_source.result = pi_catalog(models: many)
     result = apply_command("GetModelCatalog")
@@ -227,8 +230,14 @@ class KernelCoreModelCatalogTest < Minitest::Test
 
     assert_includes lines, "  harness: pi"
     assert_includes lines, "  availability: available"
-    assert_equal Meringue::Kernel::Engine::MODEL_CATALOG_OUTPUT_LIMIT, lines.count { |line| line.include?("openai/model-") }
-    assert lines.any? { |line| line.include?("and 10 more") }, lines.inspect
+    assert_includes lines, "  models: 40"
+    assert_equal(
+      Meringue::Kernel::Engine::MODEL_CATALOG_OUTPUT_EXAMPLE_LIMIT,
+      lines.find { |line| line.include?("for example:") }.scan("openai/model-").length
+    )
+    refute lines.any? { |line| line.include?("more; press Tab") }, lines.inspect
+    assert lines.any? { |line| line.include?("/models to pick one in the model picker") }, lines.inspect
+    assert_operator lines.length, :<, 12
   end
 
   private

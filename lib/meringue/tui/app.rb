@@ -136,6 +136,13 @@ module Meringue
         # PR to open. It is transient UI, so it is never persisted.
         @delivery_pr_picker_active = false
         @delivery_pr_picker_index = 0
+        # Model picker: the interactive replacement for `/models` dumping the
+        # whole harness catalog into the log. Transient UI, never persisted, and
+        # it writes nothing itself: a selection is applied as `/model <ref>`.
+        @model_picker_active = false
+        @model_picker_index = 0
+        @model_picker_query = +""
+        @model_picker_harness = nil
         @workspace_draft = ""
         @workspace_agent_scroll_offset = 0
         @workspace_terminal_scroll_offset = 0
@@ -355,6 +362,11 @@ module Meringue
 
         if @agent_workspace_active
           return handle_agent_workspace_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
+
+        if @model_picker_active
+          picker_result = handle_model_picker_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+          return picker_result if picker_result
         end
 
         if @delivery_pr_picker_active
@@ -2005,6 +2017,7 @@ module Meringue
       def handle_local_navigation_command(input_buffer, state)
         text = input_buffer.to_s.strip
         return handle_local_jump_command(text, state) if jump_command?(text)
+        return handle_local_models_command(text, state) if models_picker_command?(text)
         return handle_local_keybind_command if keybind_command?(text)
         return handle_local_config_command if config_command?(text)
         return handle_local_quit_command if quit_command?(text)
@@ -2050,6 +2063,7 @@ module Meringue
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode. In the AgentTree, #{keys_for("rename_selected")} starts a quick rename for the selected project or issue; type its new name in the composer and press Enter.
           Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
+          Model picker: /models opens a searchable list of the models the harness reports (/models claude scopes it to another harness); type to filter, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} applies the model as the future-session default (same as /model), #{keys_for("refresh_model_catalog")} re-fetches the catalog, #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
           Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
         TEXT
@@ -2115,6 +2129,26 @@ module Meringue
         text == "/keybind"
       end
 
+      # `/models` is a local TUI command that opens the model picker. `/models
+      # refresh` stays a kernel command (GetModelCatalog), so a forced re-fetch is
+      # still journaled and logged like any other kernel command instead of being
+      # a hidden side effect of a UI toggle.
+      def models_picker_command?(text)
+        tokens = text.to_s.strip.split(/\s+/)
+        return false unless tokens.first.to_s.downcase == "/models"
+
+        arguments = tokens.drop(1).map { |token| token.to_s.downcase }
+        return false if arguments.any? { |token| Input::SlashCommandParser::MODEL_CATALOG_REFRESH_WORDS.include?(token) }
+
+        arguments.length <= 1
+      end
+
+      def handle_local_models_command(text, state)
+        harness = text.to_s.strip.split(/\s+/)[1]
+        open_model_picker(state, harness: harness)
+        true
+      end
+
       def config_command?(text)
         text == "/config"
       end
@@ -2124,7 +2158,7 @@ module Meringue
       end
 
       def local_navigation_command_without_id?(input_buffer)
-        input_buffer.to_s.strip == "/jump"
+        ["/jump", "/models"].include?(input_buffer.to_s.strip.downcase)
       end
 
       def enter_agent_tree_navigation(state)
@@ -2194,9 +2228,10 @@ module Meringue
         # The logs caret belongs to the dashboard logs pane, so opening the
         # focused workspace disarms it instead of leaving Ctrl-C bound to copy.
         deactivate_logs_cursor_quietly
-        # The open-PR picker is dashboard chrome, so it must not survive into the
-        # focused workspace and reappear on return.
+        # The open-PR and model pickers are dashboard chrome, so they must not
+        # survive into the focused workspace and reappear on return.
         close_delivery_pr_picker
+        close_model_picker
         @agent_workspace_active = true
         @force_full_redraw = true
         @agent_workspace_agent_id = agent.fetch("id")
@@ -2324,6 +2359,146 @@ module Meringue
         return nil unless @delivery_pr_picker_active
 
         { "active" => true, "index" => @delivery_pr_picker_index }
+      end
+
+      def model_picker_snapshot
+        return nil unless @model_picker_active
+
+        {
+          "active" => true,
+          "index" => @model_picker_index,
+          "query" => @model_picker_query.to_s,
+          "harness" => @model_picker_harness
+        }.compact
+      end
+
+      # The picker always opens, even when the harness could not give us a
+      # catalog: an explicit "why the list is missing" line is the useful answer,
+      # and a blank popup is not. It reads the kernel-cached snapshot, so opening
+      # it never starts a harness process.
+      def open_model_picker(state, harness: nil)
+        @model_picker_active = true
+        @model_picker_index = 0
+        @model_picker_query = +""
+        @model_picker_harness = harness.to_s.strip.empty? ? nil : harness.to_s.strip
+        close_delivery_pr_picker
+        true
+      end
+
+      def close_model_picker
+        @model_picker_active = false
+        @model_picker_query = +""
+        @model_picker_index = 0
+        @model_picker_harness = nil
+      end
+
+      def model_picker_entries(state)
+        ModelPicker.entries(state, harness: @model_picker_harness, query: @model_picker_query)
+      end
+
+      # A modal list that owns typing while it is up: printable keys filter it,
+      # arrows move, Enter applies the model, Ctrl-R re-fetches the catalog, and
+      # Esc closes. Unlike the open-PR picker it does not close on any other key,
+      # because typing here is the search box rather than the composer.
+      def handle_model_picker_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
+        entries = model_picker_entries(state)
+        return handle_model_picker_mouse(key, unchanged, on_submit, state, entries) if mouse_event?(key)
+
+        if keybinding?("suggestion_previous", key)
+          move_model_picker(-1, entries.length)
+          return unchanged
+        end
+        if keybinding?("suggestion_next", key)
+          move_model_picker(1, entries.length)
+          return unchanged
+        end
+        if keybinding?("refresh_model_catalog", key)
+          refresh_model_catalog(on_submit, state)
+          return unchanged
+        end
+        if keybinding?("submit", key)
+          apply_model_picker_entry(selected_model_picker_entry(entries), on_submit, state)
+          return unchanged
+        end
+        if keybinding?("cancel_navigation", key)
+          close_model_picker
+          return unchanged
+        end
+        if keybinding?("delete_word_backward", key)
+          @model_picker_query = +""
+          @model_picker_index = 0
+          return unchanged
+        end
+        if keybinding?("delete_backward", key)
+          @model_picker_query = @model_picker_query.to_s.chars[0...-1].join
+          @model_picker_index = 0
+          return unchanged
+        end
+        if printable_key?(key)
+          @model_picker_query = "#{@model_picker_query}#{key}"
+          @model_picker_index = 0
+          return unchanged
+        end
+
+        close_model_picker
+        nil
+      end
+
+      def handle_model_picker_mouse(key, unchanged, on_submit, state, entries)
+        return unchanged unless mouse_button_press?(key) || mouse_wheel?(key)
+
+        hit = layout.model_picker_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+        if mouse_wheel?(key)
+          return nil if hit == :outside
+
+          move_model_picker(mouse_wheel_up?(key) ? -1 : 1, entries.length)
+          return unchanged
+        end
+
+        if hit.is_a?(Integer)
+          apply_model_picker_entry(entries[hit], on_submit, state)
+        elsif hit == :outside
+          close_model_picker
+        end
+        unchanged
+      end
+
+      def move_model_picker(step, count)
+        return if count <= 0
+
+        @model_picker_index = (@model_picker_index.to_i + step) % count
+      end
+
+      def selected_model_picker_entry(entries)
+        return nil if entries.empty?
+
+        entries[@model_picker_index.to_i.clamp(0, entries.length - 1)]
+      end
+
+      # Selecting a row is exactly `/model <provider/model>`: the same parser, the
+      # same `SetDefaultSessionModel` validation, the same journaling, and the same
+      # log line. The picker never writes session defaults itself.
+      def apply_model_picker_entry(entry, on_submit, state)
+        unless entry
+          # Expected unavailability (no catalog, or a query that matched nothing),
+          # so it stays a transient hint rather than a durable log line.
+          append_jump_response(ModelPicker.empty_message(state, harness: @model_picker_harness, query: @model_picker_query))
+          return false
+        end
+
+        close_model_picker
+        submit_prompt("/model #{entry.fetch("reference")}", on_submit, state)
+        true
+      end
+
+      # Refreshing is the kernel's job: the picker submits `/models refresh`, the
+      # kernel re-asks the harness and persists the snapshot, and the next frame
+      # renders the new list. The picker stays open while that happens.
+      def refresh_model_catalog(on_submit, state)
+        command = ["/models", @model_picker_harness, "refresh"].compact.join(" ")
+        submit_prompt(command, on_submit, state)
+        true
       end
 
       def open_delivery_pr_picker(state)
@@ -3432,7 +3607,8 @@ module Meringue
             "slash_suggestion_index" => slash_suggestion_index,
             "selection" => @chat_selection,
             "pending_count" => @pending_count,
-            "delivery_pr_picker" => delivery_pr_picker_snapshot
+            "delivery_pr_picker" => delivery_pr_picker_snapshot,
+            "model_picker" => model_picker_snapshot
           }
         end
       end

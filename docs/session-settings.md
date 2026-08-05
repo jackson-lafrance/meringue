@@ -4,7 +4,7 @@ Meringue exposes future Pi defaults for how every new head and worker is started
 
 ## Commands
 
-### Harness model catalog
+### Harness model catalog: the model picker
 
 ```text
 /models [harness] [refresh]
@@ -14,11 +14,29 @@ Examples:
 
 ```text
 /models
-/models pi
+/models claude
 /models refresh
+/models pi refresh
 ```
 
-`/models` lists every model the selected harness reports, with each model's supported thinking levels and context window. With no argument it uses the active harness; an explicit `pi`, `claude`, or `antigravity` inspects that harness instead. A trailing `refresh` forces a re-fetch instead of reusing the cached snapshot.
+`/models` is a **local TUI command** that opens the model picker: a searchable, keyboard-navigable list of the models the selected harness itself reports, showing each model's provider/id reference, display name, and supported thinking levels. With no argument it shows the active harness; an explicit `pi`, `claude`, or `antigravity` scopes the picker (and its refresh) to that harness instead.
+
+It replaced the old behavior, where `/models` printed the entire catalog into the visible log. A harness that reports 120 models produced 120 log lines nobody could act on, truncated with a hint that pointed at a different command.
+
+Picker keys:
+
+| Key | Effect |
+| --- | --- |
+| any printable character | filter; space separated tokens all have to match (`openai high`) |
+| `Backspace` / `Ctrl-W` | delete one character of the filter / clear it |
+| `↑` / `↓` | move the highlight (it wraps) |
+| `Enter` | apply the highlighted model, exactly as `/model <provider/model>` |
+| `Ctrl-R` | re-fetch the catalog (`GetModelCatalog` with `refresh`), keeping the picker open |
+| `Esc`, click away, or any unhandled control key | close the picker without changing anything |
+
+Selecting a row is applied through the normal slash path, so the picker itself writes nothing: `SetDefaultSessionModel` stays the only writer of the future-session default, with the same validation, journaling, and log line as typing `/model` by hand.
+
+A trailing `refresh` word keeps `/models` on the kernel path instead of opening the picker: it forces a re-fetch and reports the snapshot's state (harness, availability, model count, confirmed timestamp, note) in the log. That is also what the picker's `Ctrl-R` submits and what a head proposes for "what models can I use", so `GetModelCatalog` remains the only way the catalog is read.
 
 ### Future Pi defaults
 
@@ -132,7 +150,8 @@ The kernel owns catalog state. Snapshots live in `metadata.harness_model_catalog
 - Session reconciliation refreshes the active harness's snapshot when it is older than 10 minutes, and retries a failed or stale snapshot after 1 minute.
 - Cadence is measured from the last fetch *attempt* (`last_attempt_at`), not from `fetched_at`, so a retained list is retried on the failure cadence instead of being re-probed on every 2-second pass because its confirmed timestamp is old.
 - Refresh is silent: an expected "not fetched yet" state produces no durable log entries.
-- `/models refresh` forces an immediate re-fetch; `/models` alone reuses a fresh snapshot. `/models` reports `availability`, the confirmed timestamp, and the last failed attempt when there is one.
+- `/models refresh` forces an immediate re-fetch and reports `availability`, the model count, the confirmed timestamp, and the last failed attempt when there is one. `/models` alone opens the picker over the cached snapshot without starting a harness process; `Ctrl-R` in the picker submits the same refresh command.
+- The picker never renders an empty box. An unavailable catalog, an unsupported harness, a snapshot Meringue has never fetched, and a filter that matched nothing are four different sentences, each naming what to do next (`Ctrl-R`, or an exact `provider/model` id with `/model`).
 
 ### What completion shows
 
@@ -142,6 +161,6 @@ The kernel owns catalog state. Snapshots live in `metadata.harness_model_catalog
 - Queries match the reference, the bare model id, and the display name, so `sol`, `gpt-5.6`, and `openai/` all narrow the same list.
 - `/thinking <Tab>` offers only the levels the configured default model supports. When the model is unknown to the catalog, Meringue falls back to Pi's full ladder and labels it `model support not verified yet`.
 - A `stale` catalog is offered in full, with every entry labelled `last confirmed list` and a trailing note naming the failed refresh, so a temporary harness problem never hides models that exist.
-- When no catalog has ever been fetched, completion still offers the references Meringue knows (current session model, saved default, models in use) labelled `catalog unavailable — id not verified`, and appends one non-destructive note row explaining the state and pointing at `/models`. Selecting the note re-inserts only what was already typed, so it can never overwrite a valid explicit id.
+- When no catalog has ever been fetched, completion still offers the references Meringue knows (current session model, saved default, models in use) labelled `catalog unavailable — id not verified`, and appends one non-destructive note row explaining the state and pointing at `/models refresh`. Selecting the note re-inserts only what was already typed, so it can never overwrite a valid explicit id.
 
 Validation is unchanged by catalog state: `/model` requires an exact `provider/model` shape, and Pi still rejects an unavailable model id or an unsupported thinking level.
