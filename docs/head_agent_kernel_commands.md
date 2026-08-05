@@ -333,11 +333,12 @@ Rejection codes: `issue_id_not_created_by_this_head_result`, `ambiguous_batch_is
 
 You do not have to defend against this, and you must not try to: no re-reading state at the last moment, no "if it still exists" hedging, no duplicate commands. Target the ids you were given and let the kernel handle the race.
 
-If an issue you legitimately read is removed before your result is applied, the kernel skips that one command as a no-op and applies the rest of your batch:
+If a record you legitimately read is removed before your result is applied, the kernel skips that one command as a no-op and applies the rest of your batch. Every command that names a removable record is covered: `ModifyIssue` and `SpawnWorker` on an issue, `PromptAgent` on a worker, and `Kill` on either.
 
-- the command result carries the error code `issue_removed_before_head_result_applied` and mutates nothing,
-- the log line is `Skipped ModifyIssue: issue P4-I4 was removed by a prune at … after head H34 was spawned with it in view, so there was nothing left to update. No state was changed. Dropped issue update (status → completed, description).` — `info` for `ModifyIssue`, `warning` for `SpawnWorker`, because a dropped worker is dropped work,
-- the batch summary counts it as skipped rather than rejected (`Head result for H34: 2 accepted, 0 rejected, 0 failed. 1 command skipped because its target was removed before this result was applied.`), and the head is still recorded as applied rather than blocked.
+- the command result mutates nothing and carries `issue_removed_before_head_result_applied` or `agent_removed_before_head_result_applied`, naming which kind of record vanished,
+- the log line is `Skipped ModifyIssue: issue P4-I4 was removed by a prune at … after head H34 was spawned with it in view, so there was nothing left to update. No state was changed. Dropped issue update (status → completed, description).` It is `info` when nothing was lost (`ModifyIssue`, and `Kill` of a record that is already gone) and `warning` when work was dropped (`SpawnWorker`, `PromptAgent`),
+- the batch summary counts it as skipped rather than rejected (`Head result for H34: 2 accepted, 0 rejected, 0 failed. 1 command skipped because its target was removed before this result was applied.`), and the head is still recorded as applied rather than blocked,
+- if that leaves nothing applied, the kernel restates the user's message once as a warning so it can be resent, instead of leaving you blocked over a race you could not have avoided.
 
 An id that was already gone when you were spawned is different: it was never in your view of state, so it is still rejected, but the message tells you what happened to it (`… which was removed by a prune at …, before head H38 was spawned, so it was never in this head's view of state.`). Never lift an issue id out of quoted log text, an older message, or a pasted warning; use the ids in the state you were given.
 

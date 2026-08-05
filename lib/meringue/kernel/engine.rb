@@ -260,11 +260,19 @@ module Meringue
       # was applied. Nothing mutated, so it is journaled as `rejected`, but it is not a head
       # mistake: it is counted, worded, and logged as a skip instead of a rejection.
       REMOVED_BATCH_ISSUE_TARGET_ERROR = "issue_removed_before_head_result_applied"
-      HEAD_BATCH_SKIP_ERROR_CODES = [REMOVED_BATCH_ISSUE_TARGET_ERROR].freeze
-      # Bounded ledger of issue ids the kernel removed, so a command that arrives after a prune or
+      REMOVED_BATCH_AGENT_TARGET_ERROR = "agent_removed_before_head_result_applied"
+      HEAD_BATCH_SKIP_ERROR_CODES = [REMOVED_BATCH_ISSUE_TARGET_ERROR, REMOVED_BATCH_AGENT_TARGET_ERROR].freeze
+      # Head-batch commands whose entire target can be removed by a prune or kill while the batch is
+      # in flight. `ModifyIssue`/`SpawnWorker` are handled by the issue-target resolver; these two
+      # name a record directly and have no intra-batch reference form, so they are checked here.
+      BATCH_REMOVABLE_TARGET_COMMANDS = %w[PromptAgent Kill].freeze
+      # Bounded ledger of record ids the kernel removed, so a command that arrives after a prune or
       # kill can say what happened to its target instead of guessing. State, not logs, owns this:
-      # logs are evicted on their own retention schedule and are not a source of truth.
-      REMOVED_ISSUE_LEDGER_LIMIT = 200
+      # logs are evicted on their own retention schedule and are not a source of truth. Issues and
+      # agents are kept in separate lists so pruning twenty workers cannot evict the issue history
+      # an in-flight head result still needs.
+      REMOVED_RECORD_LEDGER_LIMIT = 200
+      REMOVED_RECORD_LEDGER_KEYS = { "issue" => "removed_issues", "agent" => "removed_agents" }.freeze
       # Same idea for a project created earlier in the same batch: a head can point at the
       # AddProject command instead of predicting `P<n>`.
       BATCH_PROJECT_REFERENCE_KEYS = %w[
@@ -4919,7 +4927,8 @@ module Meringue
         # Remember that these ids existed. A command already in flight (a head result being
         # applied while a prune lands) can then be told its target was removed instead of being
         # accused of inventing an id that was real when it was read.
-        record_removed_issues!(state, issue_ids_to_remove, reason, now)
+        record_removed_records!(state, "issue", issue_ids_to_remove, reason, now)
+        record_removed_records!(state, "agent", agent_ids_to_remove, reason, now)
         state["agents"] = state.fetch("agents").reject { |agent| agent_ids_to_remove.include?(agent.fetch("id", nil)) }
         state["projects"] = state.fetch("projects").reject { |project| removed_project_ids.include?(project.fetch("id", nil)) }
         state.fetch("issues").each do |issue|
@@ -5585,7 +5594,14 @@ module Meringue
 
         state = normalized_state
         agent = find_agent(state, agent_id)
-        return rejected_result(command_id, command_type, missing_agent_prompt_message(agent_id), ["agent_not_found"]) unless agent
+        unless agent
+          return rejected_result(
+            command_id,
+            command_type,
+            with_dropped_intent(missing_agent_prompt_message(agent_id, state), "type" => "PromptAgent", "payload" => payload),
+            ["agent_not_found"]
+          )
+        end
         # Heads are handled by `prompt_agent_command`, which retries them. Reaching this branch
         # means a caller bypassed that dispatch, so the head contract is restated instead of
         # turning the head into a worker session.
@@ -5715,12 +5731,19 @@ module Meringue
 
       # A head id that no longer resolves is the common case after a kill or a prune, and the
       # generic "does not exist" line leaves the user guessing why their retry target vanished.
-      def missing_agent_prompt_message(agent_id)
+      def missing_agent_prompt_message(agent_id, state = nil)
         id = agent_id.to_s
-        return "Agent #{id} does not exist." unless id.match?(/\AH\d+\z/i)
+        if id.match?(/\AH\d+\z/i)
+          return "Head #{id.upcase} no longer exists. Heads are removed when they are killed, cleaned up " \
+                 "after routing, or pruned, so send your message as a new prompt instead."
+        end
 
-        "Head #{id.upcase} no longer exists. Heads are removed when they are killed, cleaned up " \
-          "after routing, or pruned, so send your message as a new prompt instead."
+        # A worker id that stopped resolving is usually a record a prune or kill removed, and the
+        # kernel knows which, so it says so instead of leaving the user to guess.
+        removal = state && removed_agent_record(state, id)
+        return "Agent #{id} does not exist." unless removal
+
+        "Agent #{id} no longer exists: it was removed #{issue_removal_phrase(removal)}."
       end
 
       # Harness clients report a mode they had to substitute through generic session metadata; an
@@ -9405,7 +9428,8 @@ module Meringue
         message = "Head result for #{head_id}: #{accepted_count} accepted, #{rejected_count} rejected, #{failed_count} failed."
         return message unless skipped_count.positive?
 
-        "#{message} #{count_phrase(skipped_count, "command").capitalize} skipped because its target was removed before this result was applied."
+        pronoun = skipped_count == 1 ? "its target" : "their targets"
+        "#{message} #{count_phrase(skipped_count, "command")} skipped because #{pronoun} #{skipped_count == 1 ? "was" : "were"} removed before this result was applied."
       end
 
       def head_batch_summary_level(rejected_count:, failed_count:)
@@ -9646,6 +9670,11 @@ module Meringue
         payload = value_at(command, "payload")
         return { "command" => command } unless payload.is_a?(Hash)
 
+        if BATCH_REMOVABLE_TARGET_COMMANDS.include?(command_type)
+          removed_resolution = resolve_batch_removed_target(payload: payload, command_type: command_type, head_id: head_id)
+          return removed_resolution if removed_resolution
+        end
+
         plan = head_batch_plan(head_id: head_id, commands: commands, index: index)
         if BATCH_PROJECT_REFERENCE_COMMANDS.include?(command_type)
           project_resolution = resolve_batch_project_target(command: command, payload: payload, command_type: command_type, plan: plan)
@@ -9834,6 +9863,64 @@ module Meringue
                  else "by #{reason.tr("_", " ")}"
                  end
         removed_at ? "#{phrase} at #{removed_at}" : phrase
+      end
+
+      # `PromptAgent` and `Kill` name a whole record, and the prune that removed 21 agents in one
+      # pass can land between a head reading state and its result being applied. Telling the user
+      # "Agent P3-I9-W2 does not exist" and blocking the head for that is the same failure as the
+      # issue case: the head read a real id, the record was removed under it, and there is nothing
+      # left to do. A target that was already gone when the head was spawned still falls through to
+      # normal validation, because that head really did name something it could not see.
+      def resolve_batch_removed_target(payload:, command_type:, head_id:)
+        requested = if command_type == "PromptAgent"
+                      present_string(value_at(payload, "agent_id", "AgentID", "agentId"))
+                    else
+                      present_string(value_at(payload, "target_id", "TargetID", "targetId"))
+                    end
+        return nil unless requested
+        return nil if requested.start_with?(BATCH_REFERENCE_PREFIX)
+
+        synchronized_state do
+          state = normalized_state
+          next nil if find_agent(state, requested) || find_issue(state, requested) || find_project(state, requested)
+
+          ledger = %w[agent issue].filter_map { |kind| removed_under_head_result(state, head_id, kind, requested) }.first
+          next nil unless ledger && ledger.fetch("after_spawn")
+
+          removal = ledger.fetch("removal")
+          kind = removal.fetch("kind", "issue").to_s
+          error = kind == "agent" ? REMOVED_BATCH_AGENT_TARGET_ERROR : REMOVED_BATCH_ISSUE_TARGET_ERROR
+          {
+            "skip" => {
+              "target_id" => requested,
+              "level" => command_type == "Kill" ? "info" : "warning",
+              "message" => removed_batch_record_target_message(
+                command_type: command_type,
+                head_id: head_id,
+                record_id: requested,
+                kind: kind,
+                removal: removal
+              ),
+              "errors" => [error],
+              "details" => {
+                "head_id" => head_id.to_s,
+                "target_id" => requested,
+                "reason" => error,
+                "removed_record" => removal
+              }.compact
+            }
+          }
+        end
+      end
+
+      def removed_batch_record_target_message(command_type:, head_id:, record_id:, kind:, removal:)
+        noun = kind == "agent" ? "agent" : "issue"
+        tail = if command_type == "Kill"
+                 "so there was nothing left to kill."
+               else
+                 "so the prompt was not delivered. Re-send it if the work is still wanted."
+               end
+        "#{noun} #{record_id} was removed #{issue_removal_phrase(removal)} after head #{head_id} was spawned, #{tail}"
       end
 
       def batch_issue_remap(command, payload, command_type, requested, issue_id, reason)
@@ -10452,15 +10539,13 @@ module Meringue
           # The issue is not in state. Whether that is a removed target or an invented id is the
           # whole distinction, so decide it from recorded facts: the head's snapshot first, then
           # the kernel's own record of what it removed.
-          removal = removed_issue_record(state, issue_id)
+          ledger = removed_under_head_result(state, head_id, "issue", issue_id)
+          removal = ledger && ledger.fetch("removal")
           next issue_visibility(false, "spawn_snapshot", removed_after_spawn: true, removal: removal) if in_snapshot
           next issue_visibility(false, "not_in_spawn_snapshot", removal: removal) unless in_snapshot.nil?
-          next issue_visibility(false, "no_snapshot_recorded") unless removal
+          next issue_visibility(false, "no_snapshot_recorded") unless ledger
 
-          head_created = head.is_a?(Hash) ? parse_time_or_nil(head.fetch("created_at", nil)) : nil
-          removed_at = parse_time_or_nil(removal.fetch("removed_at", nil))
-          removed_after_spawn = head_created.nil? || removed_at.nil? || removed_at >= head_created
-          next issue_visibility(false, "removed_issue_ledger", removed_after_spawn: removed_after_spawn, removal: removal)
+          next issue_visibility(false, "removed_issue_ledger", removed_after_spawn: ledger.fetch("after_spawn"), removal: removal)
         end
       end
 
@@ -10477,21 +10562,46 @@ module Meringue
       # `remove_issue_bundles_and_agents!`, so this ledger is the durable answer to "did this id
       # ever exist" once the issue record itself is gone.
       def removed_issue_record(state, issue_id)
-        canonical = Ids.canonical(issue_id.to_s)
-        Array(state.fetch("metadata", {}).fetch("removed_issues", nil)).reverse.find do |entry|
-          entry.is_a?(Hash) && Ids.canonical(entry.fetch("issue_id", nil).to_s) == canonical
+        removed_record(state, "issue", issue_id)
+      end
+
+      def removed_agent_record(state, agent_id)
+        removed_record(state, "agent", agent_id)
+      end
+
+      def removed_record(state, kind, record_id)
+        canonical = Ids.canonical(record_id.to_s)
+        key = REMOVED_RECORD_LEDGER_KEYS.fetch(kind)
+        Array(state.fetch("metadata", {}).fetch(key, nil)).reverse.find do |entry|
+          entry.is_a?(Hash) && Ids.canonical(entry.fetch("id", entry.fetch("issue_id", nil)).to_s) == canonical
         end
       end
 
-      def record_removed_issues!(state, issue_ids, reason, now)
-        ids = Array(issue_ids).compact.map(&:to_s).uniq
+      def record_removed_records!(state, kind, record_ids, reason, now)
+        ids = Array(record_ids).compact.map(&:to_s).uniq
         return if ids.empty?
 
+        key = REMOVED_RECORD_LEDGER_KEYS.fetch(kind)
         metadata = (state["metadata"] ||= {})
-        ledger = metadata["removed_issues"]
+        ledger = metadata[key]
         ledger = [] unless ledger.is_a?(Array)
-        ledger += ids.map { |issue_id| { "issue_id" => issue_id, "reason" => reason.to_s, "removed_at" => now } }
-        metadata["removed_issues"] = ledger.last(REMOVED_ISSUE_LEDGER_LIMIT)
+        ledger += ids.map do |record_id|
+          { "id" => record_id, "kind" => kind, "reason" => reason.to_s, "removed_at" => now }
+        end
+        metadata[key] = ledger.last(REMOVED_RECORD_LEDGER_LIMIT)
+      end
+
+      # Was this record removed after the head was spawned? That is the difference between "the
+      # world changed under an in-flight result" and "this head named something it never saw".
+      def removed_under_head_result(state, head_id, kind, record_id)
+        removal = removed_record(state, kind, record_id)
+        return nil unless removal
+
+        head = find_agent(state, head_id)
+        head_created = head.is_a?(Hash) ? parse_time_or_nil(head.fetch("created_at", nil)) : nil
+        removed_at = parse_time_or_nil(removal.fetch("removed_at", nil))
+        after_spawn = head_created.nil? || removed_at.nil? || removed_at >= head_created
+        { "removal" => removal, "after_spawn" => after_spawn }
       end
 
       def head_batch_remap_message(remap)
