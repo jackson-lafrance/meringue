@@ -23,6 +23,10 @@ class InputSlashCommandParserTest < Minitest::Test
       "/theme rose-pine" => ["SetTheme", { "theme" => "rose-pine" }],
       "/harness claude" => ["SetHarness", { "provider" => "claude" }],
       "/model openai/gpt-5.6-sol" => ["SetDefaultSessionModel", { "model" => "openai/gpt-5.6-sol" }],
+      # A model id may contain slashes and colons of its own; the parser hands the
+      # whole token to the kernel, which splits it on the first slash.
+      "/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast" =>
+        ["SetDefaultSessionModel", { "model" => "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast" }],
       "/thinking xhigh" => ["SetDefaultSessionThinkingLevel", { "level" => "xhigh" }],
       "/project add /tmp" => ["AddProject", { "path" => "/tmp", "name" => "" }],
       "/project rename P1 \"Renamed app\"" => ["ModifyProject", { "project_id" => "P1", "name" => "Renamed app" }],

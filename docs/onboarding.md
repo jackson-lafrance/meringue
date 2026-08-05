@@ -28,7 +28,7 @@ undiscoverable.
 | --- | --- | --- |
 | `setup · welcome` | One paragraph on what Meringue is and how work flows through it. | — |
 | `setup · 1/4 · harness` | `pi`, `claude`, `antigravity`, each with the logo the AgentTree uses. | `/harness <name>` |
-| `setup · 2/4 · model (pi)` | The models the harness itself reported, searchable, current default first. | `/model <provider/model>` |
+| `setup · 2/4 · model (pi)` | The models the harness itself reported, searchable, current default first. | `/model <provider>/<model-id>` |
 | `setup · 3/4 · thinking` | Every level the kernel accepts, labelled by what the catalog knows. | `/thinking <level>` |
 | `setup · 4/4 · theme` | The six colorschemes. Moving the highlight repaints the dashboard live. | `/theme <name>` |
 

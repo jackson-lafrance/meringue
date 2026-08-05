@@ -128,6 +128,27 @@ class InputKernelConvergenceTest < Minitest::Test
     end
   end
 
+  # Reported bug: `/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`
+  # was rejected end to end even though Pi accepts that model. The provider is
+  # everything before the first slash; the model id keeps the rest, colon and all.
+  def test_a_multi_segment_model_reference_survives_the_whole_slash_command_path
+    reference = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"
+    input_sandbox do |sandbox|
+      applied = sandbox.submit("/model #{reference}")
+
+      assert_equal [%w[SetDefaultSessionModel accepted]], sandbox.command_result_pairs(applied)
+      assert_equal reference, Meringue::Config.load(path: sandbox.config_path).value("harness", "pi", "model")
+
+      # A rejection names its reason in the message the user sees, not only in
+      # the errors detail.
+      rejected = sandbox.command_results(sandbox.submit("/model glm-5p2-fast")).first
+      assert_equal "rejected", rejected.fetch("status")
+      assert_includes rejected.fetch("message"), "has no provider prefix"
+      assert_includes rejected.fetch("message"), "Use <provider>/<model-id>"
+      assert_equal reference, Meringue::Config.load(path: sandbox.config_path).value("harness", "pi", "model")
+    end
+  end
+
   # `/defaults` is gone: it only printed the pair the status line and `/config`
   # already show. Typing it is now an unknown command, while a head asked "which
   # model will future agents use" still reaches the same kernel command.
