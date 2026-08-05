@@ -140,6 +140,14 @@ module KernelHeadsSupport
       @released << { "workspace" => workspace, "delete_branch" => delete_branch }
       false
     end
+
+    # These workers never own a git worktree, so prune cleanup is the same idempotent "nothing to
+    # remove" success the real manager reports for a project-root workspace.
+    def cleanup_pruned_worker_workspace(workspace, protected_paths: [])
+      @cleaned ||= []
+      @cleaned << { "workspace" => workspace, "protected_paths" => Array(protected_paths) }
+      { "status" => "skipped", "reason" => "not_a_managed_worktree", "success" => true, "attempted" => false }
+    end
   end
 
   # Guarantees the kernel never shells out to `gh` during tests.
