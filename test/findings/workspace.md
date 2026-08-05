@@ -11,20 +11,20 @@ recorded here.
 
 ## Real bugs / rough edges found (tests pin current behavior)
 
-1. **A released worker branch is deleted and recreated on re-allocation, so
-   commits that only lived on it stop being reachable.**
-   `Manager#release_worker_workspace(workspace)` (without `delete_branch: true`)
-   keeps `meringue/<task>-<suffix>` and its commits. But the next
-   `allocate_worker_workspace` for the same worker calls
-   `remove_orphaned_owned_branch`, which force-deletes any `meringue/` branch
-   that is not checked out in a worktree, and then recreates the branch from
-   `origin/main`. Worker commits survive only as dangling objects until `git gc`.
-   Test: `WorkspaceManagerCollisionTest#test_reallocating_after_release_recreates_the_branch_from_origin_main`
-   (asserts the new worktree is at `origin/main`, the file committed by the
-   previous worker is absent, the commit is no longer in the branch log, and the
-   object is still in the object database).
-   Suggested fix: only prune a `meringue/` branch when it is an ancestor of the
-   base ref (i.e. carries no unique commits), or require an explicit opt-in.
+1. ~~**A released worker branch is deleted and recreated on re-allocation, so
+   commits that only lived on it stop being reachable.**~~ **Fixed.**
+   `remove_orphaned_owned_branch` no longer force-deletes: it deletes a
+   `meringue/` branch only when the branch is not registered to a worktree *and*
+   `git rev-list --count <branch> --not --exclude=<branch> --all` proves it
+   carries no commit that exists nowhere else, and it prefers `git branch -d`
+   (which refuses an unmerged branch) before the verified `-D`. A branch with
+   commits is kept and checked back out by the next allocation, so an
+   interrupted worker's commits stay reachable *and* stay in its worktree.
+   `release_worker_workspace(delete_branch: true)` follows the same rule.
+   Tests: `WorkspaceManagerCollisionTest#test_reallocating_after_release_keeps_the_branch_and_its_commits`,
+   `#test_reallocating_after_release_recreates_an_empty_branch_from_origin_main`,
+   `#test_release_with_delete_branch_keeps_a_branch_that_carries_commits`, and
+   `WorkspaceManagerFailedAllocationCleanupTest#test_cleanup_keeps_a_branch_that_carries_commits_and_says_why`.
 
 2. **`Workspace::PathResolver` raises `ArgumentError` on a path containing a
    null byte instead of returning a rejected result.** `absolute_path` rescues
@@ -94,9 +94,24 @@ recorded here.
   `"workspace_path must be an existing directory"` when it is missing, and falls
   back to the project root cwd when the manager could not create a worktree
   (including the timeout case, where the allocation errors are surfaced).
-- **Timeout handling.** A `git worktree add` timeout produces
-  `timed_out: true`, `timeout_seconds`, the captured stderr, a `cleanup` record,
-  and no leftover branch.
+- **Timeout handling.** `git worktree add` runs under two independent bounds: a
+  stall bound (no output at all for `worktree_stall_timeout` seconds) and an
+  absolute ceiling (`worktree_checkout_timeout`), which also bounds one whole
+  `allocate_worker_workspace` call including its plumbing commands and retried
+  candidates. Short plumbing keeps the 60s `git_command_timeout`. A killed
+  command produces `timed_out: true`, `timeout_seconds`, the captured output, a
+  `failure_kind` (`command_stalled` / `command_timed_out`), a `recovery`
+  classification (`retry` for a stall, `resume` for a blown ceiling), a
+  `cleanup` record, and no leftover worktree or branch. Tests:
+  `WorkspaceManagerCheckoutTimeoutTest`.
+- **Cleanup after a killed `git worktree add`.** git holds
+  `.git/worktrees/<name>/locked` for the whole checkout, so an interrupted add
+  leaves a *locked* registration that `git worktree remove --force` refuses with
+  exit 128 and `git worktree prune` skips. Cleanup unlocks, force-removes twice,
+  deletes the owned directory, prunes, verifies the registration is gone, and
+  reports anything it could not do safely in `cleanup["warnings"]` (which the
+  kernel logs as a warning). Tests:
+  `WorkspaceManagerFailedAllocationCleanupTest`.
 - **Path resolution.** Candidate order is `workspace_path`, harness `cwd`, plan
   `workspace_path`, `workspace_root_path`, `worktree_root_path`; the first
   existing directory wins; a fallback sets `recovered: true` plus a "Using X
