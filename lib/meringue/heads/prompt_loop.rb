@@ -85,19 +85,61 @@ module Meringue
         record_user_kernel_command(route)
         command_results = route.fetch("commands", []).map { |command| apply_kernel(command) }
         record_user_kernel_command_output(route, command_results)
-        worker_wait_results = wait_for_spawned_command_workers(command_results, on_event: on_event)
+        head_apply_result = apply_synchronous_head_result(command_results, on_event: on_event)
+        worker_wait_results = wait_for_spawned_command_workers(
+          command_results + [head_apply_result].compact,
+          on_event: on_event
+        )
         payload = {
           "event" => "slash_command_applied",
           "summary" => slash_summary(command_results),
           "state_mutated" => command_results.any? { |result| result.fetch("status", nil) == "accepted" } ||
+            head_apply_result&.fetch("status", nil) == "accepted" ||
             worker_wait_results.any? { |result| result.fetch("status", nil) == "settled" },
           "route" => route,
           "command_results" => command_results,
           "worker_wait_results" => worker_wait_results,
           "state_summary" => state_summary
         }
+        payload["apply_head_result"] = head_apply_result if head_apply_result
         emit(on_event, "slash_command_applied", "command_results" => command_results, "worker_wait_results" => worker_wait_results)
         payload
+      end
+
+      # `/prompt H13 "try again"` retries a failed head, and a synchronous head runner hands back its
+      # HeadResult inside that command result. Applying it here is what makes the typed retry
+      # converge with the natural-language head loop; when heads run asynchronously there is no
+      # result yet and the kernel's own polling applies it, so this does nothing.
+      def apply_synchronous_head_result(command_results, on_event: nil)
+        pending = Array(command_results).find do |result|
+          result.is_a?(Hash) && result.fetch("status", nil) == "accepted" && unapplied_head_result?(result)
+        end
+        return nil unless pending
+
+        head_id = pending.fetch("target_id")
+        head_result = head_result_from(pending)
+        emit(on_event, "head_completed", "head_id" => head_id, "head_result" => head_result)
+        apply_result = apply_kernel(
+          "type" => "ApplyHeadResult",
+          "payload" => { "head_id" => head_id, "head_result" => head_result }
+        )
+        emit(
+          on_event,
+          "head_result_applied",
+          "head_id" => head_id,
+          "head_result" => head_result,
+          "apply_result" => apply_result,
+          "command_results" => command_results_from(apply_result)
+        )
+        apply_result
+      end
+
+      def unapplied_head_result?(command_result)
+        record = command_result.fetch("result", nil)
+        return false unless record.is_a?(Hash) && record.fetch("type", nil) == "head"
+
+        metadata = record.fetch("harness_metadata", {}) || {}
+        metadata.fetch("head_result", nil).is_a?(Hash) && metadata.fetch("head_result_applied_at", nil).nil?
       end
 
       def record_user_kernel_command(route)
