@@ -147,7 +147,9 @@ module Meringue
 
       def add_project_command(context)
         project_root = default_project_root(context&.cwd || Dir.pwd)
-        suggested_name = context&.to_prompt_h&.dig("project_discovery", "current_directory", "suggested_project_name")
+        # Re-read the repository's canonical name at command construction time. Do not
+        # derive a project name from the request title or stale routing metadata.
+        suggested_name = Meringue::ProjectNaming.name_for(project_root)
 
         {
           "type" => "AddProject",
@@ -244,7 +246,11 @@ module Meringue
       end
 
       def routing_terms(text)
-        stop_words = %w[a an and are for from i in is it of on that the this to we with you]
+        stop_words = %w[
+          a an and are as at be by completed complete done for from i in is it of on or
+          that the this to we with you add change clean cleanup completed fix fixed improve
+          implement implementation update updated work
+        ]
         text.to_s.downcase.scan(/[a-z0-9_]{3,}/).reject { |term| stop_words.include?(term) }.uniq
       end
 
