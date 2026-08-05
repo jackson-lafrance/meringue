@@ -92,7 +92,11 @@ class E2eRestartRecoveryTest < Minitest::Test
     assert_equal ["P1-I2"], pruned.fetch("issues").map { |issue| issue.fetch("id") }
     assert_equal ["P1-I2-W1"], workers(pruned).map { |worker| worker.fetch("id") }.sort
     assert_equal ["P1"], pruned.fetch("projects").map { |project| project.fetch("id") }
-    assert_logged(/Pruned 2 issues, 0 projects, and 0 standalone agents\./, pruned)
+    # One line for the whole pass: two issues, their two workers plus the two heads that created
+    # them, and the two managed worktrees that were actually removed from disk.
+    assert_equal 4, removed_agent_ids.length
+    assert_logged(/Pruned 2 issues, 4 agents, 2 worktrees, and 0 projects\./, pruned)
+    refute_logged(/managed worktree for worker/, pruned)
 
     tree = agent_tree_text(pruned)
     refute_includes tree, "I1  Fix the parser"
