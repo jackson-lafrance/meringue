@@ -81,6 +81,28 @@ class FoundationDocsPolicyTest < Minitest::Test
     assert_includes contract, "it strips a trailing lifecycle status from any project name it stores"
   end
 
+  # Heads read this file to decide between a one-shot worker and a goal loop, and the two
+  # CreateGoal forms have to be documented where the head actually looks.
+  def test_head_contract_explains_when_a_critical_request_is_a_goal_loop
+    contract = File.read(FoundationSupport.repo_path("docs", "head_agent_kernel_commands.md"))
+
+    assert_includes contract, "#### Recognising a goal-loop request"
+    assert_includes contract, "#### Two forms: an existing issue, or a prompt"
+    assert_includes contract, "Urgency on its own is not a goal loop."
+    assert_includes contract, "the kernel mints the issue and attaches the goal to it in one command"
+    assert_includes contract, "`project_ambiguous`"
+    assert_includes contract, "drive it to done"
+  end
+
+  def test_goal_loop_doc_documents_both_creation_forms
+    guide = File.read(FoundationSupport.repo_path("docs", "goal_loops.md"))
+
+    assert_includes guide, "## Creating a goal"
+    assert_includes guide, "/goal create \""
+    assert_includes guide, "--project"
+    assert_includes guide, "never leaves an orphan issue behind"
+  end
+
   def test_testing_guide_documents_how_to_run_the_suite
     guide = File.read(FoundationSupport.repo_path("docs", "testing.md"))
 

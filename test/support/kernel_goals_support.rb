@@ -176,14 +176,14 @@ module KernelGoalsSupport
     end
   end
 
-  def build_engine(harness_client: self.harness_client, metric_probe: probe, **overrides)
+  def build_engine(harness_client: self.harness_client, metric_probe: probe, cwd: tmpdir, **overrides)
     Meringue::Kernel::Engine.new(
       store: store,
       harness_client: harness_client,
       harness_client_resolver: ->(_agent) { harness_client },
       head_runner: Meringue::Heads::FakeRunner.new,
       workspace_manager: workspace_manager,
-      cwd: tmpdir,
+      cwd: cwd,
       forge_client: OfflineForgeClient.new,
       metric_probe: metric_probe,
       config_path: tmp_path("config.toml"),
@@ -232,6 +232,14 @@ module KernelGoalsSupport
     result = apply_raw(type, payload, command_id: command_id)
     assert_equal "accepted", result.fetch("status"), "#{type} was not accepted: #{result.fetch("message")} #{result.fetch("errors")}"
     result
+  end
+
+  # Registers a project without an issue, for the `/goal create "<prompt>"` form where the
+  # kernel mints the issue itself.
+  def registered_project(name = "goal-project", project_name: "Goal demo")
+    root = create_git_repo(name)
+    project_id = apply!("AddProject", { "path" => root, "name" => project_name }).fetch("target_id")
+    { "root" => root, "project_id" => project_id }
   end
 
   def project_with_issue(title: "Raise kernel coverage")

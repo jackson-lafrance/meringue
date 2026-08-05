@@ -293,6 +293,36 @@ class HeadBatchTargetBindingTest < Minitest::Test
     assert_equal ["Bootstrap worker"], worker_titles(issue.fetch("id"))
   end
 
+  # A head that starts a goal loop does not have to create the issue first: the prompt form of
+  # CreateGoal mints it. The project it lands in is bound the same way CreateIssue binds one,
+  # so "register this repo and drive it to green" is a single batch with nothing predicted.
+  def test_a_prompt_goal_binds_to_the_project_the_batch_registered
+    head_id = spawn_head("This is critical: register the repo and keep going until the suite is green")
+    new_project_path = git_repo!(File.join(@temp_root, "goal-project"))
+
+    result = apply_batch(head_id, [
+      { "type" => "AddProject", "command_id" => "add", "payload" => { "path" => new_project_path, "name" => "goal-project" } },
+      {
+        "type" => "CreateGoal",
+        "payload" => {
+          "project_from_command" => "add",
+          "prompt" => "Keep going until rake test passes with zero failures.",
+          "metric" => { "command" => "rake test", "comparator" => "eq", "target" => 0, "parse" => { "type" => "last_number" } }
+        }
+      }
+    ])
+
+    assert_all_accepted(result)
+    registered = @engine.list_all.fetch("projects").find { |project| File.expand_path(project.fetch("root_path")) == File.expand_path(new_project_path) }
+    goal = @engine.list_all.fetch("goals").first
+    issue = issue_by_title("Keep going until rake test passes with zero failures")
+
+    assert_equal registered.fetch("id"), goal.fetch("project_id")
+    assert_equal registered.fetch("id"), issue.fetch("project_id")
+    assert_equal issue.fetch("id"), goal.fetch("issue_id")
+    assert_equal head_id, issue.fetch("originating_head_id"), "the minted issue is attributed to its head"
+  end
+
   # The reported recurrence: one CreateIssue plus a large fan-out of workers that all name the
   # previous, still-visible issue id.
   def test_large_fan_out_binds_to_the_created_issue_instead_of_the_previous_issue
