@@ -52,12 +52,18 @@ class TuiCaseInsensitiveIdsTest < Minitest::Test
       "/kill h83" => "/kill H83",
       "/kill p1-i1-w1" => "/kill P1-I1-W1",
       "/dismiss q8" => "/dismiss Q8",
-      "/session-settings p1-i1-w1" => "/session-settings P1-I1-W1"
+      "/prompt p1-i1-w1" => "/prompt P1-I1-W1"
     }.each do |typed, expected|
       completion = @app.send(:safe_slash_completion, typed, 0, @state)
 
       assert_equal expected, completion.to_s.strip, "completion for #{typed.inspect}"
     end
+  end
+
+  # `/session-settings` was removed, so typing it completes nothing: it is unknown text rather
+  # than a command with an agent-id argument.
+  def test_the_removed_session_settings_command_does_not_complete_an_agent_id
+    assert_nil @app.send(:safe_slash_completion, "/session-settings p1-i1-w1", 0, @state)
   end
 
   def test_an_exact_canonical_id_is_submitted_instead_of_being_recompleted

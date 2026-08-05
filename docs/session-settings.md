@@ -86,7 +86,7 @@ An invalid level names the valid ones instead of only saying nothing changed, an
 Default Pi thinking level was not changed: "xhi" is not a Pi thinking level. Did you mean xhigh? Valid levels: off, minimal, low, medium, high, xhigh, max.
 ```
 
-`/session-settings <agent_id>` remains available for inspecting the effective settings of an existing active or resumable session. It does not provide per-session model or thinking commands; existing sessions keep their own values. The old dashboard `/session` spelling remains a compatibility alias.
+There is no slash command for inspecting one existing session's effective settings. `/session-settings <agent_id>` and its old dashboard `/session <agent_id>` alias were removed, along with the `GetSessionSettings` kernel command they dispatched to, so typing either is now an unknown command. Existing sessions keep their own model and thinking values, and Meringue still records them: see [Authoritative existing-session discovery](#authoritative-existing-session-discovery) for where they are read and displayed.
 
 ## Persistence and precedence
 
@@ -121,6 +121,8 @@ Meringue records effective session settings in a harness-neutral `session_settin
 ```
 
 For a live Pi RPC process, Meringue reads `model` and `thinkingLevel` from Pi's `get_state` response. It never substitutes spawn arguments or Meringue defaults for an effective session value.
+
+That object is refreshed by the normal session paths rather than by a user command: spawning, prompting, and each reconcile poll merge the harness's reported settings back onto the agent record. It is visible in the focused worker workspace (`session settings · model … · thinking …`), in the raw `/state` output, and in the `GetInfo` record for an agent.
 
 For a resumable process whose RPC transport is unavailable, Pi's persisted JSONL session is authoritative. Meringue walks the current branch and reads `model_change` and `thinking_level_change` entries. An assistant message's provider/model is only a fallback for older session files. If Pi persisted no thinking level, Meringue reports `unknown` rather than guessing.
 

@@ -25,7 +25,6 @@ class InputSlashCommandParserTest < Minitest::Test
       "/defaults" => ["GetSessionDefaults", {}],
       "/model openai/gpt-5.6-sol" => ["SetDefaultSessionModel", { "model" => "openai/gpt-5.6-sol" }],
       "/thinking xhigh" => ["SetDefaultSessionThinkingLevel", { "level" => "xhigh" }],
-      "/session-settings P1-I1-W1" => ["GetSessionSettings", { "agent_id" => "P1-I1-W1" }],
       "/project add /tmp" => ["AddProject", { "path" => "/tmp", "name" => "" }],
       "/project rename P1 \"Renamed app\"" => ["ModifyProject", { "project_id" => "P1", "name" => "Renamed app" }],
       "/issue rename P1-I1 \"Renamed issue\"" => ["ModifyIssue", { "issue_id" => "P1-I1", "title" => "Renamed issue" }],
@@ -134,7 +133,7 @@ class InputSlashCommandParserTest < Minitest::Test
 
   def test_missing_arguments_for_strict_commands_return_invalid_slash_command
     ["/theme", "/theme a b", "/harness", "/defaults now", "/model", "/model a b",
-     "/thinking", "/thinking high extra", "/session-settings", "/session-settings P1 P2",
+     "/thinking", "/thinking high extra",
      "/model P1 extra", "/thinking P1 extra", "/project", "/project list /tmp", "/issue", "/issue delete P1",
      "/worker", "/worker kill P1-I1", "/dismiss", "/dismiss Q1 Q2", "/recount now", "/prune bogus",
      "/prune resolved errored", "/project rename P1", "/issue rename P1-I1"].each do |input|
@@ -162,12 +161,39 @@ class InputSlashCommandParserTest < Minitest::Test
     end
   end
 
-  def test_session_is_a_hidden_compatibility_alias_for_the_clearer_session_settings_command
-    legacy = parse_slash("/session P1-I1-W1")
+  # The per-session settings readout was removed. Both the command and its old dashboard alias
+  # are now ordinary unknown commands, and neither is advertised anywhere in the parser.
+  def test_session_settings_and_its_legacy_session_alias_are_unknown_commands
+    {
+      "/session-settings P1-I1-W1" => "Unknown slash command: /session-settings",
+      "/session-settings" => "Unknown slash command: /session-settings",
+      "/session P1-I1-W1" => "Unknown slash command: /session",
+      "/session" => "Unknown slash command: /session"
+    }.each do |input, message|
+      parsed = parse_slash(input)
 
-    assert_equal "GetSessionSettings", legacy.fetch("type")
-    assert_equal({ "agent_id" => "P1-I1-W1" }, legacy.fetch("payload"))
-    refute Meringue::Input::SlashCommandParser::COMMAND_SPECS.any? { |usage, _| usage.start_with?("/session ") }
+      assert_equal "InvalidSlashCommand", parsed.fetch("type"), "type for #{input.inspect}"
+      assert_equal message, parsed.fetch("payload").fetch("message")
+      assert_equal "/help", parsed.fetch("payload").fetch("usage")
+    end
+
+    usages = Meringue::Input::SlashCommandParser::COMMAND_SPECS.map(&:first)
+    refute usages.any? { |usage| usage.start_with?("/session") }
+    prefixes = Meringue::Input::SlashCommandParser::ARGUMENT_SUGGESTION_CONTEXTS.map { |context| context.fetch("prefix") }
+    refute prefixes.any? { |prefix| prefix.start_with?("/session") }
+  end
+
+  # Typing the removed command offers no argument completions either: it is matched as plain
+  # unknown text, so the popup keeps showing the real command list.
+  def test_removed_session_settings_command_offers_no_argument_suggestions
+    records = Meringue::Input::SlashCommandParser.command_suggestion_records(
+      "/session-settings ",
+      limit: 5,
+      state: suggestion_state
+    )
+
+    refute_includes records.map { |record| record.fetch("usage") }, "P1-I1-W1"
+    refute_includes records.map { |record| record.fetch("kind") }, "sessions"
   end
 
   def test_unknown_command_returns_invalid_slash_command_with_help_usage
@@ -266,14 +292,10 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_equal ["Q1"], dismiss.map { |record| record.fetch("usage") }
   end
 
-  def test_session_inspection_and_future_default_value_suggestions_are_distinct
+  def test_future_default_value_suggestions_offer_models_and_thinking_levels
     state = sample_state
     state["metadata"] = { "pi_session_defaults" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "xhigh" } }
     state.fetch("agents").first["harness_session_id"] = "pi-session-1"
-
-    inspect = Meringue::Input::SlashCommandParser.command_suggestion_records("/session-settings ", limit: 5, state: state)
-    assert_equal ["P1-I1-W1"], inspect.map { |record| record.fetch("usage") }
-    assert_equal "/session-settings P1-I1-W1", inspect.first.fetch("completion")
 
     models = Meringue::Input::SlashCommandParser.command_suggestion_records("/model openai", limit: 5, state: state)
     assert_includes models.map { |record| record.fetch("completion") }, "/model openai/gpt-5.6-sol"
@@ -541,7 +563,6 @@ class InputSlashCommandParserTest < Minitest::Test
       "/kill p1-i23-w1" => ["Kill", { "target_id" => "p1-i23-w1" }],
       "/dismiss q8" => ["DismissQuestion", { "question_id" => "q8" }],
       '/answer q8 "staging"' => ["AnswerQuestion", { "question_id" => "q8", "answer" => "staging" }],
-      "/session-settings P1-i1-W1" => ["GetSessionSettings", { "agent_id" => "P1-i1-W1" }],
       "/model openai/gpt-5.6-sol" => ["SetDefaultSessionModel", { "model" => "openai/gpt-5.6-sol" }],
       "/thinking xhigh" => ["SetDefaultSessionThinkingLevel", { "level" => "xhigh" }],
       '/worker spawn p1-i1 "go"' => ["SpawnWorker", { "issue_id" => "p1-i1", "prompt" => "go" }],
@@ -564,8 +585,7 @@ class InputSlashCommandParserTest < Minitest::Test
       "/worker spawn p1-i" => ["P1-I1", "/worker spawn P1-I1"],
       "/issue create p" => ["P1", "/issue create P1"],
       "/answer q" => ["Q1", "/answer Q1"],
-      "/dismiss q1" => ["Q1", "/dismiss Q1"],
-      "/session-settings p1-i1-w1" => ["P1-I1-W1", "/session-settings P1-I1-W1"]
+      "/dismiss q1" => ["Q1", "/dismiss Q1"]
     }.each do |input, (usage, completion)|
       records = Meringue::Input::SlashCommandParser.command_suggestion_records(input, limit: 5, state: suggestion_state)
 
@@ -587,7 +607,8 @@ class InputSlashCommandParserTest < Minitest::Test
 
   private
 
-  # sample_state plus a session-capable worker so /session-settings has something to offer.
+  # sample_state plus a worker that has a harness session, which is what id completion for
+  # agent-targeting commands (`/kill`, `/prompt`, `/jump`) is exercised against.
   def suggestion_state
     state = sample_state
     state.fetch("agents").first["harness_session_id"] = "pi-session-1"

@@ -20,13 +20,31 @@ class KernelHeadsUserKernelCommandsTest < KernelHeadsTestCase
     { "type" => type, "payload" => payload }
   end
 
-  def test_session_defaults_and_inspection_commands_are_head_proposable
+  def test_session_defaults_commands_are_head_proposable
     %w[
       GetSessionDefaults SetDefaultSessionModel SetDefaultSessionThinkingLevel
-      GetSessionSettings
     ].each do |command_type|
       assert_includes Meringue::Kernel::Engine::HEAD_PROPOSABLE_COMMANDS, command_type
     end
+  end
+
+  # `/session-settings` and its `GetSessionSettings` kernel command were removed together, so a
+  # head that proposes the old command gets the ordinary unknown-command rejection instead of
+  # silently reaching a handler no user surface advertises.
+  def test_the_removed_session_settings_command_is_not_proposable_by_a_head
+    refute_includes Meringue::Kernel::Engine::HEAD_PROPOSABLE_COMMANDS, "GetSessionSettings"
+
+    head_id = spawn_head!("show P1-I1-W1's model and thinking settings")
+    applied = apply_head_result(
+      head_id,
+      head_result(commands: [command("GetSessionSettings", "agent_id" => "P1-I1-W1")]),
+      cleanup_head: false
+    )
+    result = command_results(applied).fetch(0)
+
+    assert_equal "rejected", result.fetch("status")
+    assert_equal "Unknown kernel command: GetSessionSettings", result.fetch("message")
+    assert_includes result.fetch("errors"), "unknown_command"
   end
 
   def test_one_head_batch_can_apply_every_ordinary_user_kernel_command
