@@ -112,9 +112,6 @@ class InputKernelConvergenceTest < Minitest::Test
 
   def test_future_pi_default_slash_commands_validate_and_persist_in_the_sandbox
     input_sandbox do |sandbox|
-      initial = sandbox.submit("/defaults")
-      assert_equal [%w[GetSessionDefaults accepted]], sandbox.command_result_pairs(initial)
-
       model = sandbox.submit("/model openai/gpt-5.6-sol")
       thinking = sandbox.submit("/thinking xhigh")
       assert_equal [%w[SetDefaultSessionModel accepted]], sandbox.command_result_pairs(model)
@@ -128,6 +125,36 @@ class InputKernelConvergenceTest < Minitest::Test
       assert_equal "rejected", result.fetch("status")
       assert_includes result.fetch("errors").join(" "), "thinking level must be one of"
       assert_equal "xhigh", Meringue::Config.load(path: sandbox.config_path).value("harness", "pi", "thinking_level")
+    end
+  end
+
+  # `/defaults` is gone: it only printed the pair the status line and `/config`
+  # already show. Typing it is now an unknown command, while a head asked "which
+  # model will future agents use" still reaches the same kernel command.
+  def test_defaults_slash_command_is_removed_but_heads_can_still_read_the_defaults
+    input_sandbox do |sandbox|
+      typed = sandbox.submit("/defaults")
+      result = sandbox.command_results(typed).first
+
+      assert_equal "InvalidSlashCommand", result.fetch("command_type")
+      assert_equal "rejected", result.fetch("status")
+      assert_equal "Unknown slash command: /defaults", result.fetch("message")
+      refute typed.fetch("state_mutated")
+
+      sandbox.head_runner.enqueue(
+        sandbox.head_result(
+          title: "Report the defaults",
+          summary: "Reported the future-session pair.",
+          commands: [{ "type" => "GetSessionDefaults", "payload" => {} }]
+        )
+      )
+      head_driven = sandbox.submit("which model will future agents use")
+
+      assert_equal [%w[GetSessionDefaults accepted]], sandbox.command_result_pairs(head_driven)
+      assert_includes(
+        sandbox.command_results(head_driven).first.fetch("message"),
+        "Future Pi heads and workers use"
+      )
     end
   end
 

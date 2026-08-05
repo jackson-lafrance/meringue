@@ -18,7 +18,6 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <agent_id> \"<message>\"", "Prompt a worker session, or retry a failed head (H<n>)."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
-        ["/defaults", "Show the model and thinking level for all future Pi sessions."],
         ["/model <provider/model>", "Persist the model for all future Pi sessions; existing sessions are unchanged."],
         ["/thinking <level>", "Persist off, minimal, low, medium, high, xhigh, or max for all future Pi sessions; existing sessions are unchanged."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
@@ -572,8 +571,6 @@ module Meringue
           parse_theme(arguments)
         when "harness"
           parse_harness(arguments)
-        when "defaults"
-          parse_defaults(arguments)
         when "models"
           parse_models(arguments)
         when "model"
@@ -637,12 +634,6 @@ module Meringue
         return invalid("Usage: /harness <pi|claude|antigravity>") unless tokens.length == 1
 
         kernel_command("SetHarness", "provider" => tokens[0])
-      end
-
-      def parse_defaults(arguments)
-        return invalid("Usage: /defaults") unless split_arguments(arguments).empty?
-
-        kernel_command("GetSessionDefaults")
       end
 
       # `/models` opens the local TUI model picker: a searchable list of the

@@ -136,7 +136,6 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <agent_id> \"<message>\"", "Prompt an existing worker agent session, or retry a failed head (H<n>)."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
-        ["/defaults", "Show the model and thinking level used for all future Pi heads and workers."],
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
         ["/model <provider/model>", "Persist the model used for all future Pi heads and workers; existing sessions are unchanged."],
         ["/thinking <level>", "Persist the thinking level used for all future Pi heads and workers: off, minimal, low, medium, high, xhigh, or max."],
@@ -1252,6 +1251,13 @@ module Meringue
         accepted_result(command_id, command_type, nil, "Loaded Meringue state.", store.load, [])
       end
 
+      # Reports the model/thinking pair future Pi heads and workers will use.
+      # There is no slash command for it any more: the dashboard status line
+      # already shows `Pi defaults: <model> · <thinking>` and `/config` prints
+      # the same pair, so the typed `/defaults` was redundant surface. The
+      # command stays because a head still proposes it for "show the defaults"
+      # or "which model will future agents use", where the answer has to reach
+      # the log with the clamp caveat attached.
       def get_session_defaults(command_id, command_type)
         state = normalized_state
         defaults = configured_pi_session_defaults
