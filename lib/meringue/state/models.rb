@@ -3,6 +3,7 @@
 require "time"
 
 require_relative "../goals/record"
+require_relative "../project_naming"
 
 module Meringue
   module State
@@ -81,6 +82,7 @@ module Meringue
         state["metadata"]["created_at"] ||= now
         state["metadata"]["updated_at"] ||= state["metadata"].fetch("created_at")
         migrate_pull_requests_to_issues!(state)
+        repair_project_names!(state)
         state
       end
 
@@ -154,6 +156,22 @@ module Meringue
           match = record.fetch("id", "").to_s.match(pattern)
           match && match[1].to_i
         end.max || 0
+      end
+
+      # A project name is the product's name; a lifecycle status is what Meringue is doing
+      # to it. State written before the kernel enforced that (or by a head that echoed a
+      # rendered "Meringue working" label back into AddProject) is repaired on load instead
+      # of staying broken, so the next save persists the concise name.
+      def repair_project_names!(state)
+        Array(state["projects"]).each do |project|
+          next unless project.is_a?(Hash)
+          # Only a name that really carries a status is touched, so an untouched name is
+          # never rewritten for cosmetic reasons.
+          next unless ProjectNaming.status_suffix?(project["name"])
+
+          project["name"] = ProjectNaming.without_status_suffix(project["name"])
+        end
+        state
       end
 
       def migrate_pull_requests_to_issues!(state)

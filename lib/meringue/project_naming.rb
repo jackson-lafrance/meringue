@@ -7,12 +7,21 @@ module Meringue
   module ProjectNaming
     README_FILENAMES = %w[README.md README.markdown README.rdoc README].freeze
     MAX_NAME_LENGTH = 80
+    # Lifecycle statuses (see AGENTS.md "Statuses") describe what Meringue is
+    # doing to a project. They are never part of what the project is called, so
+    # "Meringue working" is always the name "Meringue" plus a rendered status
+    # that leaked into the name.
+    STATUS_SUFFIXES = %w[queued working idle blocked completed errored killed].freeze
     # These words describe a task, lifecycle state, or repository facet rather
-    # than the product itself. They must not become part of a project label.
-    NON_PRODUCT_SUFFIXES = %w[
-      add change clean cleanup complete completed done fix fixed improve implement
+    # than the product itself. They must not become part of a derived project
+    # label.
+    NON_PRODUCT_SUFFIXES = (%w[
+      add change clean cleanup complete done fix fixed improve implement
       integration storefront update updated work
-    ].freeze
+    ] + STATUS_SUFFIXES).uniq.freeze
+    # Punctuation that only ever joined a name to something else. Once the
+    # trailing fragment is gone the separator has nothing left to join.
+    SEPARATOR_PATTERN = /\A[-–—·•|:;,\/\\]+\z/.freeze
 
     module_function
 
@@ -21,14 +30,26 @@ module Meringue
       canonical_name(readme_name(root) || humanize_basename(File.basename(root)))
     end
 
+    # Full cleanup for a name Meringue derived itself (README heading, path
+    # basename). Safe to be aggressive here because nobody typed this name.
     def canonical_name(value)
-      text = value.to_s.strip
-      return nil if text.empty?
+      trim_trailing_words(value, NON_PRODUCT_SUFFIXES)
+    end
 
-      words = text.split
-      trimmed = words.dup
-      trimmed.pop while trimmed.length > 1 && NON_PRODUCT_SUFFIXES.include?(trimmed.last.downcase)
-      trimmed.join(" ")
+    # Minimal cleanup for a name that a human or a head supplied and that the
+    # kernel is about to store. Only a lifecycle status is removed, because a
+    # status is never a product name, while "Payments Integration" is.
+    def without_status_suffix(value)
+      trim_trailing_words(value, STATUS_SUFFIXES)
+    end
+
+    # True when a stored/proposed name carries a rendered lifecycle status,
+    # which is the shape of the "Meringue working" regression.
+    def status_suffix?(value)
+      normalized = normalize_whitespace(value)
+      return false if normalized.empty?
+
+      without_status_suffix(normalized) != normalized
     end
 
     def readme_name(root)
@@ -57,6 +78,35 @@ module Meringue
         word.match?(/\A[a-z][a-z0-9]*\z/) ? word.sub(/\A[a-z]/) { |letter| letter.upcase } : word
       end.join(" ")
     end
+
+    # Pops trailing throwaway words (and the punctuation that attached them)
+    # while always keeping at least one word, so a project genuinely called
+    # "Working" survives.
+    def trim_trailing_words(value, words_to_drop)
+      text = normalize_whitespace(value)
+      return nil if text.empty?
+
+      words = text.split(" ")
+      words.pop while words.length > 1 && droppable_word?(words.last, words_to_drop)
+      words.join(" ")
+    end
+    private_class_method :trim_trailing_words
+
+    def droppable_word?(word, words_to_drop)
+      text = word.to_s
+      return true if text.match?(SEPARATOR_PATTERN)
+
+      bare = text.gsub(/\A[\(\[\{"'“‘]+/, "").gsub(/[\)\]\}"'”’.,;:!?]+\z/, "").downcase
+      return false if bare.empty?
+
+      words_to_drop.include?(bare)
+    end
+    private_class_method :droppable_word?
+
+    def normalize_whitespace(value)
+      value.to_s.gsub(/[[:space:]]+/, " ").strip
+    end
+    private_class_method :normalize_whitespace
 
     def clean_heading(value)
       text = value.to_s.gsub(/\[([^\]]+)\]\([^)]*\)/, '\\1').strip

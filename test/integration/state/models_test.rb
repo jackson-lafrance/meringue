@@ -59,6 +59,37 @@ class StateModelsShapeTest < Minitest::Test
     assert state.fetch("questions").first.key?("unknown")
   end
 
+  # A lifecycle status is never part of a project's name. State written before that was
+  # enforced is repaired on load, so a project stored as "Meringue working" comes back as
+  # "Meringue" instead of staying broken until the user renames it.
+  def test_ensure_state_shape_repairs_project_names_that_carry_a_lifecycle_status
+    state = {
+      "projects" => [
+        { "id" => "P1", "name" => "Meringue working", "status" => "working" },
+        { "id" => "P2", "name" => "World  working", "status" => "working" },
+        { "id" => "P3", "name" => "Working Copy", "status" => "idle" },
+        { "id" => "P4", "name" => "Payments Integration", "status" => "completed" },
+        { "id" => "P5", "status" => "queued" }
+      ]
+    }
+
+    Models.ensure_state_shape!(state)
+    names = state.fetch("projects").map { |project| project["name"] }
+
+    assert_equal ["Meringue", "World", "Working Copy", "Payments Integration", nil], names
+    assert_equal %w[working working idle completed queued], state.fetch("projects").map { |project| project.fetch("status") }
+  end
+
+  def test_repairing_project_names_is_idempotent
+    state = { "projects" => [{ "id" => "P1", "name" => "Meringue working", "status" => "working" }] }
+
+    Models.ensure_state_shape!(state)
+    snapshot = JSON.generate(state)
+    Models.ensure_state_shape!(state)
+
+    assert_equal snapshot, JSON.generate(state)
+  end
+
   def test_ensure_state_shape_does_not_reject_out_of_vocabulary_statuses
     # Normalization is tolerant by design: the kernel owns lifecycle transitions, so a
     # hand-edited or future status is preserved rather than raising or being rewritten.
