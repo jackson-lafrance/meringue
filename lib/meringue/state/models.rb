@@ -22,8 +22,27 @@ module Meringue
       ].freeze
       AGENT_WORKSPACE_VIEWS = %w[agent terminal].freeze
       AGENT_WORKSPACE_FILTERS = %w[all output final reasoning tools].freeze
+      # A head is stateless per user message, so "retrying" one means re-running the request it
+      # never finished routing. Only a head that stopped without routing qualifies: `errored` (its
+      # turn or session died) or `killed` (the user stopped it) while its record is still visible
+      # in the AgentTree. A `queued`/`working` head is still routing the message, and a
+      # `completed`/`blocked` head already applied part of its result, so neither is a retry target.
+      HEAD_RETRY_STATUSES = %w[errored killed].freeze
 
       module_function
+
+      # Shared by the kernel (which performs the retry) and the TUI (which offers the selected
+      # head as a chat target), so both agree on which head rows can be reprompted.
+      def head_retry_target?(agent)
+        return false unless agent.is_a?(Hash)
+        return false unless agent.fetch("type", nil).to_s == "head"
+        return false unless HEAD_RETRY_STATUSES.include?(agent.fetch("status", nil).to_s)
+
+        metadata = agent.fetch("harness_metadata", nil)
+        metadata = {} unless metadata.is_a?(Hash)
+        # A head that already applied its result routed the work; re-running it would duplicate it.
+        metadata.fetch("head_result_applied_at", nil).to_s.strip.empty?
+      end
 
       def empty_state(now: Time.now.utc.iso8601)
         ensure_state_shape!({}, now: now)
