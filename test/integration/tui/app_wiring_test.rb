@@ -47,7 +47,13 @@ class TuiAppWiringTest < Minitest::Test
     provider = TUISupport::RecordingStateProvider.new(demo_state)
     composed = compose_app_state(@app, provider.to_proc, "typed")
 
-    assert_equal %w[_agent_tree_navigation _agent_workspace _chat _log_scope _scroll _selection], (composed.keys - demo_state.keys).sort
+    assert_equal(
+      %w[_agent_tree_navigation _agent_workspace _chat _log_scope _onboarding _scroll _selection],
+      (composed.keys - demo_state.keys).sort
+    )
+    # First-run setup renders full screen, so it is a top-level view key like the
+    # focused workspace, and it is nil unless setup is actually up.
+    assert_nil composed.fetch("_onboarding")
     demo_state.each_key { |key| assert composed.key?(key), "kernel key #{key} must survive composition" }
     assert_equal demo_state.fetch("agents"), composed.fetch("agents")
     assert_equal demo_state.fetch("questions"), composed.fetch("questions")
