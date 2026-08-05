@@ -19,6 +19,10 @@ module Meringue
 
       attr_reader :path, :file_lock
 
+      # Diagnostic hook for the read-path tests: how many times `load` had to read and
+      # normalize the file instead of reusing the cached snapshot.
+      attr_reader :snapshot_misses
+
       # +file_lock+ is shared with the kernel so a load -> mutate -> save cycle in
       # this process cannot be interleaved with one in another Meringue instance.
       # It is always acquired outside the in-process mutex to keep a single lock
@@ -27,6 +31,10 @@ module Meringue
         @path = File.expand_path(path)
         @file_lock = file_lock || FileLock.for_state_path(@path)
         @mutex = Mutex.new
+        @snapshot_mutex = Mutex.new
+        @snapshot_fingerprint = nil
+        @snapshot_json = nil
+        @snapshot_misses = 0
       end
 
       # Saves publish a complete snapshot with an atomic rename, so readers can
@@ -93,19 +101,66 @@ module Meringue
         file_lock.synchronize { @mutex.synchronize(&block) }
       end
 
+      # The TUI reloads state on every rendered frame, and the kernel reloads it for
+      # every command, so this is the hottest read in the app. Normalizing and deep
+      # string-compacting a multi-megabyte snapshot that has not changed since the
+      # last read is pure waste: `save_unlocked` already normalized and compacted
+      # whatever is on disk. Reuse the normalized snapshot until the file identity
+      # changes, and pay only for a parse to hand back an unshared, mutable copy.
       def load_unlocked
         return Models.empty_state unless File.exist?(path)
+
+        cached = cached_snapshot_json
+        return JSON.parse(cached) if cached
 
         read_state_unlocked
       end
 
       def read_state_unlocked
+        @snapshot_mutex.synchronize { @snapshot_misses += 1 }
+        fingerprint = file_fingerprint
         state = JSON.parse(File.read(path))
         # Normalize first so legacy oversized histories are pruned before the
         # deep string compactor visits entries that will not be retained.
         Models.ensure_state_shape!(state)
         Compactor.compact!(state)
+        remember_snapshot(fingerprint, state)
         state
+      end
+
+      # Saves publish through an atomic rename of a fresh temp file, so a new
+      # snapshot always has a different inode. Size and nanosecond mtime are kept
+      # as well, so a writer that replaces the file in place still invalidates.
+      # Reading the fingerprint *before* the file contents is what makes this safe:
+      # a write that lands during the read produces a fingerprint mismatch on the
+      # next call rather than a cached stale snapshot.
+      def file_fingerprint
+        stat = File.stat(path)
+        [stat.dev, stat.ino, stat.size, stat.mtime.to_i, stat.mtime.nsec]
+      rescue SystemCallError
+        nil
+      end
+
+      def cached_snapshot_json
+        fingerprint = file_fingerprint
+        return nil unless fingerprint
+
+        @snapshot_mutex.synchronize do
+          @snapshot_fingerprint == fingerprint ? @snapshot_json : nil
+        end
+      end
+
+      def remember_snapshot(fingerprint, state)
+        return unless fingerprint
+        # The file changed while it was being read, so the parsed snapshot cannot be
+        # attributed to either version. Cache nothing and re-read next time.
+        return unless fingerprint == file_fingerprint
+
+        json = JSON.generate(state)
+        @snapshot_mutex.synchronize do
+          @snapshot_fingerprint = fingerprint
+          @snapshot_json = json
+        end
       end
 
       def save_unlocked(state, preserve_log_buffer: true)
@@ -117,6 +172,9 @@ module Meringue
 
         File.write(temp_path, JSON.pretty_generate(state) + "\n")
         File.rename(temp_path, path)
+        # Seed the read cache from the snapshot this process just published, so the
+        # next render or command reuses it instead of re-normalizing our own write.
+        remember_snapshot(file_fingerprint, state)
         state
       ensure
         File.delete(temp_path) if temp_path && File.exist?(temp_path)

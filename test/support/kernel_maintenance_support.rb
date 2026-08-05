@@ -192,7 +192,8 @@ module KernelMaintenanceSupport
 
   def build_engine(forge_client: StubForgeClient.new, harness_client: Meringue::Harness::FakeClient.new,
                    harness_client_resolver: nil, head_runner: Meringue::Heads::FakeRunner.new,
-                   prune_forge_lookup_budget: Meringue::Kernel::Engine::PRUNE_FORGE_LOOKUP_BUDGET_SECONDS)
+                   prune_forge_lookup_budget: Meringue::Kernel::Engine::PRUNE_FORGE_LOOKUP_BUDGET_SECONDS,
+                   delivery_pull_request_refresh_budget: Meringue::Kernel::Engine::DELIVERY_PULL_REQUEST_REFRESH_BUDGET_SECONDS)
     Meringue::Kernel::Engine.new(
       store: Meringue::State::Store.new(path: state_path),
       harness_client: harness_client,
@@ -202,6 +203,7 @@ module KernelMaintenanceSupport
       cwd: @kernel_maintenance_tmp,
       forge_client: forge_client,
       prune_forge_lookup_budget: prune_forge_lookup_budget,
+      delivery_pull_request_refresh_budget: delivery_pull_request_refresh_budget,
       config_path: tmp_path("config.toml")
     )
   end
