@@ -28,11 +28,57 @@ class TuiAgentTreePaneTest < Minitest::Test
     assert_equal "HEADS", rendered.first
     assert_includes rendered, "  ├─ ● H1  Plan TUI rendering"
     assert_includes rendered, "  └─ ✓ H2  Classify dotfiles"
-    assert_includes rendered.join("\n"), "● P1  Meringue working"
+    assert_includes rendered.join("\n"), "● P1  Meringue"
     assert_includes rendered.join("\n"), "  ├─ ● I1  Build fake TUI demo"
     assert_includes rendered.join("\n"), "    └─ ! W1  Wait for real"
     assert_includes rendered.join("\n"), "  │ ├─ ● W1  Draw three-pane"
-    assert_includes rendered.join("\n"), "· P2  dotfiles idle"
+    assert_includes rendered.join("\n"), "· P2  dotfiles"
+  end
+
+  # Regression: a project row read "Meringue working" because the pane joined the
+  # project name to its lifecycle status. The status dot already carries the status,
+  # exactly like issue and worker rows, so the label is only the product name.
+  def test_project_rows_never_append_the_lifecycle_status_to_the_name
+    state = tree_state(
+      projects: [
+        project_record("P1", "name" => "Meringue"),
+        project_record("P2", "name" => "World", "status" => "idle")
+      ]
+    )
+
+    rendered = plain_lines(@pane.lines(state, width: 40))
+
+    assert_includes rendered, "● P1  Meringue"
+    assert_includes rendered, "· P2  World"
+    Pane::STATUS_DOTS.each_key do |status|
+      refute_includes rendered.join("\n"), "Meringue #{status}"
+      refute_includes rendered.join("\n"), "World #{status}"
+    end
+  end
+
+  # A state file written before the kernel enforced the naming contract can still hold
+  # a polluted name. The row shows the repaired product name rather than the bad label.
+  def test_project_row_strips_a_status_word_left_in_a_stored_name
+    state = tree_state(
+      projects: [
+        project_record("P1", "name" => "Meringue working"),
+        project_record("P2", "name" => "World  working", "status" => "idle"),
+        project_record("P3", "name" => "", "status" => "queued")
+      ]
+    )
+
+    rendered = plain_lines(@pane.lines(state, width: 40))
+
+    assert_includes rendered, "● P1  Meringue"
+    assert_includes rendered, "· P2  World"
+    assert_includes rendered, "○ P3  Untitled project"
+  end
+
+  # "Working Copy" is a product name, not a status. Only a trailing status word goes.
+  def test_project_row_keeps_a_name_that_only_looks_like_a_status
+    state = tree_state(projects: [project_record("P1", "name" => "Working Copy")])
+
+    assert_includes plain_lines(@pane.lines(state, width: 40)), "● P1  Working Copy"
   end
 
   def test_render_matches_the_plain_text_of_the_segment_lines

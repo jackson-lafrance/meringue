@@ -70,6 +70,17 @@ class FoundationDocsPolicyTest < Minitest::Test
     assert_includes contract, "no multi-hour wait budgets"
   end
 
+  # Project labels regressed to "Meringue working" because a lifecycle status leaked into
+  # the name. The contract heads read must state that a status is never part of a name.
+  def test_head_contract_keeps_lifecycle_statuses_out_of_project_names
+    contract = File.read(FoundationSupport.repo_path("docs", "head_agent_kernel_commands.md"))
+
+    assert_includes contract, "#### Project naming contract"
+    assert_includes contract, "A project name never contains a lifecycle status."
+    assert_includes contract, '"Meringue working"'
+    assert_includes contract, "it strips a trailing lifecycle status from any project name it stores"
+  end
+
   def test_testing_guide_documents_how_to_run_the_suite
     guide = File.read(FoundationSupport.repo_path("docs", "testing.md"))
 

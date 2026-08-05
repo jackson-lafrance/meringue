@@ -247,7 +247,7 @@ module Meringue
                                 ["  ", Style::DIM]
                               ]
                             end
-          content = [project.fetch("name", "Untitled project"), project.fetch("status", "idle")].join("  ")
+          content = project_title(project)
           title_style = selected ? Style::AGENT_TREE_SELECTED : Style::TITLE
           wrapped_lines(
             leader_segments,
@@ -257,6 +257,15 @@ module Meringue
             width: width,
             selected: selected
           )
+        end
+
+        # A project row shows the product name and nothing else. Its lifecycle status is
+        # already carried by the status dot, exactly like issue and worker rows, so the
+        # label must never read "Meringue working". A stored name that still carries a
+        # status word (written by an older Meringue, or not yet re-saved after the state
+        # repair) is cleaned here too, so the user never reads the polluted label.
+        def project_title(project)
+          ProjectNaming.without_status_suffix(project.fetch("name", nil)) || "Untitled project"
         end
 
         def item_lines(prefix:, record:, id:, title:, suffix: "", selected: false, width: nil)

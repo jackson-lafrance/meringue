@@ -4266,7 +4266,7 @@ module Meringue
         project_id = next_project_id!(state)
         project = {
           "id" => project_id,
-          "name" => present_string(name) || default_project_name(expanded_path),
+          "name" => project_display_name(name) || default_project_name(expanded_path),
           "root_path" => expanded_path,
           "status" => "working",
           "created_at" => now,
@@ -4322,7 +4322,7 @@ module Meringue
 
         now = timestamp
         previous_name = project.fetch("name", "")
-        project["name"] = name.to_s.strip
+        project["name"] = project_display_name(name) || name.to_s.strip
         project["updated_at"] = now
         log_ids = append_log(
           state,
@@ -10585,7 +10585,16 @@ module Meringue
 
       def default_project_name(path)
         basename = File.basename(path)
-        basename.empty? || basename == "/" ? path : basename
+        fallback = basename.empty? || basename == "/" ? path : basename
+        project_display_name(fallback) || fallback
+      end
+
+      # A project's name is its product name. A lifecycle status is what Meringue is
+      # currently doing to it, so a status word can never be stored as part of the name
+      # no matter who proposed it: a head echoing a rendered label, a slash command, or
+      # the directory basename fallback.
+      def project_display_name(name)
+        ProjectNaming.without_status_suffix(present_string(name))
       end
 
       def present_string(value)
