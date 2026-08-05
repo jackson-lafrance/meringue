@@ -20,6 +20,9 @@ class StateCompactorTest < Minitest::Test
     assert_equal 20_000, Compactor.limit_for_key("last_assistant_text")
     assert_equal 100_000, Compactor.limit_for_key("anything_else")
     assert_equal 100_000, Compactor.limit_for_key(nil)
+    assert_equal 2_000, Compactor.limit_for_key("command", in_array: true)
+    assert_equal 100_000, Compactor.limit_for_key("command"),
+                 "a scalar command is something Meringue still has to run, not a diagnostic"
   end
 
   def test_values_within_their_limit_are_untouched
@@ -68,6 +71,44 @@ class StateCompactorTest < Minitest::Test
     assert_equal "short", state.fetch("line").last
     assert_equal 5_000, state.fetch("unknown_list").first.bytesize,
                  "an unknown array key keeps the 100KB default limit"
+  end
+
+  # `harness_metadata.command` is the spawn argv kept for diagnostics. One of its elements is the
+  # whole `--append-system-prompt` payload, which for a head is the entire kernel snapshot. On a
+  # real 1 MB state file that argv was 29% of the whole file, re-read and re-serialized on every
+  # frame and every save, and nothing ever read it back.
+  def test_a_spawn_argv_element_is_truncated_but_the_argv_shape_survives
+    state = {
+      "agents" => [{
+        "id" => "H1",
+        "harness_metadata" => { "command" => ["pi", "--mode", "rpc", "--append-system-prompt", "s" * 90_000] }
+      }]
+    }
+
+    assert Compactor.compact!(state)
+
+    argv = state.dig("agents", 0, "harness_metadata", "command")
+    assert_equal %w[pi --mode rpc --append-system-prompt], argv.first(4), "the program and its flags stay readable"
+    assert_operator argv.last.bytesize, :<, 3_000
+    assert argv.last.start_with?("s" * 2_000)
+    assert_includes argv.last, TRUNCATION_MARKER
+  end
+
+  # A goal's metric and guardrail commands are scalars under the same key name, and Meringue still
+  # has to run them. Truncating one would silently corrupt a goal loop, so the argv limit is scoped
+  # to the array form only.
+  def test_an_executable_command_string_is_not_truncated_by_the_argv_limit
+    metric = "bundle exec rake test 2>&1 | tail -1 | #{"grep -o x " * 400}"
+    state = {
+      "goals" => [{
+        "metric" => { "command" => metric },
+        "guardrails" => [{ "command" => metric, "expect" => "exit_zero" }]
+      }]
+    }
+
+    refute Compactor.compact!(state), "a 5KB command string is well inside the default limit"
+    assert_equal metric, state.dig("goals", 0, "metric", "command")
+    assert_equal metric, state.dig("goals", 0, "guardrails", 0, "command")
   end
 
   def test_deeply_nested_structures_are_visited
