@@ -1,5 +1,13 @@
 # Copy to ~/.meringue/config.toml and adjust for your machine.
 
+# Written by first-run setup. Uncomment (or delete the section after setup has
+# run) to control whether the setup flow opens on the next launch; /setup always
+# reopens it by hand.
+# [onboarding]
+# completed_version = 1
+# completed_at = "2026-08-06T14:02:11Z"
+# outcome = "completed"   # or "skipped"
+
 [tui]
 # Default yellow/white Meringue palette. Other options:
 # rose-pine, tokyonight, gruvbox, catppuccin, kanagawa
@@ -29,7 +37,7 @@ provider = "pi"
 command = "pi"
 session_dir = "~/.meringue/pi-sessions"
 # Defaults for every future Pi head and worker. The TUI persists these with
-# /default-model and /default-thinking.
+# /model, /thinking, and the first-run setup flow.
 model = "anthropic/claude-opus-5"
 thinking_level = "max"
 # Role arrays still own tools and other Pi flags; the scalar defaults above are

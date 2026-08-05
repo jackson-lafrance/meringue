@@ -11,6 +11,9 @@ module Meringue
         # composer, so it gets a taller window than the slash-command popup while
         # still sharing the same slot, border, and keys.
         MODEL_PICKER_VISIBLE_LIMIT = 10
+        # First-run setup shares the picker's window so the flow reads as the same
+        # product; its prose lines and its choice rows share that budget.
+        ONBOARDING_VISIBLE_LIMIT = Onboarding::VISIBLE_LIMIT
         HEAD_ICON = "◆"
         WORKER_ICON = "✦"
         RESULT_ICON = "✓"
@@ -191,12 +194,14 @@ module Meringue
         # keyboard shape instead of introducing another overlay mechanism. A picker
         # wins while it is up.
         def popup?(state)
-          model_picker?(state) || delivery_pr_picker?(state) || slash_suggestions?(state)
+          onboarding?(state) || model_picker?(state) || delivery_pr_picker?(state) || slash_suggestions?(state)
         end
 
         # How many entry rows the popup shows at once, and therefore how tall the
         # layout should let the box grow.
         def popup_visible_limit(state)
+          return ONBOARDING_VISIBLE_LIMIT if onboarding?(state)
+
           model_picker?(state) ? MODEL_PICKER_VISIBLE_LIMIT : VISIBLE_SUGGESTION_LIMIT
         end
 
@@ -205,6 +210,7 @@ module Meringue
         end
 
         def popup_pane_title(state)
+          return onboarding_title(state) if onboarding?(state)
           return "models (#{ModelPicker.harness_for(state, model_picker_state(state).fetch("harness", nil))})" if model_picker?(state)
 
           delivery_pr_picker?(state) ? "open pull requests" : "slash commands"
@@ -215,6 +221,7 @@ module Meringue
         # 27 commands" inside the border reads like a 16th command and costs the
         # list a visible row. The layout draws #popup_footer_line under the box.
         def popup_lines(state)
+          return onboarding_lines(state) if onboarding?(state)
           return model_picker_lines(state) if model_picker?(state)
 
           delivery_pr_picker?(state) ? delivery_pr_picker_lines(state) : slash_suggestion_lines(state)
@@ -224,9 +231,143 @@ module Meringue
         # the full list, and the keys that move it. Empty when there is nothing to
         # say, in which case the layout reserves no row for it.
         def popup_footer_line(state)
+          return onboarding_footer_line(state) if onboarding?(state)
           return model_picker_footer_line(state) if model_picker?(state)
 
           delivery_pr_picker?(state) ? delivery_pr_picker_footer_line(state) : slash_suggestion_footer_line(state)
+        end
+
+        # First-run setup: a short modal step flow in the same popup slot. It wins
+        # over both pickers and the slash list because it is the only modal that
+        # opens by itself.
+        def onboarding?(state)
+          onboarding_state(state).fetch("active", false) == true
+        end
+
+        def onboarding_state(state)
+          value = chat_state(state).fetch("onboarding", nil)
+          value.is_a?(Hash) ? value : {}
+        end
+
+        def onboarding_step(state)
+          onboarding_state(state).fetch("step", Onboarding::WELCOME).to_s
+        end
+
+        def onboarding_plan(state)
+          steps = Array(onboarding_state(state).fetch("plan", nil))
+          steps.empty? ? Onboarding.plan(onboarding_harness(state)) : steps
+        end
+
+        def onboarding_harness(state)
+          onboarding_state(state).fetch("harness", nil)
+        end
+
+        def onboarding_query(state)
+          onboarding_state(state).fetch("query", "").to_s
+        end
+
+        def onboarding_title(state)
+          Onboarding.step_title(
+            onboarding_step(state),
+            onboarding_plan(state),
+            harness: Onboarding.harness_for(state, onboarding_harness(state))
+          )
+        end
+
+        def onboarding_note_lines(state)
+          Onboarding.note_lines(
+            state,
+            step: onboarding_step(state),
+            steps: onboarding_plan(state),
+            harness: onboarding_harness(state),
+            query: onboarding_query(state)
+          )
+        end
+
+        def onboarding_rows(state)
+          Onboarding.rows(
+            state,
+            step: onboarding_step(state),
+            harness: onboarding_harness(state),
+            query: onboarding_query(state),
+            saved_theme: onboarding_state(state).fetch("theme", nil)
+          )
+        end
+
+        # Clamped against the list that exists this frame, so a catalog that
+        # arrives mid-step cannot leave the highlight past the end.
+        def onboarding_index(state)
+          rows = onboarding_rows(state)
+          return NO_SLASH_SELECTION if rows.empty?
+
+          onboarding_state(state).fetch("index", 0).to_i.clamp(0, rows.length - 1)
+        end
+
+        # Prose and rows share the popup's height, so a step that explains itself
+        # shows fewer rows rather than overflowing the box.
+        def onboarding_visible_row_limit(state)
+          [ONBOARDING_VISIBLE_LIMIT - onboarding_note_lines(state).length, 1].max
+        end
+
+        def onboarding_window_start(state)
+          slash_suggestion_window_start(
+            onboarding_rows(state).length,
+            onboarding_index(state),
+            limit: onboarding_visible_row_limit(state)
+          )
+        end
+
+        def onboarding_lines(state)
+          notes = onboarding_note_lines(state).map { |line| [[line.to_s, Style::MUTED]] }
+          rows = onboarding_rows(state)
+          return notes if rows.empty?
+
+          selected_index = onboarding_index(state)
+          window_start = onboarding_window_start(state)
+          visible = rows.drop(window_start).first(onboarding_visible_row_limit(state))
+          notes + visible.map.with_index do |row, offset|
+            onboarding_line(row, selected: window_start + offset == selected_index)
+          end
+        end
+
+        def onboarding_line(row, selected:)
+          marker = selected ? "›" : " "
+          detail = row.fetch("detail", "").to_s
+          [
+            ["#{marker} ", selected ? Style::ACCENT_BOLD : Style::DIM],
+            [row.fetch("label").to_s, selected ? Style::ACCENT_BOLD : Style::TEXT],
+            detail.empty? ? nil : ["  #{detail}", Style::MUTED]
+          ].compact
+        end
+
+        # Caption under the box: which step this is and every key that works here.
+        # Setup is met once, so it always states its keys instead of assuming any
+        # of them are known yet.
+        def onboarding_footer_line(state)
+          step = onboarding_step(state)
+          plan = onboarding_plan(state)
+          count = Onboarding.choice_steps(plan).length
+          segments = []
+          if step == Onboarding::WELCOME
+            segments << ["#{count} steps", Style::MUTED]
+          else
+            segments << ["step #{Onboarding.step_number(step, plan)} of #{count}", Style::MUTED]
+          end
+          query = onboarding_query(state)
+          segments << ["  ·  filter: #{query}", Style::TEXT] unless query.empty?
+          segments << ["  ·  #{onboarding_key_hints(step)}", Style::DIM]
+          segments
+        end
+
+        # Short enough to survive an 80-column terminal without losing the exit
+        # key: Esc is always the last hint, and it is the one that must never be
+        # clipped.
+        def onboarding_key_hints(step)
+          return "Enter begins · Esc skips setup (/setup reopens it)" if step == Onboarding::WELCOME
+
+          hints = ["↑↓ move", "Enter applies", "← back", "Esc skip"]
+          hints.concat(["type to filter", "Ctrl-R refresh"]) if step == Onboarding::MODEL
+          hints.join(" · ")
         end
 
         # The `/models` picker: one searchable list of the models the harness
