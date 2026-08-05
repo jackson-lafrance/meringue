@@ -84,7 +84,7 @@ class KernelMaintenancePruneMergedPullRequestTest < Minitest::Test
     result = apply_command(build_engine(forge_client: forge), "Prune", {})
 
     assert_equal "accepted", result.fetch("status")
-    assert_equal "Pruned 1 issue, 0 projects, and 0 standalone agents.", result.fetch("message")
+    assert_equal "Pruned 1 issue, 1 agent, 1 worktree, and 0 projects.", result.fetch("message")
     assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
     assert_equal ["P1-I1-W1"], result.dig("result", "removed_agent_ids")
     assert_empty result.dig("result", "retained_issue_ids")
@@ -127,7 +127,7 @@ class KernelMaintenancePruneMergedPullRequestTest < Minitest::Test
     assert_empty result.dig("result", "removed_issue_ids")
     assert_equal ["P1-I1"], result.dig("result", "retained_issue_ids")
     assert_equal(
-      "Pruned 0 issues, 0 projects, and 0 standalone agents. Retained 1 issue because Meringue " \
+      "Pruned 0 issues, 0 agents, 0 worktrees, and 0 projects. Retained 1 issue because Meringue " \
       "could not verify their pull request status: P1-I1 (the forge lookup was unavailable).",
       result.fetch("message")
     )
@@ -248,7 +248,7 @@ class KernelMaintenancePruneMergedPullRequestTest < Minitest::Test
     assert_empty dirty.dig("result", "removed_issue_ids")
     assert_equal ["P1-I1-W1"], dirty.dig("result", "workspace_cleanup_blocked_agent_ids")
     assert_equal(
-      "Pruned 0 issues, 0 projects, and 0 standalone agents. Retained 1 worker because their " \
+      "Pruned 0 issues, 0 agents, 0 worktrees, and 0 projects. Retained 1 worker because their " \
       "managed worktree could not be removed: P1-I1-W1 (worktree_dirty).",
       dirty.fetch("message")
     )

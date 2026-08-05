@@ -1144,17 +1144,19 @@ module Meringue
           prune_result = result || {}
           cleanup_outcomes = Array(prune_result["workspace_cleanup_outcomes"])
           retained = Array(prune_result["retention_reasons"])
+          already_removed = cleanup_outcomes.count { |outcome| outcome["status"] == "already_removed" }
           [
             "  removed issues: #{Array(prune_result["removed_issue_ids"]).length}",
-            "  removed projects: #{Array(prune_result["removed_project_ids"]).length}",
             "  removed agents: #{Array(prune_result["removed_agent_ids"]).length}",
-            "  cleaned worktrees: #{cleanup_outcomes.count { |outcome| %w[removed already_removed].include?(outcome["status"]) }}",
+            "  removed worktrees: #{cleanup_outcomes.count { |outcome| outcome["status"] == "removed" }}",
+            "  removed projects: #{Array(prune_result["removed_project_ids"]).length}",
+            already_removed.positive? ? "  worktrees already gone: #{already_removed}" : nil,
             "  blocked worktree cleanups: #{cleanup_outcomes.count { |outcome| !outcome.fetch("success", false) }}",
             "  retained issues: #{Array(prune_result["retained_issue_ids"]).length}",
             *retained.first(PRUNE_RETENTION_REPORT_LIMIT).map do |reason|
               "    #{reason["issue_id"]}: #{Array(reason["blockers"]).join(", ")}"
             end
-          ]
+          ].compact
         when "ListGoals"
           goal_output_lines(result)
         when "CreateGoal", "ModifyGoal", "StopGoal"
@@ -1247,14 +1249,34 @@ module Meringue
             cleanup_worker_workspaces: true
           )
           removed_project_ids = prune_result.fetch("removed_project_ids", [])
+          log_ids = prune_result.fetch("workspace_cleanup_log_entry_ids", []).dup
+          log_ids.concat(append_killed_records_prune_log(state, prune_result))
           touch_state!(state, now)
           store.save(state)
           prune_result.merge(
             "changed" => true,
             "removed_project_ids" => removed_project_ids,
-            "log_entry_ids" => prune_result.fetch("workspace_cleanup_log_entry_ids", [])
+            "log_entry_ids" => log_ids.uniq
           )
         end
+      end
+
+      # Reconciliation removes killed records with the same helper `/prune` uses, so it also lost
+      # the per-worker "Removed managed worktree" line. It reports the same consolidated counts
+      # instead, which keeps the filesystem side effect visible without spending a line per worker.
+      # It stays silent when the pass removed nothing (a killed record whose worktree is still
+      # dirty is retried every tick and already warns), so this never becomes tick noise.
+      def append_killed_records_prune_log(state, prune_result)
+        return [] if prune_removed_counts(prune_result).values.sum.zero?
+
+        append_log(
+          state,
+          source_type: "kernel",
+          source_id: nil,
+          level: "info",
+          message: prune_summary_message(prune_result, prefix: "Pruned killed records:"),
+          details: prune_result
+        )
       end
 
       def get_state(command_id, command_type)
@@ -3717,16 +3739,40 @@ module Meringue
         accepted_result(command_id, command_type, nil, message, details, log_ids)
       end
 
-      def prune_summary_message(prune_result)
-        issues = Array(prune_result.fetch("removed_issue_ids", [])).length
-        projects = Array(prune_result.fetch("removed_project_ids", [])).length
-        standalone_agents = Array(prune_result.fetch("removed_standalone_agent_ids", [])).length
-        parts = [
-          "#{issues} issue#{issues == 1 ? "" : "s"}",
-          "#{projects} project#{projects == 1 ? "" : "s"}",
-          "#{standalone_agents} standalone agent#{standalone_agents == 1 ? "" : "s"}"
-        ]
-        "Pruned #{parts[0]}, #{parts[1]}, and #{parts[2]}."
+      # One prune pass is one visible line. The counts cover every record class the pass touched:
+      # issues, *every* agent record removed with them (workers bundled with an issue plus
+      # standalone/head records, not just the standalone ones), the managed worktrees actually
+      # removed, and projects. Counting only standalone agents used to report "0 standalone agents"
+      # for a pass that had just deleted five workers and their worktrees, while the worktree
+      # removals printed one info line each.
+      def prune_summary_message(prune_result, prefix: "Pruned")
+        issues, agents, worktrees, projects = prune_count_phrases(prune_result)
+        "#{prefix} #{issues}, #{agents}, #{worktrees}, and #{projects}."
+      end
+
+      def prune_count_phrases(prune_result)
+        prune_removed_counts(prune_result).map { |noun, count| count_phrase(count, noun) }
+      end
+
+      def prune_removed_counts(prune_result)
+        {
+          "issue" => Array(prune_result.fetch("removed_issue_ids", [])).length,
+          "agent" => Array(prune_result.fetch("removed_agent_ids", [])).length,
+          "worktree" => removed_worktree_agent_ids(prune_result).length,
+          "project" => Array(prune_result.fetch("removed_project_ids", [])).length
+        }
+      end
+
+      # Only worktrees this pass actually deleted are counted. `already_removed` is a confirmation,
+      # not a removal, and `skipped` workspaces (project root, dedicated directory) were never
+      # Meringue-managed worktrees.
+      def removed_worktree_agent_ids(prune_result)
+        recorded = prune_result.fetch("removed_worktree_agent_ids", nil)
+        return Array(recorded) if recorded
+
+        Array(prune_result.fetch("workspace_cleanup_outcomes", [])).filter_map do |outcome|
+          outcome.fetch("agent_id", nil) if outcome.fetch("status", nil) == "removed"
+        end
       end
 
       # Retention must never look like a silent no-op. Nonterminal issues, queued/working/blocked
@@ -4426,6 +4472,9 @@ module Meringue
           "updated_project_ids" => updated_project_ids,
           "released_head_session_agent_ids" => released_head_ids,
           "workspace_cleanup_outcomes" => workspace_cleanups,
+          "removed_worktree_agent_ids" => workspace_cleanups.filter_map do |outcome|
+            outcome.fetch("agent_id", nil) if outcome.fetch("status", nil) == "removed"
+          end,
           "workspace_cleanup_blocked_agent_ids" => blocked_worker_ids,
           "workspace_cleanup_blocked_issue_ids" => blocked_issue_ids,
           "workspace_cleanup_blocked_project_ids" => blocked_project_ids,
@@ -4498,23 +4547,23 @@ module Meringue
         plan["worktree_root_path"] || plan["workspace_root_path"] || worker.fetch("workspace_path", nil) || plan["workspace_path"]
       end
 
+      # Only cleanups the user may have to act on get their own line. A successful removal (or a
+      # confirmation that the worktree was already gone, or a workspace that was never a managed
+      # worktree) is counted by the pass summary instead, so one prune of five workers is one log
+      # line rather than six. The per-worker outcome is not lost: it is written to the worker's
+      # `harness_metadata.workspace_cleanup` and returned in the pass's `workspace_cleanup_outcomes`,
+      # which the prune log details and the command result both carry.
       def append_workspace_cleanup_log(state, worker, outcome)
-        status = outcome.fetch("status", "failed")
-        return [] if status == "skipped"
+        return [] if outcome.fetch("success", false)
+        return [] if outcome.fetch("status", "failed") == "skipped"
 
-        successful = outcome.fetch("success", false)
-        message = if status == "removed"
-                    "Removed managed worktree for worker #{worker.fetch("id")}."
-                  elsif status == "already_removed"
-                    "Confirmed the managed worktree for worker #{worker.fetch("id")} was already removed."
-                  else
-                    "Retained worker #{worker.fetch("id")} because its managed worktree could not be removed: #{outcome.fetch("reason", "unknown_error")}."
-                  end
+        message = "Retained worker #{worker.fetch("id")} because its managed worktree could not be " \
+                  "removed: #{outcome.fetch("reason", "unknown_error")}."
         append_log(
           state,
           source_type: "kernel",
           source_id: worker.fetch("id"),
-          level: successful ? "info" : "warning",
+          level: "warning",
           message: message,
           details: outcome.merge(
             "agent_id" => worker.fetch("id"),

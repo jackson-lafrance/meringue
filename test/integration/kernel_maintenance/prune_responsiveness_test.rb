@@ -149,7 +149,7 @@ class KernelMaintenancePruneResponsivenessTest < Minitest::Test
     prune_result = prune_thread.value
     command_result = prune_result.fetch("command_results").first
     assert_equal "accepted", command_result.fetch("status")
-    assert_equal "Pruned 2 issues, 0 projects, and 0 standalone agents.", command_result.fetch("message")
+    assert_equal "Pruned 2 issues, 0 agents, 0 worktrees, and 0 projects.", command_result.fetch("message")
     assert_equal [url], forge.status_calls, "one prune pass should look up each unique PR once"
   ensure
     forge&.release&.push(true) if prune_thread&.alive?
