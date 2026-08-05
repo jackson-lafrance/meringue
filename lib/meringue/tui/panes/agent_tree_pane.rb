@@ -10,11 +10,6 @@ module Meringue
         ELLIPSIS = "…"
         AGENT_TYPES = %w[head worker].freeze
 
-        # A goal issue is a goal loop, not an ordinary issue with an extra glyph, so it is
-        # marked in a fixed column (the gutter between the id and the title) as well as in
-        # its suffix chip. Scanning one column tells the user which issues are goal driven
-        # even when a chip has wrapped onto a later row.
-        GOAL_GLYPH = "◎"
         # Shown when a goal has a numeric target but nothing measurable to compare against
         # it yet: honest about the gap instead of implying 0% progress was made.
         GOAL_UNKNOWN_PERCENT = "?%"
@@ -248,14 +243,13 @@ module Meringue
             id: short_id(issue["id"]),
             title: issue.fetch("title", "Untitled issue"),
             suffix: issue_suffix(issue, workers, goal),
-            gutter: goal ? GOAL_GLYPH : nil,
             selected: selected,
             width: width
           }
         end
 
-        def item_line_count(prefix:, record:, id:, title:, suffix: "", gutter: nil, selected: false, width: nil)
-          item_lines(prefix: prefix, record: record, id: id, title: title, suffix: suffix, gutter: gutter, selected: selected, width: width).length
+        def item_line_count(prefix:, record:, id:, title:, suffix: "", selected: false, width: nil)
+          item_lines(prefix: prefix, record: record, id: id, title: title, suffix: suffix, selected: selected, width: width).length
         end
 
         def section_line(title)
@@ -305,14 +299,14 @@ module Meringue
           ProjectNaming.without_status_suffix(project.fetch("name", nil)) || "Untitled project"
         end
 
-        def item_lines(prefix:, record:, id:, title:, suffix: "", gutter: nil, selected: false, width: nil)
+        def item_lines(prefix:, record:, id:, title:, suffix: "", selected: false, width: nil)
           parts = suffix_parts(suffix)
           suffix_text = suffix_parts_text(parts)
           content = [title, suffix_text.empty? ? nil : suffix_text].compact.join("  ")
           if selected
-            selected_item_lines(prefix: prefix, record: record, id: id, content: content, suffix_parts: parts, gutter: gutter, width: width)
+            selected_item_lines(prefix: prefix, record: record, id: id, content: content, suffix_parts: parts, width: width)
           else
-            normal_item_lines(prefix: prefix, record: record, id: id, content: content, suffix_parts: parts, gutter: gutter, width: width)
+            normal_item_lines(prefix: prefix, record: record, id: id, content: content, suffix_parts: parts, width: width)
           end
         end
 
@@ -342,18 +336,7 @@ module Meringue
           end
         end
 
-        # The gutter takes over the two separator columns between the id and the title, so a
-        # goal marker costs no extra width and can never reflow a row: the leader keeps the
-        # exact length it has on every other row, selected or not.
-        def gutter_segment(gutter, selected)
-          marker = gutter.to_s
-          dim_style = selected ? Style::AGENT_TREE_SELECTED_DIM : Style::DIM
-          return ["  ", dim_style] if marker.empty?
-
-          ["#{marker[0, 1]} ", selected ? Style::GOAL_MARKER_SELECTED : Style::GOAL_MARKER]
-        end
-
-        def normal_item_lines(prefix:, record:, id:, content:, suffix_parts: [], gutter: nil, width: nil)
+        def normal_item_lines(prefix:, record:, id:, content:, suffix_parts: [], width: nil)
           # Reserve the same two columns used by the selected-row marker so
           # selecting an item cannot reflow wrapped rows under the mouse.
           leader_segments = [
@@ -361,7 +344,7 @@ module Meringue
             ["#{prefix} ", Style::DIM],
             [status_dot(record), status_style(record)],
             [" #{id}", identity_style(record) || Style::MUTED],
-            gutter_segment(gutter, false)
+            ["  ", Style::DIM]
           ]
           wrapped_lines(
             leader_segments,
@@ -378,13 +361,13 @@ module Meringue
         # agent's identity color: it already owns the highlight and explicit
         # selection marker, and an identity foreground on the selection
         # background is not guaranteed to stay legible in every theme.
-        def selected_item_lines(prefix:, record:, id:, content:, suffix_parts: [], gutter: nil, width: nil)
+        def selected_item_lines(prefix:, record:, id:, content:, suffix_parts: [], width: nil)
           leader_segments = [
             ["▸", Style::AGENT_TREE_SELECTED_STATUS],
             [" #{prefix} ", Style::AGENT_TREE_SELECTED_DIM],
             [status_dot(record), Style::AGENT_TREE_SELECTED_STATUS],
             [" #{id}", Style::AGENT_TREE_SELECTED_DIM],
-            gutter_segment(gutter, true)
+            ["  ", Style::AGENT_TREE_SELECTED_DIM]
           ]
           wrapped_lines(
             leader_segments,
@@ -622,9 +605,10 @@ module Meringue
         end
 
         # A goal loop is rendered on the issue it controls, not as a new node kind: the
-        # AgentTree stays projects -> issues -> workers. The goal chip is its own suffix
-        # element with its own color, so it reads as goal state rather than as more issue
-        # text, and it never displaces the delivery PR marker beside it.
+        # AgentTree stays projects -> issues -> workers. The goal is its own suffix chip with
+        # its own color, carrying the iteration and percent complete, so it reads as goal
+        # state rather than as more issue text. Deliberately no badge glyph beside the issue
+        # id: the numbers are the signal, and the row keeps the leader every other row has.
         def issue_suffix(issue, workers, goal = nil)
           [
             [goal_marker(goal), :goal],

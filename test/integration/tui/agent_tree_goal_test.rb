@@ -7,7 +7,8 @@ require "support/tui_support"
 # projects -> issues -> workers: no new node kind and no new lifecycle status.
 #
 # What a goal issue must say for itself:
-#   * that it is a goal at all (the ◎ gutter marker beside its id, in its own color)
+#   * that it is a goal at all, through a goal-colored chip rather than a badge glyph
+#     beside its id: the numbers are the signal
 #   * which iteration of its budget it is on
 #   * how much of the goal is actually done, as a percentage of the distance the
 #     metric has to travel from its baseline to its target
@@ -66,19 +67,35 @@ class TuiAgentTreeGoalTest < Minitest::Test
 
   # --- a goal issue reads as a goal ------------------------------------------
 
-  def test_a_goal_issue_is_marked_as_a_goal_in_a_fixed_column_beside_its_id
+  def test_a_goal_issue_reads_as_a_goal_through_its_chip_and_not_a_badge_glyph
     row = issue_row(goal_state)
 
-    assert_includes plain_line(row), "I1#{Pane::GOAL_GLYPH}", "the goal marker sits in the gutter between the id and the title"
+    assert_includes plain_line(row), "2/5 46%", "the iteration and percent chips are the goal signal"
     assert_includes styles_in(row), Style::GOAL_MARKER, "a goal reads as goal state, not as more issue text"
   end
 
-  def test_an_issue_without_a_goal_carries_no_goal_marker_and_keeps_its_worker_ratio
+  # A goal row must keep the leader every other row has: same columns between the tree
+  # connector and the title, no badge, no stray gap.
+  def test_a_goal_issue_row_lines_up_with_an_issue_that_has_no_goal
+    with_goal = goal_state
+    without_goal = goal_state
+    without_goal["goals"] = []
+
+    goal_row = plain_line(issue_row(with_goal))
+    plain_row = plain_line(issue_row(without_goal))
+
+    assert_equal plain_row.index("Raise coverage"), goal_row.index("Raise coverage"),
+                 "the title starts in the same column with and without a goal"
+    assert goal_row.start_with?("  └─ ● I1  Raise coverage"), goal_row
+    assert_equal pane.lines(without_goal, width: 60).length, pane.lines(with_goal, width: 60).length,
+                 "a goal must not add or remove rows at an ordinary width"
+  end
+
+  def test_an_issue_without_a_goal_carries_no_goal_styling_and_keeps_its_worker_ratio
     goalless = goal_state
     goalless["goals"] = []
     row = issue_row(goalless)
 
-    refute_includes plain_line(row), Pane::GOAL_GLYPH
     refute_includes styles_in(row), Style::GOAL_MARKER
     assert_includes plain_line(row), "1/1", "the ordinary worker progress suffix still renders"
   end
@@ -92,13 +109,13 @@ class TuiAgentTreeGoalTest < Minitest::Test
     refute_includes line, "1/1"
   end
 
-  def test_the_goal_marker_survives_selection_with_its_selected_palette
+  def test_the_goal_chip_survives_selection_with_its_selected_palette
     state = goal_state
     state["_agent_tree_navigation"] = { "active" => true, "selected_agent_id" => "P1-I1" }
     row = issue_row(state, width: 60)
 
     assert plain_line(row).start_with?("▸")
-    assert_includes plain_line(row), Pane::GOAL_GLYPH
+    assert_includes plain_line(row), "2/5 46%"
     assert_includes styles_in(row), Style::GOAL_MARKER_SELECTED
     refute_includes styles_in(row), Style::GOAL_MARKER, "the selected row uses the selection background everywhere"
   end
@@ -232,7 +249,6 @@ class TuiAgentTreeGoalTest < Minitest::Test
   def test_a_goal_with_no_numeric_target_shows_its_iteration_and_no_percentage
     row = issue_row(goal_state("metric" => { "command" => "", "comparator" => "gte", "target" => nil }))
 
-    assert_includes plain_line(row), "I1#{Pane::GOAL_GLYPH}"
     assert_includes plain_line(row), "2/5"
     refute_includes plain_line(row), "%"
     assert_includes styles_in(row), Style::GOAL_MARKER
@@ -242,7 +258,6 @@ class TuiAgentTreeGoalTest < Minitest::Test
     broken = state_with_goals([{ "id" => "G1", "issue_id" => "P1-I1" }, "not a goal", nil])
     line = issue_line(broken)
 
-    assert_includes line, "I1#{Pane::GOAL_GLYPH}"
     assert_includes line, "0/0"
   end
 
@@ -331,7 +346,6 @@ class TuiAgentTreeGoalTest < Minitest::Test
   def test_the_demo_fixture_shows_a_goal_driven_issue
     rendered = plain_lines(pane.lines(composed_state(demo_state), width: 34)).join("\n")
 
-    assert_includes rendered, "I2#{Pane::GOAL_GLYPH}"
     assert_includes rendered, "2/4 46%"
   end
 
