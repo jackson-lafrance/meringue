@@ -21,7 +21,7 @@ class WorkspaceManagerGitIsolationTest < Minitest::Test
 
     private
 
-    def run_command(*argv, timeout: command_timeout)
+    def run_command(*argv, **options)
       result = super
       spawned_argvs << result.fetch("argv")
       result
@@ -33,7 +33,7 @@ class WorkspaceManagerGitIsolationTest < Minitest::Test
   class RevParseTimingOutManager < Meringue::Workspace::Manager
     private
 
-    def run_command(*argv, timeout: command_timeout)
+    def run_command(*argv, **options)
       if argv.include?("rev-parse") && argv.include?("--show-toplevel")
         raise Meringue::Workspace::Manager::CommandTimeout.new(argv: argv, timeout: 0.5, stdout: "", stderr: "simulated hang")
       end

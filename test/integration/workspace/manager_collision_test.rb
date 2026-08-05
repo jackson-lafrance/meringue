@@ -94,11 +94,10 @@ class WorkspaceManagerCollisionTest < Minitest::Test
     end
   end
 
-  # Documents current behavior: after the worktree is released, the leftover
-  # meringue/ branch is treated as an orphan, deleted, and recreated from
-  # origin/main. Commits that only existed on it stop being reachable. See
-  # test/findings/workspace.md.
-  def test_reallocating_after_release_recreates_the_branch_from_origin_main
+  # A leftover meringue/ branch that carries commits is never recreated from
+  # origin/main: reallocation checks the branch back out, so an interrupted
+  # worker's commits stay reachable and stay in its worktree.
+  def test_reallocating_after_release_keeps_the_branch_and_its_commits
     with_workspace_tmpdir do |tmp|
       project = create_git_project(tmp)
       manager = workspace_manager(tmp)
@@ -115,13 +114,52 @@ class WorkspaceManagerCollisionTest < Minitest::Test
       assert second.fetch("created")
       assert_equal first.fetch("workspace_branch"), second.fetch("workspace_branch")
       assert_equal first.fetch("workspace_path"), second.fetch("workspace_path")
-      refute_path_exists File.join(second.fetch("workspace_path"), "committed.txt")
+      assert_path_exists File.join(second.fetch("workspace_path"), "committed.txt")
+      assert_equal worker_sha, git_output(project, second.fetch("workspace_path"), "rev-parse", "HEAD").strip
+      assert_includes git_output(project, project.fetch("project_root"), "log", "--oneline", second.fetch("workspace_branch")), "worker commit"
+    end
+  end
+
+  # The other half of the same rule: an empty leftover branch carries nothing, so
+  # it is deleted and recreated from a fresh origin/main instead of pinning the
+  # worker to a stale base.
+  def test_reallocating_after_release_recreates_an_empty_branch_from_origin_main
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = workspace_manager(tmp)
+      first = allocate_workspace(manager, project, task_title: "Nothing committed")
+      assert manager.release_worker_workspace(first)
+      assert branch_exists?(project, first.fetch("workspace_branch"))
+
+      second = allocate_workspace(manager, project, task_title: "Nothing committed")
+
+      assert second.fetch("created")
+      assert_equal first.fetch("workspace_branch"), second.fetch("workspace_branch")
       assert_equal(
         project.fetch("origin_sha"),
         git_output(project, second.fetch("workspace_path"), "rev-parse", "HEAD").strip
       )
-      refute_includes git_output(project, project.fetch("project_root"), "log", "--oneline", second.fetch("workspace_branch")), "worker commit"
-      assert_equal "commit", git_output(project, project.fetch("project_root"), "cat-file", "-t", worker_sha).strip
+    end
+  end
+
+  def test_release_with_delete_branch_keeps_a_branch_that_carries_commits
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = workspace_manager(tmp)
+      workspace = allocate_workspace(manager, project, task_title: "Committed then released")
+      File.write(File.join(workspace.fetch("workspace_path"), "delivered.txt"), "delivered\n")
+      git_output(project, workspace.fetch("workspace_path"), "add", ".")
+      git_output(project, workspace.fetch("workspace_path"), "commit", "-m", "delivered work")
+
+      assert manager.release_worker_workspace(workspace, delete_branch: true)
+
+      refute Dir.exist?(workspace.fetch("workspace_path"))
+      assert branch_exists?(project, workspace.fetch("workspace_branch")),
+             "a branch with commits must survive even an explicit delete"
+      assert_includes(
+        git_output(project, project.fetch("project_root"), "log", "--oneline", workspace.fetch("workspace_branch")),
+        "delivered work"
+      )
     end
   end
 

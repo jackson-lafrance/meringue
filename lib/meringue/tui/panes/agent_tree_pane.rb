@@ -533,10 +533,43 @@ module Meringue
           # Delivery PRs are owned by issues so they survive worker replacement and restart.
           # Reflect the issue marker on its worker rows without copying metadata back to workers.
           [
+            provisioning_marker(worker),
             unfinished_marker(worker),
             worker_relationship_marker(worker),
             active_pr_marker(issue || worker)
           ].reject(&:empty?).join(" ")
+        end
+
+        # A worker with no session yet is either having its workspace checked out, waiting for an
+        # automatic retry, or waiting for the user. Those read identically without a marker: all
+        # three are just a queued or blocked dot with no output.
+        def provisioning_marker(worker)
+          metadata = worker.is_a?(Hash) ? (worker["harness_metadata"] || {}) : {}
+          return "" unless metadata.is_a?(Hash)
+
+          case metadata["provisioning_state"].to_s
+          when "allocating_workspace" then ["provisioning workspace", provisioning_detail(metadata)].compact.join(" ")
+          when "retry_pending" then "workspace retry #{provisioning_attempt(metadata)}"
+          when "retry_exhausted" then "workspace failed: prompt to retry"
+          when "failed" then "workspace failed"
+          else ""
+          end
+        end
+
+        def provisioning_detail(metadata)
+          progress = metadata["provisioning_progress"]
+          return nil unless progress.is_a?(Hash)
+
+          percent = progress["detail"].to_s[/\d+%/]
+          percent || (progress["elapsed_seconds"] ? "#{progress["elapsed_seconds"].to_f.round}s" : nil)
+        end
+
+        def provisioning_attempt(metadata)
+          attempts = metadata["provisioning_attempts"].to_i
+          limit = metadata["provisioning_attempt_limit"].to_i
+          return "pending" unless limit.positive?
+
+          "#{[attempts + 1, limit].min}/#{limit}"
         end
 
         # An errored worker whose turn died mid-flight reads differently from one that failed its
