@@ -22,7 +22,6 @@ module Meringue
         ["/defaults", "Show the model and thinking level for all future Pi sessions."],
         ["/model <provider/model>", "Persist the model for all future Pi sessions; existing sessions are unchanged."],
         ["/thinking <level>", "Persist off, minimal, low, medium, high, xhigh, or max for all future Pi sessions; existing sessions are unchanged."],
-        ["/session-settings <agent_id>", "Refresh and show one existing agent's effective Pi model and thinking level."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
         ["/goal create <issue_id> \"<success criteria>\" --metric \"<command>\" --target <number> [flags]", "Attach a goal loop to an issue: iterate until the metric hits its target or a budget guard trips."],
         ["/goal status [goal_id]", "Show goal loops, iteration accounting, and stop reasons."],
@@ -52,7 +51,6 @@ module Meringue
         { "prefix" => "/rename", "source" => "targets", "append_space" => true },
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
         { "prefix" => "/prompt", "source" => "prompt_targets", "append_space" => true },
-        { "prefix" => "/session-settings", "source" => "sessions", "append_space" => false },
         { "prefix" => "/model", "source" => "session_models", "append_space" => false },
         { "prefix" => "/thinking", "source" => "thinking_levels", "append_space" => false },
         { "prefix" => "/kill", "source" => "targets", "append_space" => false },
@@ -206,10 +204,6 @@ module Meringue
                   # `/prompt` accepts worker sessions plus failed heads, which it retries.
                   Array(state["agents"]).select do |agent|
                     agent["type"] == "worker" || Meringue::State::Models.head_retry_target?(agent)
-                  end
-                when "sessions"
-                  Array(state["agents"]).select do |agent|
-                    agent["harness_session_id"] || agent["harness_session_file"] || agent["pid"]
                   end
                 when "themes"
                   available_theme_names.map { |theme| { "id" => theme, "theme" => theme } }
@@ -540,10 +534,6 @@ module Meringue
           else
             ["worker", item["status"], item["issue_id"]].compact.join(" · ")
           end
-        when "sessions"
-          model = item.dig("session_settings", "model", "reference")
-          thinking = item.dig("session_settings", "thinking_level")
-          [item["harness"] || "session", item["status"], model, thinking].compact.join(" · ")
         when "themes"
           "theme"
         when "targets"
@@ -582,8 +572,6 @@ module Meringue
           parse_defaults(arguments)
         when "models"
           parse_models(arguments)
-        when "session-settings", "session"
-          parse_session_settings(arguments, legacy: command_text == "session")
         when "model"
           parse_model(arguments)
         when "thinking"
@@ -678,14 +666,6 @@ module Meringue
         payload = { "refresh" => true }
         payload["harness"] = harness_words[0] if harness_words[0]
         kernel_command("GetModelCatalog", payload)
-      end
-
-      def parse_session_settings(arguments, legacy: false)
-        tokens = split_arguments(arguments)
-        usage = legacy ? "/session <agent_id> (alias for /session-settings <agent_id>)" : "/session-settings <agent_id>"
-        return invalid("Usage: #{usage}") unless tokens.length == 1
-
-        kernel_command("GetSessionSettings", "agent_id" => tokens[0])
       end
 
       def parse_model(arguments)
