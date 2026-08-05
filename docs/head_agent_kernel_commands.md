@@ -447,7 +447,7 @@ Example:
 
 A project name is the product's name and nothing else. Prefer `project_discovery.current_directory.suggested_project_name`, which Meringue derives from the repository's README heading and preserves its intentional capitalization. Do not use a worktree suffix, path slug, branch name, issue title, or verbose description.
 
-A project name never contains a lifecycle status. `projects[].status` (`queued`, `working`, `idle`, `blocked`, `completed`, `errored`, `killed`) is separate data that the AgentTree renders with its own glyph, so a project called `Meringue` that is currently working is still named `Meringue`. Never copy a rendered label such as `"Meringue working"` or `"World working"` into `name`, and never re-propose one through `ModifyProject` or `Rename`.
+A project name never contains a lifecycle status. `projects[].status` (`queued`, `working`, `idle`, `blocked`, `completed`, `errored`, `killed`) is separate data that the AgentTree renders with its own glyph, so a project called `Meringue` that is currently working is still named `Meringue`. Never copy a rendered label such as `"Meringue working"` or `"World working"` into `name`, and never re-propose one through `ModifyProject`.
 
 The kernel enforces this rather than trusting the proposal: it strips a trailing lifecycle status from any project name it stores, and it repairs an existing stored name that already carries one. A name that only looks like a status is safe, so `Working Copy` is kept intact.
 
@@ -464,7 +464,7 @@ Payload:
 }
 ```
 
-The project naming contract above applies here and to `Rename`: propose `"Meringue"`, never `"Meringue working"`.
+The project naming contract above applies here: propose `"Meringue"`, never `"Meringue working"`. `ModifyProject` is the only rename command for a project; use `ModifyIssue` to retitle an issue.
 
 ### GetInfo
 

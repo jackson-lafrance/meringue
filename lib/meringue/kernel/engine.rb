@@ -87,7 +87,6 @@ module Meringue
       COMMAND_ALIASES = {
         "add_project" => "AddProject",
         "modify_project" => "ModifyProject",
-        "rename" => "Rename",
         "create_issue" => "CreateIssue",
         "spawn_worker" => "SpawnWorker",
         "spawn_head" => "SpawnHead",
@@ -134,7 +133,6 @@ module Meringue
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
-        ["/rename <project_or_issue_id> \"<name>\"", "Quickly rename a project or issue."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <agent_id> \"<message>\"", "Prompt an existing worker agent session, or retry a failed head (H<n>)."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
@@ -168,7 +166,7 @@ module Meringue
       HEAD_PROPOSABLE_COMMANDS = %w[
         ListAll GetState GetInfo Help ListQuestions
         GetSessionDefaults GetModelCatalog SetDefaultSessionModel SetDefaultSessionThinkingLevel
-        AddProject ModifyProject CreateIssue ModifyIssue Rename SpawnWorker PromptAgent SpawnHead
+        AddProject ModifyProject CreateIssue ModifyIssue SpawnWorker PromptAgent SpawnHead
         CreateGoal ModifyGoal StopGoal ListGoals
         AskQuestion AnswerQuestion DismissQuestion
         Kill Prune Recount ClearState SetTheme SetHarness ReconcileSessions
@@ -540,8 +538,6 @@ module Meringue
           add_project(command_id, command_type, payload)
         when "ModifyProject"
           modify_project(command_id, command_type, payload)
-        when "Rename"
-          rename(command_id, command_type, payload)
         when "CreateIssue"
           create_issue(command_id, command_type, payload)
         when "ModifyIssue"
@@ -4723,25 +4719,10 @@ module Meringue
         accepted_result(command_id, command_type, project_id, "Added project #{project_id}.", project, log_ids)
       end
 
-      def rename(command_id, command_type, payload)
-        target_id = value_at(payload, "target_id", "TargetID", "targetId", "id", "ID")
-        name = value_at(payload, "name", "Name", "title", "Title")
-        errors = []
-        errors << "target_id is required" if blank?(target_id)
-        errors << "name is required" if blank?(name)
-        return rejected_result(command_id, command_type, "Record was not renamed.", errors) unless errors.empty?
-
-        state = normalized_state
-        if find_project(state, target_id)
-          return modify_project(command_id, command_type, payload.merge("project_id" => target_id))
-        end
-        if find_issue(state, target_id)
-          return modify_issue(command_id, command_type, payload.merge("issue_id" => target_id, "title" => name))
-        end
-
-        rejected_result(command_id, command_type, "Target #{target_id} does not exist.", ["target_not_found"])
-      end
-
+      # ModifyProject is the only command that renames a project (ModifyIssue retitles an issue).
+      # A `Rename` wrapper used to sit above this method and sniff whether a bare target id was a
+      # project or an issue, but it existed only to back the removed `/rename <id> "<name>"` slash
+      # command, so renaming is now always the explicit command for the record kind being changed.
       def modify_project(command_id, command_type, payload)
         project_id = value_at(payload, "project_id", "ProjectID", "projectId", "target_id", "TargetID", "targetId")
         name = value_at(payload, "name", "Name", "title", "Title")
