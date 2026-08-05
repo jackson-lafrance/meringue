@@ -33,6 +33,11 @@ class TuiSelectedChatTargetTest < Minitest::Test
       "agents" => [
         agent_record("H83", "harness_metadata" => { "title" => "Pending head", "head_session_state" => "pending" }),
         agent_record(
+          "H84",
+          "status" => "errored",
+          "harness_metadata" => { "title" => "Failed head", "error_message" => "fetch failed" }
+        ),
+        agent_record(
           "P1-I1-W1",
           "project_id" => "P1",
           "issue_id" => "P1-I1",
@@ -202,9 +207,37 @@ class TuiSelectedChatTargetTest < Minitest::Test
     assert_nil cleared.fetch("selected_target")
   end
 
-  # A selection on a project or an unbound head filters logs but resolves to no
-  # issue, so chat has to fall back to unscoped routing instead of shipping a
-  # half-populated target.
+  # A failed head is the one head that does target chat: it has no issue, but the
+  # next message retries that exact head, so the target has to survive the submit.
+  def test_selecting_a_failed_head_targets_it_for_a_retry
+    select_chat_target("H84")
+    composed = compose_app_state(@app, @state, "try again")
+    target = Meringue::TUI::LogScope.chat_target(composed)
+
+    refute_nil target, "a failed head must be a chat target, not a log-only filter"
+    assert_equal "H84", target.fetch("selected_id")
+    assert_equal "head", target.fetch("selected_type")
+    assert_equal "errored", target.fetch("selected_head_status")
+    refute target.key?("issue_id")
+
+    pane = Meringue::TUI::Panes::ChatPane.new
+    assert_equal "chat → retry H84 · errored", pane.composer_pane_title(composed)
+    assert_equal Meringue::TUI::Style.agent_chrome_style("H84", bold: true), pane.composer_title_style(composed)
+    assert_includes plain_line(pane.bottom_hint_line(composed)), "retries this head"
+    assert_equal "retry H84", Meringue::TUI::ChatTarget.placeholder(composed)
+
+    submissions, handler = recording_prompt_handler
+    @app.send(:handle_key, "\r", "try again", 9, -1, handler, composed)
+    submission = Timeout.timeout(5) { submissions.pop }
+
+    assert_equal "try again", submission.fetch("text")
+    assert_equal "H84", submission.dig("selected_target", "selected_id")
+    assert_equal "head", submission.dig("selected_target", "selected_type")
+  end
+
+  # A selection on a project or a head that is still routing filters logs but
+  # resolves to no issue and nothing to retry, so chat has to fall back to
+  # unscoped routing instead of shipping a half-populated target.
   def test_project_and_unbound_head_selections_do_not_target_chat
     select_chat_target("P1")
     assert_nil Meringue::TUI::LogScope.chat_target(compose_app_state(@app, @state))

@@ -96,6 +96,14 @@ worker whose turn was cut short by a transport failure (see below), so skipping 
 records in reconciliation cannot lose recoverable work: nothing else in Meringue would
 have continued them either.
 
+A leftover errored head is retryable rather than only prunable. `PromptAgent` on a head id,
+and selecting the failed head in the AgentTree, both re-run the request it never routed:
+its own session is resumed when reconciliation left that session usable, and otherwise a
+fresh head carries the original message forward. Reconciliation is unchanged by this; the
+retry either revives the record (status back to `working`, terminal reconcile marker
+cleared, so polling resumes) or leaves it terminal with `retried_by_head_id` pointing at
+its successor. See [Retrying a failed head](head_agent_kernel_commands.md#retrying-a-failed-head).
+
 ## Settled is not finished
 
 A harness state call can only report that a session is no longer streaming, and that is
