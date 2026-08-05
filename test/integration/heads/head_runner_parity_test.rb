@@ -142,6 +142,25 @@ class HeadRunnerParityTest < Minitest::Test
     assert_equal "create-issue", result.dig("commands", 1, "payload", "issue_from_command")
   end
 
+  def test_fake_runner_routes_a_product_request_to_the_matching_project_not_the_first_repository
+    snapshot = head_snapshot
+    snapshot.fetch("projects") << {
+      "id" => "P2",
+      "name" => "Shopify storefront",
+      "root_path" => "/tmp/shopify-storefront",
+      "status" => "working",
+      "updated_at" => "2024-01-04T00:00:00Z"
+    }
+
+    result = Meringue::Heads::FakeRunner.new.run(
+      user_message: "Update the Shopify checkout integration",
+      snapshot: snapshot
+    )
+
+    assert_equal "P2", result.dig("commands", 0, "payload", "project_id")
+    assert_equal "create-issue", result.dig("commands", 1, "payload", "issue_from_command")
+  end
+
   def test_harness_runner_owns_a_session_for_one_run_and_closes_it
     raw = JSON.generate(head_result(commands: [kernel_command("AnswerQuestion", "question_id" => "Q4", "answer" => "keep it")]))
     client = HeadResultHarnessClient.new(raw_output: raw)

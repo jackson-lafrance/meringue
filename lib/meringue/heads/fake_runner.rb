@@ -38,8 +38,15 @@ module Meringue
         explicit_worker = referenced_worker(snapshot, user_message) unless selected_issue
         return [prompt_worker_command(explicit_worker, user_message)] if resumable_worker?(explicit_worker)
 
-        existing_issue = selected_issue || referenced_issue(snapshot, user_message) || matching_issue(snapshot, user_message)
-        project = project_for_issue(snapshot, existing_issue) || referenced_project(snapshot, user_message) || snapshot.fetch("projects", []).first
+        explicit_issue = selected_issue || referenced_issue(snapshot, user_message)
+        project = project_for_issue(snapshot, explicit_issue) || referenced_project(snapshot, user_message) ||
+                  matching_project(snapshot, user_message) || snapshot.fetch("projects", []).first
+        project_match = matching_project(snapshot, user_message)
+        existing_issue = explicit_issue || matching_issue(
+          snapshot,
+          user_message,
+          project_id: project_match&.fetch("id", nil)
+        )
 
         unless project
           project_id = next_project_id(snapshot)
@@ -211,8 +218,19 @@ module Meringue
         snapshot.fetch("projects", []).find { |project| project.fetch("id", nil) == issue.fetch("project_id", nil) }
       end
 
-      def matching_issue(snapshot, user_message)
+      def matching_project(snapshot, user_message)
+        prompt_terms = routing_terms(user_message)
+        scored = snapshot.fetch("projects", []).filter_map do |project|
+          project_terms = routing_terms([project.fetch("name", ""), File.basename(project.fetch("root_path", ""))].join(" "))
+          score = prompt_terms.count { |term| project_terms.include?(term) }
+          score.positive? ? [score, project] : nil
+        end
+        scored.max_by { |score, project| [score, project.fetch("updated_at", "").to_s] }&.last
+      end
+
+      def matching_issue(snapshot, user_message, project_id: nil)
         issues = snapshot.fetch("issues", [])
+        issues = issues.select { |issue| issue.fetch("project_id", nil) == project_id } if project_id
         prompt_terms = routing_terms(user_message)
         scored = issues.map do |issue|
           issue_terms = routing_terms([issue.fetch("title", ""), issue.fetch("description", "")].join(" "))
