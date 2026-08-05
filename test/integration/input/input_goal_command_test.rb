@@ -93,6 +93,35 @@ class InputGoalCommandsTest < Minitest::Test
     assert_equal true, payload.fetch("paused")
   end
 
+  def test_goal_create_supports_a_reviewer_judged_goal_with_no_metric
+    command = parse('/goal create P1-I7 "the onboarding reads cleanly" --reviewer --max-iterations 4 --guardrail "rake test"')
+    payload = command.payload
+
+    assert_equal "CreateGoal", command.type
+    assert_equal "reviewer", payload.fetch("judge_mode")
+    assert_equal "the onboarding reads cleanly", payload.fetch("success_criteria")
+    assert_equal "4", payload.fetch("max_iterations")
+    assert_equal ["rake test"], payload.fetch("guardrails")
+    refute payload.key?("metric_command")
+
+    explicit = parse('/goal create P1-I7 "the onboarding reads cleanly" --judge reviewer')
+    assert_equal "reviewer", explicit.payload.fetch("judge_mode")
+  end
+
+  # The judge and the creation form are independent, so `--reviewer` also has to work on the
+  # prompt form where the kernel mints the issue.
+  def test_goal_create_supports_a_reviewer_judged_goal_from_a_prompt_alone
+    command = parse('/goal create "make the onboarding read cleanly" --reviewer --project P1 --guardrail "rake test"')
+    payload = command.payload
+
+    assert_equal "CreateGoal", command.type
+    assert_equal "reviewer", payload.fetch("judge_mode")
+    assert_equal "make the onboarding read cleanly", payload.fetch("prompt")
+    assert_equal "P1", payload.fetch("project_id")
+    refute payload.key?("issue_id")
+    refute payload.key?("metric_command")
+  end
+
   def test_goal_lifecycle_subcommands_map_onto_their_kernel_commands
     assert_equal "ListGoals", parse("/goal status").type
     assert_empty parse("/goal status").payload
@@ -151,12 +180,14 @@ class InputGoalCommandsTest < Minitest::Test
     usages = Meringue::Input::SlashCommandParser::COMMAND_SPECS.map(&:first)
 
     assert usages.any? { |usage| usage.start_with?("/goal create") }
+    assert usages.any? { |usage| usage.include?("--reviewer") }, "the reviewer-judged goal must be discoverable"
     assert usages.any? { |usage| usage.start_with?("/goal status") }
     assert usages.any? { |usage| usage.start_with?("/goal pause") }
     assert usages.any? { |usage| usage.start_with?("/goal stop") }
 
     help_usages = Meringue::Kernel::Engine::HELP_COMMANDS.map(&:first)
     assert help_usages.any? { |usage| usage.start_with?("/goal create") }, "/help must document the goal loop"
+    assert help_usages.any? { |usage| usage.include?("--reviewer") }, "/help must document the reviewer-judged goal loop"
   end
 
   def test_typing_a_goal_subcommand_suggests_the_ids_it_needs

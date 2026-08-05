@@ -31,6 +31,7 @@ Natural-language mapping:
 | "retitle/close/reopen/reparent issue P1-I3" | `ModifyIssue` |
 | "also tell P1-I3-W1 to ..." | `PromptAgent` |
 | "keep working until coverage is 80%", "iterate until the suite is green", "don't stop until X is under Y", "this is critical, drive it to done, don't just try once" | `CreateGoal`, with `prompt` when no issue represents it yet (the kernel mints the issue) or `issue_id` when one already does |
+| "keep iterating on this until it looks good", "redo it a few times until a reviewer is happy with it" | `CreateGoal` with `judge.mode: "reviewer"`: same command, judged by a reviewer session instead of a metric |
 | "show the goals", "how is that goal doing" | `ListGoals` |
 | "pause/resume that goal", "raise the goal's iteration budget", "change the goal target to 90" | `ModifyGoal` |
 | "stop that goal", "that goal is done, stop looping" | `StopGoal` |
@@ -855,20 +856,20 @@ Example:
 
 ### CreateGoal
 
-Starts a goal loop: Meringue keeps producing attempts on one issue until a kernel-measured metric reaches its target, or a budget/no-progress guard stops it. It is the command for an outcome that must be *driven to completion*, not attempted once.
+Starts a goal loop: Meringue keeps producing attempts on one issue until the goal's judge says it is met, or a budget/no-progress guard stops it. It is the command for an outcome that must be *driven to completion*, not attempted once.
 
 #### Recognising a goal-loop request
 
 Propose `CreateGoal` — not an ordinary `SpawnWorker` — when the user's message has **both** of these:
 
-1. **Insistence on the outcome, not the attempt.** "keep going until…", "don't stop until…", "iterate until…", "this is critical, it has to actually land", "drive this to done", "I don't want one attempt, I want it finished".
-2. **A finish line the kernel can check by running a command.** A number the repository can produce: coverage percentage, failing-test count, lint offenses, benchmark timing, bundle size, error count in a log.
+1. **Insistence on the outcome, not the attempt.** "keep going until…", "don't stop until…", "iterate until…", "this is critical, it has to actually land", "drive this to done", "I don't want one attempt, I want it finished", "keep redoing it until it's good".
+2. **A finish line something other than the attempt can check.** Either a number the repository can produce (coverage percentage, failing-test count, lint offenses, benchmark timing, bundle size, error count in a log) — that is `metric_only` — or a standard a reviewer can judge by reading the result ("the onboarding reads cleanly and names the three commands") — that is `judge.mode: "reviewer"`.
 
 Both halves matter, in both directions:
 
 - Urgency on its own is not a goal loop. "This is critical, fix the signup bug" with no checkable finish line is ordinary work: route one worker and say in the summary that the work is being driven directly. Do not use a goal to buy an ordinary task extra iterations; budgets are clamped (max 20 iterations, 24 h) and cannot be raised past the ceiling.
 - A measurable target on its own is not a goal loop either. "What's our coverage?" is `SpawnWorker` (or `GetInfo`), not a loop.
-- If the user clearly wants the outcome driven to completion but you cannot name a command that measures it, ask **one** clarifying question about what "done" is measured by, and route the immediate work meanwhile. Do not invent a metric the repository cannot produce, and do not silently downgrade the request to one worker.
+- If the user wants the outcome driven to completion but no command can measure it, do not invent a metric the repository cannot produce. Write the standard as `success_criteria` and use `judge.mode: "reviewer"` instead. Ask **one** clarifying question only when you cannot state a reviewable standard either, and route the immediate work meanwhile rather than silently downgrading the request to one worker.
 
 #### Two forms: an existing issue, or a prompt
 
@@ -889,12 +890,32 @@ With the prompt form:
 
 A goal loop replaces the first worker; it does not need one. The kernel spawns the attempt workers itself, so do not add a `SpawnWorker` for the same issue in the same batch.
 
-Rules:
+#### Two judges: a metric, or a reviewer
+
+The judge is independent of the form — either creation form can use either judge — but the two judges are mutually exclusive with each other. Pick one.
+
+| `judge.mode` | Finish line | Requires | Use when |
+| --- | --- | --- | --- |
+| `"metric_only"` (default) | a kernel-run command prints a number that satisfies the comparator | `metric.command` + `metric.target` | the success condition can honestly be counted |
+| `"reviewer"` | a reviewer session approves the attempt against the success criteria | `success_criteria` only | there is no number: prose, UX, design, "reads well", "feels right" |
+
+Prefer `metric_only` whenever a real number exists: it is cheaper and deterministic. Do not invent a fake metric (`echo 1`, a grep count that does not really mean quality) to force a subjective goal into it — that is exactly what `reviewer` is for.
+
+Rules for both:
 
 - An issue is still the durable goal, whether it already existed or the kernel just minted it. One issue may own only one active goal; the kernel rejects a second one.
+- Add `guardrails` for anything that must not regress (usually the test suite). Reaching the target, or getting the reviewer's approval, with a red guardrail is recorded as `not_met`, not success. Attach `rake test` (or the project's equivalent) to any goal that touches code.
+- `judge.mode` supports `"metric_only"` and `"reviewer"`. The combined modes (`worker_when_metric_met`, `worker_every_iteration`) are still rejected.
+
+Rules for `metric_only`:
+
 - The metric must be a command the kernel can run and read a number from. Meringue runs it itself in the attempt's workspace; the worker never reports the metric.
-- Add `guardrails` for anything that must not regress (usually the test suite). Reaching the target with a red guardrail is recorded as `not_met`, not success.
-- `judge.mode` only supports `"metric_only"` today. Asking for a worker-backed judge is rejected.
+
+Rules for `reviewer`:
+
+- Do **not** send a `metric.command` or `target`; the kernel rejects a reviewer-judged goal that has one. Send that command as a guardrail instead.
+- `success_criteria` is the reviewer's only bar, so write it as the standard to judge against, not as a task. "The first-run onboarding is clean and concise and explains the three core commands in one screen" is reviewable; "improve onboarding" is not, and produces a reviewer that never approves. With the prompt form, send `success_criteria` explicitly rather than letting it default to a prompt that reads like an instruction.
+- Set `budget.max_iterations` to what the user asked for ("a few times" ≈ 3, "keep going until it's right" ≈ 5). Running out of iterations without approval is a normal, reported outcome, not a failure: the work and every critique stay on the issue and the user is asked whether to accept it or raise the budget.
 
 Payload (existing issue):
 
@@ -920,7 +941,22 @@ Payload (existing issue):
 - `parse.type`: `last_number` (default), `first_number`, `regex` (with `pattern`, optional `capture`), `json_path` (with `path`), or `exit_status` (1 when the command exits 0).
 - `metric.cwd`: `workspace` (default, measures the attempt's branch) or `project_root`.
 - `budget`: `max_iterations` (default 5, ceiling 20), `max_wall_clock_seconds` (default 4 h, ceiling 24 h), `max_workers`, `max_consecutive_no_progress` (default 2), `min_metric_delta`, `min_seconds_between_iterations`.
-- `continuity`: `accumulate` (default; re-prompt the same worker and branch each iteration) or `fresh_attempt` (a new worker and worktree per iteration).
+- `continuity`: `accumulate` (default; re-prompt the same worker and branch each iteration) or `fresh_attempt` (a new worker and worktree per iteration). Keep the default for reviewer-judged goals: each round should fix the reviewer's points on the same branch, not start over.
+
+Reviewer-judged payload (the prompt form works the same way: swap `issue_id` for `prompt` plus `project_id`):
+
+```json
+{
+  "issue_id": "P1-I7",
+  "success_criteria": "the first-run onboarding is clean and concise and names the three core commands on the first screen",
+  "title": "Onboarding polish",
+  "judge": { "mode": "reviewer" },
+  "metric": { "guardrails": [{ "command": "bundle exec rake test" }] },
+  "budget": { "max_iterations": 4 }
+}
+```
+
+Each iteration, Meringue runs the attempt, runs the guardrails on its branch, then spawns one short-lived reviewer session on that same branch. The reviewer returns `{approved, rationale, critique[]}`; an approval ends the goal, and a rejection's critique becomes the next attempt's instructions verbatim. The reviewer session appears in the AgentTree as an ordinary worker on the issue and counts against the goal's session budget.
 
 Example:
 
@@ -962,7 +998,7 @@ Example with no issue yet — the user said "this is critical, don't stop until 
 }
 ```
 
-The kernel returns the goal record with a `G<n>` id, and the created issue id on the record's `issue_id`. It measures a baseline before the first attempt, then drives the loop on its own reconcile tick; the head does not need to spawn the attempt workers.
+The kernel returns the goal record with a `G<n>` id, and the created issue id on the record's `issue_id`. For a metric goal it measures a baseline before the first attempt; a reviewer-judged goal has no baseline and starts attempting immediately. Either way the kernel drives the loop on its own reconcile tick: the head does not spawn the attempt workers, does not spawn the reviewer, and must never tell a worker to wait for or poll another agent.
 
 ### ModifyGoal
 
@@ -1013,7 +1049,9 @@ Use `Kill` with the goal id instead when the user wants the running attempt sess
 
 ### ListGoals
 
-Returns goal loops with their status, iteration accounting, metric progress, and stop reason. With `goal_id` it also returns that goal's recent iterations, verdicts, and directives. Use it for read-only "how is that goal going" questions instead of spawning a worker.
+Returns goal loops with their status, iteration accounting, progress, and stop reason. With `goal_id` it also returns that goal's recent iterations, verdicts, and directives. Use it for read-only "how is that goal going" questions instead of spawning a worker.
+
+Each goal reports its `judge_mode`. A `metric_only` goal reports its metric, comparator, and target; a `reviewer` goal reports `review_state` (`not reviewed yet`, `changes requested`, `approved`, or `unreadable verdict`) and the reviewer's last critique instead.
 
 Payload:
 

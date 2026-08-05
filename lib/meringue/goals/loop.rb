@@ -25,6 +25,8 @@ module Meringue
       #   { "action" => "start_iteration","mode" => "spawn"|"prompt", "number" => n,
       #     "command_id" => ..., "worker_id" => (prompt only) }
       #   { "action" => "measure",        "iteration_number" => n }
+      #   { "action" => "review",         "mode" => "spawn"|"collect", "iteration_number" => n,
+      #     "command_id" => (spawn only), "attempt" => n, "review_worker_status" => (collect only) }
       #   { "action" => "judge",          "iteration_number" => n }
       #   { "action" => "stop",           "status" => ..., "stop_reason" => ..., "message" => ... }
       def next_action(goal:, agents: [], now: Time.now.utc)
@@ -37,7 +39,11 @@ module Meringue
 
         stop = stop_action(goal, now)
         return stop if stop
-        return action("measure_baseline") if Record.metric_value(goal.fetch("baseline_metric", nil)).nil?
+        # A reviewer-judged goal has no number to baseline against: its "before" is the
+        # success criteria the reviewer reads, not a measurement.
+        if !Record.reviewer_judged?(goal) && Record.metric_value(goal.fetch("baseline_metric", nil)).nil?
+          return action("measure_baseline")
+        end
 
         rate_limit = rate_limit_action(goal, now)
         return rate_limit if rate_limit
@@ -75,11 +81,42 @@ module Meringue
           )
         when "measuring"
           action("measure", "iteration_number" => number)
+        when "reviewing"
+          review_action(goal, iteration, number, agents)
         when "judging"
           action("judge", "iteration_number" => number)
         else
           action("wait", "reason" => "unknown_phase", "iteration_number" => number)
         end
+      end
+
+      # A reviewer turn is sequenced exactly like an attempt: the kernel spawns it, and
+      # while it is not terminal the loop can only wait. Nothing polls or sleeps; the next
+      # reconcile tick observes the settled session and collects its verdict.
+      def review_action(goal, iteration, number, agents)
+        worker_id = Record.present_string(iteration.fetch("review_worker_id", nil))
+        unless worker_id
+          attempt = iteration.fetch("review_attempts", 0).to_i + 1
+          return action(
+            "review",
+            "mode" => "spawn",
+            "iteration_number" => number,
+            "attempt" => attempt,
+            "command_id" => Record.present_string(iteration.fetch("review_command_id", nil)) || review_command_id(goal, number, attempt)
+          )
+        end
+
+        worker = find_agent(agents, worker_id)
+        return action("wait", "reason" => "review_in_flight", "iteration_number" => number) if worker && !terminal_agent?(worker)
+
+        action(
+          "review",
+          "mode" => "collect",
+          "iteration_number" => number,
+          "attempt" => iteration.fetch("review_attempts", 1).to_i,
+          "review_worker_id" => worker_id,
+          "review_worker_status" => worker ? worker.fetch("status", nil) : "missing"
+        )
       end
 
       # Termination rules, in priority order. Success first, then the guards that mean
@@ -95,10 +132,15 @@ module Meringue
         end
 
         if goal.fetch("consecutive_probe_failures", 0).to_i >= Record::PROBE_FAILURE_LIMIT
+          judge = if Record.reviewer_judged?(goal)
+                    "reviewer returned an unusable verdict"
+                  else
+                    "metric command failed"
+                  end
           return stop(
             "errored",
             "probe_unavailable",
-            "Goal #{goal.fetch("id")} stopped because its metric command failed #{goal.fetch("consecutive_probe_failures")} times in a row."
+            "Goal #{goal.fetch("id")} stopped because its #{judge} #{goal.fetch("consecutive_probe_failures")} times in a row."
           )
         end
 
@@ -112,19 +154,31 @@ module Meringue
 
         allowed_no_progress = goal.dig("budget", "max_consecutive_no_progress").to_i
         if allowed_no_progress.positive? && goal.fetch("consecutive_no_progress", 0).to_i >= allowed_no_progress
+          # Without a metric, "no progress" means the reviewer asked for the same thing
+          # again: the attempt is not moving the critique, so more iterations of the same
+          # exchange will not either.
+          detail = if Record.reviewer_judged?(goal)
+                     "with the same reviewer critique"
+                   else
+                     "without measurable progress"
+                   end
           return stop(
             "blocked",
             "no_progress",
-            "Goal #{goal.fetch("id")} stopped after #{goal.fetch("consecutive_no_progress")} iteration(s) without measurable progress."
+            "Goal #{goal.fetch("id")} stopped after #{goal.fetch("consecutive_no_progress")} iteration(s) #{detail}."
           )
         end
 
         max_iterations = goal.dig("budget", "max_iterations").to_i
         if Record.settled_iterations(goal).length >= max_iterations
+          # The expected end of a reviewer-judged goal that never got approved. It is a
+          # reported outcome, not an error: the work and every critique are still on the
+          # record, and raising the budget restarts the loop.
+          suffix = Record.reviewer_judged?(goal) ? " without reviewer approval" : ""
           return stop(
             "blocked",
             "max_iterations",
-            "Goal #{goal.fetch("id")} reached its #{max_iterations} iteration budget."
+            "Goal #{goal.fetch("id")} reached its #{max_iterations} iteration budget#{suffix}."
           )
         end
 
@@ -216,6 +270,14 @@ module Meringue
       # of creating a second worker.
       def attempt_command_id(goal, number)
         "#{goal.fetch("id")}-IT#{number}-ATTEMPT"
+      end
+
+      # Deterministic per-review command id. The retry after an unreadable verdict gets its
+      # own id on purpose: reusing the first one would hit the kernel's exactly-once spawn
+      # dedupe and hand back the same broken reviewer session.
+      def review_command_id(goal, number, attempt = 1)
+        suffix = attempt.to_i > 1 ? "-RETRY#{attempt.to_i}" : ""
+        "#{goal.fetch("id")}-IT#{number}-REVIEW#{suffix}"
       end
 
       def find_agent(agents, agent_id)
