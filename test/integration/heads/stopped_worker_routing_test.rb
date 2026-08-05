@@ -42,6 +42,37 @@ class HeadStoppedWorkerRoutingTest < Minitest::Test
     assert_includes candidate.fetch("status_reason"), "network error: Connection error."
   end
 
+  # Prompting this worker is still the right intent - the kernel answers it with a fresh session on
+  # the same worktree - but the head must be able to say so instead of promising a resume.
+  def test_a_worker_whose_session_cannot_be_replayed_is_flagged_for_the_head
+    candidate = worker_candidate(
+      status: "errored",
+      metadata_overrides: {
+        "settle_state" => "failed",
+        "settle_failure" => SETTLE_FAILURE.merge(
+          "kind" => "unreplayable_session",
+          "reason" => "its saved session can no longer be replayed to the model, so resuming it fails the same way every time"
+        ),
+        "status_reason" => "errored without finishing: its saved session can no longer be replayed to the model. " \
+                           "Its worktree and branch meringue/fix-login still hold the work, so Meringue does not " \
+                           "resume this session: continuing means a fresh session on the same workspace."
+      }
+    )
+
+    assert candidate.fetch("session_unreplayable")
+    assert candidate.fetch("stopped_without_finishing")
+    assert_includes candidate.fetch("status_reason"), "fresh session on the same workspace"
+  end
+
+  def test_a_transport_failure_is_not_flagged_as_unreplayable
+    candidate = worker_candidate(
+      status: "errored",
+      metadata_overrides: { "settle_state" => "failed", "settle_failure" => SETTLE_FAILURE }
+    )
+
+    refute candidate.key?("session_unreplayable")
+  end
+
   def test_an_ordinary_errored_worker_is_still_terminal_for_routing
     candidate = worker_candidate(status: "errored", metadata_overrides: { "error_message" => "spawn failed" })
 

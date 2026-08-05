@@ -114,8 +114,14 @@ Terminal is the last rung, not the first:
    kernel refuses to apply has no retry and is terminal immediately.
 4. **Worker resume** — a worker whose session cannot be polled is re-attached and
    re-prompted up to `WORKER_RECONCILE_RESUME_MAX_ATTEMPTS` times, staying `blocked`
-   (with one warning per attempt) rather than `errored` while attempts remain.
-5. **Terminal error** — recorded once, per the contract above.
+   (with one warning per attempt) rather than `errored` while attempts remain. A session
+   the provider has already refused to replay is skipped here (see [A session that cannot
+   be replayed](#a-session-that-cannot-be-replayed)): resuming it would send the same
+   rejected transcript.
+5. **Worker session restart** — a worker whose saved transcript the provider refuses is
+   continued once in a *fresh* session on its own worktree and branch, instead of being
+   resumed.
+6. **Terminal error** — recorded once, per the contract above.
 
 ## Cleanup of terminal records
 
@@ -183,12 +189,65 @@ was cut short keeps the dependent waiting, because prompting that predecessor re
 `if_predecessor_fails: "run"` still activates the dependent immediately, and killing the
 predecessor still cancels the chain.
 
+## A session that cannot be replayed
+
+One dead turn is different: the model provider rejects the *saved transcript* itself, not the
+request. Anthropic-style routes refuse a replayed assistant turn whose `thinking` /
+`redacted_thinking` blocks are not byte-identical to what they originally returned:
+
+```txt
+400 messages.1.content.44: `thinking` or `redacted_thinking` blocks in the latest assistant
+message cannot be modified. These blocks must remain as they were in the original response.
+```
+
+Resuming replays the same turn, so every attempt fails identically. This is what dead-ended a
+real worker: it errored, the kernel resumed its session, and three seconds later it errored
+again with the same 400, while the worker queued behind it with `if_predecessor_fails: "cancel"`
+could never start. Meringue does not own that transcript and does not rewrite harness session
+files, so it treats the session as spent and recovers the *work*:
+
+- **Classified apart from a transport blip.** `kind: "unreplayable_session"` (the harness
+  reports it - `PiClient::UNREPLAYABLE_SESSION_PATTERN` - and the kernel recognises the same
+  rejection in session events through `SETTLE_FAILURE_UNREPLAYABLE_PATTERN`). The record's
+  `status_reason` and its one error log line say the session cannot be replayed and that the
+  worktree and branch still hold the work; the log details carry `recoverable: false`.
+- **Never resumed.** `worker_resumable_after_settle_failure?` is false for these records, so
+  reconciliation does not re-attach them, `/prompt` does not deliver into them, and a queued
+  dependent is resolved by its `if_predecessor_fails` policy instead of waiting forever.
+- **Restarted once, in place.** The kernel spawns a replacement worker whose session is fresh
+  but whose workspace is the dead worker's *existing* worktree and branch
+  (`_inherit_workspace_from_agent_id`). Nothing re-creates, re-branches, or cleans up that
+  checkout: the inherited workspace plan is recorded with `created: false`, which is what keeps
+  every failure path from deleting the only copy of the work. The successor's prompt carries the
+  original assignment plus a handover note telling it to re-establish state with `git status`
+  before continuing.
+- **Bounded.** One restart per worker (`WORKER_SESSION_RESTART_MAX_ATTEMPTS`) and a chain cap
+  (`WORKER_SESSION_RESTART_MAX_CHAIN_DEPTH`), tracked in `harness_metadata.session_recovery`
+  with a deterministic restart command id so a repeated observation cannot spawn a second
+  successor. When the budget is spent, the worker stays `errored` with a reason the user can act
+  on and `/prompt` answers with which worker holds the work now.
+- **Queue-preserving.** The restart is a replacement, so `SpawnWorker` repoints the dead
+  worker's queued dependents at the successor in the same command.
+- **Prune-safe.** A worker whose worktree was taken over no longer owns it
+  (`worker_workspace_handed_over?`): pruning the replaced record removes only the record, and it
+  neither deletes the shared checkout nor warns once per pass about a worktree it handed over.
+
+Ownership note: the mutation the provider objects to happens inside the harness's own model
+request path (Pi replays the interrupted assistant turn from its session file, including a
+synthesized tool result for the tool call that never completed) and the provider route that
+validates it. Meringue's contribution to a resumed request is one plain user message. The
+behavior above is therefore resilience, not a transcript fix, and it applies to any harness
+that reports the same class of failure.
+
 ## Verifying
 
 ```bash
 ruby -Ilib -Itest test/integration/kernel_maintenance/reconcile_terminal_errors_test.rb
 ruby -Ilib -Itest test/integration/kernel_maintenance/reconcile_sessions_test.rb
 ruby -Ilib -Itest test/integration/kernel_maintenance/reconcile_delivery_pull_request_test.rb
+ruby -Ilib -Itest test/integration/kernel_workers/settle_classification_test.rb
+ruby -Ilib -Itest test/integration/kernel_workers/unreplayable_session_recovery_test.rb
+ruby -Ilib -Itest test/integration/harness/pi_client_turn_outcome_test.rb
 ```
 
 The first test file covers the log-once/no-churn contract: an unrepairable worker session,
@@ -198,7 +257,14 @@ passes, live sessions in the same pass still reconcile, an errored record withou
 reconcile details is still polled and still reports its failure once, and a settled errored
 head is retained until `/prune` removes it.
 
-The third file covers the background-pass contract: a delivery PR refresh records forge state
+The last two files cover the unreplayable-session contract: the harness classifies the provider's
+rejection of a replayed `thinking` block as `unreplayable_session` with a `fresh_session` recovery
+hint, and the kernel records it with actionable reporting, never resumes it, continues the work in
+a fresh session on the same worktree and branch without allocating a second worktree, repoints the
+queued dependent at the successor, spends at most one restart, and keeps the shared worktree when
+the replaced record is pruned.
+
+The delivery-PR file covers the background-pass contract: a delivery PR refresh records forge state
 and never lets an unavailable forge overwrite the last known state, a blocked forge lookup does
 not stop another instance from running `ListAll` or `CreateIssue`, one tick honours both the
 batch limit and the shared budget, and refresh schedules are spread so records do not all fall

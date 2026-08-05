@@ -69,6 +69,32 @@ class TuiSettleFailurePresentationTest < Minitest::Test
     assert_includes rendered, "stopped mid-turn"
   end
 
+  # A session the provider refuses to replay is not something a prompt picks up where it left off,
+  # so the row must not read like the resumable case.
+  def test_a_worker_whose_session_cannot_be_replayed_says_the_session_is_unusable
+    worker = aborted_worker
+    worker["harness_metadata"] = worker.fetch("harness_metadata").merge(
+      "settle_failure" => SETTLE_FAILURE.merge("kind" => "unreplayable_session"),
+      "status_reason" => "errored without finishing: its saved session can no longer be replayed to the model. " \
+                         "Its worktree and branch meringue/fix-prune-retention still hold the work, so Meringue " \
+                         "does not resume this session: continuing means a fresh session on the same workspace."
+    )
+
+    rendered = plain_lines(TreePane.new.lines(tree_with(worker), width: 60)).join("\n")
+
+    assert_includes rendered, "stopped: session unusable"
+    refute_includes rendered, "stopped mid-turn"
+
+    state = composed_state(
+      tree_with(worker),
+      workspace: { "agent_id" => worker.fetch("id"), "view" => "agent", "filter" => "all", "content_revision" => 1 }
+    )
+    focused = plain_lines(WorkspacePane.new.content_lines(state, width: 100)).join("\n")
+
+    assert_includes focused, "can no longer be replayed"
+    assert_includes focused, "fresh session on the same workspace"
+  end
+
   def test_a_completed_worker_gets_no_stopped_marker
     worker = agent_record(
       "P1-I1-W1",
