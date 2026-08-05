@@ -53,6 +53,7 @@ Supported action names:
 - `clear_or_quit`
 - `cancel_navigation`
 - `open_delivery_pr` (defaults to `ctrl-b`)
+- `refresh_model_catalog` (defaults to `ctrl-r`; only active inside the `/models` model picker)
 - `focus_next`, `focus_previous`
 - `scroll_up`, `scroll_down`, `scroll_page_up`, `scroll_page_down`, `scroll_top`, `scroll_bottom`
 - `submit`, `newline`
@@ -211,14 +212,14 @@ Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinki
 
 ### Model catalogs and provider resource flags
 
-`/models`, and the completion list behind `/model`, come from the harness itself rather than a list maintained in Meringue. For Pi, Meringue starts a short-lived ephemeral RPC probe (`pi --mode rpc --no-session`) and reads `get_available_models`.
+The `/models` model picker, and the completion list behind `/model`, come from the harness itself rather than a list maintained in Meringue. For Pi, Meringue starts a short-lived ephemeral RPC probe (`pi --mode rpc --no-session`) and reads `get_available_models`.
 
 That probe reuses the configured provider `command`, `env`, `extra_args`, and role `*_extra_args`, minus `--model`/`--thinking`, because provider availability depends on those flags. Two consequences matter when configuring Pi:
 
 - If `worker_extra_args` contains `--no-extensions` and your models come from a Pi extension, the catalog is legitimately empty, and Meringue reports `unavailable` with Pi's own answer instead of inventing entries. Keep the `--extension <path>` flag that registers your provider in the same array (as in the example above) so probes and real sessions agree.
 - Model/thinking defaults are dropped from the probe on purpose: an unavailable saved default must not stop Pi from reporting which models exist.
 
-Catalogs are cached in Meringue state under `metadata.harness_model_catalogs.<harness>` and refreshed in the background by reconciliation (about every 10 minutes, retried after about 1 minute when a fetch failed). `/models refresh` forces an immediate re-fetch after you log into a provider, install an extension, or edit `~/.pi/agent/models.json`.
+Catalogs are cached in Meringue state under `metadata.harness_model_catalogs.<harness>` and refreshed in the background by reconciliation (about every 10 minutes, retried after about 1 minute when a fetch failed). `/models refresh` (or `Ctrl-R` inside the model picker) forces an immediate re-fetch after you log into a provider, install an extension, or edit `~/.pi/agent/models.json`.
 
 Claude Code runs through `claude --print --output-format stream-json --verbose`; Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace. Live steer/follow-up prompting is currently Pi-only.
 

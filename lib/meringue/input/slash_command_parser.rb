@@ -23,7 +23,7 @@ module Meringue
         ["/model <provider/model>", "Persist the model for all future Pi sessions; existing sessions are unchanged."],
         ["/thinking <level>", "Persist the thinking level for all future Pi sessions; existing sessions are unchanged."],
         ["/session-settings <agent_id>", "Refresh and show one existing agent's effective Pi model and thinking level."],
-        ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
+        ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
         ["/goal create <issue_id> \"<success criteria>\" --metric \"<command>\" --target <number> [flags]", "Attach a goal loop to an issue: iterate until the metric hits its target or a budget guard trips."],
         ["/goal status [goal_id]", "Show goal loops, iteration accounting, and stop reasons."],
         ["/goal pause <goal_id>", "Pause a goal loop; the current attempt finishes but nothing new is spawned."],
@@ -395,7 +395,7 @@ module Meringue
                    end
         [{
           "usage" => headline,
-          "description" => "#{note} Run /models to retry; an exact provider/model id still works.",
+          "description" => "#{note} Run /models refresh to retry; an exact provider/model id still works.",
           "completion" => context.fetch("completion_prefix"),
           "requires_arguments" => false,
           "append_space" => false,
@@ -598,16 +598,30 @@ module Meringue
         kernel_command("GetSessionDefaults")
       end
 
-      # `/models` lists the catalog the active harness reports. A trailing
-      # `refresh` word forces a re-fetch instead of reusing the cached snapshot.
+      # `/models` opens the local TUI model picker: a searchable list of the
+      # models the harness itself reports, where selecting a row is applied as
+      # `/model <provider/model>`. Dumping the catalog into the log was unusable
+      # once a harness reported a hundred models, so the listing UI moved into
+      # the TUI while the kernel command stayed the only source of the catalog.
+      #
+      # A trailing `refresh` word is still the kernel path: it forces a re-fetch
+      # (`GetModelCatalog`) and reports the snapshot's state without opening the
+      # picker, which is also what the picker's own refresh key submits and what
+      # a head proposes for "what models can I use".
       def parse_models(arguments)
         tokens = split_arguments(arguments)
         refresh_words, harness_words = tokens.partition { |token| MODEL_CATALOG_REFRESH_WORDS.include?(token.to_s.downcase) }
         return invalid("Usage: /models [harness] [refresh]") if harness_words.length > 1 || refresh_words.length > 1
 
-        payload = {}
+        if refresh_words.empty?
+          return invalid(
+            "/models is a local TUI command. Run it in the interactive TUI to open the model picker, or /models refresh to re-fetch the catalog.",
+            usage: "/models [harness] [refresh]"
+          )
+        end
+
+        payload = { "refresh" => true }
         payload["harness"] = harness_words[0] if harness_words[0]
-        payload["refresh"] = true unless refresh_words.empty?
         kernel_command("GetModelCatalog", payload)
       end
 

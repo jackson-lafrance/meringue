@@ -241,6 +241,25 @@ module Meringue
         index < OpenPullRequests.entries(state).length ? index : :chrome
       end
 
+      # Same three answers for the model picker: a row index, `:chrome` for its
+      # own border/caption, and `:outside` for a click-away dismiss.
+      def model_picker_hit(state, width:, height:, x:, y:)
+        return :outside unless chat_pane.model_picker?(state)
+
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        return :outside unless metrics.fetch(:suggestion_height).positive?
+
+        bounds = pane_bounds(metrics, :suggestion_x, :suggestion_y, :suggestion_width, :suggestion_height)
+        bounds = bounds.merge(height: bounds.fetch(:height) + metrics.fetch(:suggestion_footer_height))
+        return :outside unless point_in_bounds?(x.to_i, y.to_i, bounds)
+
+        row = y.to_i - metrics.fetch(:suggestion_y) - 1
+        return :chrome if row.negative? || row >= Panes::ChatPane::MODEL_PICKER_VISIBLE_LIMIT
+
+        index = chat_pane.model_picker_window_start(state) + row
+        index < chat_pane.model_picker_entries(state).length ? index : :chrome
+      end
+
       def agent_tree_item_at(state, width:, height:, x:, y:)
         return nil if agent_workspace_active?(state)
 
@@ -641,8 +660,10 @@ module Meringue
         }
       end
 
-      # One popup slot above the composer, shared by the slash-command list and the
-      # open-PR picker (see ChatPane#popup?), so both are bounded the same way.
+      # One popup slot above the composer, shared by the slash-command list, the
+      # open-PR picker, and the model picker (see ChatPane#popup?), so all three
+      # are bounded the same way. Only the number of visible rows differs: the
+      # model picker is browsed, so it is allowed to be taller.
       #
       # The caption under the box gets its own reserved row, so the box keeps every
       # visible entry row it would otherwise have spent on the counter, and the
@@ -652,7 +673,7 @@ module Meringue
         return { height: 0, footer_height: 0 } unless chat_pane.popup?(state)
 
         footer_height = chat_pane.popup_footer_line(state).empty? ? 0 : 1
-        desired_height = [chat_pane.popup_lines(state).length + 2, 7].min
+        desired_height = [chat_pane.popup_lines(state).length + 2, chat_pane.popup_max_box_height(state)].min
         available_height = total_height - BOTTOM_HINT_HEIGHT - composer_height - GAP - MIN_CHAT_HEIGHT - GAP - footer_height
         height = [desired_height, [available_height, 0].max].min
         return { height: 0, footer_height: 0 } if height < 3

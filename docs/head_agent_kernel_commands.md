@@ -37,7 +37,7 @@ Natural-language mapping:
 | "use the gruvbox theme" | `SetTheme` |
 | "switch to claude/pi/antigravity" | `SetHarness` |
 | "show the defaults", "which model will future agents use" | `GetSessionDefaults` |
-| "what models can I use", "list the available models" | `GetModelCatalog` |
+| "what models can I use", "list the available models", "refresh the model list" | `GetModelCatalog` (a status report; the browsable list is the TUI model picker behind `/models`) |
 | "use provider/model for future Pi agents" | `SetDefaultSessionModel` |
 | "use high thinking for future Pi agents" | `SetDefaultSessionThinkingLevel` |
 | "show P1-I9-W3's model/thinking settings" | `GetSessionSettings` |
@@ -1212,7 +1212,7 @@ the typed path. They use normal kernel/harness validation: a non-Pi or non-resum
 rejected rather than guessed.
 
 - `GetSessionDefaults` backs `/defaults` and takes `{}`.
-- `GetModelCatalog` backs `/models [harness] [refresh]` with an optional `{ "harness": "pi", "refresh": true }`. It is read-only: it asks the harness which models exist, reuses the cached snapshot unless `refresh` is set, and reports an explicit unavailable/unsupported state instead of guessing when the harness cannot answer.
+- `GetModelCatalog` backs `/models refresh [harness]` with `{ "harness": "pi", "refresh": true }` (the `harness` key stays optional). It is read-only: it asks the harness which models exist, reuses the cached snapshot unless `refresh` is set, and reports an explicit unavailable/unsupported state instead of guessing when the harness cannot answer. Its output is a status (harness, availability, model count, timestamps, note) plus a few example references, not a listing: browsing the catalog is the TUI model picker that bare `/models` opens, which reads the same persisted snapshot. A head proposing this command for "what models can I use" therefore gets a short, scannable answer instead of a hundred log lines.
 - `SetDefaultSessionModel` backs `/model <provider/model>` with `{ "model": "provider/model" }`.
 - `SetDefaultSessionThinkingLevel` backs `/thinking <level>` with `{ "level": "high" }`.
 - `GetSessionSettings` backs `/session-settings <agent_id>` with `{ "agent_id": "P1-I1-W1" }`.

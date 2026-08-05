@@ -7,6 +7,10 @@ module Meringue
     module Panes
       class ChatPane
         VISIBLE_SUGGESTION_LIMIT = 3
+        # The model picker is a list the user browses rather than a hint over the
+        # composer, so it gets a taller window than the slash-command popup while
+        # still sharing the same slot, border, and keys.
+        MODEL_PICKER_VISIBLE_LIMIT = 10
         HEAD_ICON = "◆"
         WORKER_ICON = "✦"
         RESULT_ICON = "✓"
@@ -181,15 +185,28 @@ module Meringue
           slash_suggestion_records(state).any?
         end
 
-        # The popup slot between the logs pane and the composer. The open-PR picker
-        # and the slash-command list are both transient lists over the composer, so
-        # they share one geometry, one border, and one keyboard shape instead of
-        # introducing a second overlay mechanism. The picker wins while it is up.
+        # The popup slot between the logs pane and the composer. The model picker,
+        # the open-PR picker, and the slash-command list are all transient lists
+        # over the composer, so they share one geometry, one border, and one
+        # keyboard shape instead of introducing another overlay mechanism. A picker
+        # wins while it is up.
         def popup?(state)
-          delivery_pr_picker?(state) || slash_suggestions?(state)
+          model_picker?(state) || delivery_pr_picker?(state) || slash_suggestions?(state)
+        end
+
+        # How many entry rows the popup shows at once, and therefore how tall the
+        # layout should let the box grow.
+        def popup_visible_limit(state)
+          model_picker?(state) ? MODEL_PICKER_VISIBLE_LIMIT : VISIBLE_SUGGESTION_LIMIT
+        end
+
+        def popup_max_box_height(state)
+          popup_visible_limit(state) + 2
         end
 
         def popup_pane_title(state)
+          return "models (#{ModelPicker.harness_for(state, model_picker_state(state).fetch("harness", nil))})" if model_picker?(state)
+
           delivery_pr_picker?(state) ? "open pull requests" : "slash commands"
         end
 
@@ -198,6 +215,8 @@ module Meringue
         # 27 commands" inside the border reads like a 16th command and costs the
         # list a visible row. The layout draws #popup_footer_line under the box.
         def popup_lines(state)
+          return model_picker_lines(state) if model_picker?(state)
+
           delivery_pr_picker?(state) ? delivery_pr_picker_lines(state) : slash_suggestion_lines(state)
         end
 
@@ -205,7 +224,105 @@ module Meringue
         # the full list, and the keys that move it. Empty when there is nothing to
         # say, in which case the layout reserves no row for it.
         def popup_footer_line(state)
+          return model_picker_footer_line(state) if model_picker?(state)
+
           delivery_pr_picker?(state) ? delivery_pr_picker_footer_line(state) : slash_suggestion_footer_line(state)
+        end
+
+        # The `/models` picker: one searchable list of the models the harness
+        # itself reported, replacing the old catalog dump in the log.
+        def model_picker?(state)
+          model_picker_state(state).fetch("active", false) == true
+        end
+
+        def model_picker_state(state)
+          value = chat_state(state).fetch("model_picker", nil)
+          value.is_a?(Hash) ? value : {}
+        end
+
+        def model_picker_query(state)
+          model_picker_state(state).fetch("query", "").to_s
+        end
+
+        def model_picker_harness(state)
+          ModelPicker.harness_for(state, model_picker_state(state).fetch("harness", nil))
+        end
+
+        def model_picker_entries(state)
+          ModelPicker.entries(state, harness: model_picker_harness(state), query: model_picker_query(state))
+        end
+
+        # Clamped against the list that exists this frame, so a refresh that
+        # shortens the catalog cannot leave the cursor past the end.
+        def model_picker_index(state)
+          entries = model_picker_entries(state)
+          return NO_SLASH_SELECTION if entries.empty?
+
+          model_picker_state(state).fetch("index", 0).to_i.clamp(0, entries.length - 1)
+        end
+
+        def model_picker_window_start(state)
+          slash_suggestion_window_start(
+            model_picker_entries(state).length,
+            model_picker_index(state),
+            limit: MODEL_PICKER_VISIBLE_LIMIT
+          )
+        end
+
+        # An empty list always explains itself: an unavailable or unsupported
+        # harness catalog says so in the harness's own words instead of rendering
+        # a blank box the user cannot tell from "no models exist".
+        def model_picker_lines(state)
+          entries = model_picker_entries(state)
+          if entries.empty?
+            message = ModelPicker.empty_message(state, harness: model_picker_harness(state), query: model_picker_query(state))
+            return [[[message, Style::MUTED]]]
+          end
+
+          selected_index = model_picker_index(state)
+          window_start = model_picker_window_start(state)
+          entries.drop(window_start).first(MODEL_PICKER_VISIBLE_LIMIT).map.with_index do |entry, offset|
+            model_picker_line(entry, selected: window_start + offset == selected_index)
+          end
+        end
+
+        def model_picker_line(entry, selected:)
+          marker = selected ? "›" : " "
+          details = []
+          details << "current default" if entry.fetch("current", false)
+          details << entry.fetch("name") unless entry.fetch("name", "").to_s.empty?
+          levels = Array(entry.fetch("thinking_levels", []))
+          details << "thinking: #{levels.join(", ")}" unless levels.empty?
+          [
+            ["#{marker} ", selected ? Style::ACCENT_BOLD : Style::DIM],
+            [entry.fetch("reference"), selected ? Style::ACCENT_BOLD : Style::TEXT],
+            details.empty? ? nil : ["  #{details.join(" · ")}", Style::MUTED]
+          ].compact
+        end
+
+        # Caption under the box: where the window sits, what the query is, and the
+        # keys. The picker is modal and met rarely, so it always states its keys.
+        def model_picker_footer_line(state)
+          total = model_picker_entries(state).length
+          segments = []
+          if total.positive?
+            segments << [model_picker_count_label(state, total), Style::MUTED]
+          end
+          query = model_picker_query(state)
+          segments << ["  ·  filter: #{query}", Style::TEXT] unless query.empty?
+          segments << ["#{segments.empty? ? "" : "  ·  "}type to filter · ↑↓ move · Enter sets the default · Ctrl-R refreshes · Esc closes", Style::DIM]
+          segments
+        end
+
+        def model_picker_count_label(state, total)
+          label = if total > MODEL_PICKER_VISIBLE_LIMIT
+                    window_start = model_picker_window_start(state)
+                    "#{window_start + 1}–#{[window_start + MODEL_PICKER_VISIBLE_LIMIT, total].min} of #{total} models"
+                  else
+                    "#{total} model#{total == 1 ? "" : "s"}"
+                  end
+          state_label = ModelPicker.state_label(state, harness: model_picker_harness(state))
+          state_label ? "#{label} (#{state_label})" : label
         end
 
         def delivery_pr_picker?(state)
@@ -1038,11 +1155,11 @@ module Meringue
           index.clamp(0, count - 1)
         end
 
-        def slash_suggestion_window_start(count, selected_index)
-          return 0 if count <= VISIBLE_SUGGESTION_LIMIT || selected_index.negative?
+        def slash_suggestion_window_start(count, selected_index, limit: VISIBLE_SUGGESTION_LIMIT)
+          return 0 if count <= limit || selected_index.negative?
 
-          max_start = count - VISIBLE_SUGGESTION_LIMIT
-          [selected_index - VISIBLE_SUGGESTION_LIMIT + 1, 0].max.clamp(0, max_start)
+          max_start = count - limit
+          [selected_index - limit + 1, 0].max.clamp(0, max_start)
         end
 
         def plain_text(line)

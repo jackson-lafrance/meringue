@@ -15,6 +15,7 @@ agent_select_next = ["j", "down", "right"]
 ## Global
 
 - `Ctrl-B`: open a delivery pull request. While a worker/issue is selected (or jump mode is on a row) it opens that node's own kernel-verified PR. With nothing selected it opens the **open pull requests** picker instead, because unscoped chat is not about one worker; `↑`/`↓` move, `Enter` opens the highlighted PR in the browser, and `Esc`, another `Ctrl-B`, a click outside the list, or any other key closes it. Clicking a row opens that row. If a PR is missing, malformed, or its status cannot be refreshed, Meringue reports that state without closing the dashboard or changing the worker.
+- `Ctrl-R`: while the `/models` **model picker** is open, re-fetch the harness model catalog (`refresh_model_catalog`). It has no effect anywhere else, so it stays available for normal typing.
 - `Ctrl-D`: quit.
 - `Ctrl-C`: clear input; quit when input is empty.
 - `Esc`: cancel the innermost active thing — a text selection or the logs selection cursor first, then the AgentTree selection (which clears the logs filter) and jump mode.
@@ -239,7 +240,19 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 - `Up` / `Down`: select a suggestion; `Down` starts at the first entry and `Up` starts at the last.
 - `Enter`: insert the selected suggestion into the input. Press `Enter` again to run it.
 - `Tab`: complete the selected suggestion, or the first one when nothing is selected.
-- The box shows a window of three entries and holds **commands only**. When the list is longer than the window, a dim caption renders on its own line *below* the box: `1–3 of 27 commands  ·  ↑↓ scroll · keep typing to filter`. It is a caption about the list, not a row in it, so the window never loses an entry to it; a list that fits the window has no caption at all. The same slot and the same caption placement are used by the `Ctrl-B` open-PR picker (`2 open PRs  ·  ↑↓ move · Enter opens · Esc closes`). The focused-workspace `workspace commands` list is unwindowed and has no caption.
+- The box shows a window of three entries and holds **commands only**. When the list is longer than the window, a dim caption renders on its own line *below* the box: `1–3 of 27 commands  ·  ↑↓ scroll · keep typing to filter`. It is a caption about the list, not a row in it, so the window never loses an entry to it; a list that fits the window has no caption at all. The same slot and the same caption placement are used by the `Ctrl-B` open-PR picker (`2 open PRs  ·  ↑↓ move · Enter opens · Esc closes`) and by the `/models` model picker. The focused-workspace `workspace commands` list is unwindowed and has no caption.
+
+## Model picker
+
+Open it with `/models` (optionally `/models claude` to scope it to another harness). It is a modal list in the same popup slot as the slash-command suggestions, but it is browsed rather than glanced at, so it shows up to ten rows and captions them with `1–10 of 122 models  ·  type to filter · ↑↓ move · Enter sets the default · Ctrl-R refreshes · Esc closes`.
+
+- Any printable character: filter the list. Space separated tokens all have to match, so `openai high` narrows by provider and thinking level at once.
+- `Backspace`: delete one character of the filter. `Ctrl-W`: clear the filter.
+- `↑` / `↓`: move the highlight; it wraps. The mouse wheel scrolls it and clicking a row picks that row.
+- `Enter`: apply the highlighted model as the future-session default. This is exactly `/model <provider/model>`, so the kernel validates, journals, and logs it the same way.
+- `Ctrl-R`: re-fetch the catalog through the kernel (`/models refresh`) without closing the picker.
+- `Esc`, a click outside the list, or any unhandled control key: close it without changing anything.
+- The list is never blank: an unavailable catalog, an unsupported harness, a snapshot that has never been fetched, and a filter that matched nothing each render their own explanation and say what to do next.
 
 ## Jump mode
 
