@@ -172,7 +172,7 @@ Useful slash commands inside the TUI include:
 - `/config` — show the active config, supported defaults, conflict policy, and keybindings.
 - `/harness <pi|claude|antigravity>` — select the harness for future agents.
 - `/defaults` — inspect the model and thinking level for all future Pi heads and workers.
-- `/models [harness] [refresh]` — list every model the selected harness reports, with each model's supported thinking levels; `refresh` re-asks the harness instead of using the cached snapshot.
+- `/models [harness]` — open the model picker: a searchable list of the models the selected harness reports, with each model's provider/id, name, and supported thinking levels. Type to filter, `↑`/`↓` to move, `Enter` applies the model as the future-session default (exactly like `/model`), `Ctrl-R` re-asks the harness, `Esc` closes. `/models refresh [harness]` skips the picker and just re-fetches the catalog.
 - `/model <provider/model>` — persist the model for all future Pi sessions; existing sessions are unchanged.
 - `/thinking <level>` — persist the thinking level for all future Pi sessions; existing sessions are unchanged.
 - `/session-settings <agent_id>` — refresh and inspect one existing agent's effective Pi model and thinking level (the old dashboard `/session` spelling remains a compatibility alias; focused workspaces advertise `/open-session` for opening the harness UI).

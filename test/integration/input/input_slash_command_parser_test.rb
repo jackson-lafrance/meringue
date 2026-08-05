@@ -424,11 +424,19 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_includes unknown_levels.first.fetch("description"), "not verified"
   end
 
-  def test_models_command_lists_catalogs_and_supports_an_explicit_refresh
-    assert_equal ["GetModelCatalog", {}], parsed_command("/models")
-    assert_equal ["GetModelCatalog", { "harness" => "claude" }], parsed_command("/models claude")
+  # `/models` no longer dumps the catalog into the log: browsing it is the TUI
+  # model picker, so the bare command is a local TUI command like /jump. An
+  # explicit `refresh` word is still the kernel path, which is what the picker's
+  # refresh key submits and what a head proposes for "what models can I use".
+  def test_models_opens_the_local_picker_while_refresh_stays_a_kernel_command
+    picker = parse_slash("/models")
+    assert_equal "InvalidSlashCommand", picker.fetch("type")
+    assert_includes picker.dig("payload", "message"), "local TUI command"
+    assert_includes picker.dig("payload", "message"), "model picker"
+    assert_equal "InvalidSlashCommand", parse_slash("/models claude").fetch("type")
+
     assert_equal ["GetModelCatalog", { "refresh" => true }], parsed_command("/models refresh")
-    assert_equal ["GetModelCatalog", { "harness" => "pi", "refresh" => true }], parsed_command("/models pi refresh")
+    assert_equal ["GetModelCatalog", { "refresh" => true, "harness" => "pi" }], parsed_command("/models pi refresh")
     assert_equal "InvalidSlashCommand", parse_slash("/models pi claude").fetch("type")
 
     records = suggestion_records("/models ", sample_state_with_model_catalog)
