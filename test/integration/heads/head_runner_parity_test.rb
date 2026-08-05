@@ -173,7 +173,7 @@ class HeadRunnerParityTest < Minitest::Test
       context: context
     )
 
-    assert_equal "Shopify storefront", result.dig("commands", 0, "payload", "name")
+    assert_equal "Shopify", result.dig("commands", 0, "payload", "name")
   end
 
   def test_harness_runner_owns_a_session_for_one_run_and_closes_it

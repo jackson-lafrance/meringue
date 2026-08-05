@@ -223,7 +223,9 @@ module Meringue
       def matching_project(snapshot, user_message)
         prompt_terms = routing_terms(user_message)
         scored = snapshot.fetch("projects", []).filter_map do |project|
-          project_terms = routing_terms([project.fetch("name", ""), File.basename(project.fetch("root_path", ""))].join(" "))
+          project_name = Meringue::ProjectNaming.canonical_name(project.fetch("name", ""))
+          repository_name = Meringue::ProjectNaming.canonical_name(File.basename(project.fetch("root_path", "")))
+          project_terms = routing_terms([project_name, repository_name].compact.join(" "))
           score = prompt_terms.count { |term| project_terms.include?(term) }
           score.positive? ? [score, project] : nil
         end
