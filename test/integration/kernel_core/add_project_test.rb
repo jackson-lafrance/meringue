@@ -47,6 +47,25 @@ class KernelCoreAddProjectTest < Minitest::Test
     assert_equal "Payments API", persisted_project("P1").fetch("name")
   end
 
+  # Regression: a head that echoed the rendered "Meringue working" label back into
+  # AddProject registered a project whose stored name carried a lifecycle status.
+  def test_add_project_strips_a_lifecycle_status_from_the_proposed_name
+    project = apply_command("AddProject", "path" => make_project_dir("meringue"), "name" => "Meringue working").fetch("result")
+
+    assert_equal "Meringue", project.fetch("name")
+    assert_equal "Meringue", persisted_project("P1").fetch("name")
+
+    second = apply_command("AddProject", "path" => make_project_dir("world"), "name" => "World  working").fetch("result")
+    assert_equal "World", second.fetch("name")
+    assert_equal "Added project P2: World", log_messages.last
+  end
+
+  def test_add_project_keeps_a_product_name_that_merely_contains_a_status_word
+    project = apply_command("AddProject", "path" => make_project_dir("copy"), "name" => "Working Copy").fetch("result")
+
+    assert_equal "Working Copy", project.fetch("name")
+  end
+
   def test_add_project_falls_back_to_basename_when_name_is_blank
     path = make_project_dir("fallback")
 

@@ -35,6 +35,20 @@ class KernelCoreModifyProjectTest < Minitest::Test
     assert_equal "Original project", persisted_project("P1").fetch("name")
   end
 
+  # A rename can never reintroduce the "Meringue working" shape either.
+  def test_modify_project_strips_a_lifecycle_status_from_the_new_name
+    result = apply_command("ModifyProject", "project_id" => "P1", "name" => "Meringue working")
+
+    assert_accepted(result)
+    assert_equal "Meringue", result.fetch("result").fetch("name")
+    assert_equal "Meringue", persisted_project("P1").fetch("name")
+    assert_equal "Renamed project P1: Original project -> Meringue", log_entry(result.fetch("log_entry_ids").first).fetch("message")
+
+    renamed = apply_command("Rename", "target_id" => "P1", "name" => "World  working")
+    assert_accepted(renamed)
+    assert_equal "World", persisted_project("P1").fetch("name")
+  end
+
   def test_rename_dispatches_to_projects_and_issues
     project = apply_command("Rename", "target_id" => "P1", "name" => "New project")
     assert_accepted(project)

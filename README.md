@@ -226,7 +226,7 @@ Every agent row in the AgentTree reads as `<status> <harness logo> <id>  <title>
 HEADS
   └─ ● π H1  Route the request
 
-●   P1  meringue working
+●   P1  meringue
   └─ ●   I1  Fix signup validation 1/3
     ├─ ● π W1  Add collision check
     ├─ ✓ ✳ W2  Hide password field
@@ -235,6 +235,7 @@ HEADS
 
 - The id and logo are drawn in that agent's **identity color** — the same deterministic per-id color its log rows and `▌` gutter already use, and the same color the chat composer takes when the row is selected. One agent is one color in all three places.
 - Color is additive and status-independent: a working agent, a completed agent with its `✓`, and idle/queued/blocked/errored/killed agents all keep their color and logo. Status stays legible through the status glyph's own semantic color and the muted title of a completed row.
+- A project row is only its product name (`meringue`, not `meringue working`). Lifecycle status is carried by the status glyph on every row, so it is never spelled out beside a name; the kernel strips a trailing status word from any project name it stores and repairs one that an older state file already contains.
 - The logo is the agent's harness: `π` Pi, `✳` Claude Code, `↑` Antigravity. A harness Meringue does not ship shows a plain ASCII initial, and a record with no harness shows `?`. Every variant is exactly one column wide, and issue/project rows reserve the same cell so all ids stay in one column. Set `MERINGUE_ASCII_GLYPHS=1` for `p`/`c`/`a` if your font cannot draw the marks, or `NO_COLOR=1` to drop color while keeping glyphs, ids, and statuses.
 
 Single-click a project, issue, head, or worker row in the AgentTree to filter the logs pane to that node: a worker shows its own logs, an issue adds its workers and child issues, and a project covers its whole subtree. Right-click an agent row to open its associated delivery PR; if no PR is tracked, Meringue shows a transient notice and leaves the current selection unchanged. Issue and worker selections also focus subsequent natural-language chat: an issue targets itself, while a worker resolves to its owning issue and remains a preferred session-context hint. Selecting a head that failed before routing (`errored` or `killed`) targets that head for a retry: your next message re-runs the request it never routed, adding whatever you typed as a new instruction. Selected prompts are tagged to the issue (and the selected worker when applicable), so they remain visible in the focused logs.
