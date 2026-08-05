@@ -1,9 +1,10 @@
 # First-run setup
 
-The first time you launch `meringue` on a machine, a short modal flow opens over
-the dashboard and walks you through four choices: harness, model, thinking level,
-and theme. It ends with one card in the logs pane that names what you picked and
-teaches the core loop, so the very next thing you type can be a real goal.
+The first time you launch `meringue` on a machine, a short flow **takes over the
+whole terminal** and walks you through four choices: harness, model, thinking
+level, and theme. It ends with one card in the logs pane that names what you
+picked and teaches the core loop, so the very next thing you type can be a real
+goal.
 
 Before this existed, a new user landed on two empty boxes and a prompt, and
 `/harness`, `/model`, `/thinking`, `/theme` and the AgentTree gestures were all
@@ -11,6 +12,11 @@ undiscoverable.
 
 ## Design rules
 
+- **It owns the screen.** Setup is not a popup competing with the logs pane for
+  rows: while it runs the dashboard is not drawn at all. There is one thing on
+  screen and one thing to answer.
+- **Keyboard only.** The mouse cannot advance, select, or dismiss setup. `Enter`
+  and `Esc` are the only ways forward or out.
 - **Never a trap.** `Esc` exits from any step, keeps everything already applied,
   and never reopens by itself. Setup is always reachable again with `/setup`.
 - **Never blocking.** Reading the flow only reads persisted state, so it never
@@ -19,8 +25,68 @@ undiscoverable.
 - **The kernel is the only writer.** Each choice is applied as the ordinary slash
   command for it, so validation, journaling, and the visible log line are exactly
   what a typed command produces. The flow writes nothing itself.
-- **One visual language.** It uses the same popup slot, border, caption, and keys
-  as the `/models` picker; the dashboard stays visible behind it.
+- **One visual language.** The card, border, selection highlight, caption, and
+  bottom hint line are the dashboard's own primitives (`Canvas`, `Style`,
+  `Keybindings`), so setup looks like the app it is introducing.
+
+## The screen
+
+```txt
+                       meringue · first-run setup                  ← title
+   ────────────────────────────────────────────────  ← rule (sweeps out)
+
+   ✓ harness pi   ▸ model   · thinking   · theme                   ← step rail
+   step 2 of 4  ━━━━━━━━━━━━╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬  25%    ← progress (eases)
+
+ ╭─ setup · 2/4 · model (pi) ─────────────────────────────╮
+ │ The default model for new Pi sessions. Type to filter,        │  ← what the step changes
+ │ Ctrl-R re-asks the harness.                                  │
+ │                                                              │
+ │ ▸ openai/gpt-5.6-sol  current default · GPT-5.6 Sol          │  ← rows (staggered reveal)
+ │   anthropic/claude-opus-5  Claude Opus 5 · thinking: xhigh    │
+ ╰──────────────────────────────────────────────────╯
+   step 2 of 4  ·  ↑↓ move · Enter applies · ← back · Esc skip     ← caption
+
+ keyboard only · clicks are ignored        Ctrl-C quits · /setup reopens
+```
+
+The card is centered horizontally and vertically, capped at 88 columns so long
+model references fit without prose turning into a wall. Everything is recomputed
+from the viewport every frame, so a resize is just a redraw.
+
+## Animation
+
+Animation is chrome, and it is a **pure function of how long the current step has
+been on screen**. Nothing is buffered, queued, or replayed, so a dropped frame, a
+resize, or a forced full redraw all recompute the same picture for the same
+instant, and a terminal that cannot animate renders the settled frame instead of
+a half-finished one.
+
+| Motion | What it does |
+| --- | --- |
+| Rule sweep | The rule under the title draws out from the left in 0.3s with an eased head. |
+| Progress bar | Eases (cubic ease-out, 0.4s) from the fraction the previous step left to this step's, so advancing and going back both read as movement. Going back animates in reverse. |
+| Row reveal | Prose and rows appear in a staggered cascade (45ms apart, capped at 0.36s total) and slide two columns in as they land, so a long list tightens its stagger instead of taking seconds. |
+| Selection | The highlighted row carries the AgentTree's selection palette as a full-width band, and its marker breathes between `▸` and `▹` on a 1.2s period — it does not blink or strobe. |
+| Refresh spinner | `Ctrl-R` on the model step is the only place that waits on something outside the flow, so it is the only spinner. It stops as soon as the catalog snapshot on screen is a different one, and gives up after 12s rather than spinning forever. |
+
+Cost is bounded: setup asks for a 20fps frame only **while a step still has motion
+left in it**. Once the step settles it falls back to a 0.3s idle tick for the
+breathing marker and transient notices, which is cheaper than the dashboard's own
+refresh. It reuses the existing render loop and frame diffing — there is no second
+renderer, no background thread, and no cursor trickery.
+
+### How it degrades
+
+| Condition | Behavior |
+| --- | --- |
+| Non-interactive stdin (a pipe, a recorded frame, the test suite) | No animation; the settled frame is rendered once. |
+| Terminal smaller than 60×16 | No animation: every row is needed for content, so the settled frame is drawn immediately. Setup still runs. |
+| `MERINGUE_NO_ANIMATION=1`, or `animations = false` under `[tui]` | No animation anywhere in setup, and the idle tick drops back to the normal refresh interval. |
+| Slow terminal | Frames are skipped, not queued: each frame asks "what does this instant look like", so a stall lands on a later value and never replays the animation. |
+| Resize or full redraw mid-animation | Recomputed from the new size at the same instant. Chrome drops in a fixed, decorative-first order (the rule, then the title, then the step rail, then the progress bar, then the caption); the card and the bottom hint that names `Esc` are the last things standing. |
+| Not drawing UTF-8 (`MERINGUE_ASCII_GLYPHS=1`, or a locale that is not UTF-8) | The whole screen switches to one ASCII glyph set (`=`/`-` bar, `>` marker, `*` done, `|/-\` spinner) and the wordmark is replaced by the plain word, rather than a half-broken mix. It is the same flag the AgentTree's harness marks already honor. |
+| Short card | The wordmark is dropped before the pitch that explains the product; prose is trimmed before a choice list loses rows. |
 
 ## The steps
 
@@ -52,10 +118,33 @@ Setup adds no new keybindings; it reuses the ones the pickers already use.
 | `Esc` | exit setup now, keeping what was already applied |
 | printable / `Backspace` / `Ctrl-W` | filter — model step only |
 | `Ctrl-R` | re-fetch the model catalog (`/models <harness> refresh`) — model step only |
-| click a row / click away | apply that row / exit setup |
+| any mouse event | nothing at all (see below) |
 
 `←` is the `cursor_left` action, so rebinding `cursor_left` in
 `[tui.keybindings]` also changes setup's back key.
+
+Keys the flow does not own pass through, so `Ctrl-C` still quits and setup is
+never a trap. Pasting is swallowed except on the model step, where it filters:
+it can never land in the composer hidden behind the screen.
+
+## The mouse cannot skip setup
+
+While setup is on screen, **every** mouse report is inert: left, right, and middle
+press, release, drag, and both wheel directions. None of them apply a row, move
+the highlight, advance a step, or dismiss the flow, and none of them are forwarded
+to the dashboard underneath.
+
+This is a deliberate change. Setup used to render in the shared popup slot, where
+a click on a row applied it and a click anywhere else was a click-away dismiss — so
+a single stray click during a first launch silently skipped onboarding, which is
+exactly the moment a user is least likely to know that `/setup` would bring it
+back. Advancing and leaving are now explicit keyboard actions only, with `Esc` as
+the one skip affordance.
+
+An ignored click is answered rather than swallowed silently, so it can never be
+mistaken for a frozen screen: the bottom line of the screen shows `Clicks do
+nothing here — press Enter to continue or Esc to skip setup.` for a few seconds
+(shortened on a narrow terminal), and it clears when the step changes.
 
 ## Back, skip, and resume
 
@@ -79,7 +168,7 @@ Setup adds no new keybindings; it reuses the ones the pickers already use.
 | The config already carries the `[onboarding]` marker | Never opens by itself; `/setup` still works. |
 | `meringue demo` | Never opens: there is no kernel to apply a choice, and `/setup` says so. |
 | Non-interactive stdin | Never opens; the TUI renders one frame and exits. |
-| Terminal narrower than 64 columns or shorter than 20 rows | Does not auto-open. If the popup collapses while setup is up, it closes with `Setup needs a taller terminal — run /setup after resizing.` |
+| Terminal narrower than 46 columns or shorter than 12 rows | Does not auto-open. If the terminal is resized under a running flow, setup closes with `Setup needs a bigger terminal (at least 46×12) — run /setup after resizing.` and records nothing. |
 
 ## The marker
 
@@ -113,7 +202,7 @@ state — never fetched, unavailable, unsupported, or a filter that matched noth
 — plus one row:
 
 ```txt
-› keep the default  anthropic/claude-opus-5 · Ctrl-R asks pi for its model list
+▸ keep the default  anthropic/claude-opus-5 · Ctrl-R asks pi for its model list
 ```
 
 `Enter` on that row applies nothing and moves on, so a slow catalog can never

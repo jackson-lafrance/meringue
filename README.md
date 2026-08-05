@@ -126,7 +126,7 @@ bundle exec meringue
 bundle exec meringue tui
 ```
 
-The first launch on a machine opens a short setup flow over the dashboard: harness, model, thinking level, and theme, each already on a sensible default, so holding `Enter` accepts them all in about a second. `Esc` leaves it at any point and keeps whatever was already applied, `←` goes back a step, and `/setup` reopens it later. It applies every choice through the normal `/harness`, `/model`, `/thinking`, and `/theme` commands, and records one `[onboarding]` marker in the config so it does not open again. See [`docs/onboarding.md`](docs/onboarding.md).
+The first launch on a machine opens a short setup flow that takes over the whole terminal: harness, model, thinking level, and theme, each already on a sensible default, so holding `Enter` accepts them all in about a second. It is keyboard-only — a click cannot advance or dismiss it — with `Esc` as the one way out (keeping whatever was already applied), `←` to go back a step, and `/setup` to reopen it later. It applies every choice through the normal `/harness`, `/model`, `/thinking`, and `/theme` commands, and records one `[onboarding]` marker in the config so it does not open again. Motion degrades on its own on small or non-interactive terminals and can be turned off with `MERINGUE_NO_ANIMATION=1`. See [`docs/onboarding.md`](docs/onboarding.md).
 
 Open a safe demo state without spawning real agents:
 

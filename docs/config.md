@@ -51,6 +51,17 @@ AgentTree rows also show which harness backs each session: `π` Pi, `✳` Claude
 
 `color_scheme` is accepted as a compatibility alias for `colorscheme`. Running `/theme <name>` writes a single `colorscheme` value and removes the older `color_scheme` alias from the `[tui]` section.
 
+## Turning off animation
+
+```toml
+[tui]
+animations = false
+```
+
+Animation is opt-out and today it only affects the [first-run setup screen](onboarding.md#animation): the sweep, the eased progress bar, the staggered row reveal, and the breathing selection marker. With `animations = false` (or `MERINGUE_NO_ANIMATION=1`, which wins over the file) setup draws its settled frame immediately and stops asking for animation frames, so nothing about the flow changes except the motion. Any other value, or an absent key, keeps motion on.
+
+Motion also turns itself off without being asked: on a non-interactive stdin, and on any terminal smaller than 60×16, where every row is needed for content.
+
 ## Customizing TUI keybindings
 
 Keybindings live alongside the theme under `[tui.keybindings]`. Each key is an action name and each value is a string or array of strings. Omitted actions keep the built-in defaults; an empty array intentionally unbinds that action; unknown actions or invalid key names are ignored so defaults continue to work.

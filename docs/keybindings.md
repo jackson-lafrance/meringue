@@ -31,6 +31,7 @@ agent_select_next = ["j", "down", "right"]
 - Arrow keys and `PageUp` / `PageDown`: scroll the focused non-chat pane by a line or a page.
 - `Home` / `End`: scroll the focused non-chat pane to its first or last content line. With the logs selection cursor on, `Home` / `End` still move the cursor within its line.
 - Mouse wheel: scroll whichever pane the pointer is over, without changing focus. Hovering a pane that cannot scroll (or the composer) falls back to scrolling the focused pane.
+- None of the mouse actions on this page do anything while [first-run setup](#first-run-setup) is on screen: that flow owns the terminal and is keyboard-only.
 - When the agent tree or logs pane is focused, `Enter` enters jump mode. Non-agent log entries are skipped during jump navigation.
 - `r` in the focused AgentTree starts a quick rename for the selected project or issue by pre-filling `/project rename <project_id>` or `/issue rename <issue_id>` in the composer; type the new name and press Enter. A worker selection resolves to its owning issue.
 
@@ -244,18 +245,32 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 
 ## First-run setup
 
-The first launch on a machine opens a short setup flow in the same popup slot,
-and `/setup` reopens it any time. It adds no new keybindings.
+The first launch on a machine opens a short setup flow that **takes over the whole
+terminal** while it runs, and `/setup` reopens it any time. It adds no new
+keybindings.
 
 - `Enter`: apply the highlighted row and continue; the last step finishes the flow.
-- `↑` / `↓`: move the highlight; it wraps. The mouse wheel scrolls it and clicking a row picks that row.
+- `↑` / `↓`: move the highlight; it wraps. A list longer than the card scrolls with the highlight.
 - `←`: go back one step. This is the `cursor_left` action, so rebinding `cursor_left` changes it.
-- `Esc` or a click outside the box: exit setup, keeping everything already applied. It does not open by itself again.
+- `Esc`: exit setup, keeping everything already applied. It does not open by itself again. This is the only skip affordance.
 - On the model step only: printable characters filter, `Backspace` / `Ctrl-W` clear the filter, and `Ctrl-R` re-fetches the catalog.
 - Every step starts on the value already in effect, so holding `Enter` accepts every default and changes nothing.
 - Keys the flow does not own still work, so `Ctrl-C` and `Ctrl-D` behave normally while it is up.
 
-See [`onboarding.md`](onboarding.md) for the steps, the completion marker, and what happens when the model catalog is unavailable.
+**Setup is keyboard-only: the mouse cannot drive it.** While it is up, every mouse
+report — left click, right click, middle click, release, drag, and both wheel
+directions — is inert. It does not apply a row, move the highlight, advance a
+step, or dismiss the flow, and it is not forwarded to the dashboard underneath.
+Clicking used to apply the row under the pointer and clicking away used to skip
+the whole flow, so one stray click during a first launch silently skipped setup.
+A click now draws a short line at the bottom of the screen (`Clicks do nothing
+here — press Enter to continue or Esc to skip setup.`) so an ignored click is
+never mistaken for a frozen screen; it clears itself after a few seconds and when
+the step changes.
+
+See [`onboarding.md`](onboarding.md) for the steps, the screen layout, the
+animation, the completion marker, and what happens when the model catalog is
+unavailable.
 
 ## Model picker
 
