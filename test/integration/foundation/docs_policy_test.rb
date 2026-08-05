@@ -61,6 +61,19 @@ class FoundationDocsPolicyTest < Minitest::Test
     refute_includes contract, 'That is the normal shape for "research issue, then implementation issue"'
   end
 
+  # Heads are prompted from this document, so a capability the kernel has but the contract does
+  # not describe is a capability no head will ever use.
+  def test_head_contract_describes_both_goal_judges
+    contract = File.read(FoundationSupport.repo_path("docs", "head_agent_kernel_commands.md"))
+
+    assert_includes contract, '`"reviewer"`'
+    assert_includes contract, '"judge": { "mode": "reviewer" }'
+    assert_includes contract, "Do not invent a fake metric"
+    assert_includes contract, "the kernel rejects a reviewer-judged goal that has one"
+    assert_includes contract, "Running out of iterations without approval is a normal, reported outcome"
+    refute_includes contract, '`judge.mode` only supports `"metric_only"` today'
+  end
+
   def test_head_contract_forbids_polling_handoff_prompts
     contract = File.read(FoundationSupport.repo_path("docs", "head_agent_kernel_commands.md"))
 
