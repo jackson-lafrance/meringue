@@ -307,7 +307,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_includes result.fetch("message"), "Pi's catalog does not list max for #{proxy}"
     assert_includes result.fetch("message"), "run xhigh instead"
 
-    # `/defaults` repeats the same caveat, so the pair never reads as honoured.
+    # A head-proposed GetSessionDefaults repeats the same caveat, so the pair
+    # never reads as honoured (there is no `/defaults` command any more).
     defaults = engine.apply("type" => "GetSessionDefaults", "payload" => {})
     assert_equal "accepted", defaults.fetch("status")
     assert_includes defaults.fetch("message"), "#{proxy} with thinking max"
@@ -320,6 +321,9 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     refute_includes engine.apply("type" => "GetSessionDefaults", "payload" => {}).fetch("message"), "catalog does not list"
   end
 
+  # GetSessionDefaults survived the removal of `/defaults` because heads still
+  # propose it for "show the defaults"; its output is a durable log line, not a
+  # status-line glance.
   def test_get_defaults_reports_both_future_roles_and_logs_scope
     result = apply_command("GetSessionDefaults")
 

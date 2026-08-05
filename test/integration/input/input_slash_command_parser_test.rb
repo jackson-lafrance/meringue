@@ -22,7 +22,6 @@ class InputSlashCommandParserTest < Minitest::Test
       "/prune errored" => ["Prune", { "selector" => "errored" }],
       "/theme rose-pine" => ["SetTheme", { "theme" => "rose-pine" }],
       "/harness claude" => ["SetHarness", { "provider" => "claude" }],
-      "/defaults" => ["GetSessionDefaults", {}],
       "/model openai/gpt-5.6-sol" => ["SetDefaultSessionModel", { "model" => "openai/gpt-5.6-sol" }],
       "/thinking xhigh" => ["SetDefaultSessionThinkingLevel", { "level" => "xhigh" }],
       "/project add /tmp" => ["AddProject", { "path" => "/tmp", "name" => "" }],
@@ -167,7 +166,7 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   def test_missing_arguments_for_strict_commands_return_invalid_slash_command
-    ["/theme", "/theme a b", "/harness", "/defaults now", "/model", "/model a b",
+    ["/theme", "/theme a b", "/harness", "/model", "/model a b",
      "/thinking", "/thinking high extra",
      "/model P1 extra", "/thinking P1 extra", "/project", "/project list /tmp", "/issue", "/issue delete P1",
      "/worker", "/worker kill P1-I1", "/dismiss", "/dismiss Q1 Q2", "/recount now", "/prune bogus",
@@ -229,6 +228,25 @@ class InputSlashCommandParserTest < Minitest::Test
 
     refute_includes records.map { |record| record.fetch("usage") }, "P1-I1-W1"
     refute_includes records.map { |record| record.fetch("kind") }, "sessions"
+  end
+
+  # `/defaults` only printed the future-session model/thinking pair, which the
+  # dashboard status line and `/config` already show, so it was removed. It is
+  # now an ordinary unknown command rather than a hidden alias, and it is gone
+  # from the suggestion list and `/help`. The kernel command it used to send,
+  # `GetSessionDefaults`, survives for heads answering "show the defaults".
+  def test_defaults_command_was_removed_and_is_now_an_unknown_command
+    parsed = parse_slash("/defaults")
+
+    assert_equal "InvalidSlashCommand", parsed.fetch("type")
+    assert_equal "Unknown slash command: /defaults", parsed.fetch("payload").fetch("message")
+    assert_equal "/help", parsed.fetch("payload").fetch("usage")
+
+    usages = Meringue::Input::SlashCommandParser::COMMAND_SPECS.map(&:first)
+    refute_includes usages, "/defaults"
+    refute Meringue::Kernel::Engine::HELP_COMMANDS.map(&:first).include?("/defaults")
+    refute_includes suggestion_records("/def", {}).map { |record| record.fetch("usage") }, "/defaults"
+    assert_includes Meringue::Kernel::Engine::HEAD_PROPOSABLE_COMMANDS, "GetSessionDefaults"
   end
 
   def test_unknown_command_returns_invalid_slash_command_with_help_usage
