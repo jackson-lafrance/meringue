@@ -181,7 +181,9 @@ module Meringue
           registry.update_session_defaults!(provider: provider, model: model, thinking_level: thinking_level)
         end,
         model_catalog_provider: ->(provider) { registry.model_catalog(provider: provider, cwd: Dir.pwd) },
-        workspace_manager: Workspace::Manager.new,
+        # Timeouts for worker provisioning are configurable under `[workspace]`, because how long
+        # a `git worktree add` may take is a property of the repository and the disk.
+        workspace_manager: config ? Workspace::Manager.from_config(config) : Workspace::Manager.new,
         cwd: Dir.pwd,
         async_heads: true,
         config_path: config_path,

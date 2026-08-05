@@ -119,16 +119,64 @@ module WorkspaceSupport
   end
 
   # Manager whose `git worktree add` always times out, used to exercise the
-  # timeout/cleanup branch without ever hanging the suite.
+  # timeout/cleanup branch without ever hanging the suite. The timeout is
+  # injected, so no test ever waits for a real bound to expire.
   class TimingOutManager < Meringue::Workspace::Manager
+    def initialize(reason: Meringue::Workspace::Manager::CommandTimeout::BUDGET, run_add_first: false,
+                   commit_before_timeout: false, **options)
+      super(**options)
+      @reason = reason
+      @run_add_first = run_add_first
+      @commit_before_timeout = commit_before_timeout
+    end
+
     private
 
-    def run_command(*argv, timeout: command_timeout)
-      if argv.include?("worktree") && argv.include?("add")
-        raise Meringue::Workspace::Manager::CommandTimeout.new(argv: argv, timeout: 0.25, stdout: "", stderr: "simulated hang")
-      end
+    def run_command(*argv, **options)
+      return super unless worktree_add?(argv)
 
-      super
+      # `run_add_first` reproduces the production shape: git really did create the
+      # branch and register the worktree before Meringue killed it, so cleanup has
+      # a genuine half-provisioned worktree to deal with.
+      result = @run_add_first ? super : nil
+      simulate_interrupted_checkout(argv) if @run_add_first
+      raise Meringue::Workspace::Manager::CommandTimeout.new(
+        argv: argv,
+        timeout: 0.25,
+        reason: @reason,
+        elapsed: 0.3,
+        stdout: result ? result.fetch("stdout") : "",
+        stderr: result ? result.fetch("stderr") : "simulated hang"
+      )
+    end
+
+    def worktree_add?(argv)
+      tokens = argv.map(&:to_s)
+      tokens.include?("worktree") && tokens.include?("add")
+    end
+
+    # git writes `.git/worktrees/<name>/locked` for the duration of the checkout and
+    # unlinks it on success, so a worktree add that was killed leaves a *locked*
+    # registration behind. That is what makes `git worktree remove --force` exit 128.
+    def simulate_interrupted_checkout(argv)
+      git_root = argv[argv.index("-C") + 1].to_s
+      worktree_root = argv.last(2).first.to_s
+      worktree_root = argv.last.to_s unless Dir.exist?(worktree_root)
+      commit_in(worktree_root) if @commit_before_timeout
+      admin_dir = File.join(git_root, ".git", "worktrees", File.basename(worktree_root))
+      File.write(File.join(admin_dir, "locked"), "initializing\n") if Dir.exist?(admin_dir)
+    end
+
+    # Only used to prove cleanup refuses to delete a branch that carries commits.
+    def commit_in(worktree_root)
+      File.write(File.join(worktree_root, "worker-delivery.txt"), "delivered\n")
+      env = {
+        "GIT_CONFIG_GLOBAL" => "/dev/null", "GIT_CONFIG_SYSTEM" => "/dev/null",
+        "GIT_AUTHOR_NAME" => "Meringue Test", "GIT_AUTHOR_EMAIL" => "test@example.invalid",
+        "GIT_COMMITTER_NAME" => "Meringue Test", "GIT_COMMITTER_EMAIL" => "test@example.invalid"
+      }
+      Open3.capture3(env, "git", "-C", worktree_root, "add", ".")
+      Open3.capture3(env, "git", "-C", worktree_root, "commit", "-m", "worker delivery")
     end
   end
 

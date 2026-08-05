@@ -125,6 +125,36 @@ editor_args = ["."]
 terminal_buffer_bytes = 4194304
 ```
 
+## Worker workspace provisioning timeouts
+
+Provisioning a worker runs `git worktree add`, which checks the whole tree out. On a large
+monorepo that is minutes of honest work, so the checkout is bounded by how long it goes *quiet*
+rather than by how long it runs, with a finite backstop so a bound can never turn into a hang:
+
+```toml
+[workspace]
+# Budget for short git plumbing (rev-parse, show-ref, worktree list). Default: 60.
+git_command_timeout = 60
+# Kill `git worktree add` after this many seconds with no output at all. Git reports checkout
+# progress on stderr at least once a second, so silence this long means the command is stuck
+# (an unresponsive file-system monitor, a credential prompt, a lock it will never get) rather
+# than slow. Default: 120.
+worktree_stall_timeout = 120
+# Absolute ceiling for one `git worktree add`, and for one provisioning attempt as a whole,
+# no matter how much progress it reports. Default: 1800 (30 minutes).
+worktree_checkout_timeout = 1800
+```
+
+All three are seconds. A non-numeric or non-positive value falls back to the default, and a stall
+bound larger than the checkout ceiling is clamped to it so it can still fire. Raise
+`worktree_checkout_timeout` for an unusually large repository on slow storage; lower it if you
+would rather a giant checkout fail fast.
+
+When provisioning does fail, the worker is not thrown away: a stuck attempt is retried once
+automatically, and a worker that runs out of automatic attempts stays `blocked` with its prompt
+and failure reason intact. Prompting that worker retries provisioning with the new instruction;
+`/info <worker id>` reports the state, the attempts, the error, and the next step.
+
 Commands may be either an argv array (recommended) or a shell-quoted string such as `editor_command = "code --reuse-window"`. Strings are split into arguments, but are **never executed by a shell**: redirects, substitutions, pipes, semicolons, and worktree paths cannot become shell code. `editor_args` is a string or array of strings and defaults to `["."]`.
 
 Defaults, in precedence order:

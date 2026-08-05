@@ -51,6 +51,16 @@ module Meringue
       # Only work that could still move on its own retains a record. An errored worker is
       # settled; a queued, working, or blocked worker is not.
       PRUNE_BLOCKING_WORKER_STATUSES = %w[queued working blocked].freeze
+      # How many times workspace provisioning is attempted for one worker before it stops being
+      # retried automatically and starts waiting for a human. Two, not more: a retry of a stuck
+      # `git worktree add` is cheap and usually works, but each attempt can legitimately take
+      # minutes on a monorepo, and an unbounded retry loop would spend those minutes forever.
+      PROVISIONING_ATTEMPT_LIMIT = 2
+      # Provisioning states a worker can be resumed from. All of them mean "reservation intact,
+      # no session, no workspace".
+      PROVISIONING_RESUMABLE_STATES = %w[failed retry_pending retry_exhausted].freeze
+      # How often a slow provisioning reports that it is still working.
+      PROVISIONING_PROGRESS_INTERVAL_SECONDS = 60
       PRUNE_SETTLED_PULL_REQUEST_STATES = %w[merged closed].freeze
       # A merged pull request is terminal on the forge: it can never go back to open. Once Meringue
       # has verified and persisted a merged status for a URL, prune trusts that record instead of
@@ -1019,13 +1029,16 @@ module Meringue
             metadata = agent.fetch("harness_metadata", {}) || {}
             command_id = present_string(metadata.fetch("spawn_command_id", nil))
             prompt = present_string(metadata.fetch("spawn_prompt", nil))
-            next unless command_id && prompt
+            next unless prompt
 
             {
               "command_id" => command_id,
               "type" => "SpawnWorker",
               "payload" => {
                 "issue_id" => agent.fetch("issue_id"),
+                # The record itself, so recovery resumes this reservation instead of depending on
+                # a spawn command id the original request may never have had.
+                "_reservation_agent_id" => agent.fetch("id"),
                 "title" => metadata.fetch("title", nil),
                 "prompt" => prompt,
                 "workspace_path" => metadata.fetch("requested_workspace_path", nil),
@@ -3284,6 +3297,8 @@ module Meringue
           end
           dependents = waiting_deferred_dependents(state, [record.fetch("id")])
           info["waiting_dependent_agent_ids"] = dependents.map { |dependent| dependent.fetch("id") } if dependents.any?
+          provisioning = worker_provisioning_info(record)
+          info["provisioning"] = provisioning if provisioning
         end
         if kind == "issue"
           info["goals"] = goals_for_issue_ids(state, [record.fetch("id", target_id)]).map { |goal| goal_status_summary(goal) }
@@ -4931,6 +4946,12 @@ module Meringue
           )
         end
         return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
+        # A worker whose workspace provisioning failed has no session to prompt, but it is not
+        # dead either: prompting it is how the user retries provisioning with a fresh instruction,
+        # instead of losing the reservation and having to recreate the worker by hand.
+        if worker_awaiting_provisioning_retry?(agent)
+          return requeue_worker_provisioning(state, command_id, command_type, agent, prompt.to_s)
+        end
         # An errored worker is normally not resumable, but a worker whose turn was cut short by a
         # transport failure still owns its session, worktree, and branch: prompting it is how the
         # user recovers the work instead of losing it.
@@ -6181,6 +6202,10 @@ module Meringue
         # only way past the deferral branch, so a queued worker cannot start itself twice.
         activating_deferred = !!value_at(payload, "_activate_deferred", "activate_deferred")
         deferred_agent_id = present_string(value_at(payload, "_deferred_agent_id", "deferred_agent_id"))
+        # Set by the kernel when it re-runs provisioning for a reservation that already exists.
+        # Naming the record directly is what lets a worker be recovered or retried even when its
+        # original spawn carried no command id, instead of silently spawning a second worker.
+        reservation_agent_id = present_string(value_at(payload, "_reservation_agent_id", "reservation_agent_id"))
         requested_workspace_path = value_at(payload, "workspace_path", "WorkspacePath", "workspacePath")
         # Set by the kernel when it corrected a head's predicted issue id; kept on the worker and
         # in its spawn log so a corrected route is visible instead of silent.
@@ -6213,6 +6238,7 @@ module Meringue
           # worker for the same queued record.
           existing = worker_for_spawn_command(state, command_id)
           existing ||= find_agent(state, deferred_agent_id) if activating_deferred && deferred_agent_id
+          existing ||= reserved_worker_for_retry(state, reservation_agent_id, issue)
           if existing && agent_has_session_reference?(existing)
             return accepted_result(command_id, command_type, existing.fetch("id"), "Worker #{existing.fetch("id")} was already spawned.", existing, [])
           end
@@ -6300,6 +6326,9 @@ module Meringue
             agent_id = existing.fetch("id")
             workspace = workspace_from_reserved_agent(existing)
             active_provider = existing.fetch("harness", active_provider)
+            # This is a fresh provisioning attempt for a reservation whose last attempt failed, so
+            # the record says "allocating" again instead of still showing the previous failure.
+            mark_worker_provisioning_attempt!(existing, now)
             existing_metadata = existing.fetch("harness_metadata", {}) || {}
             follow_up_of_agent_id = existing_metadata.fetch("follow_up_of_agent_id", follow_up_of_agent_id)
             replace_agent_id = existing_metadata.fetch("replace_agent_id", replace_agent_id)
@@ -6372,7 +6401,8 @@ module Meringue
           requested_workspace_path: requested_workspace_path,
           preview_agent_id: reservation.fetch("agent_id"),
           task_title: worker_display_title(worker_title, reservation.fetch("issue")),
-          create: true
+          create: true,
+          progress_agent_id: reservation.fetch("agent_id")
         )
         if workspace.fetch("errors", []).any?
           return fail_worker_reservation(
@@ -6381,7 +6411,8 @@ module Meringue
             command_type: command_type,
             message: "Worker workspace provisioning failed: #{workspace.fetch("errors").join("; ")}",
             errors: workspace.fetch("errors"),
-            workspace: workspace
+            workspace: workspace,
+            recovery: workspace.fetch("recovery", nil)
           )
         end
         reservation["workspace"] = workspace
@@ -6543,6 +6574,116 @@ module Meringue
       def worker_provisioning_in_progress?(agent)
         state = (agent.fetch("harness_metadata", {}) || {}).fetch("provisioning_state", nil)
         %w[allocating_workspace starting_harness].include?(state.to_s)
+      end
+
+      # What GetInfo says about a worker that is being provisioned, is waiting for a retry, or
+      # gave up: what happened, how many attempts it has had, and what the user can do next.
+      def worker_provisioning_info(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        state = metadata.fetch("provisioning_state", nil).to_s
+        return nil if state.empty? || state == "ready"
+
+        errors = Array(metadata.fetch("provisioning_errors", []))
+        resumable = worker_awaiting_provisioning_retry?(agent)
+        {
+          "state" => state,
+          "attempts" => metadata.fetch("provisioning_attempts", nil),
+          "attempt_limit" => PROVISIONING_ATTEMPT_LIMIT,
+          "failed_at" => metadata.fetch("provisioning_failed_at", nil),
+          "errors" => errors.empty? ? nil : errors,
+          "progress" => metadata.fetch("provisioning_progress", nil),
+          "workspace_branch" => agent.fetch("workspace_branch", nil),
+          "resumable" => resumable,
+          "next_step" => provisioning_next_step(state, metadata, agent, resumable)
+        }.compact
+      end
+
+      def provisioning_next_step(state, metadata, agent, resumable)
+        recorded = present_string(metadata.fetch("provisioning_next_step", nil))
+        case state
+        when "allocating_workspace" then recorded || "Provisioning this worker's workspace; it starts once the checkout finishes."
+        when "retry_pending" then recorded || "Meringue is retrying provisioning automatically."
+        else
+          return recorded unless resumable
+
+          "Prompt #{agent.fetch("id")} to retry workspace provisioning, or kill it."
+        end
+      end
+
+      def mark_worker_provisioning_attempt!(agent, now)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        return unless PROVISIONING_RESUMABLE_STATES.include?(metadata.fetch("provisioning_state", nil).to_s)
+
+        agent["status"] = "queued"
+        agent["updated_at"] = now
+        agent["harness_metadata"] = metadata.merge(
+          "provisioning_state" => "allocating_workspace",
+          "provisioning_attempt_started_at" => now
+        )
+      end
+
+      # A worker whose workspace never got provisioned: the reservation, prompt, and issue are all
+      # intact, there is no session to prompt, and provisioning can simply be run again.
+      def worker_awaiting_provisioning_retry?(agent)
+        return false unless agent.is_a?(Hash) && agent.fetch("type", nil) == "worker"
+        return false if agent.fetch("status", nil) == "killed"
+        return false if agent_has_session_reference?(agent)
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        return false unless PROVISIONING_RESUMABLE_STATES.include?(metadata.fetch("provisioning_state", nil).to_s)
+
+        !blank?(metadata.fetch("spawn_prompt", nil))
+      end
+
+      # Re-queues a worker whose provisioning failed, with the user's latest instruction as its
+      # spawn prompt. Reconciliation owns the actual retry (`recover_worker_reservations`), so
+      # this never runs a multi-minute checkout inside a kernel command.
+      def requeue_worker_provisioning(state, command_id, command_type, agent, prompt)
+        now = timestamp
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        agent["status"] = "queued"
+        agent["updated_at"] = now
+        agent["harness_metadata"] = metadata.merge(
+          "spawn_prompt" => prompt.to_s,
+          "provisioning_state" => "retry_pending",
+          # An explicit ask resets the automatic budget: the user decided this is worth retrying.
+          "provisioning_attempts" => 0,
+          "provisioning_retry_requested_at" => now,
+          "provisioning_next_step" => nil,
+          **instance_ownership_metadata
+        ).compact
+        refresh_worker_parent_statuses!(state, agent, now)
+        agent_id = agent.fetch("id")
+        message = "Retrying workspace provisioning for worker #{agent_id}; it starts as soon as its workspace is ready."
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: agent_id,
+          level: "info",
+          message: message,
+          details: {
+            "agent_id" => agent_id,
+            "issue_id" => agent.fetch("issue_id", nil),
+            "previous_provisioning_errors" => Array(metadata.fetch("provisioning_errors", []))
+          }.compact
+        )
+        touch_state!(state, now)
+        store.save(state)
+        accepted_result(command_id, command_type, agent_id, message, deep_copy(agent), log_ids)
+      end
+
+      # Only an unstarted reservation on the named issue may be re-provisioned through
+      # `_reservation_agent_id`; anything else would let a payload point provisioning at a
+      # worker that is already running.
+      def reserved_worker_for_retry(state, agent_id, issue)
+        return nil unless agent_id
+
+        agent = find_agent(state, agent_id)
+        return nil unless agent && agent.fetch("type", nil) == "worker"
+        return nil unless agent.fetch("issue_id", nil) == issue.fetch("id")
+        return nil if agent_has_session_reference?(agent)
+
+        agent
       end
 
       def worker_for_spawn_command(state, command_id)
@@ -7361,21 +7502,44 @@ module Meringue
         end
       end
 
-      def fail_worker_reservation(reservation, command_id:, command_type:, message:, errors:, workspace:)
+      # A failed provisioning attempt must not end the worker's existence. The reservation, its
+      # prompt, its issue, and its routing are all still valid; only the workspace is missing. So
+      # a failure the workspace manager classified as recoverable degrades the worker instead of
+      # erroring it into a dead end with no session, nothing to prompt, and nothing to replace:
+      #
+      #   retry  -> the worker stays `queued` in `retry_pending`. `recover_worker_reservations`
+      #             (reconciliation, every 2s) provisions it again with no user action, at most
+      #             PROVISIONING_ATTEMPT_LIMIT times in total.
+      #   resume -> the worker becomes `blocked` in `retry_exhausted`. It keeps its record, its
+      #             prompt, and its failure reason, and prompting it re-queues provisioning.
+      #   none   -> today's behavior: `errored`, because another identical attempt would fail
+      #             identically. Prompting it still re-queues provisioning rather than rejecting.
+      #
+      # The reason always stays in harness_metadata (`provisioning_errors`, `provisioning_state`,
+      # `provisioning_attempts`, `workspace_plan`) so the AgentTree and GetInfo can explain it.
+      def fail_worker_reservation(reservation, command_id:, command_type:, message:, errors:, workspace:, recovery: nil)
         synchronized_state do
           state = normalized_state
           agent = find_agent(state, reservation.fetch("agent_id"))
+          degradation = nil
           if agent
             now = timestamp
-            agent["status"] = "errored"
+            degradation = provisioning_degradation(agent, recovery)
+            message = [message, degradation.fetch("next_step", nil)].compact.join(" ")
+            agent["status"] = degradation.fetch("status")
             agent["updated_at"] = now
             agent["workspace_path"] = workspace.fetch("workspace_path", agent.fetch("workspace_path", nil))
             agent["workspace_strategy"] = workspace.fetch("workspace_strategy", agent.fetch("workspace_strategy", nil))
             agent["workspace_branch"] = workspace.fetch("workspace_branch", agent.fetch("workspace_branch", nil))
             agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
-              "provisioning_state" => "failed",
+              "provisioning_state" => degradation.fetch("provisioning_state"),
               "provisioning_failed_at" => now,
               "provisioning_errors" => Array(errors),
+              "provisioning_attempts" => degradation.fetch("attempts"),
+              "provisioning_attempt_limit" => PROVISIONING_ATTEMPT_LIMIT,
+              "provisioning_recovery" => degradation.fetch("recovery"),
+              "provisioning_next_step" => degradation.fetch("next_step", nil),
+              "provisioning_progress" => nil,
               "workspace_plan" => workspace.fetch("plan", nil)
             ).compact
             issue = find_issue(state, agent.fetch("issue_id", nil))
@@ -7386,19 +7550,82 @@ module Meringue
               state,
               source_type: "kernel",
               source_id: agent.fetch("id"),
-              level: "error",
+              level: degradation.fetch("log_level"),
               message: message,
               details: {
                 "issue_id" => agent.fetch("issue_id", nil),
                 "errors" => Array(errors),
+                "provisioning_state" => degradation.fetch("provisioning_state"),
+                "provisioning_attempts" => degradation.fetch("attempts"),
                 "workspace" => workspace
               }
             )
+            log_workspace_cleanup_warnings(state, agent.fetch("id"), workspace)
             touch_state!(state, now)
             store.save(state)
           end
           failed_result(command_id, command_type, message, Array(errors))
         end
+      end
+
+      def provisioning_degradation(agent, recovery)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        attempts = metadata.fetch("provisioning_attempts", 0).to_i + 1
+        case recovery.to_s
+        when Workspace::Manager::RECOVERY_RETRY
+          if attempts < PROVISIONING_ATTEMPT_LIMIT
+            {
+              "status" => "queued",
+              "provisioning_state" => "retry_pending",
+              "recovery" => Workspace::Manager::RECOVERY_RETRY,
+              "attempts" => attempts,
+              "log_level" => "warning",
+              "next_step" => "Retrying automatically (attempt #{attempts + 1} of #{PROVISIONING_ATTEMPT_LIMIT})."
+            }
+          else
+            provisioning_resumable_degradation(attempts)
+          end
+        when Workspace::Manager::RECOVERY_RESUME
+          provisioning_resumable_degradation(attempts)
+        else
+          {
+            "status" => "errored",
+            "provisioning_state" => "failed",
+            "recovery" => Workspace::Manager::RECOVERY_NONE,
+            "attempts" => attempts,
+            "log_level" => "error",
+            "next_step" => nil
+          }
+        end
+      end
+
+      def provisioning_resumable_degradation(attempts)
+        {
+          "status" => "blocked",
+          "provisioning_state" => "retry_exhausted",
+          "recovery" => Workspace::Manager::RECOVERY_RESUME,
+          "attempts" => attempts,
+          "log_level" => "error",
+          "next_step" => "Prompt this worker to retry provisioning, or kill it."
+        }
+      end
+
+      # Cleanup that could not finish safely is reported, never swallowed: a leftover worktree
+      # registration or a branch Meringue refused to delete is something the user has to know
+      # about, and the warning names the git command that clears it.
+      def log_workspace_cleanup_warnings(state, agent_id, workspace)
+        cleanup = workspace.is_a?(Hash) ? (workspace["cleanup"] || workspace.dig("plan", "cleanup")) : nil
+        warnings = cleanup.is_a?(Hash) ? Array(cleanup["warnings"]).compact : []
+        return [] if warnings.empty?
+
+        append_log(
+          state,
+          source_type: "kernel",
+          source_id: agent_id,
+          level: "warning",
+          message: "Workspace cleanup for #{agent_id} could not finish: #{warnings.join("; ")}",
+          details: { "agent_id" => agent_id, "cleanup" => cleanup }
+        )
       end
 
       def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0, user_message: nil, question_id: nil,
@@ -7590,7 +7817,8 @@ module Meringue
         ).compact
       end
 
-      def resolve_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:, task_title:, create: false)
+      def resolve_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:, task_title:, create: false,
+                                   progress_agent_id: nil)
         if present_string(requested_workspace_path)
           expanded_path = File.expand_path(requested_workspace_path.to_s)
           errors = Dir.exist?(expanded_path) ? [] : ["workspace_path must be an existing directory"]
@@ -7607,12 +7835,13 @@ module Meringue
         end
 
         plan = if create
-                 workspace_manager.allocate_worker_workspace(
+                 allocate_worker_workspace_with_progress(
                    project_root: project.fetch("root_path"),
                    project_id: project.fetch("id"),
                    issue_id: issue.fetch("id"),
                    agent_id: preview_agent_id,
-                   task_title: task_title
+                   task_title: task_title,
+                   progress_agent_id: progress_agent_id
                  )
                else
                  workspace_manager.plan_worker_workspace(
@@ -7632,7 +7861,12 @@ module Meringue
             "plan" => plan,
             "note" => nil,
             "created" => plan.fetch("created", false),
-            "errors" => plan.fetch("errors")
+            "errors" => plan.fetch("errors"),
+            # How the manager classified the failure. The kernel turns this into the worker's
+            # degraded state instead of guessing from the error text.
+            "recovery" => plan.fetch("recovery", nil),
+            "failure_kind" => plan.fetch("failure_kind", nil),
+            "cleanup" => plan.fetch("cleanup", nil)
           }
         end
 
@@ -7669,6 +7903,78 @@ module Meringue
           "created" => false,
           "errors" => Dir.exist?(project.fetch("root_path")) ? [] : ["project root must be an existing directory"]
         }
+      end
+
+      # Provisioning a monorepo worktree is minutes of honest work. It runs off the render thread
+      # and holds no state lock, but a user watching a queued worker still deserves to know the
+      # difference between "checking out 478k files" and "wedged", so a long allocation reports
+      # progress into the worker record and the log instead of going silent.
+      def allocate_worker_workspace_with_progress(project_root:, project_id:, issue_id:, agent_id:, task_title:, progress_agent_id:)
+        arguments = {
+          project_root: project_root,
+          project_id: project_id,
+          issue_id: issue_id,
+          agent_id: agent_id,
+          task_title: task_title
+        }
+        return workspace_manager.allocate_worker_workspace(**arguments) unless progress_agent_id
+        unless workspace_manager.method(:allocate_worker_workspace).parameters.any? { |(_kind, name)| name == :progress }
+          # A workspace manager double (or an older implementation) may not accept `progress`.
+          # Provisioning must never fail because progress reporting is unavailable.
+          return workspace_manager.allocate_worker_workspace(**arguments)
+        end
+
+        workspace_manager.allocate_worker_workspace(
+          **arguments,
+          progress: worker_provisioning_progress_reporter(progress_agent_id)
+        )
+      end
+
+      def worker_provisioning_progress_reporter(agent_id)
+        last_reported = 0.0
+        lambda do |progress|
+          elapsed = progress.fetch("elapsed", 0).to_f
+          next if elapsed - last_reported < PROVISIONING_PROGRESS_INTERVAL_SECONDS
+
+          last_reported = elapsed
+          record_worker_provisioning_progress(agent_id, progress)
+        end
+      end
+
+      def record_worker_provisioning_progress(agent_id, progress)
+        detail = present_string(progress.fetch("detail", nil))
+        elapsed = progress.fetch("elapsed", 0).to_f
+        command = present_string(progress.fetch("command", nil)) || "workspace provisioning"
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          next unless agent
+
+          now = timestamp
+          agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+            "provisioning_progress" => {
+              "command" => command,
+              "elapsed_seconds" => progress.fetch("elapsed", nil),
+              "quiet_for_seconds" => progress.fetch("quiet_for", nil),
+              "detail" => detail,
+              "observed_at" => now
+            }.compact
+          )
+          agent["updated_at"] = now
+          append_log(
+            state,
+            source_type: "kernel",
+            source_id: agent_id,
+            level: "info",
+            message: "Still provisioning worker #{agent_id}: #{command} has been running for " \
+                     "#{elapsed.round}s#{detail ? " (#{detail})" : ""}.",
+            details: { "agent_id" => agent_id, "elapsed_seconds" => progress.fetch("elapsed", nil), "detail" => detail }.compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+        end
+      rescue StandardError
+        nil
       end
 
       def cleanup_worker_workspace_safely(workspace)

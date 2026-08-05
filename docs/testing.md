@@ -63,6 +63,16 @@ These need real credentials, real processes, or a real terminal, so they stay ma
 - Editor and terminal launches into external applications.
 - Absolute performance numbers and profiling. The suite keeps a few deliberately generous bounded checks (`test/integration/tui/typing_throughput_test.rb`, `test/integration/workspace/terminal_scroll_performance_test.rb`, and the persistence bounds in `test/integration/state/log_retention_test.rb`) so an accidental O(n) regression fails, but real measurement on a specific machine is still a manual exercise.
 
+Worker workspace provisioning is covered the same way, with one deliberate exception to the
+"no sleeping" rule. The provisioning watchdog exists to decide whether a *real child process* is
+progressing or stuck, so `test/integration/workspace/manager_checkout_timeout_test.rb` drives real
+`sh` processes that print (or refuse to print) output, with the bounds injected as fractions of a
+second instead of the shipped 120s/1800s. Nothing waits for a production timeout, and the file runs
+in a few seconds. The rest of the behavior is injected rather than timed:
+`test/support/workspace_support.rb`'s `TimingOutManager` raises the manager's own `CommandTimeout`
+for kernel-level tests, and `test/integration/kernel_workers/workspace_provisioning_retry_test.rb`
+fails a scripted number of attempts before provisioning for real.
+
 Goal loops are covered without either of those: `test/integration/kernel_goals/` drives the real reconcile tick with a fake harness and a scripted metric probe, so a whole multi-iteration goal runs in milliseconds. Only `metric_probe_test.rb` runs real commands, and only harmless shell builtins inside `Dir.mktmpdir`. What stays manual there is a goal against a real repository metric (a real coverage or lint run) and its real harness sessions.
 
 Manual verification checklists for these areas live in `docs/agent_workspace_integration.md` and the relevant feature docs.

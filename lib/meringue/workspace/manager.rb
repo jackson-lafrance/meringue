@@ -4,19 +4,55 @@ require "digest"
 require "fileutils"
 require "open3"
 require "pathname"
-require "timeout"
 
 module Meringue
   module Workspace
     class Manager
       DEFAULT_ROOT = File.expand_path("~/.meringue/workspaces")
+      # Budget for the short git plumbing commands allocation runs: rev-parse, show-ref,
+      # worktree list. None of them touch a working tree, so 60s is already generous and a
+      # command that spends longer than that reading refs really is stuck.
       DEFAULT_COMMAND_TIMEOUT = 60
+      # `git worktree add` is not plumbing: it checks the whole tree out. shop/world is ~478k
+      # files, which is minutes of honest work on a warm disk and longer on a cold one, so one
+      # flat 60s budget for both `git rev-parse` and a half-million-file checkout is what turned a
+      # slow provisioning into a dead worker. The checkout is therefore bounded by two independent
+      # limits instead of one:
+      #
+      #   * DEFAULT_CHECKOUT_STALL_TIMEOUT - the real bound. Git reports checkout progress on
+      #     stderr at least once a second (progress.c drives the display from a 1s SIGALRM) and
+      #     keeps doing so when stderr is a pipe, so "no output at all for two minutes" means the
+      #     command is stuck (an fsmonitor daemon that never answers, a credential prompt, a lock
+      #     it will never get), not that it is slow. That case is still killed quickly.
+      #   * DEFAULT_CHECKOUT_TIMEOUT - the backstop. A command that keeps printing progress
+      #     forever is still killed, so the stall detector can never degrade into a hang.
+      DEFAULT_CHECKOUT_STALL_TIMEOUT = 120
+      DEFAULT_CHECKOUT_TIMEOUT = 1800
+      # Cleanup after a failed attempt still has to delete a partially written tree, which is
+      # slow on a monorepo but never interactive.
+      DEFAULT_CLEANUP_TIMEOUT = 300
+      # How often the watchdog wakes up to compare the clocks. Small enough that a killed command
+      # dies promptly, large enough that the poll costs nothing.
+      COMMAND_POLL_INTERVAL = 0.1
+      # How often a long-running command reports progress to its caller.
+      PROGRESS_REPORT_INTERVAL = 15
+      READ_CHUNK_BYTES = 64 * 1024
       TERMINATION_GRACE_SECONDS = 1
       # A worker branch/worktree can already exist when a previous attempt was interrupted or when
       # another actor provisioned the same worker concurrently. Reuse it when it is usable, and
       # otherwise fall back to a uniquified branch/path instead of failing the spawn.
       ALLOCATION_ATTEMPT_LIMIT = 3
       COLLISION_ERROR_PATTERN = /already exists|already used by worktree|is already checked out/i
+      # How a failed allocation can be recovered. The manager knows git, so it classifies; the
+      # kernel owns what to do with a worker in each case.
+      #   retry  - transient. Worth another automatic attempt.
+      #   resume - real, but not worth burning another long attempt without a human. The worker
+      #            stays resumable instead of being errored into a dead end.
+      #   none   - deterministic (no git repo, every candidate path occupied). Another identical
+      #            attempt would fail identically.
+      RECOVERY_RETRY = "retry"
+      RECOVERY_RESUME = "resume"
+      RECOVERY_NONE = "none"
       # Some global git configs (Shopify's `dev` config among them) enable core.fsmonitor. Git then
       # starts a `git fsmonitor--daemon` for every new worktree and blocks on that daemon's answer
       # before it can read the new index. `git worktree add` runs `git reset --hard` internally, so
@@ -29,24 +65,115 @@ module Meringue
       GIT_VALUE_FLAGS = %w[-C -c --git-dir --work-tree --namespace --exec-path].freeze
       # Git commands whose meaning needs the word after the subcommand (`worktree add`).
       GIT_SUBCOMMAND_GROUPS = %w[worktree remote submodule stash notes reflog].freeze
+      # Git failures that another attempt can plausibly get past: someone else held a lock, or an
+      # index/ref lock file survived a crash. Distinct from a collision, which is deterministic.
+      TRANSIENT_ERROR_PATTERN = /index\.lock|cannot lock ref|unable to create.*\.lock|another git process|resource temporarily unavailable|file exists/i
 
+      # A command Meringue killed. `reason` separates the two bounds so the caller can say which
+      # one fired, and so "stuck" can be retried while "legitimately enormous" is not retried
+      # automatically.
       class CommandTimeout < StandardError
-        attr_reader :argv, :timeout, :stdout, :stderr
+        STALLED = "stalled"
+        BUDGET = "budget"
 
-        def initialize(argv:, timeout:, stdout:, stderr:)
+        attr_reader :argv, :timeout, :stdout, :stderr, :reason, :elapsed
+
+        def initialize(argv:, timeout:, stdout:, stderr:, reason: BUDGET, elapsed: nil)
           @argv = argv
           @timeout = timeout
           @stdout = stdout
           @stderr = stderr
-          super("command timed out after #{timeout} seconds: #{argv.join(" ")}")
+          @reason = reason.to_s
+          @elapsed = elapsed
+          super(
+            if stalled?
+              "command produced no output for #{timeout} seconds: #{argv.join(" ")}"
+            else
+              "command timed out after #{timeout} seconds: #{argv.join(" ")}"
+            end
+          )
+        end
+
+        def stalled?
+          reason == STALLED
+        end
+
+        # Human-readable failure for a named command, used in workspace `errors`.
+        def describe(label)
+          return "#{label} timed out after #{timeout} seconds" unless stalled?
+
+          killed_after = elapsed ? " (killed after #{format("%.1f", elapsed)} seconds)" : ""
+          "#{label} stalled: no output for #{timeout} seconds#{killed_after}"
         end
       end
 
-      attr_reader :root_path, :command_timeout
+      # Records when a running command last wrote anything, so the watchdog can tell "slow but
+      # progressing" from "stuck" without parsing git's output format.
+      class OutputMonitor
+        def initialize(now: Manager.monotonic_now)
+          @mutex = Mutex.new
+          @last_at = now
+          @last_line = nil
+        end
 
-      def initialize(root_path: DEFAULT_ROOT, command_timeout: DEFAULT_COMMAND_TIMEOUT)
+        def record(chunk)
+          line = chunk.to_s.split(/[\r\n]+/).reject { |part| part.strip.empty? }.last
+          @mutex.synchronize do
+            @last_at = Manager.monotonic_now
+            @last_line = line if line
+          end
+        end
+
+        def last_at
+          @mutex.synchronize { @last_at }
+        end
+
+        def last_line
+          @mutex.synchronize { @last_line }
+        end
+      end
+
+      def self.monotonic_now
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      # `[workspace]` in ~/.meringue/config.toml can widen or tighten every bound per machine,
+      # because "how long may a checkout take" is a property of the repository and the disk, not
+      # of Meringue.
+      def self.from_config(config, root_path: DEFAULT_ROOT)
+        section = config.respond_to?(:section) ? config.section("workspace") : {}
+        section = {} unless section.is_a?(Hash)
+        new(
+          root_path: section.fetch("root_path", root_path),
+          command_timeout: section.fetch("git_command_timeout", DEFAULT_COMMAND_TIMEOUT),
+          checkout_stall_timeout: section.fetch("worktree_stall_timeout", DEFAULT_CHECKOUT_STALL_TIMEOUT),
+          checkout_timeout: section.fetch("worktree_checkout_timeout", DEFAULT_CHECKOUT_TIMEOUT)
+        )
+      end
+
+      attr_reader :root_path, :command_timeout, :checkout_stall_timeout, :checkout_timeout, :cleanup_timeout,
+                  :progress_interval
+
+      def initialize(root_path: DEFAULT_ROOT, command_timeout: DEFAULT_COMMAND_TIMEOUT,
+                     checkout_stall_timeout: DEFAULT_CHECKOUT_STALL_TIMEOUT,
+                     checkout_timeout: DEFAULT_CHECKOUT_TIMEOUT,
+                     cleanup_timeout: DEFAULT_CLEANUP_TIMEOUT,
+                     progress_interval: PROGRESS_REPORT_INTERVAL)
         @root_path = File.expand_path(root_path)
-        @command_timeout = Float(command_timeout)
+        @command_timeout = positive_float(command_timeout, DEFAULT_COMMAND_TIMEOUT)
+        @checkout_stall_timeout = positive_float(checkout_stall_timeout, DEFAULT_CHECKOUT_STALL_TIMEOUT)
+        @checkout_timeout = positive_float(checkout_timeout, DEFAULT_CHECKOUT_TIMEOUT)
+        # A stall bound above the absolute bound could never fire, which would silently remove the
+        # only limit that catches a genuinely stuck command.
+        @checkout_stall_timeout = @checkout_timeout if @checkout_stall_timeout > @checkout_timeout
+        @cleanup_timeout = positive_float(cleanup_timeout, DEFAULT_CLEANUP_TIMEOUT)
+        @progress_interval = positive_float(progress_interval, PROGRESS_REPORT_INTERVAL)
+      end
+
+      # Hard ceiling on one allocate_worker_workspace call, including every retried candidate and
+      # every plumbing command. Provisioning can be slow; it can never be unbounded.
+      def allocation_budget
+        checkout_timeout
       end
 
       def plan_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil)
@@ -68,8 +195,12 @@ module Meringue
         }
       end
 
-      def allocate_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil)
+      # `progress` is an optional callable invoked (at most every PROGRESS_REPORT_INTERVAL
+      # seconds) while a long command is still running, so a caller can tell the user that a
+      # checkout is working rather than hung.
+      def allocate_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil, progress: nil)
         plan = nil
+        set_allocation_deadline!(self.class.monotonic_now + allocation_budget)
         plan = plan_worker_workspace(
           project_root: project_root,
           project_id: project_id,
@@ -89,16 +220,19 @@ module Meringue
 
         errors = []
         last_failure = nil
+        candidate_branch = plan.fetch("workspace_branch")
         ALLOCATION_ATTEMPT_LIMIT.times do |attempt|
           candidate = candidate_allocation(plan, attempt)
           worktree_root = candidate.fetch("worktree_root")
+          candidate_branch = candidate.fetch("branch")
           outcome = allocate_candidate_worktree(
             plan: plan,
             git_root: git_root,
             base_ref: base_ref,
             relative_project_path: relative_project_path,
-            branch: candidate.fetch("branch"),
-            worktree_root: worktree_root
+            branch: candidate_branch,
+            worktree_root: worktree_root,
+            progress: progress
           )
           workspace = outcome.fetch("workspace", nil)
           return workspace if workspace
@@ -116,19 +250,25 @@ module Meringue
           base_ref: base_ref,
           stdout: last_failure && last_failure["stdout"],
           stderr: last_failure && last_failure["stderr"],
-          exit_status: last_failure && last_failure["exit_status"]
+          exit_status: last_failure && last_failure["exit_status"],
+          failure_kind: (last_failure && last_failure["failure_kind"]) || "worktree_unavailable",
+          recovery: (last_failure && last_failure["recovery"]) || RECOVERY_NONE,
+          cleanup: last_failure && last_failure["cleanup"]
         )
       rescue CommandTimeout => e
+        # Cleanup must not inherit the exhausted allocation budget, or it would be killed on its
+        # first command and leave exactly the mess it exists to remove.
+        clear_allocation_deadline!
         cleanup = cleanup_incomplete_allocation(
           git_root: defined?(git_root) && git_root,
           worktree_root: defined?(worktree_root) && worktree_root,
-          branch: plan && plan["workspace_branch"]
+          branch: (defined?(candidate_branch) && candidate_branch) || (plan && plan["workspace_branch"])
         )
         failed_workspace(
           plan,
           # Allocation runs several git commands, so name the one that actually hung instead of
           # always blaming `git worktree add`.
-          ["#{command_label(e.argv)} timed out after #{e.timeout} seconds"],
+          [e.describe(command_label(e.argv))],
           git_root: defined?(git_root) && git_root,
           worktree_root: defined?(worktree_root) && worktree_root,
           base_ref: defined?(base_ref) && base_ref,
@@ -136,10 +276,20 @@ module Meringue
           stderr: e.stderr,
           timed_out: true,
           timeout_seconds: e.timeout,
+          # A stuck command is worth one more attempt: the usual causes (a file-system monitor
+          # that never answered, a lock another process held) do not survive a fresh spawn. A
+          # command that blew the absolute ceiling while still making progress is not retried
+          # automatically, because the retry would cost the same half hour; the worker is left
+          # resumable so a human decides.
+          failure_kind: e.stalled? ? "command_stalled" : "command_timed_out",
+          recovery: e.stalled? ? RECOVERY_RETRY : RECOVERY_RESUME,
           cleanup: cleanup
         )
       rescue StandardError => e
-        failed_workspace(plan, ["worker workspace allocation failed: #{e.message}"])
+        clear_allocation_deadline!
+        failed_workspace(plan, ["worker workspace allocation failed: #{e.message}"], failure_kind: "allocation_error")
+      ensure
+        clear_allocation_deadline!
       end
 
       def release_worker_workspace(workspace, delete_branch: false)
@@ -151,11 +301,14 @@ module Meringue
         worktree_root = workspace["worktree_root_path"] || workspace["workspace_root_path"] || workspace.dig("plan", "worktree_root_path") || workspace["workspace_path"]
         return false unless git_root && worktree_root && Dir.exist?(worktree_root.to_s)
 
-        result = run_command("git", "-C", git_root.to_s, "worktree", "remove", "--force", worktree_root.to_s)
+        result = run_command("git", "-C", git_root.to_s, "worktree", "remove", "--force", worktree_root.to_s,
+                             timeout: cleanup_timeout, deadline: false)
         return false unless result.fetch("status").success?
 
         branch = workspace["workspace_branch"] || workspace.dig("plan", "workspace_branch")
-        run_command("git", "-C", git_root.to_s, "branch", "-D", branch.to_s) if delete_branch && branch
+        # Even an explicit delete keeps a branch that carries commits: releasing a workspace must
+        # never be the reason a delivered commit stops being reachable.
+        release_owned_branch(canonical_path(git_root.to_s), branch.to_s) if delete_branch && branch
         true
       rescue StandardError
         false
@@ -250,7 +403,7 @@ module Meringue
           end
         end
 
-        removed = run_command("git", "-C", git_root, "worktree", "remove", worktree_root)
+        removed = run_command("git", "-C", git_root, "worktree", "remove", worktree_root, timeout: cleanup_timeout, deadline: false)
         unless removed.fetch("status").success?
           output = present_output(removed.fetch("stderr")) || present_output(removed.fetch("stdout"))
           reason = output.to_s.match?(/locked/i) ? "worktree_locked" : "worktree_remove_failed"
@@ -360,7 +513,7 @@ module Meringue
       end
 
       def failed_workspace(plan, errors, git_root: nil, worktree_root: nil, base_ref: nil, stdout: nil, stderr: nil, exit_status: nil,
-                           timed_out: false, timeout_seconds: nil, cleanup: nil)
+                           timed_out: false, timeout_seconds: nil, cleanup: nil, failure_kind: nil, recovery: RECOVERY_NONE)
         (plan || {}).merge(
           "git_root" => git_root,
           "workspace_root_path" => worktree_root,
@@ -373,6 +526,8 @@ module Meringue
           "exit_status" => exit_status,
           "timed_out" => timed_out,
           "timeout_seconds" => timeout_seconds,
+          "failure_kind" => failure_kind,
+          "recovery" => recovery,
           "cleanup" => cleanup
         ).compact
       end
@@ -388,7 +543,7 @@ module Meringue
         { "branch" => "#{branch}#{suffix}", "worktree_root" => "#{worktree_root}#{suffix}" }
       end
 
-      def allocate_candidate_worktree(plan:, git_root:, base_ref:, relative_project_path:, branch:, worktree_root:)
+      def allocate_candidate_worktree(plan:, git_root:, base_ref:, relative_project_path:, branch:, worktree_root:, progress: nil)
         candidate_plan = plan.merge("workspace_branch" => branch, "workspace_path" => worktree_root)
         workspace_path = relative_project_path == "." ? worktree_root : File.join(worktree_root, relative_project_path)
 
@@ -398,38 +553,57 @@ module Meringue
           return { "workspace" => adopted } if adopted
 
           discarded = discard_empty_owned_directory(worktree_root)
-          return { "retry" => true, "errors" => ["worker worktree path already exists: #{worktree_root}"] } unless discarded
+          unless discarded
+            return {
+              "retry" => true,
+              "errors" => ["worker worktree path already exists: #{worktree_root}"],
+              "failure_kind" => "path_collision",
+              "recovery" => RECOVERY_NONE
+            }
+          end
         end
 
         remove_orphaned_owned_branch(git_root, branch)
         FileUtils.mkdir_p(File.dirname(worktree_root))
         created_branch = !branch_exists?(git_root, branch)
-        argv = if branch_exists?(git_root, branch)
-                 return { "retry" => true, "errors" => ["worker branch #{branch} is checked out in another worktree"] } if branch_checked_out?(git_root, branch)
-
-                 # The branch survived a previous attempt for this worker; check it out instead of
-                 # failing on "a branch named ... already exists".
-                 ["git", "-C", git_root, "worktree", "add", worktree_root, branch]
-               else
+        argv = if created_branch
                  ["git", "-C", git_root, "worktree", "add", "-b", branch, worktree_root, base_ref]
+               else
+                 if branch_checked_out?(git_root, branch)
+                   return {
+                     "retry" => true,
+                     "errors" => ["worker branch #{branch} is checked out in another worktree"],
+                     "failure_kind" => "branch_collision",
+                     "recovery" => RECOVERY_NONE
+                   }
+                 end
+
+                 # The branch survived a previous attempt for this worker and carries commits, so
+                 # it is checked out instead of being recreated: the previous attempt's work stays
+                 # reachable and "a branch named ... already exists" never fails the spawn.
+                 ["git", "-C", git_root, "worktree", "add", worktree_root, branch]
                end
-        result = run_command(*argv)
+        result = run_command(*argv, timeout: checkout_timeout, stall_timeout: checkout_stall_timeout, progress: progress)
         stdout = result.fetch("stdout")
         stderr = result.fetch("stderr")
         status = result.fetch("status")
 
         unless status.success?
           output = present_output(stderr) || present_output(stdout)
+          collision = collision_output?(output)
           # A failed attempt must not leave a half-provisioned directory or an unused branch behind,
           # otherwise the next attempt collides with this instance's own leftovers.
-          cleanup_failed_attempt(git_root: git_root, worktree_root: worktree_root, branch: branch,
-                                 created_branch: created_branch, collision: collision_output?(output))
+          cleanup = cleanup_failed_attempt(git_root: git_root, worktree_root: worktree_root, branch: branch,
+                                           created_branch: created_branch, collision: collision)
           return {
-            "retry" => collision_output?(output),
+            "retry" => collision,
             "errors" => ["git worktree add failed: #{output || "exit #{status.exitstatus}"}"],
             "stdout" => stdout,
             "stderr" => stderr,
-            "exit_status" => status.exitstatus
+            "exit_status" => status.exitstatus,
+            "failure_kind" => collision ? "worktree_collision" : "git_error",
+            "recovery" => transient_output?(output) ? RECOVERY_RETRY : RECOVERY_NONE,
+            "cleanup" => cleanup
           }
         end
 
@@ -453,13 +627,25 @@ module Meringue
         output.to_s.match?(COLLISION_ERROR_PATTERN)
       end
 
+      def transient_output?(output)
+        return false if collision_output?(output)
+
+        output.to_s.match?(TRANSIENT_ERROR_PATTERN)
+      end
+
       def cleanup_failed_attempt(git_root:, worktree_root:, branch:, created_branch:, collision:)
-        discard_empty_owned_directory(worktree_root)
-        # Only remove a branch this attempt intended to create; a collision means the branch belongs
-        # to an existing worktree or another actor.
-        remove_orphaned_owned_branch(git_root, branch) if created_branch && !collision
-      rescue StandardError
-        nil
+        # A collision means the path or branch belongs to an existing worktree or another actor, so
+        # nothing here may be removed. Anything else is this attempt's own debris.
+        return { "attempted" => false, "reason" => "collision" } if collision
+
+        cleanup_incomplete_allocation(
+          git_root: git_root,
+          worktree_root: worktree_root,
+          branch: branch,
+          created_branch: created_branch
+        )
+      rescue StandardError => e
+        { "attempted" => true, "error" => e.message }
       end
 
       def branch_exists?(git_root, branch)
@@ -519,24 +705,152 @@ module Meringue
         end
       end
 
-      def remove_orphaned_owned_branch(git_root, branch)
-        return unless branch.to_s.start_with?("meringue/")
-        return if worktree_records(git_root).any? { |record| record["branch"] == "refs/heads/#{branch}" }
-
-        result = run_command("git", "-C", git_root, "show-ref", "--verify", "--quiet", "refs/heads/#{branch}")
-        run_command("git", "-C", git_root, "branch", "-D", branch) if result.fetch("status").success?
+      # Deletes a Meringue-owned branch only when losing it cannot lose work: it must be a
+      # `meringue/` branch, not checked out anywhere, and carry no commit that is unreachable from
+      # every other ref. A branch with commits is always kept, even though that leaves a name
+      # Meringue has to work around, because the alternative is destroying a worker's delivery.
+      def remove_orphaned_owned_branch(git_root, branch, warnings: nil)
+        release_owned_branch(git_root, branch, warnings: warnings || [])
       end
 
-      def cleanup_incomplete_allocation(git_root:, worktree_root:, branch:)
-        return { "attempted" => false } unless git_root && worktree_root && branch.to_s.start_with?("meringue/")
+      def release_owned_branch(git_root, branch, warnings: [])
+        return "not_owned" unless branch.to_s.start_with?("meringue/")
+        return "absent" unless branch_exists?(git_root, branch)
 
-        remove = run_command("git", "-C", git_root, "worktree", "remove", "--force", worktree_root, timeout: TERMINATION_GRACE_SECONDS * 5)
-        FileUtils.rm_rf(worktree_root) if owned_workspace_path?(worktree_root)
-        run_command("git", "-C", git_root, "worktree", "prune", timeout: TERMINATION_GRACE_SECONDS * 5)
-        remove_orphaned_owned_branch(git_root, branch)
-        { "attempted" => true, "worktree_remove_status" => remove.fetch("status").exitstatus }
+        if branch_checked_out?(git_root, branch)
+          warnings << "left branch #{branch} in place: it is still registered to a worktree"
+          return "kept_checked_out"
+        end
+
+        commits = unique_commit_count(git_root, branch)
+        if commits.nil?
+          # Could not prove the branch is empty, so only git's own safe delete may run: it refuses
+          # a branch that is not fully merged.
+          return "deleted" if delete_branch(git_root, branch, force: false)
+
+          warnings << "left branch #{branch} in place: git refused a safe delete and Meringue " \
+                      "could not prove the branch carries no commits"
+          return "kept_unverified"
+        end
+        if commits.positive?
+          warnings << "left branch #{branch} in place: it carries #{commits} commit#{"s" unless commits == 1} " \
+                      "that exist nowhere else"
+          return "kept_has_commits"
+        end
+
+        # Verified empty: `-d` first, and `-D` only as the fallback for a branch that is empty but
+        # not an ancestor of HEAD (a fresh worker branch off origin/main while HEAD is elsewhere).
+        return "deleted" if delete_branch(git_root, branch, force: false)
+        return "deleted" if delete_branch(git_root, branch, force: true)
+
+        warnings << "could not delete branch #{branch}"
+        "delete_failed"
+      end
+
+      def delete_branch(git_root, branch, force:)
+        run_command("git", "-C", git_root, "branch", force ? "-D" : "-d", branch).fetch("status").success?
+      rescue CommandTimeout
+        false
+      end
+
+      # Commits reachable from this branch and from no other ref. Zero means deleting the branch
+      # cannot orphan anything. nil means the question could not be answered, which callers treat
+      # as "assume it has work".
+      def unique_commit_count(git_root, branch)
+        ref = "refs/heads/#{branch}"
+        result = run_command("git", "-C", git_root, "rev-list", "--count", ref, "--not", "--exclude=#{ref}", "--all")
+        return nil unless result.fetch("status").success?
+
+        Integer(result.fetch("stdout").to_s.strip)
+      rescue ArgumentError, TypeError, CommandTimeout
+        nil
+      end
+
+      # Removes the debris a killed or failed `git worktree add` leaves behind.
+      #
+      # `git worktree add` writes `.git/worktrees/<name>/locked` ("initializing") for the whole
+      # checkout and only unlinks it on success. A worktree that was killed mid-checkout is
+      # therefore *locked*: `git worktree remove --force` refuses it with exit 128 and
+      # `git worktree prune` silently skips it. That is exactly the leak this issue reported -
+      # `worktree_remove_status: 128` plus an abandoned `meringue/*` branch after every failure,
+      # which then pushed the next attempt onto a `-2` name. Cleanup therefore unlocks, uses
+      # git's documented double `--force` override, deletes the directory it owns, prunes the
+      # registration, verifies the result, and only then releases the branch.
+      def cleanup_incomplete_allocation(git_root:, worktree_root:, branch:, created_branch: true)
+        return { "attempted" => false } unless git_root && worktree_root
+
+        warnings = []
+        outcome = remove_incomplete_worktree(git_root: git_root, worktree_root: worktree_root, warnings: warnings)
+        branch_result = if created_branch
+                          release_owned_branch(git_root, branch, warnings: warnings)
+                        else
+                          "kept_pre_existing"
+                        end
+        outcome.merge(
+          "attempted" => true,
+          "branch" => branch,
+          "branch_result" => branch_result,
+          "branch_removed" => branch_result == "deleted",
+          "warnings" => warnings
+        ).compact
       rescue StandardError => e
-        { "attempted" => true, "error" => e.message }
+        { "attempted" => true, "error" => e.message, "warnings" => ["workspace cleanup failed: #{e.message}"] }
+      end
+
+      def remove_incomplete_worktree(git_root:, worktree_root:, warnings:)
+        unless owned_workspace_path?(worktree_root)
+          warnings << "left #{worktree_root} in place: it is outside the Meringue workspace root"
+          return { "worktree_removed" => false, "worktree_remove_status" => nil }
+        end
+
+        remove = cleanup_command(git_root, "worktree", "remove", "--force", worktree_root, warnings: warnings)
+        status = exit_status_of(remove)
+        unless command_succeeded?(remove)
+          cleanup_command(git_root, "worktree", "unlock", worktree_root, warnings: nil)
+          remove = cleanup_command(git_root, "worktree", "remove", "--force", "--force", worktree_root, warnings: warnings)
+          status = exit_status_of(remove)
+        end
+
+        if Dir.exist?(worktree_root)
+          FileUtils.rm_rf(worktree_root)
+          warnings << "could not delete #{worktree_root}" if Dir.exist?(worktree_root)
+        end
+        # An unlock before pruning is what makes the prune effective: prune skips locked worktrees
+        # even when their directory is already gone.
+        cleanup_command(git_root, "worktree", "unlock", worktree_root, warnings: nil)
+        cleanup_command(git_root, "worktree", "prune", warnings: warnings)
+
+        still_registered = worktree_registered?(git_root, worktree_root)
+        if still_registered
+          warnings << "worktree #{worktree_root} is still registered in #{git_root}; " \
+                      "run `git -C #{git_root} worktree prune` to clear it"
+        end
+        { "worktree_removed" => !still_registered && !Dir.exist?(worktree_root), "worktree_remove_status" => status }
+      end
+
+      def worktree_registered?(git_root, worktree_root)
+        worktree_records(git_root).any? { |record| same_path?(record.fetch("worktree", ""), worktree_root) }
+      end
+
+      # Cleanup runs after the allocation budget is already spent, so it uses its own budget and
+      # never raises: a cleanup command that fails is reported, not propagated over the original
+      # provisioning failure.
+      def cleanup_command(git_root, *argv, warnings:)
+        run_command("git", "-C", git_root, *argv, timeout: cleanup_timeout, deadline: false)
+      rescue CommandTimeout => e
+        warnings << "#{command_label(e.argv)} timed out after #{e.timeout} seconds during cleanup" if warnings
+        nil
+      rescue StandardError => e
+        warnings << "#{command_label(["git", *argv])} failed during cleanup: #{e.message}" if warnings
+        nil
+      end
+
+      def command_succeeded?(result)
+        result.is_a?(Hash) && result.fetch("status", nil)&.success?
+      end
+
+      def exit_status_of(result)
+        result.is_a?(Hash) ? result.fetch("status", nil)&.exitstatus : nil
       end
 
       def owned_workspace_path?(path)
@@ -576,16 +890,30 @@ module Meringue
         [argv.first, *GIT_ISOLATION_ARGS, *argv[1..]]
       end
 
-      def run_command(*argv, timeout: command_timeout)
+      # Runs one command under two independent bounds.
+      #
+      #   timeout       absolute ceiling for this command, always finite.
+      #   stall_timeout optional: kill the command after this many seconds with no output at all.
+      #                 Only meaningful for a command that reports progress (`git worktree add`).
+      #   deadline      optional monotonic instant that caps `timeout`. Defaults to the ambient
+      #                 allocation deadline so one provisioning attempt is bounded as a whole;
+      #                 pass `false` to opt out (cleanup, which runs after the budget is spent).
+      #
+      # The command is polled rather than wrapped in Timeout.timeout, so the watchdog can look at
+      # output activity, report progress, and kill the process group promptly.
+      def run_command(*argv, timeout: command_timeout, stall_timeout: nil, deadline: nil, progress: nil)
         requested_argv = argv.map(&:to_s)
         # Every git command Meringue runs is spawned with the isolation flags, so no call site can
         # forget them. Timeouts still report the caller's argv, which reads better in logs.
         effective_argv = isolated_git_argv(requested_argv)
+        ceiling = effective_ceiling(timeout, deadline)
         stdout = +""
         stderr = +""
         status = nil
         stdin = out = err = wait_thread = nil
         readers = []
+        monitor = OutputMonitor.new
+        expiry = nil
 
         Open3.popen3(*effective_argv, pgroup: true) do |child_stdin, child_out, child_err, child_wait|
           stdin = child_stdin
@@ -593,24 +921,130 @@ module Meringue
           err = child_err
           wait_thread = child_wait
           stdin.close
-          readers << Thread.new { stdout << out.read.to_s }
-          readers << Thread.new { stderr << err.read.to_s }
+          readers << stream_reader(out, stdout, monitor)
+          readers << stream_reader(err, stderr, monitor)
           begin
-            Timeout.timeout(timeout) { status = wait_thread.value }
-          rescue Timeout::Error
-            terminate_process_group(wait_thread.pid)
-            readers.each { |reader| reader.join(TERMINATION_GRACE_SECONDS) }
-            raise CommandTimeout.new(argv: requested_argv, timeout: timeout, stdout: stdout, stderr: stderr)
+            expiry = watch_command(
+              wait_thread,
+              monitor,
+              ceiling: ceiling,
+              stall_timeout: stall_timeout,
+              progress: progress,
+              label: command_label(requested_argv)
+            )
+            status = wait_thread.value unless expiry
           ensure
             terminate_process_group(wait_thread.pid) if status.nil? && wait_thread&.alive?
-            readers.each(&:join)
+            readers.each { |reader| reader.join(TERMINATION_GRACE_SECONDS) }
+            # Closing the pipes unblocks a reader still parked in readpartial, so a child that
+            # left a grandchild holding the write end can never wedge this thread.
             out.close unless out.closed?
             err.close unless err.closed?
+            readers.each { |reader| reader.join(TERMINATION_GRACE_SECONDS) }
+            readers.each(&:kill)
           end
         end
+        if expiry
+          raise CommandTimeout.new(
+            argv: requested_argv,
+            timeout: expiry.fetch("limit"),
+            reason: expiry.fetch("reason"),
+            elapsed: expiry.fetch("elapsed"),
+            stdout: stdout,
+            stderr: stderr
+          )
+        end
+
         { "stdout" => stdout, "stderr" => stderr, "status" => status, "argv" => effective_argv }
       ensure
         stdin.close if stdin && !stdin.closed?
+      end
+
+      # Returns nil when the command finished on its own, or a description of the bound that
+      # fired. Never returns while the command is still allowed to run.
+      def watch_command(wait_thread, monitor, ceiling:, stall_timeout:, progress: nil, label: nil)
+        started = self.class.monotonic_now
+        reported_at = started
+        loop do
+          # Never sleep past a bound: the poll interval is the ceiling on how long the watchdog
+          # can be late, not a fixed granularity.
+          now = self.class.monotonic_now
+          nap = [
+            COMMAND_POLL_INTERVAL,
+            ceiling && (started + ceiling - now),
+            stall_timeout && (monitor.last_at + stall_timeout - now)
+          ].compact.min
+          return nil if wait_thread.join([nap, 0.01].max)
+
+          now = self.class.monotonic_now
+          elapsed = now - started
+          silence = now - monitor.last_at
+          if ceiling && elapsed >= ceiling
+            return { "reason" => CommandTimeout::BUDGET, "limit" => round_seconds(ceiling), "elapsed" => round_seconds(elapsed) }
+          end
+          if stall_timeout && silence >= stall_timeout
+            return { "reason" => CommandTimeout::STALLED, "limit" => round_seconds(stall_timeout), "elapsed" => round_seconds(elapsed) }
+          end
+          next unless progress && now - reported_at >= progress_interval
+
+          reported_at = now
+          report_progress(progress, label: label, elapsed: elapsed, silence: silence, monitor: monitor)
+        end
+      end
+
+      def report_progress(progress, label:, elapsed:, silence:, monitor:)
+        progress.call(
+          "command" => label,
+          "elapsed" => round_seconds(elapsed),
+          "quiet_for" => round_seconds(silence),
+          "detail" => monitor.last_line
+        )
+      rescue StandardError
+        nil
+      end
+
+      def stream_reader(io, buffer, monitor)
+        Thread.new do
+          loop do
+            chunk = io.readpartial(READ_CHUNK_BYTES)
+            buffer << chunk
+            monitor.record(chunk)
+          end
+        rescue EOFError, IOError, Errno::EIO
+          nil
+        end
+      end
+
+      def effective_ceiling(timeout, deadline)
+        limit = timeout.nil? ? nil : Float(timeout)
+        ambient = deadline == false ? nil : (deadline || allocation_deadline)
+        return limit unless ambient
+
+        remaining = [ambient - self.class.monotonic_now, 0.0].max
+        limit.nil? ? remaining : [limit, remaining].min
+      end
+
+      def round_seconds(value)
+        (value.to_f * 1000).round / 1000.0
+      end
+
+      def set_allocation_deadline!(at)
+        Thread.current[:meringue_workspace_allocation_deadline] = at
+      end
+
+      def clear_allocation_deadline!
+        Thread.current[:meringue_workspace_allocation_deadline] = nil
+      end
+
+      def allocation_deadline
+        Thread.current[:meringue_workspace_allocation_deadline]
+      end
+
+      def positive_float(value, fallback)
+        number = Float(value)
+        number.positive? ? number : Float(fallback)
+      rescue ArgumentError, TypeError
+        Float(fallback)
       end
 
       def terminate_process_group(pid)
