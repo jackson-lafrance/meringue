@@ -241,6 +241,33 @@ module Meringue
         index < OpenPullRequests.entries(state).length ? index : :chrome
       end
 
+      # Same three answers for first-run setup, with one extra rule: prose lines
+      # above the rows are chrome, so clicking the welcome text is never a choice.
+      def onboarding_hit(state, width:, height:, x:, y:)
+        return :outside unless chat_pane.onboarding?(state)
+
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        return :outside unless metrics.fetch(:suggestion_height).positive?
+
+        bounds = pane_bounds(metrics, :suggestion_x, :suggestion_y, :suggestion_width, :suggestion_height)
+        bounds = bounds.merge(height: bounds.fetch(:height) + metrics.fetch(:suggestion_footer_height))
+        return :outside unless point_in_bounds?(x.to_i, y.to_i, bounds)
+
+        row = y.to_i - metrics.fetch(:suggestion_y) - 1 - chat_pane.onboarding_note_lines(state).length
+        return :chrome if row.negative? || row >= chat_pane.onboarding_visible_row_limit(state)
+
+        index = chat_pane.onboarding_window_start(state) + row
+        index < chat_pane.onboarding_rows(state).length ? index : :chrome
+      end
+
+      # Whether the shared popup slot has room to draw at this size. A modal that
+      # collapsed to zero rows would silently swallow keys, so the app closes
+      # first-run setup instead of leaving an invisible modal up.
+      def popup_visible?(state, width:, height:)
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        metrics.fetch(:suggestion_height).positive?
+      end
+
       # Same three answers for the model picker: a row index, `:chrome` for its
       # own border/caption, and `:outside` for a click-away dismiss.
       def model_picker_hit(state, width:, height:, x:, y:)
@@ -661,9 +688,10 @@ module Meringue
       end
 
       # One popup slot above the composer, shared by the slash-command list, the
-      # open-PR picker, and the model picker (see ChatPane#popup?), so all three
-      # are bounded the same way. Only the number of visible rows differs: the
-      # model picker is browsed, so it is allowed to be taller.
+      # open-PR picker, the model picker, and first-run setup (see
+      # ChatPane#popup?), so all four are bounded the same way. Only the number of
+      # visible rows differs: the model picker and setup are browsed, so they are
+      # allowed to be taller.
       #
       # The caption under the box gets its own reserved row, so the box keeps every
       # visible entry row it would otherwise have spent on the counter, and the

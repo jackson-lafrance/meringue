@@ -28,6 +28,7 @@ module Meringue
         ["/goal stop <goal_id>", "Stop a goal loop for good, leaving its current attempt session alone."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
+        ["/setup", "Reopen first-run setup: harness, model, thinking level, and theme."],
         ["/keybind", "Show all TUI keybindings."],
         ["/config", "Show the active config, supported defaults, conflict policy, and keybindings."],
         ["/tree", "Show the current AgentTree state."],
@@ -100,6 +101,18 @@ module Meringue
       # cached snapshot the kernel refreshes in the background.
       MODEL_CATALOG_REFRESH_WORDS = %w[refresh reload force --refresh].freeze
       PRUNE_USAGE_MESSAGE = "Usage: /prune (no arguments; prunes resolved and errored records together)"
+      # Bare `/setup` opens the local first-run flow in the TUI. The two outcome
+      # words are the kernel spelling: they record the completion marker in the
+      # config file through `CompleteOnboarding`, so it is validated, journaled,
+      # and logged like any other kernel command instead of a silent UI write.
+      SETUP_OUTCOMES = {
+        "complete" => "completed",
+        "completed" => "completed",
+        "done" => "completed",
+        "skip" => "skipped",
+        "skipped" => "skipped"
+      }.freeze
+      SETUP_USAGE_MESSAGE = "Usage: /setup [complete|skip]"
       # The bare `/rename <id> "<name>"` shortcut was removed: renaming now always names the
       # record kind, so the command that runs is obvious from what was typed. The word is still
       # matched here (instead of falling through to "Unknown slash command") so muscle memory
@@ -591,6 +604,8 @@ module Meringue
           parse_kill(arguments)
         when "goal", "goals"
           parse_goal(arguments, bare: command_text == "goals")
+        when "setup"
+          parse_setup(arguments)
         when "jump"
           invalid("/jump is a local TUI command. Run it in the interactive TUI to open an agent session.", usage: "/jump [agent_id]")
         when "keybind"
@@ -675,6 +690,22 @@ module Meringue
         return invalid(self.class.thinking_usage_message) unless tokens.length == 1
 
         kernel_command("SetDefaultSessionThinkingLevel", "level" => tokens[0])
+      end
+
+      def parse_setup(arguments)
+        tokens = split_arguments(arguments)
+        if tokens.empty?
+          return invalid(
+            "/setup is a local TUI command. Run it in the interactive TUI to choose your harness, model, thinking level, and theme.",
+            usage: "/setup"
+          )
+        end
+        return invalid(SETUP_USAGE_MESSAGE) unless tokens.length == 1
+
+        outcome = SETUP_OUTCOMES[tokens[0].to_s.strip.downcase]
+        return invalid(SETUP_USAGE_MESSAGE) unless outcome
+
+        kernel_command("CompleteOnboarding", "outcome" => outcome)
       end
 
       def parse_project(arguments)

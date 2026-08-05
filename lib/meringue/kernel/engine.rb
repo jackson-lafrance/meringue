@@ -106,6 +106,7 @@ module Meringue
         "set_harness" => "SetHarness",
         "harness" => "SetHarness",
         "help" => "Help",
+        "complete_onboarding" => "CompleteOnboarding",
         "theme" => "SetTheme",
         "set_theme" => "SetTheme",
         "get_state" => "GetState",
@@ -146,6 +147,7 @@ module Meringue
         ["/goal stop <goal_id>", "Stop a goal loop for good, leaving its current attempt session alone."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "TUI local: open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
+        ["/setup", "TUI local: reopen first-run setup for the harness, model, thinking level, and theme."],
         ["/keybind", "TUI local: show all keybindings."],
         ["/config", "TUI local: show the active config, supported defaults, conflict policy, and keybindings."],
         ["/tree", "Show the current AgentTree state."],
@@ -529,6 +531,8 @@ module Meringue
           help(command_id, command_type)
         when "InvalidSlashCommand"
           invalid_slash_command(command_id, command_type, payload)
+        when "CompleteOnboarding"
+          complete_onboarding(command_id, command_type, payload)
         when "SetTheme"
           set_theme(command_id, command_type, payload)
         when "SetHarness"
@@ -1838,6 +1842,59 @@ module Meringue
         )
       rescue Config::ParseError => e
         rejected_result(command_id, command_type, "Theme was not changed because config could not be read.", [e.message])
+      end
+
+      # Records that first-run setup finished (or was skipped) so the TUI stops
+      # opening it by itself. The flow itself writes nothing: it applies each
+      # choice as an ordinary kernel command and ends with this one, so the kernel
+      # stays the only writer of the config file and the marker is journaled and
+      # logged like every other command.
+      #
+      # Deliberately not head-proposable: it is UI lifecycle, like `/jump` and the
+      # pickers, and a head has no way to know whether a human saw the flow.
+      def complete_onboarding(command_id, command_type, payload)
+        requested = value_at(payload, "outcome", "Outcome")
+        outcome = requested.to_s.strip.downcase
+        outcome = "completed" if outcome.empty?
+        unless Config::ONBOARDING_OUTCOMES.include?(outcome)
+          return rejected_result(
+            command_id,
+            command_type,
+            "First-run setup was not recorded.",
+            ["outcome must be one of: #{Config::ONBOARDING_OUTCOMES.join(", ")}"]
+          )
+        end
+
+        version = Config::ONBOARDING_VERSION
+        Config.save_onboarding!(outcome: outcome, version: version, path: config_path)
+
+        state = normalized_state
+        message = if outcome == "skipped"
+                    "Skipped first-run setup. It will not open again; run /setup any time."
+                  else
+                    "Completed first-run setup."
+                  end
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: nil,
+          level: "info",
+          message: message,
+          details: { "outcome" => outcome, "onboarding_version" => version, "config_path" => config_path }
+        )
+        touch_state!(state)
+        store.save(state)
+
+        accepted_result(
+          command_id,
+          command_type,
+          outcome,
+          "#{message} Saved to #{config_path}.",
+          { "outcome" => outcome, "onboarding_version" => version, "config_path" => config_path },
+          log_ids
+        )
+      rescue Config::ParseError => e
+        rejected_result(command_id, command_type, "First-run setup was not recorded because config could not be read.", [e.message])
       end
 
       def set_harness(command_id, command_type, payload)

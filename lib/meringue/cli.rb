@@ -74,7 +74,11 @@ module Meringue
           agent_session_service: agent_session_service,
           log_store: store,
           keybindings: keybindings,
-          config: config
+          config: config,
+          # First-run setup applies every choice through a kernel command, so it
+          # is only offered when there is a kernel behind the UI. `meringue demo`
+          # has none and must never open it.
+          onboarding_enabled: enable_agents
         ),
         prompt_handler: engine ? Heads::PromptLoop.new(engine: engine, wait_for_workers: false) : nil,
         reconciler: engine ? -> { engine.reconcile_sessions } : nil

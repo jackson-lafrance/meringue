@@ -71,6 +71,7 @@ lib/meringue/goals/                # goal-loop record, decisions, judge, and met
 docs/config.md                     # config and harness provider reference
 docs/head_agent_kernel_commands.md # compact head-agent command contract
 docs/keybindings.md                # TUI keyboard and jump-mode controls
+docs/onboarding.md                 # first-run setup flow, keys, and completion marker
 docs/kernel-command-application.md # exactly-once command application invariants
 docs/goal_loops.md                 # goal loops: metric, judge, budgets, and interruption
 docs/testing.md                    # test-suite guide and coverage boundaries
@@ -125,6 +126,8 @@ bundle exec meringue
 bundle exec meringue tui
 ```
 
+The first launch on a machine opens a short setup flow over the dashboard: harness, model, thinking level, and theme, each already on a sensible default, so holding `Enter` accepts them all in about a second. `Esc` leaves it at any point and keeps whatever was already applied, `←` goes back a step, and `/setup` reopens it later. It applies every choice through the normal `/harness`, `/model`, `/thinking`, and `/theme` commands, and records one `[onboarding]` marker in the config so it does not open again. See [`docs/onboarding.md`](docs/onboarding.md).
+
 Open a safe demo state without spawning real agents:
 
 ```bash
@@ -164,6 +167,7 @@ Useful slash commands inside the TUI include:
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
 - `/prompt <agent_id> "<message>"` — follow up with an existing worker, or retry a head (`H<n>`) that failed before routing your request.
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
+- `/setup` — reopen first-run setup for the harness, model, thinking level, and theme.
 - `/questions` — list questions and their statuses.
 - `/answer <question_id> "<answer>"` — answer an open question; the kernel records the answer and routes the work it unblocks.
 - `/dismiss <question_id>` — close an open question without answering it.
@@ -188,7 +192,7 @@ the canonical id. An id that does not exist is still rejected, and the message s
 you typed. Everything else stays case sensitive, including paths, branch names, model references,
 and theme/harness names.
 
-You do not have to type them. Head agents can run the same commands from plain language, so "prune the merged issues", "renumber the tree", "kill P1-I9-W3", or "what is P1-I12" apply the matching kernel command and print the same output as the typed slash command. Irreversible commands are gated: `/clear` and killing a whole project are only run when your own message unambiguously asks for them, and otherwise the head asks you to confirm. `/jump`, `/keybind`, and `/quit` are local TUI commands and stay typed-only.
+You do not have to type them. Head agents can run the same commands from plain language, so "prune the merged issues", "renumber the tree", "kill P1-I9-W3", or "what is P1-I12" apply the matching kernel command and print the same output as the typed slash command. Irreversible commands are gated: `/clear` and killing a whole project are only run when your own message unambiguously asks for them, and otherwise the head asks you to confirm. `/jump`, `/setup`, `/keybind`, and `/quit` are local TUI commands and stay typed-only.
 
 There is no command for one existing session's settings: `/model` and `/thinking` only move future-session defaults, and the effective model and thinking level of a running agent are shown on the `session settings` line of its focused workspace (`/jump <agent_id>`). Focused workspaces advertise `/open-session` for opening the harness UI.
 
@@ -260,7 +264,7 @@ Default paths:
 ~/.meringue/state.json    # persisted Meringue state
 ```
 
-The config supports TUI colorschemes, TUI keybinding overrides, default harness selection, role-specific head/worker harnesses, and provider command overrides. See `docs/config.md` for the full reference.
+The config supports TUI colorschemes, TUI keybinding overrides, default harness selection, role-specific head/worker harnesses, provider command overrides, and the first-run setup marker. See `docs/config.md` for the full reference.
 
 The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state. Durable logs retain the newest 500 entries so lifecycle history cannot grow without bound; see [`docs/log-retention.md`](docs/log-retention.md) for the measured rationale, compatibility behavior, and benchmark.
 
