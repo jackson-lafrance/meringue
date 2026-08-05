@@ -66,6 +66,12 @@ Durable timestamps are written by several layers: the kernel prefers local ISO86
 
 Opening a PR or an agent session is transient UI feedback, not orchestration history, so successful opens no longer append a log entry. `TUI::PullRequestOpener` and `Harness::TerminalSessionOpener` return `{"status" => "opened"}` with no user-visible message, while rejected and failed opens keep their explanatory message and are still logged.
 
+## One visible line per lifecycle event
+
+A successful lifecycle event writes one log line, not a progress narration of its internal phases. Spawning a worker is the canonical case: the kernel reserves the record, allocates the workspace, and starts the agent session, and the user sees only `Spawned worker P1-I1-W1 for P1-I1.` (or its follow-up/replacement/queued-activation variant) once the session exists. That line carries the routing details plus the workspace path, strategy, and branch the worker actually received, which a line emitted before allocation could not, since a planned branch may still be uniquified or adopted.
+
+This applies to success only. Phases that fail still speak for themselves: `Worker workspace provisioning failed: …` and `Could not start an agent session for worker …` are logged as errors against the worker. Phase telemetry stays structured on the record (`harness_metadata.provisioning_state`, `workspace_provisioned_at`, `provisioning_errors`) for reconciliation and `GetInfo`, and in-progress work stays visible in the AgentTree as a `queued` worker rather than as chat noise.
+
 ## Harness-neutral log copy
 
 User-visible log lines, status strings, and notices describe the coding agent, never the harness backend that runs it. The kernel logs `Started agent session for head H68.`, `Resumed agent session for worker P1-I9-W3 and prompted it to continue.`, and `Could not start an agent session for worker P1-I9-W3: …` rather than naming Pi, Claude, or Antigravity. `agent session` is the standing vocabulary for the human-readable session noun; `harness` stays in structured data (the `harness` field, log `details`, config keys such as `[harness.pi]`, and the `/harness` selection command, where naming the backend is deliberate).
