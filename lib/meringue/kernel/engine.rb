@@ -313,8 +313,11 @@ module Meringue
       # A catalog that could not be read is retried sooner, but not on every
       # 2-second reconciliation pass.
       MODEL_CATALOG_RETRY_INTERVAL_SECONDS = 60
-      # How many catalog entries `/models` prints before summarizing the rest.
-      MODEL_CATALOG_OUTPUT_LIMIT = 30
+      # How many example references a catalog result names in the log. The full
+      # list belongs in the TUI model picker (`/models`), not in the log: a
+      # hundred-plus lines of models nobody can act on used to bury every other
+      # event in the pane.
+      MODEL_CATALOG_OUTPUT_EXAMPLE_LIMIT = 3
       RECONCILE_STATE_HEALTHY = "healthy"
       RECONCILE_STATE_RESUMING = "resuming"
       RECONCILE_STATE_RESUME_FAILED = "resume_failed"
@@ -1192,27 +1195,24 @@ module Meringue
         end
       end
 
-      # Bounded, scannable listing: the full catalog can be over a hundred models,
-      # so the chat output shows a window and points at completion for the rest.
+      # A catalog read is reported as a status, not as a listing. The browsable
+      # list is the TUI model picker (`/models`), which reads this same persisted
+      # snapshot, so the log only has to say which harness answered, how fresh the
+      # answer is, and how many models it holds.
       def model_catalog_output_lines(result)
         catalog = result.is_a?(Hash) ? result : {}
         models = Array(catalog["models"])
         lines = ["  harness: #{catalog.fetch("harness", "unknown")}", "  availability: #{catalog.fetch("availability", "unknown")}"]
+        lines << "  models: #{models.length}" unless models.empty?
         lines << "  source: #{catalog.fetch("source")}" if catalog["source"]
         lines << "  confirmed: #{catalog.fetch("fetched_at")}" if catalog["fetched_at"]
         lines << "  last refresh attempt: #{catalog.fetch("last_attempt_at")}" if catalog["last_attempt_at"]
         lines << "  note: #{catalog.fetch("note")}" if catalog["note"]
         return lines if models.empty?
 
-        shown = models.first(MODEL_CATALOG_OUTPUT_LIMIT)
-        lines.concat(
-          shown.map do |model|
-            details = [model["name"], Array(model["thinking_levels"]).empty? ? nil : "thinking: #{Array(model["thinking_levels"]).join(", ")}"].compact
-            "  #{model.fetch("reference", "?")}#{details.empty? ? "" : " — #{details.join(" · ")}"}"
-          end
-        )
-        remaining = models.length - shown.length
-        lines << "  … and #{remaining} more; press Tab after /model to search all #{models.length}." if remaining.positive?
+        examples = models.first(MODEL_CATALOG_OUTPUT_EXAMPLE_LIMIT).map { |model| model.fetch("reference", "?") }
+        lines << "  for example: #{examples.join(", ")}"
+        lines << "  Run /models to pick one in the model picker, or /model <provider/model> to set it directly."
         lines
       end
 
