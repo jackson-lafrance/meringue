@@ -13,6 +13,7 @@ Test files:
 - `test/integration/kernel_heads/questions_test.rb`
 - `test/integration/kernel_heads/logging_test.rb`
 - `test/integration/kernel_heads/unrouted_user_message_test.rb`
+- `test/integration/kernel_heads/head_retry_test.rb`
 - `test/support/kernel_heads_support.rb` (fake head runners, fake harness clients, stub
   workspace manager, stub forge client, tmpdir-scoped engine builder)
 
@@ -28,6 +29,14 @@ every state/config file lives under a per-test `Dir.mktmpdir`.
 - A fully accepted batch removes (cleans up) the head record and releases its session;
   a batch with any rejected/failed command keeps the head with `status: "blocked"` and
   `head_result_apply_state: "partially_applied"` for inspection.
+- A `blocked` head is retryable, because a rejected or failed command means the work behind it
+  never happened. `/prompt H<n> "..."` and selecting the head in the AgentTree both re-run its
+  recorded request through a fresh head; the retry never resumes the blocked head's own session,
+  because that session already delivered a result the exactly-once guard has sealed, and the
+  retry releases it. The retry head's prompt names the batch's accepted commands (reuse, never
+  re-propose) and its rejected/failed ones (still unrouted), so a partially applied batch is
+  recovered without routing the same work twice. Only a head that is still routing, or that
+  applied every command it proposed, is refused. See `head_retry_test.rb`.
 - Predicted-id chaining works inside one batch (`AddProject` -> `CreateIssue` -> `SpawnWorker`
   with `P1` / `P1-I1`); symbolic issue references and unambiguous predicted ids are remapped
   to the batch-created issue so workers cannot land on another head's issue.

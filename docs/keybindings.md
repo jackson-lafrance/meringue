@@ -70,7 +70,7 @@ The AgentTree pane scrolls like any other pane, so a long tree of projects, issu
 
 ## AgentTree selection, log filtering, and chat routing
 
-A single left click on any AgentTree row selects that node. Exactly one node is selected at a time, and while a node is selected the logs pane shows only that node's logs. Right-clicking an agent row opens its associated delivery PR through the configured browser opener; if no PR is tracked, Meringue shows a transient notice and leaves the selection unchanged. An issue or worker selection is also an explicit target for subsequent natural-language chat, and a failed head (`errored` or `killed`, with no result applied) is a target for retrying that head; project selections and heads that are still routing remain log-only filters.
+A single left click on any AgentTree row selects that node. Exactly one node is selected at a time, and while a node is selected the logs pane shows only that node's logs. Right-clicking an agent row opens its associated delivery PR through the configured browser opener; if no PR is tracked, Meringue shows a transient notice and leaves the selection unchanged. An issue or worker selection is also an explicit target for subsequent natural-language chat, and a head that stopped without routing its whole request (`errored`, `killed`, or `blocked` with commands the kernel rejected or failed) is a target for retrying that head; project selections, heads that are still routing, and heads that routed every command they proposed remain log-only filters. A retryable head row says so: it carries a `prompt to retry` marker, replaced by `retried as H<n>` once it has been retried.
 
 What each node type scopes, mirroring the AgentTree hierarchy:
 
@@ -102,7 +102,7 @@ The destination is named in exactly one place: the composer's pane title, on the
 | --- | --- | --- | --- |
 | worker or head with an issue (`P1-I9-W3`) | `chat → P1-I9-W3 · <issue title>` | tinted with that agent's own log color | `head routes · Esc clears` |
 | issue (`P1-I9`) | `chat → P1-I9 · <issue title>` | tinted with that issue id's color | `head routes · Esc clears` |
-| failed head (`H13`) | `chat → retry H13 · errored` | tinted with that head's own log color | `retries this head · Esc clears` |
+| failed head (`H13`) | `chat → retry H13 · errored` (or `· blocked`) | tinted with that head's own log color | `retries this head · Esc clears` |
 | project or still-routing head (log-only) | `chat · head routes · P1 logs only` | theme default, never tinted | `head routes · Esc clears` |
 | nothing selected | `chat` | theme default, never tinted | nothing — no target to explain, nothing to clear |
 | buffer starts with `/` | `chat · slash command · P1-I9-W3 not targeted` | theme default, never tinted | `slash ignores target · Esc clears` |
