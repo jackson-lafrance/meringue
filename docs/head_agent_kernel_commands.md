@@ -322,9 +322,26 @@ Resolution order for `SpawnWorker` and `ModifyIssue`:
 3. an id that literally is one of this batch's created issues → that issue.
 4. `SpawnWorker` only: a created issue in the same project was left without a worker → bind there (or reject if several are).
 5. an id that was visible in the head's spawn snapshot, or an issue created after spawn by a still-unapplied head that was already visible to this head and then observed in current state → that existing issue.
-6. anything else → rejected.
+6. an id that was visible in the spawn snapshot but whose issue has since been removed → skipped as a no-op (see below).
+7. anything else → rejected.
+
+Visibility is decided from the head's recorded spawn snapshot, never from "does this issue exist right now". Those are different questions: a `/prune` or `/kill` can land in the seconds between a head reading state and its result being applied, and reading live state made that race look like a head that invented an id.
 
 Rejection codes: `issue_id_not_created_by_this_head_result`, `ambiguous_batch_issue_target`, `ambiguous_batch_issue_prediction`, `batch_issue_reference_not_found`, `batch_issue_reference_out_of_order`, `batch_issue_reference_unresolved`, `batch_project_reference_unresolved`, `batch_agent_reference_not_found`, `batch_agent_reference_out_of_order`, `batch_agent_reference_unresolved`.
+
+### When your target is pruned or killed while you are routing
+
+You do not have to defend against this, and you must not try to: no re-reading state at the last moment, no "if it still exists" hedging, no duplicate commands. Target the ids you were given and let the kernel handle the race.
+
+If an issue you legitimately read is removed before your result is applied, the kernel skips that one command as a no-op and applies the rest of your batch:
+
+- the command result carries the error code `issue_removed_before_head_result_applied` and mutates nothing,
+- the log line is `Skipped ModifyIssue: issue P4-I4 was removed by a prune at … after head H34 was spawned with it in view, so there was nothing left to update. No state was changed. Dropped issue update (status → completed, description).` — `info` for `ModifyIssue`, `warning` for `SpawnWorker`, because a dropped worker is dropped work,
+- the batch summary counts it as skipped rather than rejected (`Head result for H34: 2 accepted, 0 rejected, 0 failed. 1 command skipped because its target was removed before this result was applied.`), and the head is still recorded as applied rather than blocked.
+
+An id that was already gone when you were spawned is different: it was never in your view of state, so it is still rejected, but the message tells you what happened to it (`… which was removed by a prune at …, before head H38 was spawned, so it was never in this head's view of state.`). Never lift an issue id out of quoted log text, an older message, or a pasted warning; use the ids in the state you were given.
+
+Every rejected or skipped `ModifyIssue`, `SpawnWorker`, and `PromptAgent` also states the intent that did not land (`Dropped issue update (status → completed, description).`, `Dropped worker "Re-run the cleanup".`), so a dropped command is never a count the user cannot interpret.
 
 A corrected route is never silent. The kernel appends `Rerouted from predicted issue <id>.` to the worker's spawn log line, adds `rerouted_from_issue_id` to that log's details and to the worker's `harness_metadata`, and emits a separate warning log naming both issues.
 
