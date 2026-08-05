@@ -1182,8 +1182,11 @@ rejected rather than guessed.
 - `GetSessionSettings` backs `/session-settings <agent_id>` with `{ "agent_id": "P1-I1-W1" }`.
 
 Default changes affect future Pi sessions only; existing sessions retain their effective settings.
-Supported thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; the
-levels a specific model actually accepts come from the harness's model catalog.
+Accepted thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`, and that
+ladder is what `SetDefaultSessionThinkingLevel` validates against, independently of the model
+catalog. A rejected level names the whole ladder in its message. The catalog says which levels a
+specific model advertises: an unadvertised level is still accepted and the accepted message reports
+the level Pi will clamp to, because a provider extension can under-declare its model's levels.
 
 See [`session-settings.md`](session-settings.md#authoritative-model-catalog-discovery) for how the
 model catalog is discovered, cached, and degraded.

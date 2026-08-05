@@ -72,6 +72,27 @@ module Meringue
         |overloaded|502|503|504
       /ix.freeze
 
+      # Mirrors Pi's own `clampThinkingLevel`: a level a model does not advertise
+      # resolves to the nearest level it does, searching up the ladder first and
+      # then down. Pi clamps instead of failing, so Meringue uses this to say what
+      # a future session will actually run rather than to hide a level a user is
+      # allowed to set. A model's advertised list can under-report what the model
+      # really supports (a proxy provider that omits `max` from its
+      # `thinkingLevelMap`), which is exactly why it must not be treated as
+      # permission to choose.
+      def self.clamp_thinking_level(level, available_levels)
+        available = Array(available_levels).map { |value| value.to_s.strip.downcase }.reject(&:empty?)
+        requested = level.to_s.strip.downcase
+        return requested if available.include?(requested)
+        return available.first || "off" unless THINKING_LEVELS.include?(requested)
+        return "off" if available.empty?
+
+        index = THINKING_LEVELS.index(requested)
+        THINKING_LEVELS[index..].find { |candidate| available.include?(candidate) } ||
+          THINKING_LEVELS[0...index].reverse_each.find { |candidate| available.include?(candidate) } ||
+          available.first
+      end
+
       attr_reader :command, :env, :session_dir, :command_timeout,
                   :event_timeout, :shutdown_timeout
 

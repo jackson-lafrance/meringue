@@ -258,6 +258,45 @@ class TuiChatPaneTest < Minitest::Test
     assert_equal records.last.fetch("usage"), lines.last.sub("› ", "").split(" — ").first
   end
 
+  # `/thinking` shows a seven-level ladder through a three-row window, so the
+  # popup must lead with the level actually in force and caption how many more
+  # exist. Before this, the window silently ended at the level the model catalog
+  # happened to advertise and the saved default could be missing entirely.
+  def test_thinking_popup_leads_with_the_current_default_and_captions_the_whole_ladder
+    state = composed_state(
+      empty_state.merge(
+        "metadata" => {
+          "active_harness" => "pi",
+          "pi_session_defaults" => {
+            "model" => "anthropic-250k-prefer-using-this-one/claude-opus-5",
+            "thinking_level" => "max"
+          },
+          "harness_model_catalogs" => {
+            "pi" => Meringue::Harness::ModelCatalog.available(
+              harness: "pi",
+              models: [{ "provider" => "anthropic-250k-prefer-using-this-one", "id" => "claude-opus-5",
+                         "thinking_levels" => %w[off minimal low medium high xhigh], "reasoning" => true }],
+              source: "test_catalog"
+            ).to_h
+          }
+        }
+      ),
+      chat: { "input_buffer" => "/thinking ", "input_cursor" => "/thinking ".length }
+    )
+
+    records = @pane.slash_suggestion_records(state)
+    assert_equal Meringue::Harness::PiClient::THINKING_LEVELS.length, records.length
+    assert_includes records.map { |record| record.fetch("usage") }, "max"
+
+    rows = plain_lines(@pane.slash_suggestion_lines(state))
+    assert_equal Pane::VISIBLE_SUGGESTION_LIMIT, rows.length
+    assert_includes rows.first, "max — current default"
+
+    caption = plain_line(@pane.slash_suggestion_footer_line(state))
+    assert_includes caption, "1–#{Pane::VISIBLE_SUGGESTION_LIMIT} of #{records.length} thinking levels"
+    assert_includes caption, "↑↓ scroll"
+  end
+
   def test_unmatched_slash_prompt_reports_no_matching_commands
     lines = plain_lines(@pane.slash_suggestion_lines(chat_state("/definitely-not-a-command")))
 
