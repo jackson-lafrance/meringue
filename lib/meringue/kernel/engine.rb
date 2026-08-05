@@ -7,6 +7,7 @@ require "open3"
 require "securerandom"
 require "socket"
 require "time"
+require "zlib"
 
 require_relative "../config"
 require_relative "../ids"
@@ -296,6 +297,15 @@ module Meringue
       HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
       DELIVERY_PULL_REQUEST_REFRESH_INTERVAL_SECONDS = 5 * 60
+      # Refreshing a batch stamps every record with the same `last_checked_at`, which would make
+      # them all fall due together on one later tick. Each URL gets a deterministic extra delay
+      # inside this window so the herd spreads out instead of re-synchronizing every interval.
+      DELIVERY_PULL_REQUEST_REFRESH_SPREAD_SECONDS = 5 * 60
+      # A reconcile tick is background work nobody asked for. Cap how many forge lookups one tick
+      # may start and how long it may spend on them in total, so a large backlog costs many cheap
+      # ticks instead of one long one. Leftover records stay due and are picked up next tick.
+      DELIVERY_PULL_REQUEST_REFRESH_BATCH_LIMIT = 3
+      DELIVERY_PULL_REQUEST_REFRESH_BUDGET_SECONDS = 5.0
       # `/prune` verifies PR state conservatively, but forge discovery/status commands are external
       # I/O. Bound the whole lookup phase so one unreachable forge cannot leave the command pending
       # indefinitely. URLs not resolved inside the budget become `unknown` and retain their issue.
@@ -328,7 +338,7 @@ module Meringue
 
       attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path,
                   :config, :state_lock, :instance_pid, :instance_id, :prune_forge_lookup_budget, :metric_probe,
-                  :goal_advance_budget
+                  :goal_advance_budget, :delivery_pull_request_refresh_budget
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
                      head_runner: Heads::FakeRunner.new,
@@ -347,6 +357,7 @@ module Meringue
                      config_path: Config::DEFAULT_PATH,
                      config: nil,
                      prune_forge_lookup_budget: PRUNE_FORGE_LOOKUP_BUDGET_SECONDS,
+                     delivery_pull_request_refresh_budget: DELIVERY_PULL_REQUEST_REFRESH_BUDGET_SECONDS,
                      goal_advance_budget: GOAL_ADVANCE_BUDGET_SECONDS,
                      state_lock: nil,
                      instance_pid: Process.pid,
@@ -369,6 +380,7 @@ module Meringue
         @config = config || Config.load(path: @config_path)
         @deferred_worker_default_failure_policy = @config.conflict_predecessor_failure
         @prune_forge_lookup_budget = Float(prune_forge_lookup_budget)
+        @delivery_pull_request_refresh_budget = Float(delivery_pull_request_refresh_budget)
         @goal_advance_budget = Float(goal_advance_budget)
         @harness_client_resolver = harness_client_resolver
         @instance_pid = Integer(instance_pid)
@@ -3788,16 +3800,79 @@ module Meringue
       # Refresh only already-verified delivery PRs. Candidate/reported URLs remain inert, and an
       # unavailable forge never replaces the last known open/closed/merged state. /prune still
       # performs its own authoritative checks and therefore keeps its conservative rules.
+      #
+      # This runs on every ~2s reconcile tick, so it must never behave like a batch job. The same
+      # rule `/prune` follows applies here and matters more, because nothing asked for this work:
+      # read which URLs are due under the lock, talk to the forge with the lock released, then
+      # reacquire it to merge. Holding the state lock across `gh` froze every kernel command
+      # (submitting a prompt, applying a HeadResult, settling a worker) for the length of the
+      # whole burst.
       def refresh_stale_delivery_pull_requests
+        # Capped so a long backlog costs several cheap ticks instead of one long stall.
+        due_urls = due_delivery_pull_request_urls.first(DELIVERY_PULL_REQUEST_REFRESH_BATCH_LIMIT)
+        return [] if due_urls.empty?
+
+        statuses = fetch_delivery_pull_request_statuses(due_urls)
+        return [] if statuses.empty?
+
+        apply_delivery_pull_request_statuses(statuses)
+      end
+
+      # Locked, cheap, and read-only: which verified delivery PR URLs are due right now.
+      def due_delivery_pull_request_urls
+        synchronized_state do
+          now = timestamp
+          normalized_state.fetch("issues").flat_map do |issue|
+            State::Models.merge_pull_request_records(State::Models.pull_request_records_from(issue)).filter_map do |record|
+              url = present_string(State::Models.pull_request_record_url(record))
+              next if blank?(url) || !delivery_pull_request_refresh_due?(record, now)
+
+              url
+            end
+          end.uniq
+        end
+      end
+
+      # Unlocked and bounded. One shared deadline covers the whole batch, so an unreachable forge
+      # costs one budget instead of one timeout per URL. URLs left over when the budget runs out are
+      # simply not refreshed this tick; they stay due and are retried on a later tick.
+      def fetch_delivery_pull_request_statuses(urls)
+        deadline = monotonic_time + [delivery_pull_request_refresh_budget, 0.0].max
+        urls.each_with_object({}) do |url, statuses|
+          remaining = deadline - monotonic_time
+          break statuses unless remaining.positive?
+
+          statuses[url] = delivery_pull_request_status(url, timeout: remaining)
+        end
+      end
+
+      # A raising lookup is answered as `unknown` rather than aborting the batch. The apply phase
+      # already treats `unknown` as "forge unavailable, keep the last known state", and stamping
+      # `last_checked_at` is what stops one permanently broken URL from occupying a batch slot on
+      # every tick and starving the records behind it.
+      def delivery_pull_request_status(url, timeout:)
+        invoke_forge_status_lookup(url, timeout: timeout)
+      rescue StandardError => e
+        {
+          "provider" => "github",
+          "url" => url.to_s,
+          "state" => "unknown",
+          "error" => sanitized_error_message(e)
+        }
+      end
+
+      # Locked again, and against current state rather than the snapshot the URLs came from: an
+      # issue pruned or a record replaced during the forge call is simply skipped.
+      def apply_delivery_pull_request_statuses(statuses)
         synchronized_state do
           state = normalized_state
           now = timestamp
           refreshes = state.fetch("issues").flat_map do |issue|
             State::Models.merge_pull_request_records(State::Models.pull_request_records_from(issue)).filter_map do |record|
-              url = State::Models.pull_request_record_url(record)
-              next if blank?(url) || !delivery_pull_request_refresh_due?(record, now)
+              url = present_string(State::Models.pull_request_record_url(record))
+              next if blank?(url) || !statuses.key?(url)
 
-              status = pull_request_status(url)
+              status = statuses.fetch(url)
               unavailable = status.fetch("state", nil).to_s == "unknown"
               refreshed = if unavailable
                             record.merge(
@@ -3836,9 +3911,19 @@ module Meringue
         checked_at = record.is_a?(Hash) && (record["last_checked_at"] || record["verified_at"])
         return true if blank?(checked_at)
 
-        Time.iso8601(now) - Time.iso8601(checked_at.to_s) >= DELIVERY_PULL_REQUEST_REFRESH_INTERVAL_SECONDS
+        Time.iso8601(now) - Time.iso8601(checked_at.to_s) >= delivery_pull_request_refresh_interval(record)
       rescue ArgumentError, TypeError
         true
+      end
+
+      # Records refreshed together are stamped with the same `last_checked_at`, so a fixed interval
+      # makes them all fall due on the same tick forever: one synchronized burst every interval
+      # instead of a trickle. A deterministic per-URL spread keeps each record on its own schedule
+      # without storing extra scheduling state.
+      def delivery_pull_request_refresh_interval(record)
+        url = record.is_a?(Hash) ? State::Models.pull_request_record_url(record).to_s : ""
+        DELIVERY_PULL_REQUEST_REFRESH_INTERVAL_SECONDS +
+          (Zlib.crc32(url) % DELIVERY_PULL_REQUEST_REFRESH_SPREAD_SECONDS)
       end
 
       def refresh_worker_delivery_pull_requests!(state)

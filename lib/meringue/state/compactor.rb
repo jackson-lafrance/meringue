@@ -8,6 +8,13 @@ module Meringue
       LOG_MESSAGE_MAX_BYTES = 4_000
       STDERR_MAX_BYTES = 4_000
       SESSION_TEXT_MAX_BYTES = 20_000
+      # `harness_metadata.command` is the spawn argv kept for diagnostics, and one of
+      # its elements is the whole `--append-system-prompt` payload: for a head that is
+      # the entire kernel snapshot, tens of kilobytes, persisted forever. Argv was
+      # measured at 29% of a real 1 MB state file, and every byte of it is re-read,
+      # re-parsed, and re-serialized on every frame and every save. Keep enough to
+      # identify the program and its flags; drop the prompt body.
+      COMMAND_ARGUMENT_MAX_BYTES = 2_000
 
       KEY_LIMITS = {
         "error" => ERROR_STRING_MAX_BYTES,
@@ -19,6 +26,15 @@ module Meringue
         "stderr_tail" => STDERR_MAX_BYTES,
         "line" => STDERR_MAX_BYTES,
         "last_assistant_text" => SESSION_TEXT_MAX_BYTES
+      }.freeze
+
+      # Limits that apply only to strings held *inside* an array under this key.
+      # `harness_metadata.command` is an argv array, while `goal.metric.command` and
+      # `goal.guardrails[].command` are single executable command strings. Truncating
+      # a command Meringue still has to run would silently corrupt a goal loop, so the
+      # argv limit is deliberately scoped to the array form and never reaches a scalar.
+      ARRAY_ELEMENT_KEY_LIMITS = {
+        "command" => COMMAND_ARGUMENT_MAX_BYTES
       }.freeze
 
       module_function
@@ -60,7 +76,7 @@ module Meringue
         changed = false
         array.each_with_index do |value, index|
           if value.is_a?(String)
-            compacted = compact_string(value, key.to_s)
+            compacted = compact_string(value, key.to_s, in_array: true)
             if compacted != value
               array[index] = compacted
               changed = true
@@ -72,16 +88,19 @@ module Meringue
         changed
       end
 
-      def compact_string(value, key)
-        limit = limit_for_key(key)
+      def compact_string(value, key, in_array: false)
+        limit = limit_for_key(key, in_array: in_array)
         return value if value.bytesize <= limit
 
         suffix = "\n… [truncated #{value.bytesize - limit} bytes by Meringue state compaction]"
         value.byteslice(0, limit).to_s.scrub + suffix
       end
 
-      def limit_for_key(key)
-        KEY_LIMITS.fetch(key.to_s, DEFAULT_STRING_MAX_BYTES)
+      def limit_for_key(key, in_array: false)
+        string_key = key.to_s
+        return ARRAY_ELEMENT_KEY_LIMITS.fetch(string_key) if in_array && ARRAY_ELEMENT_KEY_LIMITS.key?(string_key)
+
+        KEY_LIMITS.fetch(string_key, DEFAULT_STRING_MAX_BYTES)
       end
     end
   end
