@@ -208,7 +208,7 @@ worker_extra_args = []
 
 Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/model` and `/thinking`, or set `model` and `thinking_level` under `[harness.pi]`, to change both future roles without duplicating their tool flags. These scalar values are appended after `head_extra_args` / `worker_extra_args` and therefore win over model/thinking flags in those arrays. A configured role array still replaces that role's default array entirely, so include every other flag you need.
 
-`/defaults` inspects the future Pi pair. `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. Use `/session-settings` to inspect an existing session. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
+`/defaults` inspects the future Pi pair. `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. An existing session's own effective pair has no slash command: it is recorded on the agent record and shown in the focused worker workspace and raw `/state`. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
 
 ### Model catalogs and provider resource flags
 
