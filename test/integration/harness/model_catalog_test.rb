@@ -166,6 +166,25 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
     assert_equal ["get_available_models"], stub_commands(stub).map { |command| command.fetch("type") }
   end
 
+  # A model's advertised levels explain what Pi will run, they are not permission
+  # to choose: Pi clamps an unlisted level (up the ladder first, then down)
+  # instead of failing, and a provider extension can under-declare what its model
+  # really supports. Meringue mirrors that rule so its surfaces can say "max
+  # clamps to xhigh" instead of hiding max.
+  def test_pi_clamping_mirrors_pis_own_rule_for_levels_a_model_does_not_advertise
+    proxy_levels = %w[off minimal low medium high xhigh]
+
+    assert_equal "xhigh", Meringue::Harness::PiClient.clamp_thinking_level("max", proxy_levels)
+    assert_equal "xhigh", Meringue::Harness::PiClient.clamp_thinking_level("XHIGH", proxy_levels)
+    # Nothing above the request is available, so the search falls back downward.
+    assert_equal "low", Meringue::Harness::PiClient.clamp_thinking_level("high", %w[off minimal low])
+    # A non-reasoning model reports only "off".
+    assert_equal "off", Meringue::Harness::PiClient.clamp_thinking_level("max", ["off"])
+    # Degrades instead of raising when the catalog knows nothing.
+    assert_equal "off", Meringue::Harness::PiClient.clamp_thinking_level("max", [])
+    assert_equal "minimal", Meringue::Harness::PiClient.clamp_thinking_level("ultra", %w[minimal high])
+  end
+
   def test_catalog_probe_is_ephemeral_and_drops_spawn_only_model_defaults
     client, stub = build_pi_client(
       tmpdir,

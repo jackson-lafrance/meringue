@@ -1472,12 +1472,13 @@ module Meringue
       end
 
       def set_default_session_thinking_level(command_id, command_type, payload)
-        level = value_at(payload, "level", "thinking_level", "Level", "ThinkingLevel").to_s.strip.downcase
+        requested = value_at(payload, "level", "thinking_level", "Level", "ThinkingLevel")
+        level = requested.to_s.strip.downcase
         unless Meringue::Harness::PiClient::THINKING_LEVELS.include?(level)
           return rejected_result(
             command_id,
             command_type,
-            "Default Pi thinking level was not changed.",
+            invalid_thinking_level_message("Default Pi thinking level", requested),
             ["thinking level must be one of: #{Meringue::Harness::PiClient::THINKING_LEVELS.join(", ")}"]
           )
         end
@@ -1508,8 +1509,10 @@ module Meringue
         unchanged_ids = existing_pi_session_ids(state)
         value = changed_field == "model" ? defaults.fetch("model", model) : defaults.fetch("thinking_level", thinking_level)
         label = changed_field == "model" ? "model" : "thinking level"
+        clamp_note = clamped_default_thinking_note(defaults, changed_field)
         message = "Set the default Pi #{label} to #{value} for all future Pi heads and workers. " \
-                  "Existing Pi sessions were not changed#{unchanged_ids.empty? ? "." : ": #{unchanged_ids.join(", ")}."}"
+                  "Existing Pi sessions were not changed#{unchanged_ids.empty? ? "." : ": #{unchanged_ids.join(", ")}."}" \
+                  "#{clamp_note ? " #{clamp_note}" : ""}"
         log_ids = append_log(
           state,
           source_type: "kernel",
@@ -1576,10 +1579,66 @@ module Meringue
         end.map { |agent| agent.fetch("id", nil) }.compact
       end
 
+      # A level the model's catalog entry does not advertise is still saved: Pi
+      # clamps it at spawn time, and a provider extension can under-declare what
+      # its model really supports. Saying which level Pi will actually run keeps
+      # the accepted result honest without refusing a level the user may set.
+      def clamped_default_thinking_note(defaults, changed_field)
+        return nil unless %w[thinking_level model].include?(changed_field)
+
+        reference = defaults.fetch("model", nil).to_s.strip
+        level = defaults.fetch("thinking_level", nil).to_s.strip.downcase
+        return nil if reference.empty? || level.empty?
+
+        snapshot = persisted_model_catalog(Meringue::Harness::Registry.public_provider_name("pi"))
+        return nil unless snapshot
+
+        supported = Meringue::Harness::ModelCatalog.coerce(snapshot, harness: "pi").thinking_levels_for(reference)
+        supported = Array(supported).map { |value| value.to_s.downcase }
+        return nil if supported.empty? || supported.include?(level)
+
+        clamped = Meringue::Harness::PiClient.clamp_thinking_level(level, supported)
+        "Pi's catalog does not list #{level} for #{reference}, so future Pi sessions run #{clamped} instead."
+      end
+
+      # A bare "was not changed" left the user guessing which words are legal, so
+      # the visible log line carries the ladder itself plus the obvious near-miss
+      # for a truncated level such as "xhi". The valid set is the one the kernel
+      # validates against, which is deliberately independent of the model catalog.
+      def invalid_thinking_level_message(subject, requested)
+        levels = Meringue::Harness::PiClient::THINKING_LEVELS
+        typed = requested.to_s.strip
+        reason = typed.empty? ? "a level is required" : "#{typed.inspect} is not a Pi thinking level"
+        near_miss = closest_thinking_levels(typed)
+        did_you_mean = near_miss.empty? ? nil : "Did you mean #{near_miss.join(" or ")}?"
+        [
+          "#{subject} was not changed: #{reason}.",
+          did_you_mean,
+          "Valid levels: #{levels.join(", ")}."
+        ].compact.join(" ")
+      end
+
+      # Only an unambiguous near-miss is worth naming; the full ladder follows in
+      # the same message, so "m" does not need "minimal or medium or max".
+      def closest_thinking_levels(typed)
+        candidate = typed.to_s.strip.downcase
+        return [] if candidate.empty?
+
+        matches = Meringue::Harness::PiClient::THINKING_LEVELS.select do |level|
+          level.start_with?(candidate) || candidate.start_with?(level) || level.include?(candidate)
+        end
+        matches.length > 2 ? [] : matches
+      end
+
       def pi_session_defaults_message(defaults)
         model = defaults.fetch("model", nil) || "mixed by role"
         thinking = defaults.fetch("thinking_level", nil) || "mixed by role"
-        "Future Pi heads and workers use #{model} with thinking #{thinking}. Existing sessions keep their own effective settings."
+        clamp_note = clamped_default_thinking_note(defaults, "thinking_level")
+        [
+          "Future Pi heads and workers use #{model} with thinking #{thinking}.",
+          clamp_note,
+          "Existing sessions keep their own effective settings."
+        ].compact.join(" ")
       end
 
       def get_session_settings(command_id, command_type, payload)
@@ -1651,7 +1710,14 @@ module Meringue
       def set_session_thinking_level(command_id, command_type, payload)
         agent_id = value_at(payload, "agent_id", "target_id", "AgentID", "TargetID")
         level = value_at(payload, "level", "thinking_level", "Level", "ThinkingLevel")
-        return rejected_result(command_id, command_type, "Session thinking level was not changed.", ["thinking level is required"]) if blank?(level)
+        if blank?(level)
+          return rejected_result(
+            command_id,
+            command_type,
+            invalid_thinking_level_message("Session thinking level", level),
+            ["thinking level must be one of: #{Meringue::Harness::PiClient::THINKING_LEVELS.join(", ")}"]
+          )
+        end
 
         state = normalized_state
         agent, rejection = session_settings_target(state, command_id, command_type, agent_id)

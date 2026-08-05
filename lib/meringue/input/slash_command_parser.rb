@@ -21,7 +21,7 @@ module Meringue
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/defaults", "Show the model and thinking level for all future Pi sessions."],
         ["/model <provider/model>", "Persist the model for all future Pi sessions; existing sessions are unchanged."],
-        ["/thinking <level>", "Persist the thinking level for all future Pi sessions; existing sessions are unchanged."],
+        ["/thinking <level>", "Persist off, minimal, low, medium, high, xhigh, or max for all future Pi sessions; existing sessions are unchanged."],
         ["/session-settings <agent_id>", "Refresh and show one existing agent's effective Pi model and thinking level."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
         ["/goal create <issue_id> \"<success criteria>\" --metric \"<command>\" --target <number> [flags]", "Attach a goal loop to an issue: iterate until the metric hits its target or a budget guard trips."],
@@ -404,40 +404,95 @@ module Meringue
         }]
       end
 
-      # Thinking levels follow the model in play, so an unsupported level is never
-      # offered for a model the harness would reject it for.
+      # `/thinking` offers every level the kernel accepts, and lets the catalog
+      # label them instead of removing them.
+      #
+      # Filtering the list by the catalog silently hid levels a user could really
+      # set: kernel validation is deliberately catalog-independent (the same rule
+      # `/model` follows), and Pi clamps a level a model does not advertise rather
+      # than failing. A provider extension that omits `max` from its
+      # `thinkingLevelMap` — a 250k-context proxy in front of Claude Opus 5, say —
+      # therefore made `/thinking max` succeed while `max` was missing from
+      # `/thinking`'s own list, so the saved default was invisible in its picker.
       def self.thinking_level_suggestion_records(context, state, catalog, harness)
-        reference = thinking_level_model_reference(context, state, harness)
-        levels = Array(catalog.thinking_levels_for(reference))
-        verified = !levels.empty?
-        levels = Meringue::Harness::PiClient::THINKING_LEVELS unless verified
-        query = context.fetch("query", "").to_s.downcase
-        levels.filter_map.with_index do |level, index|
-          next unless query.empty? || level.downcase.include?(query)
-
+        reference = thinking_level_model_reference(state, harness)
+        supported = normalized_thinking_levels(catalog.thinking_levels_for(reference))
+        current = current_default_thinking_level(state, harness)
+        query = context.fetch("query", "").to_s.strip.downcase
+        matching_thinking_levels(query, current).map.with_index do |level, index|
           {
             "usage" => level,
-            "description" => thinking_level_description(context, reference, verified),
+            "description" => thinking_level_description(level, reference, supported, current),
             "completion" => "#{context.fetch("completion_prefix")} #{level}",
             "requires_arguments" => false,
             "append_space" => false,
             "index" => index,
-            "kind" => "thinking_levels"
+            "kind" => "thinking_levels",
+            "current" => level == current
           }
         end
       end
 
-      def self.thinking_level_model_reference(context, state, harness)
+      # Every level Meringue accepts for a Pi default. Completion and kernel
+      # validation must agree on this ladder, so both read it from one place.
+      def self.thinking_levels
+        Meringue::Harness::PiClient::THINKING_LEVELS
+      end
+
+      def self.thinking_usage_message
+        "Usage: /thinking <#{thinking_levels.join("|")}>"
+      end
+
+      # With nothing typed the saved default leads the list: only three suggestion
+      # rows are visible at once, so a level at the far end of the ladder (`max`)
+      # would otherwise need scrolling to see, which is what made it look absent.
+      # Once the user types, prefix matches lead instead, so completing "hi"
+      # cannot resolve to a current default of "xhigh".
+      def self.matching_thinking_levels(query, current)
+        return ordered_thinking_levels(current) if query.empty?
+
+        prefixed, contained = thinking_levels.select { |level| level.include?(query) }
+                                             .partition { |level| level.start_with?(query) }
+        prefixed + contained
+      end
+
+      def self.ordered_thinking_levels(current)
+        levels = thinking_levels.dup
+        return levels unless levels.include?(current)
+
+        [current] + (levels - [current])
+      end
+
+      def self.current_default_thinking_level(state, harness)
+        level = state.dig("metadata", "pi_session_defaults", "thinking_level").to_s.strip.downcase
+        level = Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL if level.empty? && harness == "pi"
+        level
+      end
+
+      def self.normalized_thinking_levels(levels)
+        Array(levels).map { |level| level.to_s.strip.downcase }.reject(&:empty?)
+      end
+
+      def self.thinking_level_model_reference(state, harness)
         reference = state.dig("metadata", "pi_session_defaults", "model")
         reference = Meringue::Harness::Registry::DEFAULT_PI_MODEL if reference.to_s.strip.empty? && harness == "pi"
         reference.to_s
       end
 
-      def self.thinking_level_description(context, reference, verified)
-        scope = "future sessions"
-        return "#{scope} · supported by #{reference}" if verified && !reference.to_s.empty?
+      def self.thinking_level_description(level, reference, supported, current)
+        scope = level == current ? "current default" : "future sessions"
+        "#{scope} · #{thinking_level_support_label(level, reference, supported)}"
+      end
 
-        "#{scope} · model support not verified yet"
+      # Says what the catalog knows without pretending it is the last word: an
+      # unlisted level still sets the default, and Pi clamps it for a model that
+      # cannot run it.
+      def self.thinking_level_support_label(level, reference, supported)
+        return "model support not verified yet" if supported.empty? || reference.to_s.empty?
+        return "supported by #{reference}" if supported.include?(level)
+
+        clamped = Meringue::Harness::PiClient.clamp_thinking_level(level, supported)
+        "not listed for #{reference} · Pi clamps it to #{clamped}"
       end
 
       def self.id_suggestion_records(items, context)
@@ -642,7 +697,7 @@ module Meringue
 
       def parse_thinking(arguments)
         tokens = split_arguments(arguments)
-        return invalid("Usage: /thinking <off|minimal|low|medium|high|xhigh|max>") unless tokens.length == 1
+        return invalid(self.class.thinking_usage_message) unless tokens.length == 1
 
         kernel_command("SetDefaultSessionThinkingLevel", "level" => tokens[0])
       end
