@@ -37,19 +37,52 @@ class KernelMaintenancePruneErroredTest < Minitest::Test
     result = apply_command(engine, "Prune", {})
 
     assert_equal "accepted", result.fetch("status")
-    assert_equal "Pruned 2 issues, 0 projects, and 1 standalone agent.", result.fetch("message")
+    # The agent count is every agent record the pass removed: the issue-owned worker plus the
+    # standalone errored head. Reporting only standalone agents used to claim "0 standalone agents"
+    # for a pass that had just deleted a worker.
+    assert_equal "Pruned 2 issues, 2 agents, 0 worktrees, and 0 projects.", result.fetch("message")
     assert_equal %w[P1-I1 P1-I2], result.dig("result", "removed_issue_ids").sort
     assert_equal ["H1"], result.dig("result", "removed_standalone_agent_ids")
-    assert_includes result.dig("result", "removed_agent_ids"), "P1-I1-W1"
+    assert_equal %w[H1 P1-I1-W1], result.dig("result", "removed_agent_ids").sort
 
     state = read_state
     assert_empty state.fetch("issues")
     assert_equal ["H2"], ids(state.fetch("agents"))
     log = state.fetch("logs").last
-    assert_equal "Pruned 2 issues, 0 projects, and 1 standalone agent.", log.fetch("message")
+    assert_equal "Pruned 2 issues, 2 agents, 0 worktrees, and 0 projects.", log.fetch("message")
     assert_equal ["H1"], log.dig("details", "removed_standalone_agent_ids")
+    assert_equal %w[H1 P1-I1-W1], log.dig("details", "removed_agent_ids").sort
     refute log.fetch("details").key?("selector"), "prune no longer has a selector"
     assert_documented_status_vocabulary(state)
+  end
+
+  # The case the summary rewrite was asked for: several issue-owned workers and a couple of
+  # standalone heads leave in one pass, and the user is told about all of them in one line.
+  def test_summary_counts_issue_owned_and_standalone_agents_together_in_one_line
+    issues = (1..5).map do |index|
+      issue_record(id: "P1-I#{index}", project_id: "P1", status: "completed", agent_ids: ["P1-I#{index}-W1"])
+    end
+    workers = (1..5).map do |index|
+      worker_record(id: "P1-I#{index}-W1", issue_id: "P1-I#{index}", project_id: "P1", status: "completed")
+    end
+    write_state(
+      state_fixture(
+        projects: [project_record(id: "P1", status: "working")],
+        issues: issues,
+        agents: workers + [head_record(id: "H1", status: "errored"), head_record(id: "H2", status: "errored")]
+      )
+    )
+
+    result = apply_command(build_engine, "Prune", {})
+
+    assert_equal "Pruned 5 issues, 7 agents, 0 worktrees, and 0 projects.", result.fetch("message")
+    assert_equal 7, result.dig("result", "removed_agent_ids").length
+    assert_equal %w[H1 H2], result.dig("result", "removed_standalone_agent_ids").sort
+
+    state = read_state
+    assert_empty state.fetch("agents")
+    prune_logs = state.fetch("logs").select { |log| log.fetch("message").start_with?("Pruned ") }
+    assert_equal 1, prune_logs.length, "one prune pass must produce one summary line"
   end
 
   def test_errored_issue_with_live_worker_is_retained
@@ -102,7 +135,7 @@ class KernelMaintenancePruneErroredTest < Minitest::Test
 
     result = apply_command(engine, "Prune", {})
 
-    assert_equal "Pruned 0 issues, 0 projects, and 0 standalone agents.", result.fetch("message")
+    assert_equal "Pruned 0 issues, 0 agents, 0 worktrees, and 0 projects.", result.fetch("message")
     state = read_state
     assert_equal ["P1-I1"], ids(state.fetch("issues"))
     assert_equal ["H1"], ids(state.fetch("agents"))
@@ -180,6 +213,12 @@ class KernelMaintenancePruneErroredTest < Minitest::Test
     assert_equal ["P1-I2"], ids(state.fetch("issues"))
     assert_empty state.fetch("agents")
     assert_equal ["P1"], ids(state.fetch("projects"))
+    # The reconcile prune reports the same consolidated counts as `/prune`, prefixed so the line
+    # says which pass removed the records.
+    summaries = state.fetch("logs").select { |log| log.fetch("message").start_with?("Pruned killed records:") }
+    assert_equal 1, summaries.length
+    assert_equal "Pruned killed records: 1 issue, 2 agents, 0 worktrees, and 0 projects.",
+                 summaries.first.fetch("message")
   end
 
   def test_reconcile_sessions_reports_no_pruning_when_nothing_is_killed
@@ -196,5 +235,7 @@ class KernelMaintenancePruneErroredTest < Minitest::Test
     assert_empty result.dig("result", "pruned_issue_ids")
     assert_empty result.dig("result", "pruned_agent_ids")
     assert_equal ["P1-I1"], ids(read_state.fetch("issues"))
+    refute read_state.fetch("logs").any? { |log| log.fetch("message").start_with?("Pruned killed records:") },
+           "a reconcile pass that removed nothing must stay silent"
   end
 end

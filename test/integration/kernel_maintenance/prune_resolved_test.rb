@@ -30,7 +30,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     result = apply_command(engine, "Prune", "selector" => "resolved")
 
     assert_equal "accepted", result.fetch("status")
-    assert_equal "Pruned 1 issue, 0 projects, and 0 standalone agents.", result.fetch("message")
+    assert_equal "Pruned 1 issue, 1 agent, 0 worktrees, and 0 projects.", result.fetch("message")
     details = result.fetch("result")
     assert_equal ["P1-I1"], details.fetch("removed_issue_ids")
     assert_equal ["P1-I1-W1"], details.fetch("removed_agent_ids")
@@ -42,7 +42,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     assert_empty state.fetch("agents")
     assert_equal ["P1"], ids(state.fetch("projects"))
     prune_log = state.fetch("logs").last
-    assert_equal "Pruned 1 issue, 0 projects, and 0 standalone agents.", prune_log.fetch("message")
+    assert_equal "Pruned 1 issue, 1 agent, 0 worktrees, and 0 projects.", prune_log.fetch("message")
     assert_equal "kernel", prune_log.fetch("source_type")
     assert_equal "info", prune_log.fetch("level")
     assert_equal ["P1-I1"], prune_log.dig("details", "removed_issue_ids")
@@ -308,7 +308,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
 
     assert_equal ["P1"], result.dig("result", "removed_project_ids")
     assert_equal %w[P1-I1 P2-I1 P3-I1], result.dig("result", "removed_issue_ids").sort
-    assert_equal "Pruned 3 issues, 1 project, and 0 standalone agents.", result.fetch("message")
+    assert_equal "Pruned 3 issues, 0 agents, 0 worktrees, and 1 project.", result.fetch("message")
 
     state = read_state
     assert_equal %w[P2 P3], ids(state.fetch("projects"))
@@ -393,7 +393,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     result = apply_command(engine, "Prune", "selector" => "resolved")
 
     assert_equal "accepted", result.fetch("status")
-    assert_equal "Pruned 0 issues, 0 projects, and 0 standalone agents.", result.fetch("message")
+    assert_equal "Pruned 0 issues, 0 agents, 0 worktrees, and 0 projects.", result.fetch("message")
     assert_empty result.dig("result", "removed_issue_ids")
     assert_equal ["P1-I1"], ids(read_state.fetch("issues"))
   end
