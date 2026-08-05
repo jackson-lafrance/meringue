@@ -218,6 +218,41 @@ class InputKernelConvergenceTest < Minitest::Test
     end
   end
 
+  # A head that dies before routing leaves the user's request unrouted. Typing `/prompt H1 "..."`
+  # re-runs it: same typed-command path, same kernel command layer, and the retry head's own
+  # HeadResult is applied exactly like a natural-language head's.
+  def test_prompting_a_failed_head_retries_the_request_it_never_routed
+    input_sandbox do |sandbox|
+      sandbox.head_runner.enqueue_failure("model transport failed mid-turn")
+      failed = sandbox.submit("add caching to the api layer")
+
+      assert_equal "failed", failed.fetch("spawn_head_result").fetch("status")
+      assert_equal "errored", sandbox.agents.fetch(0).fetch("status")
+
+      sandbox.head_runner.enqueue(
+        sandbox.head_result(
+          title: "Route the request",
+          summary: "Registered the project on the retry.",
+          commands: [{ "type" => "AddProject", "payload" => { "path" => sandbox.project_path, "name" => "proj" } }]
+        )
+      )
+      payload = sandbox.submit('/prompt H1 "try again"')
+
+      assert_equal "slash_command_applied", payload.fetch("event")
+      assert_equal [%w[PromptAgent accepted], %w[AddProject accepted]], sandbox.command_result_pairs(payload)
+      assert payload.fetch("state_mutated")
+
+      retry_message = sandbox.head_runner.calls.last.fetch("user_message")
+      assert_includes retry_message, "Retry of head H1"
+      assert_includes retry_message, "add caching to the api layer"
+      assert_includes retry_message, "try again"
+
+      assert_equal ["P1"], sandbox.state.fetch("projects").map { |project| project.fetch("id") }
+      assert_equal "H1", sandbox.agents.find { |agent| agent.fetch("id") == "H1" }.fetch("id")
+      assert_includes sandbox.state.fetch("logs").map { |log| log.fetch("message") }.join("\n"), "Retrying head H1 as head H2"
+    end
+  end
+
   def test_rejected_head_command_marks_the_head_blocked_and_keeps_the_rest_of_state
     input_sandbox do |sandbox|
       sandbox.head_runner.enqueue(

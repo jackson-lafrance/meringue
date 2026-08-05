@@ -137,7 +137,7 @@ module Meringue
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
         ["/rename <project_or_issue_id> \"<name>\"", "Quickly rename a project or issue."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
-        ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker agent session."],
+        ["/prompt <agent_id> \"<message>\"", "Prompt an existing worker agent session, or retry a failed head (H<n>)."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/defaults", "Show the model and thinking level used for all future Pi heads and workers."],
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
@@ -475,6 +475,8 @@ module Meringue
           spawn_head(command_id, command_type, payload)
         elsif command_type == "AnswerQuestion"
           answer_question_and_route(command_id, command_type, payload)
+        elsif command_type == "PromptAgent"
+          prompt_agent_command(command_id, command_type, payload)
         elsif command_type == "SpawnWorker"
           @worker_spawn_mutex.synchronize { spawn_worker(command_id, command_type, payload) }
         elsif command_type == "ApplyHeadResult"
@@ -2008,10 +2010,18 @@ module Meringue
         # Internally routed heads (for example the head spawned for an answered question) carry a
         # long structured prompt. The visible chat log should stay short and human-facing.
         log_message = present_string(value_at(payload, "log_message", "LogMessage"))
+        retry_of = head_retry_lineage(payload)
         errors = []
 
         errors << "user_message is required" if blank?(user_message)
         return synchronized_state { rejected_result(command_id, command_type, "Head was not spawned.", errors) } unless errors.empty?
+
+        # Selecting a failed head in the AgentTree and typing a message is a retry of that head,
+        # not an unrelated new goal. Resolved before the spawn so the retry owns the whole command
+        # (it may resume the failed head's own session instead of starting a new one).
+        if retry_of.nil? && (retry_target = selected_head_retry_target(requested_selected_target))
+          return retry_head(command_id, command_type, retry_target, instruction: user_message.to_s, log_message: log_message)
+        end
 
         head_id = nil
         selected_target = nil
@@ -2044,6 +2054,7 @@ module Meringue
             user_message: user_message.to_s,
             question_id: present_string(question_id),
             selected_target: selected_target,
+            retry_of: retry_of,
             snapshot_issue_ids: state.fetch("issues").map { |issue| issue.fetch("id", nil) }.compact,
             snapshot_project_ids: state.fetch("projects").map { |project| project.fetch("id", nil) }.compact,
             snapshot_counters: deep_copy(state.fetch("counters", {}))
@@ -2059,9 +2070,14 @@ module Meringue
             details: {
               "head_id" => head_id,
               "question_id" => present_string(question_id),
+              "retry_of_head_id" => retry_of && retry_of.fetch("head_id", nil),
               **selected_target_log_details(selected_target)
             }.compact
           )
+          # Lineage is recorded next to the prompt that caused it, so the log reads
+          # "<your message>" then "Retrying head H13 as H14 ..." in order.
+          log_ids.concat(record_head_retry_respawn!(state, retry_of, head_id)) if retry_of
+          log_ids.concat(log_unretryable_head_selection(state, selected_target, head_id))
           touch_state!(state, now)
           store.save(state)
 
@@ -2159,6 +2175,385 @@ module Meringue
             [e.class.name, e.message]
           )
         end
+      end
+
+      # Retrying a head re-runs the request it never finished routing. Heads stay stateless per
+      # user message, so a retry is either the same session finishing its interrupted turn (when
+      # the head errored mid-turn and its harness session is still there) or a fresh head carrying
+      # the original request plus whatever the user just typed. The head contract is unchanged:
+      # the retry still returns HeadResult JSON and is never turned into a worker by this path.
+      #
+      # Both user entry points land here: selecting a failed head in the AgentTree and typing a
+      # message (SpawnHead with that selection) and `/prompt H13 "..."` (PromptAgent on a head id).
+      def retry_head(command_id, command_type, head, instruction: nil, log_message: nil)
+        head_id = head.is_a?(Hash) ? head.fetch("id", nil).to_s : head.to_s
+        plan = synchronized_state { head_retry_plan(normalized_state, head_id, instruction: instruction) }
+        unless plan.fetch("eligible")
+          return synchronized_state do
+            rejected_result(command_id, command_type, plan.fetch("message"), [plan.fetch("code")])
+          end
+        end
+
+        if plan.fetch("strategy") == "resume"
+          resumed = resume_head_retry(command_id, command_type, plan, instruction: instruction, log_message: log_message)
+          return resumed if resumed
+        end
+
+        respawn_head_retry(command_id, command_type, plan, instruction: instruction, log_message: log_message)
+      end
+
+      # What a retry of this head would do right now, or why it cannot happen. Pure: it reads the
+      # supplied state and never locks, so it can be called from inside a synchronized section.
+      def head_retry_plan(state, head_id, instruction: nil)
+        head = find_agent(state, head_id.to_s)
+        unless head
+          return { "eligible" => false, "code" => "agent_not_found", "message" => missing_agent_prompt_message(head_id) }
+        end
+        unless head.fetch("type", nil) == "head"
+          return { "eligible" => false, "code" => "agent_is_not_head", "message" => "Agent #{head.fetch("id")} is not a head." }
+        end
+
+        resolved_id = head.fetch("id").to_s
+        status = head.fetch("status", nil).to_s
+        unless State::Models.head_retry_target?(head)
+          return {
+            "eligible" => false,
+            "code" => head_retry_rejection_code(head),
+            "message" => head_retry_rejection_message(resolved_id, status, head)
+          }
+        end
+
+        request = head_request_in_state(state, head) || {}
+        original_message = present_string(request.fetch("user_message", nil))
+        if original_message.nil? && blank?(instruction)
+          return {
+            "eligible" => false,
+            "code" => "head_request_unavailable",
+            "message" => "Head #{resolved_id} has no recorded request to retry; send your message as a new prompt instead."
+          }
+        end
+
+        failure = head_retry_failure_case(head)
+        {
+          "eligible" => true,
+          "head_id" => resolved_id,
+          "status" => status,
+          "case" => failure.fetch("case"),
+          "reason" => failure.fetch("reason"),
+          "strategy" => failure.fetch("resumable") ? "resume" : "respawn",
+          "user_message" => original_message,
+          "question_id" => present_string(request.fetch("question_id", nil))
+        }
+      end
+
+      # The distinct ways a head stops without routing, each of which needs a different recovery:
+      #   transport_failure  its turn died mid-flight and its session is still open -> resume it
+      #   session_released   it failed and the kernel already closed its session    -> fresh head
+      #   never_started      no harness session was ever opened for it              -> fresh head
+      #   killed             the user stopped it on purpose, so its session is gone -> fresh head
+      def head_retry_failure_case(head)
+        metadata = head.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        detail = head_failure_detail(metadata)
+        suffix = detail ? " (#{detail})" : ""
+
+        if head.fetch("status", nil) == "killed"
+          return { "case" => "killed", "reason" => "you killed it before it routed this request", "resumable" => false }
+        end
+        unless agent_has_session_reference?(head)
+          return { "case" => "never_started", "reason" => "it never started an agent session#{suffix}", "resumable" => false }
+        end
+        if metadata.fetch("head_session_state", nil) == HEAD_SESSION_STATE_RELEASED
+          return { "case" => "session_released", "reason" => "it failed before returning a result#{suffix}", "resumable" => false }
+        end
+
+        {
+          "case" => "transport_failure",
+          "reason" => "its agent turn ended before it returned a result#{suffix}",
+          "resumable" => head_retry_session_resumable?(head)
+        }
+      end
+
+      def head_failure_detail(metadata)
+        reconcile = metadata.fetch("reconcile", {}) || {}
+        reconcile = {} unless reconcile.is_a?(Hash)
+        detail = present_string(metadata.fetch("error_message", nil)) || present_string(reconcile.fetch("error_message", nil))
+        detail && truncate_for_state(detail, 200)
+      end
+
+      # A head session is only resumable while it still exists: a released session was killed by
+      # the kernel when the head failed, and an unavailable one was never backed by a harness.
+      def head_retry_session_resumable?(head)
+        return false unless agent_has_session_reference?(head)
+
+        metadata = head.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        session_state = metadata.fetch("head_session_state", nil).to_s
+        return false if [HEAD_SESSION_STATE_RELEASED, HEAD_SESSION_STATE_UNAVAILABLE].include?(session_state)
+
+        client = begin
+          harness_client_for_agent(head)
+        rescue StandardError
+          nil
+        end
+        !!client && client.respond_to?(:prompt_session)
+      end
+
+      def head_retry_rejection_code(head)
+        case head.fetch("status", nil).to_s
+        when "queued", "working", "idle" then "head_still_working"
+        else "head_already_routed"
+        end
+      end
+
+      def head_retry_rejection_message(head_id, status, head)
+        metadata = head.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        case status
+        when "queued", "working", "idle"
+          "Head #{head_id} is still #{status} on its request, so there is nothing to retry yet. Send your message on its own, or kill #{head_id} first."
+        when "blocked"
+          "Head #{head_id} already applied part of its result, so retrying it would route the same work twice. Send your message as a new prompt instead."
+        else
+          if present_string(metadata.fetch("head_result_applied_at", nil))
+            "Head #{head_id} already routed its request, so there is nothing to retry. Prompt the worker it created, or send a new message."
+          else
+            "Head #{head_id} is #{status} and cannot be retried. Send your message as a new prompt instead."
+          end
+        end
+      end
+
+      # Resume path: the head's own session is still there, so the cheapest correct retry is to let
+      # it finish the turn that died. Returns nil when resuming is impossible, which makes the
+      # caller fall back to a fresh head instead of losing the user's message.
+      def resume_head_retry(command_id, command_type, plan, instruction: nil, log_message: nil)
+        head_id = plan.fetch("head_id")
+        head = synchronized_state do
+          record = find_agent(normalized_state, head_id)
+          record ? deep_copy(record) : nil
+        end
+        return nil unless head
+
+        client = harness_client_for_agent(head)
+        return nil unless client.respond_to?(:prompt_session)
+
+        session_ref = client.prompt_session(
+          agent_session_ref(head),
+          head_retry_resume_prompt(plan, instruction),
+          mode: "normal"
+        )
+
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, head_id)
+          return nil unless current
+
+          now = timestamp
+          merge_session_ref_into_agent!(current, session_ref)
+          current["status"] = "working"
+          current["updated_at"] = now
+          mark_head_session_active!(current, now: now)
+          current["harness_metadata"] = clear_head_failure_metadata(current.fetch("harness_metadata", {}) || {}).merge(
+            "retry_strategy" => "resume",
+            "retry_case" => plan.fetch("case"),
+            "head_retry_count" => head_retry_count(current) + 1,
+            "head_retried_at" => now
+          )
+          message = "Retried head #{head_id} by resuming its agent session; it will return a new HeadResult."
+          log_ids = append_head_retry_prompt_log(state, head_id, instruction: instruction, log_message: log_message)
+          log_ids.concat(append_log(
+            state,
+            source_type: "head",
+            source_id: head_id,
+            level: "info",
+            message: message,
+            details: {
+              "head_id" => head_id,
+              "retry_strategy" => "resume",
+              "retry_case" => plan.fetch("case"),
+              "reason" => plan.fetch("reason"),
+              "routing_action" => "head_retry"
+            }
+          ))
+          touch_state!(state, now)
+          store.save(state)
+
+          accepted_result(command_id, command_type, head_id, message, deep_copy(current), log_ids)
+        end
+      rescue StandardError => e
+        synchronized_state do
+          state = normalized_state
+          append_log(
+            state,
+            source_type: "head",
+            source_id: plan.fetch("head_id"),
+            level: "warning",
+            message: "Could not resume head #{plan.fetch("head_id")}'s agent session (#{sanitized_error_message(e)}); retrying it with a fresh head.",
+            details: { "head_id" => plan.fetch("head_id"), "error" => error_payload(e), "routing_action" => "head_retry" }
+          )
+          touch_state!(state)
+          store.save(state)
+        end
+        nil
+      end
+
+      # Respawn path: a fresh head runs the failed head's original request plus whatever the user
+      # typed. This is the normal outcome, because the kernel closes a head's session when it fails.
+      def respawn_head_retry(command_id, command_type, plan, instruction: nil, log_message: nil)
+        head_id = plan.fetch("head_id")
+        result = spawn_head(
+          command_id,
+          command_type,
+          {
+            "user_message" => head_retry_user_message(plan, instruction),
+            "log_message" => log_message || present_string(instruction) || "Retry head #{head_id}.",
+            "question_id" => plan.fetch("question_id", nil),
+            "_retry_of_head_id" => head_id,
+            "_retry_case" => plan.fetch("case"),
+            "_retry_reason" => plan.fetch("reason")
+          }.compact
+        )
+        return result unless result.fetch("status", nil) == "accepted"
+
+        result.merge("message" => "Retried head #{head_id} as head #{result.fetch("target_id", nil)}.")
+      end
+
+      # The retry head is a fresh stateless head, so everything it needs has to be in its message:
+      # the request that was never routed, the new instruction, and why it is running again.
+      def head_retry_user_message(plan, instruction)
+        original = present_string(plan.fetch("user_message", nil))
+        extra = present_string(instruction)
+        extra = nil if original && extra && extra.strip == original.strip
+        return extra.to_s if original.nil?
+
+        lines = [
+          "Retry of head #{plan.fetch("head_id")}, which stopped before routing this request because #{plan.fetch("reason")}.",
+          "",
+          "Original user message:",
+          original
+        ]
+        lines.concat(["", "New instruction from the user:", extra]) if extra
+        lines.concat(["", "Route this request now."])
+        lines.join("\n")
+      end
+
+      def head_retry_resume_prompt(plan, instruction)
+        extra = present_string(instruction)
+        extra = nil if extra && present_string(plan.fetch("user_message", nil))&.strip == extra.strip
+        prompt = HEAD_RESUME_PROMPT.dup
+        prompt << "\nNew instruction from the user: #{extra}\n" if extra
+        prompt
+      end
+
+      # Retry lineage handed from `respawn_head_retry` to `spawn_head` through the payload.
+      def head_retry_lineage(payload)
+        head_id = present_string(value_at(payload, "_retry_of_head_id", "retry_of_head_id"))
+        return nil unless head_id
+
+        {
+          "head_id" => head_id,
+          "case" => present_string(value_at(payload, "_retry_case", "retry_case")),
+          "reason" => present_string(value_at(payload, "_retry_reason", "retry_reason"))
+        }.compact
+      end
+
+      # Links the failed head to its successor and says so once, in the log, at the point the
+      # retry happened.
+      def record_head_retry_respawn!(state, retry_of, new_head_id)
+        previous_id = retry_of.fetch("head_id")
+        previous = find_agent(state, previous_id)
+        now = timestamp
+        if previous
+          previous["harness_metadata"] = (previous.fetch("harness_metadata", {}) || {}).merge(
+            "retried_by_head_id" => new_head_id,
+            "head_retry_count" => head_retry_count(previous) + 1,
+            "head_retried_at" => now
+          )
+          previous["updated_at"] = now
+        end
+
+        reason = retry_of.fetch("reason", nil)
+        append_log(
+          state,
+          source_type: "kernel",
+          source_id: previous_id,
+          level: "info",
+          message: "Retrying head #{previous_id} as head #{new_head_id}#{reason ? ": #{reason}" : ""}. Re-running its original request.",
+          details: {
+            "head_id" => new_head_id,
+            "retry_of_head_id" => previous_id,
+            "retry_strategy" => "respawn",
+            "retry_case" => retry_of.fetch("case", nil),
+            "head_record_missing" => previous ? nil : true,
+            "routing_action" => "head_retry"
+          }.compact
+        )
+      end
+
+      # A selected head that cannot be retried must not silently swallow the user's message. The
+      # message is routed as a new request and the log says why the selection was not a retry.
+      def log_unretryable_head_selection(state, selected_target, head_id)
+        return [] unless selected_target.is_a?(Hash)
+        return [] unless selected_target.fetch("selected_type", nil) == "head"
+
+        note = present_string(selected_target.fetch("head_retry_note", nil))
+        return [] unless note
+
+        append_log(
+          state,
+          source_type: "kernel",
+          source_id: selected_target.fetch("selected_id"),
+          level: "warning",
+          message: "#{note} Routed this message to new head #{head_id} instead.",
+          details: {
+            "head_id" => head_id,
+            "selected_target_id" => selected_target.fetch("selected_id"),
+            "routing_action" => "selected_target"
+          }
+        )
+      end
+
+      def head_retry_count(head)
+        metadata = head.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        metadata.fetch("head_retry_count", 0).to_i
+      end
+
+      # A resumed head is working again, so the failure that stopped it is history. Clearing the
+      # terminal reconcile marker is what lets reconciliation poll the session and apply its result.
+      def clear_head_failure_metadata(metadata)
+        metadata = {} unless metadata.is_a?(Hash)
+        cleared = metadata.dup
+        previous = {
+          "error_class" => cleared.delete("error_class"),
+          "error_message" => cleared.delete("error_message"),
+          "errored_at" => cleared.delete("errored_at"),
+          "reconcile" => cleared.delete("reconcile")
+        }.compact
+        cleared.delete("reconcile_state")
+        cleared["previous_head_failure"] = previous unless previous.empty?
+        cleared
+      end
+
+      # The user's own words still belong in the visible chat log on the resume path, where no new
+      # head record (and therefore no `SpawnHead` prompt log) is created.
+      def append_head_retry_prompt_log(state, head_id, instruction:, log_message:)
+        message = present_string(log_message) || present_string(instruction)
+        return [] unless message
+
+        append_log(
+          state,
+          source_type: "user",
+          source_id: nil,
+          level: "info",
+          message: message,
+          details: {
+            "head_id" => head_id,
+            "agent_id" => head_id,
+            "retry_of_head_id" => head_id,
+            "routing_action" => "head_retry"
+          }
+        )
       end
 
       def apply_head_result(command_id, command_type, payload)
@@ -2728,6 +3123,7 @@ module Meringue
         guard = case command_type
                 when "ClearState" then clear_state_head_guard(head, payload)
                 when "Kill" then kill_head_guard(head, payload)
+                when "PromptAgent" then prompt_agent_head_guard(head, payload)
                 end
         return nil unless guard
 
@@ -2779,6 +3175,22 @@ module Meringue
         {
           "message" => "Kill was refused for project #{project.fetch("id", target_id)} because the user did not unambiguously ask to kill the whole project.",
           "errors" => errors
+        }
+      end
+
+      # Prompting a head retries it by spawning another head. That is a user recovery action, not
+      # something a head may trigger: a head spawning heads is exactly the loop the stateless head
+      # contract exists to prevent.
+      def prompt_agent_head_guard(head, payload)
+        target_id = present_string(value_at(payload, "agent_id", "AgentID", "agentId"))
+        return nil unless target_id
+
+        target = synchronized_state { find_agent(normalized_state, target_id) }
+        return nil unless target && target.fetch("type", nil) == "head"
+
+        {
+          "message" => "Head #{head.fetch("id", nil)} may not prompt head #{target.fetch("id")}; only the user can retry a head.",
+          "errors" => ["head_cannot_prompt_head"]
         }
       end
 
@@ -4462,6 +4874,27 @@ module Meringue
         accepted_result(command_id, command_type, issue.fetch("id"), "Modified issue #{issue.fetch("id")}.", issue, log_ids)
       end
 
+      # `/prompt <id>` accepts a worker id and a head id. A worker id prompts that harness session;
+      # a head id retries the head, which may spawn a fresh head session, so it is dispatched here
+      # rather than inside the state lock every other kernel section shares.
+      def prompt_agent_command(command_id, command_type, payload)
+        agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
+        head = if present_string(agent_id)
+                 synchronized_state do
+                   agent = find_agent(normalized_state, agent_id.to_s)
+                   agent && agent.fetch("type", nil) == "head" ? deep_copy(agent) : nil
+                 end
+               end
+        return synchronized_state { prompt_agent(command_id, command_type, payload) } unless head
+
+        prompt = value_at(payload, "prompt", "Prompt", "message", "Message")
+        if blank?(prompt)
+          return synchronized_state { rejected_result(command_id, command_type, "Agent was not prompted.", ["prompt is required"]) }
+        end
+
+        retry_head(command_id, command_type, head, instruction: prompt.to_s)
+      end
+
       def prompt_agent(command_id, command_type, payload)
         agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
         prompt = value_at(payload, "prompt", "Prompt")
@@ -4475,7 +4908,18 @@ module Meringue
 
         state = normalized_state
         agent = find_agent(state, agent_id)
-        return rejected_result(command_id, command_type, "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
+        return rejected_result(command_id, command_type, missing_agent_prompt_message(agent_id), ["agent_not_found"]) unless agent
+        # Heads are handled by `prompt_agent_command`, which retries them. Reaching this branch
+        # means a caller bypassed that dispatch, so the head contract is restated instead of
+        # turning the head into a worker session.
+        if agent.fetch("type", nil) == "head"
+          return rejected_result(
+            command_id,
+            command_type,
+            "Agent #{agent_id} is a head; prompting a head retries it and cannot be delivered as a worker prompt.",
+            ["agent_is_not_worker"]
+          )
+        end
         return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
         # An errored worker is normally not resumable, but a worker whose turn was cut short by a
         # transport failure still owns its session, worktree, and branch: prompting it is how the
@@ -4584,6 +5028,16 @@ module Meringue
         store.save(state)
 
         accepted_result(command_id, command_type, agent.fetch("id"), delivery_message, agent, log_ids)
+      end
+
+      # A head id that no longer resolves is the common case after a kill or a prune, and the
+      # generic "does not exist" line leaves the user guessing why their retry target vanished.
+      def missing_agent_prompt_message(agent_id)
+        id = agent_id.to_s
+        return "Agent #{id} does not exist." unless id.match?(/\AH\d+\z/i)
+
+        "Head #{id.upcase} no longer exists. Heads are removed when they are killed, cleaned up " \
+          "after routing, or pruned, so send your message as a new prompt instead."
       end
 
       # Harness clients report a mode they had to substitute through generic session metadata; an
@@ -6940,7 +7394,9 @@ module Meringue
       end
 
       def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0, user_message: nil, question_id: nil,
-                           selected_target: nil, snapshot_issue_ids: [], snapshot_project_ids: [], snapshot_counters: {})
+                           selected_target: nil, retry_of: nil, snapshot_issue_ids: [], snapshot_project_ids: [],
+                           snapshot_counters: {})
+        retry_of = nil unless retry_of.is_a?(Hash)
         {
           "id" => head_id,
           "type" => "head",
@@ -6966,12 +7422,18 @@ module Meringue
             "snapshot_issue_ids" => Array(snapshot_issue_ids),
             "snapshot_project_ids" => Array(snapshot_project_ids),
             "snapshot_counters" => (snapshot_counters.is_a?(Hash) ? snapshot_counters : {}),
+            # Lineage for a head that retries a failed head. `retry_of_head_id` is what makes the
+            # log line, the AgentTree, and a later recovery say "this is H13's request again".
+            "retry_of_head_id" => retry_of && retry_of.fetch("head_id", nil),
+            "retry_case" => retry_of && retry_of.fetch("case", nil),
+            "retry_strategy" => retry_of ? "respawn" : nil,
             "head_request" => {
               "user_message" => user_message,
               "question_id" => question_id,
-              "selected_target" => selected_target
+              "selected_target" => selected_target,
+              "retry_of_head_id" => retry_of && retry_of.fetch("head_id", nil)
             }.compact
-          },
+          }.compact,
           "created_at" => now,
           "updated_at" => now
         }
@@ -9033,20 +9495,16 @@ module Meringue
       # Resolve a UI selection against the kernel's current snapshot. The input
       # layer intentionally sends only selected_id, so a worker/agent can never
       # smuggle an arbitrary issue id into head context. Agent selections resolve
-      # to their durable owning issue; issue selections target themselves.
+      # to their durable owning issue; issue selections target themselves; a head
+      # is a top-level node that resolves to itself (see `head_selected_target`).
       def resolve_selected_head_target(state, requested_target)
         return [nil, nil] if requested_target.nil?
 
-        selected_id = if requested_target.is_a?(Hash)
-                        value_at(requested_target, "selected_id", "SelectedID", "selectedId", "id")
-                      else
-                        requested_target
-                      end
-        selected_id = selected_id.to_s.strip
+        selected_id = selected_target_id(requested_target)
         # A blank or shapeless selection carries no destination, so it means the
         # same thing as no selection: route the message normally instead of
         # rejecting it for an empty routing hint.
-        return [nil, nil] if selected_id.empty?
+        return [nil, nil] if selected_id.nil?
 
         issue = find_issue(state, selected_id)
         agent = nil
@@ -9055,6 +9513,11 @@ module Meringue
           unless agent
             return [nil, { "code" => "selected_target_not_found", "message" => "selected target #{selected_id} no longer exists." }]
           end
+
+          # A head owns no issue, so it is its own target. A failed head is retried before the
+          # spawn ever gets here; a head that is still routing keeps its identity on the message
+          # instead of the message being dropped for having "no issue".
+          return [head_selected_target(state, agent, selected_id), nil] if agent.fetch("type", nil) == "head"
 
           issue_id = present_string(agent.fetch("issue_id", nil))
           unless issue_id
@@ -9092,6 +9555,47 @@ module Meringue
           )
         end
         [target.compact, nil]
+      end
+
+      def selected_target_id(requested_target)
+        selected_id = if requested_target.is_a?(Hash)
+                        value_at(requested_target, "selected_id", "SelectedID", "selectedId", "id")
+                      else
+                        requested_target
+                      end
+        selected_id = selected_id.to_s.strip
+        selected_id.empty? ? nil : selected_id
+      end
+
+      # The head record a selection names when that head can be retried right now, or nil. Used to
+      # turn "select the failed head and type a message" into a retry before a new head is spawned.
+      def selected_head_retry_target(requested_target)
+        selected_id = selected_target_id(requested_target)
+        return nil unless selected_id
+
+        synchronized_state do
+          agent = find_agent(normalized_state, selected_id)
+          next nil unless agent && agent.fetch("type", nil) == "head"
+          next nil unless State::Models.head_retry_target?(agent)
+
+          deep_copy(agent)
+        end
+      end
+
+      def head_selected_target(state, head, selected_id)
+        metadata = head.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        plan = head_retry_plan(state, head.fetch("id"))
+        {
+          "selected_id" => selected_id,
+          "selected_type" => "head",
+          "selected_agent_id" => head.fetch("id"),
+          "selected_agent_type" => "head",
+          "selected_agent_title" => metadata.fetch("title", nil),
+          "selected_head_status" => head.fetch("status", nil),
+          "head_retry_eligible" => plan.fetch("eligible"),
+          "head_retry_note" => plan.fetch("eligible") ? nil : plan.fetch("message", nil)
+        }.compact
       end
 
       # Scalar ids make the selected prompt visible under both issue and exact
@@ -9799,31 +10303,43 @@ module Meringue
       end
 
       def head_recovery_request(agent)
+        head_request_from_metadata(agent) || synchronized_state { head_request_from_logs(normalized_state, agent) }
+      end
+
+      # Same lookup for callers that already hold the state lock (head retry planning).
+      def head_request_in_state(state, agent)
+        head_request_from_metadata(agent) || head_request_from_logs(state, agent)
+      end
+
+      def head_request_from_metadata(agent)
         metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
         request = metadata.fetch("head_request", {}) || {}
+        request = {} unless request.is_a?(Hash)
         user_message = present_string(request.fetch("user_message", nil))
-        if user_message
-          return {
-            "user_message" => user_message,
-            "question_id" => present_string(request.fetch("question_id", nil)),
-            "selected_target" => request.fetch("selected_target", nil)
-          }.compact
-        end
+        return nil unless user_message
 
-        synchronized_state do
-          state = normalized_state
-          log = state.fetch("logs", []).reverse.find do |entry|
-            entry.fetch("source_type", nil) == "user" && entry.dig("details", "head_id").to_s == agent.fetch("id").to_s
-          end
-          message = log && present_string(log.fetch("message", nil))
-          next nil unless message
+        {
+          "user_message" => user_message,
+          "question_id" => present_string(request.fetch("question_id", nil)),
+          "selected_target" => request.fetch("selected_target", nil)
+        }.compact
+      end
 
-          {
-            "user_message" => message,
-            "question_id" => present_string(log.dig("details", "question_id")),
-            "selected_target" => log.dig("details", "selected_target")
-          }.compact
+      # Older head records (and records written before `head_request` existed) still have the
+      # user's own prompt in the log the kernel wrote when it spawned them.
+      def head_request_from_logs(state, agent)
+        log = state.fetch("logs", []).reverse.find do |entry|
+          entry.fetch("source_type", nil) == "user" && entry.dig("details", "head_id").to_s == agent.fetch("id").to_s
         end
+        message = log && present_string(log.fetch("message", nil))
+        return nil unless message
+
+        {
+          "user_message" => message,
+          "question_id" => present_string(log.dig("details", "question_id")),
+          "selected_target" => log.dig("details", "selected_target")
+        }.compact
       end
 
       def recovered_head_poll_result(agent, client, session_ref, original_error, attempt:, mode:, attach_error: nil)

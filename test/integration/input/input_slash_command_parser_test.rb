@@ -447,6 +447,21 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_equal ["P1"], projects.map { |record| record.fetch("usage") }
   end
 
+  # `/prompt` retries a failed head as well as prompting a worker, so a head that stopped without
+  # routing is offered as a target while heads that already did their job are not.
+  def test_prompt_suggestions_include_failed_heads
+    state = sample_state
+    state.fetch("agents") << { "id" => "H7", "type" => "head", "status" => "errored" }
+    state.fetch("agents") << { "id" => "H8", "type" => "head", "status" => "working" }
+
+    records = Meringue::Input::SlashCommandParser.command_suggestion_records("/prompt ", limit: 5, state: state)
+
+    assert_equal %w[P1-I1-W1 H7], records.map { |record| record.fetch("usage") }
+    assert_includes records.last.fetch("description"), "retry"
+    assert_equal ["PromptAgent", { "agent_id" => "h7", "prompt" => "try again" }],
+                 parsed_command('/prompt h7 "try again"')
+  end
+
   # `/prune` takes no arguments, so it contributes no argument suggestions: typing "/prune " keeps
   # offering the command itself rather than a selector list.
   def test_prune_offers_no_argument_suggestions

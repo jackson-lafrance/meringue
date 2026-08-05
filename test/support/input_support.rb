@@ -35,6 +35,13 @@ module InputSupport
       self
     end
 
+    # Queue a transport-style failure so a test can produce a head that stopped without routing,
+    # which is the state a retry recovers from.
+    def enqueue_failure(message)
+      @results << RuntimeError.new(message)
+      self
+    end
+
     def run(user_message:, snapshot:, context: nil, question_id: nil)
       @calls << {
         "user_message" => user_message,
@@ -43,7 +50,10 @@ module InputSupport
         "context_prompt" => context.respond_to?(:to_prompt_h) ? context.to_prompt_h : nil,
         "snapshot" => snapshot
       }
-      @results.shift || deep_dup(DEFAULT_RESULT)
+      queued = @results.shift
+      raise queued if queued.is_a?(Exception)
+
+      queued || deep_dup(DEFAULT_RESULT)
     end
 
     private

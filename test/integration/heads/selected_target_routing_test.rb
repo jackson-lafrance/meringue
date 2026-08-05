@@ -59,24 +59,39 @@ class HeadsSelectedTargetRoutingTest < Minitest::Test
     refute target.key?("selected_agent_id")
   end
 
-  def test_unbound_or_stale_selection_is_rejected_instead_of_silently_routing_elsewhere
+  def test_stale_selection_is_rejected_instead_of_silently_routing_elsewhere
     runner = ScriptedHeadRunner.new(results: [head_result])
     environment = build_head_environment(runner: runner, initial_state: head_snapshot)
 
-    unbound = environment.engine.apply(
-      "type" => "SpawnHead",
-      "payload" => { "user_message" => "continue", "selected_target" => { "selected_id" => "H7" } }
-    )
     stale = environment.engine.apply(
       "type" => "SpawnHead",
       "payload" => { "user_message" => "continue", "selected_target" => { "selected_id" => "P9-I9-W9" } }
     )
 
-    assert_equal "rejected", unbound.fetch("status")
-    assert_includes unbound.fetch("errors"), "selected_target_has_no_issue"
     assert_equal "rejected", stale.fetch("status")
     assert_includes stale.fetch("errors"), "selected_target_not_found"
     assert_empty runner.calls
+  end
+
+  # A head that is still routing has nothing to retry, but the user's message must not be dropped
+  # for it: it routes as a new request and the log says why the selection was not a retry.
+  def test_selecting_a_head_that_is_still_routing_routes_the_message_as_a_new_request
+    runner = ScriptedHeadRunner.new(results: [head_result(summary: "Routed as a new request.")])
+    environment = build_head_environment(runner: runner, initial_state: head_snapshot)
+
+    result = environment.engine.apply(
+      "type" => "SpawnHead",
+      "payload" => { "user_message" => "continue", "selected_target" => { "selected_id" => "H7" } }
+    )
+
+    assert_equal "accepted", result.fetch("status")
+    assert_equal 1, runner.calls.length
+    refute_equal "H7", result.fetch("target_id")
+
+    note = environment.state.fetch("logs").find { |entry| entry.fetch("message").include?("still working") }
+    refute_nil note, "the log should explain that the selected head was not retried"
+    assert_equal "warning", note.fetch("level")
+    assert_includes note.fetch("message"), "Routed this message to new head #{result.fetch("target_id")}"
   end
 
   # A blank selection carries no destination, so it means "nothing is selected"

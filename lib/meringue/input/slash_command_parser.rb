@@ -17,7 +17,7 @@ module Meringue
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
         ["/rename <project_or_issue_id> \"<name>\"", "Quickly rename a project or issue."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
-        ["/prompt <worker_id> \"<message>\"", "Prompt an existing worker session."],
+        ["/prompt <agent_id> \"<message>\"", "Prompt a worker session, or retry a failed head (H<n>)."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/defaults", "Show the model and thinking level for all future Pi sessions."],
         ["/model <provider/model>", "Persist the model for all future Pi sessions; existing sessions are unchanged."],
@@ -51,7 +51,7 @@ module Meringue
         { "prefix" => "/issue rename", "source" => "issues", "append_space" => true },
         { "prefix" => "/rename", "source" => "targets", "append_space" => true },
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
-        { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
+        { "prefix" => "/prompt", "source" => "prompt_targets", "append_space" => true },
         { "prefix" => "/session-settings", "source" => "sessions", "append_space" => false },
         { "prefix" => "/model", "source" => "session_models", "append_space" => false },
         { "prefix" => "/thinking", "source" => "thinking_levels", "append_space" => false },
@@ -202,6 +202,11 @@ module Meringue
                   Array(state["issues"])
                 when "workers"
                   Array(state["agents"]).select { |agent| agent["type"] == "worker" }
+                when "prompt_targets"
+                  # `/prompt` accepts worker sessions plus failed heads, which it retries.
+                  Array(state["agents"]).select do |agent|
+                    agent["type"] == "worker" || Meringue::State::Models.head_retry_target?(agent)
+                  end
                 when "sessions"
                   Array(state["agents"]).select do |agent|
                     agent["harness_session_id"] || agent["harness_session_file"] || agent["pid"]
@@ -474,6 +479,12 @@ module Meringue
           ["issue", item["title"], item["status"]].compact.join(" · ")
         when "workers"
           ["worker", item["status"], item["issue_id"]].compact.join(" · ")
+        when "prompt_targets"
+          if item["type"] == "head"
+            ["head", item["status"], "retry"].compact.join(" · ")
+          else
+            ["worker", item["status"], item["issue_id"]].compact.join(" · ")
+          end
         when "sessions"
           model = item.dig("session_settings", "model", "reference")
           thinking = item.dig("session_settings", "thinking_level")
