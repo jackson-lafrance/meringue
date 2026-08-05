@@ -18,7 +18,7 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <agent_id> \"<message>\"", "Prompt a worker session, or retry a failed head (H<n>)."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
-        ["/model <provider/model>", "Persist the model for all future Pi sessions; existing sessions are unchanged."],
+        ["/model <provider>/<model-id>", "Persist the model for all future Pi sessions; existing sessions are unchanged. The model id may itself contain / and :."],
         ["/thinking <level>", "Persist off, minimal, low, medium, high, xhigh, or max for all future Pi sessions; existing sessions are unchanged."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
         ["/goal create [issue_id] \"<prompt>\" --metric \"<command>\" --target <number> [flags]", "Start a goal loop: name an issue, or give only a prompt and Meringue creates the issue for it. It iterates until the metric hits its target or a budget guard trips."],
@@ -701,9 +701,19 @@ module Meringue
         kernel_command("GetModelCatalog", payload)
       end
 
+      # One token, handed to the kernel exactly as typed. The provider is
+      # everything before the first slash and the model id keeps the rest, so a
+      # real reference such as
+      # `fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast` passes
+      # through unchanged; `Meringue::Harness::ModelReference` owns the grammar.
       def parse_model(arguments)
         tokens = split_arguments(arguments)
-        return invalid("Usage: /model <provider/model>") unless tokens.length == 1
+        unless tokens.length == 1
+          return invalid(
+            "Usage: /model <provider>/<model-id> (one token; the model id may itself contain / and :, " \
+            "as in #{Meringue::Harness::ModelReference::MULTI_SEGMENT_EXAMPLE})"
+          )
+        end
 
         kernel_command("SetDefaultSessionModel", "model" => tokens[0])
       end

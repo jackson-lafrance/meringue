@@ -2,6 +2,8 @@
 
 require "time"
 
+require_relative "model_reference"
+
 module Meringue
   module Harness
     # Harness-neutral snapshot of the models a harness reports it can actually
@@ -160,12 +162,14 @@ module Meringue
 
         private
 
+        # A model id may itself contain slashes, so a reference is split on the
+        # first slash only, exactly as the harness does. See `ModelReference`.
         def provider_and_id(model)
           provider = model["provider"].to_s.strip
           id = (model["id"] || model["model_id"] || model["modelId"]).to_s.strip
           reference = model["reference"].to_s.strip
           if (provider.empty? || id.empty?) && reference.include?("/")
-            reference_provider, reference_id = reference.split("/", 2)
+            reference_provider, reference_id = ModelReference.split(reference)
             provider = reference_provider.to_s.strip if provider.empty?
             id = reference_id.to_s.strip if id.empty?
           end

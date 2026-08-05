@@ -149,7 +149,7 @@ module Meringue
         ["/prompt <agent_id> \"<message>\"", "Prompt an existing worker agent session, or retry a failed head (H<n>)."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
-        ["/model <provider/model>", "Persist the model used for all future Pi heads and workers; existing sessions are unchanged."],
+        ["/model <provider>/<model-id>", "Persist the model used for all future Pi heads and workers; existing sessions are unchanged. The model id may itself contain / and :."],
         ["/thinking <level>", "Persist the thinking level used for all future Pi heads and workers: off, minimal, low, medium, high, xhigh, or max."],
         ["/goal create [issue_id] \"<prompt>\" --metric \"<command>\" --target <number> [--project <project_id>] [--comparator gte|lte|gt|lt|eq] [--max-iterations <n>] [--guardrail \"<command>\"] [--parse last_number|first_number|exit_status] [--pattern \"<regex>\"] [--title \"<title>\"] [--fresh-attempt] [--paused]", "Start a goal loop: the kernel keeps producing attempts until the metric hits its target or a budget/no-progress guard trips. Name an issue to attach the loop to it, or give only a quoted prompt and Meringue creates the issue itself."],
         ["/goal status [goal_id]", "Show goal loops, their iteration accounting, and why a stopped goal stopped."],
@@ -1242,7 +1242,7 @@ module Meringue
 
         examples = models.first(MODEL_CATALOG_OUTPUT_EXAMPLE_LIMIT).map { |model| model.fetch("reference", "?") }
         lines << "  for example: #{examples.join(", ")}"
-        lines << "  Run /models to pick one in the model picker, or /model <provider/model> to set it directly."
+        lines << "  Run /models to pick one in the model picker, or /model <provider>/<model-id> to set it directly."
         lines
       end
 
@@ -1386,7 +1386,7 @@ module Meringue
         case catalog.fetch("availability", nil)
         when Meringue::Harness::ModelCatalog::AVAILABLE
           "#{harness} reports #{count} available model#{count == 1 ? "" : "s"}. " \
-            "Use /model <provider/model> to set the default for future sessions."
+            "Use /model <provider>/<model-id> to set the default for future sessions."
         when Meringue::Harness::ModelCatalog::STALE
           "Showing the last #{count} model#{count == 1 ? "" : "s"} #{harness} confirmed at #{catalog.fetch("fetched_at", "an earlier time")}; " \
             "the newest refresh failed: #{catalog.fetch("note", "unknown error")}"
@@ -1506,22 +1506,26 @@ module Meringue
         }
       end
 
+      # Shape validation only, and deliberately catalog-independent: a model the
+      # cached catalog does not list is still settable (the catalog can be stale,
+      # empty, unavailable, or simply behind a provider extension that added the
+      # model), it is just labelled unverified in the accepted message.
       def set_default_session_model(command_id, command_type, payload)
         model_reference = value_at(payload, "model", "model_reference", "Model", "ModelReference")
-        return rejected_result(command_id, command_type, "Default Pi model was not changed.", ["model is required"]) if blank?(model_reference)
-        unless model_reference.to_s.match?(%r{\A[^/\s]+/[^/\s]+\z})
+        reason = Meringue::Harness::ModelReference.rejection_reason(model_reference)
+        if reason
           return rejected_result(
             command_id,
             command_type,
-            "Default Pi model was not changed.",
-            ["model must use an exact provider/model id, for example openai/gpt-5.6-sol"]
+            invalid_model_reference_message("Default Pi model", reason),
+            ["model must be a provider/model id: #{reason}"]
           )
         end
 
         update_pi_session_defaults(
           command_id,
           command_type,
-          model: model_reference.to_s,
+          model: Meringue::Harness::ModelReference.normalize(model_reference),
           changed_field: "model"
         )
       end
@@ -1565,8 +1569,10 @@ module Meringue
         value = changed_field == "model" ? defaults.fetch("model", model) : defaults.fetch("thinking_level", thinking_level)
         label = changed_field == "model" ? "model" : "thinking level"
         clamp_note = clamped_default_thinking_note(defaults, changed_field)
+        unverified_note = unverified_default_model_note(defaults, changed_field)
         message = "Set the default Pi #{label} to #{value} for all future Pi heads and workers. " \
                   "Existing Pi sessions were not changed#{unchanged_ids.empty? ? "." : ": #{unchanged_ids.join(", ")}."}" \
+                  "#{unverified_note ? " #{unverified_note}" : ""}" \
                   "#{clamp_note ? " #{clamp_note}" : ""}"
         log_ids = append_log(
           state,
@@ -1656,6 +1662,38 @@ module Meringue
         "Pi's catalog does not list #{level} for #{reference}, so future Pi sessions run #{clamped} instead."
       end
 
+      # `/model` used to reject with a bare "Default Pi model was not changed.",
+      # so the reason lived only in the `errors` details and the user could not
+      # tell a typo from an unknown id from an over-strict rule. This mirrors
+      # `invalid_thinking_level_message`: the visible line names the reason and
+      # the accepted grammar.
+      def invalid_model_reference_message(subject, reason)
+        "#{subject} was not changed: #{reason}. #{Meringue::Harness::ModelReference::FORMAT_HINT}"
+      end
+
+      # A well-formed id the cached catalog does not confirm is saved, not
+      # refused: the catalog can be stale, empty, unavailable, or behind a
+      # provider extension that added the model after the last fetch. Say so,
+      # reusing the "unverified" wording the picker and completion already use
+      # for a degraded catalog.
+      def unverified_default_model_note(defaults, changed_field)
+        return nil unless changed_field == "model"
+
+        reference = defaults.fetch("model", nil).to_s.strip
+        return nil if reference.empty?
+
+        snapshot = persisted_model_catalog(Meringue::Harness::Registry.public_provider_name("pi"))
+        catalog = Meringue::Harness::ModelCatalog.coerce(snapshot, harness: "pi")
+        unless catalog.usable?
+          return "Meringue has no confirmed Pi model list right now, so #{reference} is unverified; " \
+                 "run /models refresh to check it. Pi validates it when the next Pi session starts."
+        end
+        return nil if catalog.entry_for(reference)
+
+        "Pi's model list (confirmed #{catalog.fetched_at}) does not include #{reference}, so the id is unverified; " \
+          "run /models refresh if it should be there. Pi validates it when the next Pi session starts."
+      end
+
       # A bare "was not changed" left the user guessing which words are legal, so
       # the visible log line carries the ladder itself plus the obvious near-miss
       # for a truncated level such as "xhi". The valid set is the one the kernel
@@ -1699,23 +1737,24 @@ module Meringue
       def set_session_model(command_id, command_type, payload)
         agent_id = value_at(payload, "agent_id", "target_id", "AgentID", "TargetID")
         model_reference = value_at(payload, "model", "model_reference", "Model", "ModelReference")
-        return rejected_result(command_id, command_type, "Session model was not changed.", ["model is required"]) if blank?(model_reference)
-        unless model_reference.to_s.match?(%r{\A[^/\s]+/[^/\s]+\z})
+        reason = Meringue::Harness::ModelReference.rejection_reason(model_reference)
+        if reason
           return rejected_result(
             command_id,
             command_type,
-            "Session model was not changed.",
-            ["model must use an exact provider/model id, for example openai/gpt-5.6-sol"]
+            invalid_model_reference_message("Session model", reason),
+            ["model must be a provider/model id: #{reason}"]
           )
         end
 
+        model_reference = Meringue::Harness::ModelReference.normalize(model_reference)
         state = normalized_state
         agent, rejection = session_settings_target(state, command_id, command_type, agent_id)
         return rejection if rejection
 
         previous = deep_copy(agent.fetch("session_settings", {}) || {})
         client = harness_client_for_agent(agent)
-        outcome = client.set_session_model(agent_session_ref(agent), model_reference.to_s)
+        outcome = client.set_session_model(agent_session_ref(agent), model_reference)
         persist_session_settings_result!(agent, outcome)
         settings = outcome.fetch("settings")
         message = "Updated #{agent.fetch("id")} session model to #{settings.dig("model", "reference") || "unknown"}; " \

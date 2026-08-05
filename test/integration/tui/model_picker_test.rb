@@ -109,6 +109,36 @@ class TuiModelPickerTest < Minitest::Test
     refute @pane.model_picker?(compose)
   end
 
+  # Reported bug: a Fireworks router model whose id contains slashes and a colon
+  # (`fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`) is in the
+  # catalog Pi reports, so it must be listed, searchable, and applicable from the
+  # picker. It used to list fine and then be rejected by the kernel's one-slash
+  # rule the moment Enter turned it into `/model <reference>`.
+  def test_a_multi_segment_model_id_is_listed_searchable_and_applied
+    reference = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"
+    @state = state_with_catalog(
+      catalogs: {
+        "pi" => catalog_snapshot(
+          "pi",
+          models: [
+            { "provider" => "openai", "id" => "gpt-5.6-sol", "name" => "GPT-5.6 Sol" },
+            { "provider" => "fireworks", "id" => "fireworks:accounts/fireworks/routers/glm-5p2-fast",
+              "name" => "GLM 5.2 Fast (Fireworks)" }
+          ]
+        )
+      }
+    )
+
+    open_picker
+    assert_includes picker_references, reference
+
+    "glm-5p2".each_char { |character| send_key(character) }
+    assert_equal [reference], picker_references
+
+    send_key("\r")
+    assert_equal ["/model #{reference}"], wait_for_submissions(1)
+  end
+
   def test_the_highlight_wraps_so_the_last_model_is_one_key_away
     open_picker
     send_key("\e[A")
