@@ -587,10 +587,22 @@ module Meringue
           waiting = deferred_wait_marker(worker)
           return waiting unless waiting.empty?
           return "replaces #{short_id(worker.fetch("replaces_agent_id"))}" if worker["replaces_agent_id"]
-          return "after #{short_id(worker.fetch("follow_up_of_agent_id"))}" if worker["follow_up_of_agent_id"]
+          return "after #{short_id(worker.fetch("follow_up_of_agent_id"))}" if unstarted_follow_up?(worker)
           return "replaced by #{short_id(worker.fetch("replaced_by_agent_id"))}" if worker["replaced_by_agent_id"]
 
           ""
+        end
+
+        # Lineage answers a pre-start question: "why is this row not doing anything yet, and what is
+        # it behind?". Once the worker starts, the answer is stale — its predecessor settled, the
+        # row is live work, and a permanent "after W1" both reads as still-waiting and eats the width
+        # the status, progress, and PR markers need. Provisioning keeps a worker `queued` until its
+        # harness session is live, so `queued` is exactly "has not started". The relationship stays
+        # on the record, in GetInfo ("started after: …"), and in the spawn log line.
+        def unstarted_follow_up?(worker)
+          return false unless worker["follow_up_of_agent_id"]
+
+          worker["status"].to_s == "queued"
         end
 
         def deferred_wait_marker(worker)
