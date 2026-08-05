@@ -30,7 +30,7 @@ Natural-language mapping:
 | "rename project P1" | `ModifyProject` |
 | "retitle/close/reopen/reparent issue P1-I3" | `ModifyIssue` |
 | "also tell P1-I3-W1 to ..." | `PromptAgent` |
-| "keep working until coverage is 80%", "iterate until the suite is green", "don't stop until X is under Y" | `CreateGoal` on the issue that owns that durable goal |
+| "keep working until coverage is 80%", "iterate until the suite is green", "don't stop until X is under Y", "this is critical, drive it to done, don't just try once" | `CreateGoal`, with `prompt` when no issue represents it yet (the kernel mints the issue) or `issue_id` when one already does |
 | "show the goals", "how is that goal doing" | `ListGoals` |
 | "pause/resume that goal", "raise the goal's iteration budget", "change the goal target to 90" | `ModifyGoal` |
 | "stop that goal", "that goal is done, stop looping" | `StopGoal` |
@@ -130,7 +130,7 @@ Issue and worker selection rules for the MVP:
 - Treat an issue as the durable user goal and each worker as a stateful harness session for an execution or investigation step. Pi's persisted session is the preferred source of detailed follow-up context; do not duplicate its transcript in Meringue state.
 - One goal that needs several steps is still one issue. A research step and the implementation step that consumes its findings are two workers on the same issue, ordered with `after_from_command`, not two issues. Deliverables do not define issues: a separate PR, a "no PR, findings only" step, and an implementation step can all live under one issue. See "One goal, two steps: research then implementation".
 - First classify the message as a genuinely new goal or a follow-up. Without a selected target, explicit project/issue/worker ids win. With one, explicit ids must be compatible with its resolved issue or treated as a target conflict. Otherwise compare the prompt with issue titles/descriptions, recent routing activity, latest worker results, and active session metadata in `routing_context`.
-- A refinement, correction, question about findings, or next step for an existing goal should reuse that issue. Use `CreateIssue` only when no existing issue represents the durable goal.
+- A refinement, correction, question about findings, or next step for an existing goal should reuse that issue. Use `CreateIssue` only when no existing issue represents the durable goal, and use `CreateGoal`'s prompt form instead when the request is an outcome to iterate towards rather than a task to perform once.
 - On a reused issue, prefer `PromptAgent` when one healthy worker session has the relevant context. Do not spawn another worker merely because the user sent another message.
 - Use `PromptAgent` mode `steer` for an urgent correction that should affect active work, `follow_up` for related work that should wait until the active turn settles, and `normal` for a settled resumable session. Choose from the candidate's `is_streaming`, `supported_prompt_modes_now`, `recommended_prompt_mode`, and `prompt_mode_note` instead of defaulting to `normal`; a `normal` prompt to a mid-turn session is still accepted, but the kernel delivers it as a follow-up.
 - Spawn a new worker on the same issue only when the previous session is unavailable/unhealthy, its context is known to be over 50%, its delivered workspace should remain immutable, the next step is independent, or parallel work is intentional. Set `follow_up_of_agent_id` so that relationship is visible.
@@ -149,6 +149,7 @@ When proposing a worker flow for an already registered project:
 1. Reuse an existing issue and prompt its best healthy worker when the session context should continue.
 2. Otherwise spawn a related follow-up/replacement worker on that existing issue with the relationship field set.
 3. Only for a new durable goal, return `CreateIssue`, then `SpawnWorker` for the new issue. When that goal needs a research step before implementation, create the one issue and spawn both workers on it in the same batch.
+4. When the user wants an outcome *driven to completion* against a finish line the kernel can measure ("keep going until coverage is 80%", "this is critical, don't stop until the suite is green"), propose `CreateGoal` instead of this worker flow. Its prompt form mints the issue itself, so there is no `CreateIssue` step and no first `SpawnWorker`: the kernel spawns and judges each attempt. See "CreateGoal".
 
 If no matching project is registered and the discovered local repository/directory is the right target, propose `AddProject` first, then `CreateIssue`, then `SpawnWorker` for the first top-level goal in that newly registered project.
 
@@ -830,17 +831,48 @@ Example:
 
 ### CreateGoal
 
-Attaches a goal loop to one issue: Meringue keeps producing attempts on that issue until a kernel-measured metric reaches its target, or a budget/no-progress guard stops it. Use it when the user asks for an outcome with a measurable finish line ("keep going until coverage is 80%"), not for ordinary work that one worker can finish.
+Starts a goal loop: Meringue keeps producing attempts on one issue until a kernel-measured metric reaches its target, or a budget/no-progress guard stops it. It is the command for an outcome that must be *driven to completion*, not attempted once.
+
+#### Recognising a goal-loop request
+
+Propose `CreateGoal` — not an ordinary `SpawnWorker` — when the user's message has **both** of these:
+
+1. **Insistence on the outcome, not the attempt.** "keep going until…", "don't stop until…", "iterate until…", "this is critical, it has to actually land", "drive this to done", "I don't want one attempt, I want it finished".
+2. **A finish line the kernel can check by running a command.** A number the repository can produce: coverage percentage, failing-test count, lint offenses, benchmark timing, bundle size, error count in a log.
+
+Both halves matter, in both directions:
+
+- Urgency on its own is not a goal loop. "This is critical, fix the signup bug" with no checkable finish line is ordinary work: route one worker and say in the summary that the work is being driven directly. Do not use a goal to buy an ordinary task extra iterations; budgets are clamped (max 20 iterations, 24 h) and cannot be raised past the ceiling.
+- A measurable target on its own is not a goal loop either. "What's our coverage?" is `SpawnWorker` (or `GetInfo`), not a loop.
+- If the user clearly wants the outcome driven to completion but you cannot name a command that measures it, ask **one** clarifying question about what "done" is measured by, and route the immediate work meanwhile. Do not invent a metric the repository cannot produce, and do not silently downgrade the request to one worker.
+
+#### Two forms: an existing issue, or a prompt
+
+`CreateGoal` takes either an issue that already exists or the prompt for a new one. You never have to create an issue first just to attach a goal to it.
+
+| Situation | Payload |
+| --- | --- |
+| An existing issue already represents this durable goal | `issue_id` plus `success_criteria` |
+| Nothing represents it yet | `prompt` (and `project_id`); the kernel mints the issue and attaches the goal to it in one command |
+
+With the prompt form:
+
+- The kernel derives the issue title from the first sentence of `prompt` (truncated) and keeps the prompt verbatim in the description along with the metric, target, and guardrails. Send `issue_title` when you have a better short title; send `title` for the goal's own display title.
+- `success_criteria` defaults to `prompt`. Send it separately when the criteria are sharper than the prompt.
+- **Always set `project_id`** — you already know which project the work belongs to, and the kernel does not guess for you. Without it the kernel falls back to the project containing Meringue's own working directory, then to the only registered project, and otherwise rejects the command with `project_ambiguous`. Use `project_from_command` when the same batch registers the project with `AddProject`.
+- Do not pair the prompt form with a `CreateIssue` for the same work; that produces two issues for one goal.
+- Do not send `project_id` together with `issue_id` unless they agree: a disagreement is rejected with `project_issue_mismatch` rather than silently preferring one.
+
+A goal loop replaces the first worker; it does not need one. The kernel spawns the attempt workers itself, so do not add a `SpawnWorker` for the same issue in the same batch.
 
 Rules:
 
-- An issue is still the durable goal. Reuse or create the issue first, then attach the goal to it. One issue may own only one active goal; the kernel rejects a second one.
+- An issue is still the durable goal, whether it already existed or the kernel just minted it. One issue may own only one active goal; the kernel rejects a second one.
 - The metric must be a command the kernel can run and read a number from. Meringue runs it itself in the attempt's workspace; the worker never reports the metric.
 - Add `guardrails` for anything that must not regress (usually the test suite). Reaching the target with a red guardrail is recorded as `not_met`, not success.
-- Do not use a goal to get around iteration limits on ordinary work: budgets are clamped (max 20 iterations, 24 h) and cannot be raised past the ceiling.
 - `judge.mode` only supports `"metric_only"` today. Asking for a worker-backed judge is rejected.
 
-Payload:
+Payload (existing issue):
 
 ```json
 {
@@ -886,7 +918,27 @@ Example:
 }
 ```
 
-The kernel returns the goal record with a `G<n>` id. It measures a baseline before the first attempt, then drives the loop on its own reconcile tick; the head does not need to spawn the attempt workers.
+Example with no issue yet — the user said "this is critical, don't stop until rubocop is clean":
+
+```json
+{
+  "type": "CreateGoal",
+  "payload": {
+    "project_id": "P1",
+    "prompt": "Critical: drive rubocop to zero offenses across the repo and keep rake test green. Verbatim user request plus context here.",
+    "issue_title": "Zero rubocop offenses",
+    "metric": {
+      "command": "bundle exec rubocop --format simple | tail -1",
+      "comparator": "lte",
+      "target": 0,
+      "parse": { "type": "regex", "pattern": "(\\d+) offenses", "capture": 1 },
+      "guardrails": [{ "command": "bundle exec rake test" }]
+    }
+  }
+}
+```
+
+The kernel returns the goal record with a `G<n>` id, and the created issue id on the record's `issue_id`. It measures a baseline before the first attempt, then drives the loop on its own reconcile tick; the head does not need to spawn the attempt workers.
 
 ### ModifyGoal
 
