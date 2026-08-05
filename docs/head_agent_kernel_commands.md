@@ -125,6 +125,7 @@ names, model references, harness/theme names, and harness session ids stay byte-
 Issue and worker selection rules for the MVP:
 
 - Check `routing_context.selected_target` before semantic matching. It is explicit dashboard context resolved by the kernel: an issue selection targets itself; a worker selection targets its owning issue and includes `selected_agent_id` as a preferred session-context hint. A selected failed head never reaches you as routing context: the kernel retries that head instead of spawning you.
+- If your own user message says it is a retry of an earlier head, it also lists the commands that head already applied and the ones that never landed. That list is authoritative: reuse the records it names (do not create a second issue or worker for them), route only the part that is still unrouted, and fix whatever the kernel objected to instead of re-proposing the identical command.
 - Keep a selected message on `selected_target.issue_id`. Do not create or prompt work on another issue while the target is active. If the user's text explicitly conflicts with the selected issue, ask them to clear/change the selection rather than silently ignoring either signal.
 - Selection does not bypass you. Deliberately choose the healthy worker and `PromptAgent` mode, follow-up/replacement worker, or clarification on that issue. Do not blindly prompt the selected agent when it is stale, killed, errored, or otherwise inappropriate.
 - Treat an issue as the durable user goal and each worker as a stateful harness session for an execution or investigation step. Pi's persisted session is the preferred source of detailed follow-up context; do not duplicate its transcript in Meringue state.
@@ -505,14 +506,16 @@ Payload:
 
 Omitted, `null`, and blank (`""`, `{}`, whitespace-only id) values all mean "nothing is selected": the head spawns with no `routing_context.selected_target` instead of the message being rejected. Only a non-blank id that no longer resolves to a record is rejected.
 
-Selecting a head id (`H13`) is not routing context, it is a retry of that head. See "Retrying a failed head" below. A selected head that is still routing, or that already applied its result, cannot be retried: the message is routed as a new head and the log says why the selection was not a retry.
+Selecting a head id (`H13`) is not routing context, it is a retry of that head. See "Retrying a failed head" below. A selected head that is still routing, or that already routed every command it proposed, cannot be retried: the message is routed as a new head and the log says why the selection was not a retry.
 
 ### Retrying a failed head
 
-A head is stateless per user message, so a head that stopped before routing leaves the user's request unrouted. Retrying it re-runs that request. Two user actions do it, and both are handled by the kernel before any head runs:
+A head is stateless per user message, so a head that stops without routing the whole request leaves part of that request nowhere. Retrying it re-runs the request. Two user actions do it, and both are handled by the kernel before any head runs:
 
 - selecting the failed head in the AgentTree and typing a message (`SpawnHead` with `selected_target.selected_id` set to `H<n>`)
 - `/prompt H<n> "<message>"` (`PromptAgent` with a head id)
+
+Three statuses leave a request unrouted, and all three are retryable: `errored` (its turn or session died), `killed` (the user stopped it), and `blocked` (its result was applied, but the kernel rejected or failed part of the batch). A `blocked` head is the common stranded case, because a rejected command means the work behind it never happened.
 
 The kernel picks the recovery from how the head stopped:
 
@@ -522,12 +525,30 @@ The kernel picks the recovery from how the head stopped:
 | `session_released` | it failed and the kernel already closed its session | a fresh head re-runs the original request |
 | `never_started` | no harness session was ever opened for it | a fresh head re-runs the original request |
 | `killed` | the user stopped it on purpose before it routed | a fresh head re-runs the original request |
+| `nothing_routed` | its batch was applied and not one command landed | a fresh head re-runs the original request |
+| `partially_routed` | its batch was applied and only part of it landed | a fresh head routes only what never landed |
 
-A fresh retry head receives the original user message, the new instruction if one was typed, and why it is running again. Lineage is recorded on both records (`harness_metadata.retry_of_head_id`, `harness_metadata.retried_by_head_id`, `head_retry_count`) and logged once as `Retrying head H13 as head H14: <reason>.` A resume is logged as `Retried head H13 by resuming its agent session`.
+A head whose result was already applied is never resumed, even when its harness session is still open: that session already delivered a result, the batch is journaled, and the exactly-once guard would ignore a second result from it. Retrying such a head releases the session it can no longer use.
+
+A retry does not re-run journal entries, it re-routes the request. So a fresh retry head receives the original user message, the new instruction if one was typed, why it is running again, and — from the failed head's command journal — both halves of what happened:
+
+- the commands that were **accepted**, with their target ids, marked as work that already exists and must never be proposed again
+- the commands that were **rejected or failed**, with the kernel's own objection, as the part of the request that is still unrouted
+
+So retrying a partially applied head is safe: the issue that was created is reused rather than recreated, and only the missing steps are routed. Lineage is recorded on both records (`harness_metadata.retry_of_head_id`, `harness_metadata.retried_by_head_id`, `head_retry_count`) and logged once as `Retrying head H13 as head H14: <reason>.` A resume is logged as `Retried head H13 by resuming its agent session`.
 
 The head contract is unchanged by a retry: the retried head still returns `HeadResult` JSON, still proposes commands instead of doing the work, and is never turned into a worker. Retrying is a user recovery action, so a head may not propose `PromptAgent` on another head; that command is rejected with `head_cannot_prompt_head`.
 
-Rejection codes: `head_still_working` (it has not stopped yet), `head_already_routed` (it already applied part or all of its result, so retrying would duplicate work), `head_request_unavailable` (nothing recorded to re-run), `agent_not_found` (heads are removed when killed, so the id is gone).
+Rejection codes, all of which should now be rare:
+
+| Code | When | What the user is told to do |
+| --- | --- | --- |
+| `head_still_working` | it is `queued`/`working`/`idle`, so it has not stopped routing yet | send the message on its own, or kill the head first |
+| `head_already_routed` | every command it proposed was applied, or it answered with a question instead of routing | prompt the worker it created, answer the question, or send a new message |
+| `head_request_unavailable` | no recorded request to re-run and no new message to run instead | send the message as a new prompt |
+| `agent_not_found` | the head record is gone: `Kill` removes it, and so do cleanup and `Prune` | the request text is still in the log; resend it as a new prompt |
+
+A killed head has no recovery through this path on purpose: killing a head removes its record, its session, and the request stored on it. Retrying is for a head that is still in the AgentTree, which is why a stranded head no longer has to be killed to get out of the way.
 
 Example:
 
@@ -803,7 +824,7 @@ Choose the mode deliberately:
 - `steer`: inject an urgent correction into active work before its next model call.
 - `follow_up`: queue a related next step until active work settles.
 
-`agent_id` may also be a head id (`H<n>`), which retries a head that stopped before routing its request; see "Retrying a failed head". That is a user recovery action, so heads may not propose it: a head-proposed `PromptAgent` on a head is rejected with `head_cannot_prompt_head`.
+`agent_id` may also be a head id (`H<n>`), which retries a head that stopped before routing its request, or that was left `blocked` with part of that request unrouted; see "Retrying a failed head". That is a user recovery action, so heads may not propose it: a head-proposed `PromptAgent` on a head is rejected with `head_cannot_prompt_head`, whatever status the target head is in.
 
 Killed and errored workers are not resumable through this command, with one deliberate exception: a worker that errored because its harness turn was cut short by a transport failure (a dropped wifi connection, a provider request that failed mid-turn, a session that ended before producing a result). Those records carry `harness_metadata.settle_failure`, and the routing context marks them `"stopped_without_finishing": true` with `"resumable": true` and a `status_reason`. Prompting one with `normal` is how its in-progress work is recovered, because its session, worktree, and branch are all still intact. For every other errored or killed worker, spawn a related or replacement worker on the same issue instead.
 

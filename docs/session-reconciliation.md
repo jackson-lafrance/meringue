@@ -131,7 +131,8 @@ worker whose turn was cut short by a transport failure (see below), so skipping 
 records in reconciliation cannot lose recoverable work: nothing else in Meringue would
 have continued them either.
 
-A leftover errored head is retryable rather than only prunable. `PromptAgent` on a head id,
+A leftover errored head is retryable rather than only prunable, and so is a head left
+`blocked` because the kernel rejected or failed part of its batch. `PromptAgent` on a head id,
 and selecting the failed head in the AgentTree, both re-run the request it never routed:
 its own session is resumed when reconciliation left that session usable, and otherwise a
 fresh head carries the original message forward. Reconciliation is unchanged by this; the

@@ -185,21 +185,124 @@ class KernelHeadsHeadRetryTest < KernelHeadsTestCase
     assert_includes result.fetch("message"), "send your message as a new prompt"
   end
 
-  def test_prompting_a_head_that_already_routed_is_rejected
-    engine = build_engine
-    head_id = spawn_head!("route this", target_engine: engine)
-    rewrite_state! do |raw|
-      head = raw.fetch("agents").find { |agent| agent.fetch("id") == head_id }
-      head["status"] = "blocked"
-      head.fetch("harness_metadata")["head_result_applied_at"] = utc_now_iso8601
-    end
+  # The only head that is really beyond retrying: every command it proposed was applied, so
+  # re-running its request would route the same work a second time.
+  def test_prompting_a_head_that_routed_every_command_is_rejected
+    project_id = add_project!
+    head_id = spawn_head!("route this")
+    apply_head_result(
+      head_id,
+      head_result(commands: [create_issue_command(project_id: project_id, title: "Route this")]),
+      cleanup_head: false
+    )
+    assert_equal "completed", find_agent_record(head_id).fetch("status")
 
-    result = apply_command("PromptAgent", { "agent_id" => head_id, "prompt" => "try again" }, target_engine: engine)
+    result = apply_command("PromptAgent", { "agent_id" => head_id, "prompt" => "try again" })
 
     assert_equal "rejected", result.fetch("status")
     assert_includes result.fetch("errors"), "head_already_routed"
-    assert_includes result.fetch("message"), "already applied part of its result"
-    assert_equal 1, agents(type: "head", current_state: engine.list_all).length
+    assert_includes result.fetch("message"), "already routed this request: all 1 of its commands were applied"
+    assert_includes result.fetch("message"), "Prompt the worker it created"
+    assert_equal 1, agents(type: "head").length
+  end
+
+  # H36's shape: the kernel rejected every command in the batch, so the head is `blocked` with
+  # `head_result_applied_at` set even though not one thing was routed. That head used to be
+  # refused for "already applied part of its result", which stranded the request permanently.
+  def test_a_head_whose_batch_routed_nothing_can_be_retried
+    blocked = blocked_head_that_routed_nothing!
+
+    result = apply_command("PromptAgent", { "agent_id" => blocked.fetch("head_id"), "prompt" => "try again" })
+
+    assert_equal "accepted", result.fetch("status")
+    retry_head_id = result.fetch("target_id")
+    refute_equal blocked.fetch("head_id"), retry_head_id
+
+    retry_message = head_runner.calls.last.fetch("user_message")
+    assert_includes retry_message, blocked.fetch("user_message")
+    assert_includes retry_message, "none of its 2 commands landed, so this request was never routed"
+    assert_includes retry_message, "These commands never landed"
+    assert_includes retry_message, "ModifyIssue rejected"
+    assert_includes retry_message, "Route this request now."
+    refute_includes retry_message, "already applied these commands"
+
+    lineage = logs.find { |entry| entry.fetch("message").start_with?("Retrying head #{blocked.fetch("head_id")}") }
+    refute_nil lineage
+    assert_equal "nothing_routed", lineage.dig("details", "retry_case")
+    assert_equal retry_head_id, find_agent_record(blocked.fetch("head_id")).dig("harness_metadata", "retried_by_head_id")
+  end
+
+  # H26's shape: one command landed and the rest did not. The retry re-routes the request rather
+  # than re-running journal entries, so the records that already exist are named for the retry
+  # head and it is told to reuse them instead of proposing them again.
+  def test_a_partially_applied_head_is_retried_without_rerouting_what_already_landed
+    blocked = partially_applied_blocked_head!
+
+    result = apply_command(
+      "SpawnHead",
+      { "user_message" => "try again", "selected_target" => { "selected_id" => blocked.fetch("head_id") } }
+    )
+
+    assert_equal "accepted", result.fetch("status")
+    retry_message = head_runner.calls.last.fetch("user_message")
+    assert_includes retry_message, blocked.fetch("user_message")
+    assert_includes retry_message, "only 1 of its 2 commands landed"
+    assert_includes retry_message, "already applied these commands"
+    assert_includes retry_message, "CreateIssue accepted -> #{blocked.fetch("issue_id")}"
+    assert_includes retry_message, "never propose them again"
+    assert_includes retry_message, "These commands never landed"
+    assert_includes retry_message, "SpawnWorker rejected"
+    assert_includes retry_message, "Route only the part of this request that is still unrouted"
+
+    lineage = logs.find { |entry| entry.fetch("message").start_with?("Retrying head #{blocked.fetch("head_id")}") }
+    assert_equal "partially_routed", lineage.dig("details", "retry_case")
+    # The retry must not duplicate the issue the failed batch already created.
+    assert_equal [blocked.fetch("issue_id")], issues.map { |issue| issue.fetch("id") }
+  end
+
+  # A blocked head's own session already delivered a result, and the exactly-once guard would
+  # ignore a second one, so it can never be resumed: the retry is a fresh head and the session
+  # the blocked head is still holding is closed instead of lingering forever.
+  def test_retrying_a_blocked_head_never_resumes_its_sealed_session
+    client = RecordingHarnessClient.new
+    engine = build_engine(harness_client: client)
+    blocked = blocked_head_that_routed_nothing!(target_engine: engine)
+    rewrite_state! do |raw|
+      head = raw.fetch("agents").find { |agent| agent.fetch("id") == blocked.fetch("head_id") }
+      head["harness"] = "fake"
+      head["pid"] = 4242
+      head["harness_session_id"] = "fake-head-session-1"
+      head.fetch("harness_metadata")["head_session_state"] = "active"
+    end
+
+    result = apply_command("PromptAgent", { "agent_id" => blocked.fetch("head_id"), "prompt" => "try again" }, target_engine: engine)
+
+    assert_equal "accepted", result.fetch("status")
+    refute_equal blocked.fetch("head_id"), result.fetch("target_id")
+    assert_empty client.prompts, "a sealed head session must never be prompted for a second result"
+
+    previous = find_agent_record(blocked.fetch("head_id"), current_state: engine.list_all)
+    assert_equal "released", previous.dig("harness_metadata", "head_session_state")
+    assert_equal "head_retried", previous.dig("harness_metadata", "head_session_release_reason")
+  end
+
+  # Retrying a blocked head is still a user action. A head must not be able to propose it, or a
+  # rejected batch could hand itself another head.
+  def test_a_head_may_not_propose_retrying_a_blocked_head
+    blocked = blocked_head_that_routed_nothing!
+    routing_head_id = spawn_head!("retry that blocked head")
+
+    result = apply_head_result(
+      routing_head_id,
+      head_result(
+        commands: [{ "type" => "PromptAgent", "payload" => { "agent_id" => blocked.fetch("head_id"), "prompt" => "try again" } }]
+      )
+    )
+
+    rejected = command_results(result).fetch(0)
+    assert_equal "rejected", rejected.fetch("status")
+    assert_includes rejected.fetch("errors"), "head_cannot_prompt_head"
+    assert_equal "blocked", find_agent_record(blocked.fetch("head_id")).fetch("status")
   end
 
   def test_prompting_a_head_that_is_still_working_is_rejected
@@ -264,6 +367,56 @@ class KernelHeadsHeadRetryTest < KernelHeadsTestCase
     raise "expected an errored head record" unless head && head.fetch("status") == "errored"
 
     head.fetch("id")
+  end
+
+  # A head that routed nothing at all: every command it proposed named an issue it could not
+  # have seen, so the kernel rejected the whole batch and left the head `blocked` with
+  # `head_result_applied_at` set. This is H36's real shape, produced through the real apply path
+  # rather than by hand-editing state.
+  def blocked_head_that_routed_nothing!(target_engine: nil)
+    user_message = "make /setup take over the whole screen"
+    head_id = spawn_head!(user_message, target_engine: target_engine)
+    apply_result = apply_head_result(
+      head_id,
+      head_result(
+        commands: [
+          { "type" => "ModifyIssue", "payload" => { "issue_id" => "P7-I9", "status" => "working" } },
+          spawn_worker_command(issue_id: "P7-I9", title: "Full-screen setup")
+        ]
+      ),
+      target_engine: target_engine
+    )
+    statuses = command_results(apply_result).map { |result| result.fetch("status") }
+    raise "expected every command to be rejected: #{statuses.inspect}" unless statuses.uniq == ["rejected"]
+
+    head = find_agent_record(head_id, current_state: (target_engine || engine).list_all)
+    raise "expected a blocked head, got #{head.fetch("status").inspect}" unless head.fetch("status") == "blocked"
+
+    { "head_id" => head_id, "user_message" => user_message }
+  end
+
+  # A head whose batch half landed: the issue was created, the worker on it was not. This is
+  # H26's real shape.
+  def partially_applied_blocked_head!
+    project_id = add_project!
+    user_message = "fix the slow delivery query and then have someone review it"
+    head_id = spawn_head!(user_message)
+    apply_result = apply_head_result(
+      head_id,
+      head_result(
+        commands: [
+          create_issue_command(project_id: project_id, title: "Fix the slow delivery query", command_id: "issue"),
+          spawn_worker_command(issue_id: "P7-I9", title: "Review the fix")
+        ]
+      )
+    )
+    statuses = command_results(apply_result).map { |result| result.fetch("status") }
+    raise "expected one accepted and one rejected command: #{statuses.inspect}" unless statuses == %w[accepted rejected]
+
+    head = find_agent_record(head_id)
+    raise "expected a blocked head, got #{head.fetch("status").inspect}" unless head.fetch("status") == "blocked"
+
+    { "head_id" => head_id, "user_message" => user_message, "issue_id" => command_results(apply_result).fetch(0).fetch("target_id") }
   end
 
   # A head whose turn died mid-flight while its harness session stayed open: the record is
