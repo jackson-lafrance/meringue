@@ -31,6 +31,49 @@ class InputGoalCommandsTest < Minitest::Test
     assert_equal "Raise coverage", payload.fetch("title")
   end
 
+  # The second form: no issue id at all. The kernel mints the issue from the prompt, so the
+  # parser only has to keep the two forms apart.
+  def test_goal_create_accepts_a_prompt_instead_of_an_existing_issue
+    command = parse(
+      '/goal create "get kernel coverage to 80%" --metric "bundle exec rake coverage" --target 80 --project P2 --guardrail "rake test"'
+    )
+
+    assert_equal "CreateGoal", command.type
+    payload = command.payload
+    assert_equal "get kernel coverage to 80%", payload.fetch("prompt")
+    refute payload.key?("issue_id"), "the prompt form must not invent an issue id"
+    refute payload.key?("success_criteria"), "the kernel derives the criteria from the prompt"
+    assert_equal "P2", payload.fetch("project_id")
+    assert_equal "bundle exec rake coverage", payload.fetch("metric_command")
+    assert_equal ["rake test"], payload.fetch("guardrails")
+  end
+
+  # An id-shaped first token is always read as an id, so a typo cannot silently become the
+  # title of a brand new issue.
+  def test_an_id_shaped_first_token_is_never_reinterpreted_as_a_prompt
+    lone_id = parse('/goal create P1-I7 --metric "m" --target 1')
+    assert_equal "InvalidSlashCommand", lone_id.type
+    assert_includes lone_id.payload.fetch("message"), "looks like a record id"
+
+    project_id = parse('/goal create P1 "coverage at 80%" --metric "m" --target 1')
+    assert_equal "InvalidSlashCommand", project_id.type
+    assert_includes project_id.payload.fetch("message"), "--project P1"
+
+    worker_id = parse('/goal create P1-I7-W2 "coverage at 80%" --metric "m" --target 1')
+    assert_equal "InvalidSlashCommand", worker_id.type
+    assert_includes worker_id.payload.fetch("message"), "is not an issue id"
+
+    goal_id = parse('/goal create G3 --metric "m" --target 1')
+    assert_equal "InvalidSlashCommand", goal_id.type
+  end
+
+  def test_an_unquoted_prompt_is_reported_instead_of_being_half_swallowed
+    command = parse('/goal create get coverage to 80% --metric "m" --target 80')
+
+    assert_equal "InvalidSlashCommand", command.type
+    assert_includes command.payload.fetch("message"), "Quote the whole prompt"
+  end
+
   def test_goal_create_supports_the_parsing_and_budget_flags
     command = parse(
       '/goal create P1-I7 "no offenses" --metric "rubocop" --target 0 --comparator lte ' \
@@ -90,6 +133,18 @@ class InputGoalCommandsTest < Minitest::Test
 
     missing_criteria = parse("/goal create P1-I1")
     assert_equal "InvalidSlashCommand", missing_criteria.type
+
+    nothing_at_all = parse('/goal create --metric "m" --target 1')
+    assert_equal "InvalidSlashCommand", nothing_at_all.type
+    assert_includes nothing_at_all.payload.fetch("message"), "needs a prompt"
+  end
+
+  def test_the_goal_usage_message_documents_both_creation_forms
+    usage = Meringue::Input::SlashCommandParser::GOAL_USAGE_MESSAGE
+
+    assert_includes usage, '/goal create "<prompt>"'
+    assert_includes usage, "/goal create <issue_id>"
+    assert_includes usage, "--project <project_id>"
   end
 
   def test_goal_commands_are_discoverable_from_the_command_list_and_help
@@ -110,8 +165,17 @@ class InputGoalCommandsTest < Minitest::Test
       "goals" => [{ "id" => "G1", "issue_id" => "P1-I7", "status" => "working", "success_criteria" => "coverage at least 80%" }]
     }
 
+    # The issue id is optional now, so completion leads with the prompt form and still offers
+    # every issue the loop could attach to.
     issue_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/goal create ", state: state)
-    assert_equal ["P1-I7"], issue_suggestions.map { |record| record.fetch("usage") }
+    assert_equal ["\"<prompt>\"", "P1-I7"], issue_suggestions.map { |record| record.fetch("usage") }
+    assert_includes issue_suggestions.first.fetch("description"), "no issue needed"
+    assert_equal "/goal create", issue_suggestions.first.fetch("completion"), "the note must re-insert what was typed"
+    assert_equal "/goal create P1-I7", issue_suggestions.last.fetch("completion")
+
+    # Typing an id narrows to the ids, without the note in the way.
+    typed_id = Meringue::Input::SlashCommandParser.command_suggestion_records("/goal create p1", state: state)
+    assert_equal ["P1-I7"], typed_id.map { |record| record.fetch("usage") }
 
     goal_suggestions = Meringue::Input::SlashCommandParser.command_suggestion_records("/goal pause ", state: state)
     assert_equal ["G1"], goal_suggestions.map { |record| record.fetch("usage") }

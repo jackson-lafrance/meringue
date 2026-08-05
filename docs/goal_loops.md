@@ -68,19 +68,46 @@ Iteration cadence is rate-limited by `min_seconds_between_iterations` (15s defau
 
 Killing the goal's issue or project settles the goal too; a goal is never left ticking against a record that no longer exists.
 
-## Commands
+## Creating a goal
 
-`CreateGoal`, `ModifyGoal`, `StopGoal`, and `ListGoals` are ordinary kernel commands: validated, logged, journaled, and head-proposable. See `docs/head_agent_kernel_commands.md` for the head-facing contract.
+A goal needs an issue, but you do not need to have one already. `/goal create` (and the `CreateGoal` kernel command behind it) takes either shape:
 
 ```bash
+# 1. Attach a loop to an issue that already exists.
 /goal create P1-I7 "line coverage of lib/meringue/kernel is at least 80%" \
   --metric "bundle exec rake coverage" --target 80 --guardrail "rake test" --max-iterations 4
+
+# 2. Describe the outcome and let Meringue create the issue for it.
+/goal create "get line coverage of lib/meringue/kernel to 80% without weakening the suite" \
+  --metric "bundle exec rake coverage" --target 80 --guardrail "rake test" --project P1
+```
+
+The two forms are told apart by the **first positional token, before anything else is read**:
+
+- A token shaped like a Meringue record id (`P1-I7`, `P1`, `G3`, `P1-I7-W2`) is always an id, never prose. An issue-shaped id attaches the loop to that issue; any other id shape, or an id with no criteria after it, is a usage error naming the right spelling. A mistyped id can therefore never become the title of a brand-new issue.
+- Anything else is the prompt, and it must be a single quoted argument. An unquoted sentence is rejected with "quote the whole prompt" rather than silently keeping its first two words.
+
+When the kernel mints the issue:
+
+- **Project**: `--project <project_id>` (a project name or root path also resolves) wins; otherwise the registered project containing Meringue's working directory, otherwise the only registered project, otherwise the command is rejected with `project_ambiguous` and the list of candidates. Meringue never guesses between several projects. `--project` alongside an `<issue_id>` is rejected when the two disagree.
+- **Title**: the first sentence of the prompt, trimmed to 72 characters. Heads may send `issue_title` for a better one.
+- **Description**: the prompt verbatim, plus the goal id, the success criteria, the metric command with its comparator and target, and the guardrails.
+- **Criteria**: the goal's `success_criteria` defaults to the whole prompt.
+- The issue is an ordinary issue: same `P<n>-I<n>` counter, prunable, recountable, killable.
+
+Creation is all-or-nothing, so a rejected goal **never leaves an orphan issue behind**: every validation (criteria, metric, comparator, continuity, judge mode, project) runs before anything is minted, and the issue and the goal are written in the same single save. A goal that fails validation leaves the state file exactly as it was, including the id counters.
+
+## Commands
+
+`CreateGoal`, `ModifyGoal`, `StopGoal`, and `ListGoals` are ordinary kernel commands: validated, logged, journaled, and head-proposable. See `docs/head_agent_kernel_commands.md` for the head-facing contract, including how a head decides that "this is critical, don't stop until it's done" is a goal loop rather than an ordinary worker.
+
+```bash
 /goal status            # every loop, its iteration accounting, and stop reasons
 /goal status G1         # one loop plus its recent iterations and directives
 /goal pause G1 | /goal resume G1 | /goal stop G1
 ```
 
-Useful flags: `--comparator gte|lte|gt|lt|eq`, `--parse last_number|first_number|regex|json_path|exit_status`, `--pattern "<regex>"`, `--json-path totals.line`, `--metric-cwd workspace|project_root`, `--min-delta`, `--no-progress`, `--max-workers`, `--max-seconds`, `--cooldown`, `--fresh-attempt`, `--accumulate`, `--paused`, `--title`.
+Useful flags: `--comparator gte|lte|gt|lt|eq`, `--parse last_number|first_number|regex|json_path|exit_status`, `--pattern "<regex>"`, `--json-path totals.line`, `--metric-cwd workspace|project_root`, `--project`, `--min-delta`, `--no-progress`, `--max-workers`, `--max-seconds`, `--cooldown`, `--fresh-attempt`, `--accumulate`, `--paused`, `--title`.
 
 ## Record shape
 

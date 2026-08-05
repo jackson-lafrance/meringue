@@ -150,7 +150,7 @@ module Meringue
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
         ["/model <provider/model>", "Persist the model used for all future Pi heads and workers; existing sessions are unchanged."],
         ["/thinking <level>", "Persist the thinking level used for all future Pi heads and workers: off, minimal, low, medium, high, xhigh, or max."],
-        ["/goal create <issue_id> \"<success criteria>\" --metric \"<command>\" --target <number> [--comparator gte|lte|gt|lt|eq] [--max-iterations <n>] [--guardrail \"<command>\"] [--parse last_number|first_number|exit_status] [--pattern \"<regex>\"] [--title \"<title>\"] [--fresh-attempt] [--paused]", "Attach a goal loop to an issue: the kernel keeps producing attempts until the metric hits its target or a budget/no-progress guard trips."],
+        ["/goal create [issue_id] \"<prompt>\" --metric \"<command>\" --target <number> [--project <project_id>] [--comparator gte|lte|gt|lt|eq] [--max-iterations <n>] [--guardrail \"<command>\"] [--parse last_number|first_number|exit_status] [--pattern \"<regex>\"] [--title \"<title>\"] [--fresh-attempt] [--paused]", "Start a goal loop: the kernel keeps producing attempts until the metric hits its target or a budget/no-progress guard trips. Name an issue to attach the loop to it, or give only a quoted prompt and Meringue creates the issue itself."],
         ["/goal status [goal_id]", "Show goal loops, their iteration accounting, and why a stopped goal stopped."],
         ["/goal pause <goal_id>", "Pause a goal loop after the current attempt; nothing new is spawned while it is paused."],
         ["/goal resume <goal_id>", "Resume a paused goal loop."],
@@ -206,6 +206,11 @@ module Meringue
       # session reconciliation for every goal in the state file. A single metric command can still
       # exceed this on its own; it is bounded by the goal's own `metric.timeout_seconds`.
       GOAL_ADVANCE_BUDGET_SECONDS = 30.0
+      # Longest issue title `CreateGoal` derives on its own from a prompt. The AgentTree renders
+      # an issue title on one line, so a paragraph-long prompt is cut to its first sentence and
+      # kept verbatim in the issue description instead.
+      GOAL_ISSUE_TITLE_LIMIT = 72
+      GOAL_COMPARATOR_TEXT = { "gte" => ">=", "lte" => "<=", "gt" => ">", "lt" => "<", "eq" => "==" }.freeze
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
       HEAD_RECONCILE_WARNING_DELAY_SECONDS = 5
       # Token-overlap ratio above which two clarifications from the same head are treated as
@@ -236,7 +241,9 @@ module Meringue
         project_from_command ProjectFromCommand projectFromCommand
         project_ref ProjectRef projectRef
       ].freeze
-      BATCH_PROJECT_REFERENCE_COMMANDS = %w[CreateIssue].freeze
+      # `CreateGoal` is here because its prompt form mints its own issue, so a batch that registers
+      # a project and starts a goal in it references the AddProject command the same way.
+      BATCH_PROJECT_REFERENCE_COMMANDS = %w[CreateIssue CreateGoal].freeze
       # A head can queue a worker that only starts once another agent settles ("spawn B, but start
       # it after A finishes"). The dependency is durable state on the queued worker record, not an
       # in-memory timer: the kernel activates it from the worker-settle path and from the
@@ -5315,9 +5322,16 @@ module Meringue
       # is met". It is attached to exactly one issue, owns its own budgets, and is advanced
       # by the reconcile tick rather than by a long-lived agent session.
 
+      # `CreateGoal` has two entry shapes and one outcome. `issue_id` attaches the loop to an
+      # issue that already exists; `prompt` describes the outcome and the kernel mints the issue
+      # itself, so a goal-driven request never has to be split into "create an issue, then attach
+      # a goal to it". Both shapes end at the same record, and the minted issue is written in the
+      # same save as the goal: validation runs first, so a rejected goal can never leave an
+      # orphan issue behind.
       def create_goal(command_id, command_type, payload)
-        issue_id = value_at(payload, "issue_id", "IssueID", "issueId")
-        success_criteria = value_at(payload, "success_criteria", "SuccessCriteria", "successCriteria", "criteria")
+        issue_id = present_string(value_at(payload, "issue_id", "IssueID", "issueId"))
+        prompt = present_string(value_at(payload, "prompt", "Prompt", "issue_prompt", "IssuePrompt", "issuePrompt"))
+        success_criteria = present_string(value_at(payload, "success_criteria", "SuccessCriteria", "successCriteria", "criteria")) || prompt
         title = value_at(payload, "title", "Title")
         metric = goal_metric_from_payload(payload)
         budget = goal_budget_from_payload(payload)
@@ -5327,7 +5341,7 @@ module Meringue
         paused = truthy?(value_at(payload, "paused", "Paused"))
         errors = []
 
-        errors << "issue_id is required" if blank?(issue_id)
+        errors << "issue_id or prompt is required" if issue_id.nil? && prompt.nil?
         errors << "success_criteria is required" if blank?(success_criteria)
         errors << "metric.command is required" if blank?(metric["command"])
         errors << "metric.target must be a number" if metric["target"].nil?
@@ -5347,27 +5361,65 @@ module Meringue
         return rejected_result(command_id, command_type, "Goal was not created.", errors) unless errors.empty?
 
         state = normalized_state
-        issue = find_issue(state, issue_id)
-        return rejected_result(command_id, command_type, "Issue #{issue_id} does not exist.", ["issue_not_found"]) unless issue
+        if issue_id
+          issue = find_issue(state, issue_id)
+          return rejected_result(command_id, command_type, "Issue #{issue_id} does not exist.", ["issue_not_found"]) unless issue
 
-        project = find_project(state, issue.fetch("project_id"))
-        return rejected_result(command_id, command_type, "Project #{issue.fetch("project_id")} does not exist.", ["project_not_found"]) unless project
+          project = find_project(state, issue.fetch("project_id"))
+          return rejected_result(command_id, command_type, "Project #{issue.fetch("project_id")} does not exist.", ["project_not_found"]) unless project
 
-        # One loop per issue. Two loops on one issue would race for the same branch and
-        # double the sessions the budgets are supposed to bound.
-        existing = active_goal_for_issue(state, issue.fetch("id"))
-        if existing
-          return rejected_result(
-            command_id,
-            command_type,
-            "Issue #{issue.fetch("id")} already has an active goal (#{existing.fetch("id")}).",
-            ["issue_already_has_active_goal"]
-          )
+          mismatch = goal_project_conflict(state, payload, issue, project)
+          return rejected_result(command_id, command_type, mismatch.fetch("message"), mismatch.fetch("errors")) if mismatch
+
+          # One loop per issue. Two loops on one issue would race for the same branch and
+          # double the sessions the budgets are supposed to bound.
+          existing = active_goal_for_issue(state, issue.fetch("id"))
+          if existing
+            return rejected_result(
+              command_id,
+              command_type,
+              "Issue #{issue.fetch("id")} already has an active goal (#{existing.fetch("id")}).",
+              ["issue_already_has_active_goal"]
+            )
+          end
+        else
+          resolution = resolve_goal_project(state, payload)
+          project = resolution.fetch("project", nil)
+          return rejected_result(command_id, command_type, resolution.fetch("message"), resolution.fetch("errors")) unless project
         end
 
         now = timestamp
+        goal_id = next_goal_id!(state)
+        minted = issue.nil?
+        minted_log_ids = []
+        if minted
+          issue = mint_goal_issue!(
+            state,
+            project: project,
+            prompt: prompt || success_criteria,
+            success_criteria: success_criteria,
+            issue_title: present_string(value_at(payload, "issue_title", "IssueTitle", "issueTitle")),
+            originating_head_id: value_at(payload, "originating_head_id", "originatingHeadId", "_head_id"),
+            goal_id: goal_id,
+            metric: metric,
+            now: now
+          )
+          minted_log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: issue.fetch("id"),
+            level: "info",
+            message: "Created issue #{issue.fetch("id")} for goal #{goal_id}: #{issue.fetch("title")}",
+            details: {
+              "project_id" => project.fetch("id"),
+              "parent_issue_id" => nil,
+              "goal_id" => goal_id,
+              "created_for_goal" => true
+            }
+          )
+        end
         goal = {
-          "id" => next_goal_id!(state),
+          "id" => goal_id,
           "project_id" => project.fetch("id"),
           "issue_id" => issue.fetch("id"),
           "title" => present_string(title) || issue.fetch("title", "Goal"),
@@ -5400,18 +5452,151 @@ module Meringue
         issue["status"] = "working" unless TERMINAL_AGENT_STATUSES.include?(issue.fetch("status", nil))
         issue["updated_at"] = now
 
-        log_ids = append_log(
+        log_ids = minted_log_ids + append_log(
           state,
           source_type: "kernel",
           source_id: goal.fetch("id"),
           level: "info",
-          message: "Created goal #{goal.fetch("id")} on #{issue.fetch("id")}: #{goal.fetch("success_criteria")}",
-          details: goal_log_details(goal)
+          message: "Created goal #{goal.fetch("id")} on #{minted ? "new issue " : ""}#{issue.fetch("id")}: #{goal.fetch("success_criteria")}",
+          details: goal_log_details(goal).merge("created_issue" => minted)
         )
         touch_state!(state, now)
         store.save(state)
 
-        accepted_result(command_id, command_type, goal.fetch("id"), "Created goal #{goal.fetch("id")}. #{Goals::Record.summary(goal)}", goal, log_ids)
+        message = if minted
+                    "Created issue #{issue.fetch("id")} (#{issue.fetch("title")}) and goal #{goal.fetch("id")}. #{Goals::Record.summary(goal)}"
+                  else
+                    "Created goal #{goal.fetch("id")}. #{Goals::Record.summary(goal)}"
+                  end
+        accepted_result(command_id, command_type, goal.fetch("id"), message, goal, log_ids)
+      end
+
+      # The issue a prompt-form goal needs. It is a perfectly ordinary issue: same id counter,
+      # same shape, prunable and recountable like any other. Only its provenance differs, which
+      # is recorded in the log details rather than in a new field.
+      def mint_goal_issue!(state, project:, prompt:, success_criteria:, issue_title:, originating_head_id:, goal_id:, metric:, now:)
+        issue = {
+          "id" => next_issue_id!(state, project.fetch("id")),
+          "project_id" => project.fetch("id"),
+          "parent_issue_id" => nil,
+          "originating_head_id" => present_string(originating_head_id),
+          "title" => issue_title || goal_issue_title(prompt),
+          "description" => goal_issue_description(prompt: prompt, success_criteria: success_criteria, goal_id: goal_id, metric: metric),
+          "status" => "queued",
+          "agent_ids" => [],
+          "created_at" => now,
+          "updated_at" => now
+        }
+        state.fetch("issues") << issue
+        project["updated_at"] = now
+        issue
+      end
+
+      def goal_issue_title(prompt)
+        text = prompt.to_s.strip.gsub(/\s+/, " ")
+        return "Goal loop" if text.empty?
+
+        sentence = text.split(/(?<=[.!?])\s/, 2).first.to_s.strip.sub(/[.]\z/, "")
+        sentence = text if sentence.empty?
+        return sentence if sentence.length <= GOAL_ISSUE_TITLE_LIMIT
+
+        truncated = sentence[0, GOAL_ISSUE_TITLE_LIMIT]
+        boundary = truncated.rindex(" ")
+        truncated = truncated[0, boundary] if boundary && boundary > GOAL_ISSUE_TITLE_LIMIT / 2
+        "#{truncated.rstrip}…"
+      end
+
+      # The prompt is kept verbatim, because it is what the attempt workers are ultimately
+      # working from, and the measurable finish line is spelled out underneath it.
+      def goal_issue_description(prompt:, success_criteria:, goal_id:, metric:)
+        lines = [prompt.to_s.strip]
+        lines << ""
+        lines << "Goal loop #{goal_id} drives this issue: Meringue keeps producing attempts until the criterion below is met or a budget guard stops the loop."
+        lines << "Success criteria: #{success_criteria}" unless success_criteria.to_s.strip == prompt.to_s.strip
+        comparator = GOAL_COMPARATOR_TEXT.fetch(metric["comparator"].to_s, metric["comparator"].to_s)
+        lines << "Metric (measured by the kernel, never self-reported): #{metric["command"]} #{comparator} #{Goals::Record.format_number(metric["target"])}"
+        guardrails = Array(metric["guardrails"]).map { |guardrail| guardrail.is_a?(Hash) ? guardrail["command"] : guardrail }.compact
+        lines << "Guardrails that must keep passing: #{guardrails.join(", ")}" unless guardrails.empty?
+        lines.join("\n")
+      end
+
+      # Which project a prompt-form goal's issue lands in. Explicit beats local beats sole,
+      # and an ambiguous choice is rejected with the candidates rather than guessed at, because
+      # an issue minted under the wrong project is invisible work in the wrong tree.
+      def resolve_goal_project(state, payload)
+        requested = present_string(value_at(payload, "project_id", "ProjectID", "projectId", "project", "Project"))
+        if requested
+          project = find_project(state, requested) || project_by_name_or_root(state, requested)
+          return { "project" => project } if project
+
+          return {
+            "message" => "Project #{requested} does not exist.#{registered_project_hint(state)}",
+            "errors" => ["project_not_found"]
+          }
+        end
+
+        candidates = state.fetch("projects", []).reject { |project| project.fetch("status", nil) == "killed" }
+        if candidates.empty?
+          return {
+            "message" => "No project is registered, so there is nowhere to create the goal's issue. Run /project add <path> first.",
+            "errors" => ["no_registered_project"]
+          }
+        end
+
+        local = project_for_directory(candidates, cwd)
+        return { "project" => local } if local
+        return { "project" => candidates.first } if candidates.length == 1
+
+        {
+          "message" => "Several projects are registered and this directory is not inside one of them, " \
+                       "so /goal create cannot tell where the new issue belongs. Add --project <project_id> " \
+                       "(or name an existing issue).#{registered_project_hint(state)}",
+          "errors" => ["project_ambiguous"]
+        }
+      end
+
+      # `project_id` alongside `issue_id` is redundant, so it is only worth a rejection when the
+      # two disagree: that is a head or a user pointing at two different places at once.
+      def goal_project_conflict(state, payload, issue, project)
+        requested = present_string(value_at(payload, "project_id", "ProjectID", "projectId", "project", "Project"))
+        return nil unless requested
+
+        requested_project = find_project(state, requested) || project_by_name_or_root(state, requested)
+        return nil if requested_project && requested_project.fetch("id") == project.fetch("id")
+
+        {
+          "message" => "Issue #{issue.fetch("id")} belongs to #{project.fetch("id")}, not #{requested}. " \
+                       "Drop the project when you name an issue.",
+          "errors" => ["project_issue_mismatch"]
+        }
+      end
+
+      def project_by_name_or_root(state, value)
+        needle = value.to_s.strip
+        state.fetch("projects", []).find { |project| project.fetch("name", "").to_s.casecmp?(needle) } ||
+          state.fetch("projects", []).find { |project| same_path?(project.fetch("root_path", ""), needle) }
+      end
+
+      # The deepest registered project root that contains `path`, so a nested checkout wins over
+      # its parent instead of both matching.
+      def project_for_directory(projects, path)
+        expanded = File.expand_path(path.to_s)
+        projects.select { |project| directory_contains?(project.fetch("root_path", nil), expanded) }
+                .max_by { |project| File.expand_path(project.fetch("root_path").to_s).length }
+      end
+
+      def directory_contains?(root_path, expanded_path)
+        return false if blank?(root_path)
+
+        root = File.expand_path(root_path.to_s)
+        expanded_path == root || expanded_path.start_with?("#{root}#{File::SEPARATOR}")
+      end
+
+      def registered_project_hint(state)
+        ids = state.fetch("projects", []).map { |project| project.fetch("id", nil) }.compact
+        return "" if ids.empty?
+
+        " Registered projects: #{ids.join(", ")}."
       end
 
       def modify_goal(command_id, command_type, payload)
