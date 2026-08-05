@@ -139,6 +139,8 @@ Issue and worker selection rules for the MVP:
 - Set at most one takeover relationship per `SpawnWorker`. `replace_agent_id` (or `replace_agent_from_command`) may not be combined with `follow_up_of_agent_id` or `after_agent_id`; the kernel rejects that payload with `follow_up_of_agent_id and replace_agent_id are mutually exclusive` or `deferred_after_agent_conflicts_with_replace` and spawns nothing. `follow_up_of_agent_id` together with `after_agent_id` is allowed, and is the normal shape for a queued next step.
 - To retry work that failed, spawn one new worker on the same issue with `follow_up_of_agent_id` naming the failed worker, and no `replace_agent_id`. A worker whose `harness_session_id` is `null` never started a harness session (for example its workspace could not be provisioned), so there is no session to replace and nothing for `PromptAgent` to prompt.
 - When the next step must not begin until another worker settles (research, then implementation; implementation, then review), set `after_agent_id` on `SpawnWorker` instead of prompting a busy worker or spawning parallel work. The kernel queues that worker and starts it when its predecessor settles. Ordering a step this way does not make it a separate goal: keep it on the same issue. See "Chaining a worker after another agent" below.
+- When the next step must wait for something outside Meringue instead of for an agent (a pair review landing on a PR, a deploy going green, an external job finishing), set `after_command` on `SpawnWorker`. The kernel polls that command on a timer and starts the queued worker when it passes. `after_command` and `after_agent_id` may both be set and compose as AND, with the command armed only once the predecessor settles. See "Chaining a worker after a script or command" below.
+- Never write a worker prompt that waits for an external condition by polling or sleeping either. "Wait for the review, then respond to it" is `after_command`, not an instruction inside a prompt.
 - Before routing anything, check `routing_context.open_questions` and `routing_context.answer_inference`. If this message answers an open question, close that question and route the unblocked work in the same result. See "Answering open questions" below.
 - Never prompt a worker from a different issue. If multiple issues or workers are plausible, ask a clarifying question instead of guessing.
 - Do not create nested/subissues for ordinary follow-up prompts. Set `parent_issue_id` to `null` unless the user explicitly asks for a child issue hierarchy.
@@ -669,7 +671,7 @@ Workers receive standing guidance that they do not need to ask for user permissi
 
 Not every worker issue requires a PR. For investigation-only or informational work that does not require repository changes, tell the worker to return findings or an answer without opening a PR unless the user explicitly requested one. A step that produces no PR is still a worker on the goal's issue, not a reason to create a second issue.
 
-Never write a prompt that makes a worker wait on another worker by polling: no reading `~/.meringue/state.json` in a loop, no sleeping between checks, no multi-hour wait budgets, and no reading another worker's workspace. The kernel owns sequencing and handover through `after_agent_id`/`after_from_command`. See "Chaining a worker after another agent" and "One goal, two steps: research then implementation".
+Never write a prompt that makes a worker wait by polling: no reading `~/.meringue/state.json` in a loop, no sleeping between checks, no multi-hour wait budgets, no `while ! gh pr view ...; do sleep` loops, and no reading another worker's workspace. The kernel owns sequencing and handover through `after_agent_id`/`after_from_command` for agents and `after_command` for external conditions. See "Chaining a worker after another agent", "Chaining a worker after a script or command", and "One goal, two steps: research then implementation".
 
 When the worker belongs to an issue this same HeadResult creates, set `issue_from_command` (or an `"@<command_id>"`/`"@index:<position>"` value in `issue_id`) instead of predicting the new issue id. See "Referencing an issue created in the same HeadResult".
 
@@ -695,7 +697,16 @@ Payload:
   "after_from_command": "Optional SpawnWorker command id or index in this batch instead of after_agent_id",
   "if_predecessor_fails": "Optional cancel (default) or run",
   "include_predecessor_result": "Optional false to omit the predecessor's final report from this worker's prompt",
-  "completion_head": "Optional string or object with prompt: spawn a fresh head after this worker completes, with the worker's final report as context"
+  "completion_head": "Optional string or object with prompt: spawn a fresh head after this worker completes, with the worker's final report as context",
+  "after_command": "Optional shell command the kernel polls until it says go; the worker stays queued until then",
+  "after_command_label": "Optional short human label for that condition, shown in the AgentTree and logs",
+  "after_command_expect": "Optional exit_zero (default) or output_matches",
+  "after_command_pattern": "Required regex when after_command_expect is output_matches",
+  "after_command_cwd": "Optional project_root (default) or workspace",
+  "after_command_interval_seconds": "Optional poll interval, default 60, min 5, max 3600",
+  "after_command_timeout_seconds": "Optional per-check timeout, default 30, max 120",
+  "after_command_max_wait_seconds": "Optional total wait budget, default 14400 (4h), max 86400 (24h)",
+  "if_gate_expires": "Optional cancel (default) or run, for when after_command never passes"
 }
 ```
 
@@ -818,6 +829,83 @@ A cancelled queued worker is removed like a killed worker; the warning log is th
 - A worker's issue is still immutable. Queueing does not move a worker between issues, and activation keeps the issue it was created on.
 
 Rejection codes: `after_agent_not_found`, `after_agent_is_not_worker`, `deferred_after_agent_conflicts_with_replace`, `invalid_if_predecessor_fails`, `deferred_chain_too_deep`, `deferred_after_agent_cycle`, `deferred_predecessor_already_errored`, `deferred_predecessor_already_killed`, `after_agent_reference_not_found`, `after_agent_reference_out_of_order`, `after_agent_reference_unresolved`.
+
+### Chaining a worker after a script or command
+
+Not everything a step waits for is a Meringue agent. A pair review landing on a PR, a deploy going green, a nightly job finishing, a migration completing: those are external events, and `after_agent_id` cannot express them. `after_command` can. It is the same queued-worker mechanism with a second kind of predicate, not a different feature: the worker appears immediately as a `queued` worker with no session, the condition lives on its record so it survives a restart, and the kernel starts it exactly the way it starts an agent-gated worker.
+
+Use it whenever you would otherwise be tempted to tell a worker to poll or sleep. The kernel owns the polling, the timeout, the budget, and the handover.
+
+```json
+{
+  "title": "Ship the fix, then respond to the pair review",
+  "summary": "One issue: a delivery worker, and a review-response worker queued behind it and behind the review itself.",
+  "commands": [
+    {
+      "command_id": "issue",
+      "type": "CreateIssue",
+      "payload": { "project_id": "P1", "title": "Fix the checkout crash", "description": "..." }
+    },
+    {
+      "command_id": "deliver",
+      "type": "SpawnWorker",
+      "payload": {
+        "issue_from_command": "issue",
+        "title": "Fix the crash",
+        "prompt": "Fix the checkout crash, add a regression test, and open a PR."
+      }
+    },
+    {
+      "type": "SpawnWorker",
+      "payload": {
+        "issue_from_command": "issue",
+        "after_from_command": "deliver",
+        "follow_up_of_command": "deliver",
+        "title": "Respond to the pair review",
+        "prompt": "Address every comment from the pair review on the delivery PR, push the fixes, and reply on the PR.",
+        "after_command": "gh pr view --json reviewDecision --jq .reviewDecision | grep -qE 'APPROVED|CHANGES_REQUESTED'",
+        "after_command_label": "pair review on the delivery PR",
+        "after_command_interval_seconds": 120,
+        "after_command_max_wait_seconds": 14400
+      }
+    }
+  ],
+  "questions": []
+}
+```
+
+How the condition is judged:
+
+- `after_command_expect: "exit_zero"` (default) means the gate passes when the command exits `0`. This is the shape every shell already speaks, and it keeps the predicate in the command where it belongs (`... | grep -q APPROVED`).
+- `after_command_expect: "output_matches"` plus `after_command_pattern` means the gate passes when that regex matches the command's combined stdout and stderr. Use it when exit status is uninformative, for example `gh pr view <url> --json reviewDecision` which exits `0` whatever the review says.
+- A non-zero exit (or a non-matching output) is "not yet", not a failure. The kernel simply checks again later.
+
+Composing the two kinds of gate:
+
+- `after_agent_id`/`after_from_command` and `after_command` may both be set on one `SpawnWorker`. They compose as **AND**: the worker starts when the predecessor has settled *and* the command has passed.
+- The command is only armed once the predecessor settles, and the wait budget starts from that moment. That is what makes the example above correct: `gh pr view` is never polled before the worker that opens the PR has finished.
+- `after_command` and `replace_agent_id` are mutually exclusive, for the same reason `after_agent_id` is: a replacement takes over now.
+
+Where and how it runs:
+
+- In the project's registered root directory by default (`after_command_cwd: "project_root"`). A queued worker's workspace is only *planned* until it starts, so the project root is the one directory that reliably exists. `after_command_cwd: "workspace"` uses the worker's own workspace when it already exists on disk and falls back to the project root when it does not.
+- Through `/bin/sh -c`, in its own process group, inheriting Meringue's environment. It is killed if it exceeds `after_command_timeout_seconds` (default 30s, max 120s).
+- Every `after_command_interval_seconds` (default 60s, minimum 5s), from the kernel's reconciliation pass. Nothing sleeps or blocks: the condition lives on the worker record, so a long wait survives restarts and a slow command cannot stall session reconciliation.
+
+What happens when the condition never passes:
+
+| Outcome | Default result for the queued worker |
+| --- | --- |
+| the command passes | starts, with a `--- Wait condition: <label> ---` handover block containing the command's last output |
+| the command has not passed within `after_command_max_wait_seconds` (default 4h, max 24h) | cancelled with a warning naming the condition. Set `"if_gate_expires": "run"` to start it anyway; its handover then says the condition never passed |
+| the command cannot be run at all three times in a row (missing directory, spawn failure, repeated timeout) | cancelled with a warning, without waiting out the budget. A gate that can never succeed fails loudly. `"if_gate_expires": "run"` still starts the worker |
+| the predecessor it is also waiting on errors or is killed | resolved by the `after_agent_id` rules above; the command is never polled |
+
+Handover: the gate's own output is appended to the worker's prompt the same way a predecessor's final report is, and `"include_predecessor_result": false` suppresses both blocks.
+
+Safety: this runs a command you supply on a timer, so keep it cheap, read-only, and non-interactive. It must not need a TTY, must not prompt, and must not mutate anything. Prefer a single status query with a predicate (`gh pr view ... | grep -q ...`) over a script that does work.
+
+Rejection codes: `after_command_required` (gate options with no `after_command`), `invalid_after_command`, `invalid_after_command_expect`, `invalid_after_command_pattern`, `invalid_after_command_cwd`, `invalid_if_gate_expires`, `after_command_conflicts_with_replace`.
 
 ### PromptAgent
 

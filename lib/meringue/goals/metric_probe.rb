@@ -46,6 +46,31 @@ module Meringue
         )
       end
 
+      # Runs one wait-condition ("gate") command for a queued worker and answers a single
+      # question: may the worker start yet? The kernel polls this on a timer, so it reuses the
+      # same bounded execution as a metric (own process group, hard timeout, group kill on
+      # timeout, capped captured output) rather than adding a second command runner.
+      #
+      # Three outcomes, deliberately distinguished:
+      #   passed   -> the predicate held; the caller may start the worker
+      #   not yet  -> the command ran and the predicate did not hold; poll again later
+      #   unusable -> the command could not be run or could never be judged (missing cwd, spawn
+      #               failure, timeout, unusable pattern). The caller counts these and gives up
+      #               loudly instead of polling a broken gate forever.
+      def check_gate(command:, cwd:, timeout: DEFAULT_TIMEOUT_SECONDS, expect: "exit_zero", pattern: nil)
+        outcome = run(command: command, cwd: cwd, timeout: timeout)
+        verdict = gate_verdict(outcome, expect: expect, pattern: pattern)
+        outcome.merge(
+          {
+            "command" => command.to_s,
+            "expect" => expect.to_s,
+            "passed" => verdict.fetch("passed"),
+            "unusable" => verdict.fetch("unusable"),
+            "parse_error" => verdict.fetch("parse_error", nil)
+          }.compact
+        )
+      end
+
       # A cheap, deterministic fingerprint of the workspace's current tree. Two iterations
       # with the same fingerprint produced the same code, which is how the loop detects
       # that attempts are going in circles.
@@ -64,6 +89,27 @@ module Meringue
       private
 
       attr_reader :shell, :output_limit
+
+      def gate_verdict(outcome, expect:, pattern:)
+        return { "passed" => false, "unusable" => true } if outcome.fetch("timed_out", false) || outcome.key?("error")
+
+        case expect.to_s
+        when "output_matches"
+          gate_output_verdict(outcome, pattern)
+        else
+          { "passed" => outcome.fetch("exit_status", nil).to_i.zero?, "unusable" => false }
+        end
+      end
+
+      def gate_output_verdict(outcome, pattern)
+        expression = Record.present_string(pattern)
+        return { "passed" => false, "unusable" => true, "parse_error" => "output_matches needs a pattern" } unless expression
+
+        text = [outcome.fetch("stdout_tail", ""), outcome.fetch("stderr_tail", "")].join("\n")
+        { "passed" => !Regexp.new(expression, Regexp::MULTILINE).match(text).nil?, "unusable" => false }
+      rescue RegexpError => e
+        { "passed" => false, "unusable" => true, "parse_error" => "invalid wait-condition pattern: #{e.message}" }
+      end
 
       def run(command:, cwd:, timeout:)
         return { "error" => "metric command is empty", "exit_status" => nil, "timed_out" => false, "stdout_tail" => "", "stderr_tail" => "" } if Record.present_string(command).nil?

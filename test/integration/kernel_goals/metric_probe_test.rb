@@ -105,6 +105,43 @@ class KernelGoalsMetricProbeTest < Minitest::Test
     assert_equal "exit_zero", passing.fetch("expect")
   end
 
+  # The same bounded runner backs a queued worker's `after_command` wait condition. It reports
+  # three distinct things: passed, not yet, and "this can never be judged".
+  def test_a_wait_condition_gate_separates_passed_not_yet_and_unusable
+    passed = probe.check_gate(command: "true", cwd: tmpdir)
+    not_yet = probe.check_gate(command: "exit 1", cwd: tmpdir)
+    unusable = probe.check_gate(command: "true", cwd: File.join(tmpdir, "nope"))
+
+    assert passed.fetch("passed")
+    refute passed.fetch("unusable")
+    refute not_yet.fetch("passed")
+    refute not_yet.fetch("unusable"), "a non-zero exit means not yet, not broken"
+    refute unusable.fetch("passed")
+    assert unusable.fetch("unusable")
+  end
+
+  def test_an_output_matching_gate_ignores_the_exit_status
+    matched = probe.check_gate(command: "echo APPROVED", cwd: tmpdir, expect: "output_matches", pattern: "APPROVED")
+    unmatched = probe.check_gate(command: "echo REVIEW_REQUIRED", cwd: tmpdir, expect: "output_matches", pattern: "APPROVED")
+    broken = probe.check_gate(command: "echo APPROVED", cwd: tmpdir, expect: "output_matches", pattern: "APPROVED(")
+
+    assert matched.fetch("passed")
+    refute unmatched.fetch("passed")
+    refute unmatched.fetch("unusable")
+    # A pattern that cannot compile can never match, so it is unusable rather than "not yet".
+    refute broken.fetch("passed")
+    assert broken.fetch("unusable")
+    assert_includes broken.fetch("parse_error"), "invalid wait-condition pattern"
+  end
+
+  def test_a_wedged_gate_command_is_killed_at_its_timeout
+    result = probe.check_gate(command: "sleep 30", cwd: tmpdir, timeout: 1)
+
+    assert result.fetch("timed_out")
+    assert result.fetch("unusable")
+    refute result.fetch("passed")
+  end
+
   def test_the_workspace_fingerprint_changes_with_a_commit_and_is_nil_outside_git
     assert_nil probe.workspace_fingerprint(cwd: tmpdir), "a non-repository has no fingerprint"
 

@@ -247,6 +247,39 @@ validates it. Meringue's contribution to a resumed request is one plain user mes
 behavior above is therefore resilience, not a transcript fix, and it applies to any harness
 that reports the same class of failure.
 
+## Command gates on queued workers
+
+A queued worker can also wait on a shell condition (`after_command` on `SpawnWorker`; see
+"Chaining a worker after a script or command" in `docs/head_agent_kernel_commands.md`). That
+condition is evaluated by one reconcile step, `check_deferred_worker_gates`, which runs just
+before `resolve_deferred_workers` so a condition that passes in a pass starts its worker in the
+same pass.
+
+The step is bounded in every direction, because it runs a user- or head-supplied command on a
+timer. It is the same discipline "A background pass must stay in the background" states above,
+applied to a second kind of external I/O:
+
+- **Never under the state lock.** Like the delivery-PR refresh, the step is three phases: it
+  claims the gates that are due inside the lock (by moving `next_check_at` forward, which also
+  stops a second Meringue instance from running the same check), releases the lock, runs the
+  commands, and reacquires to write the outcomes back against *current* state. No user command
+  ever executes while the state file is held.
+- **Never for long.** Each check runs in its own process group and is killed at
+  `after_command_timeout_seconds` (default 30s, max 120s), and one pass spends at most
+  `DEFERRED_WORKER_GATE_BUDGET_SECONDS` (10s) starting checks. Gates that do not fit are checked
+  on the next pass, the same way `advance_goal_loops` defers goals it cannot fit.
+- **Never forever.** A gate is polled at most every `after_command_interval_seconds` (default
+  60s, minimum 5s), gives up at `after_command_max_wait_seconds` (default 4h, max 24h), and is
+  abandoned after three consecutive checks that could not be evaluated at all. Expiry and
+  abandonment cancel the queued worker with a warning by default, or start it anyway with
+  `if_gate_expires: "run"`.
+- **Never in memory only.** The whole condition, its budget, and its next check time live in
+  `harness_metadata.deferred_spawn.command_gate` on the worker record, so a wait that outlives
+  the process resumes on the next start.
+
+The step never activates or cancels anything itself. It only updates the gate's state;
+`resolve_deferred_workers` stays the one place a queued worker starts or is cancelled.
+
 ## Verifying
 
 ```bash
@@ -256,6 +289,7 @@ ruby -Ilib -Itest test/integration/kernel_maintenance/reconcile_delivery_pull_re
 ruby -Ilib -Itest test/integration/kernel_workers/settle_classification_test.rb
 ruby -Ilib -Itest test/integration/kernel_workers/unreplayable_session_recovery_test.rb
 ruby -Ilib -Itest test/integration/harness/pi_client_turn_outcome_test.rb
+ruby -Ilib -Itest test/integration/kernel_workers/command_gated_worker_test.rb
 ```
 
 The first test file covers the log-once/no-churn contract: an unrepairable worker session,
@@ -265,15 +299,20 @@ passes, live sessions in the same pass still reconcile, an errored record withou
 reconcile details is still polled and still reports its failure once, and a settled errored
 head is retained until `/prune` removes it.
 
-The last two files cover the unreplayable-session contract: the harness classifies the provider's
-rejection of a replayed `thinking` block as `unreplayable_session` with a `fresh_session` recovery
-hint, and the kernel records it with actionable reporting, never resumes it, continues the work in
-a fresh session on the same worktree and branch without allocating a second worktree, repoints the
-queued dependent at the successor, spends at most one restart, and keeps the shared worktree when
-the replaced record is pruned.
+The settle-classification, unreplayable-session, and Pi client files cover the unreplayable-session
+contract: the harness classifies the provider's rejection of a replayed `thinking` block as
+`unreplayable_session` with a `fresh_session` recovery hint, and the kernel records it with
+actionable reporting, never resumes it, continues the work in a fresh session on the same worktree
+and branch without allocating a second worktree, repoints the queued dependent at the successor,
+spends at most one restart, and keeps the shared worktree when the replaced record is pruned.
 
 The delivery-PR file covers the background-pass contract: a delivery PR refresh records forge state
 and never lets an unavailable forge overwrite the last known state, a blocked forge lookup does
 not stop another instance from running `ListAll` or `CreateIssue`, one tick honours both the
 batch limit and the shared budget, and refresh schedules are spread so records do not all fall
 due on the same tick.
+
+The command-gated worker file covers command gates: a gate is polled no faster than its interval,
+passes and starts its worker through the ordinary queued-worker path, hands the command's output
+over, expires into a cancellation (or a start under `if_gate_expires: "run"`), is abandoned after
+three unevaluable checks, and survives a restart with its budget intact.
