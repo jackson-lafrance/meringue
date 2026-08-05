@@ -40,6 +40,156 @@ class KernelGoalsCommandTest < Minitest::Test
     assert logs_matching(/Created goal G1 on #{fixture.fetch("issue_id")}/).any?
   end
 
+  # The prompt form: no issue exists yet, so the kernel mints one and attaches the goal to it.
+  def test_create_goal_without_an_issue_mints_one_from_the_prompt
+    fixture = registered_project
+
+    result = apply!(
+      "CreateGoal",
+      {
+        "prompt" => "Get line coverage of lib/meringue/kernel to 80%. Start with the goal loop paths.",
+        "metric_command" => "rake coverage",
+        "target" => 80,
+        "guardrails" => ["rake test"]
+      }
+    )
+    record = result.fetch("result")
+    issue = state.fetch("issues").first
+
+    assert_equal "G1", result.fetch("target_id")
+    assert_equal 1, state.fetch("issues").length
+    assert_equal fixture.fetch("project_id"), issue.fetch("project_id")
+    assert_equal "Get line coverage of lib/meringue/kernel to 80%", issue.fetch("title")
+    assert_includes issue.fetch("description"), "Start with the goal loop paths."
+    assert_includes issue.fetch("description"), "rake coverage >= 80"
+    assert_includes issue.fetch("description"), "rake test"
+    assert_equal "working", issue.fetch("status"), "the minted issue is the goal's live issue"
+    assert_equal issue.fetch("id"), record.fetch("issue_id")
+    assert_equal fixture.fetch("project_id"), record.fetch("project_id")
+    assert_equal issue.fetch("title"), record.fetch("title")
+    assert_equal "Get line coverage of lib/meringue/kernel to 80%. Start with the goal loop paths.", record.fetch("success_criteria")
+    assert_includes result.fetch("message"), "Created issue #{issue.fetch("id")}"
+    assert logs_matching(/Created issue #{issue.fetch("id")} for goal G1/).any?
+    assert logs_matching(/Created goal G1 on new issue #{issue.fetch("id")}/).any?
+  end
+
+  def test_a_prompt_goal_uses_the_project_it_is_told_about_by_id_or_name
+    registered_project("first", project_name: "First")
+    second = registered_project("second", project_name: "Second")
+
+    by_id = apply!("CreateGoal", prompt_payload.merge("project_id" => second.fetch("project_id")))
+    assert_equal second.fetch("project_id"), by_id.fetch("result").fetch("project_id")
+
+    by_name = apply!("CreateGoal", prompt_payload.merge("project" => "second", "prompt" => "drive lint offenses to zero"))
+    assert_equal second.fetch("project_id"), by_name.fetch("result").fetch("project_id")
+  end
+
+  # With several projects registered and no explicit choice, the directory Meringue is running
+  # in decides. Guessing would put invisible work in the wrong tree.
+  def test_a_prompt_goal_prefers_the_project_that_contains_the_current_directory
+    first = registered_project("first", project_name: "First")
+    nested = File.join(first.fetch("root"), "lib")
+    FileUtils.mkdir_p(nested)
+    registered_project("second", project_name: "Second")
+    @engine = build_engine(cwd: nested)
+
+    result = apply!("CreateGoal", prompt_payload)
+
+    assert_equal first.fetch("project_id"), result.fetch("result").fetch("project_id")
+  end
+
+  def test_a_prompt_goal_refuses_to_guess_between_projects_and_leaves_no_issue_behind
+    registered_project("first", project_name: "First")
+    registered_project("second", project_name: "Second")
+
+    result = apply_raw("CreateGoal", prompt_payload)
+
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "project_ambiguous"
+    assert_includes result.fetch("message"), "--project"
+    assert_includes result.fetch("message"), "P1, P2"
+    assert_empty state.fetch("issues")
+    assert_empty state.fetch("goals")
+
+    unknown = apply_raw("CreateGoal", prompt_payload.merge("project_id" => "P9"))
+    assert_equal "rejected", unknown.fetch("status")
+    assert_includes unknown.fetch("errors"), "project_not_found"
+    assert_includes unknown.fetch("message"), "Registered projects: P1, P2."
+    assert_empty state.fetch("issues")
+  end
+
+  def test_a_prompt_goal_with_no_registered_project_says_so
+    result = apply_raw("CreateGoal", prompt_payload)
+
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "no_registered_project"
+    assert_includes result.fetch("message"), "/project add"
+  end
+
+  # A goal that fails validation must not leave the issue it would have driven behind: nothing
+  # is written until the whole command is known to be good.
+  def test_a_rejected_prompt_goal_never_leaves_an_orphan_issue
+    registered_project
+
+    %w[comparator judge].each do |kind|
+      payload = prompt_payload
+      payload = payload.merge("comparator" => "approximately") if kind == "comparator"
+      payload = payload.merge("judge_mode" => "worker_when_metric_met") if kind == "judge"
+
+      result = apply_raw("CreateGoal", payload)
+      assert_equal "rejected", result.fetch("status"), kind
+    end
+
+    missing_metric = apply_raw("CreateGoal", { "prompt" => "make it fast" })
+    assert_equal "rejected", missing_metric.fetch("status")
+    assert_includes missing_metric.fetch("errors"), "metric.command is required"
+
+    assert_empty state.fetch("issues"), "a rejected goal must not mint an issue"
+    assert_empty state.fetch("goals")
+    assert_equal 0, state.fetch("counters").fetch("goals", 0)
+    assert_empty state.fetch("counters").fetch("issues_by_project", {})
+  end
+
+  def test_a_project_that_disagrees_with_a_named_issue_is_rejected
+    fixture = project_with_issue
+    other = registered_project("other", project_name: "Other")
+
+    mismatch = apply_raw(
+      "CreateGoal",
+      prompt_payload.merge("issue_id" => fixture.fetch("issue_id"), "project_id" => other.fetch("project_id"))
+    )
+    assert_equal "rejected", mismatch.fetch("status")
+    assert_includes mismatch.fetch("errors"), "project_issue_mismatch"
+
+    agreeing = apply!(
+      "CreateGoal",
+      prompt_payload.merge("issue_id" => fixture.fetch("issue_id"), "project_id" => fixture.fetch("project_id"))
+    )
+    assert_equal fixture.fetch("issue_id"), agreeing.fetch("result").fetch("issue_id")
+  end
+
+  def test_a_long_prompt_is_shortened_into_a_title_and_kept_verbatim_in_the_description
+    registered_project
+    prompt = "Cut the p95 latency of the search endpoint below 200ms across every shard " \
+             "without dropping any of the relevance guarantees we promised the design team"
+
+    apply!("CreateGoal", prompt_payload.merge("prompt" => prompt))
+    issue = state.fetch("issues").first
+
+    assert_operator issue.fetch("title").length, :<=, Meringue::Kernel::Engine::GOAL_ISSUE_TITLE_LIMIT + 1
+    assert issue.fetch("title").end_with?("…"), issue.fetch("title")
+    assert_includes issue.fetch("description"), prompt
+  end
+
+  def test_an_explicit_issue_title_and_goal_title_are_both_honoured
+    registered_project
+
+    result = apply!("CreateGoal", prompt_payload.merge("issue_title" => "Kernel coverage", "title" => "Coverage loop"))
+
+    assert_equal "Kernel coverage", state.fetch("issues").first.fetch("title")
+    assert_equal "Coverage loop", result.fetch("result").fetch("title")
+  end
+
   def test_create_goal_validates_its_inputs
     fixture = project_with_issue
 
@@ -49,9 +199,15 @@ class KernelGoalsCommandTest < Minitest::Test
     assert_includes missing.fetch("errors"), "metric.command is required"
     assert_includes missing.fetch("errors"), "metric.target must be a number"
 
+    nothing_to_attach_to = apply_raw("CreateGoal", { "metric_command" => "m", "target" => 1 })
+    assert_equal "rejected", nothing_to_attach_to.fetch("status")
+    assert_includes nothing_to_attach_to.fetch("errors"), "issue_id or prompt is required"
+
+    # A mistyped issue id is still an id, so it is rejected instead of becoming a new issue title.
     unknown_issue = apply_raw("CreateGoal", { "issue_id" => "P9-I9", "success_criteria" => "x", "metric_command" => "m", "target" => 1 })
     assert_equal "rejected", unknown_issue.fetch("status")
     assert_includes unknown_issue.fetch("errors"), "issue_not_found"
+    assert_equal 1, state.fetch("issues").length, "an unknown issue id must not mint one"
 
     bad_comparator = apply_raw(
       "CreateGoal",
@@ -208,6 +364,14 @@ class KernelGoalsCommandTest < Minitest::Test
 
     issue_info = apply!("GetInfo", { "target_id" => fixture.fetch("issue_id") }).fetch("result")
     assert_equal ["G1"], issue_info.fetch("goals").map { |summary| summary.fetch("id") }
+  end
+
+  def prompt_payload
+    {
+      "prompt" => "get line coverage of the kernel to 80%",
+      "metric_command" => "rake coverage",
+      "target" => 80
+    }
   end
 
   def test_goal_commands_are_head_proposable_and_run_through_the_normal_command_path

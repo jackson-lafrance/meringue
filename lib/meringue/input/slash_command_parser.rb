@@ -21,7 +21,7 @@ module Meringue
         ["/model <provider/model>", "Persist the model for all future Pi sessions; existing sessions are unchanged."],
         ["/thinking <level>", "Persist off, minimal, low, medium, high, xhigh, or max for all future Pi sessions; existing sessions are unchanged."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
-        ["/goal create <issue_id> \"<success criteria>\" --metric \"<command>\" --target <number> [flags]", "Attach a goal loop to an issue: iterate until the metric hits its target or a budget guard trips."],
+        ["/goal create [issue_id] \"<prompt>\" --metric \"<command>\" --target <number> [flags]", "Start a goal loop: name an issue, or give only a prompt and Meringue creates the issue for it. It iterates until the metric hits its target or a budget guard trips."],
         ["/goal status [goal_id]", "Show goal loops, iteration accounting, and stop reasons."],
         ["/goal pause <goal_id>", "Pause a goal loop; the current attempt finishes but nothing new is spawned."],
         ["/goal resume <goal_id>", "Resume a paused goal loop."],
@@ -55,7 +55,7 @@ module Meringue
         { "prefix" => "/jump", "source" => "agents", "append_space" => false },
         { "prefix" => "/answer", "source" => "open_questions", "append_space" => true },
         { "prefix" => "/dismiss", "source" => "open_questions", "append_space" => false },
-        { "prefix" => "/goal create", "source" => "issues", "append_space" => true },
+        { "prefix" => "/goal create", "source" => "goal_create_targets", "append_space" => true },
         { "prefix" => "/goal status", "source" => "goals", "append_space" => false },
         { "prefix" => "/goal pause", "source" => "goals", "append_space" => false },
         { "prefix" => "/goal resume", "source" => "goals", "append_space" => false },
@@ -63,7 +63,9 @@ module Meringue
       ].freeze
 
       GOAL_USAGE_MESSAGE = <<~USAGE.strip
-        Usage: /goal create <issue_id> "<success criteria>" --metric "<command>" --target <number> [--comparator gte|lte|gt|lt|eq] [--max-iterations <n>] [--max-workers <n>] [--min-delta <n>] [--no-progress <n>] [--guardrail "<command>"] [--parse last_number|first_number|exit_status|regex|json_path] [--pattern "<regex>"] [--json-path <path>] [--metric-cwd workspace|project_root] [--title "<title>"] [--fresh-attempt] [--paused]
+        Usage: /goal create "<prompt>" --metric "<command>" --target <number> [--project <project_id>] [flags]   (Meringue creates the issue)
+               /goal create <issue_id> "<success criteria>" --metric "<command>" --target <number> [flags]      (attach to an existing issue)
+               flags: [--comparator gte|lte|gt|lt|eq] [--max-iterations <n>] [--max-workers <n>] [--min-delta <n>] [--no-progress <n>] [--guardrail "<command>"] [--parse last_number|first_number|exit_status|regex|json_path] [--pattern "<regex>"] [--json-path <path>] [--metric-cwd workspace|project_root] [--title "<title>"] [--fresh-attempt] [--paused]
                /goal status [goal_id] | /goal pause <goal_id> | /goal resume <goal_id> | /goal stop <goal_id>
       USAGE
       # Flags that take a following value, so a missing value is reported instead of silently
@@ -83,6 +85,7 @@ module Meringue
         "--pattern" => "pattern",
         "--json-path" => "json_path",
         "--metric-cwd" => "metric_cwd",
+        "--project" => "project_id",
         "--timeout" => "metric_timeout_seconds",
         "--title" => "title",
         "--judge" => "judge_mode"
@@ -194,6 +197,7 @@ module Meringue
       def self.records_for_context(context, state)
         state = {} unless state.is_a?(Hash)
         return harness_provider_suggestion_records(context) if context.fetch("source") == "harness_providers"
+        return goal_create_suggestion_records(context, state) if context.fetch("source") == "goal_create_targets"
         return session_value_suggestion_records(context, state) if %w[session_models thinking_levels].include?(context.fetch("source"))
 
         items = case context.fetch("source")
@@ -223,6 +227,25 @@ module Meringue
                 end
 
         id_suggestion_records(items, context)
+      end
+
+      # `/goal create` takes an issue id *or* a quoted prompt, so its completion offers the issues
+      # and says out loud that the id is optional. The note row is inert: selecting it re-inserts
+      # exactly what was already typed, so it can never overwrite a real id.
+      def self.goal_create_suggestion_records(context, state)
+        issues = id_suggestion_records(Array(state["issues"]), context.merge("source" => "issues"))
+        return issues unless context.fetch("query", "").to_s.empty?
+
+        note = {
+          "usage" => "\"<prompt>\"",
+          "description" => "no issue needed · quote a prompt and Meringue creates the issue (--project <project_id> picks the project)",
+          "completion" => context.fetch("completion_prefix", context.fetch("prefix")),
+          "requires_arguments" => false,
+          "append_space" => false,
+          "index" => 0,
+          "kind" => "goal_create_prompt"
+        }
+        [note] + issues.map.with_index { |record, index| record.merge("index" => index + 1) }
       end
 
       def self.harness_provider_suggestion_records(context)
@@ -799,12 +822,58 @@ module Meringue
           end
         end
 
-        return invalid(GOAL_USAGE_MESSAGE) unless positional.length == 2
+        target = goal_create_target(positional)
+        return target if target.is_a?(Meringue::Kernel::Command)
 
-        payload["issue_id"] = positional[0]
-        payload["success_criteria"] = positional[1]
+        payload.merge!(target)
         payload["guardrails"] = guardrails unless guardrails.empty?
         kernel_command("CreateGoal", payload)
+      end
+
+      # Two forms share one verb, so the first positional token decides between them and an
+      # id-shaped token is *never* reinterpreted as prose:
+      #
+      #   /goal create P1-I7 "<success criteria>"   attach a goal to an existing issue
+      #   /goal create "<prompt>"                   mint the issue from the prompt, then attach
+      #
+      # A mistyped or incomplete id therefore fails loudly here (or, if it is issue-shaped but
+      # names nothing, in the kernel) instead of silently becoming a new issue's title.
+      def goal_create_target(positional)
+        case positional.length
+        when 1
+          token = positional[0].to_s
+          return invalid(goal_create_lone_id_message(token)) if Meringue::Ids.record_id?(token)
+
+          { "prompt" => token }
+        when 2
+          first = positional[0].to_s
+          return invalid(goal_create_first_token_message(first)) unless Meringue::Ids::ISSUE_PATTERN.match?(first)
+
+          { "issue_id" => first, "success_criteria" => positional[1] }
+        when 0
+          invalid("/goal create needs a prompt, or an issue id and its success criteria. #{GOAL_USAGE_MESSAGE}")
+        else
+          invalid(
+            "/goal create takes one quoted prompt, or an issue id plus quoted success criteria; " \
+            "got #{positional.length} arguments. Quote the whole prompt as a single argument. #{GOAL_USAGE_MESSAGE}"
+          )
+        end
+      end
+
+      def goal_create_lone_id_message(token)
+        "#{token} looks like a record id, so /goal create still needs the success criteria for it: " \
+          "/goal create #{token} \"<success criteria>\" ... Quote your text instead if you meant it as a new prompt. #{GOAL_USAGE_MESSAGE}"
+      end
+
+      def goal_create_first_token_message(first)
+        if Meringue::Ids::PROJECT_PATTERN.match?(first)
+          "#{first} is a project id, not an issue id. Use /goal create \"<prompt>\" --project #{first} to let Meringue create the issue. #{GOAL_USAGE_MESSAGE}"
+        elsif Meringue::Ids.record_id?(first)
+          "#{first} is not an issue id. Name an issue as P<n>-I<n>, or quote a prompt to have Meringue create the issue. #{GOAL_USAGE_MESSAGE}"
+        else
+          "/goal create takes one quoted prompt, or an issue id plus quoted success criteria. " \
+            "Quote the whole prompt as a single argument. #{GOAL_USAGE_MESSAGE}"
+        end
       end
 
       # Ids are passed through exactly as typed. The kernel canonicalizes them against state, so

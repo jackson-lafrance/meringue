@@ -326,6 +326,25 @@ class HeadContextTest < Minitest::Test
     assert(rules.any? { |rule| rule.include?("polling Meringue state") })
   end
 
+  # "This is critical, don't stop until it's done" used to route as one ordinary worker, because
+  # nothing a head reads connected that phrasing to the goal loop.
+  def test_a_head_is_told_that_a_drive_it_to_done_request_is_a_goal_loop
+    context = build_head_context
+    prompt = context.system_prompt
+    rules = context.to_prompt_h.dig("routing_context", "decision_rules")
+
+    assert_includes prompt, "driven to completion rather than attempted once"
+    assert_includes prompt, "propose CreateGoal instead of a single one-shot worker"
+    assert_includes prompt, "CreateGoal mints its own issue from a prompt"
+    assert_includes prompt, "Urgency alone is not a goal loop"
+
+    goal_rule = rules.find { |rule| rule.include?("is a goal loop, not a one-shot worker") }
+    refute_nil goal_rule, "expected a routing rule for goal-loop requests"
+    assert_includes goal_rule, "prompt form"
+    assert_includes goal_rule, "project_from_command"
+    assert(rules.any? { |rule| rule.include?("Insistence without a measurable finish line is still ordinary work") })
+  end
+
   # A head that asked to both follow up and replace one worker had its SpawnWorker rejected, so the
   # user's retry did nothing. The kernel contract has to be stated in the routing rules.
   def test_routing_rules_forbid_combining_replace_with_follow_up_or_after
