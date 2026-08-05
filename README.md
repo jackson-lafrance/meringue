@@ -174,7 +174,7 @@ Useful slash commands inside the TUI include:
 - `/defaults` — inspect the model and thinking level for all future Pi heads and workers.
 - `/models [harness] [refresh]` — list every model the selected harness reports, with each model's supported thinking levels; `refresh` re-asks the harness instead of using the cached snapshot.
 - `/model <provider/model>` — persist the model for all future Pi sessions; existing sessions are unchanged.
-- `/thinking <level>` — persist the thinking level for all future Pi sessions; existing sessions are unchanged.
+- `/thinking <off|minimal|low|medium|high|xhigh|max>` — persist the thinking level for all future Pi sessions; existing sessions are unchanged.
 - `/session-settings <agent_id>` — refresh and inspect one existing agent's effective Pi model and thinking level (the old dashboard `/session` spelling remains a compatibility alias; focused workspaces advertise `/open-session` for opening the harness UI).
 - `/keybind` — show active TUI keybindings.
 - `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together and removes their clean, unlocked Meringue-managed worktrees. Unsafe cleanup (dirty, locked, ambiguous, or failed) retains the bundle and logs why so it can be retried.
@@ -193,7 +193,7 @@ and theme/harness names.
 
 You do not have to type them. Head agents can run the same commands from plain language, so "prune the merged issues", "renumber the tree", "kill P1-I9-W3", or "what is P1-I12" apply the matching kernel command and print the same output as the typed slash command. Irreversible commands are gated: `/clear` and killing a whole project are only run when your own message unambiguously asks for them, and otherwise the head asks you to confirm. `/jump`, `/keybind`, and `/quit` are local TUI commands and stay typed-only.
 
-`/model` and `/thinking` complete from the selected harness's own model catalog, so the selector lists every available model rather than only the ones Meringue has seen. See `docs/session-settings.md#authoritative-model-catalog-discovery` for discovery, caching, and unavailable-catalog behavior.
+`/model` and `/thinking` complete from the selected harness's own model catalog, so the selector lists every available model rather than only the ones Meringue has seen. `/thinking` always offers all seven levels — the saved default first, the rest labelled with what the configured model advertises — because the catalog explains a level rather than deciding whether you may pick it. See `docs/session-settings.md#authoritative-model-catalog-discovery` for discovery, caching, and unavailable-catalog behavior, and `docs/session-settings.md#thinking-levels` for the level ladder, labels, and clamping.
 
 See `docs/head_agent_kernel_commands.md` for the head command contract, destructive-command rules, prune eligibility, and worktree cleanup safety. See `docs/goal_loops.md` for how goal loops measure progress, judge each iteration, and stop. See `docs/recount.md` for the renumbering/cross-reference/active-session rules, and `docs/keybindings.md` for keyboard navigation, customization, and jump-mode details.
 

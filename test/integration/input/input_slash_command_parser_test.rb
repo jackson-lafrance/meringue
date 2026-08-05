@@ -398,30 +398,83 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_includes note.fetch("usage"), "latest refresh failed"
     assert_includes note.fetch("description"), "connection reset"
 
-    # Thinking levels still come from the retained per-model data.
-    thinking = suggestion_records("/thinking ", state).map { |record| record.fetch("usage") }
-    assert_equal %w[xhigh max], thinking
+    # Per-model labels still come from the retained catalog data.
+    thinking = suggestion_records("/thinking ", state)
+    assert_equal "xhigh", thinking.first.fetch("usage")
+    assert_includes thinking.first.fetch("description"), "supported by anthropic-flex/claude-opus-5"
+    assert_equal Meringue::Harness::PiClient::THINKING_LEVELS.sort,
+                 thinking.map { |record| record.fetch("usage") }.sort
   end
 
-  def test_thinking_suggestions_follow_the_models_supported_levels
+  # The catalog labels thinking levels; it no longer decides which ones exist.
+  # Every level the kernel accepts is offered, the saved default leads the list,
+  # and a level the model does not advertise says what Pi will run instead.
+  def test_thinking_suggestions_offer_every_accepted_level_and_lead_with_the_current_default
     state = sample_state_with_model_catalog
 
-    default_levels_for_catalog_model = suggestion_records("/thinking ", state)
-    assert_equal %w[xhigh max], default_levels_for_catalog_model.map { |record| record.fetch("usage") }
-    assert_includes default_levels_for_catalog_model.first.fetch("description"), "supported by anthropic-flex/claude-opus-5"
+    records = suggestion_records("/thinking ", state)
+    assert_equal %w[xhigh off minimal low medium high max], records.map { |record| record.fetch("usage") }
+    assert_equal "/thinking xhigh", records.first.fetch("completion")
+    assert records.first.fetch("current"), "the saved default must be marked"
+    assert_includes records.first.fetch("description"), "current default"
+    assert_includes records.first.fetch("description"), "supported by anthropic-flex/claude-opus-5"
 
-    # The saved default model only supports xhigh/max, so /thinking
-    # offers exactly those.
-    default_levels = suggestion_records("/thinking ", state)
-    assert_equal %w[xhigh max], default_levels.map { |record| record.fetch("usage") }
-    assert_equal "/thinking xhigh", default_levels.first.fetch("completion")
-    assert_includes default_levels.first.fetch("description"), "supported by anthropic-flex/claude-opus-5"
+    # anthropic-flex/claude-opus-5 advertises only xhigh/max, so the rest of the
+    # ladder stays selectable but says Pi will clamp it.
+    minimal = records.find { |record| record.fetch("usage") == "minimal" }
+    refute minimal.fetch("current")
+    assert_includes minimal.fetch("description"), "future sessions"
+    assert_includes minimal.fetch("description"), "not listed for anthropic-flex/claude-opus-5"
+    assert_includes minimal.fetch("description"), "Pi clamps it to xhigh"
 
-    # A model whose levels are unknown falls back to Pi's full ladder and says so.
+    max = records.find { |record| record.fetch("usage") == "max" }
+    assert_includes max.fetch("description"), "supported by anthropic-flex/claude-opus-5"
+
+    # A model whose levels are unknown offers the same ladder and says the model
+    # support is unverified rather than pretending the list is authoritative.
     unknown = sample_state_with_model_catalog(catalogs: {})
     unknown_levels = suggestion_records("/thinking ", unknown)
-    assert_equal Meringue::Harness::PiClient::THINKING_LEVELS, unknown_levels.map { |record| record.fetch("usage") }
+    assert_equal %w[xhigh off minimal low medium high max], unknown_levels.map { |record| record.fetch("usage") }
     assert_includes unknown_levels.first.fetch("description"), "not verified"
+
+    # Typing filters the same list, and prefix matches lead so completing "hi"
+    # cannot resolve to the saved default "xhigh" just because it is hoisted.
+    assert_equal %w[high xhigh], suggestion_records("/thinking hi", state).map { |record| record.fetch("usage") }
+    assert_equal ["off"], suggestion_records("/thinking of", state).map { |record| record.fetch("usage") }
+  end
+
+  # Regression for "the max thinking level isn't appearing in /thinking even
+  # though I'm on Claude Opus 5": a provider extension can under-declare a
+  # model's `thinkingLevelMap`, and the kernel accepts `max` regardless, so the
+  # picker must not drop the level its own saved default is already using.
+  def test_thinking_suggestions_keep_levels_a_provider_extension_does_not_advertise
+    proxy = "anthropic-250k-prefer-using-this-one/claude-opus-5"
+    catalogs = {
+      "pi" => model_catalog_snapshot(
+        models: [
+          { "provider" => "anthropic-250k-prefer-using-this-one", "id" => "claude-opus-5", "name" => "Claude Opus 5",
+            "thinking_levels" => %w[off minimal low medium high xhigh], "reasoning" => true },
+          { "provider" => "anthropic", "id" => "claude-opus-5", "name" => "Claude Opus 5",
+            "thinking_levels" => %w[off minimal low medium high xhigh max], "reasoning" => true }
+        ]
+      )
+    }
+    state = sample_state_with_model_catalog(catalogs: catalogs, default_model: proxy)
+    state.dig("metadata", "pi_session_defaults")["thinking_level"] = "max"
+
+    records = suggestion_records("/thinking ", state)
+    usages = records.map { |record| record.fetch("usage") }
+
+    assert_includes usages, "max"
+    assert_includes usages, "xhigh"
+    assert_equal Meringue::Harness::PiClient::THINKING_LEVELS.sort, usages.sort
+    # The level in force is the first thing the three-row popup shows.
+    assert_equal "max", usages.first
+    assert_includes records.first.fetch("description"), "current default"
+    assert_includes records.first.fetch("description"), "not listed for #{proxy}"
+    assert_includes records.first.fetch("description"), "Pi clamps it to xhigh"
+    # Typing the level the kernel accepts still completes it.
+    assert_equal "/thinking max", suggestion_records("/thinking max", state).first.fetch("completion")
   end
 
   def test_models_command_lists_catalogs_and_supports_an_explicit_refresh
