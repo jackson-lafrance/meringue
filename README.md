@@ -170,9 +170,8 @@ Useful slash commands inside the TUI include:
 - `/theme <name>` — persist a TUI colorscheme.
 - `/config` — show the active config, supported defaults, conflict policy, and keybindings.
 - `/harness <pi|claude|antigravity>` — select the harness for future agents.
-- `/defaults` — inspect the model and thinking level for all future Pi heads and workers.
 - `/models [harness]` — open the model picker: a searchable list of the models the selected harness reports, with each model's provider/id, name, and supported thinking levels. Type to filter, `↑`/`↓` to move, `Enter` applies the model as the future-session default (exactly like `/model`), `Ctrl-R` re-asks the harness, `Esc` closes. `/models refresh [harness]` skips the picker and just re-fetches the catalog.
-- `/model <provider/model>` — persist the model for all future Pi sessions; existing sessions are unchanged.
+- `/model <provider/model>` — persist the model for all future Pi sessions; existing sessions are unchanged. The pair in force is always visible in the dashboard status line (`Pi defaults: <model> · <thinking>`) and in `/config`.
 - `/thinking <off|minimal|low|medium|high|xhigh|max>` — persist the thinking level for all future Pi sessions; existing sessions are unchanged.
 - `/keybind` — show active TUI keybindings.
 - `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together and removes their clean, unlocked Meringue-managed worktrees. Unsafe cleanup (dirty, locked, ambiguous, or failed) retains the bundle and logs why so it can be retried.

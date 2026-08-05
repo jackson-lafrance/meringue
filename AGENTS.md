@@ -313,7 +313,6 @@ Do the same thing as coding harnesses for these aswell we want it to be familiar
 /issue create <project_id> "<title>" ["description"]
 /worker spawn <issue_id> "<prompt>"
 /prompt <agent_id> "<message>"
-/defaults
 /models [harness] [refresh]   (opens the model picker; `refresh` re-fetches the catalog instead)
 /model <provider/model>
 /thinking <level>

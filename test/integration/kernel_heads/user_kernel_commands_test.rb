@@ -47,6 +47,22 @@ class KernelHeadsUserKernelCommandsTest < KernelHeadsTestCase
     assert_includes result.fetch("errors"), "unknown_command"
   end
 
+  # `/defaults` was removed because the status line and `/config` already show the
+  # pair, so a head asked "which model will future agents use" is now the only way
+  # `GetSessionDefaults` runs. It has to keep working end to end, not just appear
+  # in the proposable list.
+  def test_a_head_can_still_read_the_future_session_defaults_without_a_slash_command
+    head_id = spawn_head!("which model will future agents use")
+    applied = apply_head_result(head_id, head_result(commands: [command("GetSessionDefaults")]))
+    result = command_results(applied).first
+
+    assert_equal "GetSessionDefaults", result.fetch("command_type")
+    assert_equal "accepted", result.fetch("status")
+    assert_equal "future_pi_sessions", result.dig("result", "scope")
+    assert_includes result.fetch("message"), "Future Pi heads and workers use"
+    assert_includes log_messages, result.fetch("message")
+  end
+
   def test_one_head_batch_can_apply_every_ordinary_user_kernel_command
     project_id = add_project!
     issue_id = apply_command(
