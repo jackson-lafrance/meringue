@@ -32,16 +32,62 @@ class KernelMaintenancePruneWorktreeCleanupTest < Minitest::Test
     refute Dir.exist?(workspace.fetch("worktree_root_path"))
     assert branch_exists?(project, workspace.fetch("workspace_branch")), "worktree cleanup must preserve the delivery branch"
 
-    cleanup_log = read_state.fetch("logs").find { |log| log.fetch("message").start_with?("Removed managed worktree") }
-    refute_nil cleanup_log
-    assert_equal "info", cleanup_log.fetch("level")
+    # A successful cleanup no longer costs a log line of its own: the pass summary counts it and
+    # carries the per-agent outcome, including the exact worktree path that was removed.
+    logs = read_state.fetch("logs")
+    assert_empty logs.select { |log| log.fetch("message").include?("managed worktree for worker") }
+    summaries = logs.select { |log| log.fetch("message").start_with?("Pruned ") }
+    assert_equal 1, summaries.length
+    summary = summaries.first
+    assert_equal "Pruned 1 issue, 1 agent, 1 worktree, and 0 projects.", summary.fetch("message")
+    assert_equal "info", summary.fetch("level")
+    assert_equal ["P1-I1-W1"], summary.dig("details", "removed_worktree_agent_ids")
+    logged_cleanup = summary.dig("details", "workspace_cleanup_outcomes", 0)
+    assert_equal "P1-I1-W1", logged_cleanup.fetch("agent_id")
+    assert_equal "removed", logged_cleanup.fetch("status")
     assert_equal real_path(File.dirname(workspace.fetch("worktree_root_path"))),
-                 File.dirname(cleanup_log.dig("details", "worktree_root_path"))
+                 File.dirname(logged_cleanup.fetch("worktree_root_path"))
     assert_equal File.basename(workspace.fetch("worktree_root_path")),
-                 File.basename(cleanup_log.dig("details", "worktree_root_path"))
+                 File.basename(logged_cleanup.fetch("worktree_root_path"))
   end
 
-  def test_already_removed_worktree_is_logged_as_idempotent_and_does_not_block_pruning
+  def test_pruning_many_worktrees_reports_them_in_one_summary_line
+    project = create_git_project(@kernel_maintenance_tmp, name: "managed-project")
+    manager = Meringue::Workspace::Manager.new(root_path: tmp_path("workspaces"))
+    workspaces = (1..3).map do |index|
+      allocate_workspace(
+        manager,
+        project,
+        task_title: "Completed cleanup #{index}",
+        issue_id: "P1-I#{index}",
+        agent_id: "P1-I#{index}-W1"
+      )
+    end
+    workers = workspaces.each_with_index.map do |workspace, index|
+      managed_worker_record(workspace, id: "P1-I#{index + 1}-W1", issue_id: "P1-I#{index + 1}", status: "completed")
+    end
+    write_state(
+      state_fixture(
+        projects: [project_record(id: "P1", root_path: project.fetch("project_root"), status: "working")],
+        issues: workers.each_with_index.map do |worker, index|
+          issue_record(id: "P1-I#{index + 1}", project_id: "P1", status: "completed", agent_ids: [worker.fetch("id")])
+        end,
+        agents: workers
+      )
+    )
+
+    result = apply_command(build_engine, "Prune", {})
+
+    assert_equal "Pruned 3 issues, 3 agents, 3 worktrees, and 0 projects.", result.fetch("message")
+    assert_equal %w[P1-I1-W1 P1-I2-W1 P1-I3-W1], result.dig("result", "removed_worktree_agent_ids").sort
+    workspaces.each { |workspace| refute Dir.exist?(workspace.fetch("worktree_root_path")) }
+
+    logs = read_state.fetch("logs")
+    assert_equal 1, logs.length, "three worktree removals must still be one visible log line"
+    assert_equal 3, logs.first.dig("details", "workspace_cleanup_outcomes").length
+  end
+
+  def test_already_removed_worktree_is_recorded_as_idempotent_and_does_not_block_pruning
     project, workspace = managed_project_and_workspace(task_title: "Already removed cleanup")
     manager = Meringue::Workspace::Manager.new(root_path: tmp_path("workspaces"))
     assert manager.release_worker_workspace(workspace)
@@ -51,10 +97,14 @@ class KernelMaintenancePruneWorktreeCleanupTest < Minitest::Test
 
     assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
     assert_equal "already_removed", result.dig("result", "workspace_cleanup_outcomes", 0, "status")
+    # Nothing was deleted by this pass, so the worktree count is zero and the confirmation stays in
+    # the details rather than spending a line of its own.
+    assert_equal "Pruned 1 issue, 1 agent, 0 worktrees, and 0 projects.", result.fetch("message")
+    assert_empty result.dig("result", "removed_worktree_agent_ids")
     state = read_state
-    log = state.fetch("logs").find { |entry| entry.fetch("message").start_with?("Confirmed the managed worktree") }
-    refute_nil log
-    assert_equal "worktree_already_removed", log.dig("details", "reason")
+    assert_equal 1, state.fetch("logs").length
+    summary = state.fetch("logs").first
+    assert_equal "worktree_already_removed", summary.dig("details", "workspace_cleanup_outcomes", 0, "reason")
   end
 
   def test_dirty_worktree_blocks_record_pruning_and_is_retried_after_it_is_clean
@@ -152,7 +202,13 @@ class KernelMaintenancePruneWorktreeCleanupTest < Minitest::Test
     assert_empty state.fetch("agents")
     assert_equal ["P1-I1"], ids(state.fetch("issues"))
     assert_empty issue_by_id(state, "P1-I1").fetch("agent_ids")
-    assert state.fetch("logs").any? { |log| log.fetch("message").start_with?("Removed managed worktree") }
+    # Reconciliation shares the consolidated wording, so the filesystem side effect is still
+    # visible without one line per worker.
+    summaries = state.fetch("logs").select { |log| log.fetch("message").start_with?("Pruned killed records:") }
+    assert_equal 1, summaries.length
+    assert_equal "Pruned killed records: 0 issues, 1 agent, 1 worktree, and 0 projects.",
+                 summaries.first.fetch("message")
+    assert_equal ["P1-I1-W1"], summaries.first.dig("details", "removed_worktree_agent_ids")
   end
 
   def test_project_root_and_dedicated_directory_workspaces_are_not_deleted

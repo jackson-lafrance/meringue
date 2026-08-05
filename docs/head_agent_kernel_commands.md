@@ -10,7 +10,7 @@ Meringue housekeeping is the exception to "route it to a worker": every user sla
 
 ## User commands a head may run
 
-A head-proposed command is applied, validated, journaled, and logged exactly like the typed slash command, and the kernel's own output (for example `Pruned 3 issues, 1 project, and 0 standalone agents.`) is written to the visible log by the kernel. Do not restate that output in the HeadResult summary; use the summary only to explain the decision ("Ran the prune cleanup pass.").
+A head-proposed command is applied, validated, journaled, and logged exactly like the typed slash command, and the kernel's own output (for example `Pruned 3 issues, 4 agents, 3 worktrees, and 1 project.`) is written to the visible log by the kernel. Do not restate that output in the HeadResult summary; use the summary only to explain the decision ("Ran the prune cleanup pass.").
 
 Natural-language mapping:
 
@@ -1159,6 +1159,12 @@ How a merged PR is resolved:
 - Branch discovery (`gh pr list --head <branch>`) is skipped for a worker whose exact delivery branch already has a recorded merged PR: it could only re-derive URLs Meringue already has, and a failed discovery used to retain the settled record.
 - Within the bounded lookup phase, retention-critical lookups come first (statuses of PRs already recorded on an issue, then branch discovery for settled workers whose delivery PR is still unknown), and exploratory verification of historical candidate URLs runs last. Exhausting the budget therefore costs discovery, never a known PR status.
 
+One pass, one line:
+
+- The summary is a single log entry shaped `Pruned N issues, M agents, K worktrees, and P projects.` The agent count is every agent record the pass removed (workers bundled with a removed issue, the heads removed with them, and standalone errored heads), not just the standalone ones. The worktree count is the managed worktrees actually deleted from disk; a worktree that was already gone is reported in the details, not in the count.
+- Retention sentences are appended to that same line, so `/prune` stays one visible line even when it retains records.
+- The killed-record cleanup inside `ReconcileSessions` reports the same counts with a `Pruned killed records:` prefix, and only when it actually removed something.
+
 Why a record was retained is always reported:
 
 - The prune log details carry `retained_issue_ids`, `retention_reasons` (per-issue blockers, unverified/open PR URLs, blocking workers, questions, worktree blockers), and a `forge_lookup` summary (`budget_seconds`, `elapsed_seconds`, `budget_exhausted`, `status_lookup_count`, `branch_lookup_count`, `trusted_from_state_urls`, `unavailable_urls`).
@@ -1170,7 +1176,7 @@ Worktree cleanup safety and outcomes:
 - The persisted worktree path must still be registered to the persisted `meringue/…` branch in the expected repository and must not be the main checkout or overlap a path referenced by another worker.
 - Clean, unlocked worktrees are removed with `git worktree remove` **without** `--force`. The branch is not deleted.
 - A missing but still-registered worktree is safely deregistered. A worktree already absent from both disk and git's registry is an idempotent success.
-- Dirty, locked, ambiguous, or failed cleanups leave the issue/worker record in state. The worker stores its latest `harness_metadata.workspace_cleanup` result, warning/info logs name each outcome, and the `Prune` result exposes `workspace_cleanup_outcomes` plus blocked agent/issue/project IDs.
+- Dirty, locked, ambiguous, or failed cleanups leave the issue/worker record in state, and each one is logged individually at `warning`. Successful cleanups are counted by the pass summary instead of getting a line each. Every worker stores its latest `harness_metadata.workspace_cleanup` result, and the `Prune` result and log details expose `workspace_cleanup_outcomes`, `removed_worktree_agent_ids`, and the blocked agent/issue/project IDs.
 
 PR checks are conservative and bounded. The kernel performs them outside the state lock,
 looks up each URL once, seeds the cache with pull requests already recorded as merged, and
@@ -1180,7 +1186,7 @@ indefinitely or being removed unsafely.
 
 Compatibility: a legacy `selector` value (`resolved`, `errored`, `completed`, or `merged`) is still accepted and recorded as `requested_selector` in the log details, but it is a no-op that prunes exactly the same records as a bare `/prune`. Any other `/prune` argument is rejected by the slash-command parser with a short usage message. Do not invent a selector for a head-proposed `Prune`: send an empty payload.
 
-The kernel logs the summary itself (`Pruned 3 issues, 1 project, and 0 standalone agents.`), so the HeadResult summary should not restate the counts.
+The kernel logs the summary itself (`Pruned 3 issues, 4 agents, 3 worktrees, and 1 project.`), so the HeadResult summary should not restate the counts.
 
 Example:
 

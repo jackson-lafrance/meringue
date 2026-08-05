@@ -32,7 +32,12 @@ tests were updated to the shipped behavior:
 - `Prune` takes no options. One pass removes resolved (completed/killed) **and** errored
   records; a legacy `selector` word is recorded as `requested_selector` for traceability and
   changes nothing. The old `selector` / `reason` result keys are gone.
-- The summary message is now `"Pruned N issues, M projects, and K standalone agents."`.
+- The summary message is now `"Pruned N issues, M agents, K worktrees, and P projects."` — one line per
+  pass. The agent count covers every removed agent record (issue-owned workers and heads plus
+  standalone errored heads), the worktree count covers the managed worktrees actually removed, and
+  successful worktree cleanups no longer log one `"Removed managed worktree for worker …"` line each.
+  Blocked cleanups are still logged individually at `warning`. The killed-record prune inside
+  `ReconcileSessions` logs the same counts with a `"Pruned killed records:"` prefix.
 - Blocking worker statuses are `queued`, `working`, `blocked` — an `errored` or `idle` worker
   no longer retains its issue.
 - The project blocker is named `project_not_terminal`.
