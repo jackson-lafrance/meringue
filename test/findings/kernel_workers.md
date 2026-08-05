@@ -29,6 +29,12 @@ All tests assert **current actual behavior**. No production code was changed.
   `provisioning_state = "ready"`.
 - Harness session identity (`harness`, `pid`, `harness_session_id`,
   `harness_session_file`) is recorded on the agent record after a successful spawn.
+- A successful spawn writes exactly one worker-scoped log line (`Spawned worker P1-I1-W1 for
+  P1-I1.`), emitted after allocation so its `details` carry the workspace path/branch the
+  worker really got, including a uniquified `-2` fallback. There is no preceding
+  "Provisioning workspace ..." line; the reservation phase is silent in the log and visible
+  only as a `queued` worker plus `harness_metadata.provisioning_state`. A provisioning
+  failure is still logged: the worker's only visible line is then the `error`.
 - Human-facing naming holds: branch slugs and harness session names strip `P1-I1-W1`,
   `H2`, and `Q3` style orchestration ids (`Workspace::Manager#human_slug` /
   `Engine#human_delivery_title`).

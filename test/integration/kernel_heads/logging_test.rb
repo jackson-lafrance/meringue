@@ -62,9 +62,10 @@ class KernelHeadsLoggingTest < KernelHeadsTestCase
     assert_equal "P1", issue_log.fetch("details").fetch("project_id")
     assert_nil issue_log.fetch("details").fetch("parent_issue_id")
 
-    provisioning_log = log_with_message("Provisioning workspace for worker P1-I1-W1")
-    assert_equal "kernel", provisioning_log.fetch("source_type")
-    assert_equal "P1-I1-W1", provisioning_log.fetch("source_id")
+    # Spawning a worker is one event and gets one line. There is deliberately no
+    # "Provisioning workspace for worker ..." line before it.
+    worker_logs = logs.select { |entry| entry.fetch("source_id", nil) == "P1-I1-W1" }
+    assert_equal ["Spawned worker P1-I1-W1 for P1-I1."], worker_logs.map { |entry| entry.fetch("message") }
 
     worker_log = log_with_message("Spawned worker P1-I1-W1")
     assert_equal "kernel", worker_log.fetch("source_type")

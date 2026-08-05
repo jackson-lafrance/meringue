@@ -110,16 +110,23 @@ class KernelWorkersSpawnTest < Minitest::Test
     assert_equal "working", project(engine, context.fetch("project_id")).fetch("status")
   end
 
-  def test_spawn_emits_provisioning_and_spawn_logs
+  # A successful spawn is one event, so it gets exactly one visible log line. The old
+  # "Provisioning workspace for worker ..." line said the same thing a moment earlier and
+  # is intentionally gone; the surviving line carries the full routing details.
+  def test_spawn_emits_one_spawn_log_and_no_provisioning_chatter
     engine = build_engine
     context = project_with_issue(engine)
 
     result = spawn_worker(engine, context.fetch("issue_id"))
     worker_id = result.fetch("target_id")
 
-    assert_includes log_messages(engine), "Provisioning workspace for worker #{worker_id}."
     assert_includes log_messages(engine), "Spawned worker #{worker_id} for P1-I1."
     assert_equal "Spawned worker #{worker_id} for P1-I1.", result.fetch("message")
+    assert_empty logs_matching(engine, /Provisioning workspace/)
+    assert_equal(
+      ["Spawned worker #{worker_id} for P1-I1."],
+      worker_scoped_logs(engine, worker_id).map { |entry| entry.fetch("message") }
+    )
     refute_empty result.fetch("log_entry_ids")
   end
 
