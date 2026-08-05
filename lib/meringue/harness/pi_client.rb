@@ -71,6 +71,17 @@ module Meringue
         |tls|ssl|certificate|handshake|proxy|gateway|fetch\sfailed
         |overloaded|502|503|504
       /ix.freeze
+      # A provider rejection of the *transcript itself* rather than of one unlucky request.
+      # Anthropic-style routes refuse a replayed assistant turn whose `thinking`/
+      # `redacted_thinking` blocks are not byte-identical to what they originally returned, and
+      # nothing about resuming changes that: the same saved turn is replayed, so the same request
+      # is refused again. Retrying such a session is guaranteed to fail, which is why it is
+      # classified apart from a transport blip.
+      UNREPLAYABLE_SESSION_PATTERN = /
+        (?:thinking|redacted_thinking)[^\n]{0,200}?cannot\s+be\s+modified
+        |blocks\s+must\s+remain\s+as\s+they\s+were\s+in\s+the\s+original\s+response
+        |expected\s+`?thinking`?\s+or\s+`?redacted_thinking`?
+      /ix.freeze
 
       # Mirrors Pi's own `clampThinkingLevel`: a level a model does not advertise
       # resolves to the nearest level it does, searching up the ladder first and
@@ -1221,11 +1232,15 @@ module Meringue
       end
 
       def failed_turn_outcome(stop_reason, error_message, text, ended_at)
-        network = NETWORK_ERROR_PATTERN.match?(error_message.to_s)
+        unreplayable = UNREPLAYABLE_SESSION_PATTERN.match?(error_message.to_s)
+        network = !unreplayable && NETWORK_ERROR_PATTERN.match?(error_message.to_s)
         {
           "state" => "failed",
-          "kind" => network ? "network_failure" : "provider_error",
-          "reason" => turn_failure_reason(network, error_message),
+          "kind" => turn_failure_kind(unreplayable, network),
+          "reason" => turn_failure_reason(network, error_message, unreplayable: unreplayable),
+          # Harness-neutral hint for the kernel: this session can never be resumed, but the work
+          # can continue in a fresh session on the same workspace.
+          "recovery" => unreplayable ? "fresh_session" : nil,
           "stop_reason" => stop_reason.to_s,
           "error_message" => present?(error_message) ? error_message.to_s : nil,
           # When the turn ended, so a later prompt can be told apart from stale evidence.
@@ -1234,8 +1249,21 @@ module Meringue
         }.compact
       end
 
-      def turn_failure_reason(network, error_message)
+      def turn_failure_kind(unreplayable, network)
+        return "unreplayable_session" if unreplayable
+
+        network ? "network_failure" : "provider_error"
+      end
+
+      def turn_failure_reason(network, error_message, unreplayable: false)
         detail = error_message.to_s.strip
+        if unreplayable
+          return "its saved session can no longer be replayed to the model, so resuming it fails the same way every time" if detail.empty?
+
+          return "its saved session can no longer be replayed to the model, so resuming it fails " \
+                 "the same way every time (#{detail})"
+        end
+
         if network
           return "its model request failed mid-turn because the network connection dropped" if detail.empty?
 
