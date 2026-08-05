@@ -396,6 +396,12 @@ module KernelWorkersSupport
     log_messages(engine).select { |message| message.match?(pattern) }
   end
 
+  # Every visible log entry attributed to one agent, in order. Used to assert how many
+  # lines a single lifecycle event is allowed to write.
+  def worker_scoped_logs(engine, agent_id)
+    state(engine).fetch("logs").select { |entry| entry.fetch("source_id", nil) == agent_id }
+  end
+
   def stringify(payload)
     payload.each_with_object({}) { |(key, value), result| result[key.to_s] = value }
   end

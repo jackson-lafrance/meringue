@@ -5876,14 +5876,12 @@ module Meringue
             issue["updated_at"] = now
             project["status"] = "working"
             project["updated_at"] = now
-            append_log(
-              state,
-              source_type: "kernel",
-              source_id: agent_id,
-              level: "info",
-              message: "Provisioning workspace for worker #{agent_id}.",
-              details: { "issue_id" => issue.fetch("id"), "workspace_branch" => workspace.fetch("workspace_branch", nil) }
-            )
+            # The reservation is deliberately silent: the queued worker is already visible in the
+            # AgentTree, and the "Spawned worker ..." log emitted once the harness session exists
+            # carries the same routing details plus the *actual* workspace path/branch (a plan can
+            # still be uniquified or adopted before creation). Provisioning that fails is reported
+            # by fail_worker_reservation as an error log, so nothing goes unreported.
+            # harness_metadata.provisioning_state remains the structured telemetry for this phase.
           end
           touch_state!(state, now)
           store.save(state)

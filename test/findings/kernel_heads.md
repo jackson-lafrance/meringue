@@ -50,6 +50,9 @@ every state/config file lives under a per-test `Dir.mktmpdir`.
 - Re-applying the same head result, recovering an interrupted batch, and a second kernel
   instance racing the same batch all produce exactly one issue, one worker, one question,
   and one "Spawned worker ..." log line.
+- A head-routed spawn logs one worker-scoped line, the "Spawned worker ..." line itself.
+  The old "Provisioning workspace for worker ..." line that preceded it was redundant and
+  has been removed; failure paths still log their own error line.
 - One clarification is one question record: a HeadResult `questions` entry plus a matching
   (or reworded) `AskQuestion` command resolves to the already stored question, and the
   duplicate command result carries no new log ids.
