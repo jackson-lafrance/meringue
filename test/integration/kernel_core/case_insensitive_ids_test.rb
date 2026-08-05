@@ -150,11 +150,12 @@ class KernelCoreCaseInsensitiveIdsTest < Minitest::Test
       [apply_command("Kill", "target_id" => "nope"), "Target nope does not exist."],
       [apply_command("Kill", "target_id" => "p9-i9-w9"), "Target p9-i9-w9 does not exist."],
       [apply_command("GetInfo", "target_id" => "q42"), "q42 does not exist."],
-      [apply_command("PromptAgent", "agent_id" => "p1-i1-w9", "prompt" => "hi"), "Agent p1-i1-w9 does not exist."],
+      [apply_command("PromptAgent", "agent_id" => "p1-i1-w9", "prompt" => "hi"),
+       "Agent p1-i1-w9 does not exist. Dropped prompt \"hi\"."],
       [apply_command("AnswerQuestion", "question_id" => "q9", "answer" => "x"), "Question q9 does not exist."],
       [apply_command("DismissQuestion", "question_id" => "q9"), "Question q9 does not exist."],
-      # ModifyIssue also names the update it dropped, so the id the user typed is followed by the
-      # edit that did not land.
+      # ModifyIssue and PromptAgent also name the intent they dropped, so the id the user typed is
+      # followed by the edit or prompt that did not land.
       [apply_command("ModifyIssue", "issue_id" => "p9-i9", "status" => "blocked"), "Issue p9-i9 does not exist. Dropped issue update (status \u2192 blocked)."]
     ].each do |result, expected_message|
       assert_equal "rejected", result.fetch("status"), "expected #{result.fetch("command_type")} to be rejected"

@@ -100,6 +100,151 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     assert_equal 1, head.fetch("harness_metadata").fetch("head_result_skipped_command_count")
   end
 
+  # H36 in the reported logs: every command in the batch pointed at one pruned issue, so the head
+  # was left blocked with `0 accepted, 2 rejected` and the user's request vanished into two lines
+  # that blamed the head. Nothing here can be applied, but nothing is the head's fault either.
+  def test_whole_batch_aimed_at_a_removed_issue_is_skipped_and_the_message_is_surfaced
+    project_id = add_project!
+    doomed_id = seed_issue!(project_id, "Setup flow")
+    settle_issue!(doomed_id)
+    head_id = spawn_head!("I want the /setup flow to take over the whole screen with animations")
+    apply_command("Prune", {})
+
+    result = apply_head_result(
+      head_id,
+      head_result(commands: [
+        modify_issue_command(issue_id: doomed_id, status: "working"),
+        spawn_worker_command(issue_id: doomed_id, title: "Full-screen animated setup flow")
+      ]),
+      cleanup_head: false
+    )
+
+    statuses = command_results(result).map { |entry| entry.fetch("errors") }
+    assert_equal [["issue_removed_before_head_result_applied"]] * 2, statuses
+
+    summary = logs.find { |entry| entry.fetch("message", "").start_with?("Head result for #{head_id}:") }
+    assert_equal(
+      "Head result for #{head_id}: 0 accepted, 0 rejected, 0 failed. 2 commands skipped because their targets were removed before this result was applied.",
+      summary.fetch("message")
+    )
+    assert_equal "info", summary.fetch("level")
+
+    head = find_agent_record(head_id)
+    assert_equal "completed", head.fetch("status"), "the head is not stranded as blocked"
+    assert_equal "applied", head.fetch("harness_metadata").fetch("head_result_apply_state")
+
+    # The request itself still needs handling, so it is restated once, in full, without blaming the
+    # head and without an error the user cannot act on.
+    unrouted = logs.find { |entry| entry.dig("details", "kind") == "unrouted_user_message" }
+    refute_nil unrouted
+    assert_equal "warning", unrouted.fetch("level")
+    assert_includes unrouted.fetch("message"), "Every command from head #{head_id} targeted a record that was removed before its result was applied"
+    assert_includes unrouted.fetch("details").fetch("user_message"), "take over the whole screen"
+    refute(log_messages.any? { |entry| entry.include?("could not have seen") })
+  end
+
+  # The same prune removed 21 agents. A head prompting a worker that was pruned under it is the
+  # same race, and it used to stop at "Agent P3-I9-W2 does not exist." plus a blocked head.
+  def test_prompt_for_a_worker_removed_by_the_prune_is_skipped_not_blamed
+    project_id = add_project!
+    doomed_id = seed_issue!(project_id, "Finished goal")
+    worker_id = agents(type: "worker").find { |agent| agent.fetch("issue_id", nil) == doomed_id }.fetch("id")
+    settle_issue!(doomed_id)
+    head_id = spawn_head!("Ask that worker to double-check its cleanup")
+    apply_command("Prune", {})
+
+    result = apply_head_result(
+      head_id,
+      head_result(commands: [
+        { "type" => "PromptAgent", "payload" => { "agent_id" => worker_id, "prompt" => "Double-check the cleanup you reported.", "mode" => "normal" } }
+      ]),
+      cleanup_head: false
+    )
+
+    skipped = command_results(result).fetch(0)
+    assert_equal ["agent_removed_before_head_result_applied"], skipped.fetch("errors")
+    assert_equal worker_id, skipped.fetch("target_id")
+    assert_includes skipped.fetch("message"), "agent #{worker_id} was removed by a prune"
+    assert_includes skipped.fetch("message"), "so the prompt was not delivered"
+    assert_includes skipped.fetch("message"), "Dropped prompt \"Double-check the cleanup you reported.\""
+
+    skip_log = logs.find { |entry| entry.fetch("message", "").start_with?("Skipped PromptAgent:") }
+    refute_nil skip_log
+    assert_equal "warning", skip_log.fetch("level")
+    assert_equal "completed", find_agent_record(head_id).fetch("status")
+  end
+
+  # Killing a record a prune already removed is a no-op whose intent is already satisfied.
+  def test_kill_of_an_already_removed_issue_is_a_quiet_no_op
+    project_id = add_project!
+    doomed_id = seed_issue!(project_id, "Finished goal")
+    settle_issue!(doomed_id)
+    head_id = spawn_head!("Kill off the finished goal")
+    apply_command("Prune", {})
+
+    result = apply_head_result(
+      head_id,
+      head_result(commands: [{ "type" => "Kill", "payload" => { "target_id" => doomed_id } }]),
+      cleanup_head: false
+    )
+
+    skipped = command_results(result).fetch(0)
+    assert_equal ["issue_removed_before_head_result_applied"], skipped.fetch("errors")
+    assert_includes skipped.fetch("message"), "so there was nothing left to kill"
+    skip_log = logs.find { |entry| entry.fetch("message", "").start_with?("Skipped Kill:") }
+    refute_nil skip_log
+    assert_equal "info", skip_log.fetch("level")
+    assert_equal "completed", find_agent_record(head_id).fetch("status")
+  end
+
+  # A worker id the user types after a prune gets the same explanation, without the batch machinery.
+  def test_typed_prompt_for_a_pruned_worker_names_the_removal
+    project_id = add_project!
+    doomed_id = seed_issue!(project_id, "Finished goal")
+    worker_id = agents(type: "worker").find { |agent| agent.fetch("issue_id", nil) == doomed_id }.fetch("id")
+    settle_issue!(doomed_id)
+    apply_command("Prune", {})
+
+    result = apply_command("PromptAgent", { "agent_id" => worker_id, "prompt" => "Keep going." })
+
+    assert_equal "rejected", result.fetch("status")
+    assert_equal ["agent_not_found"], result.fetch("errors")
+    assert_includes result.fetch("message"), "Agent #{worker_id} no longer exists: it was removed by a prune"
+    assert_includes result.fetch("message"), "Dropped prompt \"Keep going.\""
+  end
+
+  # The boundary of this fix, asserted so it cannot drift: a command that genuinely failed (H26's
+  # `git worktree add` timeout) and the dependent command that could not resolve its predecessor are
+  # a different root cause. They still count as rejected/failed and still leave the head blocked for
+  # inspection; making such a head reprompt-able is owned elsewhere.
+  def test_a_genuinely_failed_command_still_blocks_the_head
+    project_id = add_project!
+    engine_with_failing_spawn = build_engine(
+      head_runner: KernelHeadsSupport::StubHeadRunner.new,
+      harness_client: KernelHeadsSupport::FailingSpawnHarnessClient.new
+    )
+    head_id = spawn_head!("Fix the slow query and then pair review it", target_engine: engine_with_failing_spawn)
+
+    result = apply_head_result(
+      head_id,
+      head_result(commands: [
+        create_issue_command(project_id: project_id, title: "Slow query", command_id: "issue"),
+        spawn_worker_command(issue_id: "@issue", title: "Force the right index", command_id: "fix"),
+        spawn_worker_command(issue_id: "@issue", title: "Devx pair review", extra: { "after_from_command" => "fix" })
+      ]),
+      cleanup_head: false,
+      target_engine: engine_with_failing_spawn
+    )
+
+    statuses = command_results(result).map { |entry| entry.fetch("status") }
+    assert_equal %w[accepted failed rejected], statuses
+    assert_equal "blocked", find_agent_record(head_id, current_state: engine_with_failing_spawn.list_all).fetch("status")
+    summary = logs(current_state: engine_with_failing_spawn.list_all)
+             .find { |entry| entry.fetch("message", "").start_with?("Head result for #{head_id}:") }
+    assert_equal "Head result for #{head_id}: 1 accepted, 1 rejected, 1 failed.", summary.fetch("message")
+    assert_equal "error", summary.fetch("level")
+  end
+
   def test_killed_issue_target_names_the_kill_rather_than_a_prune
     project_id = add_project!
     doomed_id = seed_issue!(project_id, "Killed goal")
@@ -272,18 +417,26 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     assert_includes result.fetch("message"), "Dropped issue update (status \u2192 working, title \u2192 \"Reopened\")"
   end
 
-  def test_removal_ledger_is_bounded_and_records_the_reason
+  def test_removal_ledger_records_both_kinds_with_their_reason_and_stays_bounded
     project_id = add_project!
     doomed_id = seed_issue!(project_id, "Finished goal")
+    worker_id = agents(type: "worker").find { |agent| agent.fetch("issue_id", nil) == doomed_id }.fetch("id")
     settle_issue!(doomed_id)
     apply_command("Prune", {})
 
-    ledger = JSON.parse(File.read(state_path)).fetch("metadata").fetch("removed_issues")
-    entry = ledger.find { |record| record.fetch("issue_id") == doomed_id }
-    refute_nil entry
-    assert_equal "prune", entry.fetch("reason")
-    refute_nil entry.fetch("removed_at")
-    assert_operator ledger.length, :<=, Meringue::Kernel::Engine::REMOVED_ISSUE_LEDGER_LIMIT
+    metadata = JSON.parse(File.read(state_path)).fetch("metadata")
+    issue_entry = metadata.fetch("removed_issues").find { |record| record.fetch("id") == doomed_id }
+    agent_entry = metadata.fetch("removed_agents").find { |record| record.fetch("id") == worker_id }
+
+    refute_nil issue_entry
+    assert_equal ["issue", "prune"], [issue_entry.fetch("kind"), issue_entry.fetch("reason")]
+    refute_nil issue_entry.fetch("removed_at")
+    refute_nil agent_entry
+    assert_equal ["agent", "prune"], [agent_entry.fetch("kind"), agent_entry.fetch("reason")]
+    # Issues and agents are bounded separately, so pruning many workers cannot evict the issue
+    # history an in-flight head result still needs.
+    assert_operator metadata.fetch("removed_issues").length, :<=, Meringue::Kernel::Engine::REMOVED_RECORD_LEDGER_LIMIT
+    assert_operator metadata.fetch("removed_agents").length, :<=, Meringue::Kernel::Engine::REMOVED_RECORD_LEDGER_LIMIT
   end
 
   private
