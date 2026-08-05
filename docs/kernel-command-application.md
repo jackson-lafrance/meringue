@@ -146,11 +146,19 @@ therefore acknowledges an already-delivered prompt instead of sending it again.
   changed. Dropped issue update (status → completed, description).`), a separate
   count in the batch summary, and no `blocked` head. An id the head never saw is
   still rejected as a prediction, which is the mistake that check exists for.
-  Because the issue record itself is gone, the kernel keeps a bounded ledger of the
-  ids it removed and why (`state.metadata.removed_issues`, capped at
-  `Engine::REMOVED_ISSUE_LEDGER_LIMIT`) so "removed under a command in flight" can
-  be told from "never existed" from recorded facts rather than from logs, which
-  have their own retention.
+  The same race removes agents: one `/prune` pass took 10 issues and 21 agents, so
+  a batch `PromptAgent` on a pruned worker, or a `Kill` of a record that is already
+  gone, is skipped the same way (`agent_removed_before_head_result_applied`,
+  `Engine#resolve_batch_removed_target`) instead of stopping at "Agent P3-I9-W2
+  does not exist" with a blocked head. Because the record itself is gone, the
+  kernel keeps bounded ledgers of the ids it removed and why
+  (`state.metadata.removed_issues` and `state.metadata.removed_agents`, each capped
+  at `Engine::REMOVED_RECORD_LEDGER_LIMIT`) so "removed under a command in flight"
+  can be told from "never existed" from recorded facts rather than from logs, which
+  have their own retention. Kinds are bounded separately so pruning many workers
+  cannot evict the issue history an in-flight result still needs. A command that
+  genuinely failed (a worker whose `git worktree add` timed out) and a dependent
+  command that could not resolve it are a different case and still block the head.
 - **A dropped command is never a bare count.** A rejected or skipped
   `ModifyIssue`, `SpawnWorker`, or `PromptAgent` states the intent that did not
   land (`Dropped issue update (status → completed, description).`,
