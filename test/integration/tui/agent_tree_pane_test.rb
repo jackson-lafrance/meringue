@@ -169,6 +169,38 @@ class TuiAgentTreePaneTest < Minitest::Test
     assert_includes styles_in(row), Pane::STATUS_STYLES.fetch("queued")
   end
 
+  # Regression: a dependent whose predecessor had settled kept "after W1" on its row for its whole
+  # life, so a worker that had been running for minutes still read as queued behind finished work.
+  # The queue marker is a pre-start answer only; once the worker starts, the row is live work.
+  def test_a_deferred_worker_that_has_started_no_longer_renders_its_queue_marker
+    row = @pane.lines(started_deferred_state, width: 70).find { |line| plain_line(line).include?("implement") }
+
+    refute_includes plain_line(row), "after W1"
+    refute_includes plain_line(row), "waiting on"
+    refute_includes plain_line(row), "starting after"
+    assert_includes plain_line(row), Pane::STATUS_DOTS.fetch("working")
+  end
+
+  # Dropping the stale marker must not drop the suffixes that share the row.
+  def test_a_started_deferred_worker_keeps_its_status_and_pull_request_suffixes
+    lines = @pane.lines(started_deferred_state, width: 70)
+    worker_row = plain_line(lines.find { |line| plain_line(line).include?("implement") })
+    issue_row = plain_line(lines.find { |line| plain_line(line).include?("I1") })
+
+    assert_includes worker_row, "↗"
+    refute_includes worker_row, Pane::ELLIPSIS
+    assert worker_row.rstrip.end_with?("implement ↗"), worker_row.inspect
+    # 1 of 3 workers completed; the queued dependent still counts.
+    assert_includes issue_row, "1/3"
+  end
+
+  # The fix is narrow: a dependent that has not started yet still says what it is behind.
+  def test_a_worker_still_queued_behind_a_running_predecessor_keeps_its_wait_marker
+    rendered = plain_lines(@pane.lines(started_deferred_state, width: 70)).join("\n")
+
+    assert_includes rendered, "waiting on W2"
+  end
+
   def test_nested_child_issues_are_indented_under_their_parent
     state = tree_state(
       projects: [project_record("P1")],
@@ -379,6 +411,9 @@ class TuiAgentTreePaneTest < Minitest::Test
     )
   end
 
+  # A follow-up worker that has already started is covered by
+  # test_a_deferred_worker_that_has_started_no_longer_renders_its_queue_marker, so W4 here is the
+  # not-yet-started follow-up whose lineage the row is supposed to show.
   def relationship_state
     tree_state(
       projects: [project_record("P1")],
@@ -387,7 +422,44 @@ class TuiAgentTreePaneTest < Minitest::Test
         agent_record("P1-I1-W1", "issue_id" => "P1-I1", "status" => "completed"),
         agent_record("P1-I1-W2", "issue_id" => "P1-I1", "status" => "killed", "replaced_by_agent_id" => "P1-I1-W3"),
         agent_record("P1-I1-W3", "issue_id" => "P1-I1", "status" => "working", "replaces_agent_id" => "P1-I1-W2"),
-        agent_record("P1-I1-W4", "issue_id" => "P1-I1", "status" => "blocked", "follow_up_of_agent_id" => "P1-I1-W1")
+        agent_record("P1-I1-W4", "issue_id" => "P1-I1", "status" => "queued", "follow_up_of_agent_id" => "P1-I1-W1")
+      ]
+    )
+  end
+
+  # The shape the bug was reported on: W1 settled, W2 was activated behind it and is now running,
+  # and W3 is still queued behind W2.
+  def started_deferred_state
+    tree_state(
+      projects: [project_record("P1")],
+      issues: [
+        issue_record("P1-I1", "delivery_pull_request" => { "url" => "https://github.com/owner/repo/pull/12", "state" => "open" })
+      ],
+      agents: [
+        agent_record("P1-I1-W1", "issue_id" => "P1-I1", "status" => "completed", "harness_metadata" => { "title" => "research" }),
+        agent_record(
+          "P1-I1-W2",
+          "issue_id" => "P1-I1",
+          "status" => "working",
+          "after_agent_id" => "P1-I1-W1",
+          "follow_up_of_agent_id" => "P1-I1-W1",
+          "harness_metadata" => {
+            "title" => "implement",
+            "deferred_spawn" => {
+              "state" => "activated",
+              "after_agent_id" => "P1-I1-W1",
+              "started_at" => "2026-07-11T00:05:00Z"
+            }
+          }
+        ),
+        agent_record(
+          "P1-I1-W3",
+          "issue_id" => "P1-I1",
+          "status" => "queued",
+          "after_agent_id" => "P1-I1-W2",
+          "follow_up_of_agent_id" => "P1-I1-W2",
+          "harness_metadata" => { "title" => "document", "deferred_spawn" => { "state" => "waiting", "after_agent_id" => "P1-I1-W2" } }
+        )
       ]
     )
   end
