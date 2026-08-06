@@ -69,6 +69,7 @@ lib/meringue/tui/                  # terminal rendering, panes, navigation, styl
 lib/meringue/state/                # JSON persistence models and store
 lib/meringue/goals/                # goal-loop record, decisions, judge, and metric probe
 docs/config.md                     # config and harness provider reference
+docs/commit-authorship.md          # worker commit identity policy and history audit
 docs/head_agent_kernel_commands.md # compact head-agent command contract
 docs/keybindings.md                # TUI keyboard and jump-mode controls
 docs/onboarding.md                 # first-run setup flow, keys, and completion marker
@@ -265,7 +266,7 @@ Default paths:
 ~/.meringue/state.json    # persisted Meringue state
 ```
 
-The config supports TUI colorschemes, TUI keybinding overrides, default harness selection, role-specific head/worker harnesses, provider command overrides, and the first-run setup marker. See `docs/config.md` for the full reference.
+The config supports TUI colorschemes, TUI keybinding overrides, default harness selection, role-specific head/worker harnesses, provider command overrides, and the first-run setup marker. See `docs/config.md` for the full reference. Workers may commit assigned work only under the user's repository identity; see [`docs/commit-authorship.md`](docs/commit-authorship.md) for the enforcement path and history audit.
 
 The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state. Durable logs retain the newest 500 entries so lifecycle history cannot grow without bound; see [`docs/log-retention.md`](docs/log-retention.md) for the measured rationale, compatibility behavior, and benchmark.
 
