@@ -694,7 +694,8 @@ Payload:
   "after_agent_id": "Optional worker this one waits for before it starts, or \"@<command_id>\" for a worker this batch spawns",
   "after_from_command": "Optional SpawnWorker command id or index in this batch instead of after_agent_id",
   "if_predecessor_fails": "Optional cancel (default) or run",
-  "include_predecessor_result": "Optional false to omit the predecessor's final report from this worker's prompt"
+  "include_predecessor_result": "Optional false to omit the predecessor's final report from this worker's prompt",
+  "completion_head": "Optional string or object with prompt: spawn a fresh head after this worker completes, with the worker's final report as context"
 }
 ```
 
@@ -713,6 +714,25 @@ Example:
   }
 }
 ```
+
+### Completion-triggered head routing
+
+Use `completion_head` when the next routing decision depends on the worker's final report, not when the next step is already known. For example, spawn one investigation worker to list app sections, then have a completion head read that report and decide how many follow-up workers to spawn. The continuation is kernel-owned: the worker does not poll Meringue state, sleep, or wait for another session.
+
+`completion_head` may be a string prompt or an object:
+
+```json
+{
+  "completion_head": {
+    "prompt": "Read the investigation result and spawn one follow-up worker for each app section that needs implementation.",
+    "include_worker_result": true
+  }
+}
+```
+
+When the worker completes, the kernel records the final report, claims the continuation exactly once, spawns a fresh stateless head, and includes a bounded worker-result block in that head's prompt. If Meringue was down when the worker was marked completed, the next `ReconcileSessions` pass triggers the same continuation. The spawned head routes normal kernel commands (`SpawnWorker`, `PromptAgent`, questions, etc.) through the usual validation and journaling path.
+
+Use `after_agent_id` instead when the next worker is already known and only needs the predecessor's handover. Use `completion_head` when a head must inspect the result and choose dynamic fan-out or a different follow-on route.
 
 ### Chaining a worker after another agent
 
