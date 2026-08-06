@@ -14,6 +14,7 @@ Files added by this slice (plus later prune-worktree lifecycle coverage):
 - `test/integration/kernel_maintenance/clear_state_test.rb`
 - `test/integration/kernel_maintenance/reconcile_sessions_test.rb`
 - `test/integration/kernel_maintenance/recount_test.rb`
+- `test/integration/kernel_maintenance/recount_reference_integrity_test.rb`
 - `test/integration/kernel_maintenance/process_identity_test.rb`
 - `test/support/kernel_maintenance_support.rb`
 - shared contract files `Rakefile` and `test/test_helper.rb` (created verbatim)
@@ -116,5 +117,21 @@ tests were updated to the shipped behavior:
     the persisted visible log buffer (`conversation`), and leaves a valid loadable
     state file with `schema_version` and metadata timestamps.
 
+13. **Recount referential integrity** (`recount_reference_integrity_test.rb`). The rename now
+    sweeps the whole state document rather than a per-record field list, and the pass runs on a
+    copy that is only swapped in after validation. Two reference classes were genuinely stranded
+    before this work: `goals[].last_worker_id` (Kill's only handle on the session a paused goal
+    owns, and only incidentally repaired when the goal still had an `active_worker_id`) and
+    `conversation.messages[].source_id` (the chat pane resolves it to an agent record and uses it
+    to deduplicate a completion message against the kernel log for the same event). The nested
+    `harness_metadata.deferred_spawn` copy of a queued worker's dependency was already handled,
+    because free-form harness metadata was already swept; it is now locked in by tests.
+    Validation additionally fails the command when any ID that resolved before the pass does not
+    resolve after it, naming the path, while tolerating references that were already dangling.
+    Two deliberate preservations are asserted: IDs inside human-readable text stay as history, and
+    composite correlation IDs (`<agent>-PP1`, `<goal>-IT1-ATTEMPT`) stay verbatim so exactly-once
+    dedupe keeps matching.
+
 The original maintenance test slice did not change production code. Later prune-worktree
-lifecycle work updated the behavior called out in items 4 and 6.
+lifecycle work updated the behavior called out in items 4 and 6, and the reference-integrity work
+in item 13 changed `State::Recounter` and the Recount save path in `Kernel::Engine`.
