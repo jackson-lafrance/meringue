@@ -153,7 +153,10 @@ duplicating the commands that already ran.
   applied, warning when the head proposed neither commands nor questions) with
   the full message in `details`, so a request cannot vanish into command error
   lines. A batch that recorded a clarifying question is already actionable and is
-  not reported as unrouted.
+  not reported as unrouted. When the head intentionally finds no work to route
+  because current state already satisfies the request, it proposes `NoOp` with a
+  reason; that command is accepted and logged at info level, so deliberate
+  no-work results do not raise the unrouted warning.
 
 ## Verifying
 

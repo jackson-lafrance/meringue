@@ -16,7 +16,9 @@ module Meringue
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
-        ["/prompt <agent_id> \"<message>\"", "Prompt a worker session, or retry a failed head (H<n>)."],
+        ["/prompt <agent_id> \"<message>\"", "Prompt a worker session."],
+        ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
+        ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/model <provider>/<model-id>", "Persist the model for all future Pi sessions; existing sessions are unchanged. The model id may itself contain / and :."],
         ["/thinking <level>", "Persist off, minimal, low, medium, high, xhigh, or max for all future Pi sessions; existing sessions are unchanged."],
@@ -48,7 +50,9 @@ module Meringue
         { "prefix" => "/project rename", "source" => "projects", "append_space" => true },
         { "prefix" => "/issue rename", "source" => "issues", "append_space" => true },
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
-        { "prefix" => "/prompt", "source" => "prompt_targets", "append_space" => true },
+        { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
+        { "prefix" => "/retry", "source" => "retry_heads", "append_space" => false },
+        { "prefix" => "/open-session", "source" => "agents", "append_space" => false },
         { "prefix" => "/model", "source" => "session_models", "append_space" => false },
         { "prefix" => "/thinking", "source" => "thinking_levels", "append_space" => false },
         { "prefix" => "/kill", "source" => "targets", "append_space" => false },
@@ -220,11 +224,8 @@ module Meringue
                   Array(state["issues"])
                 when "workers"
                   Array(state["agents"]).select { |agent| agent["type"] == "worker" }
-                when "prompt_targets"
-                  # `/prompt` accepts worker sessions plus failed heads, which it retries.
-                  Array(state["agents"]).select do |agent|
-                    agent["type"] == "worker" || Meringue::State::Models.head_retry_target?(agent)
-                  end
+                when "retry_heads"
+                  Array(state["agents"]).select { |agent| Meringue::State::Models.head_retry_target?(agent) }
                 when "themes"
                   available_theme_names.map { |theme| { "id" => theme, "theme" => theme } }
                 when "targets"
@@ -611,12 +612,8 @@ module Meringue
           ["issue", item["title"], item["status"]].compact.join(" · ")
         when "workers"
           ["worker", item["status"], item["issue_id"]].compact.join(" · ")
-        when "prompt_targets"
-          if item["type"] == "head"
-            ["head", item["status"], "retry"].compact.join(" · ")
-          else
-            ["worker", item["status"], item["issue_id"]].compact.join(" · ")
-          end
+        when "retry_heads"
+          ["head", item["status"], "retry"].compact.join(" · ")
         when "themes"
           "theme"
         when "targets"
@@ -667,6 +664,10 @@ module Meringue
           parse_worker(arguments)
         when "prompt"
           parse_prompt(arguments)
+        when "retry"
+          parse_retry(arguments)
+        when "open-session", "open_session"
+          invalid("/open-session is a local TUI command. Run it in the interactive TUI to open an agent session for debugging.", usage: "/open-session <agent_id>")
         when "kill"
           parse_kill(arguments)
         when "goal", "goals"
@@ -840,6 +841,13 @@ module Meringue
           "agent_id" => tokens[0],
           "prompt" => tokens[1..]&.join(" ")
         )
+      end
+
+      def parse_retry(arguments)
+        tokens = split_arguments(arguments)
+        return invalid("Usage: /retry <head_id>") unless tokens.length == 1
+
+        kernel_command("RetryHead", "head_id" => tokens[0])
       end
 
       def parse_kill(arguments)

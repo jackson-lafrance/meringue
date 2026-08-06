@@ -102,7 +102,7 @@ The spread only ever delays a refresh; it never cancels one.
 
 ## The repair ladder before a failure is terminal
 
-Terminal is the last rung, not the first:
+Terminal is the last rung, not the first. These are in-flight session-repair steps before a head becomes terminal; they are not the user-facing retry of an `errored`/`blocked` head row, which is manual via `/retry` and always starts a fresh head.
 
 1. **Head transient error inside the grace window** — the head stays `working`, one
    warning is logged (`warning_logged_at` makes it once, not per pass), and the pass
@@ -138,13 +138,13 @@ records in reconciliation cannot lose recoverable work: nothing else in Meringue
 have continued them either.
 
 A leftover errored head is retryable rather than only prunable, and so is a head left
-`blocked` because the kernel rejected or failed part of its batch. `PromptAgent` on a head id,
-and selecting the failed head in the AgentTree, both re-run the request it never routed:
-its own session is resumed when reconciliation left that session usable, and otherwise a
-fresh head carries the original message forward. Reconciliation is unchanged by this; the
-retry either revives the record (status back to `working`, terminal reconcile marker
-cleared, so polling resumes) or leaves it terminal with `retried_by_head_id` pointing at
-its successor. See [Retrying a failed head](head_agent_kernel_commands.md#retrying-a-failed-head).
+`blocked` because the kernel rejected or failed part of its batch. Retry is explicit:
+`/retry H<n>` (or double-clicking the TUI's `retry me` row) starts a fresh head from the
+old head's recorded request and command journal. The old head/session is not prompted or
+resumed; the kernel releases any stale head session, removes the old row from the active
+AgentTree, and records lineage on the retry head plus the retry log. Reconciliation is
+unchanged by this because polling follows the fresh head. See [Retrying a failed
+head](head_agent_kernel_commands.md#retrying-a-failed-head).
 
 ## Settled is not finished
 

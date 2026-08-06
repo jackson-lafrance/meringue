@@ -32,13 +32,14 @@ every state/config file lives under a per-test `Dir.mktmpdir`.
   `head_result_apply_state: "partially_applied"` for inspection. A command skipped because
   its target was removed mid-flight is not a rejection for any of these purposes.
 - A `blocked` head is retryable, because a rejected or failed command means the work behind it
-  never happened. `/prompt H<n> "..."` and selecting the head in the AgentTree both re-run its
-  recorded request through a fresh head; the retry never resumes the blocked head's own session,
-  because that session already delivered a result the exactly-once guard has sealed, and the
-  retry releases it. The retry head's prompt names the batch's accepted commands (reuse, never
-  re-propose) and its rejected/failed ones (still unrouted), so a partially applied batch is
-  recovered without routing the same work twice. Only a head that is still routing, or that
-  applied every command it proposed, is refused. See `head_retry_test.rb`.
+  never happened. Retry is explicit (`/retry H<n>` or the TUI's retryable-head double-click),
+  always starts a fresh head, never resumes or messages the old head session, and removes the old
+  head row from the active tree while preserving lineage in logs/metadata. Selecting the head and
+  typing is ordinary unscoped chat, and `/prompt` is worker-only. The retry head's prompt names
+  the batch's accepted commands (reuse, never re-propose) and its rejected/failed ones (still
+  unrouted), so a partially applied batch is recovered without routing the same work twice. Only a
+  head that is still routing, or that applied every command it proposed, is refused. See
+  `head_retry_test.rb`.
 - Batch issue visibility is decided from the head's recorded spawn snapshot, not from live
   state. An issue the head saw at spawn and that a `/prune` or `/kill` removed before the
   result was applied is skipped as a no-op (`issue_removed_before_head_result_applied`,
@@ -67,8 +68,9 @@ every state/config file lives under a per-test `Dir.mktmpdir`.
   an `unrouted_user_message` log entry (`error` when commands were proposed and none
   applied, `warning` when the head proposed neither commands nor questions), with the full
   message in `details.user_message`. A batch that recorded a question is not reported as
-  unrouted, because the question is already an actionable record.
-  See `unrouted_user_message_test.rb`.
+  unrouted, because the question is already an actionable record. A deliberate no-work result uses
+  an accepted `NoOp` command with a reason, which suppresses the unrouted warning and logs at info
+  level. See `unrouted_user_message_test.rb`.
 - One batch may put two workers on one issue it just created (research step, then the
   implementation step that consumes the report). Both bind the issue with `issue_from_command`;
   the later worker names its predecessor with `follow_up_of_command` for the visible lineage and

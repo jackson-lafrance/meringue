@@ -824,16 +824,13 @@ module Meringue
           [head_retry_marker(head), active_pr_marker(head)].reject(&:empty?).join(" ")
         end
 
-        # A head that stopped without routing its request is recoverable, not dead state: selecting
-        # it and typing (or `/prompt H<n> "..."`) re-runs the request. Say so on the row, because a
-        # blocked or errored head otherwise reads as something the user can only kill. Once it has
-        # been retried, the successor is the more useful fact.
+        # A head that stopped without routing its request is recoverable, not dead state. Retrying
+        # is deliberately manual and visible (`/retry H<n>` or double-clicking this row), so the row
+        # carries an explicit affordance instead of making ordinary chat target the head.
         def head_retry_marker(head)
-          retried_by = State::Models.head_metadata(head).fetch("retried_by_head_id", nil).to_s
-          return "retried as #{retried_by}" unless retried_by.empty?
           return "" unless State::Models.head_retry_target?(head)
 
-          "prompt to retry"
+          "retry me"
         end
 
         def short_id(id)
