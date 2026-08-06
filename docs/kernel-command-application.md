@@ -116,6 +116,38 @@ duplicating the commands that already ran.
   `prompt_mode_note`) and the kernel states it in the one delivery log line. This
   path does not use the pending-prompt queue, so it cannot double deliver: the
   harness owns the ordering behind the active turn.
+- **A batch target is pruned or killed mid-flight.** A head is spawned against a
+  snapshot and its result is applied seconds later, so `/prune` or `/kill` can
+  remove a record it legitimately read in between. Visibility is therefore decided
+  from the head's recorded spawn snapshot, never from "does this issue exist right
+  now" (`Engine#head_issue_visibility`): reading live state made the race look like
+  a head that had invented an issue id, told it to use `issue_from_command` for an
+  issue it never created, marked it blocked, and dropped part of the user's intent
+  behind an unactionable warning. Now the command is skipped as a no-op with the
+  error code `issue_removed_before_head_result_applied`, an accurate line
+  (`Skipped ModifyIssue: issue P4-I4 was removed by a prune at … after head H34 was
+  spawned with it in view, so there was nothing left to update. No state was
+  changed. Dropped issue update (status → completed, description).`), a separate
+  count in the batch summary, and no `blocked` head. An id the head never saw is
+  still rejected as a prediction, which is the mistake that check exists for.
+  The same race removes agents: one `/prune` pass took 10 issues and 21 agents, so
+  a batch `PromptAgent` on a pruned worker, or a `Kill` of a record that is already
+  gone, is skipped the same way (`agent_removed_before_head_result_applied`,
+  `Engine#resolve_batch_removed_target`) instead of stopping at "Agent P3-I9-W2
+  does not exist" with a blocked head. Because the record itself is gone, the
+  kernel keeps bounded ledgers of the ids it removed and why
+  (`state.metadata.removed_issues` and `state.metadata.removed_agents`, each capped
+  at `Engine::REMOVED_RECORD_LEDGER_LIMIT`) so "removed under a command in flight"
+  can be told from "never existed" from recorded facts rather than from logs, which
+  have their own retention. Kinds are bounded separately so pruning many workers
+  cannot evict the issue history an in-flight result still needs. A command that
+  genuinely failed (a worker whose `git worktree add` timed out) and a dependent
+  command that could not resolve it are a different case and still block the head.
+- **A dropped command is never a bare count.** A rejected or skipped
+  `ModifyIssue`, `SpawnWorker`, or `PromptAgent` states the intent that did not
+  land (`Dropped issue update (status → completed, description).`,
+  `Dropped worker "Re-run the cleanup".`), so `1 rejected` is always something the
+  user can act on.
 - **A head batch accepts nothing.** The user's message is restated once as an
   `unrouted_user_message` log entry (error when commands were proposed and none
   applied, warning when the head proposed neither commands nor questions) with
@@ -130,6 +162,7 @@ Run the normal test suite, or the focused files for this contract:
 ```bash
 rake test
 ruby -Ilib -Itest test/integration/kernel_heads/exactly_once_apply_test.rb
+ruby -Ilib -Itest test/integration/kernel_heads/removed_batch_target_test.rb
 ruby -Ilib -Itest test/integration/kernel_workers/prompt_agent_test.rb
 ruby -Ilib -Itest test/integration/state/store_concurrency_test.rb
 ruby -Ilib -Itest test/integration/workspace/manager_collision_test.rb

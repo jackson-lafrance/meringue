@@ -14,6 +14,7 @@ Test files:
 - `test/integration/kernel_heads/logging_test.rb`
 - `test/integration/kernel_heads/unrouted_user_message_test.rb`
 - `test/integration/kernel_heads/head_retry_test.rb`
+- `test/integration/kernel_heads/removed_batch_target_test.rb`
 - `test/support/kernel_heads_support.rb` (fake head runners, fake harness clients, stub
   workspace manager, stub forge client, tmpdir-scoped engine builder)
 
@@ -28,7 +29,8 @@ every state/config file lives under a per-test `Dir.mktmpdir`.
   `ApplyHeadResult`.
 - A fully accepted batch removes (cleans up) the head record and releases its session;
   a batch with any rejected/failed command keeps the head with `status: "blocked"` and
-  `head_result_apply_state: "partially_applied"` for inspection.
+  `head_result_apply_state: "partially_applied"` for inspection. A command skipped because
+  its target was removed mid-flight is not a rejection for any of these purposes.
 - A `blocked` head is retryable, because a rejected or failed command means the work behind it
   never happened. `/prompt H<n> "..."` and selecting the head in the AgentTree both re-run its
   recorded request through a fresh head; the retry never resumes the blocked head's own session,
@@ -37,6 +39,26 @@ every state/config file lives under a per-test `Dir.mktmpdir`.
   re-propose) and its rejected/failed ones (still unrouted), so a partially applied batch is
   recovered without routing the same work twice. Only a head that is still routing, or that
   applied every command it proposed, is refused. See `head_retry_test.rb`.
+- Batch issue visibility is decided from the head's recorded spawn snapshot, not from live
+  state. An issue the head saw at spawn and that a `/prune` or `/kill` removed before the
+  result was applied is skipped as a no-op (`issue_removed_before_head_result_applied`,
+  `Skipped ModifyIssue: …`, `info` for `ModifyIssue` and `warning` for `SpawnWorker`), counted
+  separately in the batch summary, and leaves the head `completed`. An id the head never saw
+  is still rejected as a prediction, and an id removed *before* the head was spawned is
+  rejected with that removal named. Every rejected/skipped `ModifyIssue`, `SpawnWorker`, and
+  `PromptAgent` message states the intent it dropped. See `removed_batch_target_test.rb`.
+- The same skip covers a batch `PromptAgent` whose worker the prune removed and a batch `Kill`
+  of a record that is already gone (`agent_removed_before_head_result_applied`, `warning` for
+  the dropped prompt, `info` for the redundant kill). A typed `PromptAgent` for a pruned worker
+  is still rejected, but names the removal (`Agent P3-I9-W2 no longer exists: it was removed by
+  a prune at …`). Removal is read from `state.metadata.removed_issues` / `removed_agents`.
+- A batch where *every* command was skipped leaves nothing applied, so the user's message is
+  restated once as a `warning` (`Every command from head H36 targeted a record that was removed
+  before its result was applied…`) and the head is cleaned up like any other head that routed
+  nothing — not left `blocked`.
+- A genuinely failed command (worker workspace provisioning timing out) plus the dependent
+  command that cannot resolve it (`after_agent_reference_unresolved`) is a *different* cause and
+  still yields `1 accepted, 1 rejected, 1 failed` with a `blocked` head.
 - Predicted-id chaining works inside one batch (`AddProject` -> `CreateIssue` -> `SpawnWorker`
   with `P1` / `P1-I1`); symbolic issue references and unambiguous predicted ids are remapped
   to the batch-created issue so workers cannot land on another head's issue.
