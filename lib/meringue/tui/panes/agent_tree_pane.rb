@@ -9,6 +9,9 @@ module Meringue
         MAX_ITEM_LINES = 3
         ELLIPSIS = "…"
         AGENT_TYPES = %w[head worker].freeze
+        # A queued worker waiting on a command shows that command (or its label) in the row, so
+        # it is bounded the same way every other tree marker is.
+        GATE_LABEL_LIMIT = 28
 
         # Shown when a goal has a numeric target but nothing measurable to compare against
         # it yet: honest about the gap instead of implying 0% progress was made.
@@ -810,9 +813,29 @@ module Meringue
 
           predecessor_id = deferred["after_agent_id"].to_s
           verb = deferred["state"].to_s == "activating" ? "starting after" : "waiting on"
+          # A worker whose command gate is live is waiting on that condition, not on its
+          # predecessor: the predecessor has already settled by the time a gate is armed.
+          gate = gate_wait_label(deferred)
+          return "#{verb} #{gate}" if gate
           return verb.split.first if predecessor_id.empty?
 
           "#{verb} #{relationship_id(worker, predecessor_id)}"
+        end
+
+        # A script-gated queued worker must read honestly in the tree: it is not "waiting on W1",
+        # it is waiting for a command to say go.
+        def gate_wait_label(deferred)
+          gate = deferred["command_gate"]
+          return nil unless gate.is_a?(Hash)
+          return nil unless gate["state"].to_s == "pending"
+          return nil if gate["armed_at"].to_s.empty?
+
+          label = gate["label"].to_s.strip
+          label = gate["command"].to_s.strip if label.empty?
+          return nil if label.empty?
+
+          label = label.gsub(/\s+/, " ")
+          label.length > GATE_LABEL_LIMIT ? "#{label[0, GATE_LABEL_LIMIT - 1].rstrip}…" : label
         end
 
         # Same-issue relationships stay short; a predecessor on another issue needs its full id to

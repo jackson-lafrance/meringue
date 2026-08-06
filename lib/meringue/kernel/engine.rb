@@ -234,6 +234,7 @@ module Meringue
       # kept verbatim in the issue description instead.
       GOAL_ISSUE_TITLE_LIMIT = 72
       GOAL_COMPARATOR_TEXT = { "gte" => ">=", "lte" => "<=", "gt" => ">", "lt" => "<", "eq" => "==" }.freeze
+      GATE_LABEL_MAX_CHARS = 48
       HEAD_RECONCILE_ERROR_GRACE_SECONDS = 30
       HEAD_RECONCILE_WARNING_DELAY_SECONDS = 5
       # Token-overlap ratio above which two clarifications from the same head are treated as
@@ -289,6 +290,81 @@ module Meringue
       DEFERRED_WORKER_HANDOVER_KEYS = %w[
         include_predecessor_result IncludePredecessorResult includePredecessorResult
       ].freeze
+      # The second kind of gate a queued worker can wait on: a command the kernel runs on a timer
+      # until it says "go". It exists for events Meringue cannot observe as an agent settling - a
+      # human review landing on a PR, a deploy finishing, an external job turning green.
+      DEFERRED_WORKER_GATE_COMMAND_KEYS = %w[
+        after_command AfterCommand afterCommand
+        wait_for_command WaitForCommand waitForCommand
+        gate_command GateCommand gateCommand
+      ].freeze
+      DEFERRED_WORKER_GATE_LABEL_KEYS = %w[
+        after_command_label AfterCommandLabel afterCommandLabel
+        wait_for_label WaitForLabel waitForLabel
+      ].freeze
+      DEFERRED_WORKER_GATE_EXPECT_KEYS = %w[
+        after_command_expect AfterCommandExpect afterCommandExpect
+        wait_for_expect WaitForExpect waitForExpect
+      ].freeze
+      DEFERRED_WORKER_GATE_PATTERN_KEYS = %w[
+        after_command_pattern AfterCommandPattern afterCommandPattern
+        wait_for_pattern WaitForPattern waitForPattern
+      ].freeze
+      DEFERRED_WORKER_GATE_CWD_KEYS = %w[
+        after_command_cwd AfterCommandCwd afterCommandCwd
+        wait_for_cwd WaitForCwd waitForCwd
+      ].freeze
+      DEFERRED_WORKER_GATE_INTERVAL_KEYS = %w[
+        after_command_interval_seconds AfterCommandIntervalSeconds afterCommandIntervalSeconds
+        wait_for_interval_seconds
+      ].freeze
+      DEFERRED_WORKER_GATE_TIMEOUT_KEYS = %w[
+        after_command_timeout_seconds AfterCommandTimeoutSeconds afterCommandTimeoutSeconds
+        wait_for_timeout_seconds
+      ].freeze
+      DEFERRED_WORKER_GATE_MAX_WAIT_KEYS = %w[
+        after_command_max_wait_seconds AfterCommandMaxWaitSeconds afterCommandMaxWaitSeconds
+        wait_for_max_wait_seconds
+      ].freeze
+      DEFERRED_WORKER_GATE_EXPIRY_POLICY_KEYS = %w[
+        if_gate_expires IfGateExpires ifGateExpires
+        if_after_command_fails IfAfterCommandFails ifAfterCommandFails
+        on_gate_expiry OnGateExpiry onGateExpiry
+      ].freeze
+      # `exit_zero` is the default because it is the shape every shell already speaks and it makes
+      # the predicate the author's problem (`... | grep -q APPROVED`). `output_matches` exists for
+      # commands whose exit status is uninformative, e.g. `gh pr view --json reviewDecision`.
+      DEFERRED_WORKER_GATE_EXPECTATIONS = %w[exit_zero output_matches].freeze
+      DEFERRED_WORKER_GATE_DEFAULT_EXPECT = "exit_zero"
+      # A queued worker's workspace is only *planned*, not created, so `project_root` is the
+      # default: it is the one directory that reliably exists while the worker is still waiting.
+      DEFERRED_WORKER_GATE_CWD_MODES = %w[project_root workspace].freeze
+      DEFERRED_WORKER_GATE_DEFAULT_CWD = "project_root"
+      DEFERRED_WORKER_GATE_DEFAULT_INTERVAL_SECONDS = 60
+      DEFERRED_WORKER_GATE_MIN_INTERVAL_SECONDS = 5
+      DEFERRED_WORKER_GATE_MAX_INTERVAL_SECONDS = 60 * 60
+      # Short on purpose: a gate runs on the reconcile thread, so a slow check delays session
+      # reconciliation for everyone. A gate is a poll, not a build.
+      DEFERRED_WORKER_GATE_DEFAULT_TIMEOUT_SECONDS = 30
+      DEFERRED_WORKER_GATE_MAX_TIMEOUT_SECONDS = 120
+      # A human review can take hours, so the default budget is hours; the ceiling stops a gate
+      # from becoming a permanent background process.
+      DEFERRED_WORKER_GATE_DEFAULT_MAX_WAIT_SECONDS = 4 * 60 * 60
+      DEFERRED_WORKER_GATE_MAX_WAIT_CEILING_SECONDS = 24 * 60 * 60
+      # A gate that cannot even be run (missing cwd, spawn failure, timeout, unusable pattern)
+      # can never pass, so it is abandoned loudly after this many consecutive unusable checks
+      # instead of polling a broken command until the budget runs out.
+      DEFERRED_WORKER_GATE_UNUSABLE_LIMIT = 3
+      DEFERRED_WORKER_GATE_COMMAND_MAX_CHARS = 2_000
+      # Wall-clock a single reconcile pass may spend running gate commands, mirroring the goal
+      # loop's budget. Gates that do not fit are checked on the next pass.
+      DEFERRED_WORKER_GATE_BUDGET_SECONDS = 10.0
+      DEFERRED_WORKER_GATE_OUTPUT_MAX_CHARS = 2_000
+      DEFERRED_GATE_STATE_PENDING = "pending"
+      DEFERRED_GATE_STATE_SATISFIED = "satisfied"
+      DEFERRED_GATE_STATE_EXPIRED = "expired"
+      DEFERRED_GATE_STATE_UNAVAILABLE = "unavailable"
+      DEFERRED_GATE_UNRESOLVED_STATES = [DEFERRED_GATE_STATE_EXPIRED, DEFERRED_GATE_STATE_UNAVAILABLE].freeze
       # `cancel` (default) drops the dependent with a warning when its predecessor errors; `run`
       # starts it anyway and says so in the handover. A killed predecessor always cancels.
       DEFERRED_WORKER_FAILURE_POLICIES = %w[cancel run].freeze
@@ -1040,6 +1116,11 @@ module Meringue
         # this reconciliation hook recovers the crash window where completion was recorded but the
         # continuation head was not spawned yet.
         completion_continuation_results = reconcile_step("resolve_completion_continuations", []) { resolve_completion_continuations(trigger: "reconcile") }
+        # Command gates are evaluated before dependents are resolved, so a wait condition that
+        # passes in this pass starts its worker in the same pass. The commands run outside the
+        # state lock under their own wall-clock budget; nothing here blocks on a user command
+        # for longer than one gate's own timeout.
+        gate_check_results = reconcile_step("check_deferred_worker_gates", []) { check_deferred_worker_gates(trigger: "reconcile") }
         # Second activation hook for queued dependents. It runs after the polls so a predecessor
         # that settled in this same pass is honoured immediately, and it is the hook that recovers
         # a dependency whose predecessor settled, errored, or disappeared while Meringue was down.
@@ -1051,6 +1132,7 @@ module Meringue
         goal_steps = reconcile_step("advance_goal_loops", []) { advance_goal_loops }
         changed_count = applied_results.count { |result| result.fetch("changed", false) }
         changed_count += completion_continuation_results.count { |result| result.fetch("status", nil) == "accepted" }
+        changed_count += gate_check_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += deferred_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += recovered_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += pending_prompt_results.count { |result| result.fetch("status", nil) == "accepted" }
@@ -1077,11 +1159,12 @@ module Meringue
             "delivery_pull_request_refreshes" => delivery_pr_refreshes,
             "model_catalog_refresh" => model_catalog_refresh,
             "completion_continuation_results" => completion_continuation_results,
+            "deferred_worker_gate_results" => gate_check_results,
             "deferred_worker_results" => deferred_worker_results,
             "goal_loop_steps" => goal_steps,
             "poll_results" => applied_results
           },
-          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + completion_continuation_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) }).uniq
+          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + completion_continuation_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + gate_check_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) }).uniq
         )
       rescue StandardError => e
         error = error_payload(e)
@@ -7245,6 +7328,8 @@ module Meringue
         after_agent_id = value_at(payload, *DEFERRED_WORKER_AFTER_KEYS)
         failure_policy = normalized_deferred_failure_policy(payload)
         include_predecessor_result = deferred_handover_requested?(payload)
+        gate_plan = deferred_gate_plan(payload)
+        command_gate = gate_plan.fetch("gate", nil)
         # Set by the kernel when it starts a worker it had queued behind another agent. It is the
         # only way past the deferral branch, so a queued worker cannot start itself twice.
         activating_deferred = !!value_at(payload, "_activate_deferred", "activate_deferred")
@@ -7275,6 +7360,10 @@ module Meringue
           # it replaces. Deferring that would leave the replaced worker running indefinitely.
           errors << "deferred_after_agent_conflicts_with_replace"
         end
+        if command_gate && present_string(replace_agent_id)
+          errors << "after_command_conflicts_with_replace"
+        end
+        errors.concat(gate_plan.fetch("errors", []))
         errors << "invalid_if_predecessor_fails" if failure_policy.nil?
         return synchronized_state { rejected_result(command_id, command_type, "Worker was not spawned.", errors) } unless errors.empty?
 
@@ -7342,8 +7431,18 @@ module Meringue
               return rejected_result(command_id, command_type, "Worker #{related_agent_id} has already been killed or replaced.", ["agent_not_replaceable"])
             end
 
-            if present_string(after_agent_id) && !activating_deferred
-              decision = deferred_spawn_decision(state, after_agent_id: after_agent_id, failure_policy: failure_policy)
+            if (present_string(after_agent_id) || command_gate) && !activating_deferred
+              decision = if present_string(after_agent_id)
+                           deferred_spawn_decision(state, after_agent_id: after_agent_id, failure_policy: failure_policy)
+                         else
+                           # A gate-only worker has no predecessor to validate; it is still one
+                           # queued link, so it carries the same chain depth as a one-step chain.
+                           { "kind" => "defer", "predecessor" => nil, "chain_depth" => 1 }
+                         end
+              # A command gate keeps the worker queued even when its predecessor has already
+              # settled: there is still a condition left to satisfy, and reusing the queued path
+              # means the gate is polled and handed over by exactly one mechanism.
+              decision = decision.merge("kind" => "defer") if command_gate && decision.fetch("kind") == "start_now"
               case decision.fetch("kind")
               when "reject"
                 return rejected_result(command_id, command_type, decision.fetch("message"), decision.fetch("errors"))
@@ -7363,6 +7462,7 @@ module Meringue
                   failure_policy: failure_policy,
                   include_predecessor_result: include_predecessor_result,
                   completion_continuation: completion_continuation,
+                  command_gate: command_gate,
                   rerouted_from_issue_id: rerouted_from_issue_id
                 )
               else
@@ -8190,6 +8290,182 @@ module Meringue
         !%w[false 0 no off].include?(raw.to_s.strip.downcase)
       end
 
+      # --- Command-gated ("wait for this script") queued workers ---------------------------------
+      #
+      # `after_command` is the second predicate a queued worker can carry. It is deliberately the
+      # *same* queued-worker concept as `after_agent_id`, not a second scheduler: the condition
+      # lives on the worker record, the reconcile pass evaluates it, and activation runs through
+      # the one `resolve_deferred_workers` seam. When both predicates are present they compose as
+      # AND, and the command is only armed once the predecessor settles.
+      #
+      # Everything a gate can do is bounded up front, because it runs a user/head-supplied shell
+      # command on a timer: one process group per check, a hard per-check timeout, a minimum poll
+      # interval, a total wait budget, and a cap on consecutive unusable checks.
+      def deferred_gate_plan(payload)
+        command = present_string(value_at(payload, *DEFERRED_WORKER_GATE_COMMAND_KEYS))
+        supplementary = DEFERRED_WORKER_GATE_EXPECT_KEYS + DEFERRED_WORKER_GATE_PATTERN_KEYS +
+                        DEFERRED_WORKER_GATE_CWD_KEYS + DEFERRED_WORKER_GATE_INTERVAL_KEYS +
+                        DEFERRED_WORKER_GATE_TIMEOUT_KEYS + DEFERRED_WORKER_GATE_MAX_WAIT_KEYS +
+                        DEFERRED_WORKER_GATE_EXPIRY_POLICY_KEYS + DEFERRED_WORKER_GATE_LABEL_KEYS
+        unless command
+          # Gate options with no gate command would silently do nothing, which reads as "the wait
+          # worked" when the worker starts immediately. Say so instead.
+          return { "gate" => nil, "errors" => [] } if supplementary.none? { |key| !value_at(payload, key).nil? }
+
+          return { "gate" => nil, "errors" => ["after_command_required"] }
+        end
+
+        errors = []
+        errors << "invalid_after_command" if command.length > DEFERRED_WORKER_GATE_COMMAND_MAX_CHARS
+        expect = normalized_gate_expectation(payload)
+        errors << "invalid_after_command_expect" if expect.nil?
+        pattern = present_string(value_at(payload, *DEFERRED_WORKER_GATE_PATTERN_KEYS))
+        # A gate that can never pass must be rejected at spawn time rather than polled for hours:
+        # `output_matches` with no pattern, or with a pattern that is not a usable regex, is that.
+        if expect == "output_matches"
+          if pattern.nil?
+            errors << "invalid_after_command_pattern"
+          else
+            begin
+              Regexp.new(pattern, Regexp::MULTILINE)
+            rescue RegexpError
+              errors << "invalid_after_command_pattern"
+            end
+          end
+        end
+        cwd_mode = normalized_gate_cwd_mode(payload)
+        errors << "invalid_after_command_cwd" if cwd_mode.nil?
+        expiry_policy = normalized_gate_expiry_policy(payload)
+        errors << "invalid_if_gate_expires" if expiry_policy.nil?
+
+        return { "gate" => nil, "errors" => errors } unless errors.empty?
+
+        {
+          "gate" => {
+            "command" => command,
+            "label" => present_string(value_at(payload, *DEFERRED_WORKER_GATE_LABEL_KEYS)),
+            "expect" => expect,
+            "pattern" => pattern,
+            "cwd" => cwd_mode,
+            "interval_seconds" => bounded_gate_seconds(
+              value_at(payload, *DEFERRED_WORKER_GATE_INTERVAL_KEYS),
+              default: DEFERRED_WORKER_GATE_DEFAULT_INTERVAL_SECONDS,
+              min: DEFERRED_WORKER_GATE_MIN_INTERVAL_SECONDS,
+              max: DEFERRED_WORKER_GATE_MAX_INTERVAL_SECONDS
+            ),
+            "timeout_seconds" => bounded_gate_seconds(
+              value_at(payload, *DEFERRED_WORKER_GATE_TIMEOUT_KEYS),
+              default: DEFERRED_WORKER_GATE_DEFAULT_TIMEOUT_SECONDS,
+              min: 1,
+              max: DEFERRED_WORKER_GATE_MAX_TIMEOUT_SECONDS
+            ),
+            "max_wait_seconds" => bounded_gate_seconds(
+              value_at(payload, *DEFERRED_WORKER_GATE_MAX_WAIT_KEYS),
+              default: DEFERRED_WORKER_GATE_DEFAULT_MAX_WAIT_SECONDS,
+              min: DEFERRED_WORKER_GATE_MIN_INTERVAL_SECONDS,
+              max: DEFERRED_WORKER_GATE_MAX_WAIT_CEILING_SECONDS
+            ),
+            "if_gate_expires" => expiry_policy
+          }.compact,
+          "errors" => []
+        }
+      end
+
+      def normalized_gate_expectation(payload)
+        raw = present_string(value_at(payload, *DEFERRED_WORKER_GATE_EXPECT_KEYS))
+        return DEFERRED_WORKER_GATE_DEFAULT_EXPECT unless raw
+
+        normalized = raw.downcase.strip.tr("- ", "__")
+        normalized = "exit_zero" if %w[exit_zero exit_0 exit_status zero success].include?(normalized)
+        normalized = "output_matches" if %w[output_matches matches regex output_regex output_match].include?(normalized)
+        DEFERRED_WORKER_GATE_EXPECTATIONS.include?(normalized) ? normalized : nil
+      end
+
+      def normalized_gate_cwd_mode(payload)
+        raw = present_string(value_at(payload, *DEFERRED_WORKER_GATE_CWD_KEYS))
+        return DEFERRED_WORKER_GATE_DEFAULT_CWD unless raw
+
+        normalized = raw.downcase.strip.tr("- ", "__")
+        normalized = "project_root" if %w[project project_root root repo repository].include?(normalized)
+        normalized = "workspace" if %w[workspace worktree worker_workspace].include?(normalized)
+        DEFERRED_WORKER_GATE_CWD_MODES.include?(normalized) ? normalized : nil
+      end
+
+      # Same vocabulary as `if_predecessor_fails`, for the same reason: when the condition the
+      # worker is waiting on never resolves, `cancel` (default) drops it with a warning and `run`
+      # starts it anyway and says so in the handover.
+      def normalized_gate_expiry_policy(payload)
+        raw = present_string(value_at(payload, *DEFERRED_WORKER_GATE_EXPIRY_POLICY_KEYS))
+        return deferred_worker_default_failure_policy unless raw
+
+        normalized = raw.downcase.tr("-", "_")
+        normalized = "run" if %w[run run_anyway continue proceed start].include?(normalized)
+        normalized = "cancel" if %w[cancel skip drop abort].include?(normalized)
+        DEFERRED_WORKER_FAILURE_POLICIES.include?(normalized) ? normalized : nil
+      end
+
+      def bounded_gate_seconds(value, default:, min:, max:)
+        number = Float(value.to_s)
+        return default unless number.finite?
+
+        number.clamp(min, max).round
+      rescue ArgumentError, TypeError
+        default
+      end
+
+      def deferred_command_gate(agent_or_deferred)
+        deferred = if agent_or_deferred.is_a?(Hash) && agent_or_deferred.key?("command_gate")
+                     agent_or_deferred
+                   else
+                     deferred_spawn_metadata(agent_or_deferred)
+                   end
+        gate = deferred.fetch("command_gate", nil)
+        gate.is_a?(Hash) ? gate : nil
+      end
+
+      # Arms a gate: `armed_at` starts the total wait budget and `next_check_at` makes it due.
+      # A gate behind a predecessor is stored disarmed and armed later, so its budget measures the
+      # time the *condition* took, not the time its predecessor took.
+      def armed_deferred_gate(gate, now:)
+        base = gate.merge("state" => DEFERRED_GATE_STATE_PENDING, "checks" => gate.fetch("checks", 0).to_i)
+        return base unless now
+
+        base.merge(
+          "armed_at" => now,
+          "next_check_at" => now,
+          "expires_at" => gate_deadline(now, base.fetch("max_wait_seconds", DEFERRED_WORKER_GATE_DEFAULT_MAX_WAIT_SECONDS))
+        ).compact
+      end
+
+      def gate_armed?(gate)
+        gate.is_a?(Hash) && present_string(gate.fetch("armed_at", nil)) ? true : false
+      end
+
+      def gate_pending?(gate)
+        gate.is_a?(Hash) && gate.fetch("state", DEFERRED_GATE_STATE_PENDING).to_s == DEFERRED_GATE_STATE_PENDING
+      end
+
+      def gate_deadline(now, max_wait_seconds)
+        parsed = parse_time_or_nil(now)
+        return nil unless parsed
+
+        (parsed + max_wait_seconds.to_i).iso8601
+      end
+
+      # Short, honest label for the AgentTree row and log lines. A head-supplied label wins because
+      # "pair review on the delivery PR" reads better in a tree than a truncated `gh` invocation.
+      def deferred_gate_label(gate)
+        return "a wait condition" unless gate.is_a?(Hash)
+
+        label = present_string(gate.fetch("label", nil)) || present_string(gate.fetch("command", nil))
+        return "a wait condition" unless label
+
+        single_line = label.to_s.gsub(/\s+/, " ").strip
+        return single_line if single_line.length <= GATE_LABEL_MAX_CHARS
+
+        "#{single_line[0, GATE_LABEL_MAX_CHARS - 1].rstrip}…"
+      end
+
       # Validation for one `after_agent_id` at spawn time. Returns a rejection, a deferral, or
       # "start now" when there is nothing left to wait for.
       def deferred_spawn_decision(state, after_agent_id:, failure_policy:)
@@ -8229,8 +8505,9 @@ module Meringue
         if status == "errored" && failure_policy != "run" && worker_resumable_after_settle_failure?(predecessor)
           return { "kind" => "defer", "predecessor" => deep_copy(predecessor), "chain_depth" => chain_depth }
         end
-        return { "kind" => "start_now", "predecessor" => deep_copy(predecessor) } if status == "completed"
-        return { "kind" => "start_now", "predecessor" => deep_copy(predecessor) } if status == "errored" && failure_policy == "run"
+        if status == "completed" || (status == "errored" && failure_policy == "run")
+          return { "kind" => "start_now", "predecessor" => deep_copy(predecessor), "chain_depth" => chain_depth }
+        end
 
         deferred_rejection(
           "SpawnWorker cannot wait for #{requested} because it already #{status == "killed" ? "was killed" : "errored"}. " \
@@ -8272,7 +8549,7 @@ module Meringue
       def queue_deferred_worker(state, command_id:, command_type:, issue:, project:, prompt:, title:,
                                 requested_workspace_path:, follow_up_of_agent_id:, predecessor:,
                                 chain_depth:, failure_policy:, include_predecessor_result:, completion_continuation:,
-                                rerouted_from_issue_id:)
+                                rerouted_from_issue_id:, command_gate: nil)
         now = timestamp
         agent_id = next_worker_id!(state, issue.fetch("id"))
         workspace = resolve_worker_workspace(
@@ -8301,25 +8578,30 @@ module Meringue
           requested_workspace_path: requested_workspace_path,
           follow_up_of_agent_id: follow_up_of_agent_id,
           replace_agent_id: nil,
-          after_agent_id: predecessor.fetch("id"),
+          after_agent_id: predecessor && predecessor.fetch("id"),
           completion_continuation: completion_continuation,
           now: now,
           harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
         )
+        # A gate with no predecessor is live from the moment the worker is queued; a gate behind a
+        # predecessor is only armed once that predecessor settles, so `gh pr view` is never polled
+        # before the worker that opens the PR has finished.
+        gate_record = command_gate && armed_deferred_gate(command_gate, now: predecessor ? nil : now)
         agent["harness_metadata"] = agent.fetch("harness_metadata").merge(
           "provisioning_state" => "deferred",
           "rerouted_from_issue_id" => rerouted_from_issue_id,
           "queue_command_id" => present_string(command_id),
           "deferred_spawn" => {
             "state" => DEFERRED_STATE_WAITING,
-            "after_agent_id" => predecessor.fetch("id"),
-            "after_agent_issue_id" => predecessor.fetch("issue_id", nil),
-            "after_agent_title" => (predecessor.fetch("harness_metadata", {}) || {}).fetch("title", nil),
+            "after_agent_id" => predecessor && predecessor.fetch("id"),
+            "after_agent_issue_id" => predecessor && predecessor.fetch("issue_id", nil),
+            "after_agent_title" => predecessor && (predecessor.fetch("harness_metadata", {}) || {}).fetch("title", nil),
             "if_predecessor_fails" => failure_policy,
             "include_predecessor_result" => include_predecessor_result,
             "chain_depth" => chain_depth,
             "queued_at" => now,
-            "queued_prompt" => prompt.to_s
+            "queued_prompt" => prompt.to_s,
+            "command_gate" => gate_record
           }.compact
         ).compact
         state.fetch("agents") << agent
@@ -8338,11 +8620,14 @@ module Meringue
             "project_id" => project.fetch("id"),
             "agent_id" => agent_id,
             "routing_action" => "queue_deferred_worker",
-            "after_agent_id" => predecessor.fetch("id"),
-            "after_agent_status" => predecessor.fetch("status", nil),
+            "after_agent_id" => predecessor && predecessor.fetch("id"),
+            "after_agent_status" => predecessor && predecessor.fetch("status", nil),
             "if_predecessor_fails" => failure_policy,
             "include_predecessor_result" => include_predecessor_result,
             "chain_depth" => chain_depth,
+            "after_command" => gate_record && gate_record.fetch("command", nil),
+            "after_command_label" => gate_record && gate_record.fetch("label", nil),
+            "if_gate_expires" => gate_record && gate_record.fetch("if_gate_expires", nil),
             "title" => agent.fetch("harness_metadata", {}).fetch("title", nil)
           }.compact
         )
@@ -8353,24 +8638,38 @@ module Meringue
 
       # One-line summary for GetInfo output, so "what is P1-I1-W2" says what it is waiting on.
       def deferred_info_line(deferred)
-        after = deferred.fetch("after_agent_id", "an unknown agent")
+        after = present_string(deferred.fetch("after_agent_id", nil))
+        gate = deferred.fetch("command_gate", nil)
+        gate = nil unless gate.is_a?(Hash)
+        subject = [
+          after ? "#{after} (#{deferred.fetch("after_agent_status", "unknown")})" : nil,
+          gate ? "wait condition #{deferred_gate_label(gate)} (#{gate.fetch("state", DEFERRED_GATE_STATE_PENDING)})" : nil
+        ].compact
+        subject = ["an unknown agent"] if subject.empty?
         case deferred.fetch("state", nil).to_s
         when DEFERRED_STATE_WAITING
-          "waiting on: #{after} (#{deferred.fetch("after_agent_status", "unknown")}); if it fails: " \
+          "waiting on: #{subject.join(" and ")}; if it fails: " \
             "#{deferred.fetch("if_predecessor_fails", deferred_worker_default_failure_policy)}"
         when DEFERRED_STATE_ACTIVATING
-          "starting now after: #{after}"
+          "starting now after: #{subject.join(" and ")}"
         when DEFERRED_STATE_CANCELLED
-          "cancelled before starting: #{deferred.fetch("cancel_reason", "predecessor could not settle")} (#{after})"
+          "cancelled before starting: #{deferred.fetch("cancel_reason", "predecessor could not settle")} (#{subject.join(" and ")})"
         else
-          "started after: #{after}"
+          "started after: #{subject.join(" and ")}"
         end
       end
 
       def deferred_queue_message(agent)
         deferred = deferred_spawn_metadata(agent)
-        after_agent_id = deferred.fetch("after_agent_id", "its predecessor")
-        "Queued worker #{agent.fetch("id")} on #{agent.fetch("issue_id")} to start after #{after_agent_id} settles."
+        after_agent_id = present_string(deferred.fetch("after_agent_id", nil))
+        gate = deferred.fetch("command_gate", nil)
+        gate = nil unless gate.is_a?(Hash)
+        conditions = [
+          after_agent_id ? "#{after_agent_id} settles" : nil,
+          gate ? "#{deferred_gate_label(gate)} passes" : nil
+        ].compact
+        conditions = ["its predecessor settles"] if conditions.empty?
+        "Queued worker #{agent.fetch("id")} on #{agent.fetch("issue_id")} to start after #{conditions.join(" and ")}."
       end
 
       def activated_deferred_spawn_metadata(reserved_agent, now)
@@ -8408,11 +8707,298 @@ module Meringue
         [prompt.to_s.rstrip, "#{header}\n#{body}"].join("\n\n")
       end
 
+      # The command gate's own handover. A script-gated worker gets the same treatment as an
+      # agent-gated one: the thing it waited for hands over what it saw. `gh pr view ... --json
+      # reviewDecision` output is exactly the context the follow-up worker needs, and
+      # `include_predecessor_result: false` suppresses this block too.
+      def deferred_gate_handover_prompt(prompt, gate, include_predecessor_result)
+        return prompt.to_s unless include_predecessor_result && gate.is_a?(Hash)
+
+        last = gate.fetch("last_check", nil)
+        last = {} unless last.is_a?(Hash)
+        output = present_string([last.fetch("stdout_tail", nil), last.fetch("stderr_tail", nil)].compact.join("\n"))
+        state_line = case gate.fetch("state", nil).to_s
+                     when DEFERRED_GATE_STATE_EXPIRED
+                       "It never passed within its #{gate.fetch("max_wait_seconds", DEFERRED_WORKER_GATE_DEFAULT_MAX_WAIT_SECONDS)}s budget, " \
+                         "and this worker was started anyway (if_gate_expires: \"run\"). Verify the condition yourself before relying on it."
+                     when DEFERRED_GATE_STATE_UNAVAILABLE
+                       "It could not be run (#{gate.fetch("last_problem", "the command could not be evaluated")}), " \
+                         "and this worker was started anyway (if_gate_expires: \"run\"). Verify the condition yourself before relying on it."
+                     else
+                       "It passed, which is why this worker started."
+                     end
+        body = [
+          "Command: #{gate.fetch("command", "(unknown)")}",
+          "Checked #{gate.fetch("checks", 0).to_i} time(s); last exit status: #{last.fetch("exit_status", "unknown")}",
+          state_line,
+          "",
+          output ? "Last output:" : "Last output: none was captured.",
+          output ? truncate_gate_output(output) : nil
+        ].compact.join("\n")
+        header = "--- Wait condition: #{deferred_gate_label(gate)} ---"
+        [prompt.to_s.rstrip, "#{header}\n#{body}"].join("\n\n")
+      end
+
+      def truncate_gate_output(text)
+        value = text.to_s.strip
+        return value if value.length <= DEFERRED_WORKER_GATE_OUTPUT_MAX_CHARS
+
+        "#{value[0, DEFERRED_WORKER_GATE_OUTPUT_MAX_CHARS].rstrip}\n… [output truncated]"
+      end
+
       def truncate_handover_text(text)
         value = text.to_s.strip
         return value if value.length <= DEFERRED_WORKER_HANDOVER_MAX_CHARS
 
         "#{value[0, DEFERRED_WORKER_HANDOVER_MAX_CHARS].rstrip}\n… [handover truncated]"
+      end
+
+      # One reconcile pass over every armed, pending command gate. This is the only place a gate
+      # command is executed, and it never runs while the state lock is held: the pass claims the
+      # gates that are due, releases the lock, runs the commands under the pass budget, then writes
+      # the outcomes back. A gate that does not fit in the budget is checked on the next tick.
+      #
+      # It deliberately does not activate anything. It only updates the gate's state on the worker
+      # record; `resolve_deferred_workers` (called right after, and from the settle path, and after
+      # a restart) is still the single place a queued worker starts or is cancelled.
+      def check_deferred_worker_gates(trigger:)
+        claim = synchronized_state do
+          state = normalized_state
+          now = timestamp
+          changed = false
+          due = []
+          results = []
+          state.fetch("agents").each do |agent|
+            next unless waiting_deferred_worker?(agent)
+
+            deferred = deferred_spawn_metadata(agent)
+            gate = deferred_command_gate(deferred)
+            next unless gate && gate_pending?(gate) && gate_armed?(gate)
+
+            if gate_expired?(gate, now)
+              results << expire_deferred_worker_gate_in_state!(state, agent, deferred, gate, now: now, trigger: trigger)
+              changed = true
+              next
+            end
+            next unless gate_due?(gate, now)
+
+            # Claim the check by moving next_check_at forward *before* running anything. Another
+            # Meringue instance sharing this state file then sees the gate as not due, and a crash
+            # mid-check costs one interval instead of re-running the command in a tight loop.
+            claimed = gate.merge("next_check_at" => gate_next_check_at(now, gate)).compact
+            agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+              "deferred_spawn" => deferred.merge("command_gate" => claimed)
+            )
+            agent["updated_at"] = now
+            changed = true
+            due << {
+              "agent_id" => agent.fetch("id"),
+              "gate" => deep_copy(claimed),
+              "cwd" => deferred_gate_cwd(state, agent, claimed)
+            }
+          end
+          if changed
+            touch_state!(state, now)
+            store.save(state)
+          end
+          { "due" => due, "results" => results.compact }
+        end
+
+        results = claim.fetch("results")
+        deadline = monotonic_time + DEFERRED_WORKER_GATE_BUDGET_SECONDS
+        claim.fetch("due").each do |entry|
+          break if monotonic_time > deadline
+
+          outcome = run_deferred_gate_command(entry)
+          recorded = record_deferred_gate_outcome(entry, outcome, trigger: trigger)
+          results << recorded if recorded
+        end
+        results
+      end
+
+      def gate_expired?(gate, now)
+        deadline = parse_time_or_nil(gate.fetch("expires_at", nil))
+        current = parse_time_or_nil(now)
+        return false unless deadline && current
+
+        current >= deadline
+      end
+
+      def gate_due?(gate, now)
+        due_at = parse_time_or_nil(gate.fetch("next_check_at", nil))
+        current = parse_time_or_nil(now)
+        return true unless due_at && current
+
+        current >= due_at
+      end
+
+      def gate_next_check_at(now, gate)
+        current = parse_time_or_nil(now)
+        return nil unless current
+
+        interval = gate.fetch("interval_seconds", DEFERRED_WORKER_GATE_DEFAULT_INTERVAL_SECONDS).to_i
+        (current + [interval, DEFERRED_WORKER_GATE_MIN_INTERVAL_SECONDS].max).iso8601
+      end
+
+      # A queued worker's workspace is only planned until it starts, so `project_root` is the
+      # default and also the fallback when a `workspace` gate has no directory yet.
+      def deferred_gate_cwd(state, agent, gate)
+        if gate.fetch("cwd", DEFERRED_WORKER_GATE_DEFAULT_CWD).to_s == "workspace"
+          workspace = present_string(agent.fetch("workspace_path", nil))
+          return workspace if workspace && Dir.exist?(workspace)
+        end
+        project = find_project(state, agent.fetch("project_id", nil))
+        present_string(project && project.fetch("root_path", nil))
+      end
+
+      def run_deferred_gate_command(entry)
+        gate = entry.fetch("gate")
+        cwd = present_string(entry.fetch("cwd", nil))
+        unless cwd
+          return { "passed" => false, "unusable" => true, "error" => "the wait condition has no directory to run in", "checked_at" => timestamp }
+        end
+
+        metric_probe.check_gate(
+          command: gate.fetch("command", nil),
+          cwd: cwd,
+          timeout: gate.fetch("timeout_seconds", DEFERRED_WORKER_GATE_DEFAULT_TIMEOUT_SECONDS),
+          expect: gate.fetch("expect", DEFERRED_WORKER_GATE_DEFAULT_EXPECT),
+          pattern: gate.fetch("pattern", nil)
+        ).merge("cwd" => cwd, "checked_at" => timestamp)
+      rescue StandardError => e
+        { "passed" => false, "unusable" => true, "error" => sanitized_error_message(e), "cwd" => cwd, "checked_at" => timestamp }
+      end
+
+      def record_deferred_gate_outcome(entry, outcome, trigger:)
+        agent_id = entry.fetch("agent_id")
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          next nil unless agent && waiting_deferred_worker?(agent)
+
+          deferred = deferred_spawn_metadata(agent)
+          gate = deferred_command_gate(deferred)
+          next nil unless gate && gate_pending?(gate)
+
+          now = timestamp
+          unusable = !!outcome.fetch("unusable", false) || !present_string(outcome.fetch("error", nil)).nil?
+          passed = !!outcome.fetch("passed", false) && !unusable
+          consecutive = unusable ? gate.fetch("consecutive_unusable_checks", 0).to_i + 1 : 0
+          updated = gate.merge(
+            "checks" => gate.fetch("checks", 0).to_i + 1,
+            "last_checked_at" => now,
+            "last_check" => gate_check_record(outcome),
+            "consecutive_unusable_checks" => consecutive,
+            "last_problem" => unusable ? gate_problem_text(outcome) : nil
+          ).compact
+          if passed
+            updated["state"] = DEFERRED_GATE_STATE_SATISFIED
+            updated["satisfied_at"] = now
+          elsif consecutive >= DEFERRED_WORKER_GATE_UNUSABLE_LIMIT
+            # A gate that cannot be run can never pass. Give up loudly rather than polling a
+            # broken command until the wait budget runs out hours from now.
+            updated["state"] = DEFERRED_GATE_STATE_UNAVAILABLE
+            updated["unavailable_at"] = now
+          end
+          agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+            "deferred_spawn" => deferred.merge("command_gate" => updated)
+          )
+          agent["updated_at"] = now
+          log_ids = []
+          if unusable
+            log_ids = append_log(
+              state,
+              source_type: "kernel",
+              source_id: agent_id,
+              level: "warning",
+              message: "Wait condition #{deferred_gate_label(updated)} for queued worker #{agent_id} could not be evaluated: " \
+                       "#{updated.fetch("last_problem", "unknown problem")} (#{consecutive}/#{DEFERRED_WORKER_GATE_UNUSABLE_LIMIT}).",
+              details: {
+                "agent_id" => agent_id,
+                "issue_id" => agent.fetch("issue_id", nil),
+                "after_command" => updated.fetch("command", nil),
+                "after_command_state" => updated.fetch("state", nil),
+                "consecutive_unusable_checks" => consecutive,
+                "resolution" => "gate_check",
+                "trigger" => trigger
+              }.compact
+            )
+          end
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(
+            nil,
+            "CheckDeferredWorkerGate",
+            agent_id,
+            "Checked wait condition #{deferred_gate_label(updated)} for queued worker #{agent_id}: #{updated.fetch("state")}.",
+            {
+              "resolution" => "gate_check",
+              "agent_id" => agent_id,
+              "after_command" => updated.fetch("command", nil),
+              "after_command_state" => updated.fetch("state", nil),
+              "checks" => updated.fetch("checks", 0),
+              "passed" => passed,
+              "trigger" => trigger
+            }.compact,
+            log_ids
+          )
+        end
+      end
+
+      def expire_deferred_worker_gate_in_state!(state, agent, deferred, gate, now:, trigger:)
+        agent_id = agent.fetch("id")
+        expired = gate.merge("state" => DEFERRED_GATE_STATE_EXPIRED, "expired_at" => now)
+        agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+          "deferred_spawn" => deferred.merge("command_gate" => expired)
+        )
+        agent["updated_at"] = now
+        message = "Wait condition #{deferred_gate_label(expired)} for queued worker #{agent_id} did not pass within " \
+                  "#{expired.fetch("max_wait_seconds", DEFERRED_WORKER_GATE_DEFAULT_MAX_WAIT_SECONDS)}s."
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: agent_id,
+          level: "warning",
+          message: message,
+          details: {
+            "agent_id" => agent_id,
+            "issue_id" => agent.fetch("issue_id", nil),
+            "after_command" => expired.fetch("command", nil),
+            "after_command_state" => DEFERRED_GATE_STATE_EXPIRED,
+            "checks" => expired.fetch("checks", 0),
+            "if_gate_expires" => expired.fetch("if_gate_expires", deferred_worker_default_failure_policy),
+            "resolution" => "gate_expired",
+            "trigger" => trigger
+          }.compact
+        )
+        accepted_result(
+          nil,
+          "CheckDeferredWorkerGate",
+          agent_id,
+          message,
+          {
+            "resolution" => "gate_expired",
+            "agent_id" => agent_id,
+            "after_command" => expired.fetch("command", nil),
+            "after_command_state" => DEFERRED_GATE_STATE_EXPIRED,
+            "trigger" => trigger
+          }.compact,
+          log_ids
+        )
+      end
+
+      def gate_check_record(outcome)
+        outcome.slice(
+          "exit_status", "timed_out", "stdout_tail", "stderr_tail", "error", "parse_error", "passed", "cwd", "checked_at"
+        ).compact
+      end
+
+      def gate_problem_text(outcome)
+        return "the wait condition timed out" if outcome.fetch("timed_out", false)
+        return outcome.fetch("parse_error") if present_string(outcome.fetch("parse_error", nil))
+        return outcome.fetch("error") if present_string(outcome.fetch("error", nil))
+
+        "the wait condition could not be evaluated"
       end
 
       # The one resolution path for queued dependents. It is called from the worker-settle path,
@@ -8443,23 +9029,62 @@ module Meringue
         results
       end
 
+      # Every predicate a queued worker carries is resolved here. The agent gate decides first,
+      # because a command gate behind a predecessor must not be polled until that predecessor has
+      # settled; only when the agent side says "go" does the command gate get a say.
       def deferred_worker_resolution(state, agent)
         deferred = deferred_spawn_metadata(agent)
         recorded_id = deferred_worker_after_agent_id(agent)
+        gate = deferred_command_gate(deferred)
         base = {
           "agent_id" => agent.fetch("id"),
           "issue_id" => agent.fetch("issue_id", nil),
           "after_agent_id" => recorded_id,
           "if_predecessor_fails" => deferred.fetch("if_predecessor_fails", deferred_worker_default_failure_policy)
         }
-        unless recorded_id
-          return base.merge(
-            "kind" => "cancel",
-            "reason" => "predecessor_reference_missing",
-            "message" => "Cancelled queued worker #{agent.fetch("id")} because it no longer records which agent it was waiting for."
-          )
-        end
+        decision = if recorded_id
+                     deferred_predecessor_resolution(state, agent, base, recorded_id)
+                   elsif gate
+                     # Gate-only worker: nothing to wait for but the command.
+                     base.merge("kind" => "activate", "predecessor" => nil)
+                   else
+                     base.merge(
+                       "kind" => "cancel",
+                       "reason" => "predecessor_reference_missing",
+                       "message" => "Cancelled queued worker #{agent.fetch("id")} because it no longer records which agent it was waiting for."
+                     )
+                   end
+        return decision unless gate && decision.is_a?(Hash) && decision.fetch("kind", nil) == "activate"
 
+        deferred_gate_resolution(decision, base, gate)
+      end
+
+      # The command-gate half of the decision, reached only once the agent half says "go".
+      def deferred_gate_resolution(decision, base, gate)
+        case gate.fetch("state", DEFERRED_GATE_STATE_PENDING).to_s
+        when DEFERRED_GATE_STATE_SATISFIED
+          decision.merge("gate" => deep_copy(gate))
+        when *DEFERRED_GATE_UNRESOLVED_STATES
+          if gate.fetch("if_gate_expires", deferred_worker_default_failure_policy).to_s == "run"
+            decision.merge("gate" => deep_copy(gate), "gate_unresolved" => true)
+          else
+            base.merge(
+              "kind" => "cancel",
+              "reason" => gate.fetch("state").to_s == DEFERRED_GATE_STATE_EXPIRED ? "gate_expired" : "gate_unavailable",
+              "gate" => deep_copy(gate),
+              "message" => deferred_gate_cancellation_message(base.fetch("agent_id"), gate)
+            )
+          end
+        else
+          # Still pending. Arming is what starts its wait budget and makes it due for a check;
+          # after that the worker simply keeps waiting until a poll changes the gate's state.
+          return base.merge("kind" => "arm_gate", "gate" => deep_copy(gate)) unless gate_armed?(gate)
+
+          nil
+        end
+      end
+
+      def deferred_predecessor_resolution(state, agent, base, recorded_id)
         predecessor = deferred_effective_predecessor(state, recorded_id)
         unless predecessor
           return base.merge(
@@ -8536,6 +9161,7 @@ module Meringue
         when "activate" then activate_deferred_worker(decision, trigger: trigger)
         when "cancel" then cancel_deferred_worker(decision, trigger: trigger)
         when "repoint" then repoint_deferred_worker(decision, trigger: trigger)
+        when "arm_gate" then arm_deferred_worker_gate(decision, trigger: trigger)
         end
       end
 
@@ -8543,7 +9169,8 @@ module Meringue
       # the harness spawn leaves a normal interrupted reservation that reconciliation resumes.
       def activate_deferred_worker(decision, trigger:)
         agent_id = decision.fetch("agent_id")
-        predecessor = decision.fetch("predecessor")
+        predecessor = decision.fetch("predecessor", nil)
+        gate = decision.fetch("gate", nil)
         activation = synchronized_state do
           state = normalized_state
           agent = find_agent(state, agent_id)
@@ -8552,43 +9179,49 @@ module Meringue
           deferred = deferred_spawn_metadata(agent)
           metadata = agent.fetch("harness_metadata", {}) || {}
           now = timestamp
+          include_result = deferred.fetch("include_predecessor_result", true)
           prompt = deferred_handover_prompt(
             deferred.fetch("queued_prompt", metadata.fetch("spawn_prompt", "")),
             predecessor,
-            deferred.fetch("include_predecessor_result", true)
+            include_result
           )
+          prompt = deferred_gate_handover_prompt(prompt, gate, include_result)
           updated = metadata.merge(
             "spawn_prompt" => prompt,
             # Claims the record for this instance while the harness session is being started.
             "provisioning_state" => "allocating_workspace",
             "deferred_spawn" => deferred.merge(
               "state" => DEFERRED_STATE_ACTIVATING,
-              "after_agent_id" => predecessor.fetch("id"),
+              "after_agent_id" => predecessor && predecessor.fetch("id"),
               "predecessor_status" => decision.fetch("predecessor_status", nil),
               "activation_trigger" => trigger,
               "activated_at" => now
             ).compact
           ).merge(instance_ownership_metadata)
-          agent["after_agent_id"] = predecessor.fetch("id")
+          agent["after_agent_id"] = predecessor && predecessor.fetch("id")
           agent["harness_metadata"] = updated
           agent["updated_at"] = now
-          failed_predecessor = decision.fetch("predecessor_status", nil) != "completed"
+          unhappy = (predecessor && decision.fetch("predecessor_status", nil) != "completed") ||
+                    decision.fetch("gate_unresolved", false)
           repointed_from = present_string(decision.fetch("repointed_from_agent_id", nil)) ||
                            present_string(deferred.fetch("repointed_from_agent_id", nil))
           log_ids = append_log(
             state,
             source_type: "kernel",
             source_id: agent_id,
-            level: failed_predecessor ? "warning" : "info",
+            level: unhappy ? "warning" : "info",
             message: deferred_activation_message(agent_id, predecessor, decision, repointed_from: repointed_from),
             details: {
               "agent_id" => agent_id,
               "issue_id" => agent.fetch("issue_id", nil),
-              "after_agent_id" => predecessor.fetch("id"),
+              "after_agent_id" => predecessor && predecessor.fetch("id"),
               "after_agent_status" => decision.fetch("predecessor_status", nil),
               "repointed_from_agent_id" => repointed_from,
               "if_predecessor_fails" => decision.fetch("if_predecessor_fails", nil),
-              "include_predecessor_result" => deferred.fetch("include_predecessor_result", true),
+              "include_predecessor_result" => include_result,
+              "after_command" => gate && gate.fetch("command", nil),
+              "after_command_state" => gate && gate.fetch("state", nil),
+              "after_command_checks" => gate && gate.fetch("checks", nil),
               "trigger" => trigger
             }.compact
           )
@@ -8609,7 +9242,7 @@ module Meringue
             "prompt" => activation.fetch("prompt"),
             "workspace_path" => metadata.fetch("requested_workspace_path", nil),
             "follow_up_of_agent_id" => metadata.fetch("follow_up_of_agent_id", nil),
-            "after_agent_id" => predecessor.fetch("id"),
+            "after_agent_id" => predecessor && predecessor.fetch("id"),
             "_activate_deferred" => true,
             "_deferred_agent_id" => agent_id
           }
@@ -8618,20 +9251,104 @@ module Meringue
           "log_entry_ids" => (activation.fetch("log_entry_ids") + Array(result.fetch("log_entry_ids", []))).uniq,
           "deferred_activation" => {
             "agent_id" => agent_id,
-            "after_agent_id" => predecessor.fetch("id"),
+            "after_agent_id" => predecessor && predecessor.fetch("id"),
             "after_agent_status" => decision.fetch("predecessor_status", nil),
+            "after_command_state" => gate && gate.fetch("state", nil),
             "trigger" => trigger
-          }
+          }.compact
         )
       end
 
       def deferred_activation_message(agent_id, predecessor, decision, repointed_from: nil)
         status = decision.fetch("predecessor_status", nil).to_s
-        base = "Starting queued worker #{agent_id} because #{predecessor.fetch("id")} settled (#{status.empty? ? "settled" : status})."
+        gate = decision.fetch("gate", nil)
+        reasons = []
+        if predecessor
+          reasons << "#{predecessor.fetch("id")} settled (#{status.empty? ? "settled" : status})"
+        end
+        reasons << deferred_gate_activation_reason(gate) if gate
+        base = "Starting queued worker #{agent_id} because #{reasons.empty? ? "it has nothing left to wait for" : reasons.join(" and ")}."
         base = "#{base} It was queued behind #{repointed_from}, which that worker replaced." if present_string(repointed_from)
-        return base if status == "completed"
+        base = "#{base} Its predecessor did not complete, and if_predecessor_fails is \"run\"." if predecessor && status != "completed"
+        base
+      end
 
-        "#{base} Its predecessor did not complete, and if_predecessor_fails is \"run\"."
+      def deferred_gate_activation_reason(gate)
+        label = deferred_gate_label(gate)
+        checks = gate.fetch("checks", 0).to_i
+        case gate.fetch("state", nil).to_s
+        when DEFERRED_GATE_STATE_EXPIRED
+          "its wait condition #{label} never passed within its #{gate.fetch("max_wait_seconds", DEFERRED_WORKER_GATE_DEFAULT_MAX_WAIT_SECONDS)}s budget and if_gate_expires is \"run\""
+        when DEFERRED_GATE_STATE_UNAVAILABLE
+          "its wait condition #{label} could not be run and if_gate_expires is \"run\""
+        else
+          "its wait condition #{label} passed#{checks.positive? ? " after #{checks} check#{checks == 1 ? "" : "s"}" : ""}"
+        end
+      end
+
+      def deferred_gate_cancellation_message(agent_id, gate)
+        label = deferred_gate_label(gate)
+        if gate.fetch("state", nil).to_s == DEFERRED_GATE_STATE_UNAVAILABLE
+          return "Cancelled queued worker #{agent_id} because its wait condition #{label} could not be run " \
+                 "#{DEFERRED_WORKER_GATE_UNUSABLE_LIMIT} times in a row (#{gate.fetch("last_problem", "the command could not be evaluated")})."
+        end
+
+        "Cancelled queued worker #{agent_id} because its wait condition #{label} did not pass within " \
+          "#{gate.fetch("max_wait_seconds", DEFERRED_WORKER_GATE_DEFAULT_MAX_WAIT_SECONDS)}s."
+      end
+
+      # Arms a gate that was waiting behind a predecessor. Committed as its own tiny state step so
+      # the wait budget starts from the moment the condition became relevant and survives a restart.
+      def arm_deferred_worker_gate(decision, trigger:)
+        agent_id = decision.fetch("agent_id")
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          next nil unless agent && waiting_deferred_worker?(agent)
+
+          deferred = deferred_spawn_metadata(agent)
+          gate = deferred_command_gate(deferred)
+          next nil unless gate && gate_pending?(gate) && !gate_armed?(gate)
+
+          now = timestamp
+          armed = armed_deferred_gate(gate, now: now)
+          agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+            "deferred_spawn" => deferred.merge("command_gate" => armed)
+          )
+          agent["updated_at"] = now
+          message = "Queued worker #{agent_id} is now waiting on #{deferred_gate_label(armed)}."
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: agent_id,
+            level: "info",
+            message: message,
+            details: {
+              "agent_id" => agent_id,
+              "issue_id" => agent.fetch("issue_id", nil),
+              "after_agent_id" => deferred_worker_after_agent_id(agent),
+              "after_command" => armed.fetch("command", nil),
+              "after_command_expires_at" => armed.fetch("expires_at", nil),
+              "resolution" => "armed_gate",
+              "trigger" => trigger
+            }.compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(
+            nil,
+            "ResolveDeferredWorker",
+            agent_id,
+            message,
+            {
+              "resolution" => "armed_gate",
+              "agent_id" => agent_id,
+              "after_command" => armed.fetch("command", nil),
+              "trigger" => trigger
+            }.compact,
+            log_ids
+          )
+        end
       end
 
       # Cancelling removes the dependent the same way Kill does, because it never started and would
@@ -9524,6 +10241,17 @@ module Meringue
         agent && agent.fetch("status", nil) != "killed" && blank?(agent.fetch("replaced_by_agent_id", nil))
       end
 
+      def deferred_started_because(deferred)
+        after_agent_id = present_string(deferred.fetch("after_agent_id", nil))
+        gate = deferred_command_gate(deferred)
+        reasons = []
+        reasons << "#{after_agent_id} settled (#{deferred.fetch("predecessor_status", "completed")})" if after_agent_id
+        reasons << deferred_gate_activation_reason(gate) if gate
+        return "its predecessor settled (#{deferred.fetch("predecessor_status", "completed")})" if reasons.empty?
+
+        reasons.join(" and ")
+      end
+
       def spawn_routing_action(follow_up_of_agent_id, replaces_agent_id)
         return "replace_worker" if present_string(replaces_agent_id)
         return "spawn_follow_up_worker" if present_string(follow_up_of_agent_id)
@@ -9535,7 +10263,7 @@ module Meringue
         deferred = deferred_spawn_metadata(agent)
         base = if deferred.fetch("state", nil) == DEFERRED_STATE_ACTIVATED
                  "Started queued worker #{agent.fetch("id")} on #{issue.fetch("id")} because " \
-                   "#{deferred.fetch("after_agent_id", "its predecessor")} settled (#{deferred.fetch("predecessor_status", "completed")})."
+                   "#{deferred_started_because(deferred)}."
                elsif present_string(agent.fetch("replaces_agent_id", nil))
                  "Replaced worker #{agent.fetch("replaces_agent_id")} with #{agent.fetch("id")} on #{issue.fetch("id")}."
                elsif present_string(agent.fetch("follow_up_of_agent_id", nil))
