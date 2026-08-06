@@ -1032,11 +1032,16 @@ module Meringue
       end
 
       def start_rpc_process(argv:, cwd:)
-        stdin, stdout, stderr, wait_thread = Open3.popen3(env, *argv, chdir: cwd)
+        stdin, stdout, stderr, wait_thread = Open3.popen3(process_environment(cwd), *argv, chdir: cwd)
         RpcProcess.new(stdin: stdin, stdout: stdout, stderr: stderr, wait_thread: wait_thread,
                        argv: argv, cwd: cwd)
       rescue Errno::ENOENT => e
         raise Error, "Unable to start Pi RPC process with #{argv.first.inspect}: #{e.message}"
+      end
+
+      def process_environment(cwd)
+        configured = ENV.to_h.merge(env)
+        env.merge(Git::CommitIdentity.environment(cwd: cwd, base_environment: configured))
       end
 
       def set_session_name(process, session_name)

@@ -37,6 +37,9 @@ class KernelWorkersSpawnTest < Minitest::Test
     assert_equal "Fix the failing login spec.", spawn_call.fetch("prompt")
     assert_includes spawn_call.fetch("system_prompt"), "P1-I1 - Fix the login bug"
     assert_includes spawn_call.fetch("system_prompt"), "You are a Meringue worker agent."
+    assert_includes spawn_call.fetch("system_prompt"), "Meringue must never be the author of a git commit."
+    assert_includes spawn_call.fetch("system_prompt"), "repository's configured user.name and user.email identity"
+    assert_includes spawn_call.fetch("system_prompt"), "do not invent one or commit as Meringue"
   end
 
   def test_spawn_persists_workspace_metadata_on_the_worker_record

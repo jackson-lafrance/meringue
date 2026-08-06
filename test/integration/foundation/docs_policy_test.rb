@@ -124,4 +124,14 @@ class FoundationDocsPolicyTest < Minitest::Test
     assert_includes guide, "--name"
     assert_includes guide, "Not covered"
   end
+
+  def test_commit_authorship_policy_is_documented_and_audited
+    guide = File.read(FoundationSupport.repo_path("docs", "commit-authorship.md"))
+
+    assert_includes guide, "Meringue must never be the author"
+    assert_includes guide, "user.name"
+    assert_includes guide, "Author identity unknown"
+    assert_includes guide, "PR #175"
+    assert_includes guide, "No other safe unmerged Meringue-authored commit"
+  end
 end

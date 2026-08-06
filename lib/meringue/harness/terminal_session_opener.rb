@@ -189,7 +189,10 @@ module Meringue
 
       def open_alacritty(alacritty, cwd, command_argv)
         argv = alacritty + ["--working-directory", cwd, "-e"] + command_argv
-        pid = Process.spawn(*argv, in: File::NULL, out: File::NULL, err: File::NULL)
+        environment = ENV.to_h.merge(
+          Git::CommitIdentity.environment(cwd: cwd, base_environment: ENV.to_h)
+        )
+        pid = Process.spawn(environment, *argv, in: File::NULL, out: File::NULL, err: File::NULL)
         status = wait_for_immediate_exit(pid)
         if status
           return { "opened" => true } if status.success?
