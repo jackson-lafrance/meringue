@@ -132,6 +132,41 @@ tests were updated to the shipped behavior:
     composite correlation IDs (`<agent>-PP1`, `<goal>-IT1-ATTEMPT`) stay verbatim so exactly-once
     dedupe keeps matching.
 
+14. **A harness process that exits was only discovered by trying to resume it**
+    (`test/integration/kernel_workers/dead_harness_process_test.rb`,
+    `test/integration/harness/pi_client_process_exit_test.rb`). `poll_agent_session`'s rescue
+    treated every poll failure the same, so a `PiClient::ProcessExitedError` ("has no live process
+    and no completed assistant response") entered the resume ladder and spent all three
+    `WORKER_RECONCILE_RESUME_MAX_ATTEMPTS` on `prompt` RPCs that could only hit the 30s command
+    timeout. The user-visible failure was therefore `RpcTimeoutError` on `"prompt"`, with the real
+    `ProcessExitedError` demoted to `original_error_*`, and each attempt left the harness process
+    its `attach_session` had just started running untracked against the same session file. Fixed
+    here: the harness marks the error (`Harness::SessionProcessGoneError`), the kernel settles on
+    the first pass that sees it (`settle_failure.kind: "harness_process_exited"`), and a resume that
+    fails after attaching kills what it started.
+
+    Two related evidence bugs were fixed with it: `PiClient#read_events` required a *live* process,
+    so the `process_exit` event the client journals on its way out (with exit status) was never
+    drained - and could not be, because `get_state` raises first for a dead session. Nothing in
+    Meringue ever printed the exit. `PiClient#session_exit_evidence` now reports the same evidence
+    in a harness-neutral shape.
+
+Two real gaps found while investigating this and deliberately left out of scope, because neither is
+what the reported incident was:
+
+- **No progress signal for a worker that is genuinely quiet.** Meringue records `is_streaming` and
+  `prompt_count`, but nothing warns when a `working` worker produces no session events for a long
+  time while its process is still alive. In the incident the worker really did work for ~36 of its
+  ~37 silent minutes, so a stall warning would not have caught it any earlier than the process-exit
+  detection does. A heartbeat/idle-warning mechanism is a separate design (it needs a per-harness
+  notion of "expected quiet", and it must not punish long tool calls).
+- **`PiClient::DEFAULT_COMMAND_TIMEOUT` (30s) is spent per failed RPC.** Skipping the resume ladder
+  removes the three timeouts this incident paid, but any *other* unreachable-but-alive session still
+  costs 30s per attempt inside a serial reconcile pass. Changing that timeout affects every Pi RPC
+  and belongs with the reconcile-pass budget work, not here.
+
 The original maintenance test slice did not change production code. Later prune-worktree
 lifecycle work updated the behavior called out in items 4 and 6, and the reference-integrity work
-in item 13 changed `State::Recounter` and the Recount save path in `Kernel::Engine`.
+in item 13 changed `State::Recounter` and the Recount save path in `Kernel::Engine`. The
+dead-harness-process work in item 14 changed `Kernel::Engine`, `Harness::PiClient`, and
+`Harness::Client`.

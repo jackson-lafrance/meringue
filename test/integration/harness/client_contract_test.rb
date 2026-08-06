@@ -103,6 +103,22 @@ class HarnessClientContractTest < HarnessIntegrationTest
     end
   end
 
+  # Optional capability with a neutral default, like turn_outcome: the kernel asks any client for
+  # evidence about a session whose process is gone, and a client with nothing to say answers nil
+  # instead of raising, so one harness knowing its exit status cannot leak into the kernel.
+  def test_session_exit_evidence_is_an_optional_capability_with_a_neutral_default
+    assert_nil Harness::Client.new.session_exit_evidence({})
+
+    CLIENT_CLASSES.each do |klass|
+      assert klass.public_method_defined?(:session_exit_evidence), "#{klass} must answer #session_exit_evidence"
+    end
+
+    client, = build_pi_client(tmpdir)
+    ref = pi_session_ref(session_file: pi_session_file(tmpdir), cwd: tmpdir)
+
+    assert_nil client.session_exit_evidence(ref), "a session this client never owned has no evidence to report"
+  end
+
   def test_open_session_view_returns_a_read_only_handle_for_every_harness
     [fake_client_and_ref, pi_client_and_ref, claude_client_and_ref].each do |client, ref|
       handle = client.open_session_view(ref)

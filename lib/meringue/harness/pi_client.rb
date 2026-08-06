@@ -31,7 +31,13 @@ module Meringue
 
       class Error < StandardError; end
       class ProcessNotFoundError < Error; end
-      class ProcessExitedError < Error; end
+      # A Pi RPC session is one long-lived process, so its exit is terminal for that session's
+      # transport: no later RPC can be answered, and re-prompting it only times out. The marker
+      # tells the kernel to settle the worker with the real cause instead of retrying it as if the
+      # session were momentarily busy.
+      class ProcessExitedError < Error
+        include Harness::SessionProcessGoneError
+      end
       class SessionTransportUnavailableError < Error; end
       # Another live Meringue instance owns the session and is still mid-turn. Prompting succeeds
       # once that turn settles, so the kernel queues and retries instead of failing the command.
@@ -446,11 +452,29 @@ module Meringue
         raise
       end
 
+      # An exited process still holds the journal that recorded *why* it exited, including its own
+      # `process_exit` event, its exit status, and its stderr. Requiring a live process here is what
+      # threw that evidence away: `get_state` raises first for a dead session, so the exit event was
+      # never drained and nothing in Meringue ever said the process had gone.
       def read_events(session_ref)
-        process = process_for(session_ref, required: false)
+        process = process_for(session_ref, required: false) || exited_process_for(session_ref)
         return [] unless process
 
         process.drain_events(consumer: "kernel")
+      end
+
+      # Harness-neutral evidence about a session whose process is no longer running. Returns nil
+      # when this client never owned the process (a different Meringue instance, or a restart).
+      def session_exit_evidence(session_ref)
+        process = exited_process_for(session_ref)
+        return nil unless process
+
+        {
+          "pid" => process.pid,
+          "exit_status" => process.exit_status,
+          "stderr_tail" => present?(process.stderr_tail) ? process.stderr_tail : nil,
+          "last_event_at" => process.last_event_at
+        }.compact
       end
 
       def open_session_view(session_ref)
@@ -1357,6 +1381,15 @@ module Meringue
             end
           }
         )
+      end
+
+      # The registered process for this session that has already exited. `process_for` deliberately
+      # hides it (callers must not send RPC to a dead process); this is for reading what it left
+      # behind.
+      def exited_process_for(session_ref)
+        pid = session_ref["pid"] || session_ref[:pid]
+        process = @processes_mutex.synchronize { @processes_by_pid[pid] }
+        process && !process.alive? ? process : nil
       end
 
       def unmanaged_process_alive?(session_ref)
