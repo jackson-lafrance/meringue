@@ -180,6 +180,15 @@ bound larger than the checkout ceiling is clamped to it so it can still fire. Ra
 `worktree_checkout_timeout` for an unusually large repository on slow storage; lower it if you
 would rather a giant checkout fail fast.
 
+While provisioning runs, its worker stays `queued` and the AgentTree shows live worktree telemetry.
+The row first says `provisioning workspace`; once Git emits checkout progress it shows Git's actual
+percentage (for example, `provisioning workspace 35%`). Before a percentage is available it shows
+the checkout phase and elapsed time instead. This percentage covers only the worktree checkout, not
+harness startup, so Meringue does not invent a total-worker percentage. The state record updates
+about every 15 seconds, while the durable `Still provisioning worker ...` log is rate-limited to one
+line per minute. When the harness starts, the progress marker is cleared and the worker becomes
+`working`.
+
 When provisioning does fail, the worker is not thrown away: a stuck attempt is retried once
 automatically, and a worker that runs out of automatic attempts stays `blocked` with its prompt
 and failure reason intact. Prompting that worker retries provisioning with the new instruction;

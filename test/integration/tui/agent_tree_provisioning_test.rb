@@ -37,6 +37,33 @@ class TuiAgentTreeProvisioningTest < Minitest::Test
     assert_includes rendered, "provisioning workspace 35%"
   end
 
+  def test_structured_checkout_progress_is_rendered_without_reparsing_git_output
+    rendered = render_worker(
+      "status" => "queued",
+      "harness_metadata" => {
+        "title" => "Force the right index",
+        "provisioning_state" => "allocating_workspace",
+        "provisioning_progress" => { "phase" => "checkout", "percent" => 42, "detail" => "unstructured output" }
+      }
+    )
+
+    assert_includes rendered, "provisioning workspace 42%"
+    refute_includes rendered, "unstructured output"
+  end
+
+  def test_checkout_progress_without_a_percentage_shows_phase_and_elapsed_time
+    rendered = render_worker(
+      "status" => "queued",
+      "harness_metadata" => {
+        "title" => "Force the right index",
+        "provisioning_state" => "allocating_workspace",
+        "provisioning_progress" => { "phase" => "checkout", "elapsed_seconds" => 17.4 }
+      }
+    )
+
+    assert_includes rendered, "provisioning workspace checkout 17s"
+  end
+
   def test_a_pending_retry_shows_which_attempt_is_next
     rendered = render_worker(
       "status" => "queued",
