@@ -32,7 +32,7 @@ Picker keys:
 | any printable character | filter; space separated tokens all have to match (`openai high`) |
 | `Backspace` / `Ctrl-W` | delete one character of the filter / clear it |
 | `↑` / `↓` | move the highlight (it wraps) |
-| `Enter` | apply the highlighted model, exactly as `/model <provider/model>` |
+| `Enter` | apply the highlighted model, exactly as `/model <provider>/<model-id>` |
 | `Ctrl-R` | re-fetch the catalog (`GetModelCatalog` with `refresh`), keeping the picker open |
 | `Esc`, click away, or any unhandled control key | close the picker without changing anything |
 
@@ -43,7 +43,7 @@ A trailing `refresh` word keeps `/models` on the kernel path instead of opening 
 ### Future Pi defaults
 
 ```text
-/model <provider/model>
+/model <provider>/<model-id>
 /thinking <off|minimal|low|medium|high|xhigh|max>
 ```
 
@@ -51,6 +51,7 @@ Examples:
 
 ```text
 /model openai/gpt-5.6-sol
+/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast
 /thinking xhigh
 ```
 
@@ -60,7 +61,48 @@ There is no command that only prints the pair. The dashboard status line always 
 
 A default change does **not** mutate, reconnect, restart, or terminate an existing Pi session. It also strips spawn-only model/thinking defaults when later resuming an existing session, so a resumable session keeps its persisted effective pair. The result and durable kernel log explicitly list existing Pi agent ids left unchanged.
 
-Model defaults must be an exact `provider/model` reference. Thinking defaults must be one of Pi's known levels. A provider extension can add models dynamically, so Meringue validates the model reference shape when saving it; Pi performs model availability validation when the future session starts. Validation is deliberately independent of the catalog: a valid explicit id is still accepted when the catalog is stale, empty, or unavailable.
+Model defaults must be an exact `<provider>/<model-id>` reference. Thinking defaults must be one of Pi's known levels. A provider extension can add models dynamically, so Meringue validates the model reference *shape* when saving it; the harness performs availability validation when the future session starts. Validation is deliberately independent of the catalog: a valid explicit id is still accepted when the catalog is stale, empty, or unavailable, and an id the catalog does not list is saved and labelled unverified rather than refused.
+
+### The accepted model-reference grammar
+
+One place owns this rule (`Meringue::Harness::ModelReference`), and it is the harness's own rule rather than a stricter Meringue invention. Pi resolves a reference by splitting on the **first** slash (`resolveModel` / `findExactModelReferenceMatch`), so Meringue does too:
+
+```text
+<provider>/<model-id>
+```
+
+- the provider is everything before the first `/`
+- the model id is everything after it, and **may itself contain `/` and `:`**
+
+That last point is the whole point. A real Fireworks router model is `fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`: provider `fireworks`, model id `fireworks:accounts/fireworks/routers/glm-5p2-fast`. Meringue used to encode "exactly one slash" twice — a kernel regex (`%r{\A[^/\s]+/[^/\s]+\z}`) and a three-way `split("/", 3)` in the Pi client — which made every such model unsettable from `/model` and unusable from the picker even though Pi lists it, accepts it on `--model`, and reports it back from `get_state`.
+
+What is still rejected is limited to shapes that cannot be a model reference at all, so a typo or a shell-mangled argument cannot silently become the default model:
+
+| Rejected | Reason in the message |
+| --- | --- |
+| *(empty)* | `a model id is required` |
+| `gpt-5.6-sol` | `has no provider prefix` (a bare id is ambiguous across providers) |
+| `openai/gpt 5.6`, `openai model` | `contains whitespace, so it is not a single model id` |
+| `/gpt-5.6-sol` | `has an empty provider` |
+| `openai/` | `has an empty model id` |
+| `--model` | `looks like a command-line flag, not a model id` |
+| `./models/foo` | `looks like a filesystem path, not a model id` |
+
+Validation is a shape check only; it never consults the catalog. Whether a well-formed id names a model that exists is the harness's answer, and it is reported, not enforced:
+
+```text
+Set the default Pi model to openai/gpt-5.6-sol for all future Pi heads and workers. Existing Pi sessions were not changed. Pi's model list (confirmed 2026-07-29T18:55:30Z) does not include openai/gpt-5.6-sol, so the id is unverified; run /models refresh if it should be there. Pi validates it when the next Pi session starts.
+```
+
+With no usable catalog at all the same accepted line says `Meringue has no confirmed Pi model list right now, so <reference> is unverified`, which is the degraded/unverified state the picker and completion already describe. A catalog that does not list a model can never make that model unsettable.
+
+Every rejection states its reason in the line the user reads, in the same shape as an invalid thinking level:
+
+```text
+Default Pi model was not changed: "glm-5p2-fast" has no provider prefix. Use <provider>/<model-id>, for example openai/gpt-5.6-sol; the model id may itself contain / and :, as in fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast.
+```
+
+The old bare `Rejected SetDefaultSessionModel: Default Pi model was not changed.` kept the reason in the `errors` detail only, so a malformed id, an unknown id, and an over-strict rule all looked identical.
 
 ### Thinking levels
 
@@ -196,4 +238,4 @@ The kernel owns catalog state. Snapshots live in `metadata.harness_model_catalog
 - A `stale` catalog is offered in full, with every entry labelled `last confirmed list` and a trailing note naming the failed refresh, so a temporary harness problem never hides models that exist.
 - When no catalog has ever been fetched, completion still offers the references Meringue knows (current session model, saved default, models in use) labelled `catalog unavailable — id not verified`, and appends one non-destructive note row explaining the state and pointing at `/models refresh`. Selecting the note re-inserts only what was already typed, so it can never overwrite a valid explicit id.
 
-Validation is unchanged by catalog state: `/model` requires an exact `provider/model` shape, and `/thinking` requires one of the seven levels on the ladder. Pi still rejects an unavailable model id at spawn time, and clamps a thinking level the chosen model does not map.
+Validation is unchanged by catalog state: `/model` requires an exact `<provider>/<model-id>` shape (see [The accepted model-reference grammar](#the-accepted-model-reference-grammar)), and `/thinking` requires one of the seven levels on the ladder. An id the catalog does not list is accepted and labelled unverified. Pi still rejects an unavailable model id at spawn time, and clamps a thinking level the chosen model does not map.

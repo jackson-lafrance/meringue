@@ -660,15 +660,19 @@ module Meringue
         end
       end
 
+      # Pi splits a reference on the *first* slash (`resolveModel`), and real Pi
+      # model ids contain slashes and colons of their own
+      # (`fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`). Splitting
+      # into three and refusing the remainder made those models unusable here.
       def parse_model_reference!(model_reference)
-        reference = model_reference.to_s.strip
-        provider, model_id, extra = reference.split("/", 3)
-        if !present?(provider) || !present?(model_id) || present?(extra)
+        parsed = ModelReference.parse(model_reference)
+        unless parsed
           raise InvalidModelReferenceError,
-                "Pi models must use an exact provider/model id, for example openai/gpt-5.6-sol."
+                "Pi models must use a provider/model id: " \
+                "#{ModelReference.rejection_reason(model_reference)}. #{ModelReference::FORMAT_HINT}"
         end
 
-        [provider, model_id]
+        [parsed.fetch("provider"), parsed.fetch("id")]
       end
 
       def writable_session_state(session_ref)

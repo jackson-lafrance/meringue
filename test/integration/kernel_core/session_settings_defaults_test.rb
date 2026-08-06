@@ -232,14 +232,139 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
   end
 
   def test_default_commands_validate_values_before_persistence
-    bad_models = ["gpt-5.6-sol", "openai/model/extra", "openai/has space"]
+    # Shapes that cannot be a model reference at all: a bare id, whitespace, an
+    # empty half, a mangled flag, and a filesystem path. A model id containing
+    # extra slashes is NOT in this list any more; see the multi-segment tests
+    # below.
+    bad_models = ["gpt-5.6-sol", "openai/has space", "openai/", "/gpt-5.6-sol", "--model", "./models/foo"]
     bad_models.each do |model|
-      assert_rejected(apply_command("SetDefaultSessionModel", "model" => model), "provider/model")
+      assert_rejected(apply_command("SetDefaultSessionModel", "model" => model), "model must be a provider/model id")
     end
     assert_rejected(apply_command("SetDefaultSessionThinkingLevel", "level" => "ultra"), "thinking level must be one of")
 
     assert_empty @coordinator.calls
     refute File.exist?(File.join(tmp_root, "config.toml"))
+  end
+
+  # Reported bug: `/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`
+  # was rejected even though Pi lists that model, accepts it on `--model`, and
+  # reports it back from `get_state`. The kernel's `%r{\A[^/\s]+/[^/\s]+\z}`
+  # allowed exactly one slash, so a provider prefix plus a Fireworks
+  # account/router path could never match. Provider is everything before the
+  # FIRST slash; the model id may contain more slashes and colons.
+  MULTI_SEGMENT_MODEL = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"
+
+  def test_a_multi_segment_model_reference_is_saved_and_reaches_new_sessions
+    add_project!(name: "multi-segment")
+    create_issue!("P1", title: "Exercise multi-segment models")
+
+    [MULTI_SEGMENT_MODEL, "openai/gpt-5.6-sol"].each do |reference|
+      result = apply_command("SetDefaultSessionModel", "model" => reference)
+
+      assert_accepted(result)
+      assert_equal reference, result.dig("result", "model")
+      assert_includes result.fetch("message"), "Set the default Pi model to #{reference}"
+
+      config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
+      assert_equal reference, config.value("harness", "pi", "model")
+    end
+
+    # The value round-trips into a session spawned after the change.
+    apply_command("SetDefaultSessionModel", "model" => MULTI_SEGMENT_MODEL)
+    spawn_worker!("P1-I1", workspace_path: make_project_dir("multi-segment-worker"))
+    spawned = persisted_agents.fetch(0)
+    assert_equal MULTI_SEGMENT_MODEL, spawned.dig("session_settings", "model", "reference")
+    assert_equal "fireworks", spawned.dig("session_settings", "model", "provider")
+    assert_equal "fireworks:accounts/fireworks/routers/glm-5p2-fast", spawned.dig("session_settings", "model", "id")
+  end
+
+  def test_a_multi_segment_model_reference_is_accepted_for_one_existing_session
+    add_project!(name: "multi-segment-session")
+    create_issue!("P1", title: "Exercise multi-segment models")
+    spawn_worker!("P1-I1", workspace_path: make_project_dir("worker"))
+
+    result = apply_command("SetSessionModel", "agent_id" => "P1-I1-W1", "model" => MULTI_SEGMENT_MODEL)
+
+    assert_accepted(result)
+    assert_equal MULTI_SEGMENT_MODEL, result.dig("result", "session_settings", "model", "reference")
+    assert_equal MULTI_SEGMENT_MODEL, persisted_agents.fetch(0).dig("session_settings", "model", "reference")
+    assert_empty @coordinator.calls, "a session change must not touch the persistent defaults"
+  end
+
+  # The user saw only "Rejected SetDefaultSessionModel: Default Pi model was not
+  # changed." The reason existed, but only in the details blob, so a malformed id
+  # and an over-strict rule looked identical. Every `/model` rejection now names
+  # its reason in the line the user reads.
+  def test_a_rejected_model_reference_states_its_reason_in_the_visible_line
+    bare = apply_command("SetDefaultSessionModel", "model" => "glm-5p2-fast")
+
+    assert_rejected(bare, "model must be a provider/model id")
+    assert_includes bare.fetch("message"), "\"glm-5p2-fast\" has no provider prefix"
+    assert_includes bare.fetch("message"), "Use <provider>/<model-id>, for example openai/gpt-5.6-sol"
+    # The example proves multi-segment ids are legal, which is what the reporter
+    # could not tell from the old message.
+    assert_includes bare.fetch("message"), MULTI_SEGMENT_MODEL
+    refute_equal "Default Pi model was not changed.", bare.fetch("message")
+    # The visible log line carries the same explanation, not just the details.
+    visible = log_entry(bare.fetch("log_entry_ids").first).fetch("message")
+    assert_includes visible, "has no provider prefix"
+    refute_equal "Rejected SetDefaultSessionModel: Default Pi model was not changed.", visible
+
+    missing = apply_command("SetDefaultSessionModel", {})
+    assert_includes missing.fetch("message"), "Default Pi model was not changed: a model id is required."
+
+    spaced = apply_command("SetDefaultSessionModel", "model" => "openai/gpt 5.6")
+    assert_includes spaced.fetch("message"), "contains whitespace, so it is not a single model id"
+
+    session_missing = apply_command("SetSessionModel", "agent_id" => "P1-I1-W1")
+    assert_includes session_missing.fetch("message"), "Session model was not changed: a model id is required."
+
+    assert_empty @coordinator.calls
+    refute File.exist?(File.join(tmp_root, "config.toml"))
+  end
+
+  # Validation is catalog-independent by design, so a catalog that does not list
+  # a model can never make it unsettable. It only decides whether the accepted
+  # message labels the id verified or unverified.
+  def test_the_catalog_labels_an_unlisted_model_instead_of_refusing_it
+    engine = build_engine(
+      store: Meringue::State::Store.new(path: File.join(tmp_root, "catalog.json")),
+      harness_client: @settings_client,
+      harness_client_provider: ->(_provider) { @settings_client },
+      default_harness_provider: "pi",
+      config_path: File.join(tmp_root, "catalog-config.toml"),
+      model_catalog_provider: lambda do |_provider|
+        Meringue::Harness::ModelCatalog.available(
+          harness: "pi",
+          models: [
+            { "provider" => "fireworks", "id" => "fireworks:accounts/fireworks/routers/glm-5p2-fast",
+              "name" => "GLM 5.2 Fast (Fireworks)", "thinking_levels" => %w[off low high], "reasoning" => true }
+          ],
+          source: "test_catalog_source"
+        )
+      end
+    )
+    engine.apply("type" => "GetModelCatalog", "payload" => {})
+
+    listed = engine.apply("type" => "SetDefaultSessionModel", "payload" => { "model" => MULTI_SEGMENT_MODEL })
+    assert_equal "accepted", listed.fetch("status")
+    refute_includes listed.fetch("message"), "unverified"
+
+    unlisted = engine.apply("type" => "SetDefaultSessionModel", "payload" => { "model" => "openai/gpt-5.6-sol" })
+    assert_equal "accepted", unlisted.fetch("status")
+    assert_equal "openai/gpt-5.6-sol", unlisted.dig("result", "model")
+    assert_includes unlisted.fetch("message"), "does not include openai/gpt-5.6-sol, so the id is unverified"
+    assert_includes unlisted.fetch("message"), "/models refresh"
+  end
+
+  # No catalog at all is the degraded state the picker and completion already
+  # describe: the id is still saved, and still labelled unverified.
+  def test_a_model_set_without_any_catalog_is_saved_and_labelled_unverified
+    result = apply_command("SetDefaultSessionModel", "model" => MULTI_SEGMENT_MODEL)
+
+    assert_accepted(result)
+    assert_includes result.fetch("message"), "Meringue has no confirmed Pi model list right now"
+    assert_includes result.fetch("message"), "#{MULTI_SEGMENT_MODEL} is unverified"
   end
 
   # A rejected level used to read only "Default Pi thinking level was not

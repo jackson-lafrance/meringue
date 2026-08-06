@@ -92,6 +92,45 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     assert_equal ["xhigh"], stub_commands_of_type(stub, "set_thinking_level").map { |command| command.fetch("level") }
   end
 
+  # A real Pi model id can contain slashes and a colon
+  # (`fireworks:accounts/fireworks/routers/glm-5p2-fast`). Pi resolves the
+  # provider from the FIRST slash, so the client must split there too; splitting
+  # into three and refusing the remainder made those models unusable.
+  def test_a_multi_segment_model_id_is_split_on_the_first_slash_only
+    reference = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"
+    client, stub = build_pi_client(
+      tmpdir,
+      stub_config: {
+        "session_id" => "sess-multi-segment",
+        "thinking_level" => "high",
+        "available_thinking_levels" => %w[off low high]
+      }
+    )
+    ref = spawn(client)
+
+    updated = client.set_session_model(ref, reference)
+
+    assert_equal reference, updated.dig("settings", "model", "reference")
+    assert_equal "fireworks", updated.dig("settings", "model", "provider")
+    assert_equal "fireworks:accounts/fireworks/routers/glm-5p2-fast", updated.dig("settings", "model", "id")
+    sent = stub_commands_of_type(stub, "set_model").fetch(0)
+    assert_equal "fireworks", sent.fetch("provider")
+    assert_equal "fireworks:accounts/fireworks/routers/glm-5p2-fast", sent.fetch("modelId")
+  end
+
+  # A shape that cannot be a reference is still refused, and the error says why.
+  def test_a_model_reference_without_a_provider_is_refused_with_a_reason
+    client, _stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-bad-model" })
+    ref = spawn(client)
+
+    error = assert_raises(Meringue::Harness::PiClient::InvalidModelReferenceError) do
+      client.set_session_model(ref, "glm-5p2-fast")
+    end
+
+    assert_includes error.message, "has no provider prefix"
+    assert_includes error.message, "Use <provider>/<model-id>"
+  end
+
   def test_switching_models_downgrades_an_unsupported_thinking_level
     client, stub = build_pi_client(
       tmpdir,
