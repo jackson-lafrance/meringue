@@ -27,6 +27,10 @@ module Meringue
       BRACKETED_PASTE_END = "\e[201~"
       ESCAPE_READ_TIMEOUT = 0.01
       PASTE_READ_TIMEOUT = 0.05
+      # A 3000-line paste is a quarter of a megabyte. Reading it one `getch` at a
+      # time is a syscall per byte, which is half a second of latency before the
+      # app has even seen the text, so bulk input is read in chunks instead.
+      READ_CHUNK_BYTES = 65_536
       MAX_COALESCED_MOUSE_WHEEL_EVENTS = 200
       CLEAR_SCREEN = "\e[2J\e[H"
       HOME = "\e[H"
@@ -38,6 +42,10 @@ module Meringue
         @input = input
         @output = output
         @pending_keys = []
+        # Raw bytes read past the end of a chunked read (the keystrokes that
+        # arrived in the same chunk as a paste terminator). They are consumed
+        # before the input stream so nothing typed during a paste is lost.
+        @pending_input = +""
       end
 
       def interactive?
@@ -129,10 +137,9 @@ module Meringue
       private
 
       def read_next_key(timeout:)
-        ready = IO.select([input], nil, nil, timeout)
-        return nil unless ready
+        key = next_character(timeout: timeout)
+        return nil unless key
 
-        key = input.getch
         return read_escape_sequence(key) if key == "\e"
 
         read_pending_plain_text(key)
@@ -140,8 +147,8 @@ module Meringue
 
       def read_escape_sequence(prefix)
         sequence = prefix.dup
-        while IO.select([input], nil, nil, ESCAPE_READ_TIMEOUT)
-          sequence << input.getch
+        while (character = next_character(timeout: ESCAPE_READ_TIMEOUT))
+          sequence << character
           return read_bracketed_paste(sequence) if sequence == BRACKETED_PASTE_START
           break if complete_escape_sequence?(sequence)
           break if sequence.length >= 32
@@ -149,30 +156,85 @@ module Meringue
         parse_mouse_sequence(sequence) || sequence
       end
 
+      # The body of a paste is bulk data, not keystrokes: it is read in chunks
+      # and searched for the terminator by byte offset, so the cost is a handful
+      # of reads instead of one per pasted character. Anything a chunk carries
+      # past the terminator is pushed back for the next key read.
       def read_bracketed_paste(sequence)
-        until sequence.end_with?(BRACKETED_PASTE_END)
-          ready = IO.select([input], nil, nil, PASTE_READ_TIMEOUT)
-          break unless ready
+        buffer = sequence.dup.b
+        search_from = 0
+        while (terminator = buffer.index(BRACKETED_PASTE_END, search_from)).nil?
+          chunk = read_available_text(timeout: PASTE_READ_TIMEOUT)
+          break if chunk.empty?
 
-          sequence << input.getch
+          search_from = [buffer.bytesize - BRACKETED_PASTE_END.bytesize + 1, 0].max
+          buffer << chunk.b
         end
 
-        if sequence.end_with?(BRACKETED_PASTE_END)
-          text = sequence[BRACKETED_PASTE_START.length...-BRACKETED_PASTE_END.length]
-          { "type" => "paste", "text" => text.to_s }
-        else
-          sequence
-        end
+        return buffer.force_encoding(Encoding::UTF_8) unless terminator
+
+        text = buffer.byteslice(BRACKETED_PASTE_START.bytesize, terminator - BRACKETED_PASTE_START.bytesize).to_s
+        push_back_input(buffer.byteslice(terminator + BRACKETED_PASTE_END.bytesize, buffer.bytesize).to_s)
+        { "type" => "paste", "text" => text.force_encoding(Encoding::UTF_8) }
       end
 
+      # Terminals without bracketed paste deliver a paste as a burst of plain
+      # text. Reading that burst in chunks keeps it as cheap as the bracketed
+      # form. An escape byte ends the run and is pushed back whole, so a key
+      # pressed at the tail of a burst is still parsed as its own escape
+      # sequence instead of being glued onto the pasted text.
       def read_pending_plain_text(prefix)
         text = prefix.dup
-        while IO.select([input], nil, nil, 0)
+        loop do
           break if text.end_with?("\e")
 
-          text << input.getch
+          chunk = read_available_text(timeout: 0)
+          break if chunk.empty?
+
+          escape_index = chunk.index("\e")
+          if escape_index
+            text << chunk[0...escape_index]
+            push_back_input(chunk[escape_index..].to_s)
+            break
+          end
+
+          text << chunk
         end
         text
+      end
+
+      # Pushed-back bytes are consumed before the input stream, so a key that
+      # arrived in the same chunk as a paste is read exactly once and in order.
+      def next_character(timeout:)
+        character = if @pending_input.empty?
+                      IO.select([input], nil, nil, timeout) ? input.getch : nil
+                    else
+                      @pending_input.slice!(0)
+                    end
+        return nil if character.nil?
+
+        character.dup.force_encoding(Encoding::UTF_8)
+      end
+
+      # Whatever is already available, in one read. Falls back to a single
+      # character for inputs that cannot do a non-blocking bulk read.
+      def read_available_text(timeout: 0)
+        return @pending_input.slice!(0, @pending_input.length) unless @pending_input.empty?
+        return "" unless IO.select([input], nil, nil, timeout)
+        return input.getch.to_s.dup.force_encoding(Encoding::UTF_8) unless input.respond_to?(:read_nonblock)
+
+        chunk = input.read_nonblock(READ_CHUNK_BYTES, exception: false)
+        chunk.is_a?(String) ? chunk.dup.force_encoding(Encoding::UTF_8) : ""
+      rescue ArgumentError
+        input.getch.to_s.dup.force_encoding(Encoding::UTF_8)
+      rescue IO::WaitReadable, EOFError, IOError, SystemCallError
+        ""
+      end
+
+      def push_back_input(text)
+        return if text.to_s.empty?
+
+        @pending_input = "#{text.to_s.dup.force_encoding(Encoding::UTF_8)}#{@pending_input}"
       end
 
       def complete_escape_sequence?(sequence)

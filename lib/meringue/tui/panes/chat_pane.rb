@@ -939,6 +939,7 @@ module Meringue
           spans = input_row_spans(input_buffer, composer_available_width(input_buffer, width))
           cursor_row, cursor_column = composer_cursor_location(spans, cursor)
           selection_range = composer_selection_range(selection, chars.length)
+          paste_ranges = PasteRegistry.marker_ranges_in(input_buffer)
 
           spans.each_with_index.map do |span, index|
             input_line_segments(
@@ -947,7 +948,8 @@ module Meringue
               first_line: index.zero?,
               cursor_column: index == cursor_row ? cursor_column : nil,
               selection_range: selection_range,
-              prompt_style: prompt_style
+              prompt_style: prompt_style,
+              paste_ranges: paste_ranges
             )
           end
         end
@@ -999,6 +1001,12 @@ module Meringue
           [[spans.length - 1, 0].max, last_span ? last_span.fetch(:length) : 0]
         end
 
+        def paste_marker_index?(paste_ranges, index)
+          return false if paste_ranges.empty?
+
+          paste_ranges.any? { |range| range.cover?(index) }
+        end
+
         def composer_selection_range(selection, buffer_length)
           return nil unless selection.is_a?(Hash)
 
@@ -1012,7 +1020,8 @@ module Meringue
         # Input text itself always keeps Style::TEXT (and SELECTION inside a
         # highlight): the tint only reaches the prompt marker, so typed text
         # stays at full contrast in every colorscheme.
-        def input_line_segments(chars, span, first_line:, cursor_column:, selection_range:, prompt_style: Style::ACCENT_BOLD)
+        def input_line_segments(chars, span, first_line:, cursor_column:, selection_range:, prompt_style: Style::ACCENT_BOLD,
+                                paste_ranges: [])
           prefix = first_line ? "› " : "  "
           segments = [[prefix, first_line ? prompt_style : Style::DIM]]
           run = +""
@@ -1026,7 +1035,15 @@ module Meringue
               segments << ["_", Style::ACCENT_BOLD]
             end
 
-            style = selection_range&.include?(index) ? Style::SELECTION : Style::TEXT
+            # A collapsed paste is one chunk, so it is tinted as one token rather
+            # than reading as literal text the user typed.
+            style = if selection_range&.include?(index)
+                      Style::SELECTION
+                    elsif paste_marker_index?(paste_ranges, index)
+                      Style::ACCENT
+                    else
+                      Style::TEXT
+                    end
             if style != run_style
               segments << [run.dup, run_style] unless run.empty?
               run.clear

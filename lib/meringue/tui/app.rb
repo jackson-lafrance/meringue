@@ -175,6 +175,10 @@ module Meringue
         @workspace_agent_scroll_offset = 0
         @workspace_terminal_scroll_offset = 0
         @workspace_persistence_error = nil
+        # Collapsed pastes, one registry per composer surface. The buffers hold a
+        # short marker; the bodies live here until the message is submitted.
+        @chat_pastes = PasteRegistry.new
+        @workspace_pastes = PasteRegistry.new
         @focused_pane = "chat"
         @last_worker_click = nil
         @agent_workspace_active = false
@@ -237,7 +241,10 @@ module Meringue
         @agent_workspace_agent_id = workspace["selected_agent_id"]
         @agent_workspace_view = workspace.fetch("view", "agent")
         @agent_workspace_filter = workspace.fetch("filter", "all")
-        @workspace_draft = workspace.fetch("draft", "")
+        # A persisted draft can still carry markers whose bodies died with the
+        # previous process. They can never expand again, so they are dropped
+        # rather than sent to a worker as literal "[paste #1 +3000 lines]" text.
+        @workspace_draft = PasteRegistry.strip_markers(workspace.fetch("draft", ""))
         @workspace_agent_scroll_offset = workspace.fetch("agent_scroll_offset", 0).to_i
         @workspace_terminal_scroll_offset = workspace.fetch("terminal_scroll_offset", 0).to_i
         workspace
@@ -395,6 +402,8 @@ module Meringue
           return handle_agent_workspace_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
         end
 
+        @chat_pastes.sync!(input_buffer)
+
         # First-run setup is the only modal that opens by itself, so it takes keys
         # ahead of both pickers and the slash list. It still passes unowned keys
         # through, so Ctrl-C and Ctrl-D behave normally while it is up.
@@ -415,7 +424,7 @@ module Meringue
 
         if paste_key?(key)
           buffer, cursor = replace_chat_selection(input_buffer, input_cursor)
-          return insert_text(buffer, cursor, paste_text(key)) + [NO_SLASH_SELECTION]
+          return insert_pasted_text(buffer, cursor, paste_text(key)) + [NO_SLASH_SELECTION]
         end
 
         mouse_result = handle_mouse_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
@@ -426,7 +435,7 @@ module Meringue
 
         if plain_text_paste_key?(key)
           buffer, cursor = replace_chat_selection(input_buffer, input_cursor)
-          return insert_text(buffer, cursor, key) + [NO_SLASH_SELECTION]
+          return insert_pasted_text(buffer, cursor, key) + [NO_SLASH_SELECTION]
         end
 
         if legacy_slash_navigation && slash_suggestion_navigation_key?(key) && slash_suggestions_active?(input_buffer)
@@ -494,6 +503,7 @@ module Meringue
 
         if ctrl_c_key?(key)
           clear_selection
+          @chat_pastes.clear!
           return [+"", 0, NO_SLASH_SELECTION]
         end
 
@@ -1242,7 +1252,7 @@ module Meringue
           end
 
           buffer, cursor = replace_chat_selection(input_buffer, input_cursor)
-          return insert_text(buffer, cursor, text) + [NO_SLASH_SELECTION]
+          return insert_pasted_text(buffer, cursor, text) + [NO_SLASH_SELECTION]
         end
 
         nil
@@ -1277,7 +1287,9 @@ module Meringue
           range = chat_selection_range
           return "" unless range
 
-          input_buffer.to_s.chars[range.fetch("start")...range.fetch("end")].to_a.join
+          # Copy hands over what the user pasted, not the marker standing in for
+          # it, so the composer placeholder never leaks into another app.
+          @chat_pastes.expand(input_buffer.to_s.chars[range.fetch("start")...range.fetch("end")].to_a.join)
         else
           ""
         end
@@ -1291,11 +1303,9 @@ module Meringue
         range = chat_selection_range
         return [input_buffer, clamp_cursor(input_buffer, input_cursor)] unless range
 
-        chars = input_buffer.chars
-        start_index = range.fetch("start")
-        chars.slice!(start_index...range.fetch("end"))
+        buffer, cursor = delete_range(input_buffer, (range.fetch("start")...range.fetch("end")))
         clear_chat_selection
-        [chars.join, start_index]
+        [buffer, cursor]
       end
 
       def replace_chat_selection(input_buffer, input_cursor)
@@ -1320,17 +1330,21 @@ module Meringue
         chars = input_buffer.chars
         cursor = clamp_cursor(input_buffer, input_cursor)
 
-        case movement
-        when :left then [cursor - 1, 0].max
-        when :right then [cursor + 1, chars.length].min
-        when :up then cursor_up(chars, cursor)
-        when :down then cursor_down(chars, cursor)
-        when :home then current_line_start(chars, cursor)
-        when :end then current_line_end(chars, cursor)
-        when :word_left then previous_word_boundary(chars, cursor)
-        when :word_right then next_word_start(chars, cursor)
-        else cursor
-        end
+        moved = case movement
+                when :left then [cursor - 1, 0].max
+                when :right then [cursor + 1, chars.length].min
+                when :up then cursor_up(chars, cursor)
+                when :down then cursor_down(chars, cursor)
+                when :home then current_line_start(chars, cursor)
+                when :end then current_line_end(chars, cursor)
+                when :word_left then previous_word_boundary(chars, cursor)
+                when :word_right then next_word_start(chars, cursor)
+                else cursor
+                end
+
+        # Extending a selection stops at a marker's edges for the same reason
+        # moving the caret does: half a marker is not a thing the user can act on.
+        paste_registry.snap_cursor(input_buffer, cursor, moved)
       end
 
       # A single left click selects the clicked AgentTree row and scopes the logs
@@ -1521,6 +1535,7 @@ module Meringue
         return [input_buffer, input_cursor, slash_suggestion_index] if remainder.nil?
 
         key = remainder
+        @workspace_pastes.sync!(input_buffer)
         if workspace_scroll_key?(key)
           scroll_agent_workspace(key, state)
           return [input_buffer, input_cursor, slash_suggestion_index]
@@ -1532,10 +1547,10 @@ module Meringue
         end
 
         if paste_key?(key)
-          return insert_text(input_buffer, input_cursor, paste_text(key)) + [NO_SLASH_SELECTION]
+          return insert_pasted_text(input_buffer, input_cursor, paste_text(key)) + [NO_SLASH_SELECTION]
         end
         if plain_text_paste_key?(key)
-          return insert_text(input_buffer, input_cursor, key) + [NO_SLASH_SELECTION]
+          return insert_pasted_text(input_buffer, input_cursor, key) + [NO_SLASH_SELECTION]
         end
         if keybinding?("newline", key)
           return insert_text(input_buffer, input_cursor, "\n") + [NO_SLASH_SELECTION]
@@ -1557,6 +1572,7 @@ module Meringue
           return [+"", 0, NO_SLASH_SELECTION]
         end
         if ctrl_c_key?(key)
+          @workspace_pastes.clear!
           return [+"", 0, NO_SLASH_SELECTION]
         end
         if keybinding?("delete_backward", key)
@@ -1928,7 +1944,10 @@ module Meringue
       end
 
       def submit_agent_workspace_prompt(input_buffer, on_submit)
-        text = input_buffer.to_s.strip
+        # The composer only ever held markers for anything large; the worker gets
+        # the full bodies back here, at the one moment the cost is unavoidable.
+        text = @workspace_pastes.expand(input_buffer).strip
+        @workspace_pastes.clear!
         return if text.empty?
 
         agent_id = @agent_workspace_agent_id.to_s
@@ -3166,30 +3185,59 @@ module Meringue
         key.is_a?(String) && key.length > 1 && !key.start_with?("\e")
       end
 
+      # The registry that owns collapsed pastes for whichever composer is taking
+      # keys. The focused workspace and the dashboard each number and clear their
+      # own pastes, so neither can expand a marker the other still shows.
+      def paste_registry
+        @agent_workspace_active ? @workspace_pastes : @chat_pastes
+      end
+
+      # The single funnel for every paste entry point: bracketed paste, the
+      # plain-text fallback used by terminals without it, and the clipboard
+      # keybinding. Anything large is parked in the registry and only its marker
+      # reaches the buffer, so no later frame ever wraps the pasted body.
+      def insert_pasted_text(input_buffer, input_cursor, text)
+        registry = paste_registry
+        registry.sync!(input_buffer)
+        normalized = normalize_input_text(text)
+        insert_text(input_buffer, input_cursor, registry.collapse(normalized))
+      end
+
+      def normalize_input_text(text)
+        text.to_s.gsub("\r\n", "\n").tr("\r", "\n")
+      end
+
       def insert_text(input_buffer, input_cursor, text)
-        normalized = text.to_s.gsub("\r\n", "\n").tr("\r", "\n")
+        normalized = normalize_input_text(text)
         chars = input_buffer.chars
         cursor = clamp_cursor(input_buffer, input_cursor)
         chars.insert(cursor, *normalized.chars)
         [chars.join, cursor + normalized.length]
       end
 
-      def delete_backward(input_buffer, input_cursor)
+      # Deletions run through one range so a paste marker is always removed whole:
+      # half a marker would be text that no longer expands to anything.
+      def delete_range(input_buffer, range)
+        range = paste_registry.expand_range(input_buffer, range)
+        return [input_buffer, range.first] if range.first >= range.last
+
         chars = input_buffer.chars
+        chars.slice!(range.first...range.last)
+        [chars.join, range.first]
+      end
+
+      def delete_backward(input_buffer, input_cursor)
         cursor = clamp_cursor(input_buffer, input_cursor)
         return [input_buffer, cursor] if cursor.zero?
 
-        chars.delete_at(cursor - 1)
-        [chars.join, cursor - 1]
+        delete_range(input_buffer, ((cursor - 1)...cursor))
       end
 
       def delete_forward(input_buffer, input_cursor)
-        chars = input_buffer.chars
         cursor = clamp_cursor(input_buffer, input_cursor)
-        return [input_buffer, cursor] if cursor >= chars.length
+        return [input_buffer, cursor] if cursor >= input_buffer.to_s.length
 
-        chars.delete_at(cursor)
-        [chars.join, cursor]
+        delete_range(input_buffer, (cursor...(cursor + 1)))
       end
 
       def delete_backward_word(input_buffer, input_cursor)
@@ -3198,8 +3246,7 @@ module Meringue
         start_index = previous_word_boundary(chars, cursor)
         return [input_buffer, cursor] if start_index == cursor
 
-        chars.slice!(start_index...cursor)
-        [chars.join, start_index]
+        delete_range(input_buffer, (start_index...cursor))
       end
 
       def delete_forward_word(input_buffer, input_cursor)
@@ -3208,28 +3255,34 @@ module Meringue
         finish_index = next_word_boundary(chars, cursor)
         return [input_buffer, cursor] if finish_index == cursor
 
-        chars.slice!(cursor...finish_index)
-        [chars.join, cursor]
+        buffer, _cursor = delete_range(input_buffer, (cursor...finish_index))
+        [buffer, cursor]
       end
 
       def cursor_after_navigation(key, input_buffer, input_cursor)
         cursor = clamp_cursor(input_buffer, input_cursor)
         chars = input_buffer.chars
 
-        return [cursor - 1, 0].max if keybinding?("cursor_left", key)
-        return [cursor + 1, chars.length].min if keybinding?("cursor_right", key)
-        return cursor_up(chars, cursor) if keybinding?("cursor_up", key)
-        return cursor_down(chars, cursor) if keybinding?("cursor_down", key)
-        return current_line_start(chars, cursor) if keybinding?("cursor_home", key)
-        return current_line_end(chars, cursor) if keybinding?("cursor_end", key)
-        return previous_word_boundary(chars, cursor) if keybinding?("cursor_word_left", key)
-        return next_word_start(chars, cursor) if keybinding?("cursor_word_right", key)
+        moved = if keybinding?("cursor_left", key) then [cursor - 1, 0].max
+                elsif keybinding?("cursor_right", key) then [cursor + 1, chars.length].min
+                elsif keybinding?("cursor_up", key) then cursor_up(chars, cursor)
+                elsif keybinding?("cursor_down", key) then cursor_down(chars, cursor)
+                elsif keybinding?("cursor_home", key) then current_line_start(chars, cursor)
+                elsif keybinding?("cursor_end", key) then current_line_end(chars, cursor)
+                elsif keybinding?("cursor_word_left", key) then previous_word_boundary(chars, cursor)
+                elsif keybinding?("cursor_word_right", key) then next_word_start(chars, cursor)
+                else cursor
+                end
 
-        cursor
+        # A paste marker is one unit: a step that would land inside it continues
+        # to its far edge instead of parking the caret in the middle of a token.
+        paste_registry.snap_cursor(input_buffer, cursor, moved)
       end
 
       def clamp_cursor(input_buffer, input_cursor)
-        input_cursor.to_i.clamp(0, input_buffer.chars.length)
+        # String#length is already the character count; `chars` here would
+        # allocate one string per character on every keystroke.
+        input_cursor.to_i.clamp(0, input_buffer.to_s.length)
       end
 
       def current_line_start(chars, cursor)
@@ -3340,7 +3393,11 @@ module Meringue
       end
 
       def submit_prompt(input_buffer, on_submit, state)
-        text = input_buffer.to_s.strip
+        # Collapsed pastes are re-expanded here and nowhere else: the composer,
+        # the wrapper, and the slash completer only ever saw the markers, while
+        # the kernel receives the message the user actually pasted.
+        text = @chat_pastes.expand(input_buffer).strip
+        @chat_pastes.clear!
         return if text.empty?
 
         slash_command = text.start_with?("/")
@@ -3713,7 +3770,7 @@ module Meringue
             "view" => @agent_workspace_view,
             "filter" => @agent_workspace_filter,
             "input_buffer" => input_buffer,
-            "input_cursor" => clamp_cursor(input_buffer, input_cursor || input_buffer.chars.length),
+            "input_cursor" => clamp_cursor(input_buffer, input_cursor || input_buffer.to_s.length),
             "pending_count" => @agent_workspace_pending_count,
             "leader_hint" => workspace_leader_help,
             "leader_label" => workspace_leader_label,
@@ -4107,7 +4164,7 @@ module Meringue
           {
             "messages" => @messages.map(&:dup),
             "input_buffer" => input_buffer,
-            "input_cursor" => clamp_cursor(input_buffer, input_cursor || input_buffer.chars.length),
+            "input_cursor" => clamp_cursor(input_buffer, input_cursor || input_buffer.to_s.length),
             "slash_suggestion_index" => slash_suggestion_index,
             "selection" => @chat_selection,
             "pending_count" => @pending_count,
