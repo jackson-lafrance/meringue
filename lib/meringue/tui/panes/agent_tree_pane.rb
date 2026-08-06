@@ -89,7 +89,7 @@ module Meringue
               record: head,
               id: head.fetch("id"),
               title: record_title(head),
-              suffix: active_pr_marker(head),
+              suffix: head_suffix(head),
               selected: AgentTreeNavigation.selected_agent?(head, selected_agent_id),
               width: width
             ))
@@ -108,7 +108,7 @@ module Meringue
               record: head,
               id: head.fetch("id"),
               title: record_title(head),
-              suffix: active_pr_marker(head),
+              suffix: head_suffix(head),
               selected: AgentTreeNavigation.selected_agent?(head, selected_agent_id),
               width: width
             ), head.fetch("id")))
@@ -627,6 +627,22 @@ module Meringue
 
         def active_pr_marker(record)
           AgentTreeNavigation.active_agent_pr_url(record) ? "↗" : ""
+        end
+
+        def head_suffix(head)
+          [head_retry_marker(head), active_pr_marker(head)].reject(&:empty?).join(" ")
+        end
+
+        # A head that stopped without routing its request is recoverable, not dead state: selecting
+        # it and typing (or `/prompt H<n> "..."`) re-runs the request. Say so on the row, because a
+        # blocked or errored head otherwise reads as something the user can only kill. Once it has
+        # been retried, the successor is the more useful fact.
+        def head_retry_marker(head)
+          retried_by = State::Models.head_metadata(head).fetch("retried_by_head_id", nil).to_s
+          return "retried as #{retried_by}" unless retried_by.empty?
+          return "" unless State::Models.head_retry_target?(head)
+
+          "prompt to retry"
         end
 
         def short_id(id)

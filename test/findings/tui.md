@@ -25,6 +25,7 @@ All tests are hermetic: no TTY, no raw mode, no network, no Pi processes, no wri
 | Delivery PR presentation and link rendering | `test/integration/tui/delivery_pull_request_test.rb` |
 | Key-to-action mapping, config overrides, conflicts | `test/integration/tui/keybindings_test.rb` |
 | App wiring: snapshot in, no state mutation, no invented vocabulary | `test/integration/tui/app_wiring_test.rb` |
+| Stranded-head recovery affordance: retry marker on the row, head chat target, `/prompt` completion | `test/integration/tui/blocked_head_recovery_test.rb` |
 | Bounded typing throughput (replaces the retired benchmark script) | `test/integration/tui/typing_throughput_test.rb` |
 
 ## Deleted script

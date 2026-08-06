@@ -202,6 +202,78 @@ class StateModelsShapeTest < Minitest::Test
     assert_equal 4, Models.nonnegative_integer("4")
   end
 
+  # The kernel performs head retries, the AgentTree offers them, and `/prompt` completion lists
+  # them, so all three read this one classifier. A head is retryable while any part of the request
+  # it was given is still unrouted.
+  def test_head_retry_targets_are_heads_whose_request_is_still_unrouted
+    assert_equal %w[errored killed blocked], Models::HEAD_RETRY_STATUSES
+
+    refute Models.head_retry_target?(head_record(status: "working")), "a head that is still routing is not a retry target"
+    refute Models.head_retry_target?(head_record(status: "completed")), "a head that routed everything is not a retry target"
+    refute Models.head_retry_target?({ "id" => "P1-I1-W1", "type" => "worker", "status" => "errored" })
+
+    assert Models.head_retry_target?(head_record(status: "errored")), "an errored head never routed its request"
+    assert Models.head_retry_target?(head_record(status: "killed"))
+
+    # Applied but nothing landed: the request was dropped, so it is still owed.
+    nothing_routed = head_record(
+      status: "blocked",
+      metadata: {
+        "head_result_applied_at" => "2026-08-05T16:56:30Z",
+        "head_result_command_journal" => [
+          { "command_type" => "ModifyIssue", "status" => "rejected" },
+          { "command_type" => "SpawnWorker", "status" => "rejected" }
+        ]
+      }
+    )
+    assert Models.head_retry_target?(nothing_routed)
+    assert_empty Models.head_applied_commands(nothing_routed)
+    assert_equal 2, Models.head_unrouted_commands(nothing_routed).length
+    refute Models.head_routed_anything?(nothing_routed)
+
+    # Applied and half landed: retryable, and the journal separates the two halves so a retry can
+    # leave the accepted command alone.
+    partial = head_record(
+      status: "blocked",
+      metadata: {
+        "head_result_applied_at" => "2026-08-05T12:59:56Z",
+        "head_result_command_journal" => [
+          { "command_type" => "CreateIssue", "status" => "accepted", "target_id" => "P4-I2" },
+          { "command_type" => "SpawnWorker", "status" => "failed" }
+        ]
+      }
+    )
+    assert Models.head_retry_target?(partial)
+    assert_equal ["P4-I2"], Models.head_applied_commands(partial).map { |entry| entry.fetch("target_id") }
+    assert_equal ["SpawnWorker"], Models.head_unrouted_commands(partial).map { |entry| entry.fetch("command_type") }
+    assert Models.head_routed_anything?(partial)
+
+    # Everything landed, so re-running it would route the same work twice.
+    fully_routed = head_record(
+      status: "blocked",
+      metadata: {
+        "head_result_applied_at" => "2026-08-05T12:59:56Z",
+        "head_result_command_journal" => [{ "command_type" => "CreateIssue", "status" => "accepted", "target_id" => "P4-I2" }]
+      }
+    )
+    refute Models.head_retry_target?(fully_routed)
+
+    # A head that asked a question instead of routing handed the request back deliberately; the
+    # question is the affordance, not a retry.
+    asked_question = head_record(
+      status: "blocked",
+      metadata: {
+        "head_result_applied_at" => "2026-08-05T12:59:56Z",
+        "head_result_question_ids" => ["Q3"]
+      }
+    )
+    refute Models.head_retry_target?(asked_question)
+  end
+
+  def head_record(status:, metadata: {})
+    { "id" => "H26", "type" => "head", "status" => status, "harness_metadata" => metadata }
+  end
+
   def test_worker_pull_request_records_migrate_onto_the_issue
     state = {
       "issues" => [{ "id" => "P1-I1", "project_id" => "P1" }],
