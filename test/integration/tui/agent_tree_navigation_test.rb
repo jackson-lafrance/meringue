@@ -41,7 +41,7 @@ class TuiAgentTreeNavigationTest < Minitest::Test
     merged_pr = { "url" => "https://github.com/owner/repo/pull/5", "state" => "merged" }
     state = tree_state(
       projects: [project_record("P1")],
-      issues: [issue_record("P1-I1", "delivery_pull_request" => open_pr), issue_record("P1-I2", "delivery_pull_request" => merged_pr)],
+      issues: [issue_record("P1-I1"), issue_record("P1-I2", "delivery_pull_request" => merged_pr)],
       agents: [
         agent_record("H1", "delivery_pull_request" => open_pr),
         agent_record("H2"),
@@ -50,7 +50,7 @@ class TuiAgentTreeNavigationTest < Minitest::Test
       ]
     )
 
-    assert_equal %w[H1 P1-I1 P1-I1-W1], Navigation.selectable_pr_agent_ids(state)
+    assert_equal %w[H1 P1-I1], Navigation.selectable_pr_agent_ids(state)
     assert_empty Navigation.selectable_pr_agent_ids(composed_state(demo_state))
   end
 

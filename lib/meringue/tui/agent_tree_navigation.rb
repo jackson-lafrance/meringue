@@ -119,12 +119,13 @@ module Meringue
 
       def pr_tree_ids(issues_by_parent, agents, parent_id)
         issues_by_parent.fetch(parent_id, []).sort_by { |issue| sort_key(issue["id"]) }.flat_map do |issue|
-          workers = agents.select { |agent| agent["type"] == "worker" && agent["issue_id"] == issue["id"] && active_agent_pr_url(agent) }
-                          .sort_by { |worker| sort_key(worker["id"]) }
-                          .map { |worker| worker.fetch("id") }
+          workers = agents.select { |agent| agent["type"] == "worker" && agent["issue_id"] == issue["id"] }
+          # A delivery PR is an issue affordance. The worker check is only a compatibility
+          # fallback for pre-migration state; it must never add worker rows to PR navigation.
+          has_active_pr = active_agent_pr_url(issue) || workers.any? { |worker| active_agent_pr_url(worker) }
           ids = []
-          ids << issue.fetch("id") if active_agent_pr_url(issue)
-          ids + workers + pr_tree_ids(issues_by_parent, agents, issue["id"])
+          ids << issue.fetch("id") if has_active_pr
+          ids + pr_tree_ids(issues_by_parent, agents, issue["id"])
         end
       end
 
