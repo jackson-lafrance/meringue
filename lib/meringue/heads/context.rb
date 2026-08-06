@@ -106,7 +106,7 @@ module Meringue
         {
           "state_path" => state_path,
           "read_only" => true,
-          "guidance" => "The full Meringue state is intentionally not embedded. Read this file only when the user request requires current projects, issues, agents, questions, logs, counters, or prior PR URLs.",
+          "guidance" => "The full Meringue state is intentionally not embedded. Read this file only when the user request requires current projects, issues, agents, questions, logs, counters, prior PR URLs, or a follow-up/refinement may depend on a head that was still routing when you spawned. Use only ids that actually appear in state; never invent future issue ids.",
           "suggested_commands" => [
             {
               "purpose" => "Read full JSON state when necessary.",
@@ -151,6 +151,7 @@ module Meringue
             "Do not create or prompt work on another issue while selected_target is active. If the message explicitly conflicts with the selected issue, ask the user to clear/change the selection rather than silently ignoring it.",
             "Explicit project, issue, worker, or question ids in the user message take precedence when they are compatible with selected_target; otherwise surface the conflict instead of guessing.",
             "A refinement, correction, question about findings, or next step for an existing durable goal should reuse that issue.",
+            "If a refinement arrives while another head is still routing the original goal, read current state before returning. When that already-visible head has since created the issue for this goal, reuse the real issue_id from state; do not predict a future issue id, and use issue_from_command only for issues your own HeadResult creates.",
             "Prefer PromptAgent when a healthy worker on that issue has useful persisted harness context; do not spawn a new worker merely because this is a new user message.",
             "Use steer for an urgent correction to active work, follow_up for related work that should run after the active turn, and normal for a settled resumable session. Read the target's is_streaming/recommended_prompt_mode instead of defaulting to normal; a normal prompt to a mid-turn session is still accepted, but the kernel delivers it as a follow-up.",
             "Spawn a follow-up worker on the same issue only when no suitable session is resumable, work should be independent or parallel, context is known to be over 50%, or a delivered workspace should remain immutable.",
@@ -598,7 +599,7 @@ module Meringue
             "Do not create nested/subissues for ordinary follow-up prompts; keep parent_issue_id null unless the user explicitly asks for a child issue hierarchy.",
             "Always include a short action-oriented title in SpawnWorker payloads so workers render clearly under their issue in the AgentTree.",
             "When chaining AddProject with CreateIssue and SpawnWorker in one HeadResult, read state counters when necessary and compute the future project id from counters.projects or the max existing P<number>.",
-            "Never predict the id of an issue your own HeadResult creates. Give the CreateIssue command a command_id and set SpawnWorker.issue_from_command to that command_id (or its 0-based index), or set issue_id to \"@<command_id>\"; the kernel resolves it to the issue it actually created. Use a real issue_id only for an issue that already exists in the supplied state, and use project_from_command the same way for a project this batch registers.",
+            "Never predict the id of an issue your own HeadResult creates. Give the CreateIssue command a command_id and set SpawnWorker.issue_from_command to that command_id (or its 0-based index), or set issue_id to \"@<command_id>\"; the kernel resolves it to the issue it actually created. Use a real issue_id only for an issue that already exists in supplied or freshly read current state, and use project_from_command the same way for a project this batch registers.",
             "One batch may mix targets: workers bound with issue_from_command to issues this batch creates plus workers with a real issue_id for issues that already exist. Every issue this batch creates must get at least one worker of its own in the same batch; otherwise the kernel treats a worker aimed at another issue as a mis-target and reroutes or rejects it. At least one is a floor, not a cap: two workers on one created issue (researcher, then implementer queued with after_from_command and linked with follow_up_of_command) is a supported shape. To create an issue for later while working only on an existing issue, mark that worker with a real existing follow_up_of_agent_id, replace_agent_id, or existing_issue: true.",
             "If the app was launched outside the target project, use registered projects and candidate_search_roots to inspect likely local repositories by name/path before choosing.",
             "Ask a clarifying question when multiple repositories are plausible."
