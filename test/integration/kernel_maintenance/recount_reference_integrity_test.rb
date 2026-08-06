@@ -268,15 +268,17 @@ class KernelMaintenanceRecountReferenceIntegrityTest < Minitest::Test
     assert_equal "P1-I1-W1", recounted_state.dig("ui", "agent_workspace", "selected_agent_id")
   end
 
-  # --- Deliberate preservation -----------------------------------------------------------------
+  # --- Text, and what stays verbatim -----------------------------------------------------------
 
-  # Decision: ids inside human-readable text are history, not references. The line was true when
-  # it was written, the mapping needed to translate it is stored by the same pass, and rewriting
-  # prose would silently rewrite the record of what happened.
-  def test_ids_inside_log_message_text_are_preserved_as_history
+  # Superseded decision. This used to assert that ids inside human-readable text stay verbatim as
+  # history. That is unsafe *because* compaction reuses ids: the old spelling does not stay a
+  # harmless historical note, it starts naming whichever record inherited the number, which is how
+  # a live worker ended up displaying a removed worker's report. Text now follows the record it
+  # names, and an id whose record is gone is marked instead (see recount_history_test.rb).
+  def test_ids_inside_log_message_text_follow_the_rename
     log = recounted_state.fetch("logs").find { |entry| entry.fetch("id") == "L7" }
 
-    assert_equal "Queued worker P2-I2-W3 on P2-I2 to start after P2-I2-W2 settles.", log.fetch("message")
+    assert_equal "Queued worker P1-I1-W2 on P1-I1 to start after P1-I1-W1 settles.", log.fetch("message")
   end
 
   def test_a_previous_recount_mapping_is_not_renumbered_again
@@ -299,10 +301,10 @@ class KernelMaintenanceRecountReferenceIntegrityTest < Minitest::Test
 
   # --- Validation ------------------------------------------------------------------------------
 
-  # The backstop. `blocking_workers` stands in for any field that stores an id under a key the
-  # rewriter does not recognise: rather than persisting a tree with a stranded pointer, the pass
-  # fails, names the value and its path, and leaves state exactly as it was.
-  def test_a_reference_the_rewrite_cannot_reach_fails_the_pass_and_writes_nothing
+  # An id stored under a key the rewriter does not recognise as a reference (`blocking_workers`) is
+  # no longer a stranding hazard: it is treated as text, and text follows the record it names. This
+  # used to fail the pass as an unreachable reference.
+  def test_an_id_under_an_unrecognised_key_still_follows_the_rename
     write_state(
       state_fixture(
         projects: [project_record(id: "P2", status: "working")],
@@ -317,8 +319,21 @@ class KernelMaintenanceRecountReferenceIntegrityTest < Minitest::Test
 
     result = apply_command(engine, "Recount", {})
 
+    assert_equal "accepted", result.fetch("status"), result.fetch("message")
+    assert_equal ["P1-I1-W1"], read_state.fetch("issues").first.fetch("blocking_workers")
+  end
+
+  # The backstop, for the one shape the rewrite genuinely cannot reach: an id used as a hash *key*.
+  # Only values are rewritten, so rather than persisting a tree that still keys by a pre-recount
+  # id, the pass fails, names the value and its path, and leaves state exactly as it was.
+  def test_a_reference_the_rewrite_cannot_reach_fails_the_pass_and_writes_nothing
+    write_state(stranded_key_fixture)
+    engine = build_engine
+
+    result = apply_command(engine, "Recount", {})
+
     assert_equal "failed", result.fetch("status")
-    assert_match(/pointing at an ID that no longer exists/, result.fetch("message"))
+    assert_match(/name no record/, result.fetch("message"))
     assert_match(/P2-I2-W2/, result.fetch("message"))
     state = read_state
     assert_equal ["P2"], ids(state.fetch("projects"))
@@ -327,16 +342,7 @@ class KernelMaintenanceRecountReferenceIntegrityTest < Minitest::Test
   end
 
   def test_a_failed_recount_leaves_the_in_memory_state_untouched
-    state = Meringue::State::Models.ensure_state_shape!(
-      state_fixture(
-        projects: [project_record(id: "P2", status: "working")],
-        issues: [
-          issue_record(id: "P2-I2", project_id: "P2", status: "working", agent_ids: ["P2-I2-W2"],
-                       extra: { "blocking_workers" => ["P2-I2-W2"] })
-        ],
-        agents: [worker_record(id: "P2-I2-W2", issue_id: "P2-I2", project_id: "P2", status: "working")]
-      )
-    )
+    state = Meringue::State::Models.ensure_state_shape!(stranded_key_fixture)
     before = JSON.parse(JSON.generate(state))
 
     assert_raises(ArgumentError) { Meringue::State::Recounter.recount!(state) }
@@ -344,8 +350,22 @@ class KernelMaintenanceRecountReferenceIntegrityTest < Minitest::Test
     assert_equal before, state, "a failed recount must not partially rename the caller's state"
   end
 
-  # References that were already dangling before the pass cannot be repaired by renumbering, so
-  # they must not make `/recount` unusable.
+  # An id-keyed map outside the counters and the recorded-mapping subtrees. Nothing in state uses
+  # this shape today, which is the point: if something adds one, the pass says so.
+  def stranded_key_fixture
+    state_fixture(
+      projects: [project_record(id: "P2", status: "working")],
+      issues: [
+        issue_record(id: "P2-I2", project_id: "P2", status: "working", agent_ids: ["P2-I2-W2"],
+                     extra: { "worker_notes" => { "P2-I2-W2" => "needs review" } })
+      ],
+      agents: [worker_record(id: "P2-I2-W2", issue_id: "P2-I2", project_id: "P2", status: "working")]
+    )
+  end
+
+  # An id that was already dangling before the pass cannot be repaired by renumbering, so it must
+  # not make `/recount` unusable. It is retired rather than tolerated: the bare spelling is free to
+  # be reused, so leaving it would eventually attribute this log line to a different worker.
   def test_references_to_already_removed_records_do_not_block_a_recount
     write_state(
       state_fixture(
@@ -365,7 +385,9 @@ class KernelMaintenanceRecountReferenceIntegrityTest < Minitest::Test
     assert_equal "accepted", result.fetch("status"), result.fetch("message")
     state = read_state
     assert_equal ["P1-I1-W1"], ids(state.fetch("agents"))
-    assert_equal "P9-I9-W9", state.fetch("logs").first.fetch("source_id")
+    assert_equal "P9-I9-W9 (old id)", state.fetch("logs").first.fetch("source_id")
+    assert_nil agent_by_id(state, "P1-I1-W1").fetch("harness_metadata").fetch("replace_agent_id"),
+               "a dangling lineage link in a live record is cleared, not marked"
   end
 
   # A queued worker's two copies of its dependency must agree. If a rename ever updated one and
