@@ -438,8 +438,14 @@ Non-negotiable properties:
   by the kernel in the attempt's workspace with a hard timeout and capped output. A metric an attempt
   reports about its own work is not a measurement. Guardrail commands must keep passing, so reaching
   the target by weakening tests or thresholds is recorded as `not_met`, never as success.
-- **A judge step scores every iteration** against the metric and guardrails and writes the directive
-  the next attempt receives. Reflection is stored on the goal record, outside the agent session.
+- **Nothing grades its own work.** Some goals have no number ("this onboarding reads well"). Those use
+  `judge.mode: "reviewer"`: the kernel spawns a separate short-lived reviewer session on the attempt's
+  own branch, and that reviewer returns a structured verdict (approved, rationale, actionable critique)
+  that either ends the loop or becomes the next attempt's directive. The attempt never judges itself,
+  guardrails still apply, and running out of iterations without approval is a normal reported outcome.
+- **A judge step scores every iteration** against the metric and guardrails, or against the reviewer's
+  verdict, and writes the directive the next attempt receives. Reflection is stored on the goal record,
+  outside the agent session.
 - **Single flight.** At most one attempt agent per goal at any time. This invariant lives in the pure
   decision function, not in prompt guidance, and it is what makes unbounded spawning impossible.
 - **Every loop is bounded.** Iteration count, spawned-session count, wall clock, consecutive

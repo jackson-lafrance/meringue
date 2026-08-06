@@ -277,6 +277,22 @@ class TuiAgentTreeGoalTest < Minitest::Test
     assert_includes line, "46%"
   end
 
+  def test_a_reviewer_judged_goal_shows_where_the_reviewer_stands_instead_of_a_number
+    reviewer = goal_state(
+      "judge" => { "mode" => "reviewer" },
+      "metric" => { "guardrails" => [] },
+      "last_metric" => nil,
+      "iterations" => [
+        { "number" => 1, "phase" => "settled", "review" => { "usable" => true, "approved" => false, "critique" => ["tighten the opening"] } }
+      ]
+    )
+    line = issue_line(reviewer)
+
+    assert_includes line, "2/5"
+    assert_includes line, "changes requested"
+    refute_includes line, "/80", "a reviewer-judged goal has no metric to render"
+  end
+
   def test_a_stopped_goal_shows_why_it_stopped
     line = issue_line(goal_state("status" => "blocked", "stop_reason" => "no_progress"))
 
