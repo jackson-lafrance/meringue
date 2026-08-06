@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "review_verdict"
+
 module Meringue
   # Goal loops are the durable, kernel-owned controller for "keep working until this
   # measurable criterion is met". A goal is not an agent and not a new AgentTree node
@@ -18,13 +20,26 @@ module Meringue
       KINDS = %w[metric].freeze
       DEFAULT_KIND = "metric"
 
-      # The deterministic probe is the primary progress signal. A worker-backed judge is
-      # a planned second gate ("the metric says met, is it actually met?"), so the field
-      # exists in the schema and is validated, but only the deterministic mode is
-      # implemented here.
-      JUDGE_MODES = %w[metric_only].freeze
+      # Two judges exist.
+      #
+      # `metric_only` is the deterministic one: the kernel runs a command, reads a number,
+      # and compares it to a target. It is the default and the right judge whenever the
+      # success condition can be counted.
+      #
+      # `reviewer` covers the goals that have no number at all ("this onboarding reads
+      # well", "the UX feels right"). Each iteration is judged by a short-lived reviewer
+      # session the kernel spawns on the attempt's own branch; it returns a structured
+      # verdict (approved + rationale + actionable critique) that either ends the loop or
+      # becomes the next attempt's directive.
+      #
+      # The remaining modes combine the two ("the metric says met, is it actually met?")
+      # and are still deferred: they need a second gate ordering that neither judge needs
+      # on its own.
+      METRIC_JUDGE_MODE = "metric_only"
+      REVIEWER_JUDGE_MODE = "reviewer"
+      JUDGE_MODES = [METRIC_JUDGE_MODE, REVIEWER_JUDGE_MODE].freeze
       DEFERRED_JUDGE_MODES = %w[worker_when_metric_met worker_every_iteration].freeze
-      DEFAULT_JUDGE_MODE = "metric_only"
+      DEFAULT_JUDGE_MODE = METRIC_JUDGE_MODE
 
       # `fresh_attempt` spawns a new worker (and worktree) per iteration.
       # `accumulate` re-prompts the previous worker so one branch keeps growing.
@@ -40,7 +55,7 @@ module Meringue
       METRIC_CWD_MODES = %w[workspace project_root].freeze
       DEFAULT_METRIC_CWD = "workspace"
 
-      PHASES = %w[attempting measuring judging settled].freeze
+      PHASES = %w[attempting measuring reviewing judging settled].freeze
       VERDICTS = %w[met partially_met not_met inconclusive].freeze
 
       STOP_REASONS = %w[
@@ -67,9 +82,14 @@ module Meringue
       # Guardrails run on every measured iteration, so the count is capped to keep the
       # probe phase bounded.
       MAX_GUARDRAILS = 3
-      # Two consecutive broken probes mean the metric itself is unusable; continuing
-      # would burn sessions against a signal nobody can read.
+      # Two consecutive broken probes mean the goal's signal itself is unusable — a metric
+      # command that cannot be read, or a reviewer that will not return a verdict.
+      # Continuing would burn sessions against a signal nobody can read.
       PROBE_FAILURE_LIMIT = 2
+      # One reviewer turn per iteration, plus one retry when the first turn returns
+      # something the kernel cannot act on. A third turn would just pay for the same
+      # broken reviewer again; the iteration is settled `inconclusive` instead.
+      REVIEW_ATTEMPT_LIMIT = 2
       ITERATION_HISTORY_LIMIT = 20
       OUTPUT_TAIL_LIMIT = 2_000
 
@@ -147,6 +167,13 @@ module Meringue
         }.compact
       end
 
+      # A goal whose success condition is a reviewer's judgement rather than a number.
+      def reviewer_judged?(goal)
+        return false unless goal.is_a?(Hash)
+
+        goal.dig("judge", "mode").to_s == REVIEWER_JUDGE_MODE
+      end
+
       def normalized_budget(budget)
         budget = {} unless budget.is_a?(Hash)
         max_iterations = bounded_number(
@@ -196,6 +223,8 @@ module Meringue
           iteration["verdict"] = VERDICTS.include?(iteration["verdict"].to_s) ? iteration["verdict"].to_s : nil
           iteration["guardrails"] = Array(iteration["guardrails"]).select { |entry| entry.is_a?(Hash) }
           iteration["evidence"] = Array(iteration["evidence"]).map(&:to_s)
+          iteration["review_attempts"] = nonnegative_integer(iteration["review_attempts"]) if iteration.key?("review_attempts")
+          iteration["review"] = ReviewVerdict.normalize(iteration["review"]) if iteration["review"].is_a?(Hash)
           iteration
         end.last(ITERATION_HISTORY_LIMIT)
       end
@@ -226,6 +255,30 @@ module Meringue
 
       def last_settled_iteration(goal)
         settled_iterations(goal).last
+      end
+
+      # The most recent reviewer verdict, settled or in flight. Used for the visible
+      # "iteration N of M, last verdict, last critique" surfacing.
+      def last_review(goal)
+        iterations(goal).reverse.map { |iteration| iteration.fetch("review", nil) }.find { |review| review.is_a?(Hash) }
+      end
+
+      def review_state(goal)
+        review = last_review(goal)
+        return "not reviewed yet" unless review
+        return "unreadable verdict" unless review.fetch("usable", false)
+
+        review.fetch("approved", false) ? "approved" : "changes requested"
+      end
+
+      # One short line describing a reviewer verdict, for logs and list output.
+      def review_line(review)
+        return nil unless review.is_a?(Hash)
+        return "reviewer verdict unusable: #{review.fetch("error", "no verdict")}" unless review.fetch("usable", false)
+        return "approved#{review.fetch("rationale", nil) ? ": #{review.fetch("rationale")}" : ""}" if review.fetch("approved", false)
+
+        detail = Array(review.fetch("critique", [])).first || review.fetch("rationale", nil)
+        "changes requested#{detail ? ": #{detail}" : ""}"
       end
 
       def metric_value(measurement)
@@ -313,7 +366,11 @@ module Meringue
         parts = ["#{goal.fetch("id", "goal")} #{goal.fetch("status", "queued")}"]
         parts << "paused" if goal.fetch("paused", false)
         parts << "iteration #{goal.fetch("current_iteration", 0)}/#{goal.dig("budget", "max_iterations")}"
-        parts << "metric #{format_number(last)}#{comparator_arrow(metric["comparator"])}#{format_number(metric["target"])}" if metric["target"]
+        if reviewer_judged?(goal)
+          parts << "reviewer: #{review_state(goal)}"
+        elsif metric["target"]
+          parts << "metric #{format_number(last)}#{comparator_arrow(metric["comparator"])}#{format_number(metric["target"])}"
+        end
         parts << "stopped: #{goal.fetch("stop_reason")}" if goal.fetch("stop_reason", nil)
         parts.join(" · ")
       end

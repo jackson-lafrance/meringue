@@ -170,6 +170,7 @@ module Meringue
         ["/model <provider>/<model-id>", "Persist the model used for all future Pi heads and workers; existing sessions are unchanged. The model id may itself contain / and :."],
         ["/thinking <level>", "Persist the thinking level used for all future Pi heads and workers: off, minimal, low, medium, high, xhigh, or max."],
         ["/goal create [issue_id] \"<prompt>\" --metric \"<command>\" --target <number> [--project <project_id>] [--comparator gte|lte|gt|lt|eq] [--max-iterations <n>] [--guardrail \"<command>\"] [--parse last_number|first_number|exit_status] [--pattern \"<regex>\"] [--title \"<title>\"] [--fresh-attempt] [--paused]", "Start a goal loop: the kernel keeps producing attempts until the metric hits its target or a budget/no-progress guard trips. Name an issue to attach the loop to it, or give only a quoted prompt and Meringue creates the issue itself."],
+        ["/goal create [issue_id] \"<prompt>\" --reviewer [--project <project_id>] [--max-iterations <n>] [--guardrail \"<command>\"] [--title \"<title>\"] [--fresh-attempt] [--paused]", "Start a reviewer-judged goal loop for work with no number: each attempt is reviewed against the success criteria, and the loop stops when the reviewer approves or the iteration budget runs out."],
         ["/goal status [goal_id]", "Show goal loops, their iteration accounting, and why a stopped goal stopped."],
         ["/goal pause <goal_id>", "Pause a goal loop after the current attempt; nothing new is spawned while it is paused."],
         ["/goal resume <goal_id>", "Resume a paused goal loop."],
@@ -1322,7 +1323,8 @@ module Meringue
           [
             "  #{Goals::Record.summary(goal)}",
             goal["success_criteria"] ? "  criteria: #{goal["success_criteria"]}" : nil,
-            goal.dig("metric", "command") ? "  metric: #{goal.dig("metric", "command")}" : nil
+            Goals::Record.reviewer_judged?(goal) ? "  judged by: a reviewer session per iteration" : nil,
+            present_string(goal.dig("metric", "command")) ? "  metric: #{goal.dig("metric", "command")}" : nil
           ].compact
         when "Recount"
           mappings = result.is_a?(Hash) ? result.fetch("mappings", {}) : {}
@@ -5844,10 +5846,20 @@ module Meringue
         paused = truthy?(value_at(payload, "paused", "Paused"))
         errors = []
 
+        # A reviewer-judged goal is the "no number exists" case: its finish line is a
+        # reviewer's verdict against the success criteria, so a metric command is not just
+        # unnecessary, it would be an unmeasured field on the record. Guardrails stay.
+        reviewer_judged = judge_mode.to_s == Goals::Record::REVIEWER_JUDGE_MODE
         errors << "issue_id or prompt is required" if issue_id.nil? && prompt.nil?
         errors << "success_criteria is required" if blank?(success_criteria)
-        errors << "metric.command is required" if blank?(metric["command"])
-        errors << "metric.target must be a number" if metric["target"].nil?
+        if reviewer_judged
+          if present_string(metric["command"])
+            errors << "a reviewer-judged goal has no metric; attach that command as a guardrail instead"
+          end
+        else
+          errors << "metric.command is required" if blank?(metric["command"])
+          errors << "metric.target must be a number" if metric["target"].nil?
+        end
         if present_string(value_at(payload, "comparator", "Comparator")) && !Goals::Record::COMPARATORS.include?(value_at(payload, "comparator", "Comparator").to_s)
           errors << "comparator must be one of #{Goals::Record::COMPARATORS.join(", ")}"
         end
@@ -5856,7 +5868,7 @@ module Meringue
         end
         if present_string(judge_mode) && !Goals::Record::JUDGE_MODES.include?(judge_mode.to_s)
           errors << if Goals::Record::DEFERRED_JUDGE_MODES.include?(judge_mode.to_s)
-                      "judge mode #{judge_mode} is not implemented yet; only #{Goals::Record::JUDGE_MODES.join(", ")} is available"
+                      "judge mode #{judge_mode} is not implemented yet; available modes are #{Goals::Record::JUDGE_MODES.join(", ")}"
                     else
                       "judge mode must be one of #{Goals::Record::JUDGE_MODES.join(", ")}"
                     end
@@ -5905,6 +5917,7 @@ module Meringue
             originating_head_id: value_at(payload, "originating_head_id", "originatingHeadId", "_head_id"),
             goal_id: goal_id,
             metric: metric,
+            reviewer_judged: reviewer_judged,
             now: now
           )
           minted_log_ids = append_log(
@@ -5977,14 +5990,20 @@ module Meringue
       # The issue a prompt-form goal needs. It is a perfectly ordinary issue: same id counter,
       # same shape, prunable and recountable like any other. Only its provenance differs, which
       # is recorded in the log details rather than in a new field.
-      def mint_goal_issue!(state, project:, prompt:, success_criteria:, issue_title:, originating_head_id:, goal_id:, metric:, now:)
+      def mint_goal_issue!(state, project:, prompt:, success_criteria:, issue_title:, originating_head_id:, goal_id:, metric:, now:, reviewer_judged: false)
         issue = {
           "id" => next_issue_id!(state, project.fetch("id")),
           "project_id" => project.fetch("id"),
           "parent_issue_id" => nil,
           "originating_head_id" => present_string(originating_head_id),
           "title" => issue_title || goal_issue_title(prompt),
-          "description" => goal_issue_description(prompt: prompt, success_criteria: success_criteria, goal_id: goal_id, metric: metric),
+          "description" => goal_issue_description(
+            prompt: prompt,
+            success_criteria: success_criteria,
+            goal_id: goal_id,
+            metric: metric,
+            reviewer_judged: reviewer_judged
+          ),
           "status" => "queued",
           "agent_ids" => [],
           "created_at" => now,
@@ -6011,13 +6030,19 @@ module Meringue
 
       # The prompt is kept verbatim, because it is what the attempt workers are ultimately
       # working from, and the measurable finish line is spelled out underneath it.
-      def goal_issue_description(prompt:, success_criteria:, goal_id:, metric:)
+      def goal_issue_description(prompt:, success_criteria:, goal_id:, metric:, reviewer_judged: false)
         lines = [prompt.to_s.strip]
         lines << ""
         lines << "Goal loop #{goal_id} drives this issue: Meringue keeps producing attempts until the criterion below is met or a budget guard stops the loop."
         lines << "Success criteria: #{success_criteria}" unless success_criteria.to_s.strip == prompt.to_s.strip
-        comparator = GOAL_COMPARATOR_TEXT.fetch(metric["comparator"].to_s, metric["comparator"].to_s)
-        lines << "Metric (measured by the kernel, never self-reported): #{metric["command"]} #{comparator} #{Goals::Record.format_number(metric["target"])}"
+        if reviewer_judged
+          # No metric line for a reviewer-judged goal: there is no number, and printing an
+          # empty one would read as a metric nobody measures.
+          lines << "Judged by: an independent reviewer session per iteration (never the attempt itself), against the success criteria above."
+        else
+          comparator = GOAL_COMPARATOR_TEXT.fetch(metric["comparator"].to_s, metric["comparator"].to_s)
+          lines << "Metric (measured by the kernel, never self-reported): #{metric["command"]} #{comparator} #{Goals::Record.format_number(metric["target"])}"
+        end
         guardrails = Array(metric["guardrails"]).map { |guardrail| guardrail.is_a?(Hash) ? guardrail["command"] : guardrail }.compact
         lines << "Guardrails that must keep passing: #{guardrails.join(", ")}" unless guardrails.empty?
         lines.join("\n")
@@ -6252,21 +6277,32 @@ module Meringue
           next lines unless summaries.length == 1
 
           lines + Array(summary.fetch("iterations", [])).map do |iteration|
-            "    it#{iteration.fetch("number", 0)}: #{iteration.fetch("verdict", "?")} metric #{Goals::Record.format_number(iteration.fetch("metric", nil))}"
+            detail = if present_string(iteration.fetch("review_line", nil))
+                       iteration.fetch("review_line")
+                     else
+                       "metric #{Goals::Record.format_number(iteration.fetch("metric", nil))}"
+                     end
+            "    it#{iteration.fetch("number", 0)}: #{iteration.fetch("verdict", "?")} #{detail}"
           end
         end
       end
 
       def goal_status_summary(goal)
+        reviewer_judged = Goals::Record.reviewer_judged?(goal)
         iterations = Goals::Record.settled_iterations(goal).last(5).map do |iteration|
+          review = iteration.fetch("review", nil)
           {
             "number" => iteration.fetch("number", 0),
             "verdict" => iteration.fetch("verdict", nil),
             "metric" => Goals::Record.metric_value(iteration.fetch("metric", nil)),
             "metric_delta" => iteration.fetch("metric_delta", nil),
+            "approved" => review.is_a?(Hash) ? review.fetch("approved", nil) : nil,
+            "critique" => review.is_a?(Hash) ? Array(review.fetch("critique", [])) : nil,
+            "review_line" => Goals::Record.review_line(review),
             "attempt_worker_id" => iteration.fetch("attempt_worker_id", nil),
+            "review_worker_id" => iteration.fetch("review_worker_id", nil),
             "next_directive" => iteration.fetch("next_directive", nil)
-          }
+          }.compact
         end
         {
           "id" => goal.fetch("id"),
@@ -6274,9 +6310,12 @@ module Meringue
           "status" => goal.fetch("status", nil),
           "stop_reason" => goal.fetch("stop_reason", nil),
           "paused" => goal.fetch("paused", false),
+          "judge_mode" => goal.dig("judge", "mode"),
+          "review_state" => reviewer_judged ? Goals::Record.review_state(goal) : nil,
+          "last_critique" => reviewer_judged ? Array(Goals::Record.last_review(goal)&.fetch("critique", [])) : nil,
           "line" => "#{Goals::Record.summary(goal)} — #{goal.fetch("success_criteria", "")}",
           "iterations" => iterations
-        }
+        }.compact
       end
 
       def goal_metric_from_payload(payload)
@@ -6335,8 +6374,9 @@ module Meringue
           "paused" => goal.fetch("paused", false),
           "current_iteration" => goal.fetch("current_iteration", 0),
           "max_iterations" => goal.dig("budget", "max_iterations"),
-          "metric_command" => goal.dig("metric", "command"),
-          "comparator" => goal.dig("metric", "comparator"),
+          "judge_mode" => goal.dig("judge", "mode"),
+          "metric_command" => present_string(goal.dig("metric", "command")),
+          "comparator" => present_string(goal.dig("metric", "command")) && goal.dig("metric", "comparator"),
           "target" => goal.dig("metric", "target"),
           "last_metric" => Goals::Record.metric_value(goal.fetch("last_metric", nil)),
           "best_metric" => Goals::Record.metric_value(goal.fetch("best_metric", nil)),
@@ -6442,6 +6482,7 @@ module Meringue
         when "measure_baseline" then measure_goal_baseline(goal, action)
         when "start_iteration" then start_goal_iteration(goal, action)
         when "measure" then measure_goal_iteration(goal, action)
+        when "review" then review_goal_iteration(goal, action)
         when "judge" then judge_goal_iteration(goal, action)
         when "stop" then stop_goal_loop(goal, action)
         else nil
@@ -6652,8 +6693,12 @@ module Meringue
         end
 
         current_goal = prepared.fetch("goal")
+        reviewer_judged = Goals::Record.reviewer_judged?(current_goal)
         cwd = goal_metric_cwd(current_goal, workspace_path: prepared.fetch("workspace_path", nil))
-        measurement = run_goal_metric(current_goal, cwd: cwd)
+        # A reviewer-judged goal has no metric command to run; its guardrails and the
+        # workspace fingerprint are still measured here, so "approved but red" and "the
+        # attempt produced nothing new" stay detectable without a number.
+        measurement = reviewer_judged ? nil : run_goal_metric(current_goal, cwd: cwd)
         guardrails = run_goal_guardrails(current_goal, cwd: cwd)
         fingerprint = goal_workspace_fingerprint(cwd)
 
@@ -6666,13 +6711,18 @@ module Meringue
           return nil unless iteration
 
           now = timestamp
-          iteration["metric"] = measurement
+          iteration["metric"] = measurement if measurement
           iteration["guardrails"] = guardrails
           iteration["workspace_fingerprint"] = fingerprint
           iteration["measured_at"] = now
-          iteration["phase"] = "judging"
+          iteration["phase"] = reviewer_judged ? "reviewing" : "judging"
           current["updated_at"] = now
-          message = "Goal #{current.fetch("id")} measured iteration #{number}: #{Goals::Record.format_number(Goals::Record.metric_value(measurement))}#{guardrails.empty? ? "" : ", guardrails #{guardrails.count { |guardrail| guardrail.fetch("passed", false) }}/#{guardrails.length} passing"}."
+          guardrail_text = guardrails.empty? ? "" : ", guardrails #{guardrails.count { |guardrail| guardrail.fetch("passed", false) }}/#{guardrails.length} passing"
+          message = if reviewer_judged
+                      "Goal #{current.fetch("id")} checked iteration #{number} before review#{guardrail_text.sub(", ", ": ")}."
+                    else
+                      "Goal #{current.fetch("id")} measured iteration #{number}: #{Goals::Record.format_number(Goals::Record.metric_value(measurement))}#{guardrail_text}."
+                    end
           log_ids = append_log(
             state,
             source_type: "kernel",
@@ -6693,8 +6743,194 @@ module Meringue
         end
       end
 
+      # The review step of a reviewer-judged goal, in two halves.
+      #
+      # `spawn` starts a short-lived reviewer session on the attempt's own workspace and
+      # branch, using the ordinary worker-spawn path: that gives the reviewer a tracked
+      # agent record, the kernel's exactly-once spawn dedupe, the AgentTree, and the kill
+      # cascade for free. The kernel then does nothing until the tick observes that session
+      # settle — no polling, no sleeping, no waiting on another agent's state.
+      #
+      # `collect` reads the settled reviewer's final message and turns it into a verdict.
+      def review_goal_iteration(goal, action)
+        return collect_goal_review(goal, action) if action.fetch("mode", "spawn").to_s == "collect"
+
+        start_goal_review(goal, action)
+      end
+
+      def start_goal_review(goal, action)
+        number = action.fetch("iteration_number")
+        command_id = action.fetch("command_id")
+        attempt = action.fetch("attempt", 1).to_i
+        checkpoint = synchronized_state do
+          state = normalized_state
+          current = find_goal(state, goal.fetch("id"))
+          return nil unless current
+
+          iteration = Goals::Record.iterations(current).find { |entry| entry.fetch("number", nil).to_i == number.to_i }
+          return nil unless iteration
+
+          now = timestamp
+          iteration["review_attempts"] = attempt
+          iteration["review_command_id"] = command_id
+          iteration["review_worker_id"] = nil
+          # A reviewer session is a session: it consumes the goal's session budget like an
+          # attempt does, so a goal can never spawn more sessions than its budget allows.
+          current["workers_spawned"] = current.fetch("workers_spawned", 0).to_i + 1
+          current["updated_at"] = now
+          touch_state!(state, now)
+          store.save(state)
+          {
+            "goal" => deep_copy(current),
+            "iteration" => deep_copy(iteration),
+            "workspace_path" => iteration.fetch("attempt_workspace_path", nil),
+            "retry_reason" => attempt > 1 ? iteration.dig("review", "error") || iteration.fetch("review_error", nil) : nil
+          }
+        end
+
+        current_goal = checkpoint.fetch("goal")
+        cwd = goal_review_cwd(current_goal, workspace_path: checkpoint.fetch("workspace_path", nil))
+        prompt = Goals::ReviewPrompt.render(
+          goal: current_goal,
+          iteration: checkpoint.fetch("iteration"),
+          retry_reason: checkpoint.fetch("retry_reason", nil)
+        )
+        result = apply(
+          "command_id" => command_id,
+          "type" => "SpawnWorker",
+          "payload" => {
+            "issue_id" => current_goal.fetch("issue_id"),
+            "prompt" => prompt,
+            "title" => "#{current_goal.fetch("id")} iteration #{number} review",
+            "workspace_path" => cwd
+          }.compact
+        )
+
+        record_goal_review_spawn(current_goal.fetch("id"), number, result)
+      end
+
+      def record_goal_review_spawn(goal_id, number, result)
+        synchronized_state do
+          state = normalized_state
+          current = find_goal(state, goal_id)
+          return nil unless current
+
+          iteration = Goals::Record.iterations(current).find { |entry| entry.fetch("number", nil).to_i == number.to_i }
+          return nil unless iteration
+
+          now = timestamp
+          accepted = result.fetch("status", nil) == "accepted"
+          if accepted
+            worker_id = result.fetch("target_id", nil)
+            iteration["review_worker_id"] = worker_id
+            current["active_worker_id"] = worker_id
+            message = "Goal #{current.fetch("id")} started the review of iteration #{number} on #{worker_id}."
+            level = "info"
+          else
+            # A reviewer that cannot be started is an unreadable verdict, not a retry loop:
+            # the iteration settles inconclusive and the probe-failure guard decides whether
+            # the goal can continue at all.
+            iteration["review"] = Goals::ReviewVerdict.unusable("the reviewer session could not be started: #{result.fetch("message", "unknown error")}")
+            iteration["phase"] = "judging"
+            current["active_worker_id"] = nil
+            message = "Goal #{current.fetch("id")} could not start the review of iteration #{number}: #{result.fetch("message", "unknown error")}"
+            level = "warning"
+          end
+          current["updated_at"] = now
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: current.fetch("id"),
+            level: level,
+            message: message,
+            details: goal_log_details(current).merge(
+              "phase" => "review",
+              "iteration" => number,
+              "review_worker_id" => iteration.fetch("review_worker_id", nil),
+              "review_command_id" => iteration.fetch("review_command_id", nil),
+              "review_attempts" => iteration.fetch("review_attempts", 1)
+            ).compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+          # After a started review the only legal next decision is "wait", so this pass stops.
+          goal_step(current, "review", message, log_ids, continue: !accepted)
+        end
+      end
+
+      def collect_goal_review(goal, action)
+        number = action.fetch("iteration_number")
+        synchronized_state do
+          state = normalized_state
+          current = find_goal(state, goal.fetch("id"))
+          return nil unless current
+
+          iteration = Goals::Record.iterations(current).find { |entry| entry.fetch("number", nil).to_i == number.to_i }
+          return nil unless iteration
+
+          now = timestamp
+          worker = find_agent(state, iteration.fetch("review_worker_id", nil))
+          worker_status = action.fetch("review_worker_status", worker && worker.fetch("status", nil)).to_s
+          text = worker && (worker.fetch("harness_metadata", {}) || {}).fetch("last_assistant_text", nil)
+          review = if present_string(text)
+                     Goals::ReviewVerdict.parse(text)
+                   else
+                     Goals::ReviewVerdict.unusable("the reviewer session ended #{worker_status.empty? ? "without a final message" : worker_status} with no verdict")
+                   end
+          review = review.merge(
+            "review_worker_id" => iteration.fetch("review_worker_id", nil),
+            "reviewed_at" => now,
+            "attempt" => iteration.fetch("review_attempts", 1)
+          ).compact
+
+          attempts = iteration.fetch("review_attempts", 1).to_i
+          retryable = !review.fetch("usable", false) && attempts < Goals::Record::REVIEW_ATTEMPT_LIMIT
+          if retryable
+            # One retry, with the parse failure quoted back at the reviewer. A second
+            # unreadable answer is treated as a verdict-less iteration rather than paid for
+            # a third time.
+            iteration["review_error"] = review.fetch("error", nil)
+            iteration["review_worker_id"] = nil
+            iteration["review_command_id"] = nil
+            iteration["phase"] = "reviewing"
+            current["active_worker_id"] = nil
+            message = "Goal #{current.fetch("id")} could not read the reviewer's verdict for iteration #{number} (#{review.fetch("error", "no verdict")}); asking once more."
+            level = "warning"
+          else
+            iteration["review"] = review
+            iteration["review_worker_status"] = worker_status.empty? ? "missing" : worker_status
+            iteration["phase"] = "judging"
+            current["active_worker_id"] = nil
+            message = "Goal #{current.fetch("id")} reviewer verdict for iteration #{number}: #{Goals::Record.review_line(review)}"
+            level = review.fetch("usable", false) ? "info" : "warning"
+          end
+          current["updated_at"] = now
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: current.fetch("id"),
+            level: level,
+            message: message,
+            details: goal_log_details(current).merge(
+              "phase" => "review",
+              "iteration" => number,
+              "review_worker_id" => worker && worker.fetch("id", nil),
+              "review_worker_status" => worker_status,
+              "review_attempts" => attempts,
+              "approved" => review.fetch("approved", false),
+              "review_usable" => review.fetch("usable", false),
+              "critique" => review.fetch("critique", [])
+            ).compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+          goal_step(current, "review", message, log_ids, continue: true)
+        end
+      end
+
       # The judge step. Deterministic today: it scores the measurement against the metric
-      # and guardrails, records the verdict, and writes the directive the next attempt gets.
+      # and guardrails, or the reviewer's verdict against the success criteria, records the
+      # verdict, and writes the directive the next attempt gets.
       def judge_goal_iteration(goal, action)
         number = action.fetch("iteration_number")
         synchronized_state do
@@ -6720,10 +6956,14 @@ module Meringue
 
           measurement = iteration.fetch("metric", nil)
           if judgement.fetch("probe_ok")
-            current["last_metric"] = measurement
-            current["best_metric"] = Goals::Record.better_measurement(current, current.fetch("best_metric", nil), measurement)
+            if measurement
+              current["last_metric"] = measurement
+              current["best_metric"] = Goals::Record.better_measurement(current, current.fetch("best_metric", nil), measurement)
+            end
             current["consecutive_probe_failures"] = 0
           else
+            # An unreadable reviewer verdict is the reviewer-judged goal's broken probe: two
+            # in a row stop the loop for the same reason an unreadable metric command does.
             current["consecutive_probe_failures"] = current.fetch("consecutive_probe_failures", 0).to_i + 1
           end
           current["consecutive_no_progress"] = judgement.fetch("progress") ? 0 : current.fetch("consecutive_no_progress", 0).to_i + 1
@@ -6816,6 +7056,8 @@ module Meringue
       end
 
       def goal_stop_question(goal, action)
+        return reviewer_goal_stop_question(goal, action) if Goals::Record.reviewer_judged?(goal)
+
         case goal.fetch("stop_reason", nil)
         when "no_progress"
           "Goal #{goal.fetch("id")} stopped after #{goal.fetch("consecutive_no_progress")} iteration(s) with no measurable progress (metric #{Goals::Record.format_number(Goals::Record.metric_value(goal.fetch("last_metric", nil)))} vs target #{Goals::Record.format_number(Goals::Record.target(goal))}). Change the approach, adjust the goal, or stop it?"
@@ -6825,6 +7067,26 @@ module Meringue
           "Goal #{goal.fetch("id")} stopped because its metric command `#{goal.dig("metric", "command")}` keeps failing. Fix the command, change the metric, or stop the goal?"
         when "max_iterations"
           "Goal #{goal.fetch("id")} used its #{goal.dig("budget", "max_iterations")} iteration budget and reached #{Goals::Record.format_number(Goals::Record.metric_value(goal.fetch("last_metric", nil)))} of #{Goals::Record.format_number(Goals::Record.target(goal))}. Raise the budget, accept the result, or stop?"
+        else
+          "#{action.fetch("message")} How should this goal continue?"
+        end
+      end
+
+      # Reaching the iteration cap without approval is the ordinary end of a reviewer-judged
+      # goal, so the question says what the reviewer last asked for instead of reporting a
+      # failure the user cannot act on.
+      def reviewer_goal_stop_question(goal, action)
+        last_critique = Array(Goals::Record.last_review(goal)&.fetch("critique", [])).first
+        outstanding = last_critique ? " The reviewer's last outstanding point: #{last_critique}" : ""
+        case goal.fetch("stop_reason", nil)
+        when "no_progress"
+          "Goal #{goal.fetch("id")} stopped after #{goal.fetch("consecutive_no_progress")} iteration(s) where the reviewer repeated the same critique.#{outstanding} Change the approach, adjust the success criteria, or stop it?"
+        when "oscillation"
+          "Goal #{goal.fetch("id")} stopped because its attempts started repeating the same workspace state. Should it try a different approach, or stop?"
+        when "probe_unavailable"
+          "Goal #{goal.fetch("id")} stopped because its reviewer did not return a usable verdict twice in a row. Restart the goal, reword the success criteria, or stop it?"
+        when "max_iterations"
+          "Goal #{goal.fetch("id")} used its #{goal.dig("budget", "max_iterations")} iteration budget without reviewer approval.#{outstanding} Raise the budget, accept the work as it is, or stop?"
         else
           "#{action.fetch("message")} How should this goal continue?"
         end
@@ -6879,6 +7141,16 @@ module Meringue
         metric_probe.workspace_fingerprint(cwd: cwd)
       rescue StandardError
         nil
+      end
+
+      # A reviewer reads the attempt's own worktree and branch. The workspace is adopted,
+      # not allocated: the reviewer never gets a worktree of its own, so it cannot review a
+      # copy of the work and its session is never charged a branch.
+      def goal_review_cwd(goal, workspace_path: nil)
+        path = present_string(workspace_path)
+        return path if path && Dir.exist?(path)
+
+        project_root_for_goal(goal)
       end
 
       # The metric runs on the attempt's own workspace by default, so it measures the branch
