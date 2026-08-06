@@ -392,6 +392,9 @@ module Meringue
             "session_available" => session_available,
             "resumable" => session_available && !terminal_for_prompting?(agent),
             "stopped_without_finishing" => stopped_without_finishing?(agent) || nil,
+            # Prompting this worker cannot replay its session; the kernel answers such a prompt by
+            # continuing the work in a fresh session on the same worktree, which is a new worker id.
+            "session_unreplayable" => session_unreplayable?(agent) || nil,
             "status_reason" => metadata.fetch("status_reason", nil),
             "supported_prompt_modes_now" => supported_prompt_modes(agent, streaming: streaming, session_available: session_available),
             "recommended_prompt_mode" => recommended_prompt_mode(agent, streaming: streaming, session_available: session_available),
@@ -489,6 +492,16 @@ module Meringue
         return false unless %w[killed errored].include?(agent.fetch("status", nil))
 
         !stopped_without_finishing?(agent)
+      end
+
+      # The model provider refused to replay this worker's saved transcript, so no resume can
+      # recover it. The work itself is not lost: its worktree and branch are intact.
+      def session_unreplayable?(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        failure = metadata.fetch("settle_failure", nil)
+        return false unless failure.is_a?(Hash)
+
+        failure.fetch("kind", nil).to_s == "unreplayable_session"
       end
 
       def supported_prompt_modes(agent, streaming:, session_available:)

@@ -52,6 +52,44 @@ class HarnessPiClientTurnOutcomeTest < HarnessIntegrationTest
     assert_equal "its model request failed mid-turn (invalid request: tool schema rejected)", outcome.fetch("reason")
   end
 
+  # The failure that dead-ended a real worker: the provider refused the *saved transcript* it was
+  # asked to replay, so every resume of that session fails identically. It must not be classified as
+  # a transport blip, because a transport blip is retried and this cannot be.
+  def test_a_rejected_thinking_block_replay_is_classified_as_an_unreplayable_session
+    message = '400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.1.content.44: ' \
+              '`thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified. ' \
+              'These blocks must remain as they were in the original response."},"request_id":"req_vrtx_1"}'
+    outcome = outcome_for([assistant_line(stop_reason: "error", error_message: message)])
+
+    assert_equal "failed", outcome.fetch("state")
+    assert_equal "unreplayable_session", outcome.fetch("kind")
+    assert_equal "fresh_session", outcome.fetch("recovery")
+    assert_includes outcome.fetch("reason"), "its saved session can no longer be replayed to the model"
+    assert_includes outcome.fetch("reason"), "fails the same way every time"
+    assert_equal message, outcome.fetch("error_message")
+  end
+
+  # The same rejection wording routed through a proxy that says "expected `thinking`" instead. It is
+  # still the transcript being refused, and the word "proxy" in the text must not make it look like a
+  # network failure.
+  def test_an_expected_thinking_block_rejection_is_also_unreplayable_and_not_a_network_failure
+    outcome = outcome_for([
+                            assistant_line(
+                              stop_reason: "error",
+                              error_message: "proxy returned 400: messages.3: Expected `thinking` or `redacted_thinking`, but found `text`"
+                            )
+                          ])
+
+    assert_equal "unreplayable_session", outcome.fetch("kind")
+    assert_equal "fresh_session", outcome.fetch("recovery")
+  end
+
+  def test_a_transport_failure_carries_no_fresh_session_recovery_hint
+    outcome = outcome_for([assistant_line(stop_reason: "error", error_message: "Connection error.")])
+
+    refute outcome.key?("recovery"), "a dropped connection is recovered by resuming the same session"
+  end
+
   def test_a_failed_turn_without_an_error_message_still_reports_a_reason
     outcome = outcome_for([assistant_line(stop_reason: "error")])
 
