@@ -10,6 +10,8 @@ class KernelGoalsDecisionTest < Minitest::Test
   Record = Meringue::Goals::Record
   Evaluator = Meringue::Goals::Evaluator
   AttemptPrompt = Meringue::Goals::AttemptPrompt
+  ReviewPrompt = Meringue::Goals::ReviewPrompt
+  ReviewVerdict = Meringue::Goals::ReviewVerdict
 
   def goal(overrides = {})
     base = {
@@ -56,6 +58,194 @@ class KernelGoalsDecisionTest < Minitest::Test
 
   def now
     Time.parse("2026-07-30T01:00:00Z")
+  end
+
+  # --- reviewer-judged goals --------------------------------------------------
+
+  def reviewer_goal(overrides = {})
+    goal(
+      {
+        "judge" => { "mode" => "reviewer" },
+        "metric" => { "guardrails" => [] },
+        "baseline_metric" => nil,
+        "success_criteria" => "the onboarding reads cleanly"
+      }.merge(overrides.transform_keys(&:to_s))
+    )
+  end
+
+  def review(approved:, critique: [], rationale: "because")
+    ReviewVerdict.normalize("usable" => true, "approved" => approved, "critique" => critique, "rationale" => rationale)
+  end
+
+  def settled_review(number:, approved: false, critique: ["do the thing"], verdict: "not_met", fingerprint: nil, worker_id: nil)
+    {
+      "number" => number,
+      "phase" => "settled",
+      "verdict" => verdict,
+      "review" => review(approved: approved, critique: critique),
+      "workspace_fingerprint" => fingerprint,
+      "attempt_worker_id" => worker_id
+    }
+  end
+
+  def test_a_reviewer_judged_goal_skips_the_baseline_and_goes_straight_to_an_attempt
+    action = Loop.next_action(goal: reviewer_goal, agents: [], now: now)
+
+    assert_equal "start_iteration", action.fetch("action")
+    assert_equal "G1-IT1-ATTEMPT", action.fetch("command_id")
+  end
+
+  def test_a_measured_reviewer_iteration_asks_for_a_review_then_waits_for_it
+    open_iteration = { "number" => 1, "phase" => "reviewing", "attempt_worker_id" => "P1-I1-W1" }
+    spawn = Loop.next_action(goal: reviewer_goal("iterations" => [open_iteration]), agents: [], now: now)
+
+    assert_equal "review", spawn.fetch("action")
+    assert_equal "spawn", spawn.fetch("mode")
+    assert_equal "G1-IT1-REVIEW", spawn.fetch("command_id")
+
+    in_flight = Loop.next_action(
+      goal: reviewer_goal("iterations" => [open_iteration.merge("review_worker_id" => "P1-I1-W2", "review_attempts" => 1)]),
+      agents: [{ "id" => "P1-I1-W2", "status" => "working" }],
+      now: now
+    )
+
+    assert_equal "wait", in_flight.fetch("action")
+    assert_equal "review_in_flight", in_flight.fetch("reason")
+
+    collect = Loop.next_action(
+      goal: reviewer_goal("iterations" => [open_iteration.merge("review_worker_id" => "P1-I1-W2", "review_attempts" => 1)]),
+      agents: [{ "id" => "P1-I1-W2", "status" => "completed" }],
+      now: now
+    )
+
+    assert_equal "review", collect.fetch("action")
+    assert_equal "collect", collect.fetch("mode")
+    assert_equal "completed", collect.fetch("review_worker_status")
+  end
+
+  def test_a_retried_review_gets_its_own_command_id_so_the_spawn_is_not_deduped
+    retried = { "number" => 2, "phase" => "reviewing", "review_attempts" => 1, "review_worker_id" => nil }
+    action = Loop.next_action(goal: reviewer_goal("iterations" => [settled_review(number: 1), retried]), agents: [], now: now)
+
+    assert_equal "spawn", action.fetch("mode")
+    assert_equal 2, action.fetch("attempt")
+    assert_equal "G1-IT2-REVIEW-RETRY2", action.fetch("command_id")
+  end
+
+  def test_an_approved_review_stops_the_goal_and_the_budget_stop_says_why
+    approved = Loop.next_action(goal: reviewer_goal("iterations" => [settled_review(number: 1, approved: true, verdict: "met")]), agents: [], now: now)
+
+    assert_equal "completed", approved.fetch("status")
+    assert_equal "goal_met", approved.fetch("stop_reason")
+
+    capped = Loop.next_action(
+      goal: reviewer_goal("iterations" => (1..3).map { |number| settled_review(number: number, critique: ["round #{number}"], fingerprint: "f#{number}") }),
+      agents: [],
+      now: now
+    )
+
+    assert_equal "blocked", capped.fetch("status"), "the cap is a reported outcome, not an error"
+    assert_equal "max_iterations", capped.fetch("stop_reason")
+    assert_includes capped.fetch("message"), "without reviewer approval"
+
+    broken = Loop.next_action(goal: reviewer_goal("consecutive_probe_failures" => 2), agents: [], now: now)
+    assert_equal "probe_unavailable", broken.fetch("stop_reason")
+    assert_includes broken.fetch("message"), "reviewer returned an unusable verdict"
+  end
+
+  def test_the_reviewer_judge_turns_a_verdict_into_a_verdict_and_a_directive
+    iteration = {
+      "number" => 2,
+      "attempt_worker_status" => "completed",
+      "guardrails" => [],
+      "review" => review(approved: false, critique: ["name the three commands", "drop the second screen"], rationale: "still buried")
+    }
+    judgement = Evaluator.evaluate(goal: reviewer_goal, iteration: iteration)
+
+    assert_equal "not_met", judgement.fetch("verdict")
+    assert judgement.fetch("probe_ok")
+    assert judgement.fetch("progress"), "a new critique is movement"
+    assert_nil judgement.fetch("metric_delta")
+    assert_includes judgement.fetch("next_directive"), "1) name the three commands"
+    assert_includes judgement.fetch("next_directive"), "the onboarding reads cleanly"
+    assert judgement.fetch("evidence").any? { |line| line.include?("changes requested") }
+
+    approved = Evaluator.evaluate(goal: reviewer_goal, iteration: iteration.merge("review" => review(approved: true)))
+    assert_equal "met", approved.fetch("verdict")
+    assert_nil approved.fetch("next_directive")
+    assert_equal 1.0, approved.fetch("score")
+  end
+
+  def test_an_approved_review_with_a_red_guardrail_is_not_met_and_is_flagged
+    iteration = {
+      "number" => 1,
+      "attempt_worker_status" => "completed",
+      "guardrails" => [{ "command" => "rake test", "passed" => false, "exit_status" => 1 }],
+      "review" => review(approved: true)
+    }
+    judgement = Evaluator.evaluate(goal: reviewer_goal, iteration: iteration)
+
+    assert_equal "not_met", judgement.fetch("verdict")
+    assert judgement.fetch("gaming_suspected")
+    assert_includes judgement.fetch("next_directive"), "The reviewer approved the work but `rake test` failed"
+  end
+
+  def test_a_repeated_critique_is_not_progress_and_an_unusable_verdict_is_inconclusive
+    previous = settled_review(number: 1, critique: ["Name the three commands."])
+    repeated = {
+      "number" => 2,
+      "attempt_worker_status" => "completed",
+      "guardrails" => [],
+      "review" => review(approved: false, critique: ["name the three commands"])
+    }
+    judgement = Evaluator.evaluate(goal: reviewer_goal("iterations" => [previous]), iteration: repeated)
+
+    refute judgement.fetch("progress")
+    assert_includes judgement.fetch("evidence"), "reviewer repeated the previous critique"
+
+    unusable = Evaluator.evaluate(
+      goal: reviewer_goal,
+      iteration: { "number" => 1, "guardrails" => [], "review" => ReviewVerdict.unusable("no JSON") }
+    )
+
+    assert_equal "inconclusive", unusable.fetch("verdict")
+    refute unusable.fetch("probe_ok")
+    assert_includes unusable.fetch("next_directive"), "did not return a verdict"
+  end
+
+  def test_the_reviewer_prompt_states_the_criteria_the_contract_and_the_earlier_rounds
+    iteration = {
+      "number" => 2,
+      "attempt_branch" => "meringue/onboarding",
+      "guardrails" => [{ "command" => "rake test", "passed" => false }]
+    }
+    prompt = ReviewPrompt.render(
+      goal: reviewer_goal("iterations" => [settled_review(number: 1, critique: ["name the three commands"])]),
+      iteration: iteration,
+      retry_reason: "the reviewer did not end its turn with a JSON verdict object"
+    )
+
+    assert_includes prompt, ReviewPrompt::VERDICT_MARKER
+    assert_includes prompt, "read-only review turn"
+    assert_includes prompt, "the onboarding reads cleanly"
+    assert_includes prompt, "meringue/onboarding"
+    assert_includes prompt, "`rake test`: FAILED"
+    assert_includes prompt, "it1: changes requested: name the three commands"
+    assert_includes prompt, "could not be used"
+    assert_includes prompt, '"approved": false'
+  end
+
+  def test_the_attempt_prompt_of_a_reviewer_goal_describes_the_reviewer_not_a_metric
+    prompt = AttemptPrompt.render(
+      goal: reviewer_goal("iterations" => [settled_review(number: 1, critique: ["name the three commands"])]),
+      iteration_number: 2
+    )
+
+    assert_includes prompt, "an independent reviewer, not a metric"
+    assert_includes prompt, "it1: changes requested: name the three commands"
+    assert_includes prompt, "do not self-approve"
+    refute_includes prompt, "Metric:"
+    refute_includes prompt, "Baseline"
   end
 
   def test_a_fresh_goal_measures_its_baseline_before_spawning_anything
@@ -363,5 +553,30 @@ class KernelGoalsDecisionTest < Minitest::Test
 
     assert_equal "metric_only", judge.fetch("mode")
     assert_equal "worker_when_metric_met", judge.fetch("requested_mode")
+  end
+
+  def test_the_reviewer_judge_mode_is_implemented_and_survives_normalization
+    judge = Record.normalized_judge("mode" => "reviewer")
+
+    assert_equal "reviewer", judge.fetch("mode")
+    refute judge.key?("requested_mode")
+    assert Record.reviewer_judged?("judge" => judge)
+    refute Record.reviewer_judged?("judge" => { "mode" => "metric_only" })
+  end
+
+  def test_a_hand_edited_reviewer_iteration_is_normalized_instead_of_crashing_the_loop
+    normalized = Record.normalize!(
+      "id" => "G1",
+      "judge" => { "mode" => "reviewer" },
+      "iterations" => [
+        { "number" => 1, "phase" => "reviewing", "review_attempts" => "2", "review" => { "usable" => true, "approved" => "yes", "critique" => "one" } }
+      ]
+    )
+    iteration = normalized.fetch("iterations").first
+
+    assert_equal "reviewing", iteration.fetch("phase")
+    assert_equal 2, iteration.fetch("review_attempts")
+    assert_equal true, iteration.dig("review", "approved")
+    assert_equal ["one"], iteration.dig("review", "critique")
   end
 end

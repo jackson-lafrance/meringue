@@ -15,6 +15,8 @@ module KernelGoalsSupport
   # Harness client seam. `streaming` decides whether a polled session looks like it is still
   # working (loop must wait) or has settled (loop may measure).
   class GoalHarnessClient < Meringue::Harness::FakeClient
+    REVIEW_MARKER = Meringue::Goals::ReviewPrompt::VERDICT_MARKER
+
     attr_reader :spawns, :prompts, :kills
     attr_accessor :streaming, :spawn_error, :prompt_error
 
@@ -25,6 +27,17 @@ module KernelGoalsSupport
       @streaming = streaming
       @provider = provider.to_s
       @counter = 0
+      @review_sessions = {}
+      @review_replies = []
+      @last_review_reply = nil
+    end
+
+    # What a reviewer session says at the end of its turn. A Hash is rendered as the fenced
+    # JSON object the contract asks for; a String is returned verbatim, which is how a
+    # malformed or refusing reviewer is modelled. The last queued reply repeats.
+    def queue_review(*replies)
+      @review_replies.concat(replies.flatten)
+      self
     end
 
     def harness_name
@@ -33,14 +46,16 @@ module KernelGoalsSupport
 
     def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:)
       @counter += 1
-      @spawns << { "kind" => kind, "cwd" => cwd, "prompt" => prompt, "session_name" => session_name }
+      session_id = "goal-session-#{@counter}"
+      @spawns << { "kind" => kind, "cwd" => cwd, "prompt" => prompt, "session_name" => session_name, "session_id" => session_id }
+      @review_sessions[session_id] = true if prompt.to_s.include?(REVIEW_MARKER)
       raise @spawn_error if @spawn_error
 
       {
         "harness" => @provider,
         "pid" => 50_000 + @counter,
         "cwd" => cwd,
-        "session_id" => "goal-session-#{@counter}",
+        "session_id" => session_id,
         "session_file" => File.join(cwd.to_s, ".goal-session-#{@counter}.json"),
         "is_streaming" => streaming,
         "last_event_at" => nil,
@@ -72,12 +87,39 @@ module KernelGoalsSupport
       []
     end
 
-    def last_assistant_text(_session_ref = nil)
-      "Attempt finished."
+    def last_assistant_text(session_ref = nil)
+      session_id = session_ref.is_a?(Hash) ? session_ref["session_id"] : nil
+      return "Attempt finished." unless session_id && @review_sessions[session_id]
+
+      reply = @review_replies.shift
+      @last_review_reply = reply unless reply.nil?
+      render_review_reply(@last_review_reply)
+    end
+
+    def review_session_ids
+      @review_sessions.keys
+    end
+
+    def review_prompts
+      all_prompts.select { |prompt| prompt.include?(REVIEW_MARKER) }
     end
 
     def attempt_prompts
-      (@spawns.map { |spawn| spawn.fetch("prompt") } + @prompts.map { |prompt| prompt.fetch("prompt") })
+      all_prompts.reject { |prompt| prompt.include?(REVIEW_MARKER) }
+    end
+
+    private
+
+    def all_prompts
+      @spawns.map { |spawn| spawn.fetch("prompt") } + @prompts.map { |prompt| prompt.fetch("prompt") }
+    end
+
+    def render_review_reply(reply)
+      case reply
+      when nil then "The review session ended without a verdict."
+      when Hash then "Here is my review.\n\n```json\n#{JSON.pretty_generate(reply)}\n```"
+      else reply.to_s
+      end
     end
   end
 
@@ -261,6 +303,18 @@ module KernelGoalsSupport
     apply!("CreateGoal", payload)
   end
 
+  # A reviewer-judged goal: no metric command, no target, judged by a reviewer session.
+  def create_reviewer_goal!(issue_id, **overrides)
+    payload = {
+      "issue_id" => issue_id,
+      "success_criteria" => "the first-run onboarding reads cleanly and explains the three core commands",
+      "judge_mode" => "reviewer",
+      "max_iterations" => 3,
+      "min_seconds_between_iterations" => 0
+    }.merge(overrides.transform_keys(&:to_s))
+    apply!("CreateGoal", payload)
+  end
+
   def state
     store.load
   end
@@ -275,6 +329,16 @@ module KernelGoalsSupport
 
   def workers
     state.fetch("agents").select { |agent| agent.fetch("type") == "worker" }
+  end
+
+  def review_workers(goal_id = "G1")
+    review_ids = iterations(goal_id).filter_map { |iteration| iteration["review_worker_id"] }
+    workers.select { |worker| review_ids.include?(worker.fetch("id")) }
+  end
+
+  def attempt_workers(goal_id = "G1")
+    review_ids = iterations(goal_id).filter_map { |iteration| iteration["review_worker_id"] }
+    workers.reject { |worker| review_ids.include?(worker.fetch("id")) }
   end
 
   def iterations(goal_id = "G1")
@@ -317,4 +381,8 @@ module KernelGoalsSupport
     tick!
     harness_client.streaming = true
   end
+
+  # Same thing, named for the reviewer-judged loop where the session that settles may be an
+  # attempt or a reviewer.
+  alias settle_sessions! finish_attempt_session!
 end

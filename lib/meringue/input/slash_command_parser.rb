@@ -22,6 +22,7 @@ module Meringue
         ["/thinking <level>", "Persist off, minimal, low, medium, high, xhigh, or max for all future Pi sessions; existing sessions are unchanged."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
         ["/goal create [issue_id] \"<prompt>\" --metric \"<command>\" --target <number> [flags]", "Start a goal loop: name an issue, or give only a prompt and Meringue creates the issue for it. It iterates until the metric hits its target or a budget guard trips."],
+        ["/goal create [issue_id] \"<prompt>\" --reviewer [--max-iterations <n>]", "Start a reviewer-judged goal loop for work with no number: it iterates until a reviewer approves the work or the iteration budget runs out."],
         ["/goal status [goal_id]", "Show goal loops, iteration accounting, and stop reasons."],
         ["/goal pause <goal_id>", "Pause a goal loop; the current attempt finishes but nothing new is spawned."],
         ["/goal resume <goal_id>", "Resume a paused goal loop."],
@@ -66,6 +67,7 @@ module Meringue
       GOAL_USAGE_MESSAGE = <<~USAGE.strip
         Usage: /goal create "<prompt>" --metric "<command>" --target <number> [--project <project_id>] [flags]   (Meringue creates the issue)
                /goal create <issue_id> "<success criteria>" --metric "<command>" --target <number> [flags]      (attach to an existing issue)
+               /goal create [issue_id] "<prompt>" --reviewer [flags]                                            (no metric: a reviewer judges each iteration)
                flags: [--comparator gte|lte|gt|lt|eq] [--max-iterations <n>] [--max-workers <n>] [--min-delta <n>] [--no-progress <n>] [--guardrail "<command>"] [--parse last_number|first_number|exit_status|regex|json_path] [--pattern "<regex>"] [--json-path <path>] [--metric-cwd workspace|project_root] [--title "<title>"] [--fresh-attempt] [--paused]
                /goal status [goal_id] | /goal pause <goal_id> | /goal resume <goal_id> | /goal stop <goal_id>
       USAGE
@@ -93,6 +95,9 @@ module Meringue
       }.freeze
       GOAL_BOOLEAN_FLAGS = {
         "--paused" => ["paused", true],
+        # The friendly spelling of `--judge reviewer`: iterate until a reviewer session
+        # approves the work instead of until a metric command hits a number.
+        "--reviewer" => ["judge_mode", "reviewer"],
         "--fresh-attempt" => ["continuity", "fresh_attempt"],
         "--accumulate" => ["continuity", "accumulate"]
       }.freeze

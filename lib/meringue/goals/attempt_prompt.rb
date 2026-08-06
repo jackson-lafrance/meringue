@@ -20,7 +20,7 @@ module Meringue
       def render(goal:, iteration_number:, mode: "spawn")
         sections = []
         sections << header(goal, iteration_number, mode)
-        sections << metric_section(goal)
+        sections << (Record.reviewer_judged?(goal) ? review_section(goal) : metric_section(goal))
         history = history_section(goal)
         sections << history if history
         directive = Record.present_string(latest_directive(goal))
@@ -63,18 +63,33 @@ module Meringue
         "Guardrails that must keep passing: #{guardrails.map { |guardrail| "`#{guardrail.fetch("command", "")}`" }.join(", ")}."
       end
 
+      # A reviewer-judged goal has no number to report, so the attempt is told what the bar
+      # is and who applies it: an independent reviewer reads the branch after the turn ends.
+      def review_section(goal)
+        [
+          "Judged by: an independent reviewer, not a metric. When you finish, Meringue starts a separate reviewer session on your branch. It either approves the work or returns specific changes, and the goal completes only when it approves.",
+          "Reviewer state: #{Record.review_state(goal)}.",
+          guardrail_text(goal.fetch("metric", {}) || {})
+        ].compact.join("\n")
+      end
+
       def history_section(goal)
         settled = Record.settled_iterations(goal).last(HISTORY_LIMIT)
         return nil if settled.empty?
 
+        reviewer = Record.reviewer_judged?(goal)
         lines = settled.map do |iteration|
-          value = Record.metric_value(iteration.fetch("metric", nil))
-          delta = Record.float_or_nil(iteration.fetch("metric_delta", nil))
           directive = Record.present_string(iteration.fetch("next_directive", nil))
+          measurement = if reviewer
+                          Record.review_line(iteration.fetch("review", nil)) || "no reviewer verdict"
+                        else
+                          value = Record.metric_value(iteration.fetch("metric", nil))
+                          delta = Record.float_or_nil(iteration.fetch("metric_delta", nil))
+                          "metric #{Record.format_number(value)} (#{Evaluator.signed(delta)})"
+                        end
           [
             "  it#{iteration.fetch("number", 0)}:",
-            "metric #{Record.format_number(value)}",
-            "(#{Evaluator.signed(delta)})",
+            measurement,
             "verdict #{iteration.fetch("verdict", "unknown")}",
             directive ? "— #{directive}" : nil
           ].compact.join(" ")
@@ -87,11 +102,16 @@ module Meringue
       end
 
       def rules_section(goal)
+        reviewer = Record.reviewer_judged?(goal)
         [
           "Rules Meringue enforces for this goal (violating them fails the iteration):",
-          "- #{Evaluator::GUARD_RULES}",
-          "- Commit your work on your assigned branch so the metric can be measured on it.",
-          "- Meringue re-runs the metric after you finish and decides whether the goal is met; if it is not, you may be asked to iterate again with a new directive.",
+          "- #{reviewer ? Evaluator::REVIEW_GUARD_RULES : Evaluator::GUARD_RULES}",
+          "- Commit your work on your assigned branch so it can be #{reviewer ? "reviewed" : "measured"} on it.",
+          if reviewer
+            "- A reviewer session judges your branch after you finish; if it does not approve, you may be asked to iterate again with its critique as your directive."
+          else
+            "- Meringue re-runs the metric after you finish and decides whether the goal is met; if it is not, you may be asked to iterate again with a new directive."
+          end,
           goal.fetch("continuity", nil).to_s == "accumulate" ? "- Stay in this workspace and branch across iterations." : nil
         ].compact.join("\n")
       end
