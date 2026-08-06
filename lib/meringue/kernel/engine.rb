@@ -62,8 +62,10 @@ module Meringue
       # Provisioning states a worker can be resumed from. All of them mean "reservation intact,
       # no session, no workspace".
       PROVISIONING_RESUMABLE_STATES = %w[failed retry_pending retry_exhausted].freeze
-      # How often a slow provisioning reports that it is still working.
+      # How often a slow provisioning records a durable progress line. The AgentTree updates more
+      # often than this so a checkout does not look frozen between log entries.
       PROVISIONING_PROGRESS_INTERVAL_SECONDS = 60
+      PROVISIONING_PROGRESS_UPDATE_INTERVAL_SECONDS = 15
       PRUNE_SETTLED_PULL_REQUEST_STATES = %w[merged closed].freeze
       # A merged pull request is terminal on the forge: it can never go back to open. Once Meringue
       # has verified and persisted a merged status for a URL, prune trusts that record instead of
@@ -7709,6 +7711,7 @@ module Meringue
           now = timestamp
           agent["harness_metadata"] = (reserved_agent.fetch("harness_metadata", {}) || {}).merge(agent.fetch("harness_metadata", {})).merge(
             "provisioning_state" => "ready",
+            "provisioning_progress" => nil,
             "provisioned_at" => now,
             "spawn_command_id" => command_id,
             "rerouted_from_issue_id" => rerouted_from_issue_id,
@@ -10165,20 +10168,28 @@ module Meringue
       end
 
       def worker_provisioning_progress_reporter(agent_id)
-        last_reported = 0.0
+        last_updated = nil
+        last_logged = 0.0
         lambda do |progress|
           elapsed = progress.fetch("elapsed", 0).to_f
-          next if elapsed - last_reported < PROVISIONING_PROGRESS_INTERVAL_SECONDS
+          next if last_updated && elapsed - last_updated < PROVISIONING_PROGRESS_UPDATE_INTERVAL_SECONDS
 
-          last_reported = elapsed
-          record_worker_provisioning_progress(agent_id, progress)
+          last_updated = elapsed
+          announce = elapsed - last_logged >= PROVISIONING_PROGRESS_INTERVAL_SECONDS
+          last_logged = elapsed if announce
+          record_worker_provisioning_progress(agent_id, progress, log: announce)
         end
       end
 
-      def record_worker_provisioning_progress(agent_id, progress)
+      # Progress is telemetry about the worktree checkout, not a percentage for the whole worker
+      # lifecycle. Git's percentage is the only honest percentage available; before Git reports one,
+      # the AgentTree uses the checkout phase and elapsed time instead of inventing a 0% baseline.
+      def record_worker_provisioning_progress(agent_id, progress, log: true)
         detail = present_string(progress.fetch("detail", nil))
         elapsed = progress.fetch("elapsed", 0).to_f
         command = present_string(progress.fetch("command", nil)) || "workspace provisioning"
+        phase = provisioning_progress_phase(command)
+        percent = provisioning_progress_percent(detail)
         synchronized_state do
           state = normalized_state
           agent = find_agent(state, agent_id)
@@ -10188,6 +10199,8 @@ module Meringue
           agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
             "provisioning_progress" => {
               "command" => command,
+              "phase" => phase,
+              "percent" => percent,
               "elapsed_seconds" => progress.fetch("elapsed", nil),
               "quiet_for_seconds" => progress.fetch("quiet_for", nil),
               "detail" => detail,
@@ -10195,20 +10208,39 @@ module Meringue
             }.compact
           )
           agent["updated_at"] = now
-          append_log(
-            state,
-            source_type: "kernel",
-            source_id: agent_id,
-            level: "info",
-            message: "Still provisioning worker #{agent_id}: #{command} has been running for " \
-                     "#{elapsed.round}s#{detail ? " (#{detail})" : ""}.",
-            details: { "agent_id" => agent_id, "elapsed_seconds" => progress.fetch("elapsed", nil), "detail" => detail }.compact
-          )
+          if log
+            append_log(
+              state,
+              source_type: "kernel",
+              source_id: agent_id,
+              level: "info",
+              message: "Still provisioning worker #{agent_id}: #{command} has been running for " \
+                       "#{elapsed.round}s#{detail ? " (#{detail})" : ""}.",
+              details: {
+                "agent_id" => agent_id,
+                "phase" => phase,
+                "percent" => percent,
+                "elapsed_seconds" => progress.fetch("elapsed", nil),
+                "detail" => detail
+              }.compact
+            )
+          end
           touch_state!(state, now)
           store.save(state)
         end
       rescue StandardError
         nil
+      end
+
+      def provisioning_progress_phase(command)
+        command.to_s.match?(/worktree\s+add/i) ? "checkout" : "workspace setup"
+      end
+
+      def provisioning_progress_percent(detail)
+        match = detail.to_s.match(/(?:\A|\s)(\d{1,3})%(?:\s|\z)/)
+        return nil unless match
+
+        match[1].to_i.clamp(0, 100)
       end
 
       def cleanup_worker_workspace_safely(workspace)
