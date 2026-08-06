@@ -29,6 +29,41 @@ class KernelWorkersPromptAgentTest < Minitest::Test
     assert_includes log_messages(engine), result.fetch("message")
   end
 
+  def test_replaying_a_prompt_command_id_does_not_deliver_twice
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+
+    first = apply!(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Only deliver this once." }, command_id: "prompt-once")
+    second = apply!(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Only deliver this once." }, command_id: "prompt-once")
+
+    assert_equal "accepted", first.fetch("status")
+    assert_equal "accepted", second.fetch("status")
+    assert_equal worker_id, second.fetch("target_id")
+    assert_equal ["Only deliver this once."], @harness_client.prompts.map { |call| call.fetch("prompt") }
+    assert_equal 1, agent(engine, worker_id).fetch("harness_metadata").fetch("prompt_count")
+  end
+
+  def test_prompt_queues_behind_a_live_cross_instance_delivery_claim
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+    patch_agent!(worker_id) do |record|
+      record.fetch("harness_metadata")["prompt_delivery_claim"] = {
+        "token" => "other-claim",
+        "owner_instance_id" => "other-instance",
+        "owner_instance_pid" => Process.pid,
+        "command_id" => "other-command"
+      }
+    end
+
+    result = apply_raw(engine, "PromptAgent", { "agent_id" => worker_id, "prompt" => "Wait for the active delivery." }, command_id: "wait-command")
+    worker = agent(engine, worker_id)
+
+    assert_equal "accepted", result.fetch("status")
+    assert_equal true, result.dig("result", "queued")
+    assert_empty @harness_client.prompts
+    assert_equal ["Wait for the active delivery."], worker.fetch("harness_metadata").fetch("pending_prompts").map { |entry| entry.fetch("prompt") }
+  end
+
   def test_steer_mode_is_forwarded_to_the_active_session
     engine = build_engine
     worker_id = spawned_worker(engine)
