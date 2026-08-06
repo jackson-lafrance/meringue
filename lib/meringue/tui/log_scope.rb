@@ -77,11 +77,9 @@ module Meringue
         scope(state).fetch("kind", "").to_s
       end
 
-      # Issue/agent selections also become a chat-routing target, and so does a
-      # failed head: typing at a selected errored/killed head retries it. Projects
-      # and heads that are still routing remain useful log-only filters. The TUI
-      # sends only selected_id; the kernel resolves the authoritative issue (or
-      # head retry) again before a head is spawned.
+      # Issue/worker selections also become a chat-routing target. Heads and
+      # projects remain useful log-only filters; retrying a head is explicit
+      # (`/retry H<n>` or a retryable head double-click), not ambient chat.
       #
       # Renderers ask "what is selected?" and want a Hash they can read fields
       # from, so this is always a Hash and never nil.
@@ -95,7 +93,6 @@ module Meringue
       # nil here instead of an empty Hash every caller has to re-test.
       def chat_target(state)
         target = selected_target(state)
-        return target if target.fetch("selected_type", "").to_s == "head"
         return nil if target.fetch("issue_id", "").to_s.empty?
 
         target
@@ -161,18 +158,16 @@ module Meringue
         record.fetch("id", "").to_s
       end
 
-      # Selecting an issue targets it directly. Selecting an agent with an owning
-      # issue keeps that exact row as the focused log scope while resolving chat
-      # to the durable issue. A top-level head has no issue: a failed one is its
-      # own retry target, and one that is still routing stays a log-only
-      # selection rather than fabricating routing context.
+      # Selecting an issue targets it directly. Selecting a worker keeps that
+      # exact row as the focused log scope while resolving chat to the durable
+      # issue. A top-level head has no issue and stays log-only; retry is an
+      # explicit command instead of fabricated routing context.
       def selected_target_for(state, record)
         kind = kind_for(record)
-        return head_retry_target_for(record) if kind == "head" && State::Models.head_retry_target?(record)
 
         issue = if kind == "issue"
                   record
-                elsif %w[worker head].include?(kind)
+                elsif kind == "worker"
                   issues(state).find { |candidate| candidate.fetch("id", nil).to_s == record.fetch("issue_id", nil).to_s }
                 end
         return nil unless issue
@@ -192,22 +187,6 @@ module Meringue
           target["selected_agent_title"] = metadata.fetch("title", nil).to_s
         end
         target.reject { |_key, value| value.to_s.empty? }
-      end
-
-      # A failed head is a real chat destination with no issue behind it: the next
-      # message retries that head. The TUI still sends only the id; the kernel
-      # re-resolves it and owns the resume/respawn decision.
-      def head_retry_target_for(record)
-        metadata = record.fetch("harness_metadata", nil)
-        metadata = {} unless metadata.is_a?(Hash)
-        {
-          "selected_id" => record.fetch("id").to_s,
-          "selected_type" => "head",
-          "selected_agent_id" => record.fetch("id").to_s,
-          "selected_agent_type" => "head",
-          "selected_agent_title" => metadata.fetch("title", nil).to_s,
-          "selected_head_status" => record.fetch("status", nil).to_s
-        }.reject { |_key, value| value.to_s.empty? }
       end
 
       # Ids whose logs belong to the selected node, mirroring the AgentTree.

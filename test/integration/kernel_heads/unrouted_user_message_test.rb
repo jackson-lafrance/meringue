@@ -76,6 +76,7 @@ class KernelHeadsUnroutedUserMessageTest < KernelHeadsTestCase
     assert_equal "error", entry.fetch("level")
     assert_includes entry.fetch("message"), "extend the agent colour work to working and completed rows"
     assert_includes entry.fetch("message"), "still needs handling"
+    assert_includes entry.fetch("message"), "/retry #{head_id}"
     assert_includes entry.fetch("message"), "/prompt"
     details = entry.fetch("details")
     assert_equal "extend the agent colour work to working and completed rows", details.fetch("user_message")
@@ -117,6 +118,21 @@ class KernelHeadsUnroutedUserMessageTest < KernelHeadsTestCase
     apply_head_result(head_id, head_result(commands: [create_issue_command(project_id: project_id, title: "Colours")]))
 
     assert_nil unrouted_log, "an applied batch routed the message"
+  end
+
+  def test_an_intentional_no_op_does_not_surface_an_unrouted_warning
+    head_id = spawn_head!("make onboarding theme-first")
+
+    result = apply_head_result(
+      head_id,
+      head_result(commands: [{ "type" => "NoOp", "payload" => { "reason" => "P2-I3 already includes the theme-first onboarding requirement." } }]),
+      cleanup_head: false
+    )
+
+    assert_equal [%w[NoOp accepted]], command_statuses(result)
+    assert_nil unrouted_log, "an explicit NoOp marks intentional no-work routing"
+    assert_includes log_messages.join("\n"), "P2-I3 already includes the theme-first onboarding requirement"
+    assert_equal "completed", find_agent_record(head_id).fetch("status")
   end
 
   def test_a_clarifying_question_keeps_the_message_actionable_without_an_extra_error
