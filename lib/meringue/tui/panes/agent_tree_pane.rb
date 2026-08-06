@@ -754,8 +754,19 @@ module Meringue
           progress = metadata["provisioning_progress"]
           return nil unless progress.is_a?(Hash)
 
-          percent = progress["detail"].to_s[/\d+%/]
-          percent || (progress["elapsed_seconds"] ? "#{progress["elapsed_seconds"].to_f.round}s" : nil)
+          # `percent` is Git's checkout percentage, never a fabricated percentage for the full
+          # worker lifecycle. Older records only have the raw detail, so retain that fallback while
+          # newer kernel records can render the structured value without parsing Git output here.
+          percent = progress["percent"]
+          percent = progress["detail"].to_s[/\d+%/] if percent.nil?
+          if percent
+            percent = percent.to_s.delete_suffix("%")
+            return "#{percent}%"
+          end
+
+          phase = progress["phase"].to_s.strip
+          elapsed = progress["elapsed_seconds"] ? "#{progress["elapsed_seconds"].to_f.round}s" : nil
+          [phase.empty? ? nil : phase, elapsed].compact.join(" ").yield_self { |value| value.empty? ? nil : value }
         end
 
         def provisioning_attempt(metadata)
