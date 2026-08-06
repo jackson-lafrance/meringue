@@ -24,6 +24,8 @@ All tests are hermetic: no TTY, no raw mode, no network, no Pi processes, no wri
 | Selection geometry and clipboard transports | `test/integration/tui/selection_and_clipboard_test.rb` |
 | Delivery PR presentation and link rendering | `test/integration/tui/delivery_pull_request_test.rb` |
 | Key-to-action mapping, config overrides, conflicts | `test/integration/tui/keybindings_test.rb` |
+| First-run setup flow: what each step submits, skip/back/resume, theme preview, degraded catalog | `test/integration/tui/onboarding_test.rb` |
+| First-run setup screen: full-screen takeover, animation, degradation, and the mouse being inert | `test/integration/tui/onboarding_screen_test.rb` |
 | App wiring: snapshot in, no state mutation, no invented vocabulary | `test/integration/tui/app_wiring_test.rb` |
 | Stranded-head recovery affordance: retry marker on the row, head chat target, `/prompt` completion | `test/integration/tui/blocked_head_recovery_test.rb` |
 | Bounded typing throughput (replaces the retired benchmark script) | `test/integration/tui/typing_throughput_test.rb` |

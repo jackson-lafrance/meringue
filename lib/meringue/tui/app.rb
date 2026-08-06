@@ -11,6 +11,12 @@ module Meringue
       DEFAULT_HEIGHT = 32
       REFRESH_INTERVAL = 0.2
       TERMINAL_REFRESH_INTERVAL = 0.025
+      # First-run setup animates, so it needs frames the dashboard does not. It
+      # only asks for the fast cadence while a step is actually moving, then drops
+      # to a slow idle tick for the breathing selection caret and transient
+      # notices, so an idle setup screen costs a handful of frames a second.
+      ONBOARDING_ANIMATION_INTERVAL = Onboarding::Motion::FRAME_INTERVAL
+      ONBOARDING_IDLE_INTERVAL = Onboarding::Motion::IDLE_INTERVAL
       # Scroll steps defer the workspace state write; this is how often a
       # deferred write is actually flushed to the state file.
       WORKSPACE_PERSIST_INTERVAL = 1.0
@@ -154,6 +160,17 @@ module Meringue
         @onboarding_harness = nil
         @onboarding_saved_theme = nil
         @onboarding_applied = {}
+        # Animation clock. Every animated value is a pure function of it, so
+        # nothing is buffered and a dropped frame cannot desynchronize anything.
+        @onboarding_step_entered_at = nil
+        @onboarding_progress_from = 0.0
+        @onboarding_notice = nil
+        @onboarding_notice_at = nil
+        @onboarding_refresh_at = nil
+        @onboarding_refresh_signature = nil
+        # Capability answers are per process, not per frame.
+        @onboarding_reduced_motion = nil
+        @onboarding_ascii = nil
         @workspace_draft = ""
         @workspace_agent_scroll_offset = 0
         @workspace_terminal_scroll_offset = 0
@@ -279,8 +296,7 @@ module Meringue
               end
 
               flush_deferred_agent_workspace_persistence
-              refresh_interval = @agent_workspace_active && @agent_workspace_view == "terminal" ? TERMINAL_REFRESH_INTERVAL : REFRESH_INTERVAL
-              key = terminal.read_key(timeout: refresh_interval)
+              key = terminal.read_key(timeout: frame_refresh_interval(current_state))
               break if quit_key?(key, input_buffer)
 
               input_buffer, input_cursor, slash_suggestion_index = handle_key(
@@ -308,6 +324,9 @@ module Meringue
       attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :workspace_controller, :agent_session_service, :log_store, :keybindings, :config
 
       def shutdown_workspace_resources
+        # Quitting mid-flow (Ctrl-C, /quit, an interrupt) must not leave the theme
+        # a step was previewing on screen. Nothing else about setup is persisted.
+        close_onboarding if @onboarding_active
         persist_agent_workspace if @agent_workspace_active
         close_agent_workspace_session
         if workspace_controller&.respond_to?(:shutdown)
@@ -2390,9 +2409,15 @@ module Meringue
 
       # --- first-run setup --------------------------------------------------
 
+      # Everything the full-screen setup screen renders from, including the clock
+      # its animation is a function of. Elapsed seconds are handed to the view
+      # rather than a frame counter, so a slow terminal skips values instead of
+      # falling behind, and a resize or a forced redraw recomputes the same picture
+      # for the same instant.
       def onboarding_snapshot
         return nil unless @onboarding_active
 
+        now = monotonic_time
         {
           "active" => true,
           "step" => onboarding_step,
@@ -2400,8 +2425,69 @@ module Meringue
           "index" => @onboarding_index,
           "query" => @onboarding_query.to_s,
           "harness" => @onboarding_harness,
-          "theme" => @onboarding_saved_theme
+          "theme" => @onboarding_saved_theme,
+          "applied" => @onboarding_applied.dup,
+          "animated" => onboarding_animated?,
+          "ascii" => onboarding_ascii?,
+          "elapsed" => now - (@onboarding_step_entered_at || now),
+          "progress_from" => @onboarding_progress_from.to_f,
+          "notice" => onboarding_notice_text,
+          "refresh" => onboarding_refresh_snapshot(now)
         }.compact
+      end
+
+      # Animation is chrome, and it is only ever asked for where it can be drawn
+      # honestly: a real interactive terminal, big enough that no content row is
+      # spent on motion, and with motion not turned off. Everywhere else the same
+      # view renders its settled frame immediately.
+      def onboarding_animated?
+        return false unless terminal.interactive?
+        return false unless Onboarding.animation_allowed?(width: render_width, height: render_height)
+
+        !onboarding_reduced_motion?
+      end
+
+      def onboarding_reduced_motion?
+        return @onboarding_reduced_motion unless @onboarding_reduced_motion.nil?
+
+        @onboarding_reduced_motion = Onboarding.reduced_motion?(config: config)
+      end
+
+      def onboarding_ascii?
+        return @onboarding_ascii unless @onboarding_ascii.nil?
+
+        @onboarding_ascii = Onboarding.ascii_only?
+      end
+
+      def onboarding_notice_text
+        return nil unless @onboarding_notice && @onboarding_notice_at
+        return nil if monotonic_time - @onboarding_notice_at > Onboarding::NOTICE_SECONDS
+
+        @onboarding_notice
+      end
+
+      def set_onboarding_notice(message)
+        @onboarding_notice = message.to_s
+        @onboarding_notice_at = monotonic_time
+      end
+
+      def onboarding_refresh_snapshot(now)
+        return nil unless @onboarding_refresh_at
+
+        { "elapsed" => now - @onboarding_refresh_at, "signature" => @onboarding_refresh_signature.to_s }
+      end
+
+      # How long to wait for the next key. Setup asks for animation frames only
+      # while a step is still moving; a settled screen falls back to a slow tick
+      # for the caret and notices, which is cheaper than the dashboard's own.
+      def frame_refresh_interval(state)
+        return TERMINAL_REFRESH_INTERVAL if @agent_workspace_active && @agent_workspace_view == "terminal"
+        return REFRESH_INTERVAL unless @onboarding_active
+        return REFRESH_INTERVAL unless onboarding_animated?
+
+        layout.onboarding_animating?(state) ? ONBOARDING_ANIMATION_INTERVAL : ONBOARDING_IDLE_INTERVAL
+      rescue StandardError
+        REFRESH_INTERVAL
       end
 
       def onboarding_plan
@@ -2428,7 +2514,7 @@ module Meringue
         return false if Onboarding.completed?(config)
 
         width, height = terminal.dimensions
-        width.to_i >= Layout::MIN_WIDTH && height.to_i >= Onboarding::MIN_TERMINAL_HEIGHT
+        Onboarding.fits?(width: width, height: height)
       end
 
       # Setup reads persisted state and the theme only, so opening it starts no
@@ -2442,8 +2528,17 @@ module Meringue
         @onboarding_applied = {}
         @onboarding_saved_theme = Style.current_colorscheme.to_s
         @onboarding_index = onboarding_default_index(state)
+        @onboarding_step_entered_at = monotonic_time
+        @onboarding_progress_from = 0.0
+        @onboarding_notice = nil
+        @onboarding_notice_at = nil
+        @onboarding_refresh_at = nil
+        @onboarding_refresh_signature = nil
         close_delivery_pr_picker
         close_model_picker
+        # Taking over the screen changes every row, so the next frame is written as
+        # one repaint instead of a cloud of row patches.
+        @force_full_redraw = true
         true
       end
 
@@ -2456,6 +2551,14 @@ module Meringue
         @onboarding_harness = nil
         @onboarding_applied = {}
         @onboarding_saved_theme = nil
+        @onboarding_step_entered_at = nil
+        @onboarding_progress_from = 0.0
+        @onboarding_notice = nil
+        @onboarding_notice_at = nil
+        @onboarding_refresh_at = nil
+        @onboarding_refresh_signature = nil
+        # Handing the screen back to the dashboard is the same kind of transition.
+        @force_full_redraw = true
       end
 
       # The theme step previews live by reconfiguring the running Style, so leaving
@@ -2490,15 +2593,24 @@ module Meringue
         )
       end
 
-      # A modal step flow that owns the keys it needs and passes everything else
-      # through, so Ctrl-C still quits and setup is never a trap.
+      # A modal step flow that owns the keys and setup-specific clicks it needs
+      # and passes everything else through, so Ctrl-C still quits and setup is
+      # never a trap. Only visible option rows are clickable: empty-space clicks,
+      # drags, releases, and right-clicks cannot apply a choice or dismiss setup.
       def handle_onboarding_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
         unchanged = [input_buffer, input_cursor, slash_suggestion_index]
-        return handle_onboarding_mouse(key, unchanged, on_submit, state) if mouse_event?(key)
         return unchanged if close_collapsed_onboarding(state)
+        return handle_onboarding_mouse(key, unchanged, on_submit, state) if mouse_event?(key)
 
         rows = onboarding_rows(state)
         step = onboarding_step
+
+        # A paste belongs to the filter on the model step and to nothing at all
+        # elsewhere; it must never land in the composer hidden behind setup.
+        if paste_key?(key)
+          set_onboarding_query("#{@onboarding_query}#{paste_text(key)}", state) if step == Onboarding::MODEL
+          return unchanged
+        end
 
         if keybinding?("suggestion_previous", key)
           move_onboarding(-1, rows.length, state)
@@ -2544,26 +2656,43 @@ module Meringue
         end
 
         nil
+      rescue StandardError => e
+        # A modal that raised while it owned the keys would be the one real trap in
+        # this flow, so a failure closes it (restoring the previewed theme) and
+        # says so instead of eating every key.
+        close_onboarding
+        append_jump_response("Setup closed after an error: #{e.message}. Run /setup to try again.")
+        [input_buffer, input_cursor, slash_suggestion_index]
       end
 
+      # Setup has its own hit testing because the dashboard is not drawn behind
+      # it. A left-click on an option row applies that same row as Enter would;
+      # every other mouse event is swallowed so it cannot leak to dashboard mouse
+      # handling or become a click-away skip.
       def handle_onboarding_mouse(key, unchanged, on_submit, state)
-        return unchanged unless mouse_button_press?(key) || mouse_wheel?(key)
+        return unchanged unless mouse_button_press?(key)
+        return missed_onboarding_click(unchanged) unless key.fetch("button", 0).to_i.zero?
 
-        hit = layout.onboarding_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
-        if mouse_wheel?(key)
-          return nil if hit == :outside
+        hit = layout.onboarding_hit(
+          state,
+          width: render_width,
+          height: render_height,
+          x: mouse_x(key),
+          y: mouse_y(key)
+        )
+        return missed_onboarding_click(unchanged) unless hit.is_a?(Integer)
 
-          move_onboarding(mouse_wheel_up?(key) ? -1 : 1, onboarding_rows(state).length, state)
-          return unchanged
-        end
+        rows = onboarding_rows(state)
+        return missed_onboarding_click(unchanged) unless hit >= 0 && hit < rows.length
 
-        if hit.is_a?(Integer)
-          @onboarding_index = hit
-          preview_onboarding_theme(state)
-          advance_onboarding(onboarding_rows(state), on_submit, state)
-        elsif hit == :outside
-          skip_onboarding(on_submit, state)
-        end
+        @onboarding_index = hit
+        preview_onboarding_theme(state)
+        advance_onboarding(rows, on_submit, state)
+        unchanged
+      end
+
+      def missed_onboarding_click(unchanged)
+        set_onboarding_notice(Onboarding::NOTICE_MOUSE)
         unchanged
       end
 
@@ -2596,6 +2725,7 @@ module Meringue
       # already in effect is accepted by the kernel, so holding Enter through the
       # flow accepts every current default and changes nothing.
       def advance_onboarding(rows, on_submit, state)
+        leaving = Onboarding.step_fraction(onboarding_step, onboarding_plan)
         apply_onboarding_row(rows[@onboarding_index.to_i], on_submit, state)
         steps = onboarding_plan
         if @onboarding_step_index >= steps.length - 1
@@ -2604,8 +2734,21 @@ module Meringue
         end
 
         @onboarding_step_index += 1
-        enter_onboarding_step(state)
+        enter_onboarding_step(state, from: leaving)
         true
+      end
+
+      # The progress bar eases from where the step being left had it, so advancing
+      # and going back both read as movement instead of a jump. Everything else
+      # tied to the step being left (a pending refresh, an answer to a refused
+      # click) is dropped with it rather than following the user onto the next one.
+      def restart_onboarding_step_clock(from: nil)
+        @onboarding_progress_from = (from || Onboarding.step_fraction(onboarding_step, onboarding_plan)).to_f
+        @onboarding_step_entered_at = monotonic_time
+        @onboarding_refresh_at = nil
+        @onboarding_refresh_signature = nil
+        @onboarding_notice = nil
+        @onboarding_notice_at = nil
       end
 
       # Back is deliberately non-destructive: it returns to the step without
@@ -2614,14 +2757,16 @@ module Meringue
       def back_onboarding(state)
         return false if @onboarding_step_index.to_i <= 0
 
+        leaving = Onboarding.step_fraction(onboarding_step, onboarding_plan)
         @onboarding_step_index -= 1
-        enter_onboarding_step(state)
+        enter_onboarding_step(state, from: leaving)
         true
       end
 
       # Arriving at a step also ends the previous step's theme preview, so walking
       # back off the theme list puts the saved theme back on screen.
-      def enter_onboarding_step(state)
+      def enter_onboarding_step(state, from: nil)
+        restart_onboarding_step_clock(from: from)
         @onboarding_query = +""
         restore_onboarding_theme
         @onboarding_index = onboarding_default_index(state)
@@ -2642,8 +2787,14 @@ module Meringue
         true
       end
 
+      # Ctrl-R is the one step that waits on something outside the flow, so it is
+      # the one place with a spinner. The catalog snapshot that is on screen right
+      # now is remembered, and the spinner stops as soon as the kernel has written
+      # a different one (or the bounded wait runs out).
       def refresh_onboarding_catalog(on_submit, state)
         harness = Onboarding.harness_for(state, @onboarding_harness)
+        @onboarding_refresh_at = monotonic_time
+        @onboarding_refresh_signature = Onboarding.catalog_signature(state, harness: harness)
         submit_prompt("/models #{harness} refresh", on_submit, state)
         true
       end
@@ -2671,10 +2822,12 @@ module Meringue
         true
       end
 
-      # A popup that collapsed to zero rows would be an invisible modal eating
-      # keys, which is the one real trap in this flow.
-      def close_collapsed_onboarding(state)
-        return false if layout.popup_visible?(state, width: render_width, height: render_height)
+      # A screen too small to draw the card and its exit hint would be an
+      # invisible modal eating keys, which is the one real trap in this flow. This
+      # is checked on the next key rather than during render, so a resize below the
+      # minimum closes setup instead of leaving it up in an unusable size.
+      def close_collapsed_onboarding(_state)
+        return false if onboarding_fits?
 
         close_onboarding
         append_jump_response(Onboarding.collapsed_message)
@@ -2706,7 +2859,7 @@ module Meringue
       end
 
       def onboarding_fits?
-        render_width >= Layout::MIN_WIDTH && render_height >= Onboarding::MIN_TERMINAL_HEIGHT
+        Onboarding.fits?(width: render_width, height: render_height)
       end
 
       def model_picker_snapshot
@@ -3498,6 +3651,9 @@ module Meringue
         reconcile_log_scope!(state)
         composed_state = state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
+          # First-run setup renders full screen, so it is a top-level view like the
+          # focused workspace rather than a slot inside the chat pane.
+          Panes::OnboardingPane::STATE_KEY => onboarding_snapshot,
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
           LogScope::STATE_KEY => LogScope.snapshot(state, @log_scope_id),
           "_agent_workspace" => agent_workspace_snapshot(state, input_buffer, input_cursor, slash_suggestion_index),
@@ -3956,8 +4112,7 @@ module Meringue
             "selection" => @chat_selection,
             "pending_count" => @pending_count,
             "delivery_pr_picker" => delivery_pr_picker_snapshot,
-            "model_picker" => model_picker_snapshot,
-            "onboarding" => onboarding_snapshot
+            "model_picker" => model_picker_snapshot
           }
         end
       end
