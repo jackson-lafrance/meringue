@@ -126,7 +126,7 @@ bundle exec meringue
 bundle exec meringue tui
 ```
 
-The first launch on a machine opens a short setup flow over the dashboard: harness, model, thinking level, and theme, each already on a sensible default, so holding `Enter` accepts them all in about a second. `Esc` leaves it at any point and keeps whatever was already applied, `←` goes back a step, and `/setup` reopens it later. It applies every choice through the normal `/harness`, `/model`, `/thinking`, and `/theme` commands, and records one `[onboarding]` marker in the config so it does not open again. See [`docs/onboarding.md`](docs/onboarding.md).
+The first launch on a machine opens a short setup flow that takes over the whole terminal: theme first, then harness, model, and thinking level, each already on a sensible default, so holding `Enter` accepts them all in about a second. You can click visible option rows or use the keyboard; empty-space clicks cannot advance or dismiss it. `Esc` is the one way out (keeping whatever was already applied), `←` goes back a step, and `/setup` reopens it later. It applies every choice through the normal `/theme`, `/harness`, `/model`, and `/thinking` commands, and records one `[onboarding]` marker in the config so it does not open again. Motion degrades on its own on small or non-interactive terminals and can be turned off with `MERINGUE_NO_ANIMATION=1`. See [`docs/onboarding.md`](docs/onboarding.md).
 
 Open a safe demo state without spawning real agents:
 
@@ -167,7 +167,7 @@ Useful slash commands inside the TUI include:
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
 - `/prompt <agent_id> "<message>"` — follow up with an existing worker, or retry a head (`H<n>`) that failed, or was left blocked, without routing your request.
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
-- `/setup` — reopen first-run setup for the harness, model, thinking level, and theme.
+- `/setup` — reopen first-run setup for the theme, harness, model, and thinking level.
 - `/questions` — list questions and their statuses.
 - `/answer <question_id> "<answer>"` — answer an open question; the kernel records the answer and routes the work it unblocks.
 - `/dismiss <question_id>` — close an open question without answering it.
