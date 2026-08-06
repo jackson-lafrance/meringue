@@ -317,8 +317,8 @@ module Meringue
       # Pruning uses a deliberately stricter cleanup path than failed provisioning. It removes
       # only a registered, clean, unlocked Meringue worktree whose path and branch still match the
       # persisted ownership record. Branches are retained so delivered commits remain reachable.
-      # A structured result lets the kernel retain the record and explain anything unsafe to
-      # remove instead of forcing or guessing.
+      # A structured result lets the kernel explain anything unsafe to remove instead of forcing
+      # or guessing; the kernel decides separately whether the associated terminal record remains.
       def cleanup_pruned_worker_workspace(workspace, protected_paths: [])
         return cleanup_outcome("skipped", "invalid_workspace_record", success: true) unless workspace.is_a?(Hash)
 
