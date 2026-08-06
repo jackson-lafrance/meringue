@@ -28,7 +28,7 @@ module Meringue
         ["/goal stop <goal_id>", "Stop a goal loop for good, leaving its current attempt session alone."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
-        ["/setup", "Reopen first-run setup: harness, model, thinking level, and theme."],
+        ["/setup", "Reopen first-run setup: theme, harness, model, and thinking level."],
         ["/keybind", "Show all TUI keybindings."],
         ["/config", "Show the active config, supported defaults, conflict policy, and keybindings."],
         ["/tree", "Show the current AgentTree state."],
@@ -729,7 +729,7 @@ module Meringue
         tokens = split_arguments(arguments)
         if tokens.empty?
           return invalid(
-            "/setup is a local TUI command. Run it in the interactive TUI to choose your harness, model, thinking level, and theme.",
+            "/setup is a local TUI command. Run it in the interactive TUI to choose your theme, harness, model, and thinking level.",
             usage: "/setup"
           )
         end

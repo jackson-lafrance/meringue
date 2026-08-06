@@ -8,9 +8,9 @@ require "support/tui_support"
 # those four choices on a screen it owns outright.
 #
 # This file covers the flow itself: what each step submits, skip/back/resume, the
-# theme preview, and the degraded-catalog paths. The full-screen geometry, the
-# animation, and the rule that a click can never advance or dismiss setup are
-# covered in onboarding_screen_test.rb.
+# theme-first preview, mouse clicks on options, and the degraded-catalog paths.
+# The full-screen geometry, animation, and empty-space click behavior are covered
+# in onboarding_screen_test.rb.
 #
 # The invariants pinned down here are the ones that make it safe: it applies
 # every choice as the ordinary slash command for it (so the kernel stays the only
@@ -129,9 +129,11 @@ class TuiOnboardingTest < Minitest::Test
     body = card_lines(state).join(" ")
     assert_includes body, "many coding agents at once"
     assert_includes body, "4 quick choices"
+    assert_includes body, "pick a theme first"
+    assert_equal ["begin"], row_values
 
     line = caption(state)
-    assert_includes line, "Enter begins"
+    assert_includes line, "Enter/click begins"
     assert_includes line, "Esc skips setup (/setup reopens it)"
 
     frame = render_frame(state, width: WIDTH, height: HEIGHT)
@@ -146,10 +148,10 @@ class TuiOnboardingTest < Minitest::Test
 
     assert_equal(
       [
+        "/theme meringue",
         "/harness pi",
         "/model openai/gpt-5.6-sol",
         "/thinking high",
-        "/theme meringue",
         "/setup complete"
       ],
       wait_for_submissions(5)
@@ -161,43 +163,44 @@ class TuiOnboardingTest < Minitest::Test
     open_setup
     send_key(ENTER)
 
-    assert_equal "setup · 1/4 · harness", @pane.title(compose)
+    assert_equal "setup · 1/4 · theme", @pane.title(compose)
+    assert_equal Meringue::TUI::Style.colorschemes, row_values
+    send_key(ENTER)
+    assert_equal ["/theme meringue"], wait_for_submissions(1)
+
+    assert_equal "setup · 2/4 · harness", @pane.title(compose)
     assert_equal %w[pi claude antigravity], row_values
     send_key(ENTER)
-    assert_equal ["/harness pi"], wait_for_submissions(1)
+    assert_equal ["/theme meringue", "/harness pi"], wait_for_submissions(2)
 
-    assert_equal "setup · 2/4 · model (pi)", @pane.title(compose)
+    assert_equal "setup · 3/4 · model (pi)", @pane.title(compose)
     send_key(DOWN)
     send_key(ENTER)
-    assert_equal ["/harness pi", "/model anthropic/claude-opus-5"], wait_for_submissions(2)
+    assert_equal ["/theme meringue", "/harness pi", "/model anthropic/claude-opus-5"], wait_for_submissions(3)
 
     # Every level the kernel accepts is offered; the catalog labels them instead
     # of filtering the ladder.
-    assert_equal "setup · 3/4 · thinking", @pane.title(compose)
+    assert_equal "setup · 4/4 · thinking", @pane.title(compose)
     assert_equal Meringue::Harness::PiClient::THINKING_LEVELS.sort, row_values.sort
     send_key(ENTER)
 
-    assert_equal "setup · 4/4 · theme", @pane.title(compose)
-    assert_equal Meringue::TUI::Style.colorschemes, row_values
-    send_key(ENTER)
-
     assert_equal(
-      ["/harness pi", "/model anthropic/claude-opus-5", "/thinking high", "/theme meringue", "/setup complete"],
+      ["/theme meringue", "/harness pi", "/model anthropic/claude-opus-5", "/thinking high", "/setup complete"],
       wait_for_submissions(5)
     )
   end
 
-  def test_choosing_a_non_pi_harness_drops_the_pi_only_steps_and_renumbers
+  def test_choosing_a_non_pi_harness_drops_the_pi_only_steps_and_finishes_after_theme
     open_setup
     send_key(ENTER)
+    send_key(ENTER)
+    assert_equal "setup · 2/4 · harness", @pane.title(compose)
+
     send_key(DOWN)
     send_key(ENTER)
 
-    assert_equal ["/harness claude"], wait_for_submissions(1)
-    assert_equal "setup · 2/2 · theme", @pane.title(compose)
-
-    send_key(ENTER)
-    assert_equal ["/harness claude", "/theme meringue", "/setup complete"], wait_for_submissions(3)
+    assert_equal ["/theme meringue", "/harness claude", "/setup complete"], wait_for_submissions(3)
+    refute @pane.active?(compose)
     assert_includes messages_text, "harness claude"
     assert_includes messages_text, "Model and thinking defaults apply to Pi sessions only today."
   end
@@ -221,7 +224,7 @@ class TuiOnboardingTest < Minitest::Test
   # --- skip, back, resume -------------------------------------------------
 
   def test_escape_exits_at_every_step_keeping_what_was_already_applied
-    applied = ["/harness pi", "/model openai/gpt-5.6-sol", "/thinking high", "/theme meringue"]
+    applied = ["/theme meringue", "/harness pi", "/model openai/gpt-5.6-sol", "/thinking high"]
     Onboarding.plan("pi").each_with_index do |_step, index|
       restart_app
       open_setup
@@ -240,13 +243,13 @@ class TuiOnboardingTest < Minitest::Test
     open_setup
     send_key(ENTER)
     send_key(ENTER)
-    assert_equal "setup · 2/4 · model (pi)", @pane.title(compose)
+    assert_equal "setup · 2/4 · harness", @pane.title(compose)
 
     send_key(LEFT)
-    assert_equal "setup · 1/4 · harness", @pane.title(compose)
+    assert_equal "setup · 1/4 · theme", @pane.title(compose)
     # Back is not an undo: there is no inverse kernel command, and the finish card
     # reports what is really in effect.
-    assert_equal ["/harness pi"], wait_for_submissions(1)
+    assert_equal ["/theme meringue"], wait_for_submissions(1)
 
     # Back on the first screen is a no-op rather than a way to fall out of setup.
     send_key(LEFT)
@@ -279,25 +282,26 @@ class TuiOnboardingTest < Minitest::Test
 
   def test_moving_the_theme_highlight_previews_live_and_persists_nothing_until_enter
     open_setup
-    4.times { send_key(ENTER) }
-    wait_for_submissions(3)
-    assert_equal "setup · 4/4 · theme", @pane.title(compose)
+    send_key(ENTER)
+    assert_equal "setup · 1/4 · theme", @pane.title(compose)
     assert_equal @original_colorscheme, Meringue::TUI::Style.current_colorscheme
 
     send_key(DOWN)
     previewed = Meringue::TUI::Style.current_colorscheme
     refute_equal @original_colorscheme, previewed
     # Previewing is a live repaint, not a write: no /theme was submitted yet.
-    assert_equal 3, @submitted.length
+    assert_empty @submitted
 
     send_key(ENTER)
-    assert_equal ["/theme #{previewed}", "/setup complete"], wait_for_submissions(5).last(2)
+    assert_equal ["/theme #{previewed}"], wait_for_submissions(1)
+    assert_equal previewed, Meringue::TUI::Style.current_colorscheme,
+                 "the rest of setup should render in the selected theme"
+    assert_equal "setup · 2/4 · harness", @pane.title(compose)
   end
 
   def test_leaving_the_theme_step_restores_the_theme_that_was_saved
     open_setup
-    4.times { send_key(ENTER) }
-    wait_for_submissions(3)
+    send_key(ENTER)
     send_key(DOWN)
     refute_equal @original_colorscheme, Meringue::TUI::Style.current_colorscheme
 
@@ -308,7 +312,7 @@ class TuiOnboardingTest < Minitest::Test
     send_key(DOWN)
     send_key(ESC)
     assert_equal @original_colorscheme, Meringue::TUI::Style.current_colorscheme, "Esc must undo a preview"
-    assert_equal "/setup skip", wait_for_submissions(5).last
+    assert_equal ["/setup skip"], wait_for_submissions(1)
   end
 
   # --- degraded model catalog ---------------------------------------------
@@ -316,8 +320,8 @@ class TuiOnboardingTest < Minitest::Test
   def test_a_missing_catalog_explains_itself_and_still_offers_a_row
     @state = state_with_catalog(catalogs: {})
     open_setup
-    2.times { send_key(ENTER) }
-    wait_for_submissions(1)
+    3.times { send_key(ENTER) }
+    wait_for_submissions(2)
 
     lines = card_lines
     assert_includes lines.join(" "), "has not fetched pi's model list yet"
@@ -327,16 +331,16 @@ class TuiOnboardingTest < Minitest::Test
     # Enter on the sentinel changes nothing and still moves the flow along, so a
     # slow catalog can never trap the user on this step.
     send_key(ENTER)
-    assert_equal ["/harness pi"], @submitted
-    assert_equal "setup · 3/4 · thinking", @pane.title(compose)
+    assert_equal ["/theme meringue", "/harness pi"], @submitted
+    assert_equal "setup · 4/4 · thinking", @pane.title(compose)
   end
 
   def test_an_unavailable_or_unsupported_catalog_says_why
     unavailable = Meringue::Harness::ModelCatalog.unavailable(harness: "pi", note: "pi rpc get_available_models timed out")
     @state = state_with_catalog(catalogs: { "pi" => unavailable.to_h })
     open_setup
-    2.times { send_key(ENTER) }
-    wait_for_submissions(1)
+    3.times { send_key(ENTER) }
+    wait_for_submissions(2)
 
     assert_includes card_lines.join(" "), "pi model catalog unavailable"
     assert_includes card_lines.join(" "), "timed out"
@@ -345,8 +349,8 @@ class TuiOnboardingTest < Minitest::Test
     unsupported = Meringue::Harness::ModelCatalog.unsupported(harness: "pi").to_h
     @state = state_with_catalog(catalogs: { "pi" => unsupported })
     open_setup
-    2.times { send_key(ENTER) }
-    wait_for_submissions(1)
+    3.times { send_key(ENTER) }
+    wait_for_submissions(2)
 
     assert_includes card_lines.join(" "), "does not expose a model catalog"
   end
@@ -358,16 +362,16 @@ class TuiOnboardingTest < Minitest::Test
     )
     @state = state_with_catalog(catalogs: { "pi" => stale.to_h })
     open_setup
-    2.times { send_key(ENTER) }
-    wait_for_submissions(1)
+    3.times { send_key(ENTER) }
+    wait_for_submissions(2)
 
     assert_equal %w[openai/gpt-5.6-sol anthropic/claude-opus-5], row_values
   end
 
   def test_typing_filters_the_model_step_and_ctrl_r_asks_the_kernel_to_refresh
     open_setup
-    2.times { send_key(ENTER) }
-    wait_for_submissions(1)
+    3.times { send_key(ENTER) }
+    wait_for_submissions(2)
 
     "opus".each_char { |character| send_key(character) }
     assert_equal ["anthropic/claude-opus-5"], row_values
@@ -382,7 +386,7 @@ class TuiOnboardingTest < Minitest::Test
 
     # Refreshing stays a kernel command, and the flow stays open while it runs.
     send_key(CTRL_R)
-    assert_equal ["/harness pi", "/models pi refresh"], wait_for_submissions(2)
+    assert_equal ["/theme meringue", "/harness pi", "/models pi refresh"], wait_for_submissions(3)
     assert @pane.active?(compose)
   end
 
@@ -417,21 +421,27 @@ class TuiOnboardingTest < Minitest::Test
     assert @pane.active?(compose), "an unowned key must not silently close setup"
   end
 
-  # The regression this flow was reworked for: a click used to apply the row under
-  # the pointer and a click-away used to dismiss setup, so one stray click during
-  # a first launch silently skipped onboarding. onboarding_screen_test.rb covers
-  # the whole vocabulary of mouse events; this pins the two that used to fire.
-  def test_clicking_neither_applies_a_row_nor_exits_setup
+  # The regression this flow was reworked for: a click-away used to dismiss setup,
+  # so one stray click during a first launch silently skipped onboarding. Now only
+  # visible option rows are live, and clicking one applies exactly that option.
+  def test_clicking_visible_rows_advances_and_applies_options
     open_setup
-    send_key(ENTER)
 
-    send_key(press_event("x" => 10, "y" => 10))
-    send_key(press_event("x" => 3, "y" => 3))
-
+    send_key(press_event(onboarding_row_position(0)))
     assert @pane.active?(compose)
-    assert_equal "setup · 1/4 · harness", @pane.title(compose)
-    assert_equal 0, @pane.index(compose)
-    assert_empty @submitted, "a click may not submit anything"
+    assert_equal "setup · 1/4 · theme", @pane.title(compose)
+    assert_empty @submitted, "the welcome row only begins the flow"
+
+    selected_theme = row_values.fetch(1)
+    send_key(press_event(onboarding_row_position(1)))
+    assert_equal ["/theme #{selected_theme}"], wait_for_submissions(1)
+    assert_equal selected_theme, Meringue::TUI::Style.current_colorscheme
+    assert_equal "setup · 2/4 · harness", @pane.title(compose)
+
+    send_key(press_event("x" => 3, "y" => 3))
+    assert @pane.active?(compose)
+    assert_equal "setup · 2/4 · harness", @pane.title(compose)
+    assert_equal ["/theme #{selected_theme}"], @submitted, "empty-space clicks must not submit anything"
   end
 
   # --- view model ---------------------------------------------------------
@@ -440,7 +450,7 @@ class TuiOnboardingTest < Minitest::Test
     fresh = empty_state
 
     assert_equal "pi", Onboarding.harness_for(fresh)
-    assert_equal %w[welcome harness model thinking theme], Onboarding.plan(Onboarding.harness_for(fresh))
+    assert_equal %w[welcome theme harness model thinking], Onboarding.plan(Onboarding.harness_for(fresh))
     assert_equal(
       Meringue::Harness::Registry::DEFAULT_PI_MODEL,
       Onboarding.rows(fresh, step: "model", harness: "pi").fetch(0).fetch("value")
@@ -549,6 +559,15 @@ class TuiOnboardingTest < Minitest::Test
 
   def press_event(position)
     { "type" => "mouse", "kind" => "button", "pressed" => true, "button" => 0 }.merge(stringify(position))
+  end
+
+  def onboarding_row_position(index, state = compose)
+    view = geometry(state)
+    card = view.fetch(:card)
+    window = card.fetch(:window)
+    x = view.fetch(:card_x) + 3
+    y = view.fetch(:card_y) + 1 + card.fetch(:row_start) + index.to_i - window.fetch("start")
+    { "x" => x + 1, "y" => y + 1 }
   end
 
   # The card as the layout really sizes it for this terminal, so the assertions

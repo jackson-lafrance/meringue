@@ -2593,16 +2593,14 @@ module Meringue
         )
       end
 
-      # A modal step flow that owns the keys it needs and passes everything else
-      # through, so Ctrl-C still quits and setup is never a trap.
-      #
-      # Advancing and leaving are keyboard-only on purpose: the mouse is swallowed
-      # below, so a stray click, a click-away, a drag, or a scroll can neither
-      # apply a choice nor dismiss the flow.
+      # A modal step flow that owns the keys and setup-specific clicks it needs
+      # and passes everything else through, so Ctrl-C still quits and setup is
+      # never a trap. Only visible option rows are clickable: empty-space clicks,
+      # drags, releases, and right-clicks cannot apply a choice or dismiss setup.
       def handle_onboarding_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
         unchanged = [input_buffer, input_cursor, slash_suggestion_index]
-        return swallow_onboarding_mouse(unchanged) if mouse_event?(key)
         return unchanged if close_collapsed_onboarding(state)
+        return handle_onboarding_mouse(key, unchanged, on_submit, state) if mouse_event?(key)
 
         rows = onboarding_rows(state)
         step = onboarding_step
@@ -2667,16 +2665,33 @@ module Meringue
         [input_buffer, input_cursor, slash_suggestion_index]
       end
 
-      # Every mouse event is inert while setup is up: no advance, no skip, no
-      # selection change, and nothing forwarded to the dashboard's own mouse
-      # handling underneath. Clicking used to apply the row under the pointer and
-      # clicking away used to dismiss the flow, which meant a stray click during a
-      # first launch silently skipped onboarding.
-      #
-      # The event is answered visibly (a transient line naming the keys that do
-      # work) rather than silently, so an ignored click is never mistaken for a
-      # frozen screen.
-      def swallow_onboarding_mouse(unchanged)
+      # Setup has its own hit testing because the dashboard is not drawn behind
+      # it. A left-click on an option row applies that same row as Enter would;
+      # every other mouse event is swallowed so it cannot leak to dashboard mouse
+      # handling or become a click-away skip.
+      def handle_onboarding_mouse(key, unchanged, on_submit, state)
+        return unchanged unless mouse_button_press?(key)
+        return missed_onboarding_click(unchanged) unless key.fetch("button", 0).to_i.zero?
+
+        hit = layout.onboarding_hit(
+          state,
+          width: render_width,
+          height: render_height,
+          x: mouse_x(key),
+          y: mouse_y(key)
+        )
+        return missed_onboarding_click(unchanged) unless hit.is_a?(Integer)
+
+        rows = onboarding_rows(state)
+        return missed_onboarding_click(unchanged) unless hit >= 0 && hit < rows.length
+
+        @onboarding_index = hit
+        preview_onboarding_theme(state)
+        advance_onboarding(rows, on_submit, state)
+        unchanged
+      end
+
+      def missed_onboarding_click(unchanged)
         set_onboarding_notice(Onboarding::NOTICE_MOUSE)
         unchanged
       end
