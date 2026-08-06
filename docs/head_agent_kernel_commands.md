@@ -448,6 +448,12 @@ Example:
 }
 ```
 
+If another head registers the same root before this batch is applied, the kernel accepts this
+head's `AddProject` as a reuse of the already registered project. Its `target_id` is the winning
+project id, so subsequent `CreateIssue` and `SpawnWorker` commands keep their same-batch routing.
+A standalone duplicate `/project add` still reports `project_already_exists`; this reuse behavior
+is only for a head batch that was already in flight when the registration won elsewhere.
+
 #### Project naming contract
 
 A project name is the product's name and nothing else. Prefer `project_discovery.current_directory.suggested_project_name`, which Meringue derives from the repository's README heading and preserves its intentional capitalization. Do not use a worktree suffix, path slug, branch name, issue title, or verbose description.

@@ -334,6 +334,42 @@ class HeadBatchTargetBindingTest < Minitest::Test
     assert_equal ["Bootstrap worker"], worker_titles(issue.fetch("id"))
   end
 
+  # Two heads can both observe an unregistered root and propose AddProject before either result
+  # lands. The losing AddProject must reuse the winner's project id so its predicted project and
+  # issue targets still route the rest of its batch.
+  def test_concurrent_heads_reuse_a_project_registration_and_keep_same_batch_targets
+    new_project_path = git_repo!(File.join(@temp_root, "concurrent-project"))
+    predicted_project_id = "P#{@engine.list_all.fetch("counters").fetch("projects").to_i + 1}"
+    first_head = spawn_head("Register the concurrent project for the first goal")
+    second_head = spawn_head("Register the concurrent project for the second goal")
+
+    first_result = apply_batch(first_head, [
+      { "command_id" => "first-add", "type" => "AddProject", "payload" => { "path" => new_project_path, "name" => "concurrent-project" } },
+      create_issue("First concurrent goal", project_id: predicted_project_id, command_id: "first-issue"),
+      spawn_worker("First concurrent worker", issue_id: "#{predicted_project_id}-I1")
+    ])
+    second_result = apply_batch(second_head, [
+      { "command_id" => "second-add", "type" => "AddProject", "payload" => { "path" => new_project_path, "name" => "different-name" } },
+      create_issue("Second concurrent goal", project_id: predicted_project_id, command_id: "second-issue"),
+      spawn_worker("Second concurrent worker", issue_id: "#{predicted_project_id}-I1")
+    ])
+
+    assert_all_accepted(first_result)
+    assert_all_accepted(second_result)
+    registered = @engine.list_all.fetch("projects").select do |project|
+      File.expand_path(project.fetch("root_path")) == File.expand_path(new_project_path)
+    end
+    assert_equal 1, registered.length
+    assert_equal predicted_project_id, registered.fetch(0).fetch("id")
+    assert_equal predicted_project_id, issue_by_title("First concurrent goal").fetch("project_id")
+    assert_equal predicted_project_id, issue_by_title("Second concurrent goal").fetch("project_id")
+    assert_equal ["First concurrent worker"], worker_titles(issue_by_title("First concurrent goal").fetch("id"))
+    assert_equal ["Second concurrent worker"], worker_titles(issue_by_title("Second concurrent goal").fetch("id"))
+    assert_equal predicted_project_id, command_results(second_result).fetch(0).fetch("target_id")
+    assert_includes @engine.list_all.fetch("logs").map { |entry| entry.fetch("message", "") },
+                    "Reused project #{predicted_project_id} for head #{second_head}: concurrent-project"
+  end
+
   # A head that starts a goal loop does not have to create the issue first: the prompt form of
   # CreateGoal mints it. The project it lands in is bound the same way CreateIssue binds one,
   # so "register this repo and drive it to green" is a single batch with nothing predicted.

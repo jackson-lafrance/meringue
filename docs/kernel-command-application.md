@@ -89,6 +89,15 @@ id and terminal status. Re-applying a batch replays journaled results instead of
 re-running commands, which is how a genuine crash mid-batch resumes without
 duplicating the commands that already ran.
 
+**Concurrent project registration.** A head batch carries its head id on each proposed command.
+If its `AddProject` reaches the kernel after another head has registered the same normalized root,
+the kernel treats that duplicate as an accepted reuse of the existing project and journals the
+winning project id. This is intentionally narrower than changing the standalone `/project add`
+contract, which still rejects duplicates. Because the reused registration is accepted in the batch
+journal, later `CreateIssue` and `SpawnWorker` commands resolve their `project_from_command` or
+predicted project/issue references against the real project instead of being rejected as if the
+user's request had not routed.
+
 ## Tolerated failure modes
 
 - **The head disappears mid-batch.** Remaining commands stop, already-applied
