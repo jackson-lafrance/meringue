@@ -190,6 +190,13 @@ was cut short keeps the dependent waiting, because prompting that predecessor re
 `if_predecessor_fails: "run"` still activates the dependent immediately, and killing the
 predecessor still cancels the chain.
 
+Completion-triggered heads use the same kernel-owned settle/reconcile shape. A worker may carry a
+`harness_metadata.completion_continuation` record from `SpawnWorker`'s `completion_head` payload.
+When that worker reaches `completed`, the settle path claims the continuation and spawns a fresh
+head with a bounded copy of the worker's final report in the prompt. If Meringue is down in the
+window after completion is recorded but before the head is spawned, the next reconciliation pass
+claims the waiting continuation instead. Workers never poll state or sleep for this workflow.
+
 ## A session that cannot be replayed
 
 One dead turn is different: the model provider rejects the *saved transcript* itself, not the
