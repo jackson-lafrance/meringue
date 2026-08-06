@@ -168,6 +168,47 @@ class HeadBatchTargetBindingTest < Minitest::Test
     refute_equal "queued", started.fetch("status")
   end
 
+  # The motivating shape from the user request: deliver a PR, wait for the pair review to land,
+  # then start the worker that responds to it. Both gates ride on one SpawnWorker.
+  def test_a_review_response_worker_waits_for_the_delivery_worker_and_the_review_command
+    head_id = spawn_head("Ship the fix, then respond to the pair review")
+    result = apply_batch(head_id, [
+      create_issue("Fix the checkout crash", command_id: "goal"),
+      spawn_worker("Fix the crash", issue_from_command: "goal", command_id: "deliver"),
+      spawn_worker(
+        "Respond to the pair review",
+        issue_from_command: "goal",
+        extra: {
+          "after_from_command" => "deliver",
+          "follow_up_of_command" => "deliver",
+          "after_command" => "gh pr view --json reviewDecision --jq .reviewDecision | grep -qE 'APPROVED|CHANGES_REQUESTED'",
+          "after_command_label" => "pair review on the delivery PR",
+          "after_command_interval_seconds" => 120
+        }
+      )
+    ])
+
+    assert_all_accepted(result)
+    issue_id = issue_by_title("Fix the checkout crash").fetch("id")
+    deliverer = worker_by_title("Fix the crash")
+    responder = worker_by_title("Respond to the pair review")
+    gate = responder.fetch("harness_metadata").fetch("deferred_spawn").fetch("command_gate")
+
+    assert_equal issue_id, responder.fetch("issue_id"), "one goal, two steps, one issue"
+    assert_equal "queued", responder.fetch("status")
+    assert_equal deliverer.fetch("id"), responder.fetch("after_agent_id")
+    assert_equal "pair review on the delivery PR", gate.fetch("label")
+    assert_equal 120, gate.fetch("interval_seconds")
+    # The command waits for the PR to exist: it is not armed while the deliverer is still running.
+    assert_nil gate.fetch("armed_at", nil)
+
+    @engine.mark_worker_completed(agent_id: deliverer.fetch("id"), last_assistant_text: "Opened the PR.")
+
+    still_queued = worker_by_title("Respond to the pair review")
+    assert_equal "queued", still_queued.fetch("status"), "the review still has to land"
+    refute_nil still_queued.fetch("harness_metadata").fetch("deferred_spawn").fetch("command_gate").fetch("armed_at")
+  end
+
   # The whole point of the reference: another head creating an issue first must not break the pair.
   def test_follow_up_reference_survives_a_concurrent_issue_creation
     head_id = spawn_head("Research then implement with a concurrent head running")

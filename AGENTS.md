@@ -230,6 +230,8 @@ One durable goal is one issue, even when it needs several sequential steps. An i
 
 Heads must not paper over sequencing inside a worker prompt. Never instruct a worker to poll `~/.meringue/state.json`, sleep between checks, or wait hours for another worker to settle; the kernel owns dependent scheduling and hands the predecessor's report to the dependent worker itself.
 
+A queued worker may wait on two kinds of condition, and both live on the worker record rather than in a prompt or a timer: another agent settling (`after_agent_id`) and a bounded shell command the kernel polls until it passes (`after_command`). The second exists for events Meringue cannot observe as an agent settling, such as a review landing on a PR or an external job finishing. Both are the same queued-worker concept resolved by the same kernel seam; do not add a second scheduler for either.
+
 Do not introduce a parallel conversation-history model merely to route follow-ups. Pi or another harness owns detailed session history; Meringue should expose compact, generic routing metadata and lifecycle logs.
 
 ### Head project discovery

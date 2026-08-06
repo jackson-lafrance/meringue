@@ -162,6 +162,20 @@ class TuiAgentTreePaneTest < Minitest::Test
     assert_includes rendered, "waiting on P1-I1-W1"
   end
 
+  # A worker held by a script/command condition is not "waiting on W1"; it is waiting for that
+  # condition, and the row has to say which one.
+  def test_a_worker_queued_behind_a_command_shows_the_condition_it_waits_on
+    rendered = plain_lines(@pane.lines(command_gated_state, width: 80)).join("\n")
+
+    assert_includes rendered, "waiting on pair review"
+    # The predecessor has already settled by the time a gate is armed, so the row names the gate.
+    refute_includes rendered, "waiting on W1"
+    # No label supplied: the command itself is shown, bounded like every other marker.
+    assert_includes rendered, "waiting on gh pr view --json reviewDec…"
+    # A gate that is not armed yet is still waiting on its predecessor.
+    assert_includes rendered, "waiting on W2"
+  end
+
   def test_a_queued_dependent_still_renders_with_the_queued_status_glyph
     row = @pane.lines(deferred_state, width: 70).find { |line| plain_line(line).include?("waiting on W1") }
 
@@ -426,6 +440,66 @@ class TuiAgentTreePaneTest < Minitest::Test
           "status" => "queued",
           "after_agent_id" => "P1-I1-W1",
           "harness_metadata" => { "title" => "cross issue", "deferred_spawn" => { "state" => "waiting", "after_agent_id" => "P1-I1-W1" } }
+        )
+      ]
+    )
+  end
+
+  def command_gated_state
+    tree_state(
+      projects: [project_record("P1")],
+      issues: [issue_record("P1-I1")],
+      agents: [
+        agent_record("P1-I1-W1", "issue_id" => "P1-I1", "status" => "completed", "harness_metadata" => { "title" => "deliver" }),
+        agent_record("P1-I1-W2", "issue_id" => "P1-I1", "status" => "working", "harness_metadata" => { "title" => "still delivering" }),
+        agent_record(
+          "P1-I1-W3",
+          "issue_id" => "P1-I1",
+          "status" => "queued",
+          "after_agent_id" => "P1-I1-W1",
+          "harness_metadata" => {
+            "title" => "respond to review",
+            "deferred_spawn" => {
+              "state" => "waiting",
+              "after_agent_id" => "P1-I1-W1",
+              "command_gate" => {
+                "state" => "pending",
+                "armed_at" => "2026-01-01T00:00:00Z",
+                "label" => "pair review",
+                "command" => "gh pr view --json reviewDecision"
+              }
+            }
+          }
+        ),
+        agent_record(
+          "P1-I1-W4",
+          "issue_id" => "P1-I1",
+          "status" => "queued",
+          "harness_metadata" => {
+            "title" => "unlabelled gate",
+            "deferred_spawn" => {
+              "state" => "waiting",
+              "command_gate" => {
+                "state" => "pending",
+                "armed_at" => "2026-01-01T00:00:00Z",
+                "command" => "gh pr view --json reviewDecision --jq .reviewDecision"
+              }
+            }
+          }
+        ),
+        agent_record(
+          "P1-I1-W5",
+          "issue_id" => "P1-I1",
+          "status" => "queued",
+          "after_agent_id" => "P1-I1-W2",
+          "harness_metadata" => {
+            "title" => "gate not armed yet",
+            "deferred_spawn" => {
+              "state" => "waiting",
+              "after_agent_id" => "P1-I1-W2",
+              "command_gate" => { "state" => "pending", "label" => "pair review", "command" => "gh pr view" }
+            }
+          }
         )
       ]
     )
