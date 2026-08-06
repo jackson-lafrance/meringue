@@ -280,11 +280,12 @@ module KernelWorkersSupport
     @workspace_manager ||= Meringue::Workspace::Manager.new(root_path: workspace_root, command_timeout: 30)
   end
 
-  def build_engine(harness_client: @harness_client, workspace_manager: self.workspace_manager, cwd: tmpdir)
+  def build_engine(harness_client: @harness_client, head_runner: Meringue::Heads::FakeRunner.new,
+                   workspace_manager: self.workspace_manager, cwd: tmpdir)
     Meringue::Kernel::Engine.new(
       store: store,
       harness_client: harness_client,
-      head_runner: Meringue::Heads::FakeRunner.new,
+      head_runner: head_runner,
       workspace_manager: workspace_manager,
       cwd: cwd,
       forge_client: OfflineForgeClient.new,

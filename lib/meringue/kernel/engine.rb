@@ -294,6 +294,27 @@ module Meringue
       DEFERRED_WORKER_MAX_CHAIN_DEPTH = 5
       # The handover is a bounded excerpt of the predecessor's final report, never a transcript.
       DEFERRED_WORKER_HANDOVER_MAX_CHARS = 4_000
+      # A worker can ask the kernel to spawn a fresh head after it completes. That head receives
+      # the worker's bounded final report in its prompt and routes whatever follow-on kernel
+      # commands are appropriate. This is a durable continuation record on the worker, not a
+      # worker-side poll/sleep loop.
+      COMPLETION_CONTINUATION_KEYS = %w[
+        completion_continuation CompletionContinuation completionContinuation
+        completion_head CompletionHead completionHead
+        on_completion OnCompletion onCompletion
+        route_on_completion RouteOnCompletion routeOnCompletion
+        spawn_head_on_completion SpawnHeadOnCompletion spawnHeadOnCompletion
+      ].freeze
+      COMPLETION_CONTINUATION_PROMPT_KEYS = %w[
+        prompt Prompt user_message UserMessage userMessage
+        message Message instruction Instruction continuation_prompt continuationPrompt
+      ].freeze
+      COMPLETION_CONTINUATION_STATE_WAITING = "waiting"
+      COMPLETION_CONTINUATION_STATE_TRIGGERING = "triggering"
+      COMPLETION_CONTINUATION_STATE_TRIGGERED = "triggered"
+      COMPLETION_CONTINUATION_STATE_APPLIED = "applied"
+      COMPLETION_CONTINUATION_STATE_FAILED = "failed"
+      COMPLETION_CONTINUATION_HANDOVER_MAX_CHARS = 4_000
       DEFERRED_STATE_WAITING = "waiting"
       DEFERRED_STATE_ACTIVATING = "activating"
       DEFERRED_STATE_ACTIVATED = "activated"
@@ -673,6 +694,12 @@ module Meringue
         restart = recover_unreplayable_worker_session(result)
         return restart if restart
 
+        # Completion continuations run from the same settle hook as deferred workers: the worker
+        # records its final report, then the kernel can spawn a fresh head to route follow-on work.
+        # Reconciliation is the recovery hook for the crash window between recording completion and
+        # spawning that head.
+        result = with_completion_continuation_resolution(result, trigger: "worker_completed")
+
         # First of the two activation hooks for queued dependents. Reconciliation is the second, so
         # a dependent cannot be lost if this process dies between A finishing and B starting.
         # A failed settle resolves dependents too: `if_predecessor_fails: "run"` starts them anyway,
@@ -887,6 +914,27 @@ module Meringue
 
       private :record_worker_completion, :record_worker_settle_failure
 
+      # A completed worker may carry a kernel-owned continuation that spawns a fresh head with the
+      # worker's final report. Merge those nested results into the completion command so callers can
+      # see which head routed the follow-on work and which log lines were written.
+      def with_completion_continuation_resolution(result, trigger:)
+        agent_id = present_string(result.fetch("target_id", nil))
+        return result unless agent_id
+
+        continuations = resolve_completion_continuations(trigger: trigger, only_agent_id: agent_id)
+        return result if continuations.empty?
+
+        result.merge(
+          "log_entry_ids" => (
+            Array(result.fetch("log_entry_ids", [])) +
+              continuations.flat_map { |entry| Array(entry.fetch("log_entry_ids", [])) }
+          ).uniq,
+          "completion_continuation_results" => continuations
+        )
+      end
+
+      private :with_completion_continuation_resolution
+
       # Both settle paths share the queued-dependent hook: a dependent must be resolved from the
       # settle that actually happened, whether the predecessor finished or died mid-turn.
       def with_deferred_worker_resolution(result)
@@ -979,6 +1027,11 @@ module Meringue
 
         poll_results = agents.map { |agent| poll_agent_session(agent) }
         applied_results = poll_results.map { |poll_result| apply_poll_result(poll_result) }
+        # Completion-triggered heads are resolved after polls so a worker that completed during
+        # this pass can route follow-on commands immediately. The settle path does the same work;
+        # this reconciliation hook recovers the crash window where completion was recorded but the
+        # continuation head was not spawned yet.
+        completion_continuation_results = reconcile_step("resolve_completion_continuations", []) { resolve_completion_continuations(trigger: "reconcile") }
         # Second activation hook for queued dependents. It runs after the polls so a predecessor
         # that settled in this same pass is honoured immediately, and it is the hook that recovers
         # a dependency whose predecessor settled, errored, or disappeared while Meringue was down.
@@ -989,6 +1042,7 @@ module Meringue
         # activated worker rather than a record that is still waiting.
         goal_steps = reconcile_step("advance_goal_loops", []) { advance_goal_loops }
         changed_count = applied_results.count { |result| result.fetch("changed", false) }
+        changed_count += completion_continuation_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += deferred_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += recovered_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += pending_prompt_results.count { |result| result.fetch("status", nil) == "accepted" }
@@ -1014,11 +1068,12 @@ module Meringue
             "recovered_head_results" => recovered_results,
             "delivery_pull_request_refreshes" => delivery_pr_refreshes,
             "model_catalog_refresh" => model_catalog_refresh,
+            "completion_continuation_results" => completion_continuation_results,
             "deferred_worker_results" => deferred_worker_results,
             "goal_loop_steps" => goal_steps,
             "poll_results" => applied_results
           },
-          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) }).uniq
+          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + completion_continuation_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) }).uniq
         )
       rescue StandardError => e
         error = error_payload(e)
@@ -2262,7 +2317,11 @@ module Meringue
         # Internally routed heads (for example the head spawned for an answered question) carry a
         # long structured prompt. The visible chat log should stay short and human-facing.
         log_message = present_string(value_at(payload, "log_message", "LogMessage"))
+        log_source_type = present_string(value_at(payload, "_log_source_type", "log_source_type"))
+        log_source_type = "user" unless %w[user kernel system].include?(log_source_type)
+        log_source_id = present_string(value_at(payload, "_log_source_id", "log_source_id"))
         retry_of = head_retry_lineage(payload)
+        completion_trigger = head_completion_trigger_lineage(payload)
         errors = []
 
         errors << "user_message is required" if blank?(user_message)
@@ -2307,6 +2366,7 @@ module Meringue
             question_id: present_string(question_id),
             selected_target: selected_target,
             retry_of: retry_of,
+            completion_trigger: completion_trigger,
             snapshot_issue_ids: state.fetch("issues").map { |issue| issue.fetch("id", nil) }.compact,
             snapshot_project_ids: state.fetch("projects").map { |project| project.fetch("id", nil) }.compact,
             snapshot_unapplied_head_ids: unapplied_head_ids_for_issue_visibility(state),
@@ -2316,8 +2376,8 @@ module Meringue
 
           log_ids = append_log(
             state,
-            source_type: "user",
-            source_id: nil,
+            source_type: log_source_type,
+            source_id: log_source_type == "user" ? nil : log_source_id,
             level: "info",
             message: log_message || user_message.to_s.strip,
             details: {
@@ -2807,6 +2867,19 @@ module Meringue
           "case" => present_string(value_at(payload, "_retry_case", "retry_case")),
           "reason" => present_string(value_at(payload, "_retry_reason", "retry_reason"))
         }.compact
+      end
+
+      # Completion-triggered heads are spawned internally by the kernel, but the head record should
+      # still explain why it exists so reconciliation can recover without spawning a duplicate.
+      def head_completion_trigger_lineage(payload)
+        trigger = value_at(payload, "_completion_trigger", "completion_trigger")
+        return nil unless trigger.is_a?(Hash)
+
+        trigger.each_with_object({}) do |(key, value), result|
+          next if value.nil?
+
+          result[key.to_s] = value
+        end.compact
       end
 
       # Links the failed head to its successor and says so once, in the log, at the point the
@@ -4360,8 +4433,10 @@ module Meringue
             PRUNE_ELIGIBLE_STATUSES.include?(candidate.fetch("status", nil).to_s)
           end.map { |candidate| candidate.fetch("id") }
           # A predecessor must outlive its queue: removing it here would leave a queued dependent
-          # (possibly on another issue) with nothing to wait for.
+          # (possibly on another issue) with nothing to wait for. The same applies to a completed
+          # worker whose completion still has a head-routing continuation to fire.
           deferred_dependents = waiting_deferred_dependents(state, workers.map { |worker| worker.fetch("id", nil) })
+          completion_continuations = workers.select { |worker| pending_completion_continuation?(worker) }
           # A live goal loop is retained work: pruning its issue would delete the loop, its
           # iteration history, and the worktrees it is still measuring.
           active_goals = goals_for_issue_ids(state, subtree_ids).select { |goal| Goals::Record.loop_active?(goal) }
@@ -4371,6 +4446,7 @@ module Meringue
           blockers << "open_questions" if open_questions.any?
           blockers << "unsettled_pull_requests" if pull_request_blockers.any?
           blockers << "pending_deferred_dependents" if deferred_dependents.any?
+          blockers << "pending_completion_continuations" if completion_continuations.any?
           blockers << "active_goals" if active_goals.any?
 
           {
@@ -4383,6 +4459,7 @@ module Meringue
             "nonterminal_issue_ids" => nonterminal_issue_ids,
             "blocking_worker_ids" => blocking_workers.map { |worker| worker.fetch("id", nil) }.compact,
             "deferred_dependent_worker_ids" => deferred_dependents.map { |dependent| dependent.fetch("id", nil) }.compact,
+            "completion_continuation_worker_ids" => completion_continuations.map { |worker| worker.fetch("id", nil) }.compact,
             "open_question_ids" => open_questions.map { |question| question.fetch("id", nil) }.compact,
             "active_goal_ids" => active_goals.map { |goal| goal.fetch("id", nil) }.compact,
             "pull_request_blockers" => pull_request_blockers,
@@ -6907,6 +6984,7 @@ module Meringue
         inherit_workspace_agent_id = present_string(value_at(payload, "_inherit_workspace_from_agent_id", "inherit_workspace_from_agent_id"))
         session_restart_of_agent_id = present_string(value_at(payload, "_session_restart_of_agent_id", "session_restart_of_agent_id"))
         errors = []
+        completion_continuation = normalized_completion_continuation(payload, errors: errors)
 
         errors << "issue_id is required" if blank?(issue_id)
         errors << "prompt is required" if blank?(prompt)
@@ -7005,6 +7083,7 @@ module Meringue
                   chain_depth: decision.fetch("chain_depth"),
                   failure_policy: failure_policy,
                   include_predecessor_result: include_predecessor_result,
+                  completion_continuation: completion_continuation,
                   rerouted_from_issue_id: rerouted_from_issue_id
                 )
               else
@@ -7031,6 +7110,7 @@ module Meringue
             existing_metadata = existing.fetch("harness_metadata", {}) || {}
             follow_up_of_agent_id = existing_metadata.fetch("follow_up_of_agent_id", follow_up_of_agent_id)
             replace_agent_id = existing_metadata.fetch("replace_agent_id", replace_agent_id)
+            completion_continuation ||= worker_completion_continuation(existing)
             after_agent_id = present_string(existing.fetch("after_agent_id", nil)) ||
                              present_string(deferred_spawn_metadata(existing).fetch("after_agent_id", nil)) ||
                              present_string(after_agent_id)
@@ -7069,6 +7149,7 @@ module Meringue
               follow_up_of_agent_id: follow_up_of_agent_id,
               replace_agent_id: replace_agent_id,
               after_agent_id: present_string(after_agent_id),
+              completion_continuation: completion_continuation,
               now: now,
               harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
             )
@@ -7416,6 +7497,347 @@ module Meringue
         end
       end
 
+      # --- Completion-triggered head continuations ----------------------------------------------
+      #
+      # A worker can carry a small continuation record telling the kernel to spawn a fresh head once
+      # that worker completes. The continuation lives on the worker record, is claimed before the
+      # head is spawned, and is also resolved from reconciliation so it survives restarts without a
+      # sleeping worker session.
+      def normalized_completion_continuation(payload, errors:)
+        raw = value_at(payload, *COMPLETION_CONTINUATION_KEYS)
+        return nil if raw.nil? || raw == false
+
+        record = case raw
+                 when String
+                   { "prompt" => raw }
+                 when Hash
+                   raw.each_with_object({}) { |(key, value), result| result[key.to_s] = value }
+                 else
+                   errors << "completion_continuation must be a string prompt or object"
+                   return nil
+                 end
+        prompt = present_string(value_at(record, *COMPLETION_CONTINUATION_PROMPT_KEYS))
+        unless prompt
+          errors << "completion_continuation.prompt is required"
+          return nil
+        end
+
+        include_result = value_at(record, "include_worker_result", "IncludeWorkerResult", "includeWorkerResult")
+        {
+          "prompt" => prompt,
+          "include_worker_result" => include_result.nil? ? true : truthy?(include_result)
+        }
+      end
+
+      def completion_continuation_record(continuation, now:, spawn_command_id: nil)
+        return nil unless continuation.is_a?(Hash)
+
+        {
+          "state" => COMPLETION_CONTINUATION_STATE_WAITING,
+          "prompt" => continuation.fetch("prompt"),
+          "include_worker_result" => continuation.fetch("include_worker_result", true),
+          "created_at" => now,
+          "spawn_command_id" => present_string(spawn_command_id)
+        }.compact
+      end
+
+      def worker_completion_continuation(agent)
+        metadata = agent.is_a?(Hash) ? (agent.fetch("harness_metadata", {}) || {}) : {}
+        continuation = metadata.fetch("completion_continuation", nil)
+        continuation.is_a?(Hash) ? continuation : nil
+      end
+
+      def pending_completion_continuation?(agent)
+        return false unless agent.is_a?(Hash) && agent.fetch("type", nil) == "worker"
+        return false unless agent.fetch("status", nil) == "completed"
+
+        state = worker_completion_continuation(agent)&.fetch("state", nil).to_s
+        [COMPLETION_CONTINUATION_STATE_WAITING, COMPLETION_CONTINUATION_STATE_TRIGGERING].include?(state)
+      end
+
+      def resolve_completion_continuations(trigger:, only_agent_id: nil)
+        decisions = claim_completion_continuations(trigger: trigger, only_agent_id: only_agent_id)
+        decisions.map { |decision| trigger_completion_continuation_head(decision, trigger: trigger) }
+      end
+
+      def claim_completion_continuations(trigger:, only_agent_id: nil)
+        synchronized_state do
+          state = normalized_state
+          now = timestamp
+          decisions = []
+          changed = false
+          state.fetch("agents").each do |agent|
+            next unless agent.fetch("type", nil) == "worker"
+            next if only_agent_id && !Ids.same?(agent.fetch("id", nil), only_agent_id)
+
+            continuation = worker_completion_continuation(agent)
+            next unless continuation
+            next unless agent.fetch("status", nil) == "completed"
+
+            state_value = continuation.fetch("state", nil).to_s
+            existing_head = existing_completion_continuation_head(state, agent)
+            if existing_head
+              next if continuation_terminal_state?(state_value)
+
+              updated = continuation.merge(
+                "state" => COMPLETION_CONTINUATION_STATE_TRIGGERED,
+                "head_id" => existing_head.fetch("id"),
+                "recovered_existing_head_at" => now
+              ).compact
+              agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("completion_continuation" => updated)
+              agent["updated_at"] = now
+              decisions << completion_continuation_decision(agent, updated, existing_head: deep_copy(existing_head))
+              changed = true
+              next
+            end
+
+            next unless state_value == COMPLETION_CONTINUATION_STATE_WAITING ||
+                        (state_value == COMPLETION_CONTINUATION_STATE_TRIGGERING && !completion_continuation_owned_by_other_live_instance?(continuation))
+
+            updated = continuation.merge(
+              "state" => COMPLETION_CONTINUATION_STATE_TRIGGERING,
+              "trigger" => trigger,
+              "triggered_at" => continuation.fetch("triggered_at", nil) || now,
+              "trigger_attempts" => continuation.fetch("trigger_attempts", 0).to_i + 1,
+              **instance_ownership_metadata
+            ).compact
+            agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("completion_continuation" => updated)
+            agent["updated_at"] = now
+            decisions << completion_continuation_decision(agent, updated)
+            changed = true
+          end
+          if changed
+            touch_state!(state, now)
+            store.save(state)
+          end
+          decisions
+        end
+      end
+
+      def continuation_terminal_state?(state)
+        [
+          COMPLETION_CONTINUATION_STATE_TRIGGERED,
+          COMPLETION_CONTINUATION_STATE_APPLIED,
+          COMPLETION_CONTINUATION_STATE_FAILED
+        ].include?(state.to_s)
+      end
+
+      def completion_continuation_owned_by_other_live_instance?(continuation)
+        !other_live_instance_pid(
+          continuation.fetch("owner_instance_id", nil),
+          continuation.fetch("owner_instance_pid", nil),
+          continuation.fetch("owner_instance_started_at", nil)
+        ).nil?
+      end
+
+      def existing_completion_continuation_head(state, worker)
+        worker_id = worker.fetch("id", nil).to_s
+        state.fetch("agents").find do |agent|
+          next false unless agent.fetch("type", nil) == "head"
+
+          trigger = (agent.fetch("harness_metadata", {}) || {}).fetch("completion_trigger", nil)
+          trigger.is_a?(Hash) && trigger.fetch("worker_agent_id", nil).to_s == worker_id
+        end
+      end
+
+      def completion_continuation_decision(agent, continuation, existing_head: nil)
+        {
+          "agent" => deep_copy(agent),
+          "continuation" => deep_copy(continuation),
+          "existing_head" => existing_head
+        }.compact
+      end
+
+      def trigger_completion_continuation_head(decision, trigger:)
+        agent = decision.fetch("agent")
+        continuation = decision.fetch("continuation")
+        existing_head = decision.fetch("existing_head", nil)
+        spawn_result = if existing_head
+                         accepted_result(
+                           nil,
+                           "SpawnCompletionHead",
+                           existing_head.fetch("id"),
+                           "Completion head #{existing_head.fetch("id")} already exists for worker #{agent.fetch("id")}",
+                           existing_head,
+                           []
+                         )
+                       else
+                         spawn_completion_head(agent, continuation, trigger: trigger)
+                       end
+        head_id = present_string(spawn_result.fetch("target_id", nil))
+        apply_result = apply_completion_head_result(head_id) if spawn_result.fetch("status", nil) == "accepted" && head_id
+        finalize_completion_continuation(agent.fetch("id"), spawn_result: spawn_result, apply_result: apply_result, trigger: trigger)
+      rescue StandardError => e
+        record_completion_continuation_failure(agent.fetch("id"), e, trigger: trigger)
+      end
+
+      def spawn_completion_head(agent, continuation, trigger:)
+        spawn_head(
+          nil,
+          "SpawnHead",
+          {
+            "user_message" => completion_continuation_user_message(agent, continuation),
+            "log_message" => "Worker #{agent.fetch("id")} completed; routing follow-on work.",
+            "_log_source_type" => "kernel",
+            "_log_source_id" => agent.fetch("id"),
+            "_completion_trigger" => {
+              "kind" => "worker_completion",
+              "worker_agent_id" => agent.fetch("id"),
+              "issue_id" => agent.fetch("issue_id", nil),
+              "project_id" => agent.fetch("project_id", nil),
+              "trigger" => trigger
+            }.compact
+          }
+        )
+      end
+
+      def apply_completion_head_result(head_id)
+        head = agent_record_snapshot(head_id)
+        return nil unless head
+
+        metadata = head.fetch("harness_metadata", {}) || {}
+        head_result = metadata.fetch("head_result", nil)
+        return nil unless head_result.is_a?(Hash)
+        return already_applied_head_result(nil, "ApplyHeadResult", head_id, metadata) if present_string(metadata.fetch("head_result_applied_at", nil))
+
+        @head_result_mutex.synchronize do
+          apply_head_result(nil, "ApplyHeadResult", "head_id" => head_id, "head_result" => head_result)
+        end
+      end
+
+      def finalize_completion_continuation(agent_id, spawn_result:, apply_result:, trigger:)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          return spawn_result unless agent
+
+          continuation = worker_completion_continuation(agent) || {}
+          now = timestamp
+          head_id = present_string(spawn_result.fetch("target_id", nil))
+          spawn_accepted = spawn_result.fetch("status", nil) == "accepted"
+          apply_status = apply_result&.fetch("status", nil)
+          state_value = if !spawn_accepted
+                          COMPLETION_CONTINUATION_STATE_FAILED
+                        elsif apply_result && apply_status != "accepted"
+                          COMPLETION_CONTINUATION_STATE_FAILED
+                        elsif apply_status == "accepted"
+                          COMPLETION_CONTINUATION_STATE_APPLIED
+                        else
+                          COMPLETION_CONTINUATION_STATE_TRIGGERED
+                        end
+          updated = continuation.merge(
+            "state" => state_value,
+            "head_id" => head_id,
+            "trigger" => trigger,
+            "spawn_head_status" => spawn_result.fetch("status", nil),
+            "spawn_head_message" => spawn_result.fetch("message", nil),
+            "apply_head_result_status" => apply_status,
+            "apply_head_result_message" => apply_result&.fetch("message", nil),
+            "completed_at" => now
+          ).compact
+          agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("completion_continuation" => updated)
+          agent["updated_at"] = now
+          level = state_value == COMPLETION_CONTINUATION_STATE_FAILED ? "error" : "info"
+          message = if state_value == COMPLETION_CONTINUATION_STATE_FAILED
+                      "Completion continuation for worker #{agent_id} failed#{head_id ? " after spawning #{head_id}" : ""}."
+                    else
+                      "Spawned head #{head_id} after worker #{agent_id} completed."
+                    end
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: agent_id,
+            level: level,
+            message: message,
+            details: {
+              "agent_id" => agent_id,
+              "head_id" => head_id,
+              "trigger" => trigger,
+              "state" => state_value,
+              "spawn_head_status" => spawn_result.fetch("status", nil),
+              "apply_head_result_status" => apply_status
+            }.compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+
+          status = state_value == COMPLETION_CONTINUATION_STATE_FAILED ? "failed" : "accepted"
+          result_payload = {
+            "agent_id" => agent_id,
+            "head_id" => head_id,
+            "continuation" => updated,
+            "spawn_head_result" => spawn_result,
+            "apply_head_result" => apply_result
+          }.compact
+          if status == "accepted"
+            accepted_result(nil, "SpawnCompletionHead", head_id, message, result_payload, (Array(spawn_result.fetch("log_entry_ids", [])) + Array(apply_result&.fetch("log_entry_ids", [])) + log_ids).uniq)
+          else
+            failure = failed_result(nil, "SpawnCompletionHead", message, [spawn_result.fetch("message", nil), apply_result&.fetch("message", nil)].compact)
+            failure.merge("log_entry_ids" => (Array(failure.fetch("log_entry_ids", [])) + log_ids).uniq)
+          end
+        end
+      end
+
+      def record_completion_continuation_failure(agent_id, error, trigger:)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          return failed_result(nil, "SpawnCompletionHead", "Completion continuation failed: #{sanitized_error_message(error)}", [error.class.name, sanitized_error_message(error)]) unless agent
+
+          now = timestamp
+          continuation = worker_completion_continuation(agent) || {}
+          updated = continuation.merge(
+            "state" => COMPLETION_CONTINUATION_STATE_FAILED,
+            "trigger" => trigger,
+            "error_class" => error.class.name,
+            "error_message" => sanitized_error_message(error),
+            "failed_at" => now
+          ).compact
+          agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("completion_continuation" => updated)
+          agent["updated_at"] = now
+          message = "Completion continuation for worker #{agent_id} failed: #{sanitized_error_message(error)}"
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: agent_id,
+            level: "error",
+            message: message,
+            details: { "agent_id" => agent_id, "trigger" => trigger, "error" => error_payload(error) }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          failure = failed_result(nil, "SpawnCompletionHead", message, [error.class.name, sanitized_error_message(error)])
+          failure.merge("log_entry_ids" => (Array(failure.fetch("log_entry_ids", [])) + log_ids).uniq)
+        end
+      end
+
+      def completion_continuation_user_message(agent, continuation)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        lines = [
+          "Meringue kernel continuation: worker #{agent.fetch("id")} completed and requested follow-on head routing.",
+          "Use the worker's final result as context, then return a HeadResult with any follow-on kernel commands that should run now.",
+          "Do not ask any worker to poll Meringue state, sleep, or wait for another worker; use kernel commands such as SpawnWorker, PromptAgent, after_agent_id, or questions instead.",
+          "",
+          "Worker:",
+          "- id: #{agent.fetch("id")}",
+          "- issue_id: #{agent.fetch("issue_id", nil)}",
+          "- project_id: #{agent.fetch("project_id", nil)}",
+          "- title: #{metadata.fetch("title", nil)}",
+          "- workspace_branch: #{agent.fetch("workspace_branch", nil)}",
+          "",
+          "Continuation request:",
+          continuation.fetch("prompt").to_s
+        ]
+        if continuation.fetch("include_worker_result", true)
+          lines.concat([
+            "",
+            "Worker final result:",
+            truncate_for_state(present_string(metadata.fetch("last_assistant_text", nil)) || "(no final assistant text was recorded)", COMPLETION_CONTINUATION_HANDOVER_MAX_CHARS)
+          ])
+        end
+        lines.join("\n")
+      end
+
       # --- Deferred (queued-after) workers ------------------------------------------------------
       #
       # Dependency model: a dependent is an ordinary queued worker agent record with a top-level
@@ -7570,7 +7992,8 @@ module Meringue
       # section, so it owns its own log line and save.
       def queue_deferred_worker(state, command_id:, command_type:, issue:, project:, prompt:, title:,
                                 requested_workspace_path:, follow_up_of_agent_id:, predecessor:,
-                                chain_depth:, failure_policy:, include_predecessor_result:, rerouted_from_issue_id:)
+                                chain_depth:, failure_policy:, include_predecessor_result:, completion_continuation:,
+                                rerouted_from_issue_id:)
         now = timestamp
         agent_id = next_worker_id!(state, issue.fetch("id"))
         workspace = resolve_worker_workspace(
@@ -7600,6 +8023,7 @@ module Meringue
           follow_up_of_agent_id: follow_up_of_agent_id,
           replace_agent_id: nil,
           after_agent_id: predecessor.fetch("id"),
+          completion_continuation: completion_continuation,
           now: now,
           harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
         )
@@ -8153,7 +8577,7 @@ module Meringue
 
       def build_worker_reservation(agent_id:, issue:, project:, workspace:, provider:, command_id:, prompt:, title:,
                                    requested_workspace_path:, follow_up_of_agent_id:, replace_agent_id:, now:, harness_generation:,
-                                   after_agent_id: nil)
+                                   after_agent_id: nil, completion_continuation: nil)
         plan = workspace.fetch("plan", nil) || workspace
         {
           "id" => agent_id,
@@ -8176,6 +8600,7 @@ module Meringue
             "requested_workspace_path" => present_string(requested_workspace_path),
             "follow_up_of_agent_id" => present_string(follow_up_of_agent_id),
             "replace_agent_id" => present_string(replace_agent_id),
+            "completion_continuation" => completion_continuation_record(completion_continuation, now: now, spawn_command_id: command_id),
             "provisioning_state" => "allocating_workspace",
             "workspace_plan" => plan,
             "harness_generation" => harness_generation,
@@ -8399,9 +8824,10 @@ module Meringue
       end
 
       def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0, user_message: nil, question_id: nil,
-                           selected_target: nil, retry_of: nil, snapshot_issue_ids: [], snapshot_project_ids: [],
-                           snapshot_unapplied_head_ids: [], snapshot_counters: {})
+                           selected_target: nil, retry_of: nil, completion_trigger: nil,
+                           snapshot_issue_ids: [], snapshot_project_ids: [], snapshot_unapplied_head_ids: [], snapshot_counters: {})
         retry_of = nil unless retry_of.is_a?(Hash)
+        completion_trigger = nil unless completion_trigger.is_a?(Hash)
         {
           "id" => head_id,
           "type" => "head",
@@ -8437,6 +8863,7 @@ module Meringue
             "retry_of_head_id" => retry_of && retry_of.fetch("head_id", nil),
             "retry_case" => retry_of && retry_of.fetch("case", nil),
             "retry_strategy" => retry_of ? "respawn" : nil,
+            "completion_trigger" => completion_trigger,
             "head_request" => {
               "user_message" => user_message,
               "question_id" => question_id,
