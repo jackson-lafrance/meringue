@@ -20,6 +20,8 @@ module Meringue
         SELECTION
         PR_MARKER
         PR_MARKER_SELECTED
+        GOAL_MARKER
+        GOAL_MARKER_SELECTED
         TITLE
         PANEL_TITLE
         HEADER
@@ -168,6 +170,8 @@ module Meringue
         SELECTION: [38, 5, 232, 48, 5, 189],
         PR_MARKER: [1, 38, 5, 51],
         PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 61],
+        GOAL_MARKER: [1, 38, 5, 213],
+        GOAL_MARKER_SELECTED: [1, 38, 5, 213, 48, 5, 61],
         TITLE: [1, 38, 5, 255],
         PANEL_TITLE: [1, 38, 5, 225],
         HEADER: [1, 38, 5, 255, 48, 5, 235],
@@ -206,6 +210,8 @@ module Meringue
         SELECTION: [38, 5, 232, 48, 5, 222],
         PR_MARKER: [1, 38, 5, 51],
         PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 94],
+        GOAL_MARKER: [1, 38, 5, 213],
+        GOAL_MARKER_SELECTED: [1, 38, 5, 213, 48, 5, 94],
         TITLE: [1, 38, 5, 231],
         PANEL_TITLE: [1, 38, 5, 229],
         HEADER: [1, 38, 5, 230, 48, 5, 94],
@@ -246,6 +252,8 @@ module Meringue
         SELECTION: [38, 5, 232, 48, 5, 153],
         PR_MARKER: [1, 38, 5, 51],
         PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 24],
+        GOAL_MARKER: [1, 38, 5, 213],
+        GOAL_MARKER_SELECTED: [1, 38, 5, 213, 48, 5, 24],
         TITLE: [1, 38, 5, 255],
         PANEL_TITLE: [1, 38, 5, 147],
         HEADER: [1, 38, 5, 255, 48, 5, 235],
@@ -284,6 +292,8 @@ module Meringue
         SELECTION: [38, 5, 235, 48, 5, 223],
         PR_MARKER: [1, 38, 5, 51],
         PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 94],
+        GOAL_MARKER: [1, 38, 5, 213],
+        GOAL_MARKER_SELECTED: [1, 38, 5, 213, 48, 5, 94],
         TITLE: [1, 38, 5, 230],
         PANEL_TITLE: [1, 38, 5, 222],
         HEADER: [1, 38, 5, 223, 48, 5, 236],
@@ -322,6 +332,8 @@ module Meringue
         SELECTION: [38, 5, 232, 48, 5, 183],
         PR_MARKER: [1, 38, 5, 51],
         PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 60],
+        GOAL_MARKER: [1, 38, 5, 213],
+        GOAL_MARKER_SELECTED: [1, 38, 5, 213, 48, 5, 60],
         TITLE: [1, 38, 5, 255],
         PANEL_TITLE: [1, 38, 5, 219],
         HEADER: [1, 38, 5, 255, 48, 5, 235],
@@ -360,6 +372,8 @@ module Meringue
         SELECTION: [38, 5, 232, 48, 5, 152],
         PR_MARKER: [1, 38, 5, 51],
         PR_MARKER_SELECTED: [1, 38, 5, 51, 48, 5, 24],
+        GOAL_MARKER: [1, 38, 5, 213],
+        GOAL_MARKER_SELECTED: [1, 38, 5, 213, 48, 5, 24],
         TITLE: [1, 38, 5, 255],
         PANEL_TITLE: [1, 38, 5, 176],
         HEADER: [1, 38, 5, 252, 48, 5, 235],
