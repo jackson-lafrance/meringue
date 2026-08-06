@@ -314,7 +314,7 @@ Do the same thing as coding harnesses for these aswell we want it to be familiar
 /worker spawn <issue_id> "<prompt>"
 /prompt <agent_id> "<message>"
 /models [harness] [refresh]   (opens the model picker; `refresh` re-fetches the catalog instead)
-/model <provider/model>
+/model <provider>/<model-id>
 /thinking <level>
 /kill <agent_or_issue_id>
 /tree
@@ -481,7 +481,9 @@ The harness client should expose operations shaped like:
 - `read_events(session_ref)`
 - `attach_session(session_ref)`
 
-Model catalogs are asked of the harness, never hand-maintained in Meringue. `available_models` returns a harness-neutral catalog (models plus each model's supported thinking levels) or an explicit unavailable/unsupported result. The kernel caches the snapshot in state metadata so input completion can offer every model for the selected harness without starting a harness process while the user types. `/models` opens the TUI model picker over that cached snapshot (searchable, keyboard-navigable, and applying a selection as `/model <provider/model>`), and `/models refresh` re-asks the harness through `GetModelCatalog` and reports the snapshot's state. Catalog listings belong in the picker, not in the log.
+Model catalogs are asked of the harness, never hand-maintained in Meringue. `available_models` returns a harness-neutral catalog (models plus each model's supported thinking levels) or an explicit unavailable/unsupported result. The kernel caches the snapshot in state metadata so input completion can offer every model for the selected harness without starting a harness process while the user types. `/models` opens the TUI model picker over that cached snapshot (searchable, keyboard-navigable, and applying a selection as `/model <provider>/<model-id>`), and `/models refresh` re-asks the harness through `GetModelCatalog` and reports the snapshot's state. Catalog listings belong in the picker, not in the log.
+
+A model reference is `<provider>/<model-id>` split on the **first** slash, exactly as the harness resolves it, so a model id may itself contain `/` and `:` (`fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`). That grammar lives in one place (`Meringue::Harness::ModelReference`) and is a shape check only: the catalog labels an unlisted id as unverified and never makes it unsettable, and every rejection names its reason in the user-visible line.
 
 Future Pi defaults and existing Pi session settings are separate scopes. `/model` and `/thinking` persist app-wide Pi spawn defaults for all future heads and workers without mutating existing sessions. Existing sessions have no settings command: their effective values are recorded on the agent record as `session_settings` when the kernel spawns, prompts, or reconciles a session, and are surfaced by the focused workspace line, raw state, and `GetInfo`. A focused workspace advertises `/open-session` for opening its selected harness UI, with the old argumentless `/session` spelling also retained only as an alias. Default persistence belongs in Meringue config and runtime spawn reconfiguration belongs behind the harness registry/client boundary.
 

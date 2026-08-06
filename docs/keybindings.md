@@ -264,7 +264,7 @@ Open it with `/models` (optionally `/models claude` to scope it to another harne
 - Any printable character: filter the list. Space separated tokens all have to match, so `openai high` narrows by provider and thinking level at once.
 - `Backspace`: delete one character of the filter. `Ctrl-W`: clear the filter.
 - `↑` / `↓`: move the highlight; it wraps. The mouse wheel scrolls it and clicking a row picks that row.
-- `Enter`: apply the highlighted model as the future-session default. This is exactly `/model <provider/model>`, so the kernel validates, journals, and logs it the same way.
+- `Enter`: apply the highlighted model as the future-session default. This is exactly `/model <provider>/<model-id>`, so the kernel validates, journals, and logs it the same way.
 - `Ctrl-R`: re-fetch the catalog through the kernel (`/models refresh`) without closing the picker.
 - `Esc`, a click outside the list, or any unhandled control key: close it without changing anything.
 - The list is never blank: an unavailable catalog, an unsupported harness, a snapshot that has never been fetched, and a filter that matched nothing each render their own explanation and say what to do next.
