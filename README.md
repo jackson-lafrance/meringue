@@ -39,7 +39,7 @@ Meringue provides a single control plane for multi-agent development:
 - **A kernel-owned state model.** The kernel validates commands, mutates JSON state, allocates worker workspaces, and records logs.
 - **An AgentTree view.** Projects, issues, heads, workers, questions, and PR markers are shown in a filesystem-like hierarchy. Every agent row carries its own identity color and its harness logo, in every status, and the same color follows that agent into the logs pane and the chat composer.
 - **Structured logs.** Important lifecycle events are captured without flooding the UI with every streamed token.
-- **Safe parallelism.** For git-backed projects, workers should run in dedicated worktrees and branches so multiple agents can edit safely at once.
+- **Safe parallelism.** For git-backed projects, workers should run in dedicated worktrees and branches so multiple agents can edit safely at once. Sequential steps of one goal are the exception: a worker that continues a settled predecessor's work carries on in that worktree and branch, so one goal delivers one branch and one PR.
 
 ## How Meringue coordinates work
 
@@ -179,7 +179,7 @@ Useful slash commands inside the TUI include:
 - `/model <provider>/<model-id>` — persist the model for all future Pi sessions; existing sessions are unchanged. The reference is split on the first slash, so the model id may itself contain `/` and `:` (`/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`). An id the model catalog does not list is still set, and reported as unverified. The pair in force is always visible in the dashboard status line (`Pi defaults: <model> · <thinking>`) and in `/config`.
 - `/thinking <off|minimal|low|medium|high|xhigh|max>` — persist the thinking level for all future Pi sessions; existing sessions are unchanged.
 - `/keybind` — show active TUI keybindings.
-- `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together and removes their clean, unlocked Meringue-managed worktrees. Unsafe cleanup (dirty, locked, ambiguous, or failed) retains the bundle and logs why so it can be retried.
+- `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together and removes their clean, unlocked Meringue-managed worktrees. Unsafe cleanup (dirty, locked, ambiguous, or failed) retains the bundle and logs why so it can be retried. A worktree shared by several workers is removed once the last of them is pruned.
 - `/recount` — compact project, issue, worker, question, and goal numbering after records are removed.
 - `/goal create "<prompt>" --metric "<command>" --target <n> [--project <project_id>] [flags]` — start a goal loop from a prompt. Meringue creates the issue for it (title from the prompt's first sentence, prompt kept verbatim in the description) and keeps producing attempts until the metric it measures itself reaches the target, or an iteration/session/wall-clock budget, a no-progress guard, an oscillation guard, or a broken metric stops it. Add `--guardrail "rake test"` for anything that must not regress. `--project` picks the project when several are registered; otherwise Meringue uses the one containing your working directory, or the only one registered, and refuses to guess.
 - `/goal create <issue_id> "<success criteria>" --metric "<command>" --target <n> [flags]` — the same loop attached to an issue that already exists. An id-shaped first token is always read as an id, so a mistyped id is reported instead of quietly becoming a new issue title.

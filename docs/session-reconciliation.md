@@ -119,7 +119,7 @@ Terminal is the last rung, not the first:
    be replayed](#a-session-that-cannot-be-replayed)): resuming it would send the same
    rejected transcript.
 5. **Worker session restart** — a worker whose saved transcript the provider refuses is
-   continued once in a *fresh* session on its own worktree and branch, instead of being
+   continued once in a *fresh* session on that same worktree and branch, instead of being
    resumed.
 6. **Terminal error** — recorded once, per the contract above.
 
@@ -224,9 +224,14 @@ files, so it treats the session as spent and recovers the *work*:
   dependent is resolved by its `if_predecessor_fails` policy instead of waiting forever.
 - **Restarted once, in place.** The kernel spawns a replacement worker whose session is fresh
   but whose workspace is the dead worker's *existing* worktree and branch
-  (`_inherit_workspace_from_agent_id`). Nothing re-creates, re-branches, or cleans up that
-  checkout: the inherited workspace plan is recorded with `created: false`, which is what keeps
-  every failure path from deleting the only copy of the work. The successor's prompt carries the
+  (`_inherit_workspace_from_agent_id`). This is the same workspace-sharing path any continuation
+  worker takes (see "Sharing one worktree between related workers" in
+  `docs/head_agent_kernel_commands.md`) with one deliberate difference: a restart that cannot take
+  the worktree over fails the spawn (`inherited_workspace_unavailable`) rather than quietly
+  starting somewhere else, because a fresh checkout would not contain the work being recovered.
+  Nothing re-creates, re-branches, or cleans up that checkout: the inherited workspace plan is
+  recorded with `created: false`, which is what keeps every failure path from deleting the only
+  copy of the work. The successor's prompt carries the
   original assignment plus a handover note telling it to re-establish state with `git status`
   before continuing.
 - **Bounded.** One restart per worker (`WORKER_SESSION_RESTART_MAX_ATTEMPTS`) and a chain cap

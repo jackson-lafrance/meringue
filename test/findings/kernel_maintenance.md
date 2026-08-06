@@ -135,3 +135,21 @@ tests were updated to the shipped behavior:
 The original maintenance test slice did not change production code. Later prune-worktree
 lifecycle work updated the behavior called out in items 4 and 6, and the reference-integrity work
 in item 13 changed `State::Recounter` and the Recount save path in `Kernel::Engine`.
+
+## Pruning a shared worktree
+
+Worktree sharing between related workers broke the one-worker-one-path assumption that
+`cleanup_pruned_worker_workspaces!` was written against. Two rules now keep both halves honest:
+
+- A pruned worker whose worktree another *retained* worker still shares skips cleanup with
+  `status: "skipped"`, `reason: "workspace_shared_with_retained_worker"`, and `success: true`. The
+  record goes immediately; failing instead would retain a record prune can never clear and warn
+  about it on every pass.
+- Workers being pruned in the same pass no longer contribute to `protected_paths`. Without that, a
+  shared worktree whose every sharer was pruned together would deadlock: each sharer would refuse
+  on account of the others and the directory would never be removed.
+
+The net effect is that a shared worktree is removed exactly once, on the pass that prunes the last
+worker using it, and its delivery branch survives as before. Covered by
+`test/integration/kernel_maintenance/prune_worktree_cleanup_test.rb` and the lifecycle tests in
+`test/integration/kernel_workers/workspace_reuse_test.rb`.
