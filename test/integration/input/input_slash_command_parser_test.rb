@@ -663,6 +663,56 @@ class InputSlashCommandParserTest < Minitest::Test
     end
   end
 
+  # Start short, then go long: a typed fragment offers the record that owns the subtree before
+  # the records inside it, so killing an issue never means arrowing past its own workers.
+  def test_id_suggestions_rank_shallower_ids_before_their_descendants
+    state = tree_suggestion_state
+
+    assert_equal %w[P3-I10 P3-I10-W1 P3-I10-W2],
+                 suggestion_usages("/kill i10", state)
+    assert_equal %w[P3 P3-I2 P3-I10 P3-I10-W1 P3-I10-W2],
+                 suggestion_usages("/kill p3", state)
+  end
+
+  # Depth first, then the namespace, then numeric order, so two projects never interleave and
+  # P3-I10 still sorts after P3-I2 instead of by text.
+  def test_id_suggestions_rank_across_projects_by_depth_then_number
+    state = tree_suggestion_state
+
+    assert_equal %w[P10 P10-I1 P10-I1-W1], suggestion_usages("/kill p10", state)
+    assert_equal %w[P3-I10 P10-I1 P3-I10-W1 P3-I10-W2 P10-I1-W1], suggestion_usages("/kill -i1", state)
+    # H<n> is depth 0, so it ranks with the projects rather than between the nested ids.
+    assert_equal %w[H1 P10 P3-I10 P10-I1 P3-I10-W1 P3-I10-W2 P10-I1-W1],
+                 suggestion_usages("/kill 1", state)
+  end
+
+  # An exactly typed id stays on top even though its descendants also match it.
+  def test_id_suggestions_keep_an_exact_match_first
+    records = suggestion_records("/kill p3-i10", tree_suggestion_state)
+
+    assert_equal "P3-I10", records.first.fetch("usage")
+    assert_equal "/kill P3-I10", records.first.fetch("completion")
+  end
+
+  # Ranking only reorders matches; with nothing typed each source keeps its own order, so
+  # `/prompt` still offers live workers before the failed heads it can retry.
+  def test_id_suggestions_keep_source_order_when_nothing_is_typed
+    state = tree_suggestion_state
+    state.fetch("agents") << { "id" => "H7", "type" => "head", "status" => "errored" }
+
+    assert_equal %w[P3-I10-W2 P3-I10-W1 P10-I1-W1 H7], suggestion_usages("/prompt ", state)
+    assert_equal %w[P3-I10-W2 P3-I10-W1 P10-I1-W1 H1 H2 H7 P3-I10 P3-I2 P10-I1 P3 P10],
+                 suggestion_usages("/kill ", state)
+  end
+
+  # Only record-shaped ids are ranked. A non-id argument list (themes) keeps its curated order.
+  def test_non_id_argument_suggestions_are_not_reordered
+    themes = Meringue::TUI::Style.colorschemes
+
+    assert_equal themes, suggestion_usages("/theme ", sample_state)
+    assert_equal themes.select { |theme| theme.include?("r") }, suggestion_usages("/theme r", sample_state)
+  end
+
   # The legacy selector words still parse so existing muscle memory keeps working, but they are
   # inert: the kernel prunes everything eligible either way.
   def test_legacy_prune_selector_words_are_accepted_as_no_op_aliases
@@ -682,5 +732,33 @@ class InputSlashCommandParserTest < Minitest::Test
     state = sample_state
     state.fetch("agents").first["harness_session_id"] = "pi-session-1"
     state
+  end
+
+  def suggestion_usages(input, state)
+    suggestion_records(input, state).map { |record| record.fetch("usage") }
+  end
+
+  # Two projects, nested issues, and workers, listed in the order the state sections happen to
+  # hold them so completion ordering is exercised rather than the insertion order.
+  def tree_suggestion_state
+    {
+      "projects" => [
+        { "id" => "P3", "name" => "meringue", "status" => "working" },
+        { "id" => "P10", "name" => "dotfiles", "status" => "working" }
+      ],
+      "issues" => [
+        { "id" => "P3-I10", "title" => "Sort completions", "status" => "working" },
+        { "id" => "P3-I2", "title" => "Fix login", "status" => "queued" },
+        { "id" => "P10-I1", "title" => "Update vim config", "status" => "queued" }
+      ],
+      "agents" => [
+        { "id" => "P3-I10-W2", "type" => "worker", "status" => "working", "issue_id" => "P3-I10" },
+        { "id" => "P3-I10-W1", "type" => "worker", "status" => "completed", "issue_id" => "P3-I10" },
+        { "id" => "P10-I1-W1", "type" => "worker", "status" => "working", "issue_id" => "P10-I1" },
+        { "id" => "H1", "type" => "head", "status" => "completed" },
+        { "id" => "H2", "type" => "head", "status" => "completed" }
+      ],
+      "questions" => []
+    }
   end
 end
