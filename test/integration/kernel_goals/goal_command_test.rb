@@ -235,6 +235,30 @@ class KernelGoalsCommandTest < Minitest::Test
 
     assert_equal "rejected", result.fetch("status")
     assert result.fetch("errors").any? { |error| error.include?("not implemented yet") }
+    assert result.fetch("errors").any? { |error| error.include?("metric_only, reviewer") }, "the rejection must name the modes that do exist"
+  end
+
+  def test_a_head_can_create_a_reviewer_judged_goal_with_the_documented_nested_payload
+    fixture = project_with_issue
+
+    result = apply!(
+      "CreateGoal",
+      {
+        "issue_id" => fixture.fetch("issue_id"),
+        "success_criteria" => "the first-run onboarding is clean, concise, and explains the three core commands",
+        "title" => "Onboarding polish",
+        "judge" => { "mode" => "reviewer" },
+        "metric" => { "guardrails" => [{ "command" => "rake test" }] },
+        "budget" => { "max_iterations" => 4 }
+      }
+    )
+    record = result.fetch("result")
+
+    assert_equal "reviewer", record.dig("judge", "mode")
+    assert_equal ["rake test"], record.dig("metric", "guardrails").map { |guardrail| guardrail.fetch("command") }
+    assert_equal 4, record.dig("budget", "max_iterations")
+    assert_nil record.dig("metric", "target")
+    assert_equal "Onboarding polish", record.fetch("title")
   end
 
   def test_one_issue_can_only_own_one_active_goal

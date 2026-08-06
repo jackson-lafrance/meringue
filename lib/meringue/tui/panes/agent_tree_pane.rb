@@ -624,15 +624,21 @@ module Meringue
           Array(goals).find { |candidate| candidate.is_a?(Hash) && candidate["issue_id"] == issue["id"] }
         end
 
-        # "<iteration>/<budget> <percent complete>" plus the goal's paused/stopped state.
-        # The two numbers answer different questions on purpose: the ratio is budget spent,
-        # the percentage is progress actually made toward the target.
+        # "<iteration>/<budget> <percent/review state>" plus the goal's paused/stopped state.
+        # The iteration ratio is budget spent; the second label is either numeric progress
+        # toward a metric target or, for reviewer-judged loops, the reviewer's latest verdict.
         def goal_marker(goal)
           return "" unless goal.is_a?(Hash)
 
           budget = goal["budget"].is_a?(Hash) ? goal["budget"] : {}
           parts = ["#{goal["current_iteration"].to_i}/#{budget["max_iterations"].to_i}"]
-          parts << goal_percent_label(goal)
+          parts << if Goals::Record.reviewer_judged?(goal)
+                     # A reviewer-judged goal has no number to show, so the tree shows where the
+                     # reviewer stands instead: that is the only progress signal it has.
+                     Goals::Record.review_state(goal)
+                   else
+                     goal_percent_label(goal)
+                   end
           parts << "paused" if goal["paused"]
           parts << goal_stop_label(goal["stop_reason"])
           parts.reject { |part| part.to_s.empty? }.join(" ")

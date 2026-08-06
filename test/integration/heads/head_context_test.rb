@@ -345,6 +345,21 @@ class HeadContextTest < Minitest::Test
     assert(rules.any? { |rule| rule.include?("Insistence without a measurable finish line is still ordinary work") })
   end
 
+  # A head that only hears "the finish line must be a command" will invent a fake metric for a
+  # subjective goal, or downgrade it to one worker. The reviewer judge has to be in its context.
+  def test_a_head_is_told_that_a_subjective_finish_line_is_the_reviewer_judge
+    context = build_head_context
+    prompt = context.system_prompt
+    rules = context.to_prompt_h.dig("routing_context", "decision_rules")
+
+    assert_includes prompt, "judge.mode \"reviewer\""
+    assert_includes prompt, "could be judged by reading the result"
+
+    reviewer_rule = rules.find { |rule| rule.include?("A finish line does not have to be a number") }
+    refute_nil reviewer_rule, "expected a routing rule for reviewer-judged goals"
+    assert_includes reviewer_rule, "Never invent a fake metric"
+  end
+
   # A head that asked to both follow up and replace one worker had its SpawnWorker rejected, so the
   # user's retry did nothing. The kernel contract has to be stated in the routing rules.
   def test_routing_rules_forbid_combining_replace_with_follow_up_or_after
