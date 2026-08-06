@@ -172,6 +172,10 @@ module HarnessSupport
     if config["argv_log"]
       File.write(config["argv_log"], JSON.generate(ARGV))
     end
+    if config["env_log"]
+      keys = %w[GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL EMAIL]
+      File.write(config["env_log"], JSON.generate(keys.to_h { |key| [key, ENV[key]] }))
+    end
 
     def log_command(config, command)
       return unless config["commands_log"]
@@ -292,6 +296,10 @@ module HarnessSupport
     $stdout.sync = true
 
     File.write(config["argv_log"], JSON.generate(ARGV)) if config["argv_log"]
+    if config["env_log"]
+      keys = %w[GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL EMAIL]
+      File.write(config["env_log"], JSON.generate(keys.to_h { |key| [key, ENV[key]] }))
+    end
 
     Array(config["stdout_lines"]).each do |line|
       $stdout.write(line.is_a?(String) ? "#{line}\n" : "#{JSON.generate(line)}\n")

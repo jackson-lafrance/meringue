@@ -19,6 +19,25 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     track_session(client, ref)
   end
 
+  def test_pi_process_exports_the_repository_user_identity_to_the_child_process
+    repo = File.join(tmpdir, "repo")
+    FileUtils.mkdir_p(repo)
+    assert system("git", "init", "--initial-branch=main", chdir: repo)
+    assert system("git", "config", "user.name", "Pi User", chdir: repo)
+    assert system("git", "config", "user.email", "pi@example.test", chdir: repo)
+    env_log = File.join(tmpdir, "pi-child-env.json")
+    client, = build_pi_client(tmpdir, stub_config: { "env_log" => env_log })
+
+    ref = spawn(client, cwd: repo)
+    client.kill_session(ref)
+
+    child_env = JSON.parse(File.read(env_log))
+    assert_equal "Pi User", child_env.fetch("GIT_AUTHOR_NAME")
+    assert_equal "pi@example.test", child_env.fetch("GIT_AUTHOR_EMAIL")
+    assert_equal "Pi User", child_env.fetch("GIT_COMMITTER_NAME")
+    assert_equal "pi@example.test", child_env.fetch("GIT_COMMITTER_EMAIL")
+  end
+
   def test_spawn_session_negotiates_rpc_and_returns_a_contract_shaped_session_ref
     session_file = File.join(tmpdir, "pi-sessions", "sess-42.jsonl")
     client, stub = build_pi_client(

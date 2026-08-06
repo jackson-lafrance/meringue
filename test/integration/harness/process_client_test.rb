@@ -40,6 +40,28 @@ class HarnessProcessClientTest < HarnessIntegrationTest
     [client, stub]
   end
 
+  def test_process_client_exports_the_repository_user_identity_to_the_child_process
+    repo = File.join(tmpdir, "repo")
+    FileUtils.mkdir_p(repo)
+    assert system("git", "init", "--initial-branch=main", chdir: repo)
+    assert system("git", "config", "user.name", "Process User", chdir: repo)
+    assert system("git", "config", "user.email", "process@example.test", chdir: repo)
+    env_log = File.join(tmpdir, "child-env.json")
+    client, = build_claude_client(
+      stub_config: { "stdout_lines" => CLAUDE_STREAM, "env_log" => env_log }
+    )
+
+    ref = client.spawn_session(kind: "worker", cwd: repo, prompt: "do it", system_prompt: nil,
+                               session_name: "Identity test")
+    client.wait_for_settled(ref)
+
+    child_env = JSON.parse(File.read(env_log))
+    assert_equal "Process User", child_env.fetch("GIT_AUTHOR_NAME")
+    assert_equal "process@example.test", child_env.fetch("GIT_AUTHOR_EMAIL")
+    assert_equal "Process User", child_env.fetch("GIT_COMMITTER_NAME")
+    assert_equal "process@example.test", child_env.fetch("GIT_COMMITTER_EMAIL")
+  end
+
   def test_claude_spawn_returns_a_contract_shaped_session_ref_while_the_turn_runs
     client, = build_claude_client(stub_config: { "stdout_lines" => CLAUDE_STREAM, "sleep" => 0.4 })
 
