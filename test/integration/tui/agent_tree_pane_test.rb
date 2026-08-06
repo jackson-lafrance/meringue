@@ -272,6 +272,26 @@ class TuiAgentTreePaneTest < Minitest::Test
     assert_includes styles_in(worker_row), Style::PR_MARKER
   end
 
+  # The PR marker is row status, not decoration, so a title long enough to fill the pane
+  # is ellipsized until the marker fits instead of the marker being pushed off the row.
+  def test_a_long_title_never_pushes_the_pull_request_marker_off_the_row
+    open_pr = { "url" => "https://github.com/owner/repo/pull/12", "state" => "open" }
+    long_title = "Rework the delivery pull request marker so it survives a title that fills the whole pane"
+    state = tree_state(
+      projects: [project_record("P1")],
+      issues: [issue_record("P1-I1", "title" => long_title, "delivery_pull_request" => open_pr)],
+      agents: []
+    )
+
+    [24, 30, 34, 40].each do |width|
+      rendered = plain_lines(@pane.lines(state, width: width))
+
+      assert_includes rendered.join("\n"), "↗", "width #{width} dropped the PR marker"
+      assert_includes rendered.join("\n"), Pane::ELLIPSIS, "width #{width} should ellipsize the title instead"
+      assert rendered.all? { |line| line.length <= width }, "no row may exceed the pane content width"
+    end
+  end
+
   def test_merged_pull_requests_are_not_marked_as_active
     merged_pr = { "url" => "https://github.com/owner/repo/pull/12", "state" => "merged" }
     state = tree_state(
