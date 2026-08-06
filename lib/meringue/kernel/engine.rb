@@ -94,6 +94,24 @@ module Meringue
         |tls|ssl|certificate|handshake|proxy|gateway|fetch\sfailed
         |overloaded|502|503|504
       /ix.freeze
+      # A dead turn that resuming can never repair, because what the provider rejected is the
+      # saved transcript itself. The harness classifies it (Pi:
+      # `PiClient::UNREPLAYABLE_SESSION_PATTERN`); this pattern is the kernel's fallback for the
+      # same evidence arriving through session events instead of a turn outcome.
+      SETTLE_FAILURE_UNREPLAYABLE_KIND = "unreplayable_session"
+      SETTLE_FAILURE_UNREPLAYABLE_PATTERN = /
+        (?:thinking|redacted_thinking)[^\n]{0,200}?cannot\s+be\s+modified
+        |blocks\s+must\s+remain\s+as\s+they\s+were\s+in\s+the\s+original\s+response
+        |expected\s+`?thinking`?\s+or\s+`?redacted_thinking`?
+      /ix.freeze
+      # How many times one worker's poisoned session is restarted in place. Exactly one: the
+      # restart is a fresh session on the same worktree, so if that session dies the same way the
+      # cause is not the transcript and another identical restart would only spend tokens.
+      WORKER_SESSION_RESTART_MAX_ATTEMPTS = 1
+      # How long a chain of in-place restarts may get before Meringue stops recovering by itself
+      # and leaves the work to the user. Guards the pathological case where every successor's own
+      # first turn is also cut short mid-tool-call.
+      WORKER_SESSION_RESTART_MAX_CHAIN_DEPTH = 2
 
       COMMAND_ALIASES = {
         "add_project" => "AddProject",
@@ -649,6 +667,12 @@ module Meringue
                  end
         return result unless result.fetch("status", nil) == "accepted"
 
+        # A session the provider refuses to replay is recovered here, before dependents are
+        # resolved, so the successor exists in time to inherit the dead worker's queue instead of
+        # letting `if_predecessor_fails: "cancel"` dead-end it.
+        restart = recover_unreplayable_worker_session(result)
+        return restart if restart
+
         # First of the two activation hooks for queued dependents. Reconciliation is the second, so
         # a dependent cannot be lost if this process dies between A finishing and B starting.
         # A failed settle resolves dependents too: `if_predecessor_fails: "run"` starts them anyway,
@@ -668,7 +692,45 @@ module Meringue
         )
         return result unless result.fetch("status", nil) == "accepted"
 
+        restart = recover_unreplayable_worker_session(result)
+        return restart if restart
+
         with_deferred_worker_resolution(result)
+      end
+
+      # The settle-time half of the unreplayable-session recovery. Returns the accepted result of
+      # the settle when the successor was spawned (SpawnWorker already repointed the dead worker's
+      # dependents at it), or nil when there is nothing to recover, so the caller falls back to the
+      # normal dependent resolution.
+      def recover_unreplayable_worker_session(settle_result)
+        return nil unless settle_result.fetch("command_type", nil) == "MarkWorkerSettleFailed"
+
+        agent_id = present_string(settle_result.fetch("target_id", nil))
+        return nil unless agent_id
+
+        agent = agent_record_snapshot(agent_id)
+        return nil unless agent && worker_session_restart_eligible?(agent)
+
+        restart = restart_unreplayable_worker_session(agent_id, trigger: "settle")
+        return nil unless restart.is_a?(Hash) && restart.fetch("claimed", false)
+        # The restart could not be spawned: fall through so dependents still get resolved (and
+        # cancelled if that is their policy) rather than waiting on a worker that cannot continue.
+        return nil unless restart.fetch("restarted", false)
+
+        merge_result_log_entry_ids(settle_result, restart.fetch("log_entry_ids", []))
+      end
+
+      def merge_result_log_entry_ids(result, log_entry_ids)
+        return result if Array(log_entry_ids).empty?
+
+        result.merge("log_entry_ids" => (Array(result.fetch("log_entry_ids", [])) + Array(log_entry_ids)).uniq)
+      end
+
+      def agent_record_snapshot(agent_id)
+        synchronized_state do
+          agent = find_agent(normalized_state, agent_id)
+          agent.is_a?(Hash) ? deep_copy(agent) : nil
+        end
       end
 
       def record_worker_completion(agent_id:, harness_events: [], last_assistant_text: nil, session_ref: nil)
@@ -776,6 +838,13 @@ module Meringue
             "status_reason" => settle_failure_status_reason(failure),
             "error_message" => failure.fetch("reason")
           }
+          # A session the provider refuses to replay is not resumable, so the record says what the
+          # user can act on: the work is intact in the worktree, and continuing means a fresh
+          # session there rather than another attempt at the same transcript.
+          if unreplayable_session_failure?(failure)
+            metadata_updates["session_recovery"] = unreplayable_session_recovery_record(agent, now)
+            metadata_updates["status_reason"] = "#{settle_failure_status_reason(failure)}. #{unreplayable_session_recovery_advice(agent)}"
+          end
           # Never overwrite a partial result the worker did manage to produce.
           partial_text = present_string(last_assistant_text) || present_string(raw_failure.fetch("last_assistant_text", nil))
           metadata_updates["last_assistant_text"] = partial_text if partial_text
@@ -792,13 +861,14 @@ module Meringue
             "settle_failure" => failure,
             "recoverable" => worker_resumable_after_settle_failure?(agent)
           }.compact
+          details["session_recovery"] = metadata_updates["session_recovery"] if metadata_updates.key?("session_recovery")
           log_ids = append_harness_event_logs(state, agent, harness_events)
           log_ids.concat(append_log(
             state,
             source_type: "worker",
             source_id: agent.fetch("id"),
             level: "error",
-            message: "Worker #{agent.fetch("id")} errored without finishing: #{failure.fetch("reason")}",
+            message: settle_failure_log_message(agent, failure),
             details: details
           ))
           touch_state!(state, now)
@@ -4725,8 +4795,20 @@ module Meringue
           worker = find_agent(state, agent_id)
           next unless worker && worker.fetch("type", nil) == "worker"
 
+          # A worker whose worktree was taken over by a successor no longer owns it, so pruning it
+          # removes only its record. Without this, the shared checkout would either be deleted from
+          # under the successor or block the predecessor's record forever, one warning per pass.
+          if worker_workspace_handed_over?(state, worker)
+            outcome = handed_over_workspace_cleanup_outcome(worker, now)
+            worker["harness_metadata"] = (worker.fetch("harness_metadata", {}) || {}).merge("workspace_cleanup" => outcome)
+            next outcome.merge("log_entry_ids" => [])
+          end
+
           protected_paths = state.fetch("agents").filter_map do |other|
             next unless other.fetch("type", nil) == "worker" && other.fetch("id", nil) != agent_id
+            # The successor is listed separately, so a handed-over predecessor must not protect a
+            # path it no longer owns: that would leak the worktree when the issue is pruned.
+            next if worker_workspace_handed_over?(state, other)
 
             worker_worktree_root_path(other)
           end
@@ -4757,6 +4839,35 @@ module Meringue
           worker["harness_metadata"] = (worker.fetch("harness_metadata", {}) || {}).merge("workspace_cleanup" => outcome) if worker
           outcome.merge("log_entry_ids" => worker ? append_workspace_cleanup_log(state, worker, outcome) : [])
         end
+      end
+
+      def worker_workspace_handed_over?(state, worker)
+        successor_id = present_string(worker.fetch("replaced_by_agent_id", nil)) ||
+                       present_string(worker_session_recovery(worker).fetch("restarted_by_agent_id", nil))
+        return false unless successor_id
+
+        successor = find_agent(state, successor_id)
+        return false unless successor.is_a?(Hash) && successor.fetch("type", nil) == "worker"
+
+        root = worker_worktree_root_path(worker)
+        !!present_string(root) && worker_worktree_root_path(successor) == root
+      end
+
+      def handed_over_workspace_cleanup_outcome(worker, now)
+        {
+          "agent_id" => worker.fetch("id", nil),
+          "issue_id" => worker.fetch("issue_id", nil),
+          "project_id" => worker.fetch("project_id", nil),
+          "status" => "skipped",
+          "reason" => "workspace_handed_over_to_successor",
+          "success" => true,
+          "attempted" => false,
+          "worktree_root_path" => worker_worktree_root_path(worker),
+          "workspace_branch" => worker.fetch("workspace_branch", nil),
+          "successor_agent_id" => present_string(worker.fetch("replaced_by_agent_id", nil)) ||
+            present_string(worker_session_recovery(worker).fetch("restarted_by_agent_id", nil)),
+          "checked_at" => now
+        }.compact
       end
 
       def worker_workspace_cleanup_record(state, worker)
@@ -5211,13 +5322,19 @@ module Meringue
       # rather than inside the state lock every other kernel section shares.
       def prompt_agent_command(command_id, command_type, payload)
         agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
-        head = if present_string(agent_id)
-                 synchronized_state do
-                   agent = find_agent(normalized_state, agent_id.to_s)
-                   agent && agent.fetch("type", nil) == "head" ? deep_copy(agent) : nil
-                 end
-               end
-        return synchronized_state { prompt_agent(command_id, command_type, payload) } unless head
+        agent = present_string(agent_id) ? agent_record_snapshot(agent_id.to_s) : nil
+        head = agent && agent.fetch("type", nil) == "head" ? agent : nil
+        unless head
+          prompt = value_at(payload, "prompt", "Prompt", "message", "Message")
+          # Continuing a worker whose session the provider refuses to replay cannot be a prompt: the
+          # resume would send the same rejected transcript. It is the same intent though, so it is
+          # honoured as a fresh session on the worker's own worktree instead of a dead end.
+          if agent && worker_session_unreplayable?(agent) && present_string(prompt)
+            return continue_unreplayable_worker_session(command_id, command_type, agent, prompt.to_s)
+          end
+
+          return synchronized_state { prompt_agent(command_id, command_type, payload) }
+        end
 
         prompt = value_at(payload, "prompt", "Prompt", "message", "Message")
         if blank?(prompt)
@@ -5225,6 +5342,48 @@ module Meringue
         end
 
         retry_head(command_id, command_type, head, instruction: prompt.to_s)
+      end
+
+      # `/prompt` (or a head's PromptAgent) aimed at a worker whose session cannot be replayed. The
+      # instruction is carried into a fresh session on the same worktree and branch. When the
+      # restart was already spent, the reply names the successor that holds the work.
+      def continue_unreplayable_worker_session(command_id, command_type, agent, instruction)
+        restart = restart_unreplayable_worker_session(agent.fetch("id"), trigger: "prompt", instruction: instruction)
+        if restart.fetch("claimed", false) && restart.fetch("restarted", false)
+          successor = agent_record_snapshot(restart.fetch("successor_agent_id"))
+          return accepted_result(
+            command_id,
+            command_type,
+            restart.fetch("successor_agent_id"),
+            restart.fetch("message"),
+            successor || restart.fetch("result", nil),
+            restart.fetch("log_entry_ids", [])
+          )
+        end
+
+        synchronized_state do
+          rejected_result(command_id, command_type, unreplayable_prompt_rejection_message(agent, restart), ["session_unreplayable"])
+        end
+      end
+
+      def unreplayable_prompt_rejection_message(agent, restart)
+        current = agent_record_snapshot(agent.fetch("id")) || agent
+        recovery = worker_session_recovery(current)
+        successor_id = present_string(current.fetch("replaced_by_agent_id", nil)) ||
+                       present_string(recovery.fetch("restarted_by_agent_id", nil))
+        base = "Agent #{agent.fetch("id")} cannot be continued because its agent session can no longer be " \
+               "replayed to the model."
+        if successor_id
+          return "#{base} Worker #{successor_id} already took over its workspace, so prompt #{successor_id} instead."
+        end
+        if restart.is_a?(Hash) && restart.fetch("claimed", false)
+          return "#{base} Restarting it in a fresh session failed: #{result_failure_summary(restart.fetch("result", nil))}. " \
+                 "#{unreplayable_session_recovery_advice(current)}"
+        end
+
+        "#{base} #{unreplayable_session_recovery_advice(current)} Meringue has already used its automatic " \
+          "restart for this worker, so spawn a worker on this issue (or continue in the worktree yourself) " \
+          "instead of prompting this record."
       end
 
       def prompt_agent(command_id, command_type, payload)
@@ -6695,6 +6854,11 @@ module Meringue
         # Set by the kernel when it corrected a head's predicted issue id; kept on the worker and
         # in its spawn log so a corrected route is visible instead of silent.
         rerouted_from_issue_id = present_string(value_at(payload, "_rerouted_from_issue_id", "rerouted_from_issue_id"))
+        # Set by the kernel when it restarts a worker whose session can no longer be replayed. The
+        # successor takes over the dead worker's existing worktree and branch instead of allocating
+        # a new one, because that is where the unfinished work already lives.
+        inherit_workspace_agent_id = present_string(value_at(payload, "_inherit_workspace_from_agent_id", "inherit_workspace_from_agent_id"))
+        session_restart_of_agent_id = present_string(value_at(payload, "_session_restart_of_agent_id", "session_restart_of_agent_id"))
         errors = []
 
         errors << "issue_id is required" if blank?(issue_id)
@@ -6810,6 +6974,9 @@ module Meringue
           if existing
             agent_id = existing.fetch("id")
             workspace = workspace_from_reserved_agent(existing)
+            # A retry of an inherited-workspace reservation must not allocate a new worktree: the
+            # predecessor's checkout is the whole point of the restart.
+            inherited_workspace = inherited_workspace_reservation?(workspace) ? workspace : nil
             active_provider = existing.fetch("harness", active_provider)
             # This is a fresh provisioning attempt for a reservation whose last attempt failed, so
             # the record says "allocating" again instead of still showing the previous failure.
@@ -6822,7 +6989,17 @@ module Meringue
                              present_string(after_agent_id)
           else
             agent_id = next_worker_id!(state, issue.fetch("id"))
-            workspace = resolve_worker_workspace(
+            inherited_workspace = inherited_worker_workspace(state, inherit_workspace_agent_id) if inherit_workspace_agent_id
+            if inherit_workspace_agent_id && !inherited_workspace
+              return rejected_result(
+                command_id,
+                command_type,
+                "Worker cannot take over #{inherit_workspace_agent_id}'s workspace because that workspace is no longer on disk.",
+                ["inherited_workspace_unavailable"]
+              )
+            end
+
+            workspace = inherited_workspace || resolve_worker_workspace(
               project: project,
               issue: issue,
               requested_workspace_path: requested_workspace_path,
@@ -6848,6 +7025,14 @@ module Meringue
               now: now,
               harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
             )
+            if inherit_workspace_agent_id || session_restart_of_agent_id
+              # Persisted on the reservation so a provisioning retry inherits the same workspace and
+              # keeps counting the restart chain instead of starting the recovery over.
+              agent["harness_metadata"] = agent.fetch("harness_metadata").merge(
+                "inherit_workspace_from_agent_id" => inherit_workspace_agent_id,
+                "session_recovery" => session_restart_of_agent_id ? successor_session_recovery(state, session_restart_of_agent_id, now) : nil
+              ).compact
+            end
             state.fetch("agents") << agent
             issue.fetch("agent_ids") << agent_id unless issue.fetch("agent_ids").include?(agent_id)
             issue["status"] = "working"
@@ -6875,12 +7060,16 @@ module Meringue
             "follow_up_of_agent_id" => present_string(follow_up_of_agent_id),
             "replace_agent_id" => present_string(replace_agent_id),
             "after_agent_id" => present_string(after_agent_id),
+            "inherited_workspace" => inherited_workspace,
+            "session_restart_of_agent_id" => session_restart_of_agent_id,
             "prompt" => prompt.to_s
           }
         end
         prompt = reservation.fetch("prompt", prompt)
 
-        workspace = resolve_worker_workspace(
+        # An inherited workspace is already provisioned by definition: it is the predecessor's live
+        # worktree, so it is adopted as-is and never re-created, re-branched, or cleaned up.
+        workspace = reservation.fetch("inherited_workspace", nil) || resolve_worker_workspace(
           project: reservation.fetch("project"),
           issue: reservation.fetch("issue"),
           requested_workspace_path: requested_workspace_path,
@@ -7948,6 +8137,55 @@ module Meringue
           }.compact,
           "created_at" => now,
           "updated_at" => now
+        }
+      end
+
+      # The predecessor's workspace, adopted verbatim for a successor that continues its work.
+      # `created` is forced to false so no failure path can ever delete a worktree this kernel did
+      # not create - the commits in it are the only copy of the work being recovered.
+      def inherited_worker_workspace(state, agent_id)
+        predecessor = find_agent(state, agent_id)
+        return nil unless predecessor.is_a?(Hash)
+
+        workspace_path = present_string(predecessor.fetch("workspace_path", nil))
+        return nil unless workspace_path && Dir.exist?(File.expand_path(workspace_path))
+
+        metadata = predecessor.fetch("harness_metadata", {}) || {}
+        plan = metadata.fetch("workspace_plan", nil)
+        plan = plan.is_a?(Hash) ? deep_copy(plan) : {}
+        plan = plan.merge(
+          "created" => false,
+          "inherited_from_agent_id" => predecessor.fetch("id"),
+          "workspace_path" => workspace_path,
+          "strategy" => plan.fetch("strategy", predecessor.fetch("workspace_strategy", nil)),
+          "workspace_branch" => predecessor.fetch("workspace_branch", plan.fetch("workspace_branch", nil))
+        ).compact
+        {
+          "workspace_path" => workspace_path,
+          "workspace_strategy" => predecessor.fetch("workspace_strategy", nil),
+          "workspace_branch" => predecessor.fetch("workspace_branch", nil),
+          "note" => "took over #{predecessor.fetch("id")}'s existing workspace",
+          "plan" => plan,
+          "created" => false,
+          "errors" => []
+        }
+      end
+
+      def inherited_workspace_reservation?(workspace)
+        plan = workspace.is_a?(Hash) ? workspace.fetch("plan", nil) : nil
+        !!(plan.is_a?(Hash) && present_string(plan.fetch("inherited_from_agent_id", nil)))
+      end
+
+      # The successor's copy of the recovery record: it remembers which worker it took over and how
+      # deep the restart chain is, which is what stops an endless chain of restarts.
+      def successor_session_recovery(state, predecessor_id, now)
+        predecessor = find_agent(state, predecessor_id)
+        depth = predecessor ? worker_session_restart_chain_depth(predecessor) : 0
+        {
+          "state" => "restarted_session",
+          "restarted_from_agent_id" => predecessor_id,
+          "restarted_at" => now,
+          "restart_chain_depth" => depth + 1
         }
       end
 
@@ -10935,6 +11173,9 @@ module Meringue
         agent.fetch("type", nil) == "worker" &&
           client.respond_to?(:attach_session) &&
           agent_has_session_reference?(agent) &&
+          # A session the provider already refused to replay is not retried: the resume would send
+          # the same rejected transcript. It is recovered by a fresh session instead.
+          !worker_session_unreplayable?(agent) &&
           worker_resume_attempt_count(agent) < WORKER_RECONCILE_RESUME_MAX_ATTEMPTS
       end
 
@@ -11565,12 +11806,16 @@ module Meringue
       end
 
       def settle_failure_kind(error_message)
+        return SETTLE_FAILURE_UNREPLAYABLE_KIND if SETTLE_FAILURE_UNREPLAYABLE_PATTERN.match?(error_message.to_s)
+
         SETTLE_FAILURE_NETWORK_PATTERN.match?(error_message.to_s) ? "network_failure" : "provider_error"
       end
 
       def settle_failure_reason(error_message)
         detail = error_message.to_s.strip
-        if SETTLE_FAILURE_NETWORK_PATTERN.match?(detail)
+        if SETTLE_FAILURE_UNREPLAYABLE_PATTERN.match?(detail)
+          "its saved session can no longer be replayed to the model, so resuming it fails the same way every time (#{detail})"
+        elsif SETTLE_FAILURE_NETWORK_PATTERN.match?(detail)
           "its model request failed mid-turn (network error: #{detail})"
         elsif detail.empty?
           "its agent turn ended without finishing"
@@ -11635,9 +11880,260 @@ module Meringue
         return false unless agent.is_a?(Hash)
         return false unless agent.fetch("type", nil) == "worker"
         return false unless agent.fetch("status", nil) == "errored"
+        # The one dead turn that resuming can never repair: the provider rejected the saved
+        # transcript, so sending it again is the same request. Such a worker is recovered by
+        # restarting its work in a fresh session on the same worktree, never by a resume.
+        return false if worker_session_unreplayable?(agent)
 
         metadata = agent.fetch("harness_metadata", {}) || {}
         metadata.fetch("settle_failure", nil).is_a?(Hash) && agent_has_session_reference?(agent)
+      end
+
+      # --- sessions the provider refuses to replay -------------------------------------------
+      #
+      # A worker's turn can die in a way no resume can fix: the model provider rejects the saved
+      # transcript itself (an interrupted assistant turn whose `thinking` blocks it will not accept
+      # back). Resuming replays exactly the same turn, so every attempt fails identically and the
+      # worker - plus everything queued behind it - is dead-ended.
+      #
+      # The transcript belongs to the harness, so Meringue does not try to repair it. What it owns
+      # is the workspace: the worktree, the branch, and the work already committed there. So the
+      # recovery is a fresh session on the *same* worktree and branch, spawned as a replacement so
+      # queued dependents follow the successor instead of waiting on a session that cannot start.
+      def unreplayable_session_failure?(failure)
+        return false unless failure.is_a?(Hash)
+        return true if failure.fetch("kind", nil).to_s == SETTLE_FAILURE_UNREPLAYABLE_KIND
+
+        SETTLE_FAILURE_UNREPLAYABLE_PATTERN.match?(failure.fetch("error_message", nil).to_s)
+      end
+
+      def worker_session_unreplayable?(agent)
+        return false unless agent.is_a?(Hash)
+        return false unless agent.fetch("type", nil) == "worker"
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        unreplayable_session_failure?(metadata.fetch("settle_failure", nil))
+      end
+
+      def worker_session_recovery(agent)
+        metadata = agent.is_a?(Hash) ? (agent.fetch("harness_metadata", {}) || {}) : {}
+        metadata = {} unless metadata.is_a?(Hash)
+        recovery = metadata.fetch("session_recovery", {}) || {}
+        recovery.is_a?(Hash) ? recovery : {}
+      end
+
+      def worker_session_restart_chain_depth(agent)
+        worker_session_recovery(agent).fetch("restart_chain_depth", 0).to_i
+      end
+
+      # Everything that must be true before the kernel spends a fresh session on this recovery.
+      def worker_session_restart_eligible?(agent)
+        return false unless worker_session_unreplayable?(agent)
+        return false if agent.fetch("status", nil) == "killed"
+
+        recovery = worker_session_recovery(agent)
+        return false if present_string(recovery.fetch("restarted_by_agent_id", nil))
+        return false if recovery.fetch("restart_attempts", 0).to_i >= WORKER_SESSION_RESTART_MAX_ATTEMPTS
+        return false if worker_session_restart_chain_depth(agent) >= WORKER_SESSION_RESTART_MAX_CHAIN_DEPTH
+        return false if present_string(agent.fetch("replaced_by_agent_id", nil))
+
+        workspace_path = present_string(agent.fetch("workspace_path", nil))
+        !!workspace_path && Dir.exist?(File.expand_path(workspace_path))
+      end
+
+      def unreplayable_session_recovery_record(agent, now, extra = {})
+        recovery = worker_session_recovery(agent)
+        recovery.merge(
+          "state" => "session_unreplayable",
+          "detected_at" => recovery.fetch("detected_at", nil) || now,
+          "recommended_action" => "restart_session_in_place",
+          "workspace_path" => agent.fetch("workspace_path", nil),
+          "workspace_branch" => agent.fetch("workspace_branch", nil),
+          "restart_attempts" => recovery.fetch("restart_attempts", 0).to_i,
+          "restart_chain_depth" => worker_session_restart_chain_depth(agent)
+        ).merge(extra).compact
+      end
+
+      # What the record, the log line, and the focused pane tell the user. Deliberately concrete:
+      # the branch is what they care about, because it is where the work already is.
+      def unreplayable_session_recovery_advice(agent)
+        branch = present_string(agent.fetch("workspace_branch", nil))
+        location = branch ? "worktree and branch #{branch}" : "worktree"
+        "Its #{location} still hold the work, so Meringue does not resume this session: continuing " \
+          "means a fresh session on the same workspace."
+      end
+
+      def settle_failure_log_message(agent, failure)
+        base = "Worker #{agent.fetch("id")} errored without finishing: #{failure.fetch("reason")}"
+        return base unless unreplayable_session_failure?(failure)
+
+        "#{base}. #{unreplayable_session_recovery_advice(agent)}"
+      end
+
+      def worker_session_restart_command_id(agent_id, attempt)
+        "session-restart-#{agent_id}-#{attempt}"
+      end
+
+      # Reserves this worker's single in-place restart under the state lock, so two reconcile passes
+      # (or two kernel instances sharing one state file) cannot both spend it.
+      def claim_worker_session_restart(agent_id, trigger:)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          return { "claimed" => false, "reason" => "agent_not_found" } unless agent
+          return { "claimed" => false, "reason" => "not_eligible" } unless worker_session_restart_eligible?(agent)
+
+          now = timestamp
+          attempt = worker_session_recovery(agent).fetch("restart_attempts", 0).to_i + 1
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          agent["harness_metadata"] = metadata.merge(
+            "session_recovery" => unreplayable_session_recovery_record(
+              agent,
+              now,
+              "restart_attempts" => attempt,
+              "restart_claimed_at" => now,
+              "restart_trigger" => trigger.to_s
+            )
+          )
+          agent["updated_at"] = now
+          touch_state!(state, now)
+          store.save(state)
+          {
+            "claimed" => true,
+            "agent" => deep_copy(agent),
+            "attempt" => attempt,
+            "restart_command_id" => worker_session_restart_command_id(agent_id.to_s, attempt)
+          }
+        end
+      end
+
+      # The recovery itself: a replacement worker with a fresh session on the dead worker's own
+      # worktree and branch. Spawning it as a replacement is what unblocks the queue - dependents
+      # waiting on the dead worker are repointed at the successor by SpawnWorker itself.
+      #
+      # Must be called *outside* `synchronized_state`: it applies a SpawnWorker command.
+      def restart_unreplayable_worker_session(agent_id, trigger:, instruction: nil)
+        claim = claim_worker_session_restart(agent_id, trigger: trigger)
+        return claim unless claim.fetch("claimed", false)
+
+        agent = claim.fetch("agent")
+        result = apply(
+          "command_id" => claim.fetch("restart_command_id"),
+          "type" => "SpawnWorker",
+          "payload" => {
+            "issue_id" => agent.fetch("issue_id", nil),
+            "prompt" => unreplayable_session_restart_prompt(agent, instruction: instruction),
+            "title" => worker_session_restart_title(agent),
+            "replace_agent_id" => agent.fetch("id"),
+            "_inherit_workspace_from_agent_id" => agent.fetch("id"),
+            "_session_restart_of_agent_id" => agent.fetch("id")
+          }.compact
+        )
+        record_worker_session_restart_outcome(agent, claim, result, trigger: trigger)
+      rescue StandardError => e
+        # The record still has to say what happened, and the log line still has to be written under
+        # the state lock, so the failure is reported through the same outcome path.
+        record_worker_session_restart_outcome(
+          (claim.is_a?(Hash) && claim.fetch("agent", nil)) || { "id" => agent_id.to_s },
+          claim.is_a?(Hash) ? claim : {},
+          {
+            "command_type" => "SpawnWorker",
+            "status" => "failed",
+            "message" => "Restarting worker #{agent_id} failed: #{e.message}",
+            "errors" => [e.class.name, e.message]
+          },
+          trigger: trigger
+        )
+      end
+
+      def worker_session_restart_title(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        present_string(metadata.fetch("title", nil)) || "Continue #{agent.fetch("id")}"
+      end
+
+      # The successor is told three things a fresh session cannot know: the assignment, that its
+      # predecessor's transcript is gone for good, and that the workspace already holds real work.
+      def unreplayable_session_restart_prompt(agent, instruction: nil)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        original = present_string(metadata.fetch("spawn_prompt", nil))
+        branch = present_string(agent.fetch("workspace_branch", nil))
+        location = branch ? "The worktree at #{agent.fetch("workspace_path")} and its branch #{branch} are" : "The worktree at #{agent.fetch("workspace_path")} is"
+        header = [
+          "You are continuing work that agent #{agent.fetch("id")} started. Its agent session could " \
+          "no longer be replayed to the model, so its transcript is unavailable and this is a fresh " \
+          "session on the same workspace.",
+          "#{location} unchanged, so any work it already committed or left uncommitted is still there.",
+          "Start by re-establishing what is already done (for example `git status` and `git log`) " \
+          "before continuing, and do not redo work that is already committed."
+        ].join("\n\n")
+        sections = [header]
+        sections << "--- Original assignment ---\n\n#{original}" if original
+        sections << "--- New instruction ---\n\n#{present_string(instruction)}" if present_string(instruction)
+        sections.join("\n\n")
+      end
+
+      def record_worker_session_restart_outcome(agent, claim, result, trigger:)
+        agent_id = agent.fetch("id", nil).to_s
+        accepted = result.is_a?(Hash) && result.fetch("status", nil) == "accepted"
+        successor_id = accepted ? present_string(result.fetch("target_id", nil)) : nil
+        synchronized_state do
+          state = normalized_state
+          record = find_agent(state, agent_id)
+          now = timestamp
+          if record
+            recovery = worker_session_recovery(record).merge(
+              "state" => accepted ? "restarted" : "restart_failed",
+              "restarted_by_agent_id" => successor_id,
+              "restarted_at" => accepted ? now : nil,
+              "restart_error" => accepted ? nil : result_failure_summary(result)
+            ).compact
+            record["harness_metadata"] = (record.fetch("harness_metadata", {}) || {}).merge("session_recovery" => recovery)
+            record["updated_at"] = now
+          end
+          branch = present_string(agent.fetch("workspace_branch", nil))
+          message = if accepted
+                      "Worker #{agent_id}'s session could not be replayed, so worker #{successor_id} took over its " \
+                        "workspace#{branch ? " on branch #{branch}" : ""} in a fresh session."
+                    else
+                      "Worker #{agent_id}'s session could not be replayed and restarting it failed: " \
+                        "#{result_failure_summary(result)}. Its workspace is untouched, so the work can be continued by hand."
+                    end
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: agent_id,
+            level: accepted ? "info" : "error",
+            message: message,
+            details: {
+              "agent_id" => agent_id,
+              "successor_agent_id" => successor_id,
+              "trigger" => trigger.to_s,
+              "attempt" => claim.fetch("attempt", nil),
+              "workspace_path" => agent.fetch("workspace_path", nil),
+              "workspace_branch" => agent.fetch("workspace_branch", nil)
+            }.compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+          {
+            "claimed" => true,
+            "restarted" => accepted,
+            "agent_id" => agent_id,
+            "successor_agent_id" => successor_id,
+            "message" => message,
+            "log_entry_ids" => log_ids,
+            "result" => result
+          }
+        end
+      end
+
+      def result_failure_summary(result)
+        return "unknown error" unless result.is_a?(Hash)
+
+        present_string(result.fetch("message", nil)) ||
+          present_string(Array(result.fetch("errors", [])).join("; ")) ||
+          "unknown error"
       end
 
       # Once a prompt lands the worker is working again, so the dead-turn reason must not linger

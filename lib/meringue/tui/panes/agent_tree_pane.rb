@@ -578,7 +578,13 @@ module Meringue
           metadata = worker.is_a?(Hash) ? (worker["harness_metadata"] || {}) : {}
           return "" unless metadata.is_a?(Hash) && metadata["settle_failure"].is_a?(Hash)
 
-          metadata["settle_failure"]["kind"].to_s == "network_failure" ? "stopped: connection lost" : "stopped mid-turn"
+          case metadata["settle_failure"]["kind"].to_s
+          when "network_failure" then "stopped: connection lost"
+          # Not resumable: its saved session is what the provider rejected, so the row must not read
+          # like something a prompt will pick up where it left off.
+          when "unreplayable_session" then "stopped: session unusable"
+          else "stopped mid-turn"
+          end
         end
 
         def worker_relationship_marker(worker)
