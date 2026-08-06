@@ -5344,7 +5344,43 @@ module Meringue
         return rejected_result(command_id, command_type, "Project was not added.", errors) unless errors.empty?
 
         state = normalized_state
-        if state.fetch("projects").any? { |project| File.expand_path(project.fetch("root_path")) == expanded_path }
+        existing_project = state.fetch("projects").find do |project|
+          File.expand_path(project.fetch("root_path")) == expanded_path
+        end
+        if existing_project
+          # A head can be spawned before another head wins registration of the same root. Keep
+          # AddProject's standalone duplicate rejection (and its slash-command contract), but make
+          # a head batch idempotent so its following CreateIssue/SpawnWorker commands still see the
+          # project that won the race.
+          head_id = present_string(value_at(payload, "_head_id"))
+          head = head_id && find_agent(state, head_id)
+          if head && head.fetch("type", nil) == "head"
+            now = timestamp
+            log_ids = append_log(
+              state,
+              source_type: "kernel",
+              source_id: existing_project.fetch("id"),
+              level: "info",
+              message: "Reused project #{existing_project.fetch("id")} for head #{head_id}: #{existing_project.fetch("name")}",
+              details: {
+                "root_path" => expanded_path,
+                "head_id" => head_id,
+                "reused" => true
+              }
+            )
+            touch_state!(state, now)
+            store.save(state)
+
+            return accepted_result(
+              command_id,
+              command_type,
+              existing_project.fetch("id"),
+              "Project #{existing_project.fetch("id")} is already registered; reused it.",
+              existing_project,
+              log_ids
+            )
+          end
+
           return rejected_result(command_id, command_type, "Project is already registered.", ["project_already_exists"])
         end
 
