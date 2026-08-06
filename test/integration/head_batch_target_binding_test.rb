@@ -300,6 +300,58 @@ class HeadBatchTargetBindingTest < Minitest::Test
     assert_equal ["Predicted pair research"], worker_titles(issue_by_title("Predicted pair goal").fetch("id"))
   end
 
+  def test_prompt_agent_can_reference_a_worker_spawned_earlier_in_the_same_batch
+    issue_id = seed_issue_with_worker("Prompt reference goal", "Existing worker")
+    head_id = spawn_head("Spawn a worker and prompt it in one batch")
+    result = apply_batch(head_id, [
+      spawn_worker("Fresh worker", issue_id: issue_id, command_id: "fresh-worker"),
+      {
+        "command_id" => "fresh-prompt",
+        "type" => "PromptAgent",
+        "payload" => {
+          "agent_from_command" => "fresh-worker",
+          "prompt" => "Also check the concurrent routing path.",
+          "mode" => "follow_up"
+        }
+      }
+    ])
+
+    assert_all_accepted(result)
+    worker = worker_by_title("Fresh worker")
+    assert_equal worker.fetch("id"), command_results(result).fetch(1).fetch("target_id")
+    assert_equal 1, worker.fetch("harness_metadata").fetch("prompt_count")
+  end
+
+  def test_prompt_agent_follows_a_worker_replaced_by_another_head
+    issue_id = seed_issue_with_worker("Replacement routing goal", "Original worker")
+    original = worker_by_title("Original worker")
+    target_head = spawn_head("Continue the worker even if another head replaces it")
+    replacement_head = spawn_head("Replace the original worker")
+    replacement_result = apply_batch(replacement_head, [
+      spawn_worker("Replacement worker", issue_id: issue_id, extra: { "replace_agent_id" => original.fetch("id") })
+    ])
+    assert_all_accepted(replacement_result)
+    replacement = worker_by_title("Replacement worker")
+
+    result = apply_batch(target_head, [
+      {
+        "type" => "PromptAgent",
+        "payload" => {
+          "agent_id" => original.fetch("id"),
+          "prompt" => "Continue the work after the replacement.",
+          "mode" => "normal"
+        }
+      }
+    ])
+
+    assert_all_accepted(result)
+    updated_replacement = worker_by_title("Replacement worker")
+    assert_equal replacement.fetch("id"), command_results(result).fetch(0).fetch("target_id")
+    assert_equal 1, updated_replacement.fetch("harness_metadata").fetch("prompt_count")
+    messages = @engine.list_all.fetch("logs").map { |entry| entry.fetch("message", "") }
+    assert(messages.any? { |message| message.include?("replacement worker #{replacement.fetch("id")}") }, messages.inspect)
+  end
+
   # Case 4: no CreateIssue at all; an existing issue id must route untouched.
   def test_existing_issue_only_batch_is_untouched
     existing_id = seed_issue_with_worker("Only existing goal", "First worker")

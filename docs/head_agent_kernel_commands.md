@@ -930,6 +930,13 @@ Payload:
 }
 ```
 
+When a batch spawns a worker immediately before prompting it, use `agent_from_command` (or
+`agent_id: "@<SpawnWorker command id>"` / `"@index:<position>"`) instead of predicting its worker
+id. If another head replaces a worker while this head is routing, the kernel redirects a prompt to
+the replacement on the same issue and records the remap. A prompt command id is also remembered on
+the worker, so replaying a journal entry or a stale pending-delivery snapshot cannot deliver the
+same prompt twice.
+
 Supported `mode` values:
 
 ```txt
