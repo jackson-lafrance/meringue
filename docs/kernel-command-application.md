@@ -98,6 +98,13 @@ journal, later `CreateIssue` and `SpawnWorker` commands resolve their `project_f
 predicted project/issue references against the real project instead of being rejected as if the
 user's request had not routed.
 
+**Concurrent worker routing.** Issue and worker counters are allocated inside the shared state lock,
+and worker spawns persist a reservation before workspace or harness I/O. A `PromptAgent` may refer to
+a worker spawned earlier in its own batch by command id/index, and a prompt aimed at a worker that was
+replaced while the head was routing is redirected only to that replacement on the same issue. Prompt
+command ids are retained on the worker for bounded replay protection; a stale reconciliation snapshot
+therefore acknowledges an already-delivered prompt instead of sending it again.
+
 ## Tolerated failure modes
 
 - **The head disappears mid-batch.** Remaining commands stop, already-applied

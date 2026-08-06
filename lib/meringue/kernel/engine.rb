@@ -270,6 +270,12 @@ module Meringue
       # `CreateGoal` is here because its prompt form mints its own issue, so a batch that registers
       # a project and starts a goal in it references the AddProject command the same way.
       BATCH_PROJECT_REFERENCE_COMMANDS = %w[CreateIssue CreateGoal].freeze
+      # PromptAgent can target a worker spawned earlier in the same batch without predicting the
+      # worker id, using the same command-id/index reference form as worker lineage fields.
+      BATCH_PROMPT_AGENT_REFERENCE_KEYS = %w[
+        agent_from_command AgentFromCommand agentFromCommand
+        agent_ref AgentRef agentRef
+      ].freeze
       # A head can queue a worker that only starts once another agent settles ("spawn B, but start
       # it after A finishes"). The dependency is durable state on the queued worker record, not an
       # in-memory timer: the kernel activates it from the worker-settle path and from the
@@ -432,6 +438,7 @@ module Meringue
                                      "predicting a worker id."
       # Reconciliation redelivery attempts for a prompt that arrived while the session was busy.
       PENDING_PROMPT_MAX_ATTEMPTS = 20
+      PROMPT_COMMAND_ID_HISTORY_LIMIT = 50
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
       HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
@@ -5666,6 +5673,18 @@ module Meringue
           )
         end
         return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        delivered_prompt_ids = Array(metadata.fetch("prompt_command_ids", [])).map(&:to_s)
+        if present_string(command_id) && delivered_prompt_ids.include?(command_id.to_s)
+          return accepted_result(
+            command_id,
+            command_type,
+            agent.fetch("id"),
+            "Prompt for worker #{agent.fetch("id")} was already delivered.",
+            deep_copy(agent),
+            []
+          )
+        end
         # A worker whose workspace provisioning failed has no session to prompt, but it is not
         # dead either: prompting it is how the user retries provisioning with a fresh instruction,
         # instead of losing the reservation and having to recreate the worker by hand.
@@ -5683,6 +5702,51 @@ module Meringue
         end
 
         pending_prompt_id = present_string(value_at(payload, "_pending_prompt_id", "pending_prompt_id"))
+        if pending_prompt_id
+          pending_prompts = Array(metadata.fetch("pending_prompts", [])).select { |entry| entry.is_a?(Hash) }
+          unless pending_prompts.any? { |entry| entry.fetch("id", nil).to_s == pending_prompt_id }
+            return accepted_result(
+              command_id,
+              command_type,
+              agent.fetch("id"),
+              "Prompt for worker #{agent.fetch("id")} was already delivered.",
+              deep_copy(agent),
+              []
+            )
+          end
+        end
+        claim = metadata.fetch("prompt_delivery_claim", nil)
+        if claim.is_a?(Hash) && other_live_instance_pid(
+          claim.fetch("owner_instance_id", nil),
+          claim.fetch("owner_instance_pid", nil),
+          claim.fetch("owner_instance_started_at", nil)
+        )
+          return queue_transient_prompt(
+            command_id: command_id,
+            command_type: command_type,
+            agent_id: agent.fetch("id"),
+            prompt: prompt.to_s,
+            mode: mode,
+            pending_prompt_id: pending_prompt_id,
+            error: StandardError.new("another Meringue instance is delivering a prompt to this worker")
+          )
+        end
+
+        claim_token = SecureRandom.hex(8)
+        metadata = metadata.merge(
+          "prompt_delivery_claim" => {
+            "token" => claim_token,
+            "command_id" => present_string(command_id),
+            "prompt" => prompt.to_s,
+            "mode" => mode,
+            "claimed_at" => timestamp,
+            **instance_ownership_metadata
+          }.compact
+        )
+        agent["harness_metadata"] = metadata
+        touch_state!(state)
+        store.save(state)
+
         client = harness_client_for_agent(agent)
         session_ref = agent_session_ref(agent)
         begin
@@ -5691,6 +5755,9 @@ module Meringue
           # A session that is busy elsewhere is a timing condition, not a failure: queue the
           # prompt and let reconciliation deliver it once the current turn settles.
           if Harness.transient_session_error?(e)
+            clear_prompt_delivery_claim!(agent, claim_token)
+            touch_state!(state)
+            store.save(state)
             return queue_transient_prompt(
               command_id: command_id,
               command_type: command_type,
@@ -5702,6 +5769,9 @@ module Meringue
             )
           end
 
+          clear_prompt_delivery_claim!(agent, claim_token)
+          touch_state!(state)
+          store.save(state)
           return failed_result(
             command_id,
             command_type,
@@ -5713,6 +5783,10 @@ module Meringue
         now = timestamp
         session_metadata = session_ref.fetch("metadata", {}) || {}
         previous_metadata = agent.fetch("harness_metadata", {}) || {}
+        delivered_prompt_ids = Array(previous_metadata.fetch("prompt_command_ids", [])).map(&:to_s)
+        if present_string(command_id)
+          delivered_prompt_ids = (delivered_prompt_ids + [command_id.to_s]).uniq.last(PROMPT_COMMAND_ID_HISTORY_LIMIT)
+        end
         # The harness may have had to deliver the prompt in a different mode than the caller asked
         # for (a normal prompt into a mid-turn session is queued as a follow-up instead of being
         # dropped). Record and log what actually happened, not what was requested.
@@ -5734,7 +5808,9 @@ module Meringue
           "last_prompted_at" => now,
           "is_streaming" => session_ref.fetch("is_streaming", false),
           "last_event_at" => session_ref.fetch("last_event_at", nil),
-          "routing_action" => prompt_routing_action(delivered_mode)
+          "routing_action" => prompt_routing_action(delivered_mode),
+          "prompt_command_ids" => present_string(command_id) ? delivered_prompt_ids : nil,
+          "prompt_delivery_claim" => nil
         ).compact
         # The prompt landed, so a recorded dead-turn reason is history. Cleared after the merge
         # because the session ref carries the agent's own metadata back in.
@@ -5890,6 +5966,16 @@ module Meringue
             (present_string(command_id) && entry.fetch("command_id", nil).to_s == command_id.to_s)
         end
         metadata["pending_prompts"] = remaining
+        agent["harness_metadata"] = metadata
+      end
+
+      def clear_prompt_delivery_claim!(agent, claim_token)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        claim = metadata.fetch("prompt_delivery_claim", nil)
+        return unless claim.is_a?(Hash)
+        return if claim_token && claim.fetch("token", nil).to_s != claim_token.to_s
+
+        metadata.delete("prompt_delivery_claim")
         agent["harness_metadata"] = metadata
       end
 
@@ -10526,10 +10612,19 @@ module Meringue
                  when "SpawnWorker"
                    issue_id = value_at(payload, "issue_id", "IssueID", "issueId").to_s
                    state.fetch("agents").find do |agent|
-                     next false unless agent.fetch("type", nil) == "worker" && agent.fetch("issue_id", nil) == issue_id
+                     next false unless agent.fetch("type", nil) == "worker"
 
                      metadata = agent.fetch("harness_metadata", {}) || {}
-                     metadata.fetch("spawn_command_id", nil).to_s == command_id.to_s || blank?(metadata.fetch("spawn_command_id", nil))
+                     command_matches = metadata.fetch("spawn_command_id", nil).to_s == command_id.to_s
+                     issue_matches = agent.fetch("issue_id", nil) == issue_id
+                     command_matches || (issue_matches && blank?(metadata.fetch("spawn_command_id", nil)))
+                   end
+                 when "PromptAgent"
+                   agent_id = value_at(payload, "agent_id", "AgentID", "agentId").to_s
+                   state.fetch("agents").find do |agent|
+                     next false unless agent.fetch("type", nil) == "worker" && agent.fetch("id", nil).to_s == agent_id
+
+                     Array((agent.fetch("harness_metadata", {}) || {}).fetch("prompt_command_ids", [])).map(&:to_s).include?(command_id.to_s)
                    end
                  end
         return nil unless target
@@ -10636,6 +10731,7 @@ module Meringue
         return { "command" => command } unless payload.is_a?(Hash)
 
         plan = head_batch_plan(head_id: head_id, commands: commands, index: index)
+        prompt_resolution = nil
         if BATCH_PROJECT_REFERENCE_COMMANDS.include?(command_type)
           project_resolution = resolve_batch_project_target(command: command, payload: payload, command_type: command_type, plan: plan)
           return project_resolution if project_resolution
@@ -10660,8 +10756,25 @@ module Meringue
             command = lineage_resolution.fetch("command")
             payload = value_at(command, "payload")
           end
+        elsif command_type == "PromptAgent"
+          # A prompt can follow a SpawnWorker in the same batch. Resolve its symbolic reference
+          # before the prompt is dispatched, and redirect a stale replaced-worker id when another
+          # head completed the replacement while this head was still routing.
+          agent_resolution = resolve_batch_prompt_agent_target(command: command, payload: payload, plan: plan, index: index)
+          if agent_resolution
+            return agent_resolution if agent_resolution.fetch("rejection", nil)
+
+            prompt_resolution = agent_resolution
+            command = agent_resolution.fetch("command")
+            payload = value_at(command, "payload")
+          end
         end
-        return { "command" => command } unless BATCH_ISSUE_REFERENCE_COMMANDS.include?(command_type)
+        unless BATCH_ISSUE_REFERENCE_COMMANDS.include?(command_type)
+          return { "command" => command }.tap do |resolution|
+            resolution["remap"] = prompt_resolution.fetch("remap") if prompt_resolution&.fetch("remap", nil)
+            resolution["resolved_reference"] = prompt_resolution.fetch("resolved_reference") if prompt_resolution&.fetch("resolved_reference", nil)
+          end
+        end
 
         reference = head_batch_issue_reference(payload)
         if reference
@@ -10690,6 +10803,95 @@ module Meringue
           head_id: head_id,
           plan: plan
         )
+      end
+
+      # Resolve a PromptAgent target against a worker this batch spawned, or against a replacement
+      # that another head installed after this head captured its snapshot. A stale worker with no
+      # replacement remains a normal kernel rejection; guessing a different issue would be worse.
+      def resolve_batch_prompt_agent_target(command:, payload:, plan:, index:)
+        reference = head_batch_prompt_agent_reference(payload)
+        if reference
+          described = describe_batch_issue_reference(reference)
+          entry = find_batch_issue_reference_entry(reference, plan.fetch("spawned_workers"))
+          unless entry
+            return {
+              "rejection" => {
+                "message" => "PromptAgent references #{described}, but this head result has no matching SpawnWorker command.",
+                "errors" => ["batch_agent_reference_not_found"]
+              }
+            }
+          end
+          if entry.fetch("index", -1).to_i >= index
+            return {
+              "rejection" => {
+                "message" => "PromptAgent references #{described}, which is not applied before it. List the SpawnWorker command first.",
+                "errors" => ["batch_agent_reference_out_of_order"]
+              }
+            }
+          end
+
+          agent_id = entry.fetch("agent_id", nil)
+          unless agent_id
+            return {
+              "rejection" => {
+                "message" => "PromptAgent references #{described}, but that command did not spawn a worker (#{entry.fetch("status", "pending")}).",
+                "errors" => ["batch_agent_reference_unresolved"]
+              }
+            }
+          end
+
+          return {
+            "command" => command_with_agent_id(command, payload, agent_id),
+            "resolved_reference" => { "reference" => described, "agent_id" => agent_id, "command_type" => "PromptAgent" }
+          }
+        end
+
+        requested = Ids.canonical(present_string(value_at(payload, "agent_id", "AgentID", "agentId")))
+        return { "command" => command } unless requested
+
+        replacement = synchronized_state do
+          state = normalized_state
+          target = find_agent(state, requested)
+          replacement_id = target && present_string(target.fetch("replaced_by_agent_id", nil))
+          successor = replacement_id && find_agent(state, replacement_id)
+          next nil unless successor && successor.fetch("type", nil) == "worker"
+          next nil unless target.fetch("type", nil) == "worker"
+          next nil unless successor.fetch("issue_id", nil) == target.fetch("issue_id", nil)
+
+          successor.fetch("id")
+        end
+        return { "command" => command } unless replacement
+
+        {
+          "command" => command_with_agent_id(command, payload, replacement, rerouted_from: requested),
+          "remap" => {
+            "command_type" => "PromptAgent",
+            "requested_agent_id" => requested,
+            "agent_id" => replacement,
+            "reason" => "replaced_worker_target"
+          }
+        }
+      end
+
+      def head_batch_prompt_agent_reference(payload)
+        return nil unless payload.is_a?(Hash)
+
+        explicit = value_at(payload, *BATCH_PROMPT_AGENT_REFERENCE_KEYS)
+        return parse_batch_issue_reference(explicit) unless explicit.nil? || (!explicit.is_a?(Integer) && blank?(explicit))
+
+        agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
+        return nil unless batch_issue_reference_value?(agent_id)
+
+        parse_batch_issue_reference(agent_id)
+      end
+
+      def command_with_agent_id(command, payload, agent_id, rerouted_from: nil)
+        cleaned = payload.reject do |key, _value|
+          name = key.to_s
+          BATCH_PROMPT_AGENT_REFERENCE_KEYS.include?(name) || %w[agent_id AgentID agentId].include?(name)
+        end
+        resolved = { "agent_id" => agent_id, "_rerouted_from_agent_id" => present_string(rerouted_from) }.compact
+        command.merge("payload" => cleaned.merge(resolved))
       end
 
       # Resolution order for a literal `issue_id` inside a head batch. Every step is a fact about
@@ -11359,6 +11561,8 @@ module Meringue
       def head_batch_remap_message(remap)
         if remap.key?("project_id")
           "Routed #{remap.fetch("command_type")} to project #{remap.fetch("project_id")} added by this head result instead of predicted project #{remap.fetch("requested_project_id")}."
+        elsif remap.key?("agent_id")
+          "Routed #{remap.fetch("command_type")} to replacement worker #{remap.fetch("agent_id")} instead of stale worker #{remap.fetch("requested_agent_id")}."
         elsif remap.fetch("reason", nil) == "batch_created_issue_left_without_worker"
           "Routed #{remap.fetch("command_type")} to issue #{remap.fetch("issue_id")} created by this head result, which would otherwise have had no worker, instead of #{remap.fetch("requested_issue_id")}."
         else
