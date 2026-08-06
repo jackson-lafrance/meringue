@@ -117,6 +117,13 @@ module Meringue
         PathResolver.path_for(agent)
       end
 
+      # Deliberately pass-through, including for large pastes. This is not a
+      # Meringue composer: the bytes go to a child program in a PTY (a shell, or
+      # Pi itself), and that program owns how it echoes, collapses, or submits a
+      # paste. Substituting a "[paste #1 ...]" placeholder here would send the
+      # placeholder text to the child instead of the pasted content, and the
+      # rendering cost belongs to the child's screen, which the TerminalScreen
+      # already bounds to its scrollback.
       def terminal_key_bytes(key)
         if key.is_a?(Hash)
           return key.fetch("text", "").to_s.tr("\r", "\n") if key.fetch("type", nil) == "paste"

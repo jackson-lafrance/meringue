@@ -190,6 +190,23 @@ Copy uses a local clipboard command when one is available (`pbcopy` on macOS, th
 
 Paste is composer-only; the logs pane is copy-only.
 
+### Large pastes collapse to a placeholder
+
+A paste over 10 lines or 1000 characters does not enter the composer as text. It is parked in memory and the composer shows a single placeholder chunk instead, the same shape Pi uses:
+
+```txt
+› [paste #1 +3000 lines] please review this
+```
+
+A paste that is long but on one line reports characters instead (`[paste #2 4110 chars]`). Smaller pastes are still inserted inline and unchanged.
+
+- The placeholder behaves as one unit: `Left`/`Right`, word motion, and selection step over it, and `Backspace`/`Delete` remove the whole chunk (which also forgets its content).
+- Submitting expands every placeholder back to the exact pasted text, so the head or worker receives the full body. Several large pastes in one message each get their own number and all round-trip.
+- Copying a selection that covers a placeholder copies the pasted content, not the placeholder text.
+- `Ctrl-C` (clear input) drops the stored pastes with the text it clears, and a draft restored from a previous session drops placeholders it can no longer expand.
+
+This is a responsiveness feature, not only a display one: wrapping, cursor math, slash completion, composer height, and frame diffing all run over the ~22-character placeholder, so a 3000-line paste no longer makes every keystroke re-wrap a quarter megabyte of text.
+
 ### Using your terminal's own selection instead
 
 Meringue asks the terminal for mouse reports (`1000`/`1002`/`1006`), which is what makes in-app double-click, drag highlighting, click-to-focus, AgentTree clicks, and hover scrolling possible. While that is on, a plain drag no longer reaches the terminal's own selection, so terminals provide a modifier to bypass mouse reporting when you want their native selection (for example to select across panes or into the borders):
