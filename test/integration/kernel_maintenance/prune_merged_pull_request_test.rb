@@ -8,7 +8,7 @@ require "support/workspace_support"
 # merged".
 #
 # The defect was not a retention predicate: prune re-verified every pull request live against one
-# shared five-second forge budget, so an unreachable (or merely slow) forge downgraded pull requests
+# shared bounded forge budget, so an unreachable (or merely slow) forge downgraded pull requests
 # Meringue had already verified as merged to `unknown` and retained the whole subtree, while
 # exploratory branch discovery for those same settled workers manufactured extra `unknown` blockers.
 #
@@ -59,6 +59,45 @@ class KernelMaintenancePruneMergedPullRequestTest < Minitest::Test
       return known if known
 
       sleep(@stall_seconds)
+      { "provider" => "github", "url" => url.to_s, "state" => "unknown", "error" => "forge stalled" }
+    end
+
+    def pull_request_urls_for_branch(repository:, branch:, timeout: nil)
+      @branch_calls << [repository.to_s, branch.to_s]
+      []
+    end
+  end
+
+  # The budget bounds wall clock only, so an exhausted pass is reproduced by advancing a fake
+  # monotonic clock instead of really sleeping for the whole budget.
+  class FakeMonotonicClock
+    def initialize
+      @seconds = 0.0
+    end
+
+    def now
+      @seconds
+    end
+
+    def advance(seconds)
+      @seconds += seconds
+    end
+  end
+
+  # Burns the whole shared deadline on its first answer, the way one hung `gh` call does.
+  class BudgetBurningForgeClient
+    attr_reader :status_calls, :branch_calls
+
+    def initialize(clock:, burn_seconds:)
+      @clock = clock
+      @burn_seconds = burn_seconds
+      @status_calls = []
+      @branch_calls = []
+    end
+
+    def pull_request_status(url, timeout: nil)
+      @status_calls << url.to_s
+      @clock.advance(@burn_seconds)
       { "provider" => "github", "url" => url.to_s, "state" => "unknown", "error" => "forge stalled" }
     end
 
@@ -236,6 +275,36 @@ class KernelMaintenancePruneMergedPullRequestTest < Minitest::Test
     assert_empty read_state.fetch("issues")
   end
 
+  # A user hit the old 5s ceiling on a real backlog: one pass retained five issues whose PRs were
+  # already merged, and a second `/prune` six seconds later pruned them. The ceiling is what the
+  # pass reports, so pin it here and in the user-visible sentence.
+  def test_default_forge_lookup_budget_is_fifteen_seconds_and_is_reported_when_exhausted
+    assert_equal 15.0, Meringue::Kernel::Engine::PRUNE_FORGE_LOOKUP_BUDGET_SECONDS
+
+    result = prune_with_exhausted_forge_budget
+
+    forge_lookup = result.dig("result", "forge_lookup")
+    assert_equal 15.0, forge_lookup.fetch("budget_seconds")
+    assert forge_lookup.fetch("budget_exhausted")
+    assert_equal(
+      "Pruned 0 issues, 0 agents, 0 worktrees, and 0 projects. Retained 1 issue because Meringue " \
+      "could not verify their pull request status: P1-I1 (the 15s forge lookup budget was exhausted).",
+      result.fetch("message")
+    )
+    assert_equal ["P1-I1"], ids(read_state.fetch("issues")), "an unverified PR must still retain its issue"
+  end
+
+  # The budget stays injectable, and the sentence must quote the effective value rather than a
+  # hardcoded default.
+  def test_exhaustion_clause_reports_the_injected_budget_rather_than_the_default
+    result = prune_with_exhausted_forge_budget(budget: 2.5)
+
+    forge_lookup = result.dig("result", "forge_lookup")
+    assert_equal 2.5, forge_lookup.fetch("budget_seconds")
+    assert forge_lookup.fetch("budget_exhausted")
+    assert_includes result.fetch("message"), "(the 2.5s forge lookup budget was exhausted)"
+  end
+
   def test_merged_pull_request_never_overrides_dirty_or_locked_worktree_safety
     project, workspace = github_project_and_workspace(task_title: "Dirty delivery")
     unfinished = File.join(workspace.fetch("workspace_path"), "unfinished.txt")
@@ -299,6 +368,29 @@ class KernelMaintenancePruneMergedPullRequestTest < Minitest::Test
   end
 
   private
+
+  # One `/prune` pass whose forge burns the whole lookup budget on its first call. `budget` is left
+  # unset for the shipped default, so the same scenario can pin the default and an override.
+  def prune_with_exhausted_forge_budget(budget: nil)
+    project, workspace = github_project_and_workspace(task_title: "Budget reporting")
+    write_merged_delivery_state(
+      project,
+      workspace,
+      # Open rather than merged, so the status is re-checked live and the pass has forge work to do.
+      delivery_record: merged_delivery_pull_request_record(
+        url: pull_request_url(1),
+        branch: workspace.fetch("workspace_branch"),
+        repository: REPOSITORY
+      ).merge("state" => "open", "raw_state" => "OPEN", "merged_at" => nil)
+    )
+    clock = FakeMonotonicClock.new
+    options = { forge_client: BudgetBurningForgeClient.new(clock: clock, burn_seconds: 60.0) }
+    options[:prune_forge_lookup_budget] = budget if budget
+    engine = build_engine(**options)
+    engine.define_singleton_method(:monotonic_time) { clock.now }
+
+    apply_command(engine, "Prune", {})
+  end
 
   def pull_request_url(number)
     "https://github.com/#{REPOSITORY}/pull/#{number}"

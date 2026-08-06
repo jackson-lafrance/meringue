@@ -367,7 +367,12 @@ module Meringue
       # `/prune` verifies PR state conservatively, but forge discovery/status commands are external
       # I/O. Bound the whole lookup phase so one unreachable forge cannot leave the command pending
       # indefinitely. URLs not resolved inside the budget become `unknown` and retain their issue.
-      PRUNE_FORGE_LOOKUP_BUDGET_SECONDS = 5.0
+      # The budget is a ceiling, not a cost: a healthy forge finishes in well under a second, and a
+      # pass only spends the whole budget when the forge is unreachable or slow. Five seconds was
+      # too tight for a real backlog (a single pass exhausted it and retained issues whose PRs were
+      # already merged, so the user had to run `/prune` repeatedly), and the phase runs outside the
+      # state lock on the submission thread, so a longer ceiling delays nothing but this command.
+      PRUNE_FORGE_LOOKUP_BUDGET_SECONDS = 15.0
       # Harness model catalogs change when a user logs into a provider, installs an
       # extension, or edits models.json, so a persisted snapshot is refreshed
       # periodically in the background instead of on every completion keystroke.

@@ -41,10 +41,13 @@ facts before mutation. `/prune`, for example, checks GitHub pull-request state b
 removing a record. It snapshots state under the lock, performs forge discovery/status
 lookups without the lock, then reacquires the lock and applies against current state
 using only the per-command lookup cache. A record/PR introduced after the snapshot is
-`unknown` and retained. The whole prune lookup phase has a five-second budget, each
-`gh` subprocess is terminated at the remaining deadline, and repeated URLs are looked
-up once. Thus an unavailable forge can delay one prune briefly but cannot freeze the
-kernel or cause unsafe removal.
+`unknown` and retained. The whole prune lookup phase has a fifteen-second budget
+(`Engine::PRUNE_FORGE_LOOKUP_BUDGET_SECONDS`, injectable per engine), each `gh`
+subprocess is terminated at the remaining deadline, and repeated URLs are looked up
+once. Thus an unavailable forge can delay one prune but cannot freeze the kernel or
+cause unsafe removal: the budget is only ever spent when the forge is slow, a healthy
+pass finishes in well under a second, and no other command waits on it because the
+phase holds neither the state lock nor the prompt-loop mutex.
 
 The cache is seeded from state before any external call: a pull request already verified
 as `merged` is terminal on the forge, so prune trusts the persisted record instead of
