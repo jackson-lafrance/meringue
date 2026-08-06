@@ -24,25 +24,65 @@ module Meringue
       AGENT_WORKSPACE_VIEWS = %w[agent terminal].freeze
       AGENT_WORKSPACE_FILTERS = %w[all output final reasoning tools].freeze
       # A head is stateless per user message, so "retrying" one means re-running the request it
-      # never finished routing. Only a head that stopped without routing qualifies: `errored` (its
-      # turn or session died) or `killed` (the user stopped it) while its record is still visible
-      # in the AgentTree. A `queued`/`working` head is still routing the message, and a
-      # `completed`/`blocked` head already applied part of its result, so neither is a retry target.
-      HEAD_RETRY_STATUSES = %w[errored killed].freeze
+      # never finished routing. Three statuses leave a request unrouted:
+      #   errored  its turn or session died before it returned a result
+      #   killed   the user stopped it before it routed
+      #   blocked  its result was applied but a command was rejected or failed, so part (often
+      #            all) of the request never landed anywhere
+      # A `queued`/`working`/`idle` head is still routing the message, and a `completed` head
+      # applied every command it proposed, so neither is a retry target.
+      HEAD_RETRY_STATUSES = %w[errored killed blocked].freeze
+      HEAD_COMMAND_LANDED_STATUS = "accepted"
 
       module_function
 
       # Shared by the kernel (which performs the retry) and the TUI (which offers the selected
-      # head as a chat target), so both agree on which head rows can be reprompted.
+      # head as a chat target, and marks the row as recoverable), so every layer agrees on which
+      # head rows can be reprompted.
       def head_retry_target?(agent)
         return false unless agent.is_a?(Hash)
         return false unless agent.fetch("type", nil).to_s == "head"
         return false unless HEAD_RETRY_STATUSES.include?(agent.fetch("status", nil).to_s)
+        # No batch was applied at all, so the whole request is still unrouted.
+        return true unless head_result_applied?(agent)
 
-        metadata = agent.fetch("harness_metadata", nil)
-        metadata = {} unless metadata.is_a?(Hash)
-        # A head that already applied its result routed the work; re-running it would duplicate it.
-        metadata.fetch("head_result_applied_at", nil).to_s.strip.empty?
+        # An applied batch is retryable only while part of it never landed. The per-command
+        # journal is the durable record of that, so a retry can re-run what is missing while
+        # leaving the commands that already routed alone.
+        head_unrouted_commands(agent).any? || !head_routed_anything?(agent)
+      end
+
+      def head_result_applied?(agent)
+        !head_metadata(agent).fetch("head_result_applied_at", nil).to_s.strip.empty?
+      end
+
+      def head_command_journal(agent)
+        Array(head_metadata(agent).fetch("head_result_command_journal", nil)).select { |entry| entry.is_a?(Hash) }
+      end
+
+      # Commands whose work really landed. These must never be proposed again by a retry.
+      def head_applied_commands(agent)
+        head_command_journal(agent).select { |entry| entry.fetch("status", nil).to_s == HEAD_COMMAND_LANDED_STATUS }
+      end
+
+      # Commands that were rejected, failed, or never ran. These are what a retry still owes
+      # the user.
+      def head_unrouted_commands(agent)
+        head_command_journal(agent).reject { |entry| entry.fetch("status", nil).to_s == HEAD_COMMAND_LANDED_STATUS }
+      end
+
+      # Did an applied batch put the request anywhere at all? An accepted command routed work,
+      # and a recorded question handed the request back to the user on purpose. A batch that did
+      # neither dropped the message, which is exactly the state a retry exists to recover.
+      def head_routed_anything?(agent)
+        return true if head_applied_commands(agent).any?
+
+        Array(head_metadata(agent).fetch("head_result_question_ids", nil)).any? { |id| !id.to_s.strip.empty? }
+      end
+
+      def head_metadata(agent)
+        metadata = agent.is_a?(Hash) ? agent.fetch("harness_metadata", nil) : nil
+        metadata.is_a?(Hash) ? metadata : {}
       end
 
       def empty_state(now: Time.now.utc.iso8601)

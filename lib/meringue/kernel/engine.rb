@@ -2378,7 +2378,12 @@ module Meringue
           "reason" => failure.fetch("reason"),
           "strategy" => failure.fetch("resumable") ? "resume" : "respawn",
           "user_message" => original_message,
-          "question_id" => present_string(request.fetch("question_id", nil))
+          "question_id" => present_string(request.fetch("question_id", nil)),
+          # What the failed batch already did, straight from its command journal. The retry head
+          # is told both halves so it can route what is missing without re-proposing work that
+          # already landed.
+          "applied_commands" => head_retry_command_digest(State::Models.head_applied_commands(head)),
+          "unrouted_commands" => head_retry_command_digest(State::Models.head_unrouted_commands(head))
         }
       end
 
@@ -2387,11 +2392,20 @@ module Meringue
       #   session_released   it failed and the kernel already closed its session    -> fresh head
       #   never_started      no harness session was ever opened for it              -> fresh head
       #   killed             the user stopped it on purpose, so its session is gone -> fresh head
+      #   nothing_routed     its batch was applied and not one command landed       -> fresh head
+      #   partially_routed   its batch was applied and only part of it landed       -> fresh head
+      #
+      # The two applied cases are never resumed, even when the head's harness session is still
+      # open: that session already delivered a result, the kernel journaled and sealed the batch,
+      # and the exactly-once guard in `apply_head_result` would ignore a second result from it.
+      # Their retry is always a fresh head that routes what the batch left unrouted.
       def head_retry_failure_case(head)
         metadata = head.fetch("harness_metadata", {}) || {}
         metadata = {} unless metadata.is_a?(Hash)
         detail = head_failure_detail(metadata)
         suffix = detail ? " (#{detail})" : ""
+
+        return applied_batch_retry_failure_case(head) if State::Models.head_result_applied?(head)
 
         if head.fetch("status", nil) == "killed"
           return { "case" => "killed", "reason" => "you killed it before it routed this request", "resumable" => false }
@@ -2408,6 +2422,53 @@ module Meringue
           "reason" => "its agent turn ended before it returned a result#{suffix}",
           "resumable" => head_retry_session_resumable?(head)
         }
+      end
+
+      # A head whose result was applied is `blocked` because the kernel rejected or failed part of
+      # its batch. That is not a head failure at all: the head routed, the kernel refused, and the
+      # user's request is the thing left stranded. The reason says how much of it survived, because
+      # that is what the user reads in the retry log line.
+      def applied_batch_retry_failure_case(head)
+        applied = State::Models.head_applied_commands(head)
+        unrouted = State::Models.head_unrouted_commands(head)
+        total = applied.length + unrouted.length
+        if applied.any?
+          return {
+            "case" => "partially_routed",
+            "reason" => "only #{applied.length} of its #{total} commands landed, so the rest of this request was never routed",
+            "resumable" => false
+          }
+        end
+
+        reason = if total.zero?
+                   "its result routed nothing"
+                 else
+                   "none of its #{total} #{total == 1 ? "command" : "commands"} landed, so this request was never routed"
+                 end
+        { "case" => "nothing_routed", "reason" => reason, "resumable" => false }
+      end
+
+      # Compact per-command history for the retry head's prompt. A journal entry carries the whole
+      # command result, so only the parts that explain what happened are carried over.
+      def head_retry_command_digest(entries)
+        Array(entries).map do |entry|
+          {
+            "command_type" => entry.fetch("command_type", nil),
+            "status" => entry.fetch("status", nil),
+            "target_id" => present_string(entry.fetch("target_id", nil)),
+            "message" => present_string(entry.fetch("message", nil)) && single_line_excerpt(entry.fetch("message"), limit: 240),
+            "errors" => Array(entry.fetch("errors", [])).map { |error| single_line_excerpt(error, limit: 120) }
+          }.compact
+        end
+      end
+
+      def head_retry_command_line(entry)
+        line = "#{entry.fetch("command_type", nil) || "command"} #{entry.fetch("status", nil) || "unknown"}"
+        target = present_string(entry.fetch("target_id", nil))
+        line += " -> #{target}" if target
+        detail = present_string(entry.fetch("message", nil)) || present_string(Array(entry.fetch("errors", [])).join("; "))
+        line += ": #{detail}" if detail
+        line
       end
 
       def head_failure_detail(metadata)
@@ -2442,20 +2503,22 @@ module Meringue
         end
       end
 
+      # A refusal must leave the user with a next action, and reaching one should be rare. Only two
+      # refusals survive: a head that has not stopped routing yet, and a head that really did route
+      # everything it proposed (so there is nothing left to re-run).
       def head_retry_rejection_message(head_id, status, head)
-        metadata = head.fetch("harness_metadata", {}) || {}
-        metadata = {} unless metadata.is_a?(Hash)
-        case status
-        when "queued", "working", "idle"
-          "Head #{head_id} is still #{status} on its request, so there is nothing to retry yet. Send your message on its own, or kill #{head_id} first."
-        when "blocked"
-          "Head #{head_id} already applied part of its result, so retrying it would route the same work twice. Send your message as a new prompt instead."
+        if %w[queued working idle].include?(status)
+          return "Head #{head_id} is still #{status} on its request, so there is nothing to retry yet. " \
+                 "Send your message on its own, or kill #{head_id} first."
+        end
+
+        applied = State::Models.head_applied_commands(head)
+        if applied.any?
+          "Head #{head_id} already routed this request: all #{applied.length} of its commands were applied. Prompt the worker it created, or send your message as a new prompt."
+        elsif State::Models.head_result_applied?(head)
+          "Head #{head_id} answered this request with a question instead of routing it, so there is nothing to re-run. Answer it with /answer, or send your message as a new prompt."
         else
-          if present_string(metadata.fetch("head_result_applied_at", nil))
-            "Head #{head_id} already routed its request, so there is nothing to retry. Prompt the worker it created, or send a new message."
-          else
-            "Head #{head_id} is #{status} and cannot be retried. Send your message as a new prompt instead."
-          end
+          "Head #{head_id} is #{status} and cannot be retried. Send your message as a new prompt instead."
         end
       end
 
@@ -2555,22 +2618,58 @@ module Meringue
       end
 
       # The retry head is a fresh stateless head, so everything it needs has to be in its message:
-      # the request that was never routed, the new instruction, and why it is running again.
+      # the request that was never routed, what the failed batch already applied (which it must not
+      # propose again), what never landed and why, the new instruction, and why it is running again.
       def head_retry_user_message(plan, instruction)
         original = present_string(plan.fetch("user_message", nil))
         extra = present_string(instruction)
         extra = nil if original && extra && extra.strip == original.strip
         return extra.to_s if original.nil?
 
+        applied = Array(plan.fetch("applied_commands", []))
         lines = [
           "Retry of head #{plan.fetch("head_id")}, which stopped before routing this request because #{plan.fetch("reason")}.",
           "",
           "Original user message:",
           original
         ]
+        lines.concat(head_retry_landed_command_lines(applied))
+        lines.concat(head_retry_unrouted_command_lines(Array(plan.fetch("unrouted_commands", []))))
         lines.concat(["", "New instruction from the user:", extra]) if extra
-        lines.concat(["", "Route this request now."])
+        lines.concat(["", head_retry_closing_instruction(applied)])
         lines.join("\n")
+      end
+
+      # Retrying a partially applied batch must not route the same work twice, and the kernel does
+      # not re-run journal entries: a retry re-routes the request. So the records that already exist
+      # are named for the retry head, which reuses them the same way it reuses any existing issue or
+      # worker it can see in state.
+      def head_retry_landed_command_lines(applied)
+        return [] if applied.empty?
+
+        [
+          "",
+          "Its previous attempt already applied these commands, and that work exists in state now. " \
+            "Reuse those records and never propose them again:",
+          *applied.map { |entry| "- #{head_retry_command_line(entry)}" }
+        ]
+      end
+
+      def head_retry_unrouted_command_lines(unrouted)
+        return [] if unrouted.empty?
+
+        [
+          "",
+          "These commands never landed, so that part of the request is still unrouted. Read current " \
+            "state first, then fix what the kernel objected to instead of resending the same command:",
+          *unrouted.map { |entry| "- #{head_retry_command_line(entry)}" }
+        ]
+      end
+
+      def head_retry_closing_instruction(applied)
+        return "Route this request now." if applied.empty?
+
+        "Route only the part of this request that is still unrouted, reusing the records above."
       end
 
       def head_retry_resume_prompt(plan, instruction)
@@ -2608,6 +2707,15 @@ module Meringue
           previous["updated_at"] = now
         end
 
+        # A head that already delivered a result can never deliver another one the kernel would
+        # accept: its batch is journaled and sealed by the exactly-once guard, and reconciliation
+        # stops polling it once `head_result_applied_at` is set. The harness session it still owns
+        # is therefore dead weight, so the retry hands the request to a fresh head and closes it
+        # instead of leaving a live session behind for every blocked head in the tree.
+        session_release = if previous && State::Models.head_result_applied?(previous)
+                            release_head_session!(previous, reason: "head_retried", now: now)
+                          end
+
         reason = retry_of.fetch("reason", nil)
         append_log(
           state,
@@ -2621,6 +2729,7 @@ module Meringue
             "retry_strategy" => "respawn",
             "retry_case" => retry_of.fetch("case", nil),
             "head_record_missing" => previous ? nil : true,
+            "previous_head_session_released" => session_release && session_release.fetch("changed", false) ? true : nil,
             "routing_action" => "head_retry"
           }.compact
         )
