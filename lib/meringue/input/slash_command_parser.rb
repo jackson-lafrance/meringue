@@ -528,18 +528,36 @@ module Meringue
         "not listed for #{reference} · Pi clamps it to #{clamped}"
       end
 
+      # Id completion for `/kill`, `/prompt`, `/jump`, and friends is ranked shallowest-first:
+      # among the ids that match what was typed, the record that owns a subtree is offered before
+      # the records inside it. Typing `i10` lists P3-I10 above P3-I10-W1, and typing `p3` lists P3,
+      # then P3-I10, then P3-I10-W1 — start short, then go long.
+      #
+      # A typed fragment almost always names the thing the user is thinking about ("kill that
+      # issue"), and its workers are one arrow key away; the previous order came from whatever
+      # sequence the state sections happened to be concatenated in, which put an issue's own
+      # workers above it. Which records match is unchanged, only their order.
+      #
+      # With nothing typed each source keeps its own order (`/prompt` lists worker sessions before
+      # the failed heads it can retry, `/kill` lists agents before issues before projects). That is
+      # a relevance decision the source made, not an accident of id shape, so ranking only kicks in
+      # once there is a query to rank against.
       def self.id_suggestion_records(items, context)
         query = context.fetch("query", "").to_s.downcase
         prefix = context.fetch("completion_prefix", context.fetch("prefix"))
         source = context.fetch("source")
-        Array(items).filter_map.with_index do |item, index|
+        matches = Array(items).filter_map.with_index do |item, index|
           id = item["id"].to_s
           next if id.empty?
-          next unless query.empty? || id.downcase.start_with?(query) || id.downcase.include?(query)
+          next unless query.empty? || id.downcase.include?(query)
 
+          { "item" => item, "id" => id, "index" => index }
+        end
+        ranked_id_suggestions(matches, query).map.with_index do |match, index|
+          id = match.fetch("id")
           {
             "usage" => id,
-            "description" => description_for_suggestion(item, source),
+            "description" => description_for_suggestion(match.fetch("item"), source),
             "completion" => "#{prefix} #{id}",
             "requires_arguments" => context.fetch("append_space"),
             "append_space" => context.fetch("append_space"),
@@ -547,6 +565,32 @@ module Meringue
             "kind" => source
           }
         end
+      end
+
+      def self.ranked_id_suggestions(matches, query)
+        return matches if query.empty?
+
+        matches.sort_by { |match| id_suggestion_sort_key(match.fetch("id"), match.fetch("index"), query) }
+      end
+
+      # Sort key, most significant part first:
+      #
+      #   1. an exact match on what was typed (`/kill p3-i10` keeps P3-I10 on top)
+      #   2. record ids before anything else, so a non-id list (themes) is never reshuffled
+      #   3. id depth: P3 before P3-I10 before P3-I10-W1, and H<n>/Q<n>/G<n> count as depth 0
+      #   4. id namespace, so one depth is not interleaved (H1, H2, P1, P2 rather than H1, P1, H2)
+      #   5. numeric order within the namespace: P3-I2 before P3-I10 before P10-I1
+      #
+      # Ids of the same depth and namespace share a shape, so numeric order is also shortest-first.
+      # The trailing id/index pair only breaks ties, and keeps non-record entries in source order.
+      def self.id_suggestion_sort_key(id, index, query)
+        exact = id.downcase == query ? 0 : 1
+        return [exact, 1, 0, "", [], "", index] unless Meringue::Ids.record_id?(id)
+
+        segments = id.upcase.scan(/[A-Z]+|\d+/)
+        namespace = segments.grep(/[A-Z]/).join
+        numbers = segments.grep(/\d/).map(&:to_i)
+        [exact, 0, numbers.length - 1, namespace, numbers, id.downcase, index]
       end
 
       def self.available_theme_names
