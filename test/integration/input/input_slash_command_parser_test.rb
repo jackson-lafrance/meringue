@@ -123,7 +123,7 @@ class InputSlashCommandParserTest < Minitest::Test
     refute_includes suggested.map(&:first), "/rename <project_or_issue_id> \"<name>\""
   end
 
-  def test_worker_spawn_and_prompt_arguments
+  def test_worker_spawn_prompt_and_retry_arguments
     spawn = parse_slash('/worker spawn P1-I1 "Fix it please"')
     assert_equal "SpawnWorker", spawn.fetch("type")
     assert_equal({ "issue_id" => "P1-I1", "prompt" => "Fix it please" }, spawn.fetch("payload"))
@@ -131,6 +131,10 @@ class InputSlashCommandParserTest < Minitest::Test
     prompt = parse_slash('/prompt P1-I1-W1 "any update?"')
     assert_equal "PromptAgent", prompt.fetch("type")
     assert_equal({ "agent_id" => "P1-I1-W1", "prompt" => "any update?" }, prompt.fetch("payload"))
+
+    retry_command = parse_slash("/retry H7")
+    assert_equal "RetryHead", retry_command.fetch("type")
+    assert_equal({ "head_id" => "H7" }, retry_command.fetch("payload"))
   end
 
   def test_answer_command_produces_answer_question_with_quoted_answer
@@ -175,7 +179,7 @@ class InputSlashCommandParserTest < Minitest::Test
     ["/theme", "/theme a b", "/harness", "/model", "/model a b",
      "/thinking", "/thinking high extra",
      "/model P1 extra", "/thinking P1 extra", "/project", "/project list /tmp", "/issue", "/issue delete P1",
-     "/worker", "/worker kill P1-I1", "/dismiss", "/dismiss Q1 Q2", "/recount now", "/prune bogus",
+     "/worker", "/worker kill P1-I1", "/retry", "/retry H7 again", "/dismiss", "/dismiss Q1 Q2", "/recount now", "/prune bogus",
      "/prune resolved errored", "/project rename P1", "/issue rename P1-I1"].each do |input|
       parsed = parse_slash(input)
       assert_equal "InvalidSlashCommand", parsed.fetch("type"), "expected #{input.inspect} to be invalid"
@@ -278,7 +282,7 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   def test_local_tui_commands_are_reported_as_not_kernel_commands
-    %w[/quit /jump /keybind /config /setup].each do |input|
+    %w[/quit /jump /keybind /config /setup /open-session].each do |input|
       parsed = parse_slash(input)
       assert_equal "InvalidSlashCommand", parsed.fetch("type")
       assert_match(/local TUI command/, parsed.fetch("payload").fetch("message"))
@@ -599,19 +603,19 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_equal ["P1"], projects.map { |record| record.fetch("usage") }
   end
 
-  # `/prompt` retries a failed head as well as prompting a worker, so a head that stopped without
-  # routing is offered as a target while heads that already did their job are not.
-  def test_prompt_suggestions_include_failed_heads
+  # `/prompt` is worker-only. Retryable heads are suggested by the explicit `/retry` command.
+  def test_retry_suggestions_include_failed_heads_and_prompt_does_not
     state = sample_state
     state.fetch("agents") << { "id" => "H7", "type" => "head", "status" => "errored" }
     state.fetch("agents") << { "id" => "H8", "type" => "head", "status" => "working" }
 
-    records = Meringue::Input::SlashCommandParser.command_suggestion_records("/prompt ", limit: 5, state: state)
+    prompt_records = Meringue::Input::SlashCommandParser.command_suggestion_records("/prompt ", limit: 5, state: state)
+    assert_equal %w[P1-I1-W1], prompt_records.map { |record| record.fetch("usage") }
 
-    assert_equal %w[P1-I1-W1 H7], records.map { |record| record.fetch("usage") }
-    assert_includes records.last.fetch("description"), "retry"
-    assert_equal ["PromptAgent", { "agent_id" => "h7", "prompt" => "try again" }],
-                 parsed_command('/prompt h7 "try again"')
+    retry_records = Meringue::Input::SlashCommandParser.command_suggestion_records("/retry ", limit: 5, state: state)
+    assert_equal %w[H7], retry_records.map { |record| record.fetch("usage") }
+    assert_includes retry_records.first.fetch("description"), "retry"
+    assert_equal ["RetryHead", { "head_id" => "h7" }], parsed_command("/retry h7")
   end
 
   # `/prune` takes no arguments, so it contributes no argument suggestions: typing "/prune " keeps
@@ -636,6 +640,7 @@ class InputSlashCommandParserTest < Minitest::Test
       "/thinking xhigh" => ["SetDefaultSessionThinkingLevel", { "level" => "xhigh" }],
       '/worker spawn p1-i1 "go"' => ["SpawnWorker", { "issue_id" => "p1-i1", "prompt" => "go" }],
       '/prompt p1-i1-w1 "hi"' => ["PromptAgent", { "agent_id" => "p1-i1-w1", "prompt" => "hi" }],
+      "/retry h83" => ["RetryHead", { "head_id" => "h83" }],
       '/issue create p1 "Title"' => ["CreateIssue", { "project_id" => "p1", "title" => "Title", "description" => "" }]
     }.each do |input, (type, payload)|
       parsed = parse_slash(input)
@@ -694,13 +699,14 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_equal "/kill P3-I10", records.first.fetch("completion")
   end
 
-  # Ranking only reorders matches; with nothing typed each source keeps its own order, so
-  # `/prompt` still offers live workers before the failed heads it can retry.
+  # Ranking only reorders matches; with nothing typed each source keeps its own order. `/prompt`
+  # remains worker-only, while retryable heads are offered by `/retry`.
   def test_id_suggestions_keep_source_order_when_nothing_is_typed
     state = tree_suggestion_state
     state.fetch("agents") << { "id" => "H7", "type" => "head", "status" => "errored" }
 
-    assert_equal %w[P3-I10-W2 P3-I10-W1 P10-I1-W1 H7], suggestion_usages("/prompt ", state)
+    assert_equal %w[P3-I10-W2 P3-I10-W1 P10-I1-W1], suggestion_usages("/prompt ", state)
+    assert_equal %w[H7], suggestion_usages("/retry ", state)
     assert_equal %w[P3-I10-W2 P3-I10-W1 P10-I1-W1 H1 H2 H7 P3-I10 P3-I2 P10-I1 P3 P10],
                  suggestion_usages("/kill ", state)
   end

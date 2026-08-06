@@ -93,15 +93,15 @@ class TuiChatTargetComposerTest < Minitest::Test
     refute_includes hint, "target:"
   end
 
-  # A worker id contains its issue id, so the title resolves the destination on
-  # its own. An agent whose id does not encode the issue (a head bound to one)
-  # would otherwise lose the resolved issue now that the bottom line drops it.
+  # A worker id normally contains its issue id, so the title resolves the destination on
+  # its own. A nonstandard worker id that does not encode the issue still names the resolved
+  # issue now that the bottom line drops it.
   def test_an_agent_whose_id_does_not_encode_its_issue_still_names_the_resolved_issue
-    @state["agents"] << agent_record("H84", "project_id" => "P1", "issue_id" => "P1-I1")
-    composed = select("H84")
+    @state["agents"] << agent_record("A84", "project_id" => "P1", "issue_id" => "P1-I1")
+    composed = select("A84")
 
     assert_equal "agent", ChatTarget.presentation(composed).fetch("kind")
-    assert_equal "chat → H84 → P1-I1 · Fix retries", @pane.composer_pane_title(composed)
+    assert_equal "chat → A84 → P1-I1 · Fix retries", @pane.composer_pane_title(composed)
     assert_equal [["head routes · Esc clears", Style::MUTED]], ChatTarget.hint_segments(composed)
     # A worker id already carries its issue, so it is not repeated there.
     assert_equal "chat → P1-I1-W1 · Fix retries", @pane.composer_pane_title(select("P1-I1-W1"))

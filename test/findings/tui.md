@@ -27,7 +27,7 @@ All tests are hermetic: no TTY, no raw mode, no network, no Pi processes, no wri
 | First-run setup flow: what each step submits, skip/back/resume, theme preview, degraded catalog | `test/integration/tui/onboarding_test.rb` |
 | First-run setup screen: full-screen takeover, animation, degradation, and the mouse being inert | `test/integration/tui/onboarding_screen_test.rb` |
 | App wiring: snapshot in, no state mutation, no invented vocabulary | `test/integration/tui/app_wiring_test.rb` |
-| Stranded-head recovery affordance: retry marker on the row, head chat target, `/prompt` completion | `test/integration/tui/blocked_head_recovery_test.rb` |
+| Stranded-head recovery affordance: `retry me` marker, log-only head selection, double-click `/retry`, `/retry` completion | `test/integration/tui/blocked_head_recovery_test.rb` |
 | Bounded typing throughput (replaces the retired benchmark script) | `test/integration/tui/typing_throughput_test.rb` |
 | Large-paste collapse: markers, atomic editing, submit expansion, typing cost after a 3000-line paste | `test/integration/tui/large_paste_collapse_test.rb` |
 | Bracketed/plain paste reading: chunked reads, pushback of keys that share a chunk, unterminated pastes, UTF-8 | `test/integration/tui/terminal_paste_read_test.rb` |

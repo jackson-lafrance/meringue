@@ -207,32 +207,26 @@ class TuiSelectedChatTargetTest < Minitest::Test
     assert_nil cleared.fetch("selected_target")
   end
 
-  # A failed head is the one head that does target chat: it has no issue, but the
-  # next message retries that exact head, so the target has to survive the submit.
-  def test_selecting_a_failed_head_targets_it_for_a_retry
+  # A failed head is retryable, but ordinary chat never targets or messages it. It stays a
+  # log-only selection; retry is explicit via /retry or the row's double-click affordance.
+  def test_selecting_a_failed_head_is_log_only_not_chat_retry
     select_chat_target("H84")
     composed = compose_app_state(@app, @state, "try again")
-    target = Meringue::TUI::LogScope.chat_target(composed)
 
-    refute_nil target, "a failed head must be a chat target, not a log-only filter"
-    assert_equal "H84", target.fetch("selected_id")
-    assert_equal "head", target.fetch("selected_type")
-    assert_equal "errored", target.fetch("selected_head_status")
-    refute target.key?("issue_id")
+    assert_nil Meringue::TUI::LogScope.chat_target(composed)
 
     pane = Meringue::TUI::Panes::ChatPane.new
-    assert_equal "chat → retry H84 · errored", pane.composer_pane_title(composed)
-    assert_equal Meringue::TUI::Style.agent_chrome_style("H84", bold: true), pane.composer_title_style(composed)
-    assert_includes plain_line(pane.bottom_hint_line(composed)), "retries this head"
-    assert_equal "retry H84", Meringue::TUI::ChatTarget.placeholder(composed)
+    assert_equal "chat · head routes · H84 logs only", pane.composer_pane_title(composed)
+    assert_nil pane.composer_title_style(composed)
+    assert_includes plain_line(pane.bottom_hint_line(composed)), "head routes"
+    assert_equal "enter a prompt", Meringue::TUI::ChatTarget.placeholder(composed)
 
     submissions, handler = recording_prompt_handler
     @app.send(:handle_key, "\r", "try again", 9, -1, handler, composed)
     submission = Timeout.timeout(5) { submissions.pop }
 
     assert_equal "try again", submission.fetch("text")
-    assert_equal "H84", submission.dig("selected_target", "selected_id")
-    assert_equal "head", submission.dig("selected_target", "selected_type")
+    assert_nil submission.fetch("selected_target")
   end
 
   # A selection on a project or a head that is still routing filters logs but

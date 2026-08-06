@@ -26,11 +26,8 @@ module Meringue
     # - `slash`      the buffer starts with `/`, so the selection is ignored by
     #                routing. The composer is deliberately untinted; a tinted box
     #                would promise scoping that slash commands never carry.
-    # - `agent`      a head/worker row with an owning issue is selected. Tinted
+    # - `agent`      a worker row with an owning issue is selected. Tinted
     #                with the selected agent's own log color.
-    # - `head`       a failed head row is selected. The next message retries that
-    #                head instead of starting an unrelated request, so it is a
-    #                real destination and is tinted with the head's own color.
     # - `issue`      an issue row is selected. Tinted with that issue id's color.
     # - `log_only`   a project, or a head that is still routing, is selected. It
     #                filters logs but does not scope chat, so it stays untinted
@@ -55,9 +52,6 @@ module Meringue
       # chat bar names the destination: that a fresh head (not the selected row)
       # receives the message, and how to drop the selection.
       ROUTING_HINT = "head routes · Esc clears"
-      # A failed head is retried rather than routed fresh, so the gesture line has
-      # to say what Enter will actually do.
-      HEAD_RETRY_HINT = "retries this head · Esc clears"
       # A slash command bypasses the selection, so its hint has to warn rather
       # than promise head routing for the selected node.
       SLASH_HINT = "slash ignores target · Esc clears"
@@ -79,7 +73,7 @@ module Meringue
 
         {
           "kind" => kind,
-          "targeted" => %w[agent head issue].include?(kind),
+          "targeted" => %w[agent issue].include?(kind),
           "label" => label,
           "issue_id" => issue_id,
           "issue_title" => target.fetch("issue_title", "").to_s,
@@ -96,7 +90,6 @@ module Meringue
         case target.fetch("kind")
         when SLASH then slash_title(target)
         when AGENT then agent_title(target)
-        when HEAD then head_title(target)
         when ISSUE then "chat → #{target.fetch("issue_id")}#{title_suffix(target)}"
         when LOG_ONLY then "chat · head routes · #{target.fetch("label")} logs only"
         else "chat"
@@ -134,7 +127,6 @@ module Meringue
       def placeholder(state)
         target = presentation(state)
         return "enter a prompt" unless target.fetch("targeted")
-        return "retry #{target.fetch("agent_id")}" if target.fetch("kind") == HEAD
 
         "message #{primary_label(target)}"
       end
@@ -153,7 +145,6 @@ module Meringue
         target = presentation(state)
         case target.fetch("kind")
         when SLASH then slash_hint_segments(target)
-        when HEAD then [[HEAD_RETRY_HINT, Style::MUTED]]
         when AGENT, ISSUE, LOG_ONLY then [[ROUTING_HINT, Style::MUTED]]
         else []
         end
@@ -170,17 +161,10 @@ module Meringue
 
       def kind_for(state, issue_id, label)
         return SLASH if slash_prompt?(state)
-        return HEAD if head_selection?(state)
         return LOG_ONLY if issue_id.empty? && !label.empty?
         return NONE if issue_id.empty?
 
         agent_selection?(state) ? AGENT : ISSUE
-      end
-
-      # Only a retryable head resolves to a head target; a head that is still
-      # routing never reaches here (LogScope keeps it log-only).
-      def head_selection?(state)
-        LogScope.selected_target(state).fetch("selected_type", "").to_s == HEAD
       end
 
       def agent_selection?(state)
@@ -196,25 +180,15 @@ module Meringue
 
       def tint_id_for(kind, agent_id, issue_id)
         case kind
-        when AGENT, HEAD then agent_id
+        when AGENT then agent_id
         when ISSUE then issue_id
         else ""
         end
       end
 
-      # A failed head has no issue to name, so the title says what Enter does to
-      # it and why the row is still there.
-      def head_title(target)
-        status = target.fetch("head_status", "")
-        suffix = status.empty? ? "" : " · #{status}"
-        "chat → retry #{target.fetch("agent_id")}#{suffix}"
-      end
-
-      # The clicked agent row is the id the user is looking for, and chat resolves
-      # it to that agent's owning issue. A worker id already contains its issue id
-      # (`P1-I9-W3` → `P1-I9`), so naming both would only stutter; an agent whose
-      # id does not encode its issue (a head bound to one) names the resolved
-      # issue too, because the bottom line no longer spells it out.
+      # The clicked worker row is the id the user is looking for, and chat resolves
+      # it to that worker's owning issue. A worker id already contains its issue id
+      # (`P1-I9-W3` → `P1-I9`), so naming both would only stutter.
       def agent_title(target)
         agent_id = target.fetch("agent_id")
         issue_id = target.fetch("issue_id")
