@@ -110,6 +110,73 @@ class KernelHeadsApplyResultTest < KernelHeadsTestCase
     assert_equal ["#{project_id}-I1"], agents(type: "worker").map { |agent| agent.fetch("issue_id") }
   end
 
+  def test_refinement_can_target_issue_created_by_a_visible_unapplied_head
+    project_id = add_project!
+    setup_head_id = spawn_head!("Build the setup flow")
+    refinement_head_id = spawn_head!("Make the setup flow choose the theme first")
+
+    setup_result = apply_head_result(
+      setup_head_id,
+      head_result(
+        commands: [
+          create_issue_command(project_id: project_id, title: "Build setup flow", command_id: "setup"),
+          spawn_worker_command(issue_id: nil, title: "Build setup flow", extra: { "issue_from_command" => "setup" })
+        ]
+      )
+    )
+    issue_id = command_results(setup_result).fetch(0).fetch("target_id")
+
+    result = apply_head_result(
+      refinement_head_id,
+      head_result(
+        commands: [
+          {
+            "type" => "ModifyIssue",
+            "payload" => {
+              "issue_id" => issue_id,
+              "description" => "Refined requirement: choose and preview the theme before the setup flow asks for the harness."
+            }
+          },
+          spawn_worker_command(issue_id: issue_id, title: "Apply theme-first setup refinement")
+        ]
+      ),
+      cleanup_head: false
+    )
+
+    assert_equal([["ModifyIssue", "accepted"], ["SpawnWorker", "accepted"]], command_statuses(result))
+    issue = issues.find { |candidate| candidate.fetch("id") == issue_id }
+    assert_includes issue.fetch("description"), "choose and preview the theme"
+    assert_includes agents(type: "worker").map { |agent| agent.fetch("issue_id") }, issue_id
+    refute command_results(result).any? { |entry| entry.fetch("errors", []).include?("issue_id_not_created_by_this_head_result") }
+  end
+
+  def test_issue_created_by_a_later_unseen_head_is_still_rejected
+    project_id = add_project!
+    early_head_id = spawn_head!("Refine whatever setup issue appears next")
+    later_head_id = spawn_head!("Create the setup issue")
+
+    later_result = apply_head_result(
+      later_head_id,
+      head_result(commands: [create_issue_command(project_id: project_id, title: "Later setup issue")])
+    )
+    issue_id = command_results(later_result).fetch(0).fetch("target_id")
+
+    result = apply_head_result(
+      early_head_id,
+      head_result(
+        commands: [
+          { "type" => "ModifyIssue", "payload" => { "issue_id" => issue_id, "status" => "blocked" } }
+        ]
+      ),
+      cleanup_head: false
+    )
+
+    rejected = command_results(result).fetch(0)
+    assert_equal "rejected", rejected.fetch("status")
+    assert_includes rejected.fetch("errors"), "issue_id_not_created_by_this_head_result"
+    refute_equal "blocked", issues.find { |candidate| candidate.fetch("id") == issue_id }.fetch("status")
+  end
+
   def test_commands_are_applied_in_the_proposed_order
     project_id = add_project!
     head_id = spawn_head!("Order matters")

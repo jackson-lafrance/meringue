@@ -2248,6 +2248,13 @@ module Meringue
         )
       end
 
+      def unapplied_head_ids_for_issue_visibility(state)
+        state.fetch("agents", []).select do |agent|
+          agent.fetch("type", nil) == "head" && !State::Models.head_result_applied?(agent) &&
+            !%w[blocked errored killed].include?(agent.fetch("status", nil).to_s)
+        end.map { |agent| agent.fetch("id", nil) }.compact
+      end
+
       def spawn_head(command_id, command_type, payload)
         user_message = value_at(payload, "user_message", "UserMessage", "message")
         question_id = value_at(payload, "question_id", "QuestionID", "questionId")
@@ -2302,6 +2309,7 @@ module Meringue
             retry_of: retry_of,
             snapshot_issue_ids: state.fetch("issues").map { |issue| issue.fetch("id", nil) }.compact,
             snapshot_project_ids: state.fetch("projects").map { |project| project.fetch("id", nil) }.compact,
+            snapshot_unapplied_head_ids: unapplied_head_ids_for_issue_visibility(state),
             snapshot_counters: deep_copy(state.fetch("counters", {}))
           )
           state.fetch("agents") << agent
@@ -8392,7 +8400,7 @@ module Meringue
 
       def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0, user_message: nil, question_id: nil,
                            selected_target: nil, retry_of: nil, snapshot_issue_ids: [], snapshot_project_ids: [],
-                           snapshot_counters: {})
+                           snapshot_unapplied_head_ids: [], snapshot_counters: {})
         retry_of = nil unless retry_of.is_a?(Hash)
         {
           "id" => head_id,
@@ -8418,6 +8426,11 @@ module Meringue
             # and the counters let the kernel recompute exactly which ids the head would predict.
             "snapshot_issue_ids" => Array(snapshot_issue_ids),
             "snapshot_project_ids" => Array(snapshot_project_ids),
+            # A follow-up head can be spawned while an earlier head is still routing. If that
+            # earlier, already-visible head creates an issue before this head's result applies,
+            # this head may legitimately read it from state and refine or staff it even though the
+            # issue id was not in snapshot_issue_ids yet.
+            "snapshot_unapplied_head_ids" => Array(snapshot_unapplied_head_ids),
             "snapshot_counters" => (snapshot_counters.is_a?(Hash) ? snapshot_counters : {}),
             # Lineage for a head that retries a failed head. `retry_of_head_id` is what makes the
             # log line, the AgentTree, and a later recovery say "this is H13's request again".
@@ -9107,9 +9120,12 @@ module Meringue
       # The kernel now resolves the pointer itself. A head may reference the issue-creating command
       # in the same batch (`issue_from_command`, or an `issue_id` like "@H1-C1"/"@index:0"), and a
       # still-predicted id is verified against the issues the head could actually see plus the
-      # issues its own batch created. An unverifiable prediction is remapped to this batch's issue
-      # when that is unambiguous, and rejected otherwise, so work never routes onto another head's
-      # issue. Pre-existing issue ids keep working unchanged.
+      # issues its own batch created. "Could see" includes the spawn snapshot and issues created by
+      # heads that were already visible and still unapplied when this head spawned, because a
+      # refinement head may read the updated state file after that earlier head lands. An
+      # unverifiable prediction is remapped to this batch's issue when that is unambiguous, and
+      # rejected otherwise, so work never routes onto another head's issue. Pre-existing issue ids
+      # keep working unchanged.
       def resolve_head_batch_issue_reference(command:, head_id:, index:, commands: [])
         return { "command" => command } unless command.is_a?(Hash)
 
@@ -9801,8 +9817,12 @@ module Meringue
         end
       end
 
-      # An issue is visible to a head only when the head's spawn snapshot contained it, so an issue
-      # another head created after this head was spawned can never be a deliberate target.
+      # An issue is visible to a head when the head's spawn snapshot contained it, when this head's
+      # own batch created it, or when a head already visible and still unapplied at spawn time
+      # created it before this head returned its result. The last case covers natural-language
+      # refinements that arrive while the original routing head is still landing: the refinement
+      # head may read the updated state file and route to that just-minted issue without leaving a
+      # spurious "could not have seen it" rejection.
       def head_could_see_issue?(head_id:, issue_id:)
         synchronized_state do
           state = normalized_state
@@ -9815,7 +9835,15 @@ module Meringue
 
           metadata = head.fetch("harness_metadata", {}) || {}
           snapshot_issue_ids = metadata.fetch("snapshot_issue_ids", nil)
-          next Array(snapshot_issue_ids).include?(issue.fetch("id")) if snapshot_issue_ids.is_a?(Array)
+          snapshot_ids_tracked = snapshot_issue_ids.is_a?(Array)
+          next true if snapshot_ids_tracked && Array(snapshot_issue_ids).include?(issue.fetch("id"))
+
+          originating_head_id = present_string(issue.fetch("originating_head_id", nil))
+          snapshot_unapplied_head_ids = metadata.fetch("snapshot_unapplied_head_ids", nil)
+          if originating_head_id && snapshot_unapplied_head_ids.is_a?(Array)
+            next true if snapshot_unapplied_head_ids.map(&:to_s).include?(originating_head_id)
+          end
+          next false if snapshot_ids_tracked
 
           # Heads recorded before snapshot ids were tracked fall back to creation order.
           issue_created = parse_time_or_nil(issue.fetch("created_at", nil))

@@ -195,7 +195,7 @@ The referenced `CreateIssue` must appear earlier in `commands` than the command 
 }
 ```
 
-When you target an issue that already exists, keep using its real `issue_id` exactly as it appears in the supplied state. That path is unchanged.
+When you target an issue that already exists, keep using its real `issue_id` exactly as it appears in state. A head may be spawned while another head is still routing, so the JSON state file can advance while you work. If you read current state and find that an already-visible head created the issue for the user's follow-up/refinement, treat that as an existing issue and use the real `issue_id`. Do not invent a future id: if your own batch creates the issue, use `issue_from_command` instead.
 
 The same applies to a project your batch registers: set `project_from_command` on `CreateIssue` (or `project_id: "@<command_id>"`) to point at the `AddProject` command in the same batch instead of predicting `P<n>`.
 
@@ -321,7 +321,7 @@ Resolution order for `SpawnWorker` and `ModifyIssue`:
 2. an id this head would have predicted for one of its own creations → that created issue.
 3. an id that literally is one of this batch's created issues → that issue.
 4. `SpawnWorker` only: a created issue in the same project was left without a worker → bind there (or reject if several are).
-5. an id that was visible in the head's spawn snapshot → that pre-existing issue.
+5. an id that was visible in the head's spawn snapshot, or an issue created after spawn by a still-unapplied head that was already visible to this head and then observed in current state → that existing issue.
 6. anything else → rejected.
 
 Rejection codes: `issue_id_not_created_by_this_head_result`, `ambiguous_batch_issue_target`, `ambiguous_batch_issue_prediction`, `batch_issue_reference_not_found`, `batch_issue_reference_out_of_order`, `batch_issue_reference_unresolved`, `batch_project_reference_unresolved`, `batch_agent_reference_not_found`, `batch_agent_reference_out_of_order`, `batch_agent_reference_unresolved`.
