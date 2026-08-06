@@ -8,8 +8,8 @@ module Meringue
       # Setup used to render in the shared popup slot over the dashboard, which
       # made it compete with the logs pane for rows and made a click anywhere on
       # the screen meaningful. It now owns the terminal while it runs: the
-      # dashboard is not drawn at all, the flow is driven by the keyboard only,
-      # and this pane is the only thing on screen.
+      # dashboard is not drawn at all, the flow is driven by keyboard or mouse
+      # row selection, and this pane is the only thing on screen.
       #
       # Like every other pane, it is a pure view over the composed state snapshot
       # and produces `[text, style]` segment lines for `Layout` to draw with the
@@ -206,6 +206,7 @@ module Meringue
           visible = entries.drop(window_start).first(row_capacity)
           {
             lines: card_lines(state, prose: prose, visible: visible, window_start: window_start, width: width).first(capacity),
+            row_start: prose.length,
             window: { "start" => window_start, "finish" => window_start + visible.length, "count" => entries.length }
           }
         end
@@ -351,36 +352,36 @@ module Meringue
         # Short enough to survive a narrow terminal without losing the exit key:
         # Esc is always last, and it is the one that must never be clipped.
         def key_hints(step)
-          return "Enter begins · Esc skips setup (/setup reopens it)" if step.to_s == Onboarding::WELCOME
+          return "Enter/click begins · Esc skips setup (/setup reopens it)" if step.to_s == Onboarding::WELCOME
 
-          hints = ["↑↓ move", "Enter applies", "← back", "Esc skip"]
+          hints = ["↑↓ move", "click row", "Enter applies", "← back", "Esc skip"]
           hints.concat(["type to filter", "Ctrl-R refresh"]) if step.to_s == Onboarding::MODEL
           hints.join(" · ")
         end
 
         def short_key_hints(step)
-          return "Enter begins · Esc skips" if step.to_s == Onboarding::WELCOME
+          return "Enter/click begins · Esc skips" if step.to_s == Onboarding::WELCOME
 
-          "↑↓ move · Enter applies · Esc skip"
+          "↑↓ move · click/Enter applies · Esc skip"
         end
 
         def minimum_key_hints(step)
-          step.to_s == Onboarding::WELCOME ? "Enter · Esc" : "↑↓ · Enter · Esc"
+          step.to_s == Onboarding::WELCOME ? "Enter/click · Esc" : "↑↓ · click/Enter · Esc"
         end
 
         # Bottom line of the screen. A stray click is answered here rather than by
-        # advancing the flow, which is the whole point: the mouse cannot skip
-        # setup, so it says so and leaves the state alone.
+        # advancing the flow, which is the whole point: only option rows are
+        # clickable, so the mouse cannot skip setup from empty space.
         def hint_segments(state, width: nil)
           limit = width.to_i
           kind = notice_kind(state)
           return [[Onboarding.notice_text(kind, width: limit), Style::WARNING]] unless kind.empty?
 
-          return [["keyboard only · clicks ignored", Style::MUTED]] if limit.positive? && limit < 52
+          return [["click rows or use keys", Style::MUTED]] if limit.positive? && limit < 52
 
           [
-            ["keyboard only", Style::MUTED],
-            [" · clicks are ignored, they cannot skip setup", Style::DIM]
+            ["click rows or use keys", Style::MUTED],
+            [" · empty-space clicks cannot skip setup", Style::DIM]
           ]
         end
 

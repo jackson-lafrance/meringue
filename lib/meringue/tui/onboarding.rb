@@ -12,8 +12,8 @@ module Meringue
     #
     # Setup takes over the whole terminal while it runs (see
     # Layout#render_onboarding), so it is not a popup competing with the
-    # dashboard for rows: it owns the screen, it is driven by the keyboard only,
-    # and a stray click cannot advance or dismiss it.
+    # dashboard for rows: it owns the screen, accepts keyboard and mouse row
+    # selection, and a stray click cannot skip or dismiss it.
     #
     # It is still a view model in the same shape as `ModelPicker`: it answers
     # from persisted state and the config file only, so building a frame never
@@ -52,7 +52,7 @@ module Meringue
       # Prose is wrapped by the caller at the card's real content width; this is
       # the fallback for callers that do not know a width yet.
       PROSE_WIDTH = 74
-      # How long the "clicks do nothing here" answer to a stray click stays up.
+      # How long the "click an option row" answer to a missed click stays up.
       NOTICE_SECONDS = 4.0
       # A refresh spinner is honest only while the catalog can still change. After
       # this the kernel has already logged whatever happened.
@@ -121,14 +121,14 @@ module Meringue
       ].freeze
       BANNER_WIDTH = 22
 
-      # Answers to input the flow deliberately refuses. `MOUSE` is the important
-      # one: clicking used to advance or dismiss setup, and now it does nothing, so
-      # the refusal is stated instead of looking like a frozen screen.
+      # Answers to mouse input that did not hit an option row. Clicking used to
+      # advance or dismiss setup from anywhere; now only visible options apply, so
+      # missed clicks explain where to click instead of looking frozen.
       NOTICE_MOUSE = "mouse"
       NOTICE_TEXTS = {
         NOTICE_MOUSE => [
-          "Clicks do nothing here — press Enter to continue or Esc to skip setup.",
-          "Clicks do nothing — use Enter or Esc."
+          "Click an option row, press Enter to continue, or Esc to skip setup.",
+          "Click a row, Enter, or Esc."
         ].freeze
       }.freeze
 
@@ -312,13 +312,13 @@ module Meringue
         Meringue::Harness::Registry.public_provider_name(harness) == "pi"
       end
 
-      # The whole flow in order. Recomputed from the chosen harness, so picking
-      # Claude at step 1 drops the two Pi-only steps instead of showing steps that
-      # cannot apply.
+      # The whole flow in order. Theme is the first real choice so the rest of
+      # setup renders in the colors the user picked. The plan is still recomputed
+      # from the chosen harness, so picking Claude drops the two Pi-only steps
+      # instead of showing steps that cannot apply.
       def plan(harness = nil)
-        steps = [WELCOME, HARNESS]
+        steps = [WELCOME, THEME, HARNESS]
         steps.concat(PI_ONLY_STEPS) if pi?(harness)
-        steps << THEME
         steps
       end
 
@@ -386,7 +386,7 @@ module Meringue
           "Meringue runs many coding agents at once and keeps you in one window.",
           "You type a goal, a head agent routes it, and workers do the work in their own git " \
           "worktrees. The tree on the left is how you watch them.",
-          "#{choice_steps(steps).length} quick choices, each already on a sensible default: hold Enter to accept them all."
+          "#{choice_steps(steps).length} quick choices, each already on a sensible default: pick a theme first so the rest of setup uses it, or hold Enter to accept them all."
         ]
         paragraphs.each_with_object([]) do |paragraph, lines|
           lines << "" unless lines.empty?
@@ -408,6 +408,7 @@ module Meringue
       # applies it, so the controller never has to know how a setting is written.
       def rows(state, step:, harness: nil, query: nil, saved_theme: nil)
         case step.to_s
+        when WELCOME then welcome_rows
         when HARNESS then harness_rows(state, harness)
         when MODEL then model_rows(state, harness: harness, query: query)
         when THINKING then thinking_rows(state, harness: harness)
@@ -441,6 +442,19 @@ module Meringue
         index = index.to_i.clamp(0, count - 1)
         start = index - ((limit - 1) / 2)
         start.clamp(0, count - limit)
+      end
+
+      def welcome_rows
+        [
+          {
+            "kind" => SENTINEL,
+            "value" => "begin",
+            "label" => "begin setup",
+            "detail" => "choose a theme first",
+            "current" => true,
+            "command" => nil
+          }
+        ]
       end
 
       def harness_rows(state, chosen)

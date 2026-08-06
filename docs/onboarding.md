@@ -1,10 +1,10 @@
 # First-run setup
 
 The first time you launch `meringue` on a machine, a short flow **takes over the
-whole terminal** and walks you through four choices: harness, model, thinking
-level, and theme. It ends with one card in the logs pane that names what you
-picked and teaches the core loop, so the very next thing you type can be a real
-goal.
+whole terminal** and walks you through four choices: theme, harness, model, and
+thinking level. Theme comes first so the rest of setup renders in the colors you
+picked. It ends with one card in the logs pane that names what you picked and
+teaches the core loop, so the very next thing you type can be a real goal.
 
 Before this existed, a new user landed on two empty boxes and a prompt, and
 `/harness`, `/model`, `/thinking`, `/theme` and the AgentTree gestures were all
@@ -15,8 +15,9 @@ undiscoverable.
 - **It owns the screen.** Setup is not a popup competing with the logs pane for
   rows: while it runs the dashboard is not drawn at all. There is one thing on
   screen and one thing to answer.
-- **Keyboard only.** The mouse cannot advance, select, or dismiss setup. `Enter`
-  and `Esc` are the only ways forward or out.
+- **Mouse-safe.** Visible option rows can be clicked, but empty-space clicks and
+  dashboard mouse gestures cannot advance, select, or dismiss setup. `Esc` is
+  still the only skip affordance.
 - **Never a trap.** `Esc` exits from any step, keeps everything already applied,
   and never reopens by itself. Setup is always reachable again with `/setup`.
 - **Never blocking.** Reading the flow only reads persisted state, so it never
@@ -35,19 +36,19 @@ undiscoverable.
                        meringue · first-run setup                  ← title
    ────────────────────────────────────────────────  ← rule (sweeps out)
 
-   ✓ harness pi   ▸ model   · thinking   · theme                   ← step rail
-   step 2 of 4  ━━━━━━━━━━━━╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬╬  25%    ← progress (eases)
+   ✓ theme gruvbox   ✓ harness pi   ▸ model   · thinking           ← step rail
+   step 3 of 4  ━━━━━━━━━━━━━━━━━━━╬╬╬╬╬╬╬╬╬╬╬  50%       ← progress (eases)
 
- ╭─ setup · 2/4 · model (pi) ─────────────────────────────╮
+ ╭─ setup · 3/4 · model (pi) ─────────────────────────────╮
  │ The default model for new Pi sessions. Type to filter,        │  ← what the step changes
  │ Ctrl-R re-asks the harness.                                  │
  │                                                              │
  │ ▸ openai/gpt-5.6-sol  current default · GPT-5.6 Sol          │  ← rows (staggered reveal)
  │   anthropic/claude-opus-5  Claude Opus 5 · thinking: xhigh    │
  ╰──────────────────────────────────────────────────╯
-   step 2 of 4  ·  ↑↓ move · Enter applies · ← back · Esc skip     ← caption
+   step 3 of 4  ·  ↑↓ move · click row · Enter applies · ← back · Esc skip
 
- keyboard only · clicks are ignored        Ctrl-C quits · /setup reopens
+ click rows or use keys · empty-space clicks cannot skip setup
 ```
 
 The card is centered horizontally and vertically, capped at 88 columns so long
@@ -92,19 +93,19 @@ renderer, no background thread, and no cursor trickery.
 
 | Screen | What it does | Applied as |
 | --- | --- | --- |
-| `setup · welcome` | One paragraph on what Meringue is and how work flows through it. | — |
-| `setup · 1/4 · harness` | `pi`, `claude`, `antigravity`, each with the logo the AgentTree uses. | `/harness <name>` |
-| `setup · 2/4 · model (pi)` | The models the harness itself reported, searchable, current default first. | `/model <provider>/<model-id>` |
-| `setup · 3/4 · thinking` | Every level the kernel accepts, labelled by what the catalog knows. | `/thinking <level>` |
-| `setup · 4/4 · theme` | The six colorschemes. Moving the highlight repaints the dashboard live. | `/theme <name>` |
+| `setup · welcome` | One paragraph on what Meringue is and how work flows through it, plus a begin row. | — |
+| `setup · 1/4 · theme` | The six colorschemes. Moving the highlight repaints setup live; applying it keeps the rest of setup in that theme. | `/theme <name>` |
+| `setup · 2/4 · harness` | `pi`, `claude`, `antigravity`, each with the logo the AgentTree uses. | `/harness <name>` |
+| `setup · 3/4 · model (pi)` | The models the harness itself reported, searchable, current default first. | `/model <provider>/<model-id>` |
+| `setup · 4/4 · thinking` | Every level the kernel accepts, labelled by what the catalog knows. | `/thinking <level>` |
 
 Every step starts on the value that is already in effect, and re-applying a value
 is accepted by the kernel, so holding `Enter` through the flow accepts every
 default and finishes in about a second without changing anything.
 
 Choosing a harness other than Pi drops the model and thinking steps, because both
-write `[harness.pi]` and the other harnesses report them as unsupported. The step
-counter becomes `1/2`, `2/2`.
+write `[harness.pi]` and the other harnesses report them as unsupported. Because
+theme has already been chosen, applying the non-Pi harness finishes setup.
 
 ## Keys
 
@@ -118,7 +119,7 @@ Setup adds no new keybindings; it reuses the ones the pickers already use.
 | `Esc` | exit setup now, keeping what was already applied |
 | printable / `Backspace` / `Ctrl-W` | filter — model step only |
 | `Ctrl-R` | re-fetch the model catalog (`/models <harness> refresh`) — model step only |
-| any mouse event | nothing at all (see below) |
+| left-click a visible row | apply that row and continue; finish on the last step |
 
 `←` is the `cursor_left` action, so rebinding `cursor_left` in
 `[tui.keybindings]` also changes setup's back key.
@@ -129,21 +130,21 @@ it can never land in the composer hidden behind the screen.
 
 ## The mouse cannot skip setup
 
-While setup is on screen, **every** mouse report is inert: left, right, and middle
-press, release, drag, and both wheel directions. None of them apply a row, move
-the highlight, advance a step, or dismiss the flow, and none of them are forwarded
-to the dashboard underneath.
+While setup is on screen, a left-click on a visible option row applies that row
+just like `Enter`. Other mouse reports — right click, middle click, release, drag,
+both wheel directions, and left-clicks on chrome or empty space — are inert. They
+do not move the highlight, advance a step, dismiss the flow, or reach the
+dashboard underneath.
 
 This is a deliberate change. Setup used to render in the shared popup slot, where
 a click on a row applied it and a click anywhere else was a click-away dismiss — so
 a single stray click during a first launch silently skipped onboarding, which is
 exactly the moment a user is least likely to know that `/setup` would bring it
-back. Advancing and leaving are now explicit keyboard actions only, with `Esc` as
-the one skip affordance.
+back. Empty-space clicks are now inert, with `Esc` as the one skip affordance.
 
-An ignored click is answered rather than swallowed silently, so it can never be
-mistaken for a frozen screen: the bottom line of the screen shows `Clicks do
-nothing here — press Enter to continue or Esc to skip setup.` for a few seconds
+A missed click is answered rather than swallowed silently, so it can never be
+mistaken for a frozen screen: the bottom line of the screen shows `Click an
+option row, press Enter to continue, or Esc to skip setup.` for a few seconds
 (shortened on a narrow terminal), and it clears when the step changes.
 
 ## Back, skip, and resume

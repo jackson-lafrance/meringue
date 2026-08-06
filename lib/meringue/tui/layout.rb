@@ -122,8 +122,8 @@ module Meringue
       end
 
       def pane_at(state, width:, height:, x:, y:)
-        # Setup owns the screen and takes no pointer input at all, so no click can
-        # resolve to a dashboard pane while it is up.
+        # Setup owns the screen, so clicks resolve only inside setup and never to
+        # dashboard panes while it is up.
         return "onboarding" if onboarding_active?(state)
         return "agent_workspace" if agent_workspace_active?(state)
 
@@ -332,6 +332,43 @@ module Meringue
         geometry
       end
 
+      # Where a click landed relative to the full-screen setup card: a row index
+      # for an option, `:chrome` for card chrome/prose/borders, and `:outside` for
+      # anything off the card. The row index is absolute in Onboarding.rows, so a
+      # windowed model list can apply the exact visible row that was clicked.
+      def onboarding_hit(state, width:, height:, x:, y:)
+        return :outside unless onboarding_active?(state)
+
+        geometry = onboarding_geometry(state, width: width, height: height)
+        bounds = {
+          x: geometry.fetch(:card_x),
+          y: geometry.fetch(:card_y),
+          width: geometry.fetch(:card_width),
+          height: geometry.fetch(:card_height)
+        }
+        return :outside unless point_in_bounds?(x.to_i, y.to_i, bounds)
+
+        content_x = geometry.fetch(:card_x) + 2
+        content_y = geometry.fetch(:card_y) + 1
+        content_width = [geometry.fetch(:card_width) - 4, 0].max
+        content_height = [geometry.fetch(:card_height) - 2, 0].max
+        return :chrome if content_width.zero? || content_height.zero?
+        return :chrome unless x.to_i >= content_x && x.to_i < content_x + content_width
+        return :chrome unless y.to_i >= content_y && y.to_i < content_y + content_height
+
+        card = geometry.fetch(:card)
+        window = card.fetch(:window, {})
+        row_start = card.fetch(:row_start, nil)
+        return :chrome unless row_start
+
+        row = y.to_i - content_y
+        visible_count = window.fetch("finish", 0).to_i - window.fetch("start", 0).to_i
+        return :chrome unless row >= row_start && row < row_start + visible_count
+
+        index = window.fetch("start", 0).to_i + (row - row_start)
+        index < window.fetch("count", 0).to_i ? index : :chrome
+      end
+
       # Same three answers for the model picker: a row index, `:chrome` for its
       # own border/caption, and `:outside` for a click-away dismiss.
       def model_picker_hit(state, width:, height:, x:, y:)
@@ -484,9 +521,9 @@ module Meringue
       end
 
       # The setup screen: centered card, animated chrome above it, one caption
-      # under it, and the bottom hint line that says the mouse is not an input
-      # here. Drawn with the same Canvas/draw_pane primitives as every pane, so
-      # there is no second renderer to keep in sync.
+      # under it, and the bottom hint line that says option rows can be clicked
+      # but empty space cannot skip setup. Drawn with the same Canvas/draw_pane
+      # primitives as every pane, so there is no second renderer to keep in sync.
       def render_onboarding(canvas, state, width, height, color:)
         geometry = onboarding_geometry(state, width: width, height: height)
         card_x = geometry.fetch(:card_x)

@@ -3,13 +3,13 @@
 require "test_helper"
 require "support/tui_support"
 
-# The setup *screen*: the full-screen takeover, the animation, and the rule that
-# the mouse cannot drive the flow.
+# The setup *screen*: the full-screen takeover, animation, and setup-owned mouse
+# hit testing.
 #
 # Setup used to render in the shared popup slot over the dashboard, which meant a
 # click on any row applied it and a click anywhere else dismissed the whole flow.
 # One stray click during a first launch silently skipped onboarding. It now owns
-# the terminal, is keyboard-only, and animates as a pure function of elapsed
+# the terminal, accepts clicks only on visible setup option rows, and animates as a pure function of elapsed
 # seconds so a dropped frame, a resize, or a full redraw all recompute the same
 # picture.
 #
@@ -84,40 +84,48 @@ class TuiOnboardingScreenTest < Minitest::Test
     assert_nil @layout.send(:agent_tree_content_dimensions, state, width: WIDTH, height: HEIGHT)
   end
 
-  # --- the mouse cannot drive the flow -------------------------------------
+  # --- setup-owned mouse hit testing ---------------------------------------
 
-  # The regression. Every mouse event the terminal can report is inert: no row is
-  # applied, no step advances, setup is not dismissed, and the highlight does not
-  # even move.
-  def test_no_mouse_event_advances_selects_or_dismisses_setup
+  # The regression. Mouse events are owned by setup now: a left-click on a visible
+  # row applies that option, while all other mouse events are swallowed and never
+  # become dashboard clicks or click-away skips.
+  def test_only_left_clicks_on_visible_option_rows_drive_setup
     open_setup
     send_key(ENTER)
     send_key(DOWN)
+    expected_index = @pane.index(compose)
 
     before = @pane.snapshot(compose).reject { |key, _| %w[elapsed notice].include?(key) }
 
-    mouse_events.each do |label, event|
+    inert_mouse_events.each do |label, event|
       result = send_key(event)
 
       assert_equal ["", 0, -1], result, "#{label} must leave the composer alone"
       assert @pane.active?(compose), "#{label} must not dismiss setup"
-      assert_equal "setup · 1/4 · harness", @pane.title(compose), "#{label} must not change step"
-      assert_equal 1, @pane.index(compose), "#{label} must not move the highlight"
+      assert_equal "setup · 1/4 · theme", @pane.title(compose), "#{label} must not change step"
+      assert_equal expected_index, @pane.index(compose), "#{label} must not move the highlight"
       assert_empty @submitted, "#{label} must not submit anything"
       assert_equal before, @pane.snapshot(compose).reject { |key, _| %w[elapsed notice].include?(key) },
                    "#{label} must not change setup state"
     end
+
+    selected_theme = @pane.rows(compose).fetch(2).fetch("value")
+    send_key(press_event(onboarding_row_position(2)))
+
+    assert_equal ["/theme #{selected_theme}"], wait_for_submissions(1)
+    assert_equal "setup · 2/4 · harness", @pane.title(compose)
+    assert_equal selected_theme, Meringue::TUI::Style.current_colorscheme
   end
 
   # An ignored click is answered on screen, so it never looks like a freeze.
-  def test_a_click_is_answered_with_a_visible_notice_naming_the_keys_that_work
+  def test_a_missed_click_is_answered_with_a_visible_notice_naming_the_actions_that_work
     open_setup
-    refute_includes render_frame(compose, width: WIDTH, height: HEIGHT), "Clicks do nothing"
+    refute_includes render_frame(compose, width: WIDTH, height: HEIGHT), "Click an option row"
 
-    send_key(press_event("x" => 20, "y" => 12))
+    send_key(press_event("x" => 1, "y" => 1))
     frame = render_frame(compose, width: WIDTH, height: HEIGHT)
 
-    assert_includes frame, "Clicks do nothing here"
+    assert_includes frame, "Click an option row"
     assert_includes frame, "Enter"
     assert_includes frame, "Esc"
   end
@@ -126,13 +134,13 @@ class TuiOnboardingScreenTest < Minitest::Test
   # across steps.
   def test_the_click_notice_expires_and_does_not_survive_the_step
     open_setup
-    send_key(press_event("x" => 20, "y" => 12))
+    send_key(press_event("x" => 1, "y" => 1))
     assert_equal Onboarding::NOTICE_MOUSE, @pane.notice_kind(compose)
 
     @app.instance_variable_set(:@onboarding_notice_at, @app.send(:monotonic_time) - Onboarding::NOTICE_SECONDS - 1)
     assert_equal "", @pane.notice_kind(compose)
 
-    send_key(press_event("x" => 20, "y" => 12))
+    send_key(press_event("x" => 1, "y" => 1))
     send_key(ENTER)
     assert_equal "", @pane.notice_kind(compose), "advancing a step clears the answer to a stale click"
   end
@@ -148,14 +156,14 @@ class TuiOnboardingScreenTest < Minitest::Test
     assert_equal "setup · welcome", @pane.title(compose)
     assert_equal "", @pane.query(compose)
 
-    2.times { send_key(ENTER) }
-    wait_for_submissions(1)
-    assert_equal "setup · 2/4 · model (pi)", @pane.title(compose)
+    3.times { send_key(ENTER) }
+    wait_for_submissions(2)
+    assert_equal "setup · 3/4 · model (pi)", @pane.title(compose)
 
     send_key(paste_event("opus"))
     assert_equal "opus", @pane.query(compose)
     assert_equal ["anthropic/claude-opus-5"], @pane.rows(compose).map { |row| row.fetch("value") }
-    assert_equal ["/harness pi"], @submitted
+    assert_equal ["/theme meringue", "/harness pi"], @submitted
   end
 
   # --- animation -----------------------------------------------------------
@@ -291,7 +299,7 @@ class TuiOnboardingScreenTest < Minitest::Test
     state = animated_state(elapsed: 5.0, ascii: true)
     assert_equal Onboarding::ASCII_GLYPHS, @pane.glyphs(state)
     assert row_line(state, 0).start_with?(">", "-"), row_line(state, 0)
-    bar = plain_line(@pane.progress_segments(animated_state(step: Onboarding::THEME, elapsed: 5.0, ascii: true), width: 60))
+    bar = plain_line(@pane.progress_segments(animated_state(step: Onboarding::THINKING, elapsed: 5.0, ascii: true), width: 60))
     assert_includes bar, "="
     assert_includes bar, "-"
     assert_equal ["MERINGUE"], @pane.prose_entries(welcome_state(ascii: true), width: 60).map(&:first).first(1)
@@ -345,8 +353,7 @@ class TuiOnboardingScreenTest < Minitest::Test
   # Quitting mid-flow must not leave a previewed theme on screen.
   def test_shutdown_closes_setup_and_restores_a_previewed_theme
     open_setup
-    4.times { send_key(ENTER) }
-    wait_for_submissions(3)
+    send_key(ENTER)
     send_key(DOWN)
     refute_equal @original_colorscheme, Meringue::TUI::Style.current_colorscheme
 
@@ -363,10 +370,11 @@ class TuiOnboardingScreenTest < Minitest::Test
   # timer alone.
   def test_the_refresh_spinner_runs_while_the_catalog_is_stale_and_stops_when_it_changes
     open_setup
-    2.times { send_key(ENTER) }
-    wait_for_submissions(1)
-    send_key(CTRL_R)
+    3.times { send_key(ENTER) }
     wait_for_submissions(2)
+    stale_state = @state
+    send_key(CTRL_R)
+    wait_for_submissions(3)
 
     assert @pane.active?(compose)
     assert_includes card_text, "asking pi for its model list"
@@ -376,7 +384,7 @@ class TuiOnboardingScreenTest < Minitest::Test
     refute_includes card_text, "asking pi for its model list"
 
     # And it gives up rather than spinning forever if nothing ever lands.
-    @state = state_with_catalog
+    @state = stale_state
     assert_includes card_text, "asking pi for its model list"
     @app.instance_variable_set(:@onboarding_refresh_at, @app.send(:monotonic_time) - Onboarding::REFRESH_SPINNER_SECONDS - 1)
     refute_includes card_text, "asking pi for its model list"
@@ -494,23 +502,35 @@ class TuiOnboardingScreenTest < Minitest::Test
     end
   end
 
-  # Everything a terminal can report through the mouse, including the two events
-  # that used to apply a row and dismiss the flow.
-  def mouse_events
-    position = { "x" => 20, "y" => 12 }
+  # Everything a terminal can report through the mouse except the one live event:
+  # a left-button press on a visible option row.
+  def inert_mouse_events
+    position = onboarding_row_position(1)
     {
-      "a press on a row" => press_event(position),
-      "a press on the chrome" => press_event("x" => 4, "y" => 3),
+      "a press on the chrome" => press_event(onboarding_chrome_position),
       "a press outside the card" => press_event("x" => 1, "y" => 1),
       "a release" => { "type" => "mouse", "kind" => "button", "pressed" => false, "button" => 0 }.merge(position),
-      "a right click" => { "type" => "mouse", "kind" => "button", "pressed" => true, "button" => 2 }.merge(position),
-      "a middle click" => { "type" => "mouse", "kind" => "button", "pressed" => true, "button" => 1 }.merge(position),
+      "a right click on a row" => { "type" => "mouse", "kind" => "button", "pressed" => true, "button" => 2 }.merge(position),
+      "a middle click on a row" => { "type" => "mouse", "kind" => "button", "pressed" => true, "button" => 1 }.merge(position),
       "a drag" => { "type" => "mouse", "kind" => "motion", "pressed" => true, "button" => 32 }.merge(position),
       "a wheel up" => { "type" => "mouse", "kind" => "wheel_up", "pressed" => true, "button" => 64, "count" => 1 }.merge(position),
       "a wheel down" => { "type" => "mouse", "kind" => "wheel_down", "pressed" => true, "button" => 65, "count" => 1 }.merge(position),
-      "a double click" => press_event(position),
       "a click on the exit hint" => press_event("x" => 4, "y" => HEIGHT)
     }
+  end
+
+  def onboarding_row_position(index, state = compose)
+    view = @layout.onboarding_geometry(state, width: WIDTH, height: HEIGHT)
+    card = view.fetch(:card)
+    window = card.fetch(:window)
+    x = view.fetch(:card_x) + 3
+    y = view.fetch(:card_y) + 1 + card.fetch(:row_start) + index.to_i - window.fetch("start")
+    { "x" => x + 1, "y" => y + 1 }
+  end
+
+  def onboarding_chrome_position(state = compose)
+    view = @layout.onboarding_geometry(state, width: WIDTH, height: HEIGHT)
+    { "x" => view.fetch(:card_x) + 1, "y" => view.fetch(:card_y) + 1 }
   end
 
   def press_event(position)
