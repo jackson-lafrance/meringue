@@ -3552,6 +3552,7 @@ module Meringue
 
       def apply_slash_command_results(command_results)
         clear_logs! if clear_state_accepted?(command_results)
+        reload_recounted_presentation_state! if recount_accepted?(command_results)
         apply_theme_command_results(command_results)
       end
 
@@ -3559,6 +3560,26 @@ module Meringue
         Array(command_results).any? do |result|
           result.fetch("command_type", nil) == "ClearState" && result.fetch("status", nil) == "accepted"
         end
+      end
+
+      def recount_accepted?(command_results)
+        Array(command_results).any? do |result|
+          result.fetch("command_type", nil) == "Recount" && result.fetch("status", nil) == "accepted"
+        end
+      end
+
+      # A recount renames records, and the kernel rewrote the ids embedded in persisted chat
+      # history and in the focused-workspace selection to match. This in-memory state is written
+      # back on the next append, so it has to be re-read: otherwise the stale buffer would
+      # reintroduce pre-recount ids that now name different records.
+      def reload_recounted_presentation_state!
+        return unless log_store&.respond_to?(:load)
+
+        state = log_store.load
+        restore_logs!(state)
+        restore_agent_workspace!(state)
+      rescue StandardError
+        nil
       end
 
       def clear_logs!
