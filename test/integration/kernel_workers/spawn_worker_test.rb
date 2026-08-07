@@ -40,6 +40,8 @@ class KernelWorkersSpawnTest < Minitest::Test
     assert_includes spawn_call.fetch("system_prompt"), "Meringue must never be the author of a git commit."
     assert_includes spawn_call.fetch("system_prompt"), "repository's configured user.name and user.email identity"
     assert_includes spawn_call.fetch("system_prompt"), "do not invent one or commit as Meringue"
+    assert_includes spawn_call.fetch("system_prompt"), "meaningful findings, decisions, and implementation milestones"
+    assert_includes spawn_call.fetch("system_prompt"), "Do not narrate routine tool use or invent progress"
   end
 
   def test_spawn_persists_workspace_metadata_on_the_worker_record
