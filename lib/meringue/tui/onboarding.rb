@@ -651,8 +651,8 @@ module Meringue
           "    picks the project and issue, and spawns or prompts a worker for you.",
           "  · The left pane is the AgentTree: projects → issues → workers. Click a row to",
           "    filter the logs to it and aim your next message at it; Esc clears that.",
-          "  · Double-click a worker to open its focused workspace: full transcript, a shell",
-          "    in its worktree, and its pull request.",
+          "  · Double-click an issue to open its pull request; double-click a worker to open",
+          "    its focused workspace: full transcript, a shell in its worktree, and its context.",
           "",
           "  Enter send · Tab focus · / commands · Esc clear · Ctrl-B pull request · /keybind all keys"
         ]

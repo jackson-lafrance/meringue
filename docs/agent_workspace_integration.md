@@ -30,13 +30,13 @@ The presentation record must not become a second source of harness truth. PIDs, 
 
 ## Delivery pull requests
 
-`TUI::DeliveryPullRequest.for_id(state, worker_id)` resolves a worker through its issue and returns presentation data for the kernel-verified `delivery_pull_request`. Candidate and worker-reported URLs are intentionally not actionable. Use:
+`TUI::DeliveryPullRequest.for_id(state, issue_or_worker_id)` resolves a worker through its owning issue and returns presentation data for the kernel-verified `delivery_pull_request`. Candidate and worker-reported URLs are intentionally not actionable. Use:
 
 - `TUI::DeliveryPullRequest.openable?` before invoking a URL opener;
 - `TUI::DeliveryPullRequest.status_label` for `open`, `merged`, `closed`, stale, unavailable, invalid, and not-yet-tracked labels;
 - the returned `url` and `number` for the prominent workspace link.
 
-Outside a focused workspace, `Ctrl-B` (`open_delivery_pr`) opens the selected worker's verified delivery PR; with nothing selected it opens a picker over every open PR in the tree instead of guessing one (see [`docs/keybindings.md`](keybindings.md#what-the-bottom-hint-line-shows)). Inside either focused view, use the configurable workspace leader followed by `workspace_open_pull_request` (`Ctrl-Space`, then `p` by default). The bottom status line keeps the PR number/status and sequence visible. Bare terminal `Ctrl-B` is forwarded to the PTY rather than stolen from shells, multiplexers, or editors.
+Outside a focused workspace, `Ctrl-B` (`open_delivery_pr`) opens the selected issue's verified delivery PR (a worker selection resolves to its owning issue); with nothing selected it opens a picker over every open PR in the tree instead of guessing one (see [`docs/keybindings.md`](keybindings.md#what-the-bottom-hint-line-shows)). Inside either focused view, use the configurable workspace leader followed by `workspace_open_pull_request` (`Ctrl-Space`, then `p` by default). The bottom status line keeps the issue's PR number/status and sequence visible. Bare terminal `Ctrl-B` is forwarded to the PTY rather than stolen from shells, multiplexers, or editors.
 
 Reconciliation refreshes old verified PR status at most once every five minutes. A forge/auth/network failure records `availability: unavailable` and an error while preserving the last known PR state and URL; a later successful refresh clears that error instead of leaving it attached to a healthy record. This is intentional: `/prune` still performs fresh conservative checks and will not prune an unknown PR. The one status it does not re-check is a record already verified as `merged`, because merging is terminal on the forge — that record stays authoritative even while the forge is unreachable, so settled work is still prunable.
 

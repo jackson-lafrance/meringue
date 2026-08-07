@@ -195,15 +195,15 @@ class TuiAgentTreePaneTest < Minitest::Test
     assert_includes plain_line(row), Pane::STATUS_DOTS.fetch("working")
   end
 
-  # Dropping the stale marker must not drop the suffixes that share the row.
-  def test_a_started_deferred_worker_keeps_its_status_and_pull_request_suffixes
+  # Dropping the worker marker must not drop the issue's PR affordance or the worker's own state.
+  def test_a_started_deferred_worker_keeps_its_status_while_the_issue_keeps_the_pull_request_marker
     lines = @pane.lines(started_deferred_state, width: 70)
     worker_row = plain_line(lines.find { |line| plain_line(line).include?("implement") })
     issue_row = plain_line(lines.find { |line| plain_line(line).include?("I1") })
 
-    assert_includes worker_row, "↗"
+    refute_includes worker_row, "↗"
     refute_includes worker_row, Pane::ELLIPSIS
-    assert worker_row.rstrip.end_with?("implement ↗"), worker_row.inspect
+    assert_includes issue_row, "↗"
     # 1 of 3 workers completed; the queued dependent still counts.
     assert_includes issue_row, "1/3"
   end
@@ -265,14 +265,16 @@ class TuiAgentTreePaneTest < Minitest::Test
     refute_includes rendered, "\u0007"
   end
 
-  def test_open_pull_requests_are_marked_on_heads_issues_and_workers
+  def test_open_pull_requests_are_marked_on_their_owner_rows_not_workers
     open_pr = { "url" => "https://github.com/owner/repo/pull/12", "state" => "open" }
     state = tree_state(
       projects: [project_record("P1")],
-      issues: [issue_record("P1-I1", "delivery_pull_request" => open_pr)],
+      issues: [issue_record("P1-I1")],
       agents: [
         agent_record("H1", "delivery_pull_request" => open_pr),
-        agent_record("P1-I1-W1", "issue_id" => "P1-I1")
+        # Pre-migration state may still carry the record on the worker. The marker
+        # belongs on the issue row even while that compatibility fallback is used.
+        agent_record("P1-I1-W1", "issue_id" => "P1-I1", "delivery_pull_request" => open_pr)
       ]
     )
     lines = @pane.lines(state, width: 60)
@@ -282,8 +284,8 @@ class TuiAgentTreePaneTest < Minitest::Test
 
     assert_includes plain_line(head_row), "↗"
     assert_includes plain_line(issue_row), "↗"
-    assert_includes plain_line(worker_row), "↗"
-    assert_includes styles_in(worker_row), Style::PR_MARKER
+    refute_includes plain_line(worker_row), "↗"
+    refute_includes styles_in(worker_row), Style::PR_MARKER
   end
 
   # The PR marker is row status, not decoration, so a title long enough to fill the pane
