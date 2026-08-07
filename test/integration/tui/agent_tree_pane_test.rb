@@ -176,6 +176,123 @@ class TuiAgentTreePaneTest < Minitest::Test
     assert_includes rendered, "waiting on W2"
   end
 
+  # Regression: a queued worker's "waiting on <label>" text is row status, so it carries the
+  # marker accent exactly like "1/3" and "↗". A script gate's label is long enough to wrap at
+  # real pane widths, and the wrapped suffix used to match no line end, so the whole marker
+  # silently fell back to the plain title style. plain_line() cannot see that, which is why
+  # these assertions read the styled segments instead.
+  def test_a_command_gated_wait_marker_keeps_the_marker_style_at_every_width
+    state = long_gate_state
+
+    gate_marker_widths.each do |width|
+      rows = item_rows(state, "P1-I1-W2", width: width)
+
+      assert_equal LONG_GATE_MARKER, marker_text(rows, Style::PR_MARKER), "width #{width}"
+      refute_includes styled_text(rows, Style::TEXT), "waiting on", "width #{width} left the marker unstyled"
+    end
+  end
+
+  # The selected row re-styles the marker instead of dropping it: the accent keeps the
+  # selection background, so the highlight covers the suffix like the rest of the row.
+  def test_a_selected_command_gated_wait_marker_keeps_the_selected_marker_style
+    state = long_gate_state(selected: true)
+
+    gate_marker_widths.each do |width|
+      rows = item_rows(state, "P1-I1-W2", width: width)
+
+      assert_equal LONG_GATE_MARKER, marker_text(rows, Style::PR_MARKER_SELECTED), "width #{width}"
+      refute_includes styled_text(rows, Style::AGENT_TREE_SELECTED), "waiting on", "width #{width}"
+      refute_includes styles_in(rows.first), Style::PR_MARKER, "a selected row never uses the unselected accent"
+    end
+  end
+
+  # Both verbs and both gate forms are the same marker, so they cannot style differently.
+  def test_every_wait_marker_form_uses_the_same_marker_style
+    [
+      [deferred_state, "P1-I1-W2", "waiting on W1"],
+      [deferred_state, "P1-I1-W3", "starting after W1"],
+      [deferred_state, "P1-I2-W1", "waiting on P1-I1-W1"],
+      [command_gated_state, "P1-I1-W3", "waiting on pair review"],
+      [command_gated_state, "P1-I1-W4", "waiting on gh pr view --json reviewDec…"],
+      [command_gated_state, "P1-I1-W5", "waiting on W2"]
+    ].each do |state, id, marker|
+      [34, 44, 80].each do |width|
+        rows = item_rows(state, id, width: width)
+
+        assert_equal marker, marker_text(rows, Style::PR_MARKER), "#{id} at width #{width}"
+      end
+    end
+  end
+
+  # A wrapped marker must not be re-styled by rebuilding the text: the styled segments still
+  # have to join back to exactly the plain row, with no escape sequence smuggled into the
+  # content and no row wider than the pane.
+  def test_styling_the_wait_marker_never_leaks_escapes_or_changes_the_row_width
+    [long_gate_state, long_gate_state(selected: true)].each do |state|
+      (20..80).each do |width|
+        @pane.lines(state, width: width).each do |line|
+          text = plain_line(line)
+
+          refute_includes text, "\e", "width #{width} leaked an escape sequence into the row text"
+          assert_operator text.length, :<=, width, "width #{width} overflowed the pane"
+          assert line.all? { |segment| segment.is_a?(Array) && segment.length == 2 }, "width #{width}"
+        end
+      end
+    end
+  end
+
+  # The accent has to be a real accent in every bundled theme, not the body style under a
+  # different name, and every theme has to keep the selected variant distinct too.
+  def test_the_wait_marker_accent_is_distinct_in_every_bundled_colorscheme
+    Style.colorschemes.each do |scheme|
+      with_colorscheme(scheme) do
+        rows = item_rows(long_gate_state, "P1-I1-W2", width: 40)
+        selected_rows = item_rows(long_gate_state(selected: true), "P1-I1-W2", width: 40)
+
+        assert_equal LONG_GATE_MARKER, marker_text(rows, Style::PR_MARKER), scheme
+        assert_equal LONG_GATE_MARKER, marker_text(selected_rows, Style::PR_MARKER_SELECTED), scheme
+        refute_equal Style::TEXT.to_s, Style::PR_MARKER.to_s, "#{scheme} renders the marker as body text"
+        refute_equal Style::AGENT_TREE_SELECTED.to_s, Style::PR_MARKER_SELECTED.to_s, scheme
+      end
+    end
+  end
+
+  # The same positional styling has to keep multi-chip suffixes separated when they wrap: a
+  # goal chip pushed onto a continuation line keeps its own color next to the PR marker.
+  def test_a_wrapped_multi_chip_suffix_keeps_each_chip_in_its_own_style
+    state = tree_state(
+      projects: [project_record("P1")],
+      issues: [
+        issue_record(
+          "P1-I1",
+          "title" => "Keep the flake rate under control for the whole integration suite",
+          "delivery_pull_request" => { "url" => "https://github.com/owner/repo/pull/12", "state" => "open" }
+        )
+      ],
+      agents: []
+    )
+    state["goals"] = [{
+      "id" => "G1",
+      "issue_id" => "P1-I1",
+      "current_iteration" => 2,
+      "budget" => { "max_iterations" => 6 },
+      "metric" => { "target" => 100, "comparator" => "gte" },
+      "baseline_metric" => { "value" => 0 },
+      "last_metric" => { "value" => 40 },
+      "paused" => true,
+      "stop_reason" => "probe_unavailable"
+    }]
+
+    # Widths chosen so the goal chip itself is split by the wrap, and one where the title is
+    # elided to keep the chips on the row.
+    [34, 40, 46, 50, 60].each do |width|
+      rows = item_rows(state, "P1-I1", width: width)
+
+      assert_equal "2/6 40% paused stopped: metric unreadable", marker_text(rows, Style::GOAL_MARKER), "width #{width}"
+      assert_equal "↗", marker_text(rows, Style::PR_MARKER), "width #{width}"
+    end
+  end
+
   def test_a_queued_dependent_still_renders_with_the_queued_status_glyph
     row = @pane.lines(deferred_state, width: 70).find { |line| plain_line(line).include?("waiting on W1") }
 
@@ -413,6 +530,71 @@ class TuiAgentTreePaneTest < Minitest::Test
   end
 
   private
+
+  # The label from the reported row, bounded by Pane::GATE_LABEL_LIMIT.
+  LONG_GATE_MARKER = "waiting on CI concluded on shop/world…"
+
+  # Widths where the marker survives the row: below this the whole suffix is ellipsized away,
+  # which is truncation behavior rather than styling and is unchanged by this fix.
+  def gate_marker_widths
+    (26..80).to_a
+  end
+
+  # The row the bug was reported on: a queued worker held by a live command gate whose label
+  # is long enough to wrap at ordinary AgentTree widths.
+  def long_gate_state(selected: false)
+    tree_state(
+      projects: [project_record("P1")],
+      issues: [issue_record("P1-I1")],
+      agents: [
+        agent_record("P1-I1-W1", "issue_id" => "P1-I1", "status" => "completed", "harness_metadata" => { "title" => "deliver" }),
+        agent_record(
+          "P1-I1-W2",
+          "issue_id" => "P1-I1",
+          "status" => "queued",
+          "after_agent_id" => "P1-I1-W1",
+          "harness_metadata" => {
+            "title" => "Merge if CI passed, fix it if not",
+            "deferred_spawn" => {
+              "state" => "waiting",
+              "after_agent_id" => "P1-I1-W1",
+              "command_gate" => {
+                "state" => "pending",
+                "armed_at" => "2026-01-01T00:00:00Z",
+                "label" => "CI concluded on shop/world PR 953732",
+                "command" => "gh pr view --json statusCheckRollup"
+              }
+            }
+          }
+        )
+      ],
+      selected_agent_id: selected ? "P1-I1-W2" : nil,
+      navigation_active: selected
+    )
+  end
+
+  # Every rendered row that belongs to one tree item, wrapped rows included.
+  def item_rows(state, id, width:)
+    lines = @pane.lines(state, width: width)
+    ids = @pane.line_item_ids(state, width: width)
+
+    assert_equal lines.length, ids.length
+    lines.each_with_index.select { |_line, index| ids[index] == id }.map(&:first)
+  end
+
+  # The chip as the user reads it across a wrap: contiguous styled runs within a row join
+  # directly, and the single space the wrap consumed between rows is restored.
+  def marker_text(rows, style)
+    # The space that separates two chips is styled with the chip that follows it, so a run is
+    # stripped before the rows are rejoined.
+    rows.map { |row| styled_text([row], style).strip }.reject(&:empty?).join(" ")
+  end
+
+  def styled_text(rows, style)
+    rows.flat_map { |row| Array(row).select { |segment| segment.is_a?(Array) && segment.fetch(1, nil).to_s == style.to_s } }
+        .map { |segment| segment.fetch(0).to_s }
+        .join
+  end
 
   def deferred_state
     tree_state(
