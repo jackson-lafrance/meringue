@@ -711,7 +711,7 @@ Payload:
   "after_from_command": "Optional SpawnWorker command id or index in this batch instead of after_agent_id",
   "if_predecessor_fails": "Optional cancel (default) or run",
   "include_predecessor_result": "Optional false to omit the predecessor's final report from this worker's prompt",
-  "completion_head": "Optional string or object with prompt: spawn a fresh head after this worker completes, with the worker's final report as context",
+  "completion_head": "Optional string or object with prompt: spawn a fresh head after this worker completes; the object may carry the same after_command gate fields to hold routing until an external condition passes",
   "after_command": "Optional shell command the kernel polls until it says go; the worker stays queued until then",
   "after_command_label": "Optional short human label for that condition, shown in the AgentTree and logs",
   "after_command_expect": "Optional exit_zero (default) or output_matches",
@@ -799,7 +799,32 @@ Use `completion_head` when the next routing decision depends on the worker's fin
 
 When the worker completes, the kernel records the final report, claims the continuation exactly once, spawns a fresh stateless head, and includes a bounded worker-result block in that head's prompt. If Meringue was down when the worker was marked completed, the next `ReconcileSessions` pass triggers the same continuation. The spawned head routes normal kernel commands (`SpawnWorker`, `PromptAgent`, questions, etc.) through the usual validation and journaling path.
 
-Use `after_agent_id` instead when the next worker is already known and only needs the predecessor's handover. Use `completion_head` when a head must inspect the result and choose dynamic fan-out or a different follow-on route.
+When that routing decision must not happen until an external condition changes, put the ordinary `after_command` fields **inside** the `completion_head` object:
+
+```json
+{
+  "completion_head": {
+    "prompt": "Read the delivery report and route the work needed after the pair review lands.",
+    "include_worker_result": true,
+    "after_command": "gh pr view --json reviewDecision --jq .reviewDecision | grep -qE 'APPROVED|CHANGES_REQUESTED'",
+    "after_command_label": "pair review on the delivery PR",
+    "after_command_cwd": "workspace",
+    "after_command_interval_seconds": 120,
+    "after_command_max_wait_seconds": 14400
+  }
+}
+```
+
+The worker may complete, but no head or checker worker starts yet. Its completed worker record keeps the continuation plus the disarmed gate; completion arms the gate, and the shared kernel wait-gate pass polls it under the same bounds as a queued worker's `after_command`. On success, the head receives both the worker report and the gate's bounded last output. The issue remains `working` while this continuation is queued. The persisted command, deadline, check count, next-check time, and continuation claim survive restarts. The ownership claim prevents concurrent spawns, the existing-head lookup recovers a crash after spawn, and applying that head checkpoints the source continuation in the same state transaction before removing the head, so the eventual routing is exactly once even across the apply/cleanup crash window.
+
+All ordinary gate options and policies have the same meaning here: `after_command_expect`/`after_command_pattern`, `after_command_cwd`, interval, per-check timeout, max wait, and `if_gate_expires`. The wait budget starts when the worker completes, not when it starts. Default expiry cancels the continuation with a warning; `if_gate_expires: "run"` starts the head anyway and tells it the condition did not resolve. Invalid nested gates reject `SpawnWorker` before a harness session starts rather than silently dropping the wait.
+
+Choose where the condition belongs:
+
+- Use `after_agent_id` when the next worker is already known and only needs the predecessor's handover.
+- Use top-level `after_command` when the next worker is known but should not start until the external condition passes.
+- Use `completion_head.after_command` when a head must inspect the worker result and make a dynamic routing decision, but even that decision must wait for a known external condition.
+- If a completion head can only discover the condition from the final report (for example the report contains the new PR URL), have that head queue the **real follow-up worker** with top-level `after_command`. Do not launch a worker whose only job is to check once and recursively request another completion head; that is the short-lived-worker churn kernel gates exist to avoid.
 
 ### Chaining a worker after another agent
 

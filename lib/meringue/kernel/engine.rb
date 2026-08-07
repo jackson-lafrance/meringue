@@ -401,6 +401,7 @@ module Meringue
       COMPLETION_CONTINUATION_STATE_TRIGGERED = "triggered"
       COMPLETION_CONTINUATION_STATE_APPLIED = "applied"
       COMPLETION_CONTINUATION_STATE_FAILED = "failed"
+      COMPLETION_CONTINUATION_STATE_CANCELLED = "cancelled"
       COMPLETION_CONTINUATION_HANDOVER_MAX_CHARS = 4_000
       DEFERRED_STATE_WAITING = "waiting"
       DEFERRED_STATE_ACTIVATING = "activating"
@@ -1145,15 +1146,20 @@ module Meringue
         poll_results = agents.map { |agent| poll_agent_session(agent) }
         applied_results = poll_results.map { |poll_result| apply_poll_result(poll_result) }
         # Completion-triggered heads are resolved after polls so a worker that completed during
-        # this pass can route follow-on commands immediately. The settle path does the same work;
-        # this reconciliation hook recovers the crash window where completion was recorded but the
-        # continuation head was not spawned yet.
+        # this pass can route follow-on commands immediately. A continuation carrying an external
+        # gate is only armed here; it remains durable state on the completed worker until the shared
+        # wait-gate pass below says the condition is satisfied.
         completion_continuation_results = reconcile_step("resolve_completion_continuations", []) { resolve_completion_continuations(trigger: "reconcile") }
         # Command gates are evaluated before dependents are resolved, so a wait condition that
-        # passes in this pass starts its worker in the same pass. The commands run outside the
-        # state lock under their own wall-clock budget; nothing here blocks on a user command
-        # for longer than one gate's own timeout.
-        gate_check_results = reconcile_step("check_deferred_worker_gates", []) { check_deferred_worker_gates(trigger: "reconcile") }
+        # passes in this pass starts its worker (or completion head) in the same pass. The commands
+        # run outside the state lock under their own wall-clock budget; nothing here blocks on a
+        # user command for longer than one gate's own timeout.
+        gate_check_results = reconcile_step("check_kernel_wait_gates", []) { check_kernel_wait_gates(trigger: "reconcile") }
+        completion_continuation_results.concat(
+          reconcile_step("resolve_completion_continuations_after_wait_gates", []) do
+            resolve_completion_continuations(trigger: "reconcile_after_wait_gate")
+          end
+        )
         # Second activation hook for queued dependents. It runs after the polls so a predecessor
         # that settled in this same pass is honoured immediately, and it is the hook that recovers
         # a dependency whose predecessor settled, errored, or disappeared while Meringue was down.
@@ -3363,6 +3369,11 @@ module Meringue
           head["harness_metadata"] = metadata
           head["status"] = rejected_count.positive? || failed_count.positive? ? "blocked" : "completed"
           head["updated_at"] = now
+          # A completion head and the worker continuation that spawned it are checkpointed in the
+          # same state transaction. If the process dies after this save but before the synchronous
+          # caller finalizes its result, reconciliation sees `applied` instead of spawning a second
+          # head after the first head record has already been cleaned up.
+          checkpoint_completion_continuation_from_head_result!(state, head, now: now)
 
           log_ids.concat(command_results.flat_map { |result| result.fetch("log_entry_ids", []) })
           log_ids.concat(summary_log_ids)
@@ -8236,10 +8247,16 @@ module Meringue
         end
 
         include_result = value_at(record, "include_worker_result", "IncludeWorkerResult", "includeWorkerResult")
+        gate_plan = deferred_gate_plan(record)
+        errors.concat(gate_plan.fetch("errors", []))
         {
           "prompt" => prompt,
-          "include_worker_result" => include_result.nil? ? true : truthy?(include_result)
-        }
+          "include_worker_result" => include_result.nil? ? true : truthy?(include_result),
+          # The same persisted, bounded predicate used by queued workers can hold the continuation
+          # itself. It is stored disarmed and only begins consuming its wait budget after the worker
+          # completes, so worker runtime never counts against an external review/deploy deadline.
+          "command_gate" => gate_plan.fetch("gate", nil)
+        }.compact
       end
 
       def completion_continuation_record(continuation, now:, spawn_command_id: nil)
@@ -8249,6 +8266,7 @@ module Meringue
           "state" => COMPLETION_CONTINUATION_STATE_WAITING,
           "prompt" => continuation.fetch("prompt"),
           "include_worker_result" => continuation.fetch("include_worker_result", true),
+          "command_gate" => continuation.fetch("command_gate", nil),
           "created_at" => now,
           "spawn_command_id" => present_string(spawn_command_id)
         }.compact
@@ -8269,15 +8287,17 @@ module Meringue
       end
 
       def resolve_completion_continuations(trigger:, only_agent_id: nil)
-        decisions = claim_completion_continuations(trigger: trigger, only_agent_id: only_agent_id)
-        decisions.map { |decision| trigger_completion_continuation_head(decision, trigger: trigger) }
+        claims = claim_completion_continuations(trigger: trigger, only_agent_id: only_agent_id)
+        claims.map do |claim|
+          claim.fetch("result", nil) || trigger_completion_continuation_head(claim, trigger: trigger)
+        end
       end
 
       def claim_completion_continuations(trigger:, only_agent_id: nil)
         synchronized_state do
           state = normalized_state
           now = timestamp
-          decisions = []
+          claims = []
           changed = false
           state.fetch("agents").each do |agent|
             next unless agent.fetch("type", nil) == "worker"
@@ -8299,13 +8319,97 @@ module Meringue
               ).compact
               agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("completion_continuation" => updated)
               agent["updated_at"] = now
-              decisions << completion_continuation_decision(agent, updated, existing_head: deep_copy(existing_head))
+              claims << completion_continuation_decision(agent, updated, existing_head: deep_copy(existing_head))
               changed = true
               next
             end
 
             next unless state_value == COMPLETION_CONTINUATION_STATE_WAITING ||
                         (state_value == COMPLETION_CONTINUATION_STATE_TRIGGERING && !completion_continuation_owned_by_other_live_instance?(continuation))
+
+            gate = completion_continuation_gate(continuation)
+            if gate
+              gate_state = gate.fetch("state", DEFERRED_GATE_STATE_PENDING).to_s
+              if gate_state == DEFERRED_GATE_STATE_PENDING
+                unless gate_armed?(gate)
+                  armed = armed_deferred_gate(gate, now: now)
+                  updated = continuation.merge("command_gate" => armed)
+                  agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("completion_continuation" => updated)
+                  agent["updated_at"] = now
+                  refresh_worker_parent_statuses!(state, agent, now)
+                  message = "Completion continuation for worker #{agent.fetch("id")} is queued until wait condition " \
+                            "#{deferred_gate_label(armed)} passes."
+                  log_ids = append_log(
+                    state,
+                    source_type: "kernel",
+                    source_id: agent.fetch("id"),
+                    level: "info",
+                    message: message,
+                    details: {
+                      "agent_id" => agent.fetch("id"),
+                      "issue_id" => agent.fetch("issue_id", nil),
+                      "after_command" => armed.fetch("command", nil),
+                      "after_command_state" => armed.fetch("state", nil),
+                      "after_command_expires_at" => armed.fetch("expires_at", nil),
+                      "resolution" => "completion_continuation_gate_armed",
+                      "trigger" => trigger
+                    }.compact
+                  )
+                  claims << {
+                    "result" => accepted_result(
+                      nil,
+                      "QueueCompletionContinuation",
+                      agent.fetch("id"),
+                      message,
+                      { "agent_id" => agent.fetch("id"), "continuation" => deep_copy(updated) },
+                      log_ids
+                    )
+                  }
+                  changed = true
+                end
+                next
+              end
+
+              if DEFERRED_GATE_UNRESOLVED_STATES.include?(gate_state) &&
+                 gate.fetch("if_gate_expires", deferred_worker_default_failure_policy).to_s != "run"
+                updated = continuation.merge(
+                  "state" => COMPLETION_CONTINUATION_STATE_CANCELLED,
+                  "cancelled_at" => now,
+                  "cancel_reason" => gate_state == DEFERRED_GATE_STATE_EXPIRED ? "gate_expired" : "gate_unavailable"
+                )
+                agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("completion_continuation" => updated)
+                agent["updated_at"] = now
+                refresh_worker_parent_statuses!(state, agent, now)
+                message = completion_continuation_gate_cancellation_message(agent.fetch("id"), gate)
+                log_ids = append_log(
+                  state,
+                  source_type: "kernel",
+                  source_id: agent.fetch("id"),
+                  level: "warning",
+                  message: message,
+                  details: {
+                    "agent_id" => agent.fetch("id"),
+                    "issue_id" => agent.fetch("issue_id", nil),
+                    "after_command" => gate.fetch("command", nil),
+                    "after_command_state" => gate_state,
+                    "resolution" => "completion_continuation_gate_cancelled",
+                    "trigger" => trigger
+                  }.compact
+                )
+                claims << {
+                  "result" => accepted_result(
+                    nil,
+                    "CancelCompletionContinuation",
+                    agent.fetch("id"),
+                    message,
+                    { "agent_id" => agent.fetch("id"), "continuation" => deep_copy(updated) },
+                    log_ids
+                  )
+                }
+                changed = true
+                next
+              end
+            end
 
             updated = continuation.merge(
               "state" => COMPLETION_CONTINUATION_STATE_TRIGGERING,
@@ -8316,14 +8420,14 @@ module Meringue
             ).compact
             agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("completion_continuation" => updated)
             agent["updated_at"] = now
-            decisions << completion_continuation_decision(agent, updated)
+            claims << completion_continuation_decision(agent, updated)
             changed = true
           end
           if changed
             touch_state!(state, now)
             store.save(state)
           end
-          decisions
+          claims
         end
       end
 
@@ -8331,7 +8435,8 @@ module Meringue
         [
           COMPLETION_CONTINUATION_STATE_TRIGGERED,
           COMPLETION_CONTINUATION_STATE_APPLIED,
-          COMPLETION_CONTINUATION_STATE_FAILED
+          COMPLETION_CONTINUATION_STATE_FAILED,
+          COMPLETION_CONTINUATION_STATE_CANCELLED
         ].include?(state.to_s)
       end
 
@@ -8351,6 +8456,31 @@ module Meringue
           trigger = (agent.fetch("harness_metadata", {}) || {}).fetch("completion_trigger", nil)
           trigger.is_a?(Hash) && trigger.fetch("worker_agent_id", nil).to_s == worker_id
         end
+      end
+
+      def checkpoint_completion_continuation_from_head_result!(state, head, now:)
+        metadata = head.is_a?(Hash) ? (head.fetch("harness_metadata", {}) || {}) : {}
+        trigger = metadata.fetch("completion_trigger", nil)
+        return false unless trigger.is_a?(Hash) && trigger.fetch("kind", nil).to_s == "worker_completion"
+
+        worker = find_agent(state, trigger.fetch("worker_agent_id", nil))
+        return false unless worker && worker.fetch("type", nil) == "worker"
+
+        continuation = worker_completion_continuation(worker)
+        return false unless continuation
+
+        updated = continuation.merge(
+          "state" => COMPLETION_CONTINUATION_STATE_APPLIED,
+          "head_id" => head.fetch("id"),
+          "trigger" => trigger.fetch("trigger", continuation.fetch("trigger", nil)),
+          "apply_head_result_status" => "accepted",
+          "head_result_applied_at" => now,
+          "completed_at" => now
+        ).compact
+        worker["harness_metadata"] = (worker.fetch("harness_metadata", {}) || {}).merge("completion_continuation" => updated)
+        worker["updated_at"] = now
+        refresh_worker_parent_statuses!(state, worker, now)
+        true
       end
 
       def completion_continuation_decision(agent, continuation, existing_head: nil)
@@ -8450,6 +8580,7 @@ module Meringue
           ).compact
           agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("completion_continuation" => updated)
           agent["updated_at"] = now
+          refresh_worker_parent_statuses!(state, agent, now)
           level = state_value == COMPLETION_CONTINUATION_STATE_FAILED ? "error" : "info"
           message = if state_value == COMPLETION_CONTINUATION_STATE_FAILED
                       "Completion continuation for worker #{agent_id} failed#{head_id ? " after spawning #{head_id}" : ""}."
@@ -8508,6 +8639,7 @@ module Meringue
           ).compact
           agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge("completion_continuation" => updated)
           agent["updated_at"] = now
+          refresh_worker_parent_statuses!(state, agent, now)
           message = "Completion continuation for worker #{agent_id} failed: #{sanitized_error_message(error)}"
           log_ids = append_log(
             state,
@@ -8529,7 +8661,7 @@ module Meringue
         lines = [
           "Meringue kernel continuation: worker #{agent.fetch("id")} completed and requested follow-on head routing.",
           "Use the worker's final result as context, then return a HeadResult with any follow-on kernel commands that should run now.",
-          "Do not ask any worker to poll Meringue state, sleep, or wait for another worker; use kernel commands such as SpawnWorker, PromptAgent, after_agent_id, or questions instead.",
+          "Do not launch a worker merely to re-check a condition, and do not ask one to poll Meringue state, sleep, or wait. Use kernel commands such as SpawnWorker, PromptAgent, after_agent_id, after_command, or questions instead.",
           "",
           "Worker:",
           "- id: #{agent.fetch("id")}",
@@ -8548,7 +8680,48 @@ module Meringue
             truncate_for_state(present_string(metadata.fetch("last_assistant_text", nil)) || "(no final assistant text was recorded)", COMPLETION_CONTINUATION_HANDOVER_MAX_CHARS)
           ])
         end
+        gate = completion_continuation_gate(continuation)
+        lines.concat(completion_continuation_gate_context(gate)) if gate
         lines.join("\n")
+      end
+
+      def completion_continuation_gate(continuation)
+        gate = continuation.is_a?(Hash) ? continuation.fetch("command_gate", nil) : nil
+        gate.is_a?(Hash) ? gate : nil
+      end
+
+      def completion_continuation_gate_context(gate)
+        last = gate.fetch("last_check", nil)
+        last = {} unless last.is_a?(Hash)
+        output = present_string([last.fetch("stdout_tail", nil), last.fetch("stderr_tail", nil)].compact.join("\n"))
+        state_text = case gate.fetch("state", nil).to_s
+                     when DEFERRED_GATE_STATE_EXPIRED
+                       "The condition did not pass within its #{gate.fetch("max_wait_seconds", DEFERRED_WORKER_GATE_DEFAULT_MAX_WAIT_SECONDS)}s budget; routing is running because if_gate_expires is \"run\"."
+                     when DEFERRED_GATE_STATE_UNAVAILABLE
+                       "The condition could not be evaluated (#{gate.fetch("last_problem", "unknown problem")}); routing is running because if_gate_expires is \"run\"."
+                     else
+                       "The condition passed; this is why follow-on routing is running now."
+                     end
+        [
+          "",
+          "Completion wait condition: #{deferred_gate_label(gate)}",
+          "Command: #{gate.fetch("command", "(unknown)")}",
+          "Checked #{gate.fetch("checks", 0).to_i} time(s); last exit status: #{last.fetch("exit_status", "unknown")}",
+          state_text,
+          output ? "Last output:" : "Last output: none was captured.",
+          output ? truncate_gate_output(output) : nil
+        ].compact
+      end
+
+      def completion_continuation_gate_cancellation_message(agent_id, gate)
+        label = deferred_gate_label(gate)
+        if gate.fetch("state", nil).to_s == DEFERRED_GATE_STATE_UNAVAILABLE
+          return "Cancelled completion continuation for worker #{agent_id} because its wait condition #{label} " \
+                 "could not be run #{DEFERRED_WORKER_GATE_UNUSABLE_LIMIT} times in a row."
+        end
+
+        "Cancelled completion continuation for worker #{agent_id} because its wait condition #{label} did not pass within " \
+          "#{gate.fetch("max_wait_seconds", DEFERRED_WORKER_GATE_DEFAULT_MAX_WAIT_SECONDS)}s."
       end
 
       # --- Deferred (queued-after) workers ------------------------------------------------------
@@ -8941,7 +9114,11 @@ module Meringue
         ).compact
         state.fetch("agents") << agent
         issue.fetch("agent_ids") << agent_id unless issue.fetch("agent_ids").include?(agent_id)
+        # Queued work is still live work. This matters when a completion head reopens an issue that
+        # had just rolled up to completed before it placed the follow-up behind an external gate.
+        issue["status"] = "working" unless issue.fetch("status", nil) == "killed"
         issue["updated_at"] = now
+        project["status"] = "working" unless project.fetch("status", nil) == "killed"
         project["updated_at"] = now
         message = deferred_queue_message(agent)
         log_ids = append_log(
@@ -9088,15 +9265,13 @@ module Meringue
         "#{value[0, DEFERRED_WORKER_HANDOVER_MAX_CHARS].rstrip}\n… [handover truncated]"
       end
 
-      # One reconcile pass over every armed, pending command gate. This is the only place a gate
-      # command is executed, and it never runs while the state lock is held: the pass claims the
-      # gates that are due, releases the lock, runs the commands under the pass budget, then writes
-      # the outcomes back. A gate that does not fit in the budget is checked on the next tick.
-      #
-      # It deliberately does not activate anything. It only updates the gate's state on the worker
-      # record; `resolve_deferred_workers` (called right after, and from the settle path, and after
-      # a restart) is still the single place a queued worker starts or is cancelled.
-      def check_deferred_worker_gates(trigger:)
+      # One reconcile pass over every armed, pending command gate. Both queued workers and
+      # completion continuations use this pass: a gate is a persisted kernel wait predicate, not a
+      # reason to spend a harness session. Commands never run while the state lock is held. The pass
+      # claims due gates, releases the lock, runs them under one shared budget, then merges outcomes
+      # into the current owner record. Owner-specific resolvers remain the only places that start a
+      # worker, spawn a head, or cancel work.
+      def check_kernel_wait_gates(trigger:)
         claim = synchronized_state do
           state = normalized_state
           now = timestamp
@@ -9104,29 +9279,52 @@ module Meringue
           due = []
           results = []
           state.fetch("agents").each do |agent|
-            next unless waiting_deferred_worker?(agent)
+            if waiting_deferred_worker?(agent)
+              deferred = deferred_spawn_metadata(agent)
+              gate = deferred_command_gate(deferred)
+              if gate && gate_pending?(gate) && gate_armed?(gate)
+                if gate_expired?(gate, now)
+                  results << expire_deferred_worker_gate_in_state!(state, agent, deferred, gate, now: now, trigger: trigger)
+                  changed = true
+                elsif gate_due?(gate, now)
+                  claimed = gate.merge("next_check_at" => gate_next_check_at(now, gate)).compact
+                  agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+                    "deferred_spawn" => deferred.merge("command_gate" => claimed)
+                  )
+                  agent["updated_at"] = now
+                  changed = true
+                  due << {
+                    "owner_type" => "deferred_worker",
+                    "agent_id" => agent.fetch("id"),
+                    "gate" => deep_copy(claimed),
+                    "cwd" => deferred_gate_cwd(state, agent, claimed)
+                  }
+                end
+              end
+            end
 
-            deferred = deferred_spawn_metadata(agent)
-            gate = deferred_command_gate(deferred)
-            next unless gate && gate_pending?(gate) && gate_armed?(gate)
+            continuation = worker_completion_continuation(agent)
+            gate = completion_continuation_gate(continuation)
+            next unless pending_completion_continuation?(agent) && gate && gate_pending?(gate) && gate_armed?(gate)
 
             if gate_expired?(gate, now)
-              results << expire_deferred_worker_gate_in_state!(state, agent, deferred, gate, now: now, trigger: trigger)
+              results << expire_completion_continuation_gate_in_state!(state, agent, continuation, gate, now: now, trigger: trigger)
               changed = true
               next
             end
             next unless gate_due?(gate, now)
 
-            # Claim the check by moving next_check_at forward *before* running anything. Another
-            # Meringue instance sharing this state file then sees the gate as not due, and a crash
-            # mid-check costs one interval instead of re-running the command in a tight loop.
+            # Moving next_check_at first is the cross-process claim. A crash may delay the next
+            # check by one interval, but can never turn a condition into a hot loop or duplicate it
+            # across two Meringue instances.
             claimed = gate.merge("next_check_at" => gate_next_check_at(now, gate)).compact
             agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
-              "deferred_spawn" => deferred.merge("command_gate" => claimed)
+              "completion_continuation" => continuation.merge("command_gate" => claimed)
             )
             agent["updated_at"] = now
             changed = true
             due << {
+              "owner_type" => "completion_continuation",
               "agent_id" => agent.fetch("id"),
               "gate" => deep_copy(claimed),
               "cwd" => deferred_gate_cwd(state, agent, claimed)
@@ -9145,7 +9343,11 @@ module Meringue
           break if monotonic_time > deadline
 
           outcome = run_deferred_gate_command(entry)
-          recorded = record_deferred_gate_outcome(entry, outcome, trigger: trigger)
+          recorded = if entry.fetch("owner_type", "deferred_worker") == "completion_continuation"
+                       record_completion_continuation_gate_outcome(entry, outcome, trigger: trigger)
+                     else
+                       record_deferred_gate_outcome(entry, outcome, trigger: trigger)
+                     end
           results << recorded if recorded
         end
         results
@@ -9216,25 +9418,11 @@ module Meringue
           next nil unless gate && gate_pending?(gate)
 
           now = timestamp
-          unusable = !!outcome.fetch("unusable", false) || !present_string(outcome.fetch("error", nil)).nil?
-          passed = !!outcome.fetch("passed", false) && !unusable
-          consecutive = unusable ? gate.fetch("consecutive_unusable_checks", 0).to_i + 1 : 0
-          updated = gate.merge(
-            "checks" => gate.fetch("checks", 0).to_i + 1,
-            "last_checked_at" => now,
-            "last_check" => gate_check_record(outcome),
-            "consecutive_unusable_checks" => consecutive,
-            "last_problem" => unusable ? gate_problem_text(outcome) : nil
-          ).compact
-          if passed
-            updated["state"] = DEFERRED_GATE_STATE_SATISFIED
-            updated["satisfied_at"] = now
-          elsif consecutive >= DEFERRED_WORKER_GATE_UNUSABLE_LIMIT
-            # A gate that cannot be run can never pass. Give up loudly rather than polling a
-            # broken command until the wait budget runs out hours from now.
-            updated["state"] = DEFERRED_GATE_STATE_UNAVAILABLE
-            updated["unavailable_at"] = now
-          end
+          merged = merged_wait_gate_outcome(gate, outcome, now: now)
+          updated = merged.fetch("gate")
+          unusable = merged.fetch("unusable")
+          passed = merged.fetch("passed")
+          consecutive = merged.fetch("consecutive_unusable_checks")
           agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
             "deferred_spawn" => deferred.merge("command_gate" => updated)
           )
@@ -9280,6 +9468,48 @@ module Meringue
         end
       end
 
+      def expire_completion_continuation_gate_in_state!(state, agent, continuation, gate, now:, trigger:)
+        agent_id = agent.fetch("id")
+        expired = gate.merge("state" => DEFERRED_GATE_STATE_EXPIRED, "expired_at" => now)
+        agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+          "completion_continuation" => continuation.merge("command_gate" => expired)
+        )
+        agent["updated_at"] = now
+        message = "Wait condition #{deferred_gate_label(expired)} for worker #{agent_id}'s completion continuation did not pass within " \
+                  "#{expired.fetch("max_wait_seconds", DEFERRED_WORKER_GATE_DEFAULT_MAX_WAIT_SECONDS)}s."
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: agent_id,
+          level: "warning",
+          message: message,
+          details: {
+            "agent_id" => agent_id,
+            "issue_id" => agent.fetch("issue_id", nil),
+            "after_command" => expired.fetch("command", nil),
+            "after_command_state" => DEFERRED_GATE_STATE_EXPIRED,
+            "checks" => expired.fetch("checks", 0),
+            "if_gate_expires" => expired.fetch("if_gate_expires", deferred_worker_default_failure_policy),
+            "resolution" => "completion_continuation_gate_expired",
+            "trigger" => trigger
+          }.compact
+        )
+        accepted_result(
+          nil,
+          "CheckCompletionContinuationGate",
+          agent_id,
+          message,
+          {
+            "resolution" => "completion_continuation_gate_expired",
+            "agent_id" => agent_id,
+            "after_command" => expired.fetch("command", nil),
+            "after_command_state" => DEFERRED_GATE_STATE_EXPIRED,
+            "trigger" => trigger
+          }.compact,
+          log_ids
+        )
+      end
+
       def expire_deferred_worker_gate_in_state!(state, agent, deferred, gate, now:, trigger:)
         agent_id = agent.fetch("id")
         expired = gate.merge("state" => DEFERRED_GATE_STATE_EXPIRED, "expired_at" => now)
@@ -9320,6 +9550,100 @@ module Meringue
           }.compact,
           log_ids
         )
+      end
+
+      def record_completion_continuation_gate_outcome(entry, outcome, trigger:)
+        agent_id = entry.fetch("agent_id")
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          next nil unless agent && pending_completion_continuation?(agent)
+
+          continuation = worker_completion_continuation(agent)
+          gate = completion_continuation_gate(continuation)
+          next nil unless gate && gate_pending?(gate)
+
+          now = timestamp
+          merged = merged_wait_gate_outcome(gate, outcome, now: now)
+          updated = merged.fetch("gate")
+          unusable = merged.fetch("unusable")
+          passed = merged.fetch("passed")
+          consecutive = merged.fetch("consecutive_unusable_checks")
+          agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+            "completion_continuation" => continuation.merge("command_gate" => updated)
+          )
+          agent["updated_at"] = now
+          log_ids = []
+          if unusable
+            log_ids = append_log(
+              state,
+              source_type: "kernel",
+              source_id: agent_id,
+              level: "warning",
+              message: "Wait condition #{deferred_gate_label(updated)} for worker #{agent_id}'s completion continuation " \
+                       "could not be evaluated: #{updated.fetch("last_problem", "unknown problem")} " \
+                       "(#{consecutive}/#{DEFERRED_WORKER_GATE_UNUSABLE_LIMIT}).",
+              details: {
+                "agent_id" => agent_id,
+                "issue_id" => agent.fetch("issue_id", nil),
+                "after_command" => updated.fetch("command", nil),
+                "after_command_state" => updated.fetch("state", nil),
+                "consecutive_unusable_checks" => consecutive,
+                "resolution" => "completion_continuation_gate_check",
+                "trigger" => trigger
+              }.compact
+            )
+          end
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(
+            nil,
+            "CheckCompletionContinuationGate",
+            agent_id,
+            "Checked wait condition #{deferred_gate_label(updated)} for worker #{agent_id}'s completion continuation: #{updated.fetch("state")}.",
+            {
+              "resolution" => "completion_continuation_gate_check",
+              "agent_id" => agent_id,
+              "after_command" => updated.fetch("command", nil),
+              "after_command_state" => updated.fetch("state", nil),
+              "checks" => updated.fetch("checks", 0),
+              "passed" => passed,
+              "trigger" => trigger
+            }.compact,
+            log_ids
+          )
+        end
+      end
+
+      # Owner-independent state transition for one bounded check. Keeping this in one place is what
+      # makes `after_command` mean the same thing on queued workers and completion continuations;
+      # owner-specific methods above only decide where to persist it and how to describe it.
+      def merged_wait_gate_outcome(gate, outcome, now:)
+        unusable = !!outcome.fetch("unusable", false) || !present_string(outcome.fetch("error", nil)).nil?
+        passed = !!outcome.fetch("passed", false) && !unusable
+        consecutive = unusable ? gate.fetch("consecutive_unusable_checks", 0).to_i + 1 : 0
+        updated = gate.merge(
+          "checks" => gate.fetch("checks", 0).to_i + 1,
+          "last_checked_at" => now,
+          "last_check" => gate_check_record(outcome),
+          "consecutive_unusable_checks" => consecutive,
+          "last_problem" => unusable ? gate_problem_text(outcome) : nil
+        ).compact
+        if passed
+          updated["state"] = DEFERRED_GATE_STATE_SATISFIED
+          updated["satisfied_at"] = now
+        elsif consecutive >= DEFERRED_WORKER_GATE_UNUSABLE_LIMIT
+          # A gate that cannot be run can never pass. Give up loudly rather than polling a broken
+          # command until the total wait budget runs out hours from now.
+          updated["state"] = DEFERRED_GATE_STATE_UNAVAILABLE
+          updated["unavailable_at"] = now
+        end
+        {
+          "gate" => updated,
+          "unusable" => unusable,
+          "passed" => passed,
+          "consecutive_unusable_checks" => consecutive
+        }
       end
 
       def gate_check_record(outcome)
@@ -12363,8 +12687,9 @@ module Meringue
         end
         return if workers.empty?
 
+        pending_continuation = workers.any? { |worker| pending_completion_continuation?(worker) }
         issue["status"] = if workers.all? { |worker| worker.fetch("status", nil) == "completed" }
-                            active_goal ? "working" : "completed"
+                            active_goal || pending_continuation ? "working" : "completed"
                           elsif workers.any? { |worker| worker.fetch("status", nil) == "errored" }
                             "errored"
                           elsif workers.any? { |worker| worker.fetch("status", nil) == "blocked" }

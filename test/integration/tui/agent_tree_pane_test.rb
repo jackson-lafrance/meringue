@@ -176,6 +176,13 @@ class TuiAgentTreePaneTest < Minitest::Test
     assert_includes rendered, "waiting on W2"
   end
 
+  def test_a_completed_worker_with_gated_head_routing_shows_the_condition
+    rendered = plain_lines(@pane.lines(command_gated_state, width: 80)).join("\n")
+
+    assert_includes rendered, "route after review"
+    assert_includes rendered, "routing after deployment approval"
+  end
+
   def test_a_queued_dependent_still_renders_with_the_queued_status_glyph
     row = @pane.lines(deferred_state, width: 70).find { |line| plain_line(line).include?("waiting on W1") }
 
@@ -500,6 +507,23 @@ class TuiAgentTreePaneTest < Minitest::Test
               "state" => "waiting",
               "after_agent_id" => "P1-I1-W2",
               "command_gate" => { "state" => "pending", "label" => "pair review", "command" => "gh pr view" }
+            }
+          }
+        ),
+        agent_record(
+          "P1-I1-W6",
+          "issue_id" => "P1-I1",
+          "status" => "completed",
+          "harness_metadata" => {
+            "title" => "route after review",
+            "completion_continuation" => {
+              "state" => "waiting",
+              "command_gate" => {
+                "state" => "pending",
+                "armed_at" => "2026-01-01T00:00:00Z",
+                "label" => "deployment approval",
+                "command" => "test -f approved"
+              }
             }
           }
         )
