@@ -291,6 +291,8 @@ class TuiAgentTreePaneTest < Minitest::Test
       assert_equal "2/6 40% paused stopped: metric unreadable", marker_text(rows, Style::GOAL_MARKER), "width #{width}"
       assert_equal "↗", marker_text(rows, Style::PR_MARKER), "width #{width}"
     end
+  end
+
   def test_a_completed_worker_with_gated_head_routing_shows_the_condition
     rendered = plain_lines(@pane.lines(command_gated_state, width: 80)).join("\n")
 
