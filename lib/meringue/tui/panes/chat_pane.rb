@@ -35,20 +35,74 @@ module Meringue
           return @log_lines_cache.fetch(:lines) if @log_lines_cache&.fetch(:key, nil) == cache_key
 
           entries = log_entries(state)
-          lines = if entries.empty?
-                    empty_logs_lines(state, width: width)
-                  else
-                    selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
-                    entries.flat_map do |entry|
-                      gutter = gutter_segment(entry)
-                      entry_lines = role_lines(entry, selected_agent_id: selected_agent_id, width: width)
-                      entry_lines.concat(body_lines(entry, width: width, gutter: gutter))
-                      entry_lines << status_line(entry.fetch("status"), gutter) if entry.fetch("kind", nil) == "message" && entry.fetch("status", nil)
-                      entry_lines
-                    end
-                  end
-          @log_lines_cache = { key: cache_key, lines: lines }
+          lines = []
+          paragraph_ranges = {}
+          if entries.empty?
+            append_log_body_paragraphs(lines, paragraph_ranges, empty_logs_lines(state, width: width))
+          else
+            selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
+            entries.each do |entry|
+              gutter = gutter_segment(entry)
+              append_log_paragraph(lines, paragraph_ranges, role_lines(entry, selected_agent_id: selected_agent_id, width: width))
+              append_log_body_paragraphs(lines, paragraph_ranges, body_lines(entry, width: width, gutter: gutter))
+              if entry.fetch("kind", nil) == "message" && entry.fetch("status", nil)
+                append_log_paragraph(lines, paragraph_ranges, [status_line(entry.fetch("status"), gutter)])
+              end
+            end
+          end
+          @log_lines_cache = { key: cache_key, lines: lines, paragraph_ranges: paragraph_ranges }
           lines
+        end
+
+        # Inclusive wrapped-row bounds for the displayed paragraph containing a
+        # logs content row. Headers and statuses are their own paragraphs; body
+        # text stays together across soft wraps and stops at displayed blank
+        # lines or at the next log entry.
+        def log_paragraph_range(state, line_index, width: nil)
+          lines = log_lines(state, width: width)
+          index = line_index.to_i
+          return nil unless index.between?(0, lines.length - 1)
+
+          range = @log_lines_cache.fetch(:paragraph_ranges, {}).fetch(index, nil)
+          range&.dup
+        end
+
+        def append_log_body_paragraphs(lines, paragraph_ranges, rows)
+          paragraph = []
+          flush = lambda do
+            append_log_paragraph(lines, paragraph_ranges, paragraph)
+            paragraph = []
+          end
+
+          Array(rows).each do |row|
+            if blank_log_body_row?(row)
+              flush.call
+              append_log_paragraph(lines, paragraph_ranges, [row])
+            else
+              paragraph << row
+            end
+          end
+          flush.call
+        end
+
+        def append_log_paragraph(lines, paragraph_ranges, rows)
+          rows = Array(rows)
+          return if rows.empty?
+
+          start_line = lines.length
+          lines.concat(rows)
+          finish_line = lines.length - 1
+          range = { "start_line" => start_line, "end_line" => finish_line }
+          (start_line..finish_line).each { |line_index| paragraph_ranges[line_index] = range }
+        end
+
+        def blank_log_body_row?(row)
+          segments = Array(row)
+          text = plain_text(segments)
+          return true if text.strip.empty?
+          return false unless segments.length == 1
+
+          [AGENT_GUTTER, PLAIN_GUTTER].include?(text)
         end
 
         # Pane title, so an active AgentTree selection is always visible as the
@@ -1097,7 +1151,7 @@ module Meringue
             return [["⧉ logs select", Style::ACCENT], ["  arrows move · Shift+arrows extend · Ctrl-C copies · Esc exits", Style::MUTED]]
           end
           return [["⧉ selection", Style::ACCENT], ["  Ctrl-C copies", Style::MUTED]] if selection.fetch("active", false)
-          return [["double-click a word to copy it · Alt-V or Shift+arrows select logs", Style::MUTED]] if logs_pane_focused?(state)
+          return [["double-click a word · triple-click a paragraph · Alt-V or Shift+arrows select logs", Style::MUTED]] if logs_pane_focused?(state)
 
           []
         end

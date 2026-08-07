@@ -157,6 +157,17 @@ module Meringue
         view.fetch(:lines).map { |line| line_plain_text(line) }
       end
 
+      # Inclusive wrapped-row bounds of the displayed paragraph under a logs
+      # selection point. ChatPane owns paragraph grouping because it knows which
+      # soft-wrapped rows came from the same log body.
+      def logs_text_paragraph_range(state, width:, height:, line_index:)
+        dimensions = logs_content_dimensions(state, width: width, height: height)
+        return nil unless dimensions
+        return nil unless chat_pane.respond_to?(:log_paragraph_range)
+
+        chat_pane.log_paragraph_range(state, line_index, width: dimensions.fetch(:content_width))
+      end
+
       # Which content lines the logs pane is currently showing, so keyboard
       # selection can page by a real screenful and place a fresh caret in view.
       def logs_visible_window(state, width:, height:)
