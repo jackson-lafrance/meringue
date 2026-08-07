@@ -696,15 +696,17 @@ module Meringue
       end
 
       # Right-click is a direct AgentTree action rather than a context menu: an
-      # agent row opens its associated delivery PR using the same opener as the
-      # keyboard action. Non-agent rows are intentionally ignored.
+      # issue row opens its associated delivery PR using the same opener as the
+      # keyboard action. Worker rows deliberately do not duplicate that affordance;
+      # their direct action is the focused workspace on double-click.
       def handle_mouse_right_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         pane = pane_at_mouse_position(key, state)
         return nil unless pane == "agent_tree"
 
         item_id = agent_tree_item_at_mouse_position(key, state)
-        agent = Array(state.fetch("agents", [])).find { |candidate| candidate.is_a?(Hash) && candidate["id"].to_s == item_id.to_s }
-        return [input_buffer, input_cursor, slash_suggestion_index] unless agent && AgentTreeNavigation.selectable_agent?(agent)
+        record = agent_tree_record(state, item_id)
+        return [input_buffer, input_cursor, slash_suggestion_index] unless record
+        return [input_buffer, input_cursor, slash_suggestion_index] unless issue_tree_record?(record) || record["type"] == "head"
 
         open_pr_by_agent_id(state, item_id)
         [input_buffer, input_cursor, slash_suggestion_index]
@@ -1349,8 +1351,8 @@ module Meringue
 
       # A single left click selects the clicked AgentTree row and scopes the logs
       # pane to it. Clicking the already-selected row, or empty space inside the
-      # tree, is the explicit deselect gesture. Double-click still opens the
-      # focused workspace and must not be read as a deselect.
+      # tree, is the explicit deselect gesture. A double-click is node-specific:
+      # issues open their delivery PR and workers open their focused workspace.
       def handle_agent_tree_item_click(item_id, key, state)
         if item_id.to_s.empty?
           @last_worker_click = nil
@@ -1358,20 +1360,58 @@ module Meringue
           return false
         end
 
-        # Only rows that resolve to a worker workspace participate in the
-        # double-click action. In particular, a pending head is still selectable
-        # for focused logs, but repeated clicks never append "no session" chat
-        # messages or attempt to open a worker-only view.
-        workspace_openable = !agent_workspace_agent_for_item(state, item_id).nil?
-        double_click = workspace_openable && worker_double_click?(item_id, key)
-        @last_worker_click = nil unless workspace_openable
+        record = agent_tree_record(state, item_id)
+        return false unless record
+
+        action = agent_tree_double_click_action(record, item_id, key, state)
+        double_click = action.fetch(:double_click)
+        @last_worker_click = nil unless action.fetch(:track_click)
         if !double_click && @log_scope_id.to_s == item_id.to_s
           deselect_agent_tree_item
           return false
         end
 
         select_agent_tree_item(state, item_id)
-        double_click && open_agent_workspace_by_id(state, item_id)
+        case action.fetch(:kind)
+        when :pull_request
+          double_click && open_pr_by_agent_id(state, item_id)
+        when :workspace
+          double_click && open_agent_workspace_by_id(state, item_id)
+        else
+          false
+        end
+      end
+
+      def agent_tree_double_click_action(record, item_id, key, state)
+        if issue_tree_record?(record)
+          { kind: :pull_request, track_click: true, double_click: worker_double_click?(item_id, key) }
+        elsif record["type"].to_s == "worker"
+          workspace_openable = worker_workspace_available?(record)
+          {
+            kind: :workspace,
+            track_click: workspace_openable,
+            double_click: workspace_openable && worker_double_click?(item_id, key)
+          }
+        else
+          { kind: :none, track_click: false, double_click: false }
+        end
+      end
+
+      def agent_tree_record(state, item_id)
+        return nil if item_id.to_s.empty?
+
+        Array(state.fetch("issues", [])).find { |record| record.is_a?(Hash) && record["id"].to_s == item_id.to_s } ||
+          Array(state.fetch("agents", [])).find { |record| record.is_a?(Hash) && record["id"].to_s == item_id.to_s }
+      end
+
+      def worker_workspace_available?(worker)
+        Workspace::PathResolver.path_for(worker)
+      rescue StandardError
+        nil
+      end
+
+      def issue_tree_record?(record)
+        AgentTreeNavigation.issue_record?(record)
       end
 
       def select_agent_tree_item(state, item_id)
@@ -2118,8 +2158,8 @@ module Meringue
         <<~TEXT.strip
           Keybindings (from [tui.keybindings], with defaults for omitted actions):
           Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels a selection first, then the AgentTree log/chat target and jump mode.
-          Focus: click a dashboard section to focus it; double-clicking a worker or an issue with a worker opens its focused workspace, while unavailable rows stay quiet. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
-          AgentTree selection and chat target: single-click a project, issue, head, or worker row to select it and filter the logs pane to that node (a worker shows its own logs, an issue adds all of its workers and child issues, a project adds its whole subtree). Right-click an agent to open its associated delivery PR; agents without one show a transient notice and leave the selection unchanged. An issue also targets subsequent natural-language chat to that issue; a worker selection resolves chat to its owning issue. A fresh head still routes every message using that explicit target context. The selection stays highlighted, is scrolled back into view when it changes, and keeps filtering while you work in the logs or chat pane; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} in jump mode retarget it. Click the highlighted row again, click empty space in the AgentTree, or press #{keys_for("cancel_navigation")} to clear it. Heads without an owning issue and projects remain log-only filters, and unavailable rows are a silent no-op when double-clicked.
+          Focus: click a dashboard section to focus it; double-clicking an issue opens its delivery PR (or shows a transient no-PR notice), while double-clicking a worker with a workspace opens its focused workspace. Workers without workspaces stay quiet. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
+          AgentTree selection and chat target: single-click a project, issue, head, or worker row to select it and filter the logs pane to that node (a worker shows its own logs, an issue adds all of its workers and child issues, a project adds its whole subtree). Right-click an issue to open its associated delivery PR; workers do not duplicate that affordance, and an issue without one shows a transient notice. An issue also targets subsequent natural-language chat to that issue; a worker selection resolves chat to its owning issue. A fresh head still routes every message using that explicit target context. The selection stays highlighted, is scrolled back into view when it changes, and keeps filtering while you work in the logs or chat pane; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} in jump mode retarget it. Double-click an issue to open its PR, or double-click a worker with an assigned workspace to open that worker's focused workspace. Click the highlighted row again, click empty space in the AgentTree, or press #{keys_for("cancel_navigation")} to clear it. Heads without an owning issue, projects, and workers without workspaces remain log-only filters for these mouse actions.
           Selection: drag with the mouse in the logs pane or the composer to select text; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
           Logs selection (keyboard): focus the logs pane, then #{keys_for("logs_selection_mode")} toggles the selection cursor or any Shift+movement starts it. #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor, #{keys_for("cursor_word_left")}/#{keys_for("cursor_word_right")} move by word, #{keys_for("cursor_home")}/#{keys_for("cursor_end")} jump to the line edges, and #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} move by page. #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")}, #{keys_for("select_home")}/#{keys_for("select_end")}, #{keys_for("select_word_left")}/#{keys_for("select_word_right")}, and #{keys_for("select_page_up")}/#{keys_for("select_page_down")} extend the selection. #{keys_for("copy_selection")} copies the selection (or the cursor line when nothing is extended); #{keys_for("cancel_navigation")} exits.
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
@@ -3552,6 +3592,7 @@ module Meringue
 
       def apply_slash_command_results(command_results)
         clear_logs! if clear_state_accepted?(command_results)
+        reload_recounted_presentation_state! if recount_accepted?(command_results)
         apply_theme_command_results(command_results)
       end
 
@@ -3559,6 +3600,26 @@ module Meringue
         Array(command_results).any? do |result|
           result.fetch("command_type", nil) == "ClearState" && result.fetch("status", nil) == "accepted"
         end
+      end
+
+      def recount_accepted?(command_results)
+        Array(command_results).any? do |result|
+          result.fetch("command_type", nil) == "Recount" && result.fetch("status", nil) == "accepted"
+        end
+      end
+
+      # A recount renames records, and the kernel rewrote the ids embedded in persisted chat
+      # history and in the focused-workspace selection to match. This in-memory state is written
+      # back on the next append, so it has to be re-read: otherwise the stale buffer would
+      # reintroduce pre-recount ids that now name different records.
+      def reload_recounted_presentation_state!
+        return unless log_store&.respond_to?(:load)
+
+        state = log_store.load
+        restore_logs!(state)
+        restore_agent_workspace!(state)
+      rescue StandardError
+        nil
       end
 
       def clear_logs!

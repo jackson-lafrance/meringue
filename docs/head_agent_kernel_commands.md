@@ -1430,7 +1430,9 @@ Example:
 
 ### Recount
 
-Compacts project, issue, worker, and question ids after records are removed, and backs the user-facing `/recount` command. "renumber the tree", "recount the ids", and "tidy the numbering after that prune" all map here. Head ids are never renamed.
+Compacts project, issue, worker, question, and goal ids after records are removed, and backs the user-facing `/recount` command. "renumber the tree", "recount the ids", and "tidy the numbering after that prune" all map here. Head ids are never renamed.
+
+Compacting reuses ids, so the pass also resolves every id already written about a record: references and narrative text follow a renamed record, and an id whose record is gone is cleared in live slots and marked `(old id)` in history so it cannot be read as the record that inherited the id. See `docs/recount.md`.
 
 Takes no payload. The kernel rejects the pass while another head's result is still in flight; the head that proposed the command does not block itself. Because Recount renames existing ids, propose it as the only command in the batch, or as the last one, and never mix it with commands that reference ids that are about to change.
 

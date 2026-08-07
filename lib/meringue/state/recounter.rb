@@ -16,9 +16,25 @@ module Meringue
     #
     #   * the pass runs on a copy and is swapped in only after validation passes, so a broken
     #     rename can never be persisted, and
-    #   * `validate_integrity!` compares the references that resolved before the pass against the
-    #     references that resolve after it. Anything the rewrite missed fails loudly, by path,
-    #     instead of leaving a queued worker waiting on an id that no longer exists.
+    #   * `validate_integrity!` audits the finished document and fails loudly, by path, on any id
+    #     the rewrite left behind, instead of leaving a queued worker waiting on an id that no
+    #     longer exists.
+    #
+    # Compaction *reuses* ids, and that is what makes "rewrite what resolves" insufficient on its
+    # own. The record that was `P2-I2-W1` before a pass may be gone, and an unrelated worker can
+    # hold that id afterwards (or be created into it later, since the counters are rewound), so an
+    # id left behind does not merely dangle - it silently starts naming a different record. Every
+    # id this pass can rename is therefore resolved exactly one of two ways:
+    #
+    #   * the record survived: the id is rewritten to its new spelling, in structured reference
+    #     fields *and* in the human-readable text that quotes it (log messages, issue titles and
+    #     descriptions, worker prompts and reports, question context, goal directives, chat rows),
+    #     because that text is what the user reads and what a head or dependent worker is handed;
+    #   * the record is gone: the bare spelling must stop resolving, because it is now free to be
+    #     handed to someone else. In the live orchestration slots the kernel acts on it is cleared,
+    #     exactly as dangling worker lineage links already were. In append-only history (log
+    #     routing, chat routing) and in text it is marked `(old id)`, so the line stays readable
+    #     and attributable to something historical while resolving to no record at all.
     module Recounter
       # Correlation identifiers that are only ever compared against copies of themselves. They
       # are never resolved back to an AgentTree record, so they are preserved verbatim even when
@@ -36,10 +52,42 @@ module Meringue
       # both rewriting and auditing.
       HISTORY_SUBTREE_KEYS = %w[last_recount mappings].freeze
 
+      # Sections that record what already happened. A reference here cannot be "repointed" the way
+      # a live orchestration slot can, so a dangling one is marked rather than cleared: a log line
+      # keeps its routing id (annotated) instead of becoming an unattributed line.
+      HISTORY_SECTION_KEYS = %w[logs conversation].freeze
+
+      # Values that are byte-exact evidence rather than prose or references: filesystem paths, git
+      # branches, URLs, the argv a session was spawned with, raw process output, and harness
+      # snapshots. An id-shaped substring inside them (`meringue/fix-P3-I9-abc`) is part of an
+      # exact string that something outside Meringue owns, so these subtrees are skipped entirely
+      # and nothing inside them is rewritten, marked, or audited.
+      VERBATIM_KEYS = %w[
+        branch command cwd harness_model_catalogs path pi_session_defaults pi_state
+        stderr stderr_tail stdout url
+      ].freeze
+      VERBATIM_KEY_SUFFIXES = %w[
+        _branch _branches _dir _file _files _path _paths _ref _root _url _urls
+      ].freeze
+
       # The grammar of every id this pass can rename. Used by the audit to recognise a stored
       # reference no matter which key holds it, so a field stored under an unconventional key is
       # still caught by validation rather than silently stranded.
       RENAMEABLE_ID_PATTERN = /\A(?:P\d+(?:-I\d+(?:-W\d+)?)?|Q\d+|G\d+)\z/.freeze
+
+      # The same grammar *inside* prose. Deliberately case-sensitive: Meringue always writes ids in
+      # canonical upper case, so an id typed in lower case inside a quoted user request stays
+      # exactly as the user wrote it instead of being edited into a reference. A word character,
+      # `-`, or `/` on either side also disqualifies a match, which is what keeps a branch name
+      # (`meringue/fix-P3-I9-abc`), a model id (`glm-5p2-fast`), and a composite correlation id
+      # (`P1-I1-W1-PP1`, `G1-IT2-ATTEMPT`, `session-restart-P1-I1-W1-1`) intact.
+      EMBEDDED_ID_PATTERN = %r{(?<![\w/-])(P\d+(?:-I\d+(?:-W\d+)?)?|Q\d+|G\d+)(?![\w/-])}
+
+      # Appended to an id that no longer names a record. Deliberately plain, and deliberately not a
+      # claim about *why*: the record may have been pruned or killed, or (in state written before
+      # this behavior existed) renamed by an earlier pass that left the text behind. What is always
+      # true is that the spelling is out of date and now resolves to nothing, which is the point.
+      RETIRED_ID_MARKER = " (old id)"
 
       module_function
 
@@ -60,20 +108,17 @@ module Meringue
         goal_map = sequential_map(goal_records(state), Meringue::Goals::Record::ID_PATTERN) { |number, _record| "G#{number}" }
         id_map = project_map.merge(issue_map).merge(worker_map).merge(question_map).merge(goal_map)
 
-        # Captured before anything moves: references that were *already* dangling (a log entry
-        # about a pruned worker, a lineage link to a removed session) cannot be repaired by a
-        # renumber, so they are the only unresolved references validation is allowed to tolerate.
-        # The deferred census is the same idea for queued-worker chains: only a chain this pass
-        # breaks is a failure.
-        preexisting_dangling = unresolved_references(state)
+        # Captured before anything moves: only a queued-worker chain that was coherent to begin
+        # with is required to be coherent afterwards, so legacy or hand-edited state cannot make
+        # `/recount` permanently unusable while a chain this pass would break still fails loudly.
         deferred_chains = deferred_chain_census(state, worker_map)
 
-        rewrite_references!(state, id_map)
+        rewrite_ids!(state, id_map)
         verify_primary_ids!(state, project_map, issue_map, worker_map, question_map, goal_map)
         clean_agent_relationships!(state)
         rebuild_issue_agent_ids!(state)
         reset_counters!(state)
-        validate_integrity!(state, preexisting_dangling: preexisting_dangling, deferred_chains: deferred_chains)
+        validate_integrity!(state, deferred_chains: deferred_chains)
 
         {
           "project_ids" => changed_entries(project_map),
@@ -134,39 +179,82 @@ module Meringue
         end.map(&:first)
       end
 
-      # One simultaneous substitution over the whole document. Primary `id` fields are rewritten
-      # by the same pass as the references that point at them, so a swap (P2 -> P1 while P4 -> P2)
-      # can never be applied twice to the same value.
-      def rewrite_references!(state, id_map)
-        walk_references!(state) do |value, _path, reference|
-          reference ? id_map.fetch(value, value) : value
+      # One simultaneous substitution over the whole document, visiting every string exactly once.
+      # Primary `id` fields are rewritten by the same pass as the references that point at them, so
+      # a swap (P2 -> P1 while P4 -> P2) can never be applied twice to the same value - and neither
+      # can a marker, which is what makes a second pass a no-op.
+      def rewrite_ids!(state, id_map)
+        walk_references!(state) do |value, _path, reference, mode|
+          reference ? rewrite_reference_id(value, id_map, mode: mode) : rewrite_text(value, id_map)
         end
         state
       end
 
+      # A structured id slot: exactly one record id, or nothing. When its record is gone the slot
+      # must stop resolving, because the spelling it holds is now free to be reused.
+      def rewrite_reference_id(value, id_map, mode:)
+        mapped = id_map[value]
+        return mapped if mapped
+        return value unless RENAMEABLE_ID_PATTERN.match?(value)
+
+        mode == :history ? "#{value}#{RETIRED_ID_MARKER}" : nil
+      end
+
+      # Human-readable text: log messages, issue titles and descriptions, worker prompts and
+      # reports, question context, goal directives, chat rows. The ids quoted here are references
+      # too - they are what the user reads and what a head or dependent worker is handed later - so
+      # they follow their record, or are marked when there is no longer a record to follow.
+      def rewrite_text(text, id_map)
+        return text unless text.match?(EMBEDDED_ID_PATTERN)
+
+        text.gsub(EMBEDDED_ID_PATTERN) do |token|
+          # Already annotated by an earlier pass: neither spelling nor marker may change again.
+          next token if Regexp.last_match.post_match.start_with?(RETIRED_ID_MARKER)
+
+          id_map.fetch(token) { "#{token}#{RETIRED_ID_MARKER}" }
+        end
+      end
+
       # Shared traversal for the rewrite and for the audit, so the two can never disagree about
-      # which parts of state hold live references. `reference` marks values the rewrite is allowed
-      # to rename; the audit inspects every string it sees regardless, which is what makes it a
-      # backstop for a field stored under an unexpected key. Containers are only written when the
-      # block actually returned a different value, so the audit traversal never mutates state.
-      def walk_references!(node, path = "", reference = false, &block)
+      # which parts of state hold live references. `reference` marks values that are a whole id
+      # slot; every other string is prose and is scanned for ids embedded in it. `mode` says
+      # whether a dangling slot in this subtree can be cleared (live orchestration) or must be
+      # marked (append-only history). Containers are only written when the block actually returned
+      # a different value, so the audit traversal never mutates state.
+      def walk_references!(node, path = "", reference = false, mode = :live, visit_keys: false, &block)
         case node
         when Hash
           node.each do |key, child|
-            next if history_key?(key)
+            next if history_key?(key) || verbatim_key?(key)
 
-            replacement = walk_references!(child, "#{path}.#{key}", reference_key?(key), &block)
+            # An id used as a hash *key* is invisible to the rewrite, which only visits values, so
+            # the audit inspects keys as well: a future id-keyed map fails the pass loudly instead
+            # of silently keeping a pre-recount spelling. The counters keyed by project/issue id
+            # are rebuilt from the live tree before validation runs, and the history subtrees that
+            # legitimately key by an old id are skipped above.
+            block.call(key, "#{path}.#{key} (key)", true, mode) if visit_keys && RENAMEABLE_ID_PATTERN.match?(key.to_s)
+
+            replacement = walk_references!(
+              child, "#{path}.#{key}", reference_key?(key), section_mode(key, mode), visit_keys: visit_keys, &block
+            )
             node[key] = replacement unless replacement.equal?(child)
           end
           node
         when Array
+          cleared = false
           node.each_with_index do |child, index|
-            replacement = walk_references!(child, "#{path}[#{index}]", reference, &block)
-            node[index] = replacement unless replacement.equal?(child)
+            replacement = walk_references!(child, "#{path}[#{index}]", reference, mode, visit_keys: visit_keys, &block)
+            next if replacement.equal?(child)
+
+            cleared ||= replacement.nil?
+            node[index] = replacement
           end
+          # A cleared reference leaves no hole behind: an id list drops the removed member rather
+          # than carrying a nil the rest of the kernel would have to defend against.
+          node.compact! if cleared
           node
         when String
-          block.call(node, path, reference)
+          block.call(node, path, reference, mode)
         else
           node
         end
@@ -174,6 +262,22 @@ module Meringue
 
       def history_key?(key)
         HISTORY_SUBTREE_KEYS.include?(normalized_key(key))
+      end
+
+      # Byte-exact evidence and self-referential correlation keys are skipped whole: nothing inside
+      # them is rewritten, marked, or audited, because something outside Meringue's numbering owns
+      # the exact string.
+      def verbatim_key?(key)
+        normalized = normalized_key(key)
+        return true if OPAQUE_ID_KEYS.include?(normalized)
+        return true if VERBATIM_KEYS.include?(normalized)
+
+        VERBATIM_KEY_SUFFIXES.any? { |suffix| normalized.end_with?(suffix) }
+      end
+
+      # History mode is inherited by the whole subtree once entered.
+      def section_mode(key, mode)
+        HISTORY_SECTION_KEYS.include?(normalized_key(key)) ? :history : mode
       end
 
       def reference_key?(key)
@@ -201,15 +305,34 @@ module Meringue
         ids.compact.to_h { |id| [id, true] }
       end
 
-      # Stored ids that resolve to nothing, as `{ id => first path that stores it }`.
+      # Every id still spelled anywhere in state that names no record, as
+      # `{ id => first path that spells it }`. Both shapes count: a whole reference slot, and an id
+      # quoted inside prose. An id already annotated with the retired marker is resolved by
+      # definition - it deliberately names nothing and can never be mistaken for a live record.
       def unresolved_references(state)
         live = live_ids(state)
         found = {}
-        walk_references!(state) do |value, path, _reference|
-          found[value] ||= path if RENAMEABLE_ID_PATTERN.match?(value) && !live.key?(value)
+        walk_references!(state, visit_keys: true) do |value, path, reference, _mode|
+          if reference
+            found[value] ||= path if RENAMEABLE_ID_PATTERN.match?(value) && !live.key?(value)
+          else
+            each_embedded_id(value) { |token| found[token] ||= path unless live.key?(token) }
+          end
           value
         end
         found
+      end
+
+      # Ids quoted in prose, skipping any that is already followed by the retired marker.
+      def each_embedded_id(text)
+        return unless text.match?(EMBEDDED_ID_PATTERN)
+
+        text.to_enum(:scan, EMBEDDED_ID_PATTERN).each do
+          match = Regexp.last_match
+          next if match.post_match.start_with?(RETIRED_ID_MARKER)
+
+          yield match[1]
+        end
       end
 
       def verify_primary_ids!(state, project_map, issue_map, worker_map, question_map, goal_map)
@@ -277,11 +400,11 @@ module Meringue
         end
       end
 
-      def validate_integrity!(state, preexisting_dangling: {}, deferred_chains: {})
+      def validate_integrity!(state, deferred_chains: {})
         validate_unique_ids!(state)
         validate_tree_shape!(state)
         validate_deferred_chains!(state, deferred_chains)
-        validate_no_new_dangling_references!(state, preexisting_dangling)
+        validate_resolved_ids!(state)
         true
       end
 
@@ -392,17 +515,20 @@ module Meringue
         end
       end
 
-      # The catch-all. Every stored id that resolved before the pass must still resolve after it,
-      # whatever record or nesting level holds it. References that were already dangling are the
-      # only tolerated unresolved values, because a renumber cannot resurrect a removed record.
-      def validate_no_new_dangling_references!(state, preexisting_dangling)
-        broken = unresolved_references(state).reject { |value, _path| preexisting_dangling.key?(value) }
+      # The catch-all, and the invariant the whole design exists for: when the pass is done, every
+      # id still spelled in state - in a reference slot or in prose - names a record that exists
+      # right now. Nothing is tolerated. A pre-existing dangling id is not an excuse to leave a
+      # bare id behind, because compaction is free to hand that exact spelling to another record,
+      # at which point the id stops dangling and starts lying; either the rewrite resolved it, or
+      # the marker retired it, or this refuses the pass rather than persisting misattribution.
+      def validate_resolved_ids!(state)
+        broken = unresolved_references(state)
         return true if broken.empty?
 
         details = broken.first(5).map { |value, path| "#{value} (#{path})" }.join(", ")
         raise ArgumentError,
-              "Recount would strand #{broken.length} reference#{broken.length == 1 ? "" : "s"} " \
-              "pointing at an ID that no longer exists: #{details}."
+              "Recount would leave #{broken.length} ID#{broken.length == 1 ? "" : "s"} " \
+              "in state that name no record: #{details}."
       end
 
       def present_reference(value)
