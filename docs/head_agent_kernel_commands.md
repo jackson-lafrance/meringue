@@ -1410,7 +1410,7 @@ What is retained:
 - An issue whose worker is the predecessor of a worker that is still queued behind it (`pending_deferred_dependents`), so a queued dependent can never lose the agent it is waiting for.
 - An issue whose subtree has an open question.
 - An issue with an attached PR that is open (including a draft) or whose status cannot be resolved. Merged and closed-without-merge PRs are settled and do not block pruning.
-- A bundle whose managed worktree cannot be removed safely. Dirty and locked worktrees are never forced; ownership/path/branch mismatches and git failures also retain the record so a later `/prune` can retry.
+- A managed worktree is never removed when cleanup is unsafe. Dirty and locked worktrees are never forced; ownership/path/branch mismatches and git failures preserve the worktree while the otherwise-eligible records are pruned.
 
 How a merged PR is resolved:
 
@@ -1424,10 +1424,10 @@ One pass, one line:
 - Retention sentences are appended to that same line, so `/prune` stays one visible line even when it retains records.
 - The killed-record cleanup inside `ReconcileSessions` reports the same counts with a `Pruned killed records:` prefix, and only when it actually removed something.
 
-Why a record was retained is always reported:
+Why a record was retained or a worktree was preserved is always reported:
 
-- The prune log details carry `retained_issue_ids`, `retention_reasons` (per-issue blockers, unverified/open PR URLs, blocking workers, questions, worktree blockers), and a `forge_lookup` summary (`budget_seconds`, `elapsed_seconds`, `budget_exhausted`, `status_lookup_count`, `branch_lookup_count`, `trusted_from_state_urls`, `unavailable_urls`).
-- The prune message names the reasons the user cannot see in the AgentTree: `Retained 2 issues because Meringue could not verify their pull request status: P1-I20, P1-I21 (the 15s forge lookup budget was exhausted).` and `Retained 1 worker because their managed worktree could not be removed: P1-I1-W1 (worktree_dirty).` Those retentions are logged at `warning`; nonterminal issues, live workers, and open questions stay `info` because they are visible in the tree.
+- The prune log details carry `retained_issue_ids`, `retention_reasons` (per-issue lifecycle/PR blockers, unverified/open PR URLs, blocking workers, and questions), `workspace_cleanup_outcomes` (including failures that did not retain eligible records), and a `forge_lookup` summary (`budget_seconds`, `elapsed_seconds`, `budget_exhausted`, `status_lookup_count`, `branch_lookup_count`, `trusted_from_state_urls`, `unavailable_urls`).
+- The prune message names the reasons the user cannot see in the AgentTree: `Retained 2 issues because Meringue could not verify their pull request status: P1-I20, P1-I21 (the 15s forge lookup budget was exhausted).` and `Preserved 1 managed worktree because cleanup was not safe: P1-I1-W1 (worktree_dirty).` Cleanup failures are logged at `warning`; nonterminal issues, live workers, and open questions stay `info` because they are visible in the tree.
 
 Worktree cleanup safety and outcomes:
 
@@ -1435,7 +1435,7 @@ Worktree cleanup safety and outcomes:
 - The persisted worktree path must still be registered to the persisted `meringue/…` branch in the expected repository and must not be the main checkout or overlap a path referenced by another worker.
 - Clean, unlocked worktrees are removed with `git worktree remove` **without** `--force`. The branch is not deleted.
 - A missing but still-registered worktree is safely deregistered. A worktree already absent from both disk and git's registry is an idempotent success.
-- Dirty, locked, ambiguous, or failed cleanups leave the issue/worker record in state, and each one is logged individually at `warning`. Successful cleanups are counted by the pass summary instead of getting a line each. Every worker stores its latest `harness_metadata.workspace_cleanup` result, and the `Prune` result and log details expose `workspace_cleanup_outcomes`, `removed_worktree_agent_ids`, and the blocked agent/issue/project IDs.
+- Dirty, locked, ambiguous, or failed cleanups leave the worktree and branch untouched, and each one is logged individually at `warning`; the eligible issue/worker records still leave state. Successful cleanups are counted by the pass summary instead of getting a line each. Every attempted worker stores its latest `harness_metadata.workspace_cleanup` result before removal, and the `Prune` result and log details expose `workspace_cleanup_outcomes`, `removed_worktree_agent_ids`, and the cleanup-blocked agent/issue/project IDs.
 
 PR checks are conservative and bounded. The kernel performs them outside the state lock,
 looks up each URL once, seeds the cache with pull requests already recorded as merged, and
