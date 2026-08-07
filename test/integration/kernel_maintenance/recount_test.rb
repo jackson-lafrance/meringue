@@ -160,7 +160,7 @@ class KernelMaintenanceRecountTest < Minitest::Test
     assert_equal 5, state.dig("conversation", "next_message_id")
   end
 
-  def test_recount_updates_structured_log_references_but_not_historical_text
+  def test_recount_updates_log_references_and_the_ids_embedded_in_log_text
     write_state(gapped_state)
     engine = build_engine
 
@@ -171,7 +171,9 @@ class KernelMaintenanceRecountTest < Minitest::Test
     assert_equal "P1-I2", log.dig("details", "issue_id")
     assert_equal "P1-I1-W2", log.dig("details", "agent_id")
     assert_equal "4242", log.dig("details", "pid"), "opaque pid keys stay untouched"
-    assert_equal "Historical log text about P2-I2", log.fetch("message")
+    # The line still describes the same record, so it has to spell that record's current id:
+    # `P2-I2` now belongs to a different issue. See recount_history_test.rb.
+    assert_equal "Historical log text about P1-I1", log.fetch("message")
   end
 
   def test_recount_records_its_mapping_in_metadata_and_logs_one_entry

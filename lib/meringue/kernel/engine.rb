@@ -4111,10 +4111,12 @@ module Meringue
         )
         touch_state!(state, now)
         # The rename covers every section of the document, including the routing ids stored on
-        # persisted chat messages. The default save merges the on-disk chat buffer back over the
-        # in-memory one (persisted wins per message id), which would silently restore the pre-recount
-        # `source_id` values, so this write owns the whole snapshot. It is safe because Recount holds
-        # the state lock for the read and the write.
+        # persisted chat messages and the ids embedded in their text. The default save merges the
+        # on-disk chat buffer back over the in-memory one (persisted wins per message id), which
+        # would silently restore pre-recount ids that now name different records, so this write owns
+        # the whole snapshot. It is safe because Recount holds the state lock for the read and the
+        # write. The TUI reloads the buffer when it sees the accepted result, so its own in-memory
+        # copy cannot write those ids back either.
         store.save(state, preserve_log_buffer: false)
 
         accepted_result(
