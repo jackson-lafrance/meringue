@@ -127,6 +127,12 @@ module Meringue
         |blocks\s+must\s+remain\s+as\s+they\s+were\s+in\s+the\s+original\s+response
         |expected\s+`?thinking`?\s+or\s+`?redacted_thinking`?
       /ix.freeze
+      # A worker whose harness process is gone. The harness proves it by raising an error carrying
+      # `Harness::SessionProcessGoneError`, so this is evidence rather than a timeout heuristic and
+      # a legitimately slow start can never be classified as one.
+      SETTLE_FAILURE_PROCESS_EXIT_KIND = "harness_process_exited"
+      # Enough stderr to name a crash, not enough to bloat every state write.
+      PROCESS_EXIT_STDERR_MAX_BYTES = 600
       # How many times one worker's poisoned session is restarted in place. Exactly one: the
       # restart is a fresh session on the same worktree, so if that session dies the same way the
       # cause is not the transcript and another identical restart would only spend tokens.
@@ -9007,7 +9013,7 @@ module Meringue
         end
         # A worker whose turn was cut short by a transport failure is `errored` but not finished: it
         # can still be continued, so queueing work behind it is legitimate rather than a rejection.
-        if status == "errored" && failure_policy != "run" && worker_resumable_after_settle_failure?(predecessor)
+        if status == "errored" && failure_policy != "run" && deferred_predecessor_can_still_finish?(predecessor)
           return { "kind" => "defer", "predecessor" => deep_copy(predecessor), "chain_depth" => chain_depth }
         end
         if status == "completed" || (status == "errored" && failure_policy == "run")
@@ -9019,6 +9025,16 @@ module Meringue
             "Spawn the worker without after_agent_id, or set if_predecessor_fails to \"run\" when the follow-up work should happen anyway.",
           ["deferred_predecessor_already_#{status}"]
         )
+      end
+
+      # Whether an `errored` predecessor is worth waiting on. "Its turn died but its session is
+      # live" is: reconciliation re-attaches and re-prompts that session by itself, so the chain
+      # really does continue. "Its harness process is gone" is not: nothing in Meringue revives it
+      # without a user prompt, so waiting means waiting on a human for an unbounded time. That is
+      # exactly the silent wait a queued dependent must never sit in, so it is resolved by its
+      # `if_predecessor_fails` policy instead.
+      def deferred_predecessor_can_still_finish?(predecessor)
+        worker_resumable_after_settle_failure?(predecessor) && !worker_harness_process_exited?(predecessor)
       end
 
       def deferred_rejection(message, errors)
@@ -9773,11 +9789,19 @@ module Meringue
         when "errored"
           if base.fetch("if_predecessor_fails") == "run"
             activation
-          elsif worker_resumable_after_settle_failure?(predecessor)
+          elsif deferred_predecessor_can_still_finish?(predecessor)
             # The predecessor did not fail its work: its turn was cut short by a transport failure
             # and can still be continued, so a dropped connection must not permanently cancel the
             # work queued behind it. Keep waiting; killing the predecessor still cancels the chain.
             waiting
+          elsif worker_harness_process_exited?(predecessor)
+            base.merge(
+              "kind" => "cancel",
+              "reason" => "predecessor_harness_process_exited",
+              "message" => "Cancelled queued worker #{agent.fetch("id")} because #{predecessor_id}'s agent session " \
+                           "process exited before it finished. Prompting #{predecessor_id} continues its work; " \
+                           "re-queue this step behind it once it is running again."
+            )
           else
             base.merge(
               "kind" => "cancel",
@@ -13599,6 +13623,11 @@ module Meringue
         result["settle_failure"] = settle_failure if settle_failure
         result
       rescue StandardError => e
+        # Checked before the resume ladder on purpose. A worker whose harness process is gone has
+        # nothing to resume: re-attaching and re-prompting it burns the resume budget on `prompt`
+        # RPCs that can only time out, and the timeout is then what the user reads instead of the
+        # process exit that actually happened.
+        return harness_process_gone_poll_result(agent, client, session_ref, e) if worker_harness_process_gone?(agent, e)
         return resume_worker_session_from_poll_error(agent, client, session_ref, e) if worker_reconcile_resume_eligible?(agent, client)
         return recover_head_session_from_poll_error(agent, client, session_ref, e) if head_reconcile_recovery_eligible?(agent)
 
@@ -13950,8 +13979,119 @@ module Meringue
           worker_resume_attempt_count(agent) < WORKER_RECONCILE_RESUME_MAX_ATTEMPTS
       end
 
+      # --- a harness process that is gone -------------------------------------------------------
+      #
+      # A `ProcessExitedError`-class failure is not a transport blip: the process that owned the
+      # session left, so no later RPC can be answered. Reconciliation used to discover this only by
+      # *trying to resume* the session, and then spent its whole resume budget on `prompt` RPCs that
+      # could only time out - which is why a real incident reported
+      # `RpcTimeoutError: Timed out waiting for Pi RPC response to "prompt"` for a worker whose
+      # actual failure was `ProcessExitedError`. The exit is now recorded on the first pass that
+      # observes it, named for what it is.
+      def worker_harness_process_gone?(agent, error)
+        agent.fetch("type", nil) == "worker" && Harness.session_process_gone_error?(error)
+      end
+
+      def harness_process_gone_poll_result(agent, client, session_ref, error)
+        # Recorded evidence underneath, fresh evidence on top: a client that can still describe the
+        # exit wins, and one that cannot (a restart, a session this process never owned) falls back
+        # to what the record already says instead of re-wording the same failure.
+        evidence = recorded_process_exit_evidence(agent).merge(safe_session_exit_evidence(client, session_ref) || {})
+        {
+          "agent_id" => agent.fetch("id", nil),
+          "agent_type" => "worker",
+          "state" => "settle_failed",
+          "session_ref" => session_ref,
+          # The harness journalled its own `process_exit` event before its pipes closed. Draining it
+          # here is what finally puts that event in the log: the happy path never reached
+          # `read_events`, because `get_state` raises first for a session whose process is gone.
+          "events" => safe_read_events(client, session_ref),
+          "last_assistant_text" => nil,
+          "settle_failure" => harness_process_exit_settle_failure(error, evidence)
+        }
+      end
+
+      def harness_process_exit_settle_failure(error, evidence)
+        exit_status = evidence.fetch("exit_status", nil)
+        exit_status = nil unless exit_status.is_a?(Hash)
+        stderr_tail = present_string(evidence.fetch("stderr_tail", nil))
+        {
+          "kind" => SETTLE_FAILURE_PROCESS_EXIT_KIND,
+          "reason" => harness_process_exit_reason(exit_status),
+          "source" => "harness_process_exit",
+          "error_class" => error.class.name,
+          "error_message" => sanitized_error_message(error),
+          "exit_status" => exit_status,
+          "stderr_tail" => stderr_tail && truncate_for_state(stderr_tail, PROCESS_EXIT_STDERR_MAX_BYTES),
+          "process_exited_at" => present_string(evidence.fetch("last_event_at", nil))
+        }.compact
+      end
+
+      # Derived only from the exit status, which does not move for the life of the record: the reason
+      # is part of the settle-failure signature that makes this log once instead of once per pass.
+      def harness_process_exit_reason(exit_status)
+        base = "its agent session process exited before it produced a result"
+        detail = if exit_status.nil?
+                   nil
+                 elsif present_string(exit_status.fetch("termsig", nil))
+                   "terminated by signal #{exit_status.fetch("termsig")}"
+                 elsif !exit_status.fetch("exit_code", nil).nil?
+                   "exit code #{exit_status.fetch("exit_code")}"
+                 end
+        detail ? "#{base} (#{detail})" : base
+      end
+
+      def harness_process_exit_failure?(failure)
+        failure.is_a?(Hash) && failure.fetch("kind", nil).to_s == SETTLE_FAILURE_PROCESS_EXIT_KIND
+      end
+
+      def worker_harness_process_exited?(agent)
+        return false unless agent.is_a?(Hash)
+        return false unless agent.fetch("type", nil) == "worker"
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        metadata.is_a?(Hash) && harness_process_exit_failure?(metadata.fetch("settle_failure", nil))
+      end
+
+      def harness_process_exit_recovery_advice
+        "Its session history and workspace are intact, so prompting this worker continues it in a new agent process."
+      end
+
+      # Evidence the record already carries. A Meringue restart loses the process object that knew
+      # the exit status, and without this the same failure would be re-worded and therefore re-logged
+      # as if it were new.
+      def recorded_process_exit_evidence(agent)
+        metadata = agent.is_a?(Hash) ? (agent.fetch("harness_metadata", {}) || {}) : {}
+        failure = metadata.is_a?(Hash) ? metadata.fetch("settle_failure", nil) : nil
+        return {} unless harness_process_exit_failure?(failure)
+
+        {
+          "exit_status" => failure.fetch("exit_status", nil),
+          "stderr_tail" => failure.fetch("stderr_tail", nil),
+          "last_event_at" => failure.fetch("process_exited_at", nil)
+        }.compact
+      end
+
+      def safe_session_exit_evidence(client, session_ref)
+        return nil unless client.respond_to?(:session_exit_evidence)
+
+        evidence = client.session_exit_evidence(session_ref)
+        evidence.is_a?(Hash) ? stringify_keys(evidence) : nil
+      rescue StandardError
+        nil
+      end
+
+      def safe_read_events(client, session_ref)
+        return [] unless client.respond_to?(:read_events)
+
+        Array(client.read_events(session_ref))
+      rescue StandardError
+        []
+      end
+
       def resume_worker_session_from_poll_error(agent, client, session_ref, original_error)
         attempt = worker_resume_attempt_count(agent) + 1
+        resumed_ref = nil
         resumed_ref = client.attach_session(session_ref)
         resumed_ref = prompt_resumed_worker_session(client, resumed_ref)
         {
@@ -13971,6 +14111,10 @@ module Meringue
           }
         }
       rescue StandardError => resume_error
+        # The attach may well have started a replacement harness process before the prompt failed.
+        # Leaving it running is what let three failed resume attempts leave three untracked agent
+        # processes writing to the same session file long after the worker had been settled.
+        safely_kill_recovery_session(client, resumed_ref) if resumed_ref
         {
           "agent_id" => agent.fetch("id", nil),
           "agent_type" => "worker",
@@ -14737,9 +14881,10 @@ module Meringue
 
       def settle_failure_log_message(agent, failure)
         base = "Worker #{agent.fetch("id")} errored without finishing: #{failure.fetch("reason")}"
-        return base unless unreplayable_session_failure?(failure)
+        return "#{base}. #{unreplayable_session_recovery_advice(agent)}" if unreplayable_session_failure?(failure)
+        return "#{base}. #{harness_process_exit_recovery_advice}" if harness_process_exit_failure?(failure)
 
-        "#{base}. #{unreplayable_session_recovery_advice(agent)}"
+        base
       end
 
       def worker_session_restart_command_id(agent_id, attempt)

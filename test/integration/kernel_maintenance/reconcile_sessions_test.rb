@@ -192,6 +192,57 @@ class KernelMaintenanceReconcileSessionsTest < Minitest::Test
     refute_includes client.calls.map(&:first), "attach_session"
   end
 
+  # Proof that the process is gone is not a transport blip: there is nothing to attach and nothing to
+  # re-prompt, so the resume ladder is skipped entirely and the exit is the recorded reason.
+  def test_a_session_whose_process_is_gone_is_settled_without_a_resume_attempt
+    state_with_worker(pid: Process.pid.to_s, session_file: live_session_file)
+    engine, client = stub_engine(
+      { "sess-1" => {
+        "process_gone_error" => "Pi session /tmp/sess-1.jsonl has no live process and no completed assistant response",
+        "exit_status" => { "exit_code" => nil, "termsig" => 9, "success" => false },
+        "stderr_tail" => "Killed: 9",
+        "process_exited_at" => "2026-01-01T00:05:00Z",
+        "events" => [{ "type" => "process_exit" }]
+      } }
+    )
+
+    result = apply_command(engine, "ReconcileSessions", {})
+
+    poll = result.dig("result", "poll_results").first
+    assert_equal "settle_failed", poll.fetch("state")
+
+    state = read_state
+    worker = agent_by_id(state, "P1-I1-W1")
+    failure = worker.dig("harness_metadata", "settle_failure")
+
+    assert_equal "errored", worker.fetch("status")
+    assert_equal "harness_process_exited", failure.fetch("kind")
+    assert_includes failure.fetch("reason"), "terminated by signal 9"
+    assert_equal "Killed: 9", failure.fetch("stderr_tail")
+    assert_equal "2026-01-01T00:05:00Z", failure.fetch("process_exited_at")
+    assert_nil worker.dig("harness_metadata", "reconcile")
+
+    refute_includes client.calls.map(&:first), "attach_session"
+    refute_includes client.calls.map(&:first), "prompt_session"
+    assert_includes client.calls, ["read_events", "sess-1"], "the exit evidence must still be drained"
+    assert_documented_status_vocabulary(state)
+  end
+
+  # A resume attempt that fails after attaching has already started a replacement session. Leaving it
+  # running is how three failed attempts left three untracked processes on one session file.
+  def test_a_resume_attempt_that_fails_after_attaching_kills_the_session_it_started
+    state_with_worker(pid: Process.pid.to_s, session_file: live_session_file)
+    engine, client = stub_engine(
+      { "sess-1" => { "get_state_error" => "rpc pipe closed", "prompt_error" => "prompt timed out" } }
+    )
+
+    apply_command(engine, "ReconcileSessions", {})
+
+    assert_includes client.calls, ["attach_session", "sess-1"]
+    assert_includes client.calls, ["kill_session", "sess-1"], "the half-started session must not be orphaned"
+    assert_equal "blocked", agent_by_id(read_state, "P1-I1-W1").fetch("status")
+  end
+
   def test_fake_and_sessionless_agents_are_not_polled
     write_state(
       state_fixture(
