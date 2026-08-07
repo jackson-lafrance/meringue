@@ -427,8 +427,32 @@ module Meringue
             replace_agent_from_command ReplaceAgentFromCommand replaceAgentFromCommand
             replace_agent_ref replaceAgentRef
           ]
+        },
+        {
+          "field" => "reuse_workspace_of_agent_id",
+          "aliases" => %w[
+            reuse_workspace_of_agent_id ReuseWorkspaceOfAgentID reuseWorkspaceOfAgentID reuseWorkspaceOfAgentId
+          ],
+          "reference_keys" => %w[
+            reuse_workspace_from_command ReuseWorkspaceFromCommand reuseWorkspaceFromCommand
+            reuse_workspace_ref reuseWorkspaceRef
+          ]
         }
       ].freeze
+      WORKSPACE_REUSE_AGENT_KEYS = %w[
+        reuse_workspace_of_agent_id ReuseWorkspaceOfAgentID reuseWorkspaceOfAgentID reuseWorkspaceOfAgentId
+      ].freeze
+      SHARE_WORKSPACE_KEYS = %w[share_workspace ShareWorkspace shareWorkspace].freeze
+      # Why a worker is allowed to continue in another worker's worktree instead of getting a fresh
+      # one. The source decides how a refusal is handled: a continuation or explicit request falls
+      # back to fresh provisioning, while a session restart exists *only* to take over the dead
+      # worker's checkout, so it fails loudly rather than silently abandoning that work.
+      WORKSPACE_REUSE_SOURCE_EXPLICIT = "explicit"
+      WORKSPACE_REUSE_SOURCE_CONTINUATION = "continuation"
+      WORKSPACE_REUSE_SOURCE_SESSION_RESTART = "session_restart"
+      WORKSPACE_REUSE_STATE_CLAIMED = "claimed"
+      WORKSPACE_REUSE_STATE_REUSED = "reused"
+      WORKSPACE_REUSE_STATE_REFUSED = "refused"
       # Predicting a worker id is the failure mode this hint exists for: the predecessor's agent id
       # depends on the issue id the kernel mints, so a prediction goes stale as soon as another head
       # creates an issue first.
@@ -5023,6 +5047,7 @@ module Meringue
       end
 
       def cleanup_pruned_worker_workspaces!(state, worker_ids, now)
+        pruned_ids = Array(worker_ids).compact
         Array(worker_ids).filter_map do |agent_id|
           worker = find_agent(state, agent_id)
           next unless worker && worker.fetch("type", nil) == "worker"
@@ -5035,12 +5060,26 @@ module Meringue
             worker["harness_metadata"] = (worker.fetch("harness_metadata", {}) || {}).merge("workspace_cleanup" => outcome)
             next outcome.merge("log_entry_ids" => [])
           end
+          # Several workers can legitimately share one worktree. The record may go as soon as this
+          # worker no longer needs it; the *worktree* may only go once nobody does. A retained
+          # sharer therefore skips cleanup successfully instead of failing it, because failing would
+          # retain this record - and warn about it - on every pass forever.
+          retained_sharers = retained_workspace_sharer_ids(state, worker, pruned_ids)
+          if retained_sharers.any?
+            outcome = shared_workspace_cleanup_outcome(worker, retained_sharers, now)
+            worker["harness_metadata"] = (worker.fetch("harness_metadata", {}) || {}).merge("workspace_cleanup" => outcome)
+            next outcome.merge("log_entry_ids" => [])
+          end
 
           protected_paths = state.fetch("agents").filter_map do |other|
             next unless other.fetch("type", nil) == "worker" && other.fetch("id", nil) != agent_id
             # The successor is listed separately, so a handed-over predecessor must not protect a
             # path it no longer owns: that would leak the worktree when the issue is pruned.
             next if worker_workspace_handed_over?(state, other)
+            # A worker this same pass is removing cannot own the path either. Protecting it would
+            # deadlock a shared worktree whose every sharer is being pruned: each sharer would
+            # refuse on account of the others and the worktree would never be removed.
+            next if pruned_ids.any? { |pruned_id| Ids.same?(pruned_id, other.fetch("id", nil)) }
 
             worker_worktree_root_path(other)
           end
@@ -5083,6 +5122,39 @@ module Meringue
 
         root = worker_worktree_root_path(worker)
         !!present_string(root) && worker_worktree_root_path(successor) == root
+      end
+
+      # Workers that still need this worker's worktree once this pass is done: any worker sharing the
+      # same worktree root that the pass is not removing.
+      def retained_workspace_sharer_ids(state, worker, pruned_ids)
+        root = present_string(worker_worktree_root_path(worker))
+        return [] unless root
+        return [] unless worker.fetch("workspace_strategy", nil) == "git_worktree"
+
+        excluded = Array(pruned_ids) + [worker.fetch("id", nil)]
+        state.fetch("agents", []).filter_map do |other|
+          next unless other.is_a?(Hash) && other.fetch("type", nil) == "worker"
+          next if excluded.any? { |id| Ids.same?(id, other.fetch("id", nil)) }
+          next unless same_workspace_path?(present_string(worker_worktree_root_path(other)), root)
+
+          other.fetch("id", nil)
+        end.compact
+      end
+
+      def shared_workspace_cleanup_outcome(worker, sharing_agent_ids, now)
+        {
+          "agent_id" => worker.fetch("id", nil),
+          "issue_id" => worker.fetch("issue_id", nil),
+          "project_id" => worker.fetch("project_id", nil),
+          "status" => "skipped",
+          "reason" => "workspace_shared_with_retained_worker",
+          "success" => true,
+          "attempted" => false,
+          "worktree_root_path" => worker_worktree_root_path(worker),
+          "workspace_branch" => worker.fetch("workspace_branch", nil),
+          "sharing_agent_ids" => sharing_agent_ids,
+          "checked_at" => now
+        }.compact
       end
 
       def handed_over_workspace_cleanup_outcome(worker, now)
@@ -7478,11 +7550,25 @@ module Meringue
         # a new one, because that is where the unfinished work already lives.
         inherit_workspace_agent_id = present_string(value_at(payload, "_inherit_workspace_from_agent_id", "inherit_workspace_from_agent_id"))
         session_restart_of_agent_id = present_string(value_at(payload, "_session_restart_of_agent_id", "session_restart_of_agent_id"))
+        # Head-facing workspace sharing: name the predecessor whose worktree/branch this worker
+        # should continue in, or turn the continuation default off for a step that must be isolated.
+        reuse_workspace_agent_id = present_string(value_at(payload, *WORKSPACE_REUSE_AGENT_KEYS))
         errors = []
+        share_workspace = normalized_share_workspace(payload, errors: errors)
         completion_continuation = normalized_completion_continuation(payload, errors: errors)
 
         errors << "issue_id is required" if blank?(issue_id)
         errors << "prompt is required" if blank?(prompt)
+        if share_workspace == false && reuse_workspace_agent_id
+          errors << "share_workspace_conflicts_with_reuse_workspace_of_agent_id"
+        end
+        if reuse_workspace_agent_id && present_string(requested_workspace_path)
+          errors << "workspace_path_conflicts_with_reuse_workspace_of_agent_id"
+        end
+        if share_workspace && !reuse_workspace_agent_id &&
+           [follow_up_of_agent_id, replace_agent_id, after_agent_id].none? { |value| present_string(value) }
+          errors << "share_workspace_requires_a_related_worker"
+        end
         if present_string(follow_up_of_agent_id) && present_string(replace_agent_id)
           errors << "follow_up_of_agent_id and replace_agent_id are mutually exclusive"
         end
@@ -7561,6 +7647,27 @@ module Meringue
             if present_string(replace_agent_id) && !replaceable_worker?(related_agent)
               return rejected_result(command_id, command_type, "Worker #{related_agent_id} has already been killed or replaced.", ["agent_not_replaceable"])
             end
+            if reuse_workspace_agent_id
+              # A bad reference is a head contract error, not a safety refusal: it is rejected the
+              # same way a bad lineage reference is, instead of silently provisioning fresh.
+              reuse_target = find_agent(state, reuse_workspace_agent_id)
+              if !reuse_target || reuse_target.fetch("type", nil) != "worker"
+                return rejected_result(
+                  command_id,
+                  command_type,
+                  "Worker #{reuse_workspace_agent_id} does not exist, so its workspace cannot be reused. #{RELATED_AGENT_REFERENCE_HINT}",
+                  ["reuse_workspace_agent_not_found"]
+                )
+              end
+              if reuse_target.fetch("issue_id", nil) != issue.fetch("id")
+                return rejected_result(
+                  command_id,
+                  command_type,
+                  "Worker #{reuse_workspace_agent_id} belongs to another issue, so its workspace cannot be reused. #{RELATED_AGENT_REFERENCE_HINT}",
+                  ["reuse_workspace_agent_issue_mismatch"]
+                )
+              end
+            end
 
             if (present_string(after_agent_id) || command_gate) && !activating_deferred
               decision = if present_string(after_agent_id)
@@ -7594,7 +7701,20 @@ module Meringue
                   include_predecessor_result: include_predecessor_result,
                   completion_continuation: completion_continuation,
                   command_gate: command_gate,
-                  rerouted_from_issue_id: rerouted_from_issue_id
+                  rerouted_from_issue_id: rerouted_from_issue_id,
+                  # The workspace decision is deliberately not made here: a queued worker is
+                  # provisioned when it activates, and whether its predecessor's worktree is free
+                  # can only be answered then. The *intent* is persisted so activation, a
+                  # provisioning retry, and a restart all resolve it the same way.
+                  workspace_reuse_request: workspace_reuse_request(
+                    share_workspace: share_workspace,
+                    reuse_agent_id: reuse_workspace_agent_id,
+                    inherit_agent_id: nil,
+                    follow_up_of_agent_id: follow_up_of_agent_id,
+                    replace_agent_id: nil,
+                    after_agent_id: decision.fetch("predecessor", nil)&.fetch("id", nil),
+                    requested_workspace_path: requested_workspace_path
+                  )
                 )
               else
                 # Nothing left to wait for: the predecessor already settled, so start now and still
@@ -7610,9 +7730,6 @@ module Meringue
           if existing
             agent_id = existing.fetch("id")
             workspace = workspace_from_reserved_agent(existing)
-            # A retry of an inherited-workspace reservation must not allocate a new worktree: the
-            # predecessor's checkout is the whole point of the restart.
-            inherited_workspace = inherited_workspace_reservation?(workspace) ? workspace : nil
             active_provider = existing.fetch("harness", active_provider)
             # This is a fresh provisioning attempt for a reservation whose last attempt failed, so
             # the record says "allocating" again instead of still showing the previous failure.
@@ -7624,19 +7741,67 @@ module Meringue
             after_agent_id = present_string(existing.fetch("after_agent_id", nil)) ||
                              present_string(deferred_spawn_metadata(existing).fetch("after_agent_id", nil)) ||
                              present_string(after_agent_id)
+            # A queued worker's workspace is decided when it activates, and a retry re-decides it,
+            # because "is the predecessor's worktree free" is only answerable now. The persisted
+            # request is what makes activation, a retry, and a restart resolve it the same way.
+            reuse_request = persisted_workspace_reuse_request(
+              existing,
+              share_workspace: share_workspace,
+              reuse_agent_id: reuse_workspace_agent_id,
+              inherit_agent_id: inherit_workspace_agent_id,
+              follow_up_of_agent_id: follow_up_of_agent_id,
+              replace_agent_id: replace_agent_id,
+              after_agent_id: after_agent_id,
+              requested_workspace_path: requested_workspace_path
+            )
+            workspace_reuse = reuse_request && claim_reused_worker_workspace(
+              state,
+              request: reuse_request,
+              requester_id: agent_id,
+              issue: issue,
+              reserved_workspace: workspace
+            )
+            if workspace_reuse && workspace_reuse.fetch("state") == WORKSPACE_REUSE_STATE_CLAIMED
+              workspace = workspace_reuse.fetch("workspace")
+              existing["workspace_path"] = workspace.fetch("workspace_path")
+              existing["workspace_strategy"] = workspace.fetch("workspace_strategy")
+              existing["workspace_branch"] = workspace.fetch("workspace_branch", nil)
+              existing["harness_metadata"] = (existing.fetch("harness_metadata", {}) || {}).merge(
+                "workspace_plan" => workspace.fetch("plan", nil)
+              ).compact
+            end
           else
             agent_id = next_worker_id!(state, issue.fetch("id"))
-            inherited_workspace = inherited_worker_workspace(state, inherit_workspace_agent_id) if inherit_workspace_agent_id
-            if inherit_workspace_agent_id && !inherited_workspace
+            reuse_request = workspace_reuse_request(
+              share_workspace: share_workspace,
+              reuse_agent_id: reuse_workspace_agent_id,
+              inherit_agent_id: inherit_workspace_agent_id,
+              follow_up_of_agent_id: follow_up_of_agent_id,
+              replace_agent_id: replace_agent_id,
+              after_agent_id: after_agent_id,
+              requested_workspace_path: requested_workspace_path
+            )
+            workspace_reuse = reuse_request && claim_reused_worker_workspace(
+              state,
+              request: reuse_request,
+              requester_id: agent_id,
+              issue: issue
+            )
+            # A session restart exists only to take over the dead worker's checkout, so it fails
+            # loudly instead of silently starting fresh somewhere else and abandoning that work.
+            if session_restart_workspace_reuse_refused?(workspace_reuse)
               return rejected_result(
                 command_id,
                 command_type,
-                "Worker cannot take over #{inherit_workspace_agent_id}'s workspace because that workspace is no longer on disk.",
+                "Worker cannot take over #{reuse_request.fetch("agent_id")}'s workspace: " \
+                "#{workspace_reuse_reason_text(workspace_reuse)}.",
                 ["inherited_workspace_unavailable"]
               )
             end
 
-            workspace = inherited_workspace || resolve_worker_workspace(
+            claimed_workspace = workspace_reuse && workspace_reuse.fetch("state") == WORKSPACE_REUSE_STATE_CLAIMED ?
+                                  workspace_reuse.fetch("workspace") : nil
+            workspace = claimed_workspace || resolve_worker_workspace(
               project: project,
               issue: issue,
               requested_workspace_path: requested_workspace_path,
@@ -7660,6 +7825,7 @@ module Meringue
               replace_agent_id: replace_agent_id,
               after_agent_id: present_string(after_agent_id),
               completion_continuation: completion_continuation,
+              workspace_reuse_request: reuse_request,
               now: now,
               harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
             )
@@ -7698,16 +7864,31 @@ module Meringue
             "follow_up_of_agent_id" => present_string(follow_up_of_agent_id),
             "replace_agent_id" => present_string(replace_agent_id),
             "after_agent_id" => present_string(after_agent_id),
-            "inherited_workspace" => inherited_workspace,
+            "workspace_reuse" => workspace_reuse,
             "session_restart_of_agent_id" => session_restart_of_agent_id,
             "prompt" => prompt.to_s
           }
         end
         prompt = reservation.fetch("prompt", prompt)
 
-        # An inherited workspace is already provisioned by definition: it is the predecessor's live
-        # worktree, so it is adopted as-is and never re-created, re-branched, or cleaned up.
-        workspace = reservation.fetch("inherited_workspace", nil) || resolve_worker_workspace(
+        # A claimed workspace is already provisioned by definition: it is the predecessor's existing
+        # worktree, so it is adopted as-is and never re-created, re-branched, or cleaned up. The git
+        # half of the safety check runs here, outside the state lock, because it shells out.
+        workspace_reuse = settle_workspace_reuse_claim(reservation)
+        workspace = reuse_claim_workspace(workspace_reuse)
+        if workspace.nil? && session_restart_workspace_reuse_refused?(workspace_reuse)
+          return fail_worker_reservation(
+            reservation,
+            command_id: command_id,
+            command_type: command_type,
+            message: "Worker #{reservation.fetch("agent_id")} could not take over " \
+                     "#{workspace_reuse.fetch("of_agent_id", "its predecessor")}'s workspace: " \
+                     "#{workspace_reuse_reason_text(workspace_reuse)}.",
+            errors: ["inherited_workspace_unavailable", workspace_reuse.fetch("reason", "workspace_reuse_refused")],
+            workspace: reservation.fetch("workspace", {})
+          )
+        end
+        workspace ||= resolve_worker_workspace(
           project: reservation.fetch("project"),
           issue: reservation.fetch("issue"),
           requested_workspace_path: requested_workspace_path,
@@ -7716,6 +7897,8 @@ module Meringue
           create: true,
           progress_agent_id: reservation.fetch("agent_id")
         )
+        reservation["workspace_reuse"] = workspace_reuse
+        prompt = shared_workspace_prompt_note(prompt, workspace_reuse)
         if workspace.fetch("errors", []).any?
           return fail_worker_reservation(
             reservation,
@@ -7728,7 +7911,7 @@ module Meringue
           )
         end
         reservation["workspace"] = workspace
-        checkpoint_worker_workspace!(reservation, workspace)
+        checkpoint_worker_workspace!(reservation, workspace, reuse: workspace_reuse)
 
         session_ref = nil
         begin
@@ -7860,9 +8043,13 @@ module Meringue
               "workspace_branch" => agent.fetch("workspace_branch"),
               "title" => agent.fetch("harness_metadata", {}).fetch("title", nil),
               "rerouted_from_issue_id" => rerouted_from_issue_id,
+              "workspace_reuse" => workspace_reuse,
               "repointed_deferred_agent_ids" => repointed_dependents.fetch("agent_ids").empty? ? nil : repointed_dependents.fetch("agent_ids")
             }.compact
           ))
+          # Whether a worker got its own worktree or continued in someone else's is exactly the kind
+          # of thing a user should never have to infer from a branch name.
+          log_ids.concat(append_workspace_reuse_log(state, agent, workspace_reuse))
           touch_state!(state, now)
           store.save(state)
 
@@ -8014,6 +8201,21 @@ module Meringue
       # that worker completes. The continuation lives on the worker record, is claimed before the
       # head is spawned, and is also resolved from reconciliation so it survives restarts without a
       # sleeping worker session.
+      # `share_workspace`: true asks for the continuation default explicitly, false opts a
+      # continuation step out of it, and nil leaves the default in place.
+      def normalized_share_workspace(payload, errors:)
+        raw = value_at(payload, *SHARE_WORKSPACE_KEYS)
+        return nil if raw.nil? || blank?(raw)
+        return raw if [true, false].include?(raw)
+
+        value = raw.to_s.strip.downcase
+        return true if %w[true yes on 1].include?(value)
+        return false if %w[false no off 0].include?(value)
+
+        errors << "invalid_share_workspace"
+        nil
+      end
+
       def normalized_completion_continuation(payload, errors:)
         raw = value_at(payload, *COMPLETION_CONTINUATION_KEYS)
         return nil if raw.nil? || raw == false
@@ -8681,7 +8883,7 @@ module Meringue
       def queue_deferred_worker(state, command_id:, command_type:, issue:, project:, prompt:, title:,
                                 requested_workspace_path:, follow_up_of_agent_id:, predecessor:,
                                 chain_depth:, failure_policy:, include_predecessor_result:, completion_continuation:,
-                                rerouted_from_issue_id:, command_gate: nil)
+                                rerouted_from_issue_id:, command_gate: nil, workspace_reuse_request: nil)
         now = timestamp
         agent_id = next_worker_id!(state, issue.fetch("id"))
         workspace = resolve_worker_workspace(
@@ -8712,6 +8914,7 @@ module Meringue
           replace_agent_id: nil,
           after_agent_id: predecessor && predecessor.fetch("id"),
           completion_continuation: completion_continuation,
+          workspace_reuse_request: workspace_reuse_request,
           now: now,
           harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
         )
@@ -9705,7 +9908,7 @@ module Meringue
 
       def build_worker_reservation(agent_id:, issue:, project:, workspace:, provider:, command_id:, prompt:, title:,
                                    requested_workspace_path:, follow_up_of_agent_id:, replace_agent_id:, now:, harness_generation:,
-                                   after_agent_id: nil, completion_continuation: nil)
+                                   after_agent_id: nil, completion_continuation: nil, workspace_reuse_request: nil)
         plan = workspace.fetch("plan", nil) || workspace
         {
           "id" => agent_id,
@@ -9730,6 +9933,7 @@ module Meringue
             "replace_agent_id" => present_string(replace_agent_id),
             "completion_continuation" => completion_continuation_record(completion_continuation, now: now, spawn_command_id: command_id),
             "provisioning_state" => "allocating_workspace",
+            "workspace_reuse_request" => workspace_reuse_request,
             "workspace_plan" => plan,
             "harness_generation" => harness_generation,
             **instance_ownership_metadata,
@@ -9740,21 +9944,238 @@ module Meringue
         }
       end
 
-      # The predecessor's workspace, adopted verbatim for a successor that continues its work.
-      # `created` is forced to false so no failure path can ever delete a worktree this kernel did
-      # not create - the commits in it are the only copy of the work being recovered.
-      def inherited_worker_workspace(state, agent_id)
-        predecessor = find_agent(state, agent_id)
-        return nil unless predecessor.is_a?(Hash)
+      # --- Shared worker workspaces -------------------------------------------------------------
+      #
+      # A successor that continues a predecessor's line of work on the same issue works in the
+      # predecessor's own worktree and branch instead of getting a fresh worktree on a suffixed
+      # branch. That is what makes "one worker investigates, the next implements" leave one branch
+      # and one pull request behind, and what lets a successor see work the predecessor never
+      # committed.
+      #
+      # Reuse is decided in two halves, on purpose:
+      #
+      #   claim_reused_worker_workspace   runs under the state lock, answers the questions only
+      #                                   Meringue state can answer (is this really the same line
+      #                                   of work, is any worker that could still write to that
+      #                                   checkout alive, has that branch already been delivered),
+      #                                   and *writes* the shared path onto the reservation. The
+      #                                   write is the claim: a second successor spawned at the
+      #                                   same moment then sees a live occupant and gets its own
+      #                                   worktree.
+      #   verify_reused_worker_workspace  runs outside the lock because it shells out to git, and
+      #                                   answers whether the worktree is still registered, still
+      #                                   on that branch, and unlocked.
+      #
+      # Any refusal falls back to fresh provisioning with a log line, except for a session restart,
+      # which exists only to take over the dead worker's checkout and therefore fails loudly.
 
+      # Which predecessor's workspace this spawn may continue in, and why. nil means "provision a
+      # fresh worktree".
+      def workspace_reuse_request(share_workspace:, reuse_agent_id:, inherit_agent_id:, follow_up_of_agent_id:,
+                                  replace_agent_id:, after_agent_id:, requested_workspace_path:)
+        # An explicitly requested path is the caller's own workspace choice; nothing to share.
+        return nil if present_string(requested_workspace_path)
+        if present_string(inherit_agent_id)
+          return { "source" => WORKSPACE_REUSE_SOURCE_SESSION_RESTART, "agent_id" => present_string(inherit_agent_id) }
+        end
+        return nil if share_workspace == false
+        if present_string(reuse_agent_id)
+          return { "source" => WORKSPACE_REUSE_SOURCE_EXPLICIT, "agent_id" => present_string(reuse_agent_id) }
+        end
+
+        # The continuation default, in priority order. `after_agent_id` first because a queued
+        # worker's predecessor is guaranteed settled, which is the case reuse is safest in.
+        candidate = present_string(after_agent_id) || present_string(follow_up_of_agent_id) || present_string(replace_agent_id)
+        return nil unless candidate
+
+        { "source" => WORKSPACE_REUSE_SOURCE_CONTINUATION, "agent_id" => candidate }
+      end
+
+      # The reuse request for a reservation that already exists (a queued worker activating, a
+      # provisioning retry, a reconciliation restart). The persisted request is the durable intent;
+      # a continuation still re-reads the predecessor from the live record, because a replacement
+      # can have repointed the chain since the worker was queued.
+      def persisted_workspace_reuse_request(agent, share_workspace:, reuse_agent_id:, inherit_agent_id:,
+                                            follow_up_of_agent_id:, replace_agent_id:, after_agent_id:,
+                                            requested_workspace_path:)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        persisted = metadata.fetch("workspace_reuse_request", nil)
+        persisted = nil unless persisted.is_a?(Hash)
+        recorded_inherit = present_string(metadata.fetch("inherit_workspace_from_agent_id", nil))
+        if persisted && persisted.fetch("source", nil) != WORKSPACE_REUSE_SOURCE_CONTINUATION
+          return persisted
+        end
+
+        request = workspace_reuse_request(
+          share_workspace: persisted ? nil : share_workspace,
+          reuse_agent_id: reuse_agent_id,
+          inherit_agent_id: recorded_inherit || inherit_agent_id,
+          follow_up_of_agent_id: follow_up_of_agent_id,
+          replace_agent_id: replace_agent_id,
+          after_agent_id: after_agent_id,
+          requested_workspace_path: present_string(requested_workspace_path) ||
+            present_string(metadata.fetch("requested_workspace_path", nil))
+        )
+        # A reservation whose plan already carries a shared workspace keeps it even when no
+        # relationship field survived, so a retry never abandons a checkout it already took over.
+        return request if request
+        return nil unless shared_workspace_plan?(metadata.fetch("workspace_plan", nil))
+
+        {
+          "source" => (persisted && persisted.fetch("source", nil)) || WORKSPACE_REUSE_SOURCE_CONTINUATION,
+          "agent_id" => present_string((metadata.fetch("workspace_plan", {}) || {}).fetch("inherited_from_agent_id", nil))
+        }
+      end
+
+      # Decides whether this spawn may continue in another worker's worktree, and claims it.
+      def claim_reused_worker_workspace(state, request:, requester_id:, issue:, reserved_workspace: nil)
+        source = request.fetch("source")
+        predecessor_id = present_string(request.fetch("agent_id", nil))
+        predecessor = predecessor_id ? find_agent(state, predecessor_id) : nil
+        workspace = nil
+        if predecessor.is_a?(Hash) && predecessor.fetch("type", nil) == "worker"
+          unless predecessor.fetch("issue_id", nil) == issue.fetch("id")
+            return workspace_reuse_refusal(request, "predecessor_on_another_issue")
+          end
+          unless predecessor.fetch("workspace_strategy", nil) == "git_worktree"
+            # Nothing to share: the predecessor is working in the project root or a caller-supplied
+            # directory, and normal resolution already lands this worker in the same place.
+            return workspace_reuse_refusal(request, "predecessor_workspace_is_not_a_worktree")
+          end
+
+          workspace = shared_worker_workspace(predecessor, source: source)
+        elsif shared_workspace_record?(reserved_workspace)
+          # The predecessor's record was pruned, but this reservation already carries its shared
+          # workspace, so the work is still reachable and the takeover stands.
+          workspace = reserved_workspace
+        end
+        return workspace_reuse_refusal(request, "predecessor_not_found") unless workspace
+
+        branch = present_string(workspace.fetch("workspace_branch", nil))
+        root = present_string(workspace_worktree_root_path(workspace))
+        path = present_string(workspace.fetch("workspace_path", nil))
+        return workspace_reuse_refusal(request, "predecessor_workspace_unknown") unless branch && root && path
+        unless Dir.exist?(File.expand_path(path)) && Dir.exist?(File.expand_path(root))
+          return workspace_reuse_refusal(request, "workspace_missing", "worktree_root_path" => root)
+        end
+
+        # The predecessor is deliberately *not* excluded here: a predecessor that is still working,
+        # idle, or blocked can start streaming into that checkout again at any moment, and two live
+        # sessions in one worktree is the one outcome this whole path exists to prevent.
+        occupants = workspace_occupant_agent_ids(state, root, excluding: [requester_id])
+        if occupants.any?
+          reason = predecessor_id && occupants.any? { |id| Ids.same?(id, predecessor_id) } ? "predecessor_still_live" : "workspace_in_use"
+          return workspace_reuse_refusal(request, reason, "occupant_agent_ids" => occupants, "worktree_root_path" => root)
+        end
+        if (merged = trusted_delivery_pull_request_for_branch(issue, branch))
+          # That branch has already been delivered and merged. Pushing more work onto it would land
+          # on a pull request that can never be reopened, so the next step starts from a fresh one.
+          return workspace_reuse_refusal(
+            request,
+            "delivery_branch_already_merged",
+            "workspace_branch" => branch,
+            "pull_request_url" => State::Models.pull_request_record_url(merged)
+          )
+        end
+
+        {
+          "state" => WORKSPACE_REUSE_STATE_CLAIMED,
+          "source" => source,
+          "of_agent_id" => predecessor_id,
+          "workspace_branch" => branch,
+          "workspace_path" => path,
+          "worktree_root_path" => root,
+          "workspace" => workspace
+        }.compact
+      end
+
+      def workspace_reuse_refusal(request, reason, details = {})
+        {
+          "state" => WORKSPACE_REUSE_STATE_REFUSED,
+          "source" => request.fetch("source"),
+          "of_agent_id" => present_string(request.fetch("agent_id", nil)),
+          "reason" => reason
+        }.merge(details).compact
+      end
+
+      # Runs the git half of the safety check for a claimed workspace, outside the state lock.
+      def settle_workspace_reuse_claim(reservation)
+        reuse = reservation.fetch("workspace_reuse", nil)
+        return nil unless reuse.is_a?(Hash)
+        return reuse unless reuse.fetch("state", nil) == WORKSPACE_REUSE_STATE_CLAIMED
+
+        inspection = verify_reused_worker_workspace(reuse.fetch("workspace"), project: reservation.fetch("project", nil))
+        return reuse.merge("state" => WORKSPACE_REUSE_STATE_REUSED, "verified" => inspection.fetch("reason", nil)) if inspection.fetch("usable", false)
+
+        reuse.reject { |key, _value| key == "workspace" }.merge(
+          "state" => WORKSPACE_REUSE_STATE_REFUSED,
+          "reason" => inspection.fetch("reason", "worktree_unusable"),
+          "checked_out_branch" => inspection.fetch("checked_out_branch", nil),
+          "error" => inspection.fetch("error", nil)
+        ).compact
+      end
+
+      def verify_reused_worker_workspace(workspace, project:)
+        # A workspace manager double (or an older implementation) may not answer this question.
+        # Reuse must not become unavailable because the inspection is.
+        return { "usable" => true, "reason" => "inspection_unavailable" } unless workspace_manager.respond_to?(:inspect_shared_worktree)
+
+        plan = workspace.fetch("plan", nil)
+        plan = {} unless plan.is_a?(Hash)
+        workspace_manager.inspect_shared_worktree(
+          worktree_root: workspace_worktree_root_path(workspace),
+          branch: workspace.fetch("workspace_branch", nil),
+          git_root: present_string(plan["git_root"]) || (project && project.fetch("root_path", nil))
+        )
+      rescue StandardError => e
+        { "usable" => false, "reason" => "worktree_inspection_error", "error" => sanitized_error_message(e) }
+      end
+
+      def reuse_claim_workspace(reuse)
+        return nil unless reuse.is_a?(Hash) && reuse.fetch("state", nil) == WORKSPACE_REUSE_STATE_REUSED
+
+        reuse.fetch("workspace", nil)
+      end
+
+      def session_restart_workspace_reuse_refused?(reuse)
+        reuse.is_a?(Hash) &&
+          reuse.fetch("state", nil) == WORKSPACE_REUSE_STATE_REFUSED &&
+          reuse.fetch("source", nil) == WORKSPACE_REUSE_SOURCE_SESSION_RESTART
+      end
+
+      # Workers that could still write to a worktree. Only a terminal worker is guaranteed not to:
+      # an `idle` or `blocked` worker is one prompt or one reconnect away from streaming again, and a
+      # `queued` worker has already claimed its path for a spawn that is about to start.
+      def workspace_occupant_agent_ids(state, worktree_root, excluding: [])
+        excluded = Array(excluding).compact
+        state.fetch("agents", []).filter_map do |other|
+          next unless other.is_a?(Hash) && other.fetch("type", nil) == "worker"
+          next if excluded.any? { |id| Ids.same?(id, other.fetch("id", nil)) }
+          next if TERMINAL_AGENT_STATUSES.include?(other.fetch("status", nil).to_s)
+
+          other_root = present_string(worker_worktree_root_path(other))
+          next unless other_root && same_workspace_path?(other_root, worktree_root)
+
+          other.fetch("id", nil)
+        end.compact
+      end
+
+      # The predecessor's workspace, adopted verbatim for a successor that continues its work.
+      # `created` is forced to false so no failure path can ever delete a worktree this spawn did
+      # not create - the work in it is the only copy.
+      def shared_worker_workspace(predecessor, source:)
         workspace_path = present_string(predecessor.fetch("workspace_path", nil))
-        return nil unless workspace_path && Dir.exist?(File.expand_path(workspace_path))
+        return nil unless workspace_path
 
         metadata = predecessor.fetch("harness_metadata", {}) || {}
         plan = metadata.fetch("workspace_plan", nil)
         plan = plan.is_a?(Hash) ? deep_copy(plan) : {}
         plan = plan.merge(
           "created" => false,
+          "shared" => true,
+          "reuse_source" => source,
+          # Kept under the original key so records written before workspace sharing existed, and
+          # every ownership check that already reads it, keep working unchanged.
           "inherited_from_agent_id" => predecessor.fetch("id"),
           "workspace_path" => workspace_path,
           "strategy" => plan.fetch("strategy", predecessor.fetch("workspace_strategy", nil)),
@@ -9764,16 +10185,125 @@ module Meringue
           "workspace_path" => workspace_path,
           "workspace_strategy" => predecessor.fetch("workspace_strategy", nil),
           "workspace_branch" => predecessor.fetch("workspace_branch", nil),
-          "note" => "took over #{predecessor.fetch("id")}'s existing workspace",
+          "note" => "continues in #{predecessor.fetch("id")}'s existing workspace",
           "plan" => plan,
           "created" => false,
+          "reused_from_agent_id" => predecessor.fetch("id"),
           "errors" => []
         }
       end
 
-      def inherited_workspace_reservation?(workspace)
-        plan = workspace.is_a?(Hash) ? workspace.fetch("plan", nil) : nil
-        !!(plan.is_a?(Hash) && present_string(plan.fetch("inherited_from_agent_id", nil)))
+      def shared_workspace_plan?(plan)
+        plan.is_a?(Hash) && !!present_string(plan.fetch("inherited_from_agent_id", nil))
+      end
+
+      def shared_workspace_record?(workspace)
+        workspace.is_a?(Hash) && shared_workspace_plan?(workspace.fetch("plan", nil))
+      end
+
+      def workspace_worktree_root_path(workspace)
+        return nil unless workspace.is_a?(Hash)
+
+        plan = workspace.fetch("plan", nil)
+        plan = {} unless plan.is_a?(Hash)
+        present_string(plan["worktree_root_path"]) || present_string(plan["workspace_root_path"]) ||
+          present_string(workspace.fetch("workspace_path", nil)) || present_string(plan["workspace_path"])
+      end
+
+      def same_workspace_path?(left, right)
+        return false if blank?(left) || blank?(right)
+        return true if same_path?(left, right)
+
+        canonical_workspace_path(left) == canonical_workspace_path(right)
+      end
+
+      def canonical_workspace_path(path)
+        expanded = File.expand_path(path.to_s)
+        File.exist?(expanded) ? File.realpath(expanded) : expanded
+      rescue StandardError
+        File.expand_path(path.to_s)
+      end
+
+      WORKSPACE_REUSE_REASON_TEXT = {
+        "predecessor_not_found" => "that worker's workspace is no longer recorded",
+        "predecessor_on_another_issue" => "that worker belongs to another issue",
+        "predecessor_workspace_is_not_a_worktree" => "that worker is not working in a managed git worktree",
+        "predecessor_workspace_unknown" => "that worker's worktree and branch are not recorded",
+        "workspace_missing" => "that worktree is no longer on disk",
+        "predecessor_still_live" => "that worker is still live, and two sessions must never share one worktree",
+        "workspace_in_use" => "another live worker is already working in that worktree",
+        "delivery_branch_already_merged" => "that branch has already been merged",
+        "worktree_missing" => "that worktree is no longer on disk",
+        "outside_managed_workspace_root" => "that worktree is outside the Meringue workspace root",
+        "branch_not_meringue_managed" => "that branch is not Meringue-managed",
+        "git_root_missing" => "the repository that worktree belongs to is gone",
+        "worktree_list_failed" => "git could not list the repository's worktrees",
+        "worktree_not_registered" => "git no longer registers that directory as a worktree",
+        "worktree_branch_moved" => "that worktree has moved to another branch",
+        "worktree_locked" => "that worktree is locked",
+        "worktree_inspection_timed_out" => "git did not answer in time",
+        "worktree_inspection_error" => "that worktree could not be inspected"
+      }.freeze
+
+      def workspace_reuse_reason_text(reuse)
+        reason = (reuse.is_a?(Hash) ? reuse.fetch("reason", nil) : nil).to_s
+        WORKSPACE_REUSE_REASON_TEXT.fetch(reason, reason.empty? ? "it is not safe to share" : reason.tr("_", " "))
+      end
+
+      # Says plainly whether this worker continued in an existing workspace or got a fresh one, so a
+      # branch name is never the only evidence.
+      def append_workspace_reuse_log(state, agent, reuse)
+        return [] unless reuse.is_a?(Hash)
+        # A session restart already reports the takeover in its own recovery log line.
+        return [] if reuse.fetch("source", nil) == WORKSPACE_REUSE_SOURCE_SESSION_RESTART
+
+        of_agent_id = present_string(reuse.fetch("of_agent_id", nil))
+        subject = of_agent_id ? "worker #{of_agent_id}'s" : "an existing"
+        reused = reuse.fetch("state", nil) == WORKSPACE_REUSE_STATE_REUSED
+        message = if reused
+                    "Worker #{agent.fetch("id")} reused #{subject} worktree at #{agent.fetch("workspace_path")} " \
+                      "on branch #{agent.fetch("workspace_branch")} instead of provisioning a new one."
+                  else
+                    "Worker #{agent.fetch("id")} did not reuse #{of_agent_id ? subject : "the related worker's"} " \
+                      "worktree (#{workspace_reuse_reason_text(reuse)}), so Meringue provisioned a fresh worktree " \
+                      "on branch #{agent.fetch("workspace_branch")}."
+                  end
+        append_log(
+          state,
+          source_type: "kernel",
+          source_id: agent.fetch("id"),
+          # An explicit request that could not be honored is worth a warning; the continuation
+          # default falling back to a fresh worktree is normal and only needs explaining.
+          level: !reused && reuse.fetch("source", nil) == WORKSPACE_REUSE_SOURCE_EXPLICIT ? "warning" : "info",
+          message: message,
+          details: reuse.reject { |key, _value| key == "workspace" }.merge(
+            "agent_id" => agent.fetch("id"),
+            "issue_id" => agent.fetch("issue_id", nil),
+            "workspace_path" => agent.fetch("workspace_path", nil),
+            "workspace_branch" => agent.fetch("workspace_branch", nil)
+          ).compact
+        )
+      end
+
+      # What a successor is told about a workspace it did not provision. Without it, a fresh session
+      # would find someone else's uncommitted changes with no explanation, and could open a second
+      # pull request for a branch that already has one.
+      def shared_workspace_prompt_note(prompt, reuse)
+        return prompt unless reuse.is_a?(Hash) && reuse.fetch("state", nil) == WORKSPACE_REUSE_STATE_REUSED
+        # The session-restart prompt already explains the takeover in more detail.
+        return prompt if reuse.fetch("source", nil) == WORKSPACE_REUSE_SOURCE_SESSION_RESTART
+
+        predecessor = present_string(reuse.fetch("of_agent_id", nil))
+        owner = predecessor ? "agent #{predecessor}" : "an earlier agent"
+        [
+          prompt.to_s,
+          "--- Shared workspace ---",
+          "You are continuing in #{owner}'s existing worktree at #{reuse.fetch("workspace_path")} on branch " \
+          "#{reuse.fetch("workspace_branch")}, not a fresh checkout. Work it already did, committed or not, is " \
+          "still there: start with `git status` and `git log` and do not redo it.",
+          "Deliver on this same branch. If it already has an open pull request, update that pull request instead " \
+          "of opening a second one."
+        ].join("\n\n")
       end
 
       # The successor's copy of the recovery record: it remembers which worker it took over and how
@@ -9802,7 +10332,7 @@ module Meringue
         }
       end
 
-      def checkpoint_worker_workspace!(reservation, workspace)
+      def checkpoint_worker_workspace!(reservation, workspace, reuse: nil)
         synchronized_state do
           state = normalized_state
           agent = find_agent(state, reservation.fetch("agent_id"))
@@ -9817,6 +10347,9 @@ module Meringue
           agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
             "cwd" => workspace.fetch("workspace_path"),
             "workspace_plan" => workspace.fetch("plan", nil),
+            # Durable so a restart, a reconciliation pass, and GetInfo all know this worker shares a
+            # workspace rather than owning one.
+            "workspace_reuse" => reuse.is_a?(Hash) ? reuse.reject { |key, _value| key == "workspace" }.merge("decided_at" => now) : nil,
             "provisioning_state" => "starting_harness",
             "workspace_provisioned_at" => now
           ).compact

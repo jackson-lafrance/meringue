@@ -83,6 +83,23 @@ class FoundationDocsPolicyTest < Minitest::Test
     assert_includes contract, "no multi-hour wait budgets"
   end
 
+  # A successor continuing a predecessor's work shares its worktree. A head that still believes
+  # every worker gets its own checkout writes prompts that copy work between directories.
+  def test_head_contract_explains_worktree_sharing_between_related_workers
+    contract = File.read(FoundationSupport.repo_path("docs", "head_agent_kernel_commands.md"))
+
+    assert_includes contract, "### Sharing one worktree between related workers"
+    assert_includes contract, "**keeps working in that predecessor's worktree and branch**"
+    assert_includes contract, "#### When the kernel refuses to share"
+    assert_includes contract, "Two live harness sessions must never write one worktree."
+    assert_includes contract, "A dirty worktree is *not* a refusal reason"
+    assert_includes contract, "reuse_workspace_of_agent_id"
+    assert_includes contract, "reuse_workspace_from_command"
+    assert_includes contract, '`share_workspace: false` opts a continuation worker out'
+    assert_includes contract, "update that pull request rather than open a second one"
+    refute_includes contract, "Both workers stay in their own kernel-assigned workspace."
+  end
+
   # Project labels regressed to "Meringue working" because a lifecycle status leaked into
   # the name. The contract heads read must state that a status is never part of a name.
   def test_head_contract_keeps_lifecycle_statuses_out_of_project_names
