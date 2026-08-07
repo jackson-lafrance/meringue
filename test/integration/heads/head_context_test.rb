@@ -142,6 +142,37 @@ class HeadContextTest < Minitest::Test
     refute gate.key?("last_check")
   end
 
+  def test_worker_candidates_expose_a_command_gated_completion_continuation
+    snapshot = head_snapshot
+    worker = snapshot.fetch("agents").first
+    worker["status"] = "completed"
+    worker.fetch("harness_metadata")["completion_continuation"] = {
+      "state" => "waiting",
+      "prompt" => "Route the review response after it lands.",
+      "include_worker_result" => true,
+      "command_gate" => {
+        "command" => "gh pr view --json reviewDecision",
+        "label" => "pair review",
+        "expect" => "output_matches",
+        "state" => "pending",
+        "checks" => 2,
+        "if_gate_expires" => "cancel",
+        "last_check" => { "stdout_tail" => "SECRET_TRANSCRIPT_LINE" }
+      }
+    }
+
+    candidate = build_head_context(snapshot: snapshot)
+                  .to_prompt_h.dig("routing_context", "worker_candidates").first
+    continuation = candidate.fetch("completion_continuation")
+    gate = continuation.fetch("command_gate")
+
+    assert_equal "waiting", continuation.fetch("state")
+    assert_equal "Route the review response after it lands.", continuation.fetch("prompt")
+    assert_equal "pair review", gate.fetch("label")
+    assert_equal 2, gate.fetch("checks")
+    refute gate.key?("last_check")
+  end
+
   def test_killed_worker_is_not_resumable_and_has_no_prompt_modes
     snapshot = head_snapshot
     snapshot.fetch("agents").first["status"] = "killed"
@@ -404,7 +435,10 @@ class HeadContextTest < Minitest::Test
 
     assert(rules.any? { |rule| rule.include?("Use after_command when the next step must wait for something outside Meringue") })
     assert(rules.any? { |rule| rule.include?("after_command composes with after_agent_id as AND") })
+    assert(rules.any? { |rule| rule.include?("Use completion_head.after_command") })
+    assert(rules.any? { |rule| rule.include?("instead of launching a short-lived worker just to check the state") })
     assert_includes reference, "### Chaining a worker after a script or command"
+    assert_includes reference, "completion_head.after_command"
     assert_includes reference, "\"after_command\":"
     assert_includes reference, "if_gate_expires"
   end

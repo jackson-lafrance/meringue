@@ -266,7 +266,7 @@ module Meringue
           /config                   # show active config, supported defaults, conflict policy, and keybindings
           /jump [agent_id]          # open a focused workspace; omit id to navigate the AgentTree
           /recount                  # compact AgentTree numbering after records are removed
-          Ctrl-B                    # open the selected worker's verified delivery PR; with nothing selected, pick from the open PRs
+          Ctrl-B                    # open the selected issue's verified delivery PR; with nothing selected, pick from the open PRs
           Enter in jump mode        # open selected issue/agent PR when one is available
           a in jump mode            # open the selected agent's focused workspace
           AgentTree single-click    # focus logs; issue/worker selections also target chat through a fresh head

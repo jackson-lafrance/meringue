@@ -15,6 +15,7 @@ Files added by this slice (plus later prune-worktree lifecycle coverage):
 - `test/integration/kernel_maintenance/reconcile_sessions_test.rb`
 - `test/integration/kernel_maintenance/recount_test.rb`
 - `test/integration/kernel_maintenance/recount_reference_integrity_test.rb`
+- `test/integration/kernel_maintenance/recount_history_test.rb`
 - `test/integration/kernel_maintenance/process_identity_test.rb`
 - `test/support/kernel_maintenance_support.rb`
 - shared contract files `Rakefile` and `test/test_helper.rb` (created verbatim)
@@ -48,11 +49,11 @@ tests were updated to the shipped behavior:
 ## Behaviour worth flagging (tests assert current actual behaviour)
 
 1. **Recount aborts with `KeyError` for an orphaned issue.** An issue whose
-   `project_id` no longer exists makes `State::Recounter.worker_id_map` raise
-   `KeyError: key not found: "<issue id>"` (recounter.rb:58) before the friendlier
-   `validate_integrity!` `ArgumentError` can run. The kernel surfaces this as a
+   `project_id` no longer exists is not in the id mapping, so building that mapping raises
+   `KeyError: key not found: "<issue id>"` before the friendlier `validate_integrity!`
+   `ArgumentError` can run. The kernel surfaces this as a
    `failed` command result and, importantly, leaves the persisted state file
-   untouched. A cleaner error (or a repair step for orphaned records) would be an
+   untouched (the pass mutates a copy, so the caller's in-memory state is untouched too). A cleaner error (or a repair step for orphaned records) would be an
    improvement. Asserted in `test_orphaned_issue_aborts_the_recount_before_integrity_validation`
    and `test_orphaned_issue_recount_fails_the_command_without_writing_state`.
 2. **Recount is refused whenever any head record exists**, not only when a head
@@ -118,7 +119,6 @@ tests were updated to the shipped behavior:
 12. **ClearState** wipes projects/issues/agents/questions/logs, all counters, and
     the persisted visible log buffer (`conversation`), and leaves a valid loadable
     state file with `schema_version` and metadata timestamps.
-
 13. **Recount referential integrity** (`recount_reference_integrity_test.rb`). The rename now
     sweeps the whole state document rather than a per-record field list, and the pass runs on a
     copy that is only swapped in after validation. Two reference classes were genuinely stranded
@@ -130,10 +130,43 @@ tests were updated to the shipped behavior:
     because free-form harness metadata was already swept; it is now locked in by tests.
     Validation additionally fails the command when any ID that resolved before the pass does not
     resolve after it, naming the path, while tolerating references that were already dangling.
-    Two deliberate preservations are asserted: IDs inside human-readable text stay as history, and
-    composite correlation IDs (`<agent>-PP1`, `<goal>-IT1-ATTEMPT`) stay verbatim so exactly-once
-    dedupe keeps matching.
+    Composite correlation IDs (`<agent>-PP1`, `<goal>-IT1-ATTEMPT`) stay verbatim so exactly-once
+    dedupe keeps matching. The other preservation asserted there — IDs inside human-readable text
+    staying as history — was **superseded** by item 14, which is why that expectation now lives
+    inverted in `recount_history_test.rb`.
+14. **Recount resolves ids inside history, and retires ids it cannot resolve** (added with
+    `recount_history_test.rb`). Item 13 tolerated an already-dangling id and left ids in text
+    alone. Because compacting *reuses* ids, both are how a pruned worker's history ends up
+    rendered under whichever live record inherited its id (reported: a live World worker showing a
+    completed Meringue worker's report and PR). The pass now resolves every id it can rename:
+    references *and* narrative text follow a surviving record, dangling references are cleared in
+    the live orchestration slots the kernel acts on, and a dangling id in append-only history or
+    prose is marked `(old id)` so the line stays readable but resolves to nothing. Validation is
+    correspondingly strict: after the pass, every id still spelled in state must name a live
+    record, or the whole recount is refused rather than persisting misattributed history. Opaque
+    evidence (paths, branches, argv, URLs, harness snapshots, composite correlation ids, a previous
+    pass's `mappings`/`last_recount`) and lower-case ids quoted from user text are skipped.
 
 The original maintenance test slice did not change production code. Later prune-worktree
 lifecycle work updated the behavior called out in items 4 and 6, and the reference-integrity work
 in item 13 changed `State::Recounter` and the Recount save path in `Kernel::Engine`.
+
+## Pruning a shared worktree
+
+Worktree sharing between related workers broke the one-worker-one-path assumption that
+`cleanup_pruned_worker_workspaces!` was written against. Two rules now keep both halves honest:
+
+- A pruned worker whose worktree another *retained* worker still shares skips cleanup with
+  `status: "skipped"`, `reason: "workspace_shared_with_retained_worker"`, and `success: true`. The
+  record goes immediately; failing instead would retain a record prune can never clear and warn
+  about it on every pass.
+- Workers being pruned in the same pass no longer contribute to `protected_paths`. Without that, a
+  shared worktree whose every sharer was pruned together would deadlock: each sharer would refuse
+  on account of the others and the directory would never be removed.
+
+The net effect is that a shared worktree is removed exactly once, on the pass that prunes the last
+worker using it, and its delivery branch survives as before. Covered by
+`test/integration/kernel_maintenance/prune_worktree_cleanup_test.rb` and the lifecycle tests in
+`test/integration/kernel_workers/workspace_reuse_test.rb`.
+in items 13 and 14 changed `State::Recounter`, the Recount save path in `Kernel::Engine`, and (for
+item 14) the TUI's post-recount reload of its own presentation buffers.
