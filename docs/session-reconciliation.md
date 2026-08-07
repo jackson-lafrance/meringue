@@ -192,10 +192,11 @@ predecessor still cancels the chain.
 
 Completion-triggered heads use the same kernel-owned settle/reconcile shape. A worker may carry a
 `harness_metadata.completion_continuation` record from `SpawnWorker`'s `completion_head` payload.
-When that worker reaches `completed`, the settle path claims the continuation and spawns a fresh
-head with a bounded copy of the worker's final report in the prompt. If Meringue is down in the
-window after completion is recorded but before the head is spawned, the next reconciliation pass
-claims the waiting continuation instead. Workers never poll state or sleep for this workflow.
+When that worker reaches `completed`, the settle path either claims the continuation immediately or,
+when the nested object has an `after_command`, arms its persisted gate and leaves the routing queued.
+The eventual head receives a bounded copy of the worker's final report (and gate output when present)
+in the prompt. If Meringue is down in the window after completion, the next reconciliation pass
+resumes the same gate/claim instead. Workers never poll state or sleep for this workflow.
 
 ## A session that cannot be replayed
 
@@ -247,13 +248,15 @@ validates it. Meringue's contribution to a resumed request is one plain user mes
 behavior above is therefore resilience, not a transcript fix, and it applies to any harness
 that reports the same class of failure.
 
-## Command gates on queued workers
+## Kernel wait gates
 
-A queued worker can also wait on a shell condition (`after_command` on `SpawnWorker`; see
-"Chaining a worker after a script or command" in `docs/head_agent_kernel_commands.md`). That
-condition is evaluated by one reconcile step, `check_deferred_worker_gates`, which runs just
-before `resolve_deferred_workers` so a condition that passes in a pass starts its worker in the
-same pass.
+A queued worker can wait on a shell condition (top-level `after_command` on `SpawnWorker`; see
+"Chaining a worker after a script or command" in `docs/head_agent_kernel_commands.md`). A worker's
+completion continuation can wait on the same condition (`completion_head.after_command`) when the
+follow-on *routing decision* must not happen yet. Both are persisted kernel wait predicates, not
+checker sessions. One reconcile step, `check_kernel_wait_gates`, evaluates both owner types and then
+the ordinary owner-specific resolver either starts the queued worker or spawns the completion head.
+A condition that passes can therefore release its work in the same reconciliation pass.
 
 The step is bounded in every direction, because it runs a user- or head-supplied command on a
 timer. It is the same discipline "A background pass must stay in the background" states above,
@@ -271,14 +274,19 @@ applied to a second kind of external I/O:
 - **Never forever.** A gate is polled at most every `after_command_interval_seconds` (default
   60s, minimum 5s), gives up at `after_command_max_wait_seconds` (default 4h, max 24h), and is
   abandoned after three consecutive checks that could not be evaluated at all. Expiry and
-  abandonment cancel the queued worker with a warning by default, or start it anyway with
-  `if_gate_expires: "run"`.
-- **Never in memory only.** The whole condition, its budget, and its next check time live in
-  `harness_metadata.deferred_spawn.command_gate` on the worker record, so a wait that outlives
-  the process resumes on the next start.
+  abandonment cancel the queued worker or completion continuation with a warning by default, or
+  release it anyway with `if_gate_expires: "run"`.
+- **Never in memory only.** The whole condition, its budget, and its next check time live on the
+  worker record: `harness_metadata.deferred_spawn.command_gate` for a queued worker, or
+  `harness_metadata.completion_continuation.command_gate` for deferred head routing. A wait that
+  outlives the process resumes on the next start, and an in-flight completion claim still uses the
+  existing owner/head lookup to avoid spawning the eventual head twice.
 
-The step never activates or cancels anything itself. It only updates the gate's state;
-`resolve_deferred_workers` stays the one place a queued worker starts or is cancelled.
+The step never activates or cancels anything itself. It only updates a gate's state;
+`resolve_deferred_workers` remains the one place a queued worker starts or is cancelled, and
+`resolve_completion_continuations` remains the one place a completion head is claimed, spawned, or
+cancelled. That separation is what lets both kinds share polling and timeout policy without sharing
+their lifecycle side effects.
 
 ## Verifying
 
@@ -312,7 +320,10 @@ not stop another instance from running `ListAll` or `CreateIssue`, one tick hono
 batch limit and the shared budget, and refresh schedules are spread so records do not all fall
 due on the same tick.
 
-The command-gated worker file covers command gates: a gate is polled no faster than its interval,
-passes and starts its worker through the ordinary queued-worker path, hands the command's output
-over, expires into a cancellation (or a start under `if_gate_expires: "run"`), is abandoned after
-three unevaluable checks, and survives a restart with its budget intact.
+The command-gated worker file covers current top-level `after_command` users: a gate is polled no
+faster than its interval, passes and starts its worker through the ordinary queued-worker path,
+hands the command's output over, expires into a cancellation (or a start under
+`if_gate_expires: "run"`), is abandoned after three unevaluable checks, and survives a restart with
+its budget intact. `completion_triggered_head_test.rb` covers the other owner: no head/checker worker
+churn before the condition changes, restart-safe release, exactly-once head routing, gate output
+handover, and both expiry policies.

@@ -30,8 +30,8 @@ module Meringue
 
       # Limits that apply only to strings held *inside* an array under this key.
       # `harness_metadata.command` is an argv array, while `goal.metric.command`,
-      # `goal.guardrails[].command`, and a queued worker's
-      # `deferred_spawn.command_gate.command` are single executable command strings.
+      # `goal.guardrails[].command`, and the gates under `deferred_spawn.command_gate`
+      # or `completion_continuation.command_gate` are single executable command strings.
       # Truncating a command Meringue still has to run would silently corrupt a goal loop
       # or poll a mangled gate forever, so the argv limit is deliberately scoped to the
       # array form and never reaches a scalar.
