@@ -841,6 +841,9 @@ module Meringue
           # Not resumable: its saved session is what the provider rejected, so the row must not read
           # like something a prompt will pick up where it left off.
           when "unreplayable_session" then "stopped: session unusable"
+          # The process behind the session left. Naming that is the difference between a row that
+          # reads as live work and one that reads as work waiting to be picked back up.
+          when "harness_process_exited" then "stopped: agent process exited"
           else "stopped mid-turn"
           end
         end

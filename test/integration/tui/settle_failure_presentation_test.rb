@@ -95,6 +95,33 @@ class TuiSettleFailurePresentationTest < Minitest::Test
     assert_includes focused, "fresh session on the same workspace"
   end
 
+  # The whole point of the incident this marker came from was a row that read as live work for 37
+  # minutes while the process behind it was gone.
+  def test_a_worker_whose_agent_process_exited_says_so
+    worker = aborted_worker
+    worker["harness_metadata"] = worker.fetch("harness_metadata").merge(
+      "settle_failure" => SETTLE_FAILURE.merge(
+        "kind" => "harness_process_exited",
+        "reason" => "its agent session process exited before it produced a result (exit code 1)"
+      ),
+      "status_reason" => "errored without finishing: its agent session process exited before it produced a result " \
+                         "(exit code 1)"
+    )
+
+    rendered = plain_lines(TreePane.new.lines(tree_with(worker), width: 100)).join("\n")
+
+    assert_includes rendered, "stopped: agent process exited"
+    refute_includes rendered, "stopped mid-turn"
+
+    state = composed_state(
+      tree_with(worker),
+      workspace: { "agent_id" => worker.fetch("id"), "view" => "agent", "filter" => "all", "content_revision" => 1 }
+    )
+    focused = plain_lines(WorkspacePane.new.content_lines(state, width: 100)).join("\n")
+
+    assert_includes focused, "process exited before it produced a result"
+  end
+
   def test_a_completed_worker_gets_no_stopped_marker
     worker = agent_record(
       "P1-I1-W1",

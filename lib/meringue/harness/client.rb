@@ -109,6 +109,22 @@ module Meringue
         nil
       end
 
+      # Harness-neutral evidence about a session whose process is gone.
+      #
+      # A client that raises an error carrying `Harness::SessionProcessGoneError` should also be
+      # able to say what it saw when the process left:
+      #
+      #   { "pid" => 27282,
+      #     "exit_status" => { "exit_code" => 1, "termsig" => nil, "success" => false },
+      #     "stderr_tail" => "...",
+      #     "last_event_at" => "2026-08-06T18:22:51Z" }
+      #
+      # Returning nil means "no evidence available" (for example a session this process never
+      # owned). The kernel then reports the exit without the exit status rather than guessing.
+      def session_exit_evidence(_session_ref)
+        nil
+      end
+
       def attach_session(session_ref)
         raise NotImplementedError, "harness clients must implement #attach_session"
       end

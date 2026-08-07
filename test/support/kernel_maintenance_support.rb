@@ -47,6 +47,13 @@ module KernelMaintenanceSupport
     end
   end
 
+  # A harness error that proves the session's process is gone, exactly the way
+  # Meringue::Harness::PiClient::ProcessExitedError does. The kernel must settle a
+  # worker on this evidence instead of re-prompting a process that cannot answer.
+  class StubProcessGoneError < StandardError
+    include Meringue::Harness::SessionProcessGoneError
+  end
+
   # In-process harness stub. Behaviour is scripted per harness session id so one
   # reconcile pass can mix healthy, dead-pid, missing-session-file, and
   # unresumable sessions.
@@ -79,6 +86,7 @@ module KernelMaintenanceSupport
       @calls << ["get_state", session_id_of(session_ref)]
       config = config_for(session_ref)
       raise_configured_error(config, "get_state_error")
+      raise_process_gone_error(config)
       raise_dead_pid_error(config, session_ref)
       raise_missing_session_file_error(config, session_ref)
       settle(session_ref, config)
@@ -120,6 +128,21 @@ module KernelMaintenanceSupport
       session_ref.merge("killed" => true, "is_streaming" => false)
     end
 
+    # Only answered for a session the script says has exited, mirroring a real
+    # client that can only report what it owned.
+    def session_exit_evidence(session_ref)
+      @calls << ["session_exit_evidence", session_id_of(session_ref)]
+      config = config_for(session_ref)
+      return nil unless config["process_gone_error"]
+
+      {
+        "pid" => session_ref.is_a?(Hash) ? (session_ref["pid"] || session_ref[:pid]) : nil,
+        "exit_status" => config["exit_status"],
+        "stderr_tail" => config["stderr_tail"],
+        "last_event_at" => config["process_exited_at"]
+      }.compact
+    end
+
     def session_id_of(session_ref)
       session_ref.is_a?(Hash) ? (session_ref["session_id"] || session_ref[:session_id]).to_s : ""
     end
@@ -139,6 +162,13 @@ module KernelMaintenanceSupport
       return if message.nil?
 
       raise RuntimeError, message.to_s
+    end
+
+    def raise_process_gone_error(config)
+      message = config["process_gone_error"]
+      return if message.nil?
+
+      raise StubProcessGoneError, message.to_s
     end
 
     # Persisted pids can be reused or long dead. A stubbed harness reports that
