@@ -475,6 +475,8 @@ module Meringue
           "stderr_tail" => present?(process.stderr_tail) ? process.stderr_tail : nil,
           "last_event_at" => process.last_event_at
         }.compact
+      end
+
       # Pi event names stop at this boundary, exactly like `read_events` and the session view.
       def session_progress(events)
         PiSessionView.progress_items(events)
