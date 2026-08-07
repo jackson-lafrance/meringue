@@ -78,12 +78,14 @@ tests were updated to the shipped behavior:
    their issue and project, while `answered`/`dismissed` question records survive
    the removal of the issue they point at (their `issue_id` then dangles). Asserted
    in `test_answered_and_dismissed_questions_do_not_block_pruning`.
-6. **Prune now couples managed worktree cleanup to record removal.** Clean, unlocked,
+6. **Prune separates managed worktree cleanup from record removal.** Clean, unlocked,
    ownership-verified Meringue worktrees are removed before their issue/worker records;
-   dirty, locked, ambiguous, or failed cleanups retain both the worktree and state bundle
-   for retry. Missing/already-removed worktrees are idempotent, project-root/dedicated
-   directories are untouched, and immediate `Kill` retains its existing no-worktree-delete
-   behavior. Covered by the two prune-worktree test files listed above.
+   dirty, locked, ambiguous, or failed cleanups preserve the worktree and branch while
+   eligible terminal records are still pruned. Each failure remains structured and is
+   logged at `warning`; successful removals alone count as worktrees. Missing/already-removed
+   worktrees are idempotent, project-root/dedicated directories are untouched, and immediate
+   `Kill` retains its existing no-worktree-delete behavior. Covered by the two prune-worktree
+   test files listed above.
 7. **PR retention rules**: only `merged` and `closed` pull requests are treated as
    settled. `open`, draft (`state == "open"` plus `is_draft`), and unresolvable
    (`state == "unknown"`, e.g. `gh` failing) PRs all block pruning of the issue and

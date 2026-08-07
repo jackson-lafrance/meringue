@@ -305,7 +305,7 @@ class KernelMaintenancePruneMergedPullRequestTest < Minitest::Test
     assert_includes result.fetch("message"), "(the 2.5s forge lookup budget was exhausted)"
   end
 
-  def test_merged_pull_request_never_overrides_dirty_or_locked_worktree_safety
+  def test_merged_pull_request_prunes_records_without_overriding_worktree_safety
     project, workspace = github_project_and_workspace(task_title: "Dirty delivery")
     unfinished = File.join(workspace.fetch("workspace_path"), "unfinished.txt")
     File.write(unfinished, "do not discard\n")
@@ -314,34 +314,36 @@ class KernelMaintenancePruneMergedPullRequestTest < Minitest::Test
 
     dirty = apply_command(engine, "Prune", {})
 
-    assert_empty dirty.dig("result", "removed_issue_ids")
+    assert_equal ["P1-I1"], dirty.dig("result", "removed_issue_ids")
+    assert_equal ["P1-I1-W1"], dirty.dig("result", "removed_agent_ids")
     assert_equal ["P1-I1-W1"], dirty.dig("result", "workspace_cleanup_blocked_agent_ids")
     assert_equal(
-      "Pruned 0 issues, 0 agents, 0 worktrees, and 0 projects. Retained 1 worker because their " \
-      "managed worktree could not be removed: P1-I1-W1 (worktree_dirty).",
+      "Pruned 1 issue, 1 agent, 0 worktrees, and 0 projects. Preserved 1 managed worktree " \
+      "because cleanup was not safe: P1-I1-W1 (worktree_dirty).",
       dirty.fetch("message")
     )
     assert_equal "do not discard\n", File.read(unfinished)
-    assert_equal ["P1-I1-W1"], ids(read_state.fetch("agents"))
+    assert_empty read_state.fetch("agents")
+    assert Dir.exist?(workspace.fetch("worktree_root_path"))
 
+    # The records are gone, but a later maintenance action may still inspect the preserved worktree.
+    # Recreate only the fixture to verify that a lock is never overridden either.
     File.delete(unfinished)
+    write_merged_delivery_state(project, workspace)
     git_output(project, project.fetch("project_root"), "worktree", "lock", "--reason", "manual review",
                workspace.fetch("worktree_root_path"))
     begin
       locked = apply_command(engine, "Prune", {})
 
-      assert_empty locked.dig("result", "removed_issue_ids")
+      assert_equal ["P1-I1"], locked.dig("result", "removed_issue_ids")
+      assert_equal ["P1-I1-W1"], locked.dig("result", "removed_agent_ids")
       assert_equal "worktree_locked", locked.dig("result", "workspace_cleanup_outcomes", 0, "reason")
-      assert_match(/managed worktree could not be removed: P1-I1-W1 \(worktree_locked\)/, locked.fetch("message"))
+      assert_match(/Preserved 1 managed worktree because cleanup was not safe: P1-I1-W1 \(worktree_locked\)/,
+                   locked.fetch("message"))
       assert Dir.exist?(workspace.fetch("worktree_root_path"))
     ensure
       git_output(project, project.fetch("project_root"), "worktree", "unlock", workspace.fetch("worktree_root_path"))
     end
-
-    unlocked = apply_command(engine, "Prune", {})
-
-    assert_equal ["P1-I1"], unlocked.dig("result", "removed_issue_ids")
-    refute Dir.exist?(workspace.fetch("worktree_root_path"))
   end
 
   # The periodic refresh writes the last failure onto the record. Once the forge answers again the

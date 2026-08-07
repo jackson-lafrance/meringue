@@ -107,32 +107,68 @@ class KernelMaintenancePruneWorktreeCleanupTest < Minitest::Test
     assert_equal "worktree_already_removed", summary.dig("details", "workspace_cleanup_outcomes", 0, "reason")
   end
 
-  def test_dirty_worktree_blocks_record_pruning_and_is_retried_after_it_is_clean
+  def test_dirty_worktree_is_preserved_while_eligible_records_are_pruned
     project, workspace = managed_project_and_workspace(task_title: "Dirty cleanup")
     unfinished = File.join(workspace.fetch("workspace_path"), "unfinished.txt")
     File.write(unfinished, "do not discard\n")
     write_managed_worker_state(project, workspace)
-    engine = build_engine
 
-    blocked = apply_command(engine, "Prune", {})
+    result = apply_command(build_engine, "Prune", {})
 
-    assert_empty blocked.dig("result", "removed_issue_ids")
-    assert_equal ["P1-I1-W1"], blocked.dig("result", "workspace_cleanup_blocked_agent_ids")
-    assert_equal "worktree_dirty", blocked.dig("result", "workspace_cleanup_outcomes", 0, "reason")
-    decision = blocked.dig("result", "issue_decisions").find { |item| item.fetch("issue_id") == "P1-I1" }
-    assert_includes decision.fetch("blockers"), "workspace_cleanup_failed"
+    assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
+    assert_equal ["P1-I1-W1"], result.dig("result", "removed_agent_ids")
+    assert_equal ["P1-I1-W1"], result.dig("result", "workspace_cleanup_blocked_agent_ids")
+    assert_equal "worktree_dirty", result.dig("result", "workspace_cleanup_outcomes", 0, "reason")
+    assert_equal "Pruned 1 issue, 1 agent, 0 worktrees, and 0 projects. Preserved 1 managed worktree " \
+                 "because cleanup was not safe: P1-I1-W1 (worktree_dirty).", result.fetch("message")
     assert_equal "do not discard\n", File.read(unfinished)
-    assert_equal %w[P1-I1-W1], ids(read_state.fetch("agents"))
-    warning = read_state.fetch("logs").find { |log| log.fetch("message").include?("could not be removed") }
+    state = read_state
+    assert_empty state.fetch("issues")
+    assert_empty state.fetch("agents")
+    warning = state.fetch("logs").find { |log| log.fetch("message").include?("could not be removed") }
     assert_equal "warning", warning.fetch("level")
     assert_equal "worktree_dirty", warning.dig("details", "reason")
+    assert Dir.exist?(workspace.fetch("worktree_root_path")), "a dirty worktree must never be forced away"
+  end
 
-    File.delete(unfinished)
-    retried = apply_command(engine, "Prune", {})
+  def test_branch_mismatch_prunes_records_but_preserves_the_registered_worktree
+    project, workspace = managed_project_and_workspace(task_title: "Mismatched cleanup")
+    registered_branch = workspace.fetch("workspace_branch")
+    mismatched_branch = "meringue/someone-elses-branch"
+    worker = managed_worker_record(workspace, id: "P1-I1-W1", issue_id: "P1-I1", status: "completed")
+    worker["workspace_branch"] = mismatched_branch
+    worker.fetch("harness_metadata").fetch("workspace_plan")["workspace_branch"] = mismatched_branch
+    write_state(
+      state_fixture(
+        projects: [project_record(id: "P1", root_path: project.fetch("project_root"), status: "working")],
+        issues: [issue_record(id: "P1-I1", project_id: "P1", status: "completed", agent_ids: [worker.fetch("id")])],
+        agents: [worker]
+      )
+    )
 
-    assert_equal ["P1-I1"], retried.dig("result", "removed_issue_ids")
-    assert_equal "removed", retried.dig("result", "workspace_cleanup_outcomes", 0, "status")
-    refute Dir.exist?(workspace.fetch("worktree_root_path"))
+    result = apply_command(build_engine, "Prune", {})
+
+    assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
+    assert_equal ["P1-I1-W1"], result.dig("result", "removed_agent_ids")
+    cleanup = result.dig("result", "workspace_cleanup_outcomes", 0)
+    assert_equal "worktree_branch_mismatch", cleanup.fetch("reason")
+    refute cleanup.fetch("success")
+    assert_empty result.dig("result", "removed_worktree_agent_ids")
+    assert_empty result.dig("result", "retained_issue_ids")
+    decision = result.dig("result", "issue_decisions").find { |item| item.fetch("issue_id") == "P1-I1" }
+    assert decision.fetch("prunable")
+    assert_equal "Pruned 1 issue, 1 agent, 0 worktrees, and 0 projects. Preserved 1 managed worktree " \
+                 "because cleanup was not safe: P1-I1-W1 (worktree_branch_mismatch).", result.fetch("message")
+    assert Dir.exist?(workspace.fetch("worktree_root_path")), "a branch mismatch must preserve the worktree"
+    listing = git_output(project, project.fetch("project_root"), "worktree", "list", "--porcelain")
+    assert_includes listing, "worktree #{real_path(workspace.fetch("worktree_root_path"))}"
+    assert_includes listing, "branch refs/heads/#{registered_branch}"
+    state = read_state
+    assert_empty state.fetch("issues")
+    assert_empty state.fetch("agents")
+    warning = state.fetch("logs").find { |log| log.fetch("source_id", nil) == "P1-I1-W1" }
+    assert_equal "warning", warning.fetch("level")
+    assert_equal "worktree_branch_mismatch", warning.dig("details", "reason")
   end
 
   # A shared worktree is removed only once nobody needs it. The *record* of a worker that is done
