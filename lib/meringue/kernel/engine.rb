@@ -29,6 +29,8 @@ module Meringue
 
         Not every worker issue requires a pull request. If the assigned issue is investigation-only or informational and does not require repository changes, return the requested findings or answer without opening a PR unless the issue explicitly asks for one.
 
+        During longer work, keep progress visible by briefly reporting meaningful findings, decisions, and implementation milestones when they occur. Do not narrate routine tool use or invent progress when there is no substantive update.
+
         Use human-facing delivery names. Branch names, pull request titles, and pull request metadata should be derived from the assigned issue title or requested change, not from Meringue agent ids, worker ids, Pi ids, or subagent implementation details. If a unique suffix is needed, use a short opaque suffix rather than an orchestration id.
 
         Report true blockers instead of asking for routine approval: missing credentials, authentication or authorization failures, missing or invalid remotes, branch/worktree collisions, unrelated uncommitted work that would be overwritten, or unsafe/destructive operations.
@@ -87,21 +89,17 @@ module Meringue
       # "Spawned worker …" and its final report, which made a healthy 40-minute session
       # indistinguishable from a hung one.
       #
-      # The volume controls are floors, not caps on content, and they matter because the retained
+      # The volume control is a floor, not a cap on content, and it matters because the retained
       # log window is 500 entries (see docs/log-retention.md): three concurrent workers narrating
-      # freely would evict every kernel and user line within an hour. A worker's *first* progress
-      # line is immediate, and after that:
-      #   * model-authored text is floored at one line per 2 minutes per worker (<= 30/hour), and
-      #   * a stretch with no authored text at all falls back to a much quieter tool-activity
-      #     line, floored at one per 5 minutes (<= 12/hour), purely so silence stays
-      #     distinguishable from a hang.
+      # freely would evict every kernel and user line within an hour. A worker's *first* authored
+      # progress line is immediate, then text is floored at one line per 2 minutes per worker
+      # (<= 30/hour). Raw tool activity is never turned into Meringue-authored progress; when the
+      # agent has not emitted a semantic update, the log truthfully stays quiet.
       # Consecutive identical text is dropped outright, so a repeated message never spends a slot.
       WORKER_PROGRESS_LOG_INTERVAL_SECONDS = 120
-      WORKER_PROGRESS_TOOL_INTERVAL_SECONDS = 300
       # Progress is a headline, not a transcript: the focused workspace pane and the harness
       # session file already hold the full text.
       WORKER_PROGRESS_MESSAGE_MAX_CHARS = 240
-      WORKER_PROGRESS_TOOL_NAME_LIMIT = 4
       # A harness turn that ends is not automatically a turn that finished. These are the
       # harness-reported turn outcomes that mean the work stopped without a result, so the
       # agent must settle as `errored` with a visible reason instead of as `completed`.
@@ -13215,50 +13213,24 @@ module Meringue
             "kind" => "worker_progress",
             "progress_kind" => candidate.fetch("kind"),
             "issue_id" => agent.fetch("issue_id", nil),
-            "project_id" => agent.fetch("project_id", nil),
-            "tool_names" => candidate.fetch("tool_names", nil),
-            "tool_call_count" => candidate.fetch("tool_call_count", nil)
+            "project_id" => agent.fetch("project_id", nil)
           }.compact
         )
       end
 
-      # One poll can carry a whole burst of items; at most one of them is ever logged.
-      # Model-authored text always wins, because it is the only part of the stream that explains
-      # a decision. Tool activity is the fallback for a stretch that produced no text at all.
+      # One poll can carry a whole burst of items; at most the newest authored update is logged.
+      # Tool calls prove activity, but they do not explain progress and must not be synthesized
+      # into a semantic-sounding status line.
       def worker_progress_candidate(progress_items)
-        items = Array(progress_items).select { |item| item.is_a?(Hash) }
-        return nil if items.empty?
-
-        authored = items.reverse.find do |item|
-          item.fetch("kind", nil).to_s == "assistant_text" && present_string(item.fetch("text", nil))
+        authored = Array(progress_items).reverse.find do |item|
+          item.is_a?(Hash) &&
+            item.fetch("kind", nil).to_s == "assistant_text" &&
+            present_string(item.fetch("text", nil))
         end
-        if authored
-          text = worker_progress_text(authored.fetch("text"))
-          return { "kind" => "assistant_text", "text" => text } if text
-        end
+        return nil unless authored
 
-        tool_calls = items.select { |item| item.fetch("kind", nil).to_s == "tool_call" }
-        return nil if tool_calls.empty?
-
-        names = tool_calls.filter_map { |item| present_string(item.fetch("tool_name", nil)) }.uniq
-        return nil if names.empty?
-
-        {
-          "kind" => "tool_activity",
-          "text" => worker_progress_tool_text(names, tool_calls.length),
-          "tool_names" => names,
-          "tool_call_count" => tool_calls.length
-        }
-      end
-
-      # Meringue-authored, and deliberately so: this line exists only because the worker said
-      # nothing itself, exactly like the "Still provisioning worker …" line.
-      def worker_progress_tool_text(names, call_count)
-        shown = names.first(WORKER_PROGRESS_TOOL_NAME_LIMIT)
-        remaining = names.length - shown.length
-        listed = shown.join(", ")
-        listed = "#{listed}, +#{remaining} more" if remaining.positive?
-        "Still working: #{listed} (#{count_phrase(call_count, "tool call")})."
+        text = worker_progress_text(authored.fetch("text"))
+        text ? { "kind" => "assistant_text", "text" => text } : nil
       end
 
       def worker_progress_text(text)
@@ -13283,12 +13255,7 @@ module Meringue
         current = parse_time_or_nil(now)
         return true unless current
 
-        interval = if candidate.fetch("kind") == "assistant_text"
-                     WORKER_PROGRESS_LOG_INTERVAL_SECONDS
-                   else
-                     WORKER_PROGRESS_TOOL_INTERVAL_SECONDS
-                   end
-        (current - last_logged_at) >= interval
+        (current - last_logged_at) >= WORKER_PROGRESS_LOG_INTERVAL_SECONDS
       end
 
       def stringify_keys(hash)
