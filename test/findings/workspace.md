@@ -185,3 +185,23 @@ claiming that repository policy forbids automated test files.
   capturing the arguments, and a `TerminalSession` double. `Kernel::Engine` is
   built with a temp state path and temp config path and is only asked to resolve
   a workspace (no state is loaded or saved).
+
+## Shared worktree inspection
+
+`Manager#inspect_shared_worktree(worktree_root:, branch:, git_root:)` answers the git-only half of
+"may another worker continue in this worktree": the directory exists, is under the managed
+workspace root, carries a `meringue/` branch, is still registered by `git worktree list
+--porcelain`, is checked out on exactly that branch (not another branch and not detached), and is
+not locked. It deliberately does *not* run `git status`: uncommitted work is what a successor is
+meant to inherit, and `--untracked-files=all` is the slowest command in the provisioning path.
+
+Refusal reasons are structured (`worktree_missing`, `outside_managed_workspace_root`,
+`branch_not_meringue_managed`, `git_root_missing`, `worktree_list_failed`,
+`worktree_not_registered`, `worktree_branch_moved`, `worktree_locked`,
+`worktree_inspection_timed_out`, `worktree_inspection_error`) so the kernel can turn each one into
+a plain sentence in the log. Locked out of the same `CommandTimeout` budget as the rest of the
+manager. Covered by `test/integration/workspace/manager_shared_worktree_test.rb`.
+
+Cleanup is unchanged: a second `cleanup_pruned_worker_workspace` for an already-removed shared
+worktree is an idempotent `already_removed` success, which is what lets the kernel prune several
+sharers in one pass.

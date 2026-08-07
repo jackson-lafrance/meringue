@@ -281,14 +281,15 @@ module KernelWorkersSupport
   end
 
   def build_engine(harness_client: @harness_client, head_runner: Meringue::Heads::FakeRunner.new,
-                   workspace_manager: self.workspace_manager, cwd: tmpdir)
+                   workspace_manager: self.workspace_manager, cwd: tmpdir,
+                   forge_client: OfflineForgeClient.new)
     Meringue::Kernel::Engine.new(
       store: store,
       harness_client: harness_client,
       head_runner: head_runner,
       workspace_manager: workspace_manager,
       cwd: cwd,
-      forge_client: OfflineForgeClient.new,
+      forge_client: forge_client,
       config_path: tmp_path("config.toml")
     )
   end
