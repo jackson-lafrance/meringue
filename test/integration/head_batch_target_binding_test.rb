@@ -235,6 +235,38 @@ class HeadBatchTargetBindingTest < Minitest::Test
     assert_equal ["Interloping worker"], worker_titles(issue_by_title("Interloping goal").fetch("id"))
   end
 
+  # Reuse can name its predecessor by batch command too, which matters because the predecessor's
+  # agent id does not exist until the kernel mints the issue id.
+  def test_reuse_workspace_reference_resolves_to_a_worker_spawned_in_the_same_batch
+    head_id = spawn_head("Research then continue in the same checkout")
+    result = apply_batch(head_id, [
+      create_issue("Shared checkout goal", command_id: "goal"),
+      spawn_worker("Shared research", issue_from_command: "goal", command_id: "research"),
+      spawn_worker(
+        "Shared implementation",
+        issue_from_command: "goal",
+        extra: { "after_from_command" => "research", "reuse_workspace_from_command" => "research" }
+      )
+    ])
+
+    assert_all_accepted(result)
+    researcher = worker_by_title("Shared research")
+    queued = worker_by_title("Shared implementation")
+
+    assert_equal "queued", queued.fetch("status")
+    assert_equal(
+      { "source" => "explicit", "agent_id" => researcher.fetch("id") },
+      queued.fetch("harness_metadata").fetch("workspace_reuse_request")
+    )
+
+    @engine.mark_worker_completed(agent_id: researcher.fetch("id"), last_assistant_text: "Findings recorded.")
+
+    started = worker_by_title("Shared implementation")
+    assert_equal researcher.fetch("workspace_path"), started.fetch("workspace_path")
+    assert_equal researcher.fetch("workspace_branch"), started.fetch("workspace_branch")
+    assert_equal "reused", started.fetch("harness_metadata").fetch("workspace_reuse").fetch("state")
+  end
+
   def test_follow_up_reference_accepts_a_command_index
     head_id = spawn_head("Research then implement by index")
     result = apply_batch(head_id, [

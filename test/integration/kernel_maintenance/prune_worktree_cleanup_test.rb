@@ -135,7 +135,10 @@ class KernelMaintenancePruneWorktreeCleanupTest < Minitest::Test
     refute Dir.exist?(workspace.fetch("worktree_root_path"))
   end
 
-  def test_prune_never_removes_a_workspace_still_referenced_by_another_worker
+  # A shared worktree is removed only once nobody needs it. The *record* of a worker that is done
+  # with it may go immediately: retaining it would mean a record prune can never clean up plus one
+  # "could not be removed" warning on every single pass.
+  def test_prune_keeps_a_shared_worktree_alive_for_the_worker_still_using_it
     project, workspace = managed_project_and_workspace(task_title: "Shared metadata")
     first = managed_worker_record(workspace, id: "P1-I1-W1", issue_id: "P1-I1", status: "completed")
     second = managed_worker_record(workspace, id: "P1-I2-W1", issue_id: "P1-I2", status: "working")
@@ -152,10 +155,48 @@ class KernelMaintenancePruneWorktreeCleanupTest < Minitest::Test
 
     result = apply_command(build_engine, "Prune", {})
 
-    assert_empty result.dig("result", "removed_issue_ids")
-    assert_equal "workspace_owned_by_another_worker", result.dig("result", "workspace_cleanup_outcomes", 0, "reason")
-    assert Dir.exist?(workspace.fetch("worktree_root_path"))
-    assert_equal %w[P1-I1-W1 P1-I2-W1], ids(read_state.fetch("agents")).sort
+    cleanup = result.dig("result", "workspace_cleanup_outcomes", 0)
+    assert_equal "skipped", cleanup.fetch("status")
+    assert_equal "workspace_shared_with_retained_worker", cleanup.fetch("reason")
+    assert cleanup.fetch("success")
+    assert_equal ["P1-I2-W1"], cleanup.fetch("sharing_agent_ids")
+    assert Dir.exist?(workspace.fetch("worktree_root_path")), "the worker still using it must keep its checkout"
+    assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
+    assert_equal ["P1-I2-W1"], ids(read_state.fetch("agents"))
+    assert_empty result.dig("result", "removed_worktree_agent_ids")
+    assert_empty read_state.fetch("logs").select { |log| log.fetch("message").include?("could not be removed") }
+  end
+
+  # Once every sharer is settled, one pass removes the shared worktree exactly once and credits the
+  # removal to a single worker rather than double-counting it.
+  def test_prune_removes_a_shared_worktree_once_when_every_sharer_is_settled
+    project, workspace = managed_project_and_workspace(task_title: "Shared handover")
+    first = managed_worker_record(workspace, id: "P1-I1-W1", issue_id: "P1-I1", status: "completed")
+    second = managed_worker_record(workspace, id: "P1-I1-W2", issue_id: "P1-I1", status: "completed")
+    write_state(
+      state_fixture(
+        projects: [project_record(id: "P1", root_path: project.fetch("project_root"), status: "completed")],
+        issues: [
+          issue_record(
+            id: "P1-I1",
+            project_id: "P1",
+            status: "completed",
+            agent_ids: [first.fetch("id"), second.fetch("id")]
+          )
+        ],
+        agents: [first, second]
+      )
+    )
+
+    result = apply_command(build_engine, "Prune", {})
+
+    assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
+    assert_equal %w[P1-I1-W1 P1-I1-W2], result.dig("result", "removed_agent_ids").sort
+    refute Dir.exist?(workspace.fetch("worktree_root_path"))
+    assert_equal 1, result.dig("result", "removed_worktree_agent_ids").length
+    assert_equal "Pruned 1 issue, 2 agents, 1 worktree, and 1 project.", result.fetch("message")
+    assert branch_exists?(project, workspace.fetch("workspace_branch")), "the shared delivery branch must survive"
+    assert_empty read_state.fetch("logs").select { |log| log.fetch("message").include?("could not be removed") }
   end
 
   def test_stale_issue_agent_link_never_prunes_another_issues_worker_or_worktree
