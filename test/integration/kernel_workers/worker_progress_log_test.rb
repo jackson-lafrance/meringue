@@ -120,7 +120,7 @@ class KernelWorkersProgressLogTest < Minitest::Test
     assert message.start_with?("Investigating the reconcile tick.")
   end
 
-  def test_tool_only_work_falls_back_to_a_quieter_still_working_line
+  def test_tool_only_work_stays_silent_instead_of_fabricating_semantic_progress
     client = streaming_client
     client.events = [
       { "type" => "tool_execution_start", "toolName" => "read", "args" => { "path" => "lib/a.rb" } },
@@ -130,29 +130,17 @@ class KernelWorkersProgressLogTest < Minitest::Test
     engine = build_engine(harness_client: client)
     context = project_with_issue(engine)
     worker_id = spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
+
     apply!(engine, "ReconcileSessions", {})
-
-    entry = only_progress_log(engine, worker_id)
-    assert_equal "Still working: read, grep (3 tool calls).", entry.fetch("message")
-    assert_equal "tool_activity", entry.fetch("details").fetch("progress_kind")
-    assert_equal %w[read grep], entry.fetch("details").fetch("tool_names")
-    assert_equal 3, entry.fetch("details").fetch("tool_call_count")
-
-    # The text floor is not enough for a silent worker: tool activity waits far longer.
     client.events = [{ "type" => "tool_execution_start", "toolName" => "edit", "args" => { "path" => "lib/c.rb" } }]
-    age_progress!(worker_id, seconds: Meringue::Kernel::Engine::WORKER_PROGRESS_LOG_INTERVAL_SECONDS + 1)
     apply!(engine, "ReconcileSessions", {})
-    assert_equal 1, progress_messages(engine, worker_id).length
 
-    age_progress!(worker_id, seconds: Meringue::Kernel::Engine::WORKER_PROGRESS_TOOL_INTERVAL_SECONDS + 1)
-    apply!(engine, "ReconcileSessions", {})
-    assert_equal(
-      ["Still working: read, grep (3 tool calls).", "Still working: edit (1 tool call)."],
-      progress_messages(engine, worker_id)
-    )
+    assert_empty progress_messages(engine, worker_id)
+    assert_nil agent(engine, worker_id).fetch("harness_metadata").fetch("progress", nil),
+               "tool calls are activity, not an agent-authored progress update"
   end
 
-  def test_authored_text_always_wins_over_tool_activity
+  def test_an_authored_semantic_update_is_reported_while_raw_tool_activity_is_not
     client = streaming_client
     client.events = [
       { "type" => "tool_execution_start", "toolName" => "read", "args" => { "path" => "lib/a.rb" } },

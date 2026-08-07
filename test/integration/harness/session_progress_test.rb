@@ -34,13 +34,11 @@ class HarnessSessionProgressTest < HarnessIntegrationTest
     { "type" => "turn_end" }
   ].freeze
 
-  def test_pi_progress_keeps_authored_text_and_tool_calls_and_drops_token_noise
+  def test_pi_progress_keeps_authored_text_and_drops_tool_activity_and_token_noise
     items = Harness::PiSessionView.progress_items(PI_EVENTS)
 
-    assert_equal %w[assistant_text tool_call], items.map { |item| item.fetch("kind") }
+    assert_equal ["assistant_text"], items.map { |item| item.fetch("kind") }
     assert_equal "Rebasing onto origin/main before editing.", items.first.fetch("text")
-    assert_equal "bash", items.last.fetch("tool_name")
-    assert_equal "rake test", items.last.fetch("summary")
   end
 
   def test_pi_progress_ignores_non_assistant_messages_and_unknown_events
@@ -48,6 +46,7 @@ class HarnessSessionProgressTest < HarnessIntegrationTest
       { "type" => "message_end", "message" => { "role" => "user", "content" => [{ "type" => "text", "text" => "do it" }] } },
       { "type" => "message_end", "message" => { "role" => "toolResult", "content" => [{ "type" => "text", "text" => "output" }] } },
       { "type" => "queue_update", "steering" => [] },
+      { "type" => "tool_execution_start", "toolName" => "bash", "args" => { "command" => "rake test" } },
       { "type" => "message_end", "message" => { "role" => "assistant", "content" => [{ "type" => "thinking", "thinking" => "quiet" }] } },
       "not-a-hash"
     ]
@@ -60,7 +59,7 @@ class HarnessSessionProgressTest < HarnessIntegrationTest
 
     items = client.session_progress(PI_EVENTS)
 
-    assert_equal %w[assistant_text tool_call], items.map { |item| item.fetch("kind") }
+    assert_equal ["assistant_text"], items.map { |item| item.fetch("kind") }
   end
 
   def test_process_backed_harnesses_read_progress_from_their_wrapped_records
@@ -84,10 +83,8 @@ class HarnessSessionProgressTest < HarnessIntegrationTest
 
     items = SessionProgress.from_process_events(events)
 
-    assert_equal %w[assistant_text tool_call], items.map { |item| item.fetch("kind") }
+    assert_equal ["assistant_text"], items.map { |item| item.fetch("kind") }
     assert_equal "Running the suite before I touch anything.", items.first.fetch("text")
-    assert_equal "Bash", items.last.fetch("tool_name")
-    assert_equal "rake test", items.last.fetch("summary")
   end
 
   def test_claude_client_derives_progress_from_the_events_it_already_drained

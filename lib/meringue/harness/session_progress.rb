@@ -11,15 +11,15 @@ module Meringue
     # `PiSessionView`), and every item is derived from events the caller has *already* drained, so
     # producing progress never costs an extra harness round trip.
     #
-    # Item shapes:
+    # Item shape:
     #
-    #   { "kind" => "assistant_text", "text" => "Rebasing onto origin/main before editing." }
-    #   { "kind" => "tool_call", "tool_name" => "bash", "summary" => "rake test" }
+    #   { "kind" => "assistant_text", "text" => "The root cause is the shared drain cursor." }
     #
-    # A harness that cannot supply session events returns `[]`, and Meringue simply stays quiet
-    # for that worker instead of degrading anything else.
+    # Only authored text is progress. Tool calls prove activity but cannot truthfully communicate
+    # a finding, decision, or milestone on the agent's behalf. A harness with no authored update
+    # returns `[]`, and Meringue simply stays quiet for that worker.
     module SessionProgress
-      KINDS = %w[assistant_text tool_call].freeze
+      KINDS = %w[assistant_text].freeze
       # Progress lines are a summary, never a transcript. The kernel truncates again for the log
       # line itself; this bound only keeps a runaway message out of the poll result.
       MAX_TEXT_CHARS = 2_000
@@ -31,13 +31,6 @@ module Meringue
         return nil unless normalized
 
         { "kind" => "assistant_text", "text" => normalized }
-      end
-
-      def tool_call(tool_name, summary: nil)
-        name = normalize_text(tool_name)
-        return nil unless name
-
-        { "kind" => "tool_call", "tool_name" => name, "summary" => normalize_text(summary) }.compact
       end
 
       def normalize_text(value)
@@ -70,14 +63,8 @@ module Meringue
         message = record["message"].is_a?(Hash) ? record["message"] : record
         return [] unless assistant_record?(record, message)
 
-        items = []
         text = assistant_text(text_blocks(message["content"]))
-        items << text if text
-        tool_blocks(message["content"]).each do |block|
-          item = tool_call(block["name"], summary: tool_summary(block["input"]))
-          items << item if item
-        end
-        items
+        text ? [text] : []
       end
 
       def assistant_record?(record, message)
@@ -97,25 +84,6 @@ module Meringue
         end.join("\n")
       end
 
-      def tool_blocks(content)
-        return [] unless content.is_a?(Array)
-
-        content.select { |block| block.is_a?(Hash) && %w[tool_use toolCall].include?(block["type"].to_s) }
-      end
-
-      # A one-line hint about what the tool was asked to do. Only obviously human-readable
-      # scalars are used; tool payloads can be enormous and are never worth streaming into logs.
-      def tool_summary(arguments)
-        return normalize_text(arguments) if arguments.is_a?(String)
-        return nil unless arguments.is_a?(Hash)
-
-        %w[command cmd path file_path pattern query url description].each do |key|
-          value = arguments[key] || arguments[key.to_sym]
-          summary = normalize_text(value)
-          return summary if summary
-        end
-        nil
-      end
     end
   end
 end

@@ -78,11 +78,10 @@ Provisioning is the one phase allowed to speak while it is still running, becaus
 
 A worker session is not one lifecycle event; it is tens of minutes of work between `Spawned worker P1-I1-W1 for P1-I1.` and the worker's final report. That stretch used to be completely silent in the main log, which made a healthy 40-minute session indistinguishable from a hung one. It now speaks, under tight volume rules.
 
-**Where the lines come from.** Reconciliation already drains each live session's events once per tick and hands them to the kernel. The same array is passed straight back to the harness client as `Harness::Client#session_progress(events)`, a *pure* transform that returns harness-neutral items:
+**Where the lines come from.** Reconciliation already drains each live session's events once per tick and hands them to the kernel. The same array is passed straight back to the harness client as `Harness::Client#session_progress(events)`, a *pure* transform that returns harness-neutral, assistant-authored updates:
 
 ```txt
-{ "kind" => "assistant_text", "text" => "Rebasing onto origin/main before editing." }
-{ "kind" => "tool_call", "tool_name" => "bash", "summary" => "rake test" }
+{ "kind" => "assistant_text", "text" => "The root cause is the shared drain cursor." }
 ```
 
 It is deliberately not a second read. `ProcessClient::ManagedProcess` keeps a single shared drain cursor, so a second `read_events` call for progress would take events away from settle classification and corrupt how a worker is recorded as finishing. Deriving progress therefore costs no extra harness round trip, adds no I/O to the reconcile tick, and runs entirely on the existing background reconciler thread — never on the UI thread.
@@ -91,28 +90,27 @@ It is deliberately not a second read. `ProcessClient::ManagedProcess` keeps a si
 
 | Harness | Source | Progress |
 | --- | --- | --- |
-| Pi | raw RPC events (`PiSessionView.progress_items`) | `message_end` carries the complete assistant message, including its text blocks, *before* its tool calls execute — the model saying what it is about to do and why. `tool_execution_start` supplies the tool name and a one-line argument hint. Per-token `message_update` is ignored outright. |
-| Claude Code and other `ProcessClient` backends | wrapped stdout records (`SessionProgress.from_process_events`) | assistant records' text blocks and `tool_use` blocks. The terminal `result` record is skipped because the kernel already logs it as the worker's completion output. |
+| Pi | raw RPC events (`PiSessionView.progress_items`) | `message_end` carries the complete assistant message, including its text blocks, *before* its tool calls execute. Per-token `message_update` and every `tool_execution_*` event are ignored outright. |
+| Claude Code and other `ProcessClient` backends | wrapped stdout records (`SessionProgress.from_process_events`) | assistant records' text blocks only. `tool_use` blocks are ignored, and the terminal `result` record is skipped because the kernel already logs it as the worker's completion output. |
 | Antigravity | plain-text `--print` stdout | no JSON records, so no progress. |
 | Fake, and any client that does not override the contract | — | `[]`. |
 
 The default on `Harness::Client` is `[]`, so a backend that cannot describe its own activity simply stays quiet; nothing else about it degrades. A client that raises is caught and treated the same way, because progress must never be able to break a reconcile pass.
 
-**What reaches the log, and how little of it.** At most one progress line per worker per poll. Model-authored text always wins, because it is the only part of the stream that explains a decision; a stretch that produced no text at all falls back to a Meringue-authored `Still working: read, grep (12 tool calls).` line, in the same spirit as `Still provisioning worker …`. On top of that:
+**What reaches the log, and how little of it.** At most one progress line per worker per poll, and it must be complete assistant-authored text. The worker system prompt asks for brief updates only when there is a meaningful finding, decision, or implementation milestone. Raw tool events are deliberately excluded: they prove that a process invoked something, but tool names and call counts cannot truthfully say what the agent learned or accomplished. If no authored semantic update is available, Meringue emits no progress line instead of fabricating one. On top of that:
 
-- the *first* line a worker produces is never delayed — it is the one that proves the session is alive;
+- the *first* authored line a worker produces is never delayed;
 - authored text is then floored at one line per **2 minutes** per worker (at most 30/hour);
-- the tool-activity fallback is floored at one line per **5 minutes** (at most 12/hour), because it carries far less signal;
 - consecutive identical text is dropped outright, so a repeated sentence never spends a slot;
 - each line is collapsed to one line and truncated to 240 characters with a trailing `…`.
 
 These floors exist because the retained log window is bounded at 500 entries (see [`log-retention.md`](log-retention.md)). Without them, three concurrent narrating workers would evict every kernel and user line within the hour.
 
-**Persistence and lifecycle.** Progress lines are ordinary durable log entries: `source_type: "worker"`, `source_id` the worker id, `level: "info"`, and `details.kind == "worker_progress"` (plus `progress_kind`, `issue_id`, `project_id`, and the tool names/count for a fallback line). They are attributed to the worker exactly like its completion line, so the logs pane renders them with the worker's own colour and the `✦` progress marker, the AgentTree log scope filters them with the rest of that worker's history, and `details.kind` makes them identifiable for any future filter. They age out through the normal 500-entry window; `/prune` does not remove log entries at all, and `/recount` rewrites their `source_id` and `details` ids through the same reference walk it applies to every other record.
+**Persistence and lifecycle.** Progress lines are ordinary durable log entries: `source_type: "worker"`, `source_id` the worker id, `level: "info"`, and `details.kind == "worker_progress"` (plus `progress_kind`, `issue_id`, and `project_id`). They are attributed to the worker exactly like its completion line, so the logs pane renders them with the worker's own colour and the `✦` progress marker, the AgentTree log scope filters them with the rest of that worker's history, and `details.kind` makes them identifiable for any future filter. They age out through the normal 500-entry window; `/prune` does not remove log entries at all, and `/recount` rewrites their `source_id` and `details` ids through the same reference walk it applies to every other record.
 
 The newest observation is also kept on the worker record at `harness_metadata.progress` (`text`, `kind`, `observed_at`, plus the `logged_text`/`logged_at`/`logged_count` throttle marker). That field is a fixed size rather than a growing history, it is what makes the rate limit survive a restart or a second Meringue instance, and it means `GetInfo` and raw state can show current activity even while the log line itself is throttled.
 
-Heads are excluded: they are short-lived routers that already log their own summary, so narrating them would be pure noise. Settled polls are excluded too, because a settled turn is about to log its real result. No worker prompt guidance was added — every line is derived from the session event stream the harness already produces.
+Heads are excluded: they are short-lived routers that already log their own summary, so narrating them would be pure noise. Settled polls are excluded too, because a settled turn is about to log its real result. The worker prompt requests semantic milestones, but the log still contains only text the agent actually emitted through the harness event stream.
 
 ## Harness-neutral log copy
 
