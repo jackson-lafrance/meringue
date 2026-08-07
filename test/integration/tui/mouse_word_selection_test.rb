@@ -4,10 +4,10 @@ require "test_helper"
 require "support/tui_support"
 require "base64"
 
-# Mouse word selection in the logs (chat) pane: double-click selects the word
-# under the pointer, a double-click drag extends by whole words, and finishing a
-# logs drag copies. Everything here runs against in-memory layout geometry with
-# PATH emptied, so no test touches a real terminal or the developer's clipboard.
+# Mouse text selection in the logs (chat) pane: double-click selects a word,
+# triple-click selects a displayed paragraph, and continued drags retain that
+# word or paragraph granularity. Everything here runs against in-memory layout
+# geometry with PATH emptied, so no test touches a real terminal or clipboard.
 class TuiMouseWordSelectionTest < Minitest::Test
   include TUISupport
 
@@ -70,6 +70,66 @@ class TuiMouseWordSelectionTest < Minitest::Test
       assert_equal target.fetch(:word), @app.send(:selection_text, state, "")
       assert_equal target.fetch(:word), copied_text
       assert_equal %(copied "#{target.fetch(:word)}"), @app.send(:selection_status_text)
+    end
+  end
+
+  def test_triple_click_selects_and_copies_the_complete_wrapped_paragraph
+    state = paragraph_logs_state
+    lines = @layout.logs_text_lines(state, width: WIDTH, height: HEIGHT)
+    first_line = lines.index { |line| line.include?("alpha") }
+    last_line = lines.index { |line| line.include?("omega") }
+    separator = ((last_line + 1)...lines.length).find { |line_index| lines.fetch(line_index).strip.empty? }
+
+    refute_nil first_line
+    refute_nil last_line
+    refute_nil separator
+    assert_operator last_line, :>, first_line, "the selected paragraph must span soft-wrapped rows"
+
+    position = logs_click_position(state, last_line, lines.fetch(last_line).index("omega") + 1)
+    expected_text = lines[first_line...separator].join("\n")
+
+    with_stub_clipboard do
+      triple_click(state, position)
+
+      expected = Selection.normalize(
+        "logs",
+        Selection.point(first_line, 0),
+        Selection.point(last_line, lines.fetch(last_line).length)
+      )
+
+      assert_equal expected, @app.send(:logs_selection)
+      assert_equal expected_text, @app.send(:selection_text, state, "")
+      assert_equal expected_text, copied_text
+      refute_includes copied_text, "second paragraph"
+      assert_equal "copied #{last_line - first_line + 1} lines", @app.send(:selection_status_text)
+    end
+  end
+
+  def test_triple_click_drag_extends_the_selection_by_complete_paragraphs
+    state = paragraph_logs_state
+    lines = @layout.logs_text_lines(state, width: WIDTH, height: HEIGHT)
+    first_line = lines.index { |line| line.include?("alpha") }
+    first_end = lines.index { |line| line.include?("omega") }
+    second_line = lines.index { |line| line.include?("second paragraph") }
+    refute_nil first_line
+    refute_nil first_end
+    refute_nil second_line
+
+    start_position = logs_click_position(state, first_line, lines.fetch(first_line).index("alpha") + 1)
+    finish_position = logs_click_position(state, second_line, lines.fetch(second_line).index("second") + 1)
+
+    with_stub_clipboard do
+      triple_click(state, start_position, release: false)
+      send_mouse(motion_event(finish_position), state)
+      send_mouse(release_event(finish_position), state)
+
+      expected_text = lines[first_line..second_line].join("\n")
+      selection = @app.send(:logs_selection)
+
+      assert_equal Selection.point(first_line, 0), selection.fetch("start")
+      assert_equal Selection.point(second_line, lines.fetch(second_line).length), selection.fetch("end")
+      assert_equal expected_text, @app.send(:selection_text, state, "")
+      assert_equal expected_text, copied_text
     end
   end
 
@@ -259,6 +319,26 @@ class TuiMouseWordSelectionTest < Minitest::Test
     end
   end
 
+  def test_a_third_composer_click_preserves_the_existing_single_double_click_cycle
+    buffer = "ship P1-I18-W2 now"
+    state = composed_state(empty_state, chat: { "input_buffer" => buffer, "input_cursor" => buffer.length })
+    position = composer_click_position(state, buffer.index("I18"))
+
+    with_stub_clipboard do
+      send_mouse(press_event(position), state, buffer)
+      send_mouse(release_event(position), state, buffer)
+      send_mouse(press_event(position), state, buffer)
+      send_mouse(release_event(position), state, buffer)
+      refute_nil @app.send(:chat_selection_range), "the second click still selects a word"
+
+      send_mouse(press_event(position), state, buffer)
+      send_mouse(release_event(position), state, buffer)
+
+      assert_nil @app.send(:chat_selection_range), "the composer still starts a fresh caret after its double-click"
+      assert_nil copied_text
+    end
+  end
+
   def test_mouse_wheel_still_scrolls_the_hovered_logs_pane
     state = logs_state
     target = visible_word(state, WORKER_ID_PATTERN)
@@ -288,6 +368,11 @@ class TuiMouseWordSelectionTest < Minitest::Test
 
   def wrapped_logs_state
     message = "alpha #{"filler " * 20}omega"
+    composed_state(empty_state.merge("logs" => [log_record("L1", "message" => message)]))
+  end
+
+  def paragraph_logs_state
+    message = "alpha #{"filler " * 20}omega\n\nsecond paragraph must stay outside the first selection"
     composed_state(empty_state.merge("logs" => [log_record("L1", "message" => message)]))
   end
 
@@ -363,6 +448,13 @@ class TuiMouseWordSelectionTest < Minitest::Test
     send_mouse(release_event(position), state) if release
   end
 
+  def triple_click(state, position, release: true)
+    double_click(state, position)
+    @clock += 0.05
+    send_mouse(press_event(position), state)
+    send_mouse(release_event(position), state) if release
+  end
+
   def send_mouse(event, state, buffer = "", cursor = 0)
     @app.send(:handle_key, event, buffer, cursor, -1, nil, state)
   end
@@ -391,7 +483,7 @@ class TuiMouseWordSelectionTest < Minitest::Test
   end
 
   def copied_text
-    match = @terminal.output.string.match(/\e\]52;c;([^\a]*)\a/)
-    match && Base64.strict_decode64(match[1])
+    encoded = @terminal.output.string.scan(/\e\]52;c;([^\a]*)\a/).last&.first
+    encoded && Base64.strict_decode64(encoded)
   end
 end

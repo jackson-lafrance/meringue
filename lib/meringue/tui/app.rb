@@ -211,10 +211,11 @@ module Meringue
         @logs_cursor_column = 0
         @selection_dragging = false
         # Mouse selection granularity: "character" for a plain drag, "word"
-        # after a double-click, plus the word the double-click anchored on so a
-        # double-click-drag can extend whole words.
+        # after a double-click, and "paragraph" after a logs triple-click. The
+        # matching anchor keeps a continued drag on the same granularity.
         @selection_granularity = "character"
         @selection_anchor_word = nil
+        @selection_anchor_paragraph = nil
         @last_text_click = nil
         @selection_status = nil
         @selection_status_at = nil
@@ -871,10 +872,12 @@ module Meringue
         @logs_cursor_active = false
         @selection_dragging = true
         clear_selection_status
+        return true if triple_click?(click_count) && select_logs_paragraph(state, position)
         return true if double_click?(click_count) && select_logs_word(state, position)
 
         @selection_granularity = "character"
         @selection_anchor_word = nil
+        @selection_anchor_paragraph = nil
         @logs_selection_anchor = position
         @logs_selection_focus = position
         @logs_cursor_column = position.fetch("column", 0).to_i
@@ -891,35 +894,47 @@ module Meringue
         if word
           @selection_granularity = "word"
           @selection_anchor_word = { "start" => word.begin, "end" => word.end }
+          @selection_anchor_paragraph = nil
           update_chat_selection(word.begin, word.end)
           return word.end
         end
 
         @selection_granularity = "character"
         @selection_anchor_word = nil
+        @selection_anchor_paragraph = nil
         update_chat_selection(index, index)
         index
       end
 
       def double_click?(click_count)
-        click_count.to_i >= 2
+        click_count.to_i == 2
       end
 
-      # Click counting is position- and time-bounded, so a slow second click, or
-      # a click on another row, starts a fresh single-click selection instead of
-      # silently selecting a word somewhere else.
+      def triple_click?(click_count)
+        click_count.to_i == 3
+      end
+
+      # Click counting is position- and time-bounded, so a slow next click, or a
+      # click on another row, starts a fresh single-click selection. Logs count
+      # through three for paragraph selection; the composer deliberately keeps
+      # its existing single/double cycle.
       def text_click_count(pane, key)
         now = monotonic_time
         click = { pane: pane.to_s, x: mouse_x(key), y: mouse_y(key), at: now, count: 1 }
         previous = @last_text_click
-        click[:count] = 2 if previous && consecutive_text_click?(previous, click)
+        if previous && previous.fetch(:count, 1).to_i < text_click_limit(pane) && consecutive_text_click?(previous, click)
+          click[:count] = previous.fetch(:count, 1).to_i + 1
+        end
         @last_text_click = click
         click.fetch(:count)
       end
 
+      def text_click_limit(pane)
+        pane.to_s == "logs" ? 3 : 2
+      end
+
       def consecutive_text_click?(previous, click)
         return false unless previous.fetch(:pane, nil) == click.fetch(:pane)
-        return false unless previous.fetch(:count, 1) == 1
         return false unless previous.fetch(:y, nil) == click.fetch(:y)
         return false unless (previous.fetch(:x, 0) - click.fetch(:x)).abs <= DOUBLE_CLICK_COLUMN_TOLERANCE
 
@@ -936,10 +951,44 @@ module Meringue
 
         @selection_granularity = "word"
         @selection_anchor_word = { "line" => line_index, "start" => word.begin, "end" => word.end }
+        @selection_anchor_paragraph = nil
         @logs_selection_anchor = Selection.point(line_index, word.begin)
         @logs_selection_focus = Selection.point(line_index, word.end)
         @logs_cursor_column = word.end
         true
+      end
+
+      # Triple-clicking selects the complete displayed paragraph under the
+      # pointer, including all of its soft-wrapped rows but not an adjacent log
+      # entry or paragraph. It uses the same content coordinates as every other
+      # logs selection, so the highlight remains stable across rerenders.
+      def select_logs_paragraph(state, position)
+        lines = logs_selection_lines(state)
+        paragraph = logs_paragraph_range(state, position.fetch("line", 0).to_i)
+        return false unless paragraph
+
+        start_line = paragraph.fetch("start_line").to_i
+        end_line = paragraph.fetch("end_line").to_i
+        return false unless start_line.between?(0, lines.length - 1) && end_line.between?(start_line, lines.length - 1)
+
+        @selection_granularity = "paragraph"
+        @selection_anchor_word = nil
+        @selection_anchor_paragraph = paragraph
+        @logs_selection_anchor = Selection.point(start_line, 0)
+        @logs_selection_focus = Selection.point(end_line, lines.fetch(end_line).length)
+        @logs_cursor_column = lines.fetch(end_line).length
+        true
+      end
+
+      def logs_paragraph_range(state, line_index)
+        return nil unless layout.respond_to?(:logs_text_paragraph_range)
+
+        layout.logs_text_paragraph_range(
+          state,
+          width: render_width,
+          height: render_height,
+          line_index: line_index
+        )
       end
 
       def logs_word_range(state, line_index, column)
@@ -949,9 +998,13 @@ module Meringue
         Selection.word_range(lines.fetch(line_index), column)
       end
 
-      # A plain drag moves the focus point; a double-click drag grows the
-      # selection to whole words in whichever direction the pointer went.
+      # A plain drag moves the focus point; double- and triple-click drags grow
+      # the selection by whole words and whole displayed paragraphs, respectively.
       def extend_logs_selection(state, position)
+        if @selection_granularity == "paragraph" && @selection_anchor_paragraph
+          return extend_logs_paragraph_selection(state, position)
+        end
+
         anchor_word = @selection_anchor_word
         unless @selection_granularity == "word" && anchor_word
           @logs_selection_focus = position
@@ -965,6 +1018,17 @@ module Meringue
         anchor_end = Selection.point(anchor_word.fetch("line", 0).to_i, anchor_word.fetch("end", 0).to_i)
         @logs_selection_anchor = [anchor_start, word_start].min_by { |point| selection_point_order(point) }
         @logs_selection_focus = [anchor_end, word_end].max_by { |point| selection_point_order(point) }
+      end
+
+      def extend_logs_paragraph_selection(state, position)
+        lines = logs_selection_lines(state)
+        target = logs_paragraph_range(state, position.fetch("line", 0).to_i)
+        return position if lines.empty? || target.nil?
+
+        first_line = [@selection_anchor_paragraph.fetch("start_line").to_i, target.fetch("start_line").to_i].min
+        last_line = [@selection_anchor_paragraph.fetch("end_line").to_i, target.fetch("end_line").to_i].max
+        @logs_selection_anchor = Selection.point(first_line, 0)
+        @logs_selection_focus = Selection.point(last_line, lines.fetch(last_line).length)
       end
 
       def selection_point_order(point)
@@ -1029,6 +1093,7 @@ module Meringue
       def reset_mouse_selection_granularity
         @selection_granularity = "character"
         @selection_anchor_word = nil
+        @selection_anchor_paragraph = nil
       end
 
       # Keyboard-driven logs selection.
@@ -2160,7 +2225,7 @@ module Meringue
           Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels a selection first, then the AgentTree log/chat target and jump mode.
           Focus: click a dashboard section to focus it; double-clicking an issue opens its delivery PR (or shows a transient no-PR notice), while double-clicking a worker with a workspace opens its focused workspace. Workers without workspaces stay quiet. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
           AgentTree selection and chat target: single-click a project, issue, head, or worker row to select it and filter the logs pane to that node (a worker shows its own logs, an issue adds all of its workers and child issues, a project adds its whole subtree). Right-click an issue to open its associated delivery PR; workers do not duplicate that affordance, and an issue without one shows a transient notice. An issue also targets subsequent natural-language chat to that issue; a worker selection resolves chat to its owning issue. A fresh head still routes every message using that explicit target context. The selection stays highlighted, is scrolled back into view when it changes, and keeps filtering while you work in the logs or chat pane; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} in jump mode retarget it. Double-click an issue to open its PR, or double-click a worker with an assigned workspace to open that worker's focused workspace. Click the highlighted row again, click empty space in the AgentTree, or press #{keys_for("cancel_navigation")} to clear it. Heads without an owning issue, projects, and workers without workspaces remain log-only filters for these mouse actions.
-          Selection: drag with the mouse in the logs pane or the composer to select text; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
+          Selection: drag with the mouse in the logs pane or the composer to select text; double-click selects a word, and triple-click selects a complete logs paragraph; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
           Logs selection (keyboard): focus the logs pane, then #{keys_for("logs_selection_mode")} toggles the selection cursor or any Shift+movement starts it. #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor, #{keys_for("cursor_word_left")}/#{keys_for("cursor_word_right")} move by word, #{keys_for("cursor_home")}/#{keys_for("cursor_end")} jump to the line edges, and #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} move by page. #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")}, #{keys_for("select_home")}/#{keys_for("select_end")}, #{keys_for("select_word_left")}/#{keys_for("select_word_right")}, and #{keys_for("select_page_up")}/#{keys_for("select_page_down")} extend the selection. #{keys_for("copy_selection")} copies the selection (or the cursor line when nothing is extended); #{keys_for("cancel_navigation")} exits.
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
           Chat: #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.

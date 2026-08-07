@@ -24,7 +24,7 @@ agent_select_next = ["j", "down", "right"]
 
 - Click a dashboard section: move focus to that section (the active outline follows the focused section). The logs pane includes user-visible prompts, agent output, and important kernel events.
 - Click a project, issue, head, or worker row in the AgentTree: select/highlight it and filter the logs pane to it. Right-click an issue row to open its associated delivery PR; worker rows do not duplicate that affordance, and an issue without a PR gets a transient notice. Issue and worker selections also target subsequent natural-language chat through a fresh head. See [AgentTree selection, log filtering, and chat routing](#agenttree-selection-log-filtering-and-chat-routing).
-- Double-click text in the logs pane: select the word under the pointer (see [Text selection and clipboard](#text-selection-and-clipboard)). Double-click tracking is per pane, so tree clicks and text clicks never pair up.
+- Double-click text in the logs pane: select the word under the pointer. Triple-click: select the complete displayed paragraph, including all of its soft-wrapped rows (see [Text selection and clipboard](#text-selection-and-clipboard)). Text-click tracking is per pane, so tree clicks and text clicks never pair up.
 - Double-click an issue to open its delivery PR; without a PR it shows a transient notice and does not open a worker workspace. Double-click a worker with an assigned workspace to open its focused workspace; a worker without a workspace is a silent no-op.
 - `Tab` / `Ctrl-Tab`: move focus forward.
 - `Shift-Tab`: move focus backward.
@@ -170,14 +170,15 @@ This selection is separate from text selection: it decides which log entries are
 Selection is rendered by Meringue itself, so it works without holding `Shift` and without switching the host terminal into its own selection mode. A selection is always scoped to the pane the drag started in: a drag that leaves the logs pane clamps to the logs text area instead of highlighting the AgentTree or the composer.
 
 - Double-click a word in the logs pane: select and highlight that word, and copy it to the system clipboard. The bottom hint line echoes what was copied, for example `⧉ copied "P1-I18-W2"`.
+- Triple-click a logs paragraph: select and highlight the complete paragraph under the pointer, including every soft-wrapped row but not an adjacent paragraph or log entry, and copy it to the system clipboard.
 - Drag with the left mouse button in the logs pane: select log text. The highlight uses the active colorscheme's `SELECTION` style and follows the content while you scroll. Releasing the button copies the highlighted text.
-- Double-click, then drag without releasing: extend the selection by whole words in either direction, including onto other (soft-wrapped) rows.
+- Double-click, then drag without releasing: extend the selection by whole words in either direction, including onto other (soft-wrapped) rows. Triple-click, then drag extends by complete paragraphs.
 - Double-click a word in the chat composer: select that word. Drag from a double-click to extend by word there too. The composer stays copy-on-demand (`Ctrl-C` / `Ctrl-X`), so selecting text you are about to retype never overwrites your clipboard.
 - Drag with the left mouse button in the chat composer: select input text. Clicking without dragging just moves the cursor.
 - `Ctrl-C` / `Alt-C`: copy the selection to the system clipboard. While a selection is active, `Ctrl-C` copies instead of clearing the input or quitting.
 - `Esc`, or a single click anywhere else: clear the selection.
 
-Word boundaries are tuned for what actually shows up in logs: agent ids (`P1-I18-W2`), file references (`lib/meringue/tui/app.rb:643`), and URLs (`https://example.com/pull/12?tab=files`) select whole, while trailing prose punctuation does not (double-clicking `done.` selects `done`, `yes,` selects `yes`). Punctuation runs and brackets are their own selection, and double-clicking blank space selects nothing instead of copying whitespace. Double-click detection needs the second press on the same row within half a second; a slower or further-away second click starts a normal caret/drag selection instead.
+Word boundaries are tuned for what actually shows up in logs: agent ids (`P1-I18-W2`), file references (`lib/meringue/tui/app.rb:643`), and URLs (`https://example.com/pull/12?tab=files`) select whole, while trailing prose punctuation does not (double-clicking `done.` selects `done`, `yes,` selects `yes`). Punctuation runs and brackets are their own selection, and double-clicking blank space selects nothing instead of copying whitespace. Multi-click detection needs each successive press on the same row within half a second; a slower or further-away click starts a normal caret/drag selection instead. The composer retains its existing single/double-click cycle and does not add paragraph selection.
 
 A word lives on one wrapped row: log text wraps at whitespace, so only a single token longer than the pane is split, and a word drag then covers each row it crosses.
 - `Shift-Left` / `Shift-Right` / `Shift-Up` / `Shift-Down`: extend the composer selection by character or line.
@@ -210,7 +211,7 @@ This is a responsiveness feature, not only a display one: wrapping, cursor math,
 
 ### Using your terminal's own selection instead
 
-Meringue asks the terminal for mouse reports (`1000`/`1002`/`1006`), which is what makes in-app double-click, drag highlighting, click-to-focus, AgentTree clicks, and hover scrolling possible. While that is on, a plain drag no longer reaches the terminal's own selection, so terminals provide a modifier to bypass mouse reporting when you want their native selection (for example to select across panes or into the borders):
+Meringue asks the terminal for mouse reports (`1000`/`1002`/`1006`), which is what makes in-app double-/triple-click selection, drag highlighting, click-to-focus, AgentTree clicks, and hover scrolling possible. While that is on, a plain drag no longer reaches the terminal's own selection, so terminals provide a modifier to bypass mouse reporting when you want their native selection (for example to select across panes or into the borders):
 
 | terminal | hold while dragging |
 | --- | --- |
