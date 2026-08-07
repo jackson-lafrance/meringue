@@ -26,6 +26,14 @@ module Meringue
           "probe_unavailable" => "stopped: metric unreadable"
         }.freeze
 
+        # One wrapped row of a tree item, plus where it started in the laid-out content.
+        # The offset is what lets a suffix chip keep its color when the wrap splits it across
+        # lines: the chip is located by position rather than by matching text at a line end.
+        Chunk = Struct.new(:text, :offset, :elided)
+        # The wrapped rows of one item together with the index at which the suffix chips begin
+        # in the text those rows were wrapped from.
+        ContentLayout = Struct.new(:chunks, :suffix_start)
+
         STATUS_DOTS = {
           "queued" => "○",
           "working" => "●",
@@ -331,6 +339,22 @@ module Meringue
           parts.map { |part| part.fetch(0) }.join(" ")
         end
 
+        # The chips exactly as they appear in the wrapped content: the row text is whitespace
+        # normalized before it is wrapped, so the chips have to be normalized the same way for
+        # their positions inside that text to line up.
+        def suffix_chips(parts)
+          parts.filter_map do |text, kind|
+            normalized = normalized_content(text).strip
+            next nil if normalized.empty?
+
+            [normalized, kind]
+          end
+        end
+
+        def chips_text(chips)
+          chips.map { |chip| chip.fetch(0) }.join(" ")
+        end
+
         def suffix_style(kind, selected)
           if kind == :goal
             selected ? Style::GOAL_MARKER_SELECTED : Style::GOAL_MARKER
@@ -389,19 +413,15 @@ module Meringue
           leader_text = plain_text(leader_segments)
           continuation_segments ||= [[" " * leader_text.length, selected ? Style::AGENT_TREE_SELECTED_DIM : Style::DIM]]
           content_width = wrapped_content_width(width, leader_text.length)
-          chunks = wrap_content(content, content_width, suffix_parts_text(suffix_parts))
+          chips = suffix_chips(suffix_parts)
+          layout = wrap_content(content, content_width, chips_text(chips))
 
-          lines = []
-          chunks.each_with_index do |chunk, index|
-            segments = if index.zero?
-                         leader_segments + [[chunk, title_style]]
-                       else
-                         continuation_segments + [[chunk, continuation_style]]
-                       end
-            segments = style_suffix_marker(segments, suffix_parts, selected)
-            lines << (selected ? pad_selected_line(segments, width) : segments)
+          layout.chunks.each_with_index.map do |chunk, index|
+            leader = index.zero? ? leader_segments : continuation_segments
+            body_style = index.zero? ? title_style : continuation_style
+            segments = leader + chunk_segments(chunk, layout.suffix_start, chips, body_style, selected)
+            selected ? pad_selected_line(segments, width) : segments
           end
-          lines
         end
 
         def wrapped_content_width(width, leader_length)
@@ -410,41 +430,57 @@ module Meringue
           [width.to_i - leader_length, 1].max
         end
 
-        def style_suffix_marker(segments, suffix_parts, selected)
-          return segments if suffix_parts.empty?
+        # Suffix chips are located by their position in the wrapped content, not by matching
+        # text at the end of a line. A chip is row status ("waiting on CI concluded on…",
+        # "1/3", "↗", the goal chip) and it must keep its accent no matter where the wrap
+        # falls, including when one chip is split over two rows or shares a row with the tail
+        # of the title. Regression: a long "waiting on <label>" chip that wrapped matched no
+        # line end, so the whole suffix silently fell back to the plain title style.
+        def chunk_segments(chunk, suffix_start, chips, body_style, selected)
+          text = chunk.text.to_s
+          return [[text, body_style]] if text.empty? || suffix_start.nil? || chips.empty?
+          # Rows that stop before the suffix begins (the title lines of a wrapped row) are the
+          # common case and never need a per-character pass.
+          return [[text, body_style]] if chunk.offset + text.length <= suffix_start
 
-          segments.each_with_index.reverse_each do |segment, index|
-            next unless segment.is_a?(Array)
-
-            text = segment.fetch(0, "").to_s
-            run = matching_suffix_run(text, suffix_parts)
-            next unless run
-
-            run_text = suffix_parts_text(run)
-            base_text = text[0...-run_text.length]
-            styled_suffix = []
-            styled_suffix << [base_text, segment.fetch(1, nil)] unless base_text.empty?
-            run.each_with_index do |(part_text, kind), part_index|
-              style = suffix_style(kind, selected)
-              styled_suffix << [" ", style] if part_index.positive?
-              styled_suffix << [part_text, style]
+          segments = []
+          buffer = +""
+          buffer_style = nil
+          text.each_char.with_index do |char, index|
+            # A trailing "…" is synthetic: it has no source character, so it inherits the style
+            # of the character before it rather than reading past the end of the row.
+            elided_tail = chunk.elided && index.positive? && index == text.length - 1
+            style = style_at(chunk.offset + (elided_tail ? index - 1 : index), suffix_start, chips, body_style, selected)
+            if buffer_style.nil? || style == buffer_style
+              buffer_style = style
+              buffer << char
+            else
+              segments << [buffer, buffer_style]
+              buffer = char.dup
+              buffer_style = style
             end
-            return segments[0...index] + styled_suffix + segments[(index + 1)..]
           end
-
+          segments << [buffer, buffer_style] unless buffer.empty?
           segments
         end
 
-        # A wrapped row can end with only some of the suffix chips, so the longest run of
-        # chips this line actually ends with is what gets marker styling. Without this a goal
-        # chip pushed onto its own continuation line would silently lose its color.
-        def matching_suffix_run(text, suffix_parts)
-          (suffix_parts.length - 1).downto(0) do |finish|
-            0.upto(finish) do |start|
-              run = suffix_parts[start..finish]
-              joined = suffix_parts_text(run)
-              return run if !joined.empty? && text.end_with?(joined)
-            end
+        def style_at(position, suffix_start, chips, body_style, selected)
+          return body_style if position < suffix_start
+
+          kind = chip_kind_at(position - suffix_start, chips)
+          kind.nil? ? body_style : suffix_style(kind, selected)
+        end
+
+        # Chips are joined by a single space inside the suffix. The separator is styled with
+        # the chip that follows it, so two adjacent chips never show an unstyled gap.
+        def chip_kind_at(offset, chips)
+          cursor = 0
+          chips.each_with_index do |(text, kind), index|
+            start = index.zero? ? cursor : cursor - 1
+            finish = cursor + text.length
+            return kind if offset >= start && offset < finish
+
+            cursor = finish + 1
           end
 
           nil
@@ -481,19 +517,26 @@ module Meringue
           end
         end
 
-        def wrap_content(content, width, suffix_text = "")
+        # `suffix` is the already-normalized chip text, so it can be located inside the
+        # normalized content by position.
+        def wrap_content(content, width, suffix = "")
           text = normalized_content(content)
-          return [text] unless width
+          return content_layout(text, [Chunk.new(text, 0)], suffix) unless width
 
           lines = split_wrapped_lines(text, width)
-          return lines if lines.length <= MAX_ITEM_LINES
+          return content_layout(text, lines, suffix) if lines.length <= MAX_ITEM_LINES
 
-          fitted = fit_lines_keeping_suffix(text, normalized_content(suffix_text).strip, width)
+          fitted = fit_lines_keeping_suffix(text, suffix, width)
           return fitted if fitted
 
           visible = lines.first(MAX_ITEM_LINES)
-          visible[-1] = ellipsize(visible.last, width)
-          visible
+          visible[-1] = Chunk.new(ellipsize(visible.last.text, width), visible.last.offset, true)
+          content_layout(text, visible, suffix)
+        end
+
+        def content_layout(text, chunks, suffix)
+          start = suffix.to_s.empty? || !text.end_with?(suffix) ? nil : text.length - suffix.length
+          ContentLayout.new(chunks, start)
         end
 
         # The goal chip and the PR marker are the row's status, not decoration, so an
@@ -511,9 +554,12 @@ module Meringue
           best = nil
           while low <= high
             middle = (low + high) / 2
-            lines = split_wrapped_lines(content_keeping_suffix(head, middle, suffix), width)
+            candidate = content_keeping_suffix(head, middle, suffix)
+            lines = split_wrapped_lines(candidate, width)
             if lines.length <= MAX_ITEM_LINES
-              best = lines
+              # The suffix survives, but at a new offset: the layout is rebuilt from the
+              # truncated text so chip positions stay correct.
+              best = content_layout(candidate, lines, suffix)
               low = middle + 1
             else
               high = middle - 1
@@ -534,24 +580,29 @@ module Meringue
           value.empty? ? " " : value
         end
 
+        # Returns Chunks rather than bare strings: the offset of each wrapped row into `text`
+        # is what keeps suffix chip styling correct across a wrap.
         def split_wrapped_lines(text, width)
-          remaining = text.dup
+          cursor = 0
           lines = []
 
-          until remaining.empty?
+          while cursor < text.length
+            remaining = text[cursor..].to_s
             if remaining.length <= width
-              lines << remaining
+              lines << Chunk.new(remaining, cursor)
               break
             end
 
             slice = remaining[0, width + 1]
             break_at = slice.rindex(" ") || width
             break_at = width if break_at <= 0
-            lines << remaining[0, break_at].rstrip
-            remaining = remaining[break_at..].to_s.lstrip
+            lines << Chunk.new(remaining[0, break_at].rstrip, cursor)
+            tail = remaining[break_at..].to_s
+            # Wrapping drops the whitespace it broke on, so the next row's offset has to skip it.
+            cursor += break_at + (tail.length - tail.lstrip.length)
           end
 
-          lines.empty? ? [" "] : lines
+          lines.empty? ? [Chunk.new(" ", 0)] : lines
         end
 
         def ellipsize(text, width)
