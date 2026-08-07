@@ -45,6 +45,13 @@ module KernelWorkersSupport
       Array(@events)
     end
 
+    # Mirrors a harness that can derive mid-work progress from its own event stream. Events are
+    # supplied to this client in raw Pi RPC shape, so kernel tests drive the real extractor
+    # instead of a hand-written progress list.
+    def session_progress(events)
+      Meringue::Harness::PiSessionView.progress_items(events)
+    end
+
     # Read-only transcript view used by the worker session UI boundary. The
     # reported session_state is what drives automatic prompt-mode selection.
     def open_session_view(session_ref)

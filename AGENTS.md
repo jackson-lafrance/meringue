@@ -406,6 +406,8 @@ The logs pane should show:
 - important harness events such as Pi RPC `agent_start`, `agent_end`, tool execution start/end, and process exits
 - clarifying questions created and answered
 
+A live worker is not allowed to be silent for the whole length of its session either. While a worker session is streaming, the kernel derives a small number of mid-work progress lines from the session events reconciliation has *already* drained, attributed to that worker and its issue. `session_progress(events)` is a pure transform of that array rather than a second read, because some transports share one drain cursor and a second read would steal events from settle classification; a harness that cannot describe its own activity returns nothing and stays quiet. Progress is heavily floored (model-authored text at most once every two minutes per worker, a Meringue-authored tool-activity fallback at most once every five, consecutive duplicates dropped, each line truncated to a headline) so it can never bury kernel and user lines in the bounded log window. See `docs/agent-output.md`.
+
 Do not persist every streamed token from the harness as a log entry.
 Streaming output can be rendered live in the TUI, while durable logs should store important lifecycle events,
 final summaries, errors, and kernel state changes. Expected TUI unavailability (for example repeatedly clicking a pending head that has no focused worker workspace yet) must not append durable or visible chat/log messages; use a silent no-op or transient UI affordance, while preserving real operation failures.
@@ -494,6 +496,7 @@ The harness client should expose operations shaped like:
 - `set_session_thinking_level(session_ref, level)`
 - `available_models()`
 - `read_events(session_ref)`
+- `session_progress(events)`
 - `attach_session(session_ref)`
 
 Model catalogs are asked of the harness, never hand-maintained in Meringue. `available_models` returns a harness-neutral catalog (models plus each model's supported thinking levels) or an explicit unavailable/unsupported result. The kernel caches the snapshot in state metadata so input completion can offer every model for the selected harness without starting a harness process while the user types. `/models` opens the TUI model picker over that cached snapshot (searchable, keyboard-navigable, and applying a selection as `/model <provider>/<model-id>`), and `/models refresh` re-asks the harness through `GetModelCatalog` and reports the snapshot's state. Catalog listings belong in the picker, not in the log.
