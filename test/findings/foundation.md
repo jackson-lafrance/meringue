@@ -27,3 +27,37 @@ Not a bug, but it makes area-scoped testing awkward and is the likely reason the
 
 - `meringue reset-state` and the default `meringue`/`meringue tui`/`meringue demo` commands are not exercised: they write to `~/.meringue/state.json` or boot a TUI against the real terminal. The CLI test only covers `--version`, `--help`, unknown commands, and `demo-state`.
 - The retired head-loop walkthrough script ran a full fake head loop through `Heads::SimpleLoop`. This slice replaced its boot-level value (library loads, CLI answers, entrypoint works); the head/kernel loop behavior itself belongs to the kernel and heads slices.
+
+## 4. Several git-backed tests are not hermetic against the developer's git config (pre-existing)
+
+Found while running the full suite for the worker-progress-log slice, on a machine whose
+global git config sets `commit.gpgSign = true` (Shopify `dev` gitconfig) and `core.fsmonitor = true`.
+
+`rake test` hangs indefinitely, with no failure and no output, inside test `setup`:
+
+```
+HeadBatchTargetBindingTest#setup
+  -> git_repo!  ->  system("git", "commit", "-q", "-m", "initial", chdir: path)
+     -> /opt/dev/bin/gpg-auto-pin ... -> gpg --pinentry-mode loopback ...   # never returns
+```
+
+`test/support/kernel_workers_support.rb#run_git` already does the right thing: it runs git with
+`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`, `GIT_TERMINAL_PROMPT=0`, and explicit
+author/committer identity. `test/integration/head_batch_target_binding_test.rb#git_repo!` (and any
+other fixture that shells out to git with a bare `system`/`Open3` call and no env) inherits the
+developer's configuration instead, so a signing hook, a credential helper, or an fsmonitor daemon
+can block the suite forever. This violates the "no reliance on a developer's machine state" rule in
+`AGENTS.md` and `docs/testing.md`.
+
+Workaround for running the suite today, without weakening the identity the commit-authorship tests
+need:
+
+```bash
+printf '[include]\n\tpath = %s\n[core]\n\tfsmonitor = false\n[commit]\n\tgpgSign = false\n[tag]\n\tgpgSign = false\n' "$HOME/.gitconfig" > /tmp/meringue_test_gitconfig
+GIT_CONFIG_GLOBAL=/tmp/meringue_test_gitconfig rake test
+```
+
+Not fixed here because the fix belongs to the test-hermeticity slice, not to the worker-progress
+slice: it means auditing every fixture that shells out to git and routing them through one shared
+isolated-git helper. Follow-up: extract `run_git` into a shared support module and use it from every
+test that builds a git fixture.

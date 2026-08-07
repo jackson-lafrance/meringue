@@ -52,6 +52,22 @@ class HarnessClientContractTest < HarnessIntegrationTest
     end
   end
 
+  # `session_progress` is a defaulted contract method rather than an abstract one: a backend that
+  # cannot describe its own mid-work activity answers "no progress" and everything else keeps
+  # working. Every client must still accept the same one-argument shape, because the kernel calls
+  # it with the event array it already drained.
+  def test_every_client_answers_the_session_progress_contract
+    CLIENT_CLASSES.each do |klass|
+      assert klass.public_method_defined?(:session_progress), "#{klass} does not answer #session_progress"
+      assert_equal normalized_parameters(Harness::Client, :session_progress),
+                   normalized_parameters(klass, :session_progress),
+                   "#{klass}#session_progress signature drifted from the harness contract"
+    end
+
+    assert_empty Harness::Client.new.session_progress([{ "type" => "message_end" }])
+    assert_empty Harness::FakeClient.new.session_progress([{ "type" => "message_end" }])
+  end
+
   def test_prompt_session_accepts_the_shared_mode_keyword
     CLIENT_CLASSES.each do |klass|
       modes = klass.instance_method(:prompt_session).parameters

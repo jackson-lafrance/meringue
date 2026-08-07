@@ -110,6 +110,44 @@ class TuiLogsPaneTest < Minitest::Test
     assert_includes plain_lines(@pane.log_lines(state, width: 60)).join("\n"), "Completed."
   end
 
+  # Mid-work progress is a worker-authored line, so it must read as the worker talking (✦, the
+  # worker's own gutter) and must stay visibly distinct from its final result (✓ … · done).
+  def test_worker_progress_lines_are_attributed_to_the_worker_and_distinct_from_its_result
+    logs = [
+      log_record(
+        "L1",
+        "source_type" => "worker",
+        "source_id" => "P1-I1-W1",
+        "message" => "Rebasing onto origin/main before editing.",
+        "timestamp" => "2026-07-11T00:01:00Z",
+        "details" => { "kind" => "worker_progress", "progress_kind" => "assistant_text", "issue_id" => "P1-I1" }
+      ),
+      log_record(
+        "L2",
+        "source_type" => "worker",
+        "source_id" => "P1-I1-W1",
+        "message" => "Worker P1-I1-W1 completed.",
+        "timestamp" => "2026-07-11T00:02:00Z",
+        "details" => { "last_assistant_text" => "All done now" }
+      )
+    ]
+    state = composed_state(
+      empty_state.merge(
+        "logs" => logs,
+        "agents" => [agent_record("P1-I1-W1", "harness_metadata" => { "title" => "Worker title" })]
+      )
+    )
+    lines = plain_lines(@pane.log_lines(state, width: 70))
+    joined = lines.join("\n")
+
+    assert_includes joined, "✦ P1-I1-W1 · Worker title"
+    assert_includes joined, "Rebasing onto origin/main before editing."
+    assert_includes joined, "✓ P1-I1-W1 · Worker title · done"
+    progress_header = lines.find { |line| line.include?("✦ P1-I1-W1") }
+    refute_includes progress_header, "· done", "progress must not be presented as a finished result"
+    refute_includes progress_header, "· warn"
+  end
+
   def test_conversation_messages_and_durable_logs_interleave_by_instant
     logs = [
       log_record("L1", "message" => "utc entry", "timestamp" => "2026-07-11T12:00:00Z"),

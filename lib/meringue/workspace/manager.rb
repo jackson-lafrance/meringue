@@ -314,11 +314,69 @@ module Meringue
         false
       end
 
+      # Whether an existing Meringue worktree is safe for another worker to continue working in.
+      #
+      # The kernel decides *who* may share a workspace (relationship, liveness, delivery state);
+      # this answers the git-only half of that question for a worktree the kernel already believes
+      # belongs to the predecessor. It deliberately does not run `git status`: a dirty tree is the
+      # whole point of continuing someone else's work, and `--untracked-files=all` is the slowest
+      # command in the provisioning path on a large repository.
+      #
+      # Reasons a shared worktree is refused:
+      #   worktree_missing            the directory is gone
+      #   outside_managed_workspace_root  not a Meringue-owned path, so Meringue makes no claims
+      #   branch_not_meringue_managed the recorded branch is not a `meringue/` branch
+      #   git_root_missing            the repository the worktree belongs to is gone
+      #   worktree_list_failed        git could not be asked
+      #   worktree_not_registered     the directory exists but git no longer knows it
+      #   worktree_branch_moved       another branch (or a detached HEAD) is checked out there now
+      #   worktree_locked             git holds a lock on it, including a half-finished checkout
+      def inspect_shared_worktree(worktree_root:, branch:, git_root:)
+        return reuse_outcome(false, "worktree_missing") if worktree_root.to_s.strip.empty?
+
+        worktree_root = canonical_path(worktree_root)
+        return reuse_outcome(false, "worktree_missing") unless Dir.exist?(worktree_root)
+        return reuse_outcome(false, "outside_managed_workspace_root") unless owned_workspace_path?(worktree_root)
+        return reuse_outcome(false, "branch_not_meringue_managed") unless branch.to_s.start_with?("meringue/")
+        return reuse_outcome(false, "git_root_missing") if git_root.to_s.strip.empty? || !Dir.exist?(git_root.to_s)
+
+        listed = run_command("git", "-C", canonical_path(git_root), "worktree", "list", "--porcelain")
+        unless listed.fetch("status").success?
+          return reuse_outcome(
+            false,
+            "worktree_list_failed",
+            error: present_output(listed.fetch("stderr")) || present_output(listed.fetch("stdout"))
+          )
+        end
+
+        record = parse_worktree_records(listed.fetch("stdout")).find do |candidate|
+          same_path?(candidate.fetch("worktree", ""), worktree_root)
+        end
+        return reuse_outcome(false, "worktree_not_registered") unless record
+
+        checked_out = record.fetch("branch", nil)
+        unless checked_out == "refs/heads/#{branch}"
+          return reuse_outcome(
+            false,
+            "worktree_branch_moved",
+            checked_out_branch: checked_out ? checked_out.sub(%r{\Arefs/heads/}, "") : nil,
+            detached: record.key?("detached")
+          )
+        end
+        return reuse_outcome(false, "worktree_locked") if record.key?("locked")
+
+        reuse_outcome(true, "worktree_reusable", worktree_root_path: worktree_root, workspace_branch: branch)
+      rescue CommandTimeout => e
+        reuse_outcome(false, "worktree_inspection_timed_out", error: e.message)
+      rescue StandardError => e
+        reuse_outcome(false, "worktree_inspection_error", error: e.message)
+      end
+
       # Pruning uses a deliberately stricter cleanup path than failed provisioning. It removes
       # only a registered, clean, unlocked Meringue worktree whose path and branch still match the
       # persisted ownership record. Branches are retained so delivered commits remain reachable.
-      # A structured result lets the kernel retain the record and explain anything unsafe to
-      # remove instead of forcing or guessing.
+      # A structured result lets the kernel explain anything unsafe to remove instead of forcing
+      # or guessing; the kernel decides separately whether the associated terminal record remains.
       def cleanup_pruned_worker_workspace(workspace, protected_paths: [])
         return cleanup_outcome("skipped", "invalid_workspace_record", success: true) unless workspace.is_a?(Hash)
 
@@ -488,6 +546,13 @@ module Meringue
         left_path == right_path ||
           left_path.start_with?("#{right_path}#{File::SEPARATOR}") ||
           right_path.start_with?("#{left_path}#{File::SEPARATOR}")
+      end
+
+      def reuse_outcome(usable, reason, **details)
+        {
+          "usable" => usable,
+          "reason" => reason
+        }.merge(details.transform_keys(&:to_s)).compact
       end
 
       def cleanup_outcome(status, reason, success:, attempted: false, **details)
