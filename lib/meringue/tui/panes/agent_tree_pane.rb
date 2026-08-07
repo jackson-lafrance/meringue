@@ -670,7 +670,10 @@ module Meringue
             # worker ratio beside that reads as a second, conflicting fraction, so the goal
             # chip stands in for it. Every other issue keeps the ordinary worker ratio.
             [goal ? "" : progress(workers), :marker],
-            [active_pr_marker(issue), :marker]
+            # Delivery PRs are issue state. Older snapshots may still have the record on a
+            # worker until the state migration runs, so use that only as an issue-row fallback;
+            # never copy the marker onto each worker row.
+            [active_pr_marker(issue, workers), :marker]
           ].reject { |text, _kind| text.to_s.empty? }
         end
 
@@ -774,14 +777,13 @@ module Meringue
           "#{completed}/#{visible_workers.length}"
         end
 
-        def worker_suffix(worker, issue = nil)
-          # Delivery PRs are owned by issues so they survive worker replacement and restart.
-          # Reflect the issue marker on its worker rows without copying metadata back to workers.
+        def worker_suffix(worker, _issue = nil)
+          # Delivery PRs belong to the issue row. Worker rows retain only worker/session state,
+          # so a replacement or a second worker cannot duplicate the issue's PR affordance.
           [
             provisioning_marker(worker),
             unfinished_marker(worker),
-            worker_relationship_marker(worker),
-            active_pr_marker(issue || worker)
+            worker_relationship_marker(worker)
           ].reject(&:empty?).join(" ")
         end
 
@@ -848,6 +850,8 @@ module Meringue
           # queued dependent looks identical to a worker whose session is still being provisioned.
           waiting = deferred_wait_marker(worker)
           return waiting unless waiting.empty?
+          completion_wait = completion_wait_marker(worker)
+          return completion_wait unless completion_wait.empty?
           return "replaces #{short_id(worker.fetch("replaces_agent_id"))}" if worker["replaces_agent_id"]
           return "after #{short_id(worker.fetch("follow_up_of_agent_id"))}" if unstarted_follow_up?(worker)
           return "replaced by #{short_id(worker.fetch("replaced_by_agent_id"))}" if worker["replaced_by_agent_id"]
@@ -884,6 +888,15 @@ module Meringue
           "#{verb} #{relationship_id(worker, predecessor_id)}"
         end
 
+        def completion_wait_marker(worker)
+          metadata = worker["harness_metadata"]
+          continuation = metadata.is_a?(Hash) ? metadata["completion_continuation"] : nil
+          return "" unless continuation.is_a?(Hash) && continuation["state"].to_s == "waiting"
+
+          gate = gate_wait_label(continuation)
+          gate ? "routing after #{gate}" : ""
+        end
+
         # A script-gated queued worker must read honestly in the tree: it is not "waiting on W1",
         # it is waiting for a command to say go.
         def gate_wait_label(deferred)
@@ -907,8 +920,10 @@ module Meringue
           issue_id == worker["issue_id"].to_s ? short_id(id) : id.to_s
         end
 
-        def active_pr_marker(record)
-          AgentTreeNavigation.active_agent_pr_url(record) ? "↗" : ""
+        def active_pr_marker(record, fallback_records = [])
+          return "↗" if AgentTreeNavigation.active_agent_pr_url(record)
+
+          Array(fallback_records).any? { |candidate| AgentTreeNavigation.active_agent_pr_url(candidate) } ? "↗" : ""
         end
 
         def head_suffix(head)

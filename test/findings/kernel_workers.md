@@ -207,3 +207,45 @@ Notes for future slices:
   still activates immediately, killing the predecessor still cancels the chain, and an errored
   predecessor with no resumable session still cancels the dependent exactly as before. Spawning
   behind an already settle-failed worker is queued rather than rejected.
+
+## Shared worker worktrees (behavior change)
+
+Test files added by this slice:
+
+- `test/integration/kernel_workers/workspace_reuse_test.rb`
+- `test/integration/workspace/manager_shared_worktree_test.rb`
+
+Previously every worker got its own worktree, and a successor on an issue whose
+`meringue/<slug>` branch already existed was pushed onto a numerically suffixed branch. One
+goal's sequential steps therefore delivered several branches and several pull requests, and a
+successor could not see work its predecessor had not committed.
+
+A worker that continues a predecessor's line of work on the same issue now keeps working in that
+predecessor's worktree and branch. The continuation default fires for `after_agent_id` (first,
+because a queued worker's predecessor is guaranteed settled), then `follow_up_of_agent_id`, then
+`replace_agent_id`; `_inherit_workspace_from_agent_id` (the unreplayable-session restart) is the
+same path. Heads can also name a predecessor explicitly with `reuse_workspace_of_agent_id` /
+`reuse_workspace_from_command`, or opt a continuation out with `share_workspace: false`.
+
+Safety is split in two so the git work never runs under the state lock:
+
+- `claim_reused_worker_workspace` (under the lock) checks the relationship, that no non-terminal
+  worker occupies the worktree, and that the branch's pull request is not already merged. It
+  writes the shared path onto the reservation, which is what makes a second successor spawned at
+  the same moment see an occupant and get its own worktree.
+- `settle_workspace_reuse_claim` → `Workspace::Manager#inspect_shared_worktree` (outside the lock)
+  checks that git still registers the directory, that it is on the recorded branch, and that it is
+  unlocked.
+
+Every refusal falls back to fresh provisioning plus one log line naming the worker and the reason;
+only a session restart hard-fails (`inherited_workspace_unavailable`), because a fresh checkout
+would not contain the work it exists to recover. A dirty tree is explicitly *not* a refusal
+reason. The predecessor is deliberately not exempted from the occupancy check, which is why
+`replace_agent_id` on a live worker still gets its own worktree.
+
+Durable records: `harness_metadata.workspace_reuse_request` (intent, so activation, a provisioning
+retry, and a restart all resolve the same way), `harness_metadata.workspace_reuse` (outcome), and
+`workspace_plan.shared` / `workspace_plan.inherited_from_agent_id` with `created: false` so no
+failure path can delete a worktree the spawn did not create. The reused worker's prompt gains a
+`--- Shared workspace ---` block telling it to update the branch's existing pull request rather
+than open a second one.
