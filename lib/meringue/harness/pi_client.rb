@@ -453,6 +453,11 @@ module Meringue
         process.drain_events(consumer: "kernel")
       end
 
+      # Pi event names stop at this boundary, exactly like `read_events` and the session view.
+      def session_progress(events)
+        PiSessionView.progress_items(events)
+      end
+
       def open_session_view(session_ref)
         process = process_for(session_ref, required: false)
         return history_session_view(session_ref) unless process

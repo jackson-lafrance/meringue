@@ -425,14 +425,16 @@ module Meringue
         def transcript_timestamp(value)
           return nil if value.nil? || value.to_s.empty?
 
-          time = if value.is_a?(Numeric)
-                   seconds = value.to_f
-                   seconds /= 1000 if seconds > 10_000_000_000
-                   Time.at(seconds).utc
-                 else
-                   Time.parse(value.to_s)
-                 end
-          time.strftime("%H:%M:%S")
+          timestamp = if value.is_a?(Numeric)
+                        seconds = value.to_f
+                        seconds /= 1000 if seconds > 10_000_000_000
+                        Time.at(seconds)
+                      else
+                        value
+                      end
+          # Pi emits UTC ISO8601 or epoch timestamps. Use the same local-clock
+          # conversion as the dashboard instead of formatting the source zone.
+          Timestamps.format(timestamp, "%H:%M:%S") || value.to_s
         rescue ArgumentError, RangeError, TypeError
           value.to_s
         end

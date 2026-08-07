@@ -83,7 +83,7 @@ module Meringue
         "quit" => "Quit",
         "clear_or_quit" => "Clear input / quit empty prompt",
         "cancel_navigation" => "Cancel dashboard navigation",
-        "open_delivery_pr" => "Open the selected worker's delivery PR, or pick from the open PRs",
+        "open_delivery_pr" => "Open the selected issue's delivery PR, or pick from the open PRs",
         "refresh_model_catalog" => "In the model picker: re-fetch the harness model catalog",
         "focus_next" => "Focus next pane",
         "focus_previous" => "Focus previous pane",

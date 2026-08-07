@@ -14,7 +14,7 @@ agent_select_next = ["j", "down", "right"]
 
 ## Global
 
-- `Ctrl-B`: open a delivery pull request. While a worker/issue is selected (or jump mode is on a row) it opens that node's own kernel-verified PR. With nothing selected it opens the **open pull requests** picker instead, because unscoped chat is not about one worker; `↑`/`↓` move, `Enter` opens the highlighted PR in the browser, and `Esc`, another `Ctrl-B`, a click outside the list, or any other key closes it. Clicking a row opens that row. If a PR is missing, malformed, or its status cannot be refreshed, Meringue reports that state without closing the dashboard or changing the worker.
+- `Ctrl-B`: open a delivery pull request. While an issue/worker is selected (or jump mode is on a row) it opens the owning issue's kernel-verified PR. With nothing selected it opens the **open pull requests** picker instead, because unscoped chat is not about one issue; `↑`/`↓` move, `Enter` opens the highlighted PR in the browser, and `Esc`, another `Ctrl-B`, a click outside the list, or any other key closes it. Clicking a row opens that row. If a PR is missing, malformed, or its status cannot be refreshed, Meringue reports that state without closing the dashboard or changing the selection.
 - `Ctrl-R`: while the `/models` **model picker** is open, re-fetch the harness model catalog (`refresh_model_catalog`). It has no effect anywhere else, so it stays available for normal typing.
 - `Ctrl-D`: quit.
 - `Ctrl-C`: clear input; quit when input is empty.
@@ -23,9 +23,9 @@ agent_select_next = ["j", "down", "right"]
 ## Focus and scrolling
 
 - Click a dashboard section: move focus to that section (the active outline follows the focused section). The logs pane includes user-visible prompts, agent output, and important kernel events.
-- Click a project, issue, head, or worker row in the AgentTree: select/highlight it and filter the logs pane to it. Right-click an agent row to open its associated delivery PR; if none is tracked, Meringue shows a transient notice and leaves the selection unchanged. Issue and worker selections also target subsequent natural-language chat through a fresh head. See [AgentTree selection, log filtering, and chat routing](#agenttree-selection-log-filtering-and-chat-routing).
+- Click a project, issue, head, or worker row in the AgentTree: select/highlight it and filter the logs pane to it. Right-click an issue row to open its associated delivery PR; worker rows do not duplicate that affordance, and an issue without a PR gets a transient notice. Issue and worker selections also target subsequent natural-language chat through a fresh head. See [AgentTree selection, log filtering, and chat routing](#agenttree-selection-log-filtering-and-chat-routing).
 - Double-click text in the logs pane: select the word under the pointer (see [Text selection and clipboard](#text-selection-and-clipboard)). Double-click tracking is per pane, so tree clicks and text clicks never pair up.
-- Double-click a worker (or an issue with a worker): open its focused workspace. A pending head or issue without a worker is a silent no-op instead of adding an unavailable-session message to chat/log history. This is the primary mouse action; PR opening remains an explicit action.
+- Double-click an issue to open its delivery PR; without a PR it shows a transient notice and does not open a worker workspace. Double-click a worker with an assigned workspace to open its focused workspace; a worker without a workspace is a silent no-op.
 - `Tab` / `Ctrl-Tab`: move focus forward.
 - `Shift-Tab`: move focus backward.
 - Arrow keys and `PageUp` / `PageDown`: scroll the focused non-chat pane by a line or a page.
@@ -71,7 +71,7 @@ The AgentTree pane scrolls like any other pane, so a long tree of projects, issu
 
 ## AgentTree selection, log filtering, and chat routing
 
-A single left click on any AgentTree row selects that node. Exactly one node is selected at a time, and while a node is selected the logs pane shows only that node's logs. Right-clicking an agent row opens its associated delivery PR through the configured browser opener; if no PR is tracked, Meringue shows a transient notice and leaves the selection unchanged. An issue or worker selection is also an explicit target for subsequent natural-language chat, and a head that stopped without routing its whole request (`errored`, `killed`, or `blocked` with commands the kernel rejected or failed) is a target for retrying that head; project selections, heads that are still routing, and heads that routed every command they proposed remain log-only filters. A retryable head row says so: it carries a `prompt to retry` marker, replaced by `retried as H<n>` once it has been retried.
+A single left click on any AgentTree row selects that node. Exactly one node is selected at a time, and while a node is selected the logs pane shows only that node's logs. Right-clicking an issue row opens its associated delivery PR through the configured browser opener; worker rows do not duplicate that affordance, and an issue without a PR gets a transient notice. Double-clicking an issue opens its PR; double-clicking a worker opens its focused workspace only when that workspace exists. An issue or worker selection is also an explicit target for subsequent natural-language chat, and a head that stopped without routing its whole request (`errored`, `killed`, or `blocked` with commands the kernel rejected or failed) is a target for retrying that head; project selections, heads that are still routing, and heads that routed every command they proposed remain log-only filters. A retryable head row says so: it carries a `prompt to retry` marker, replaced by `retried as H<n>` once it has been retried.
 
 What each node type scopes, mirroring the AgentTree hierarchy:
 
@@ -139,7 +139,7 @@ The single row under the chat bar is shared, left to right, and truncated at the
 
 6. **Interaction hints**: `Enter send · Ctrl-C clear/quit · Tab focus · / commands · /keybind keys`.
 
-A selected worker shows the PR for **its own** delivery branch, not merely the first PR ever attached to its issue, so a second worker on an issue no longer displays its predecessor's number. An issue selection shows the newest PR that is still live, falling back to the newest settled one so a finished issue still says what it delivered. Every one of these facts comes from state the kernel already persisted (`delivery_pull_requests` on the issue); rendering never runs `gh`.
+Delivery PR records are owned by issues, so an issue selection shows the newest PR that is still live, falling back to the newest settled one so a finished issue still says what it delivered. A worker selection resolves to that owning issue for the same action and never gets a second worker-owned marker or record. Every one of these facts comes from state the kernel already persisted (`delivery_pull_requests` on the issue); rendering never runs `gh`.
 
 The open-PR picker opens in the same popup slot as the slash-command list, above the composer, and lists every PR that is not merged or closed, newest number first: `#145  Fix signup validation  P1-I9 · open`. A PR the kernel has not verified yet is listed as `unverified` rather than hidden. Rows are named by their issue title, because delivery records do not carry a PR title of their own.
 
@@ -307,8 +307,8 @@ Start jump mode with `/jump` or by focusing the agent tree or logs pane and pres
 
 - `Up` / `Down` / `Left` / `Right`: select an issue or agent, which also retargets the logs pane filter to the newly selected node and auto-scrolls the AgentTree by the minimum amount needed to keep the selected row visible. In the logs pane, only agent titles are selectable; non-agent events are skipped.
 - `PageUp` / `PageDown`, `Home` / `End`, and the mouse wheel: scroll the focused pane while a selection is active, since jump mode owns the arrow keys.
-- `Ctrl-B`: open the selected worker's verified delivery pull request (jump mode always has a row selected, so it never opens the picker). The PR remains easy to open when status refresh is temporarily unavailable.
-- `Enter`: open the selected agent's pull request when a PR is available.
+- `Ctrl-B`: open the selected issue's verified delivery pull request (a worker selection resolves to its owning issue; jump mode always has a row selected, so it never opens the picker). The PR remains easy to open when status refresh is temporarily unavailable.
+- `Enter`: open the selected issue's pull request when a PR is available; a worker row is routed to its owning issue.
 - `a`: open the selected worker's focused workspace. Selecting an issue opens its newest non-killed worker; heads without a durable worker context stay on the dashboard.
 - `Esc`: cancel jump mode and clear the AgentTree selection, including its logs filter.
 
@@ -365,6 +365,6 @@ The leader and each suffix are configurable as `workspace_leader`, `workspace_sw
 
 Scrolling either focused view reuses the dashboard's frame-diffed rendering: composed lines are cached until the underlying transcript or terminal screen actually changes, offsets are clamped to what the pane can scroll, and the workspace selection is written to the state file on a slow cadence instead of once per scroll step.
 
-Agents with an open pull request are marked `↗` in the AgentTree. An issue driven by a goal loop carries a goal-colored `<iteration>/<budget> <percent complete>` chip beside that PR marker, and no badge glyph of its own; see [Goal loops](goal_loops.md#how-a-goal-reads-in-the-agenttree). Worker selection and focused-workspace view state are restored from the state file after restart; selections for pruned workers are cleared safely.
+Issues with an open pull request are marked `↗` in the AgentTree; worker rows never repeat their issue's marker. An issue driven by a goal loop carries a goal-colored `<iteration>/<budget> <percent complete>` chip beside that PR marker, and no badge glyph of its own; see [Goal loops](goal_loops.md#how-a-goal-reads-in-the-agenttree). Worker selection and focused-workspace view state are restored from the state file after restart; selections for pruned workers are cleared safely.
 
 See [Agent workspace delivery and recovery integration](agent_workspace_integration.md) for persistence, stale PR metadata, and degraded dependency behavior.
