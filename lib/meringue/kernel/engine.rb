@@ -83,6 +83,25 @@ module Meringue
         content_delta message_delta thinking_delta stream_delta stream_chunk
       ].freeze
       HARNESS_EVENT_LOG_PATTERN = /(process_(?:exit|error|failed)|rpc_parse_error|error|failed|failure)/i.freeze
+      # Mid-work worker progress. A worker used to be silent in the main log between
+      # "Spawned worker …" and its final report, which made a healthy 40-minute session
+      # indistinguishable from a hung one.
+      #
+      # The volume controls are floors, not caps on content, and they matter because the retained
+      # log window is 500 entries (see docs/log-retention.md): three concurrent workers narrating
+      # freely would evict every kernel and user line within an hour. A worker's *first* progress
+      # line is immediate, and after that:
+      #   * model-authored text is floored at one line per 2 minutes per worker (<= 30/hour), and
+      #   * a stretch with no authored text at all falls back to a much quieter tool-activity
+      #     line, floored at one per 5 minutes (<= 12/hour), purely so silence stays
+      #     distinguishable from a hang.
+      # Consecutive identical text is dropped outright, so a repeated message never spends a slot.
+      WORKER_PROGRESS_LOG_INTERVAL_SECONDS = 120
+      WORKER_PROGRESS_TOOL_INTERVAL_SECONDS = 300
+      # Progress is a headline, not a transcript: the focused workspace pane and the harness
+      # session file already hold the full text.
+      WORKER_PROGRESS_MESSAGE_MAX_CHARS = 240
+      WORKER_PROGRESS_TOOL_NAME_LIMIT = 4
       # A harness turn that ends is not automatically a turn that finished. These are the
       # harness-reported turn outcomes that mean the work stopped without a result, so the
       # agent must settle as `errored` with a visible reason instead of as `completed`.
@@ -13138,6 +13157,137 @@ module Meringue
         nil
       end
 
+      # Harness-neutral progress for one poll, derived from the events this poll already drained.
+      #
+      # Never a second `read_events`: `ProcessClient::ManagedProcess` keeps one shared drain
+      # cursor, so reading again for progress would take events away from settle classification.
+      # It is also never allowed to break a reconcile pass, so an unsupported or misbehaving
+      # client degrades to "no progress" rather than raising into the tick.
+      def session_progress_items(agent, client, events)
+        return [] unless agent.fetch("type", nil) == "worker"
+        return [] unless client.respond_to?(:session_progress)
+
+        Array(client.session_progress(events)).select { |item| item.is_a?(Hash) }
+      rescue StandardError
+        []
+      end
+
+      # Turns this poll's progress items into at most one durable log line for the worker.
+      #
+      # The newest observation is always recorded on the record (cheap, single field, no growth)
+      # so `GetInfo` and the AgentTree can see current activity even while the log line is
+      # throttled; only the throttled subset becomes a log entry.
+      def record_worker_progress!(state, agent, progress_items, now)
+        return [] unless agent.fetch("type", nil) == "worker"
+
+        candidate = worker_progress_candidate(progress_items)
+        return [] unless candidate
+
+        metadata = agent.fetch("harness_metadata", nil)
+        metadata = agent["harness_metadata"] = {} unless metadata.is_a?(Hash)
+        previous = metadata.fetch("progress", nil)
+        previous = {} unless previous.is_a?(Hash)
+
+        progress = previous.merge(
+          "kind" => candidate.fetch("kind"),
+          "text" => candidate.fetch("text"),
+          "observed_at" => now
+        )
+        metadata["progress"] = progress
+        return [] unless worker_progress_log_due?(previous, candidate, now)
+
+        metadata["progress"] = progress.merge(
+          "logged_text" => candidate.fetch("text"),
+          "logged_kind" => candidate.fetch("kind"),
+          "logged_at" => now,
+          "logged_count" => previous.fetch("logged_count", 0).to_i + 1
+        )
+        append_log(
+          state,
+          source_type: "worker",
+          source_id: agent.fetch("id", nil),
+          level: "info",
+          message: candidate.fetch("text"),
+          details: {
+            "kind" => "worker_progress",
+            "progress_kind" => candidate.fetch("kind"),
+            "issue_id" => agent.fetch("issue_id", nil),
+            "project_id" => agent.fetch("project_id", nil),
+            "tool_names" => candidate.fetch("tool_names", nil),
+            "tool_call_count" => candidate.fetch("tool_call_count", nil)
+          }.compact
+        )
+      end
+
+      # One poll can carry a whole burst of items; at most one of them is ever logged.
+      # Model-authored text always wins, because it is the only part of the stream that explains
+      # a decision. Tool activity is the fallback for a stretch that produced no text at all.
+      def worker_progress_candidate(progress_items)
+        items = Array(progress_items).select { |item| item.is_a?(Hash) }
+        return nil if items.empty?
+
+        authored = items.reverse.find do |item|
+          item.fetch("kind", nil).to_s == "assistant_text" && present_string(item.fetch("text", nil))
+        end
+        if authored
+          text = worker_progress_text(authored.fetch("text"))
+          return { "kind" => "assistant_text", "text" => text } if text
+        end
+
+        tool_calls = items.select { |item| item.fetch("kind", nil).to_s == "tool_call" }
+        return nil if tool_calls.empty?
+
+        names = tool_calls.filter_map { |item| present_string(item.fetch("tool_name", nil)) }.uniq
+        return nil if names.empty?
+
+        {
+          "kind" => "tool_activity",
+          "text" => worker_progress_tool_text(names, tool_calls.length),
+          "tool_names" => names,
+          "tool_call_count" => tool_calls.length
+        }
+      end
+
+      # Meringue-authored, and deliberately so: this line exists only because the worker said
+      # nothing itself, exactly like the "Still provisioning worker …" line.
+      def worker_progress_tool_text(names, call_count)
+        shown = names.first(WORKER_PROGRESS_TOOL_NAME_LIMIT)
+        remaining = names.length - shown.length
+        listed = shown.join(", ")
+        listed = "#{listed}, +#{remaining} more" if remaining.positive?
+        "Still working: #{listed} (#{count_phrase(call_count, "tool call")})."
+      end
+
+      def worker_progress_text(text)
+        collapsed = present_string(text.to_s.gsub(/\s+/, " "))
+        return nil unless collapsed
+        return collapsed if collapsed.length <= WORKER_PROGRESS_MESSAGE_MAX_CHARS
+
+        "#{collapsed[0, WORKER_PROGRESS_MESSAGE_MAX_CHARS - 1].rstrip}\u2026"
+      end
+
+      def worker_progress_log_due?(previous, candidate, now)
+        last_text = previous.fetch("logged_text", nil).to_s
+        # Re-observing the same sentence is not progress, whatever the clock says.
+        return false if !last_text.empty? && last_text == candidate.fetch("text")
+
+        last_logged_at = parse_time_or_nil(previous.fetch("logged_at", nil))
+        # The first line a worker produces is never delayed: that is the one that proves the
+        # session is alive. A logged_at Meringue cannot parse also fails open, so a hand-edited
+        # record makes the worker chatty rather than silent.
+        return true unless last_logged_at
+
+        current = parse_time_or_nil(now)
+        return true unless current
+
+        interval = if candidate.fetch("kind") == "assistant_text"
+                     WORKER_PROGRESS_LOG_INTERVAL_SECONDS
+                   else
+                     WORKER_PROGRESS_TOOL_INTERVAL_SECONDS
+                   end
+        (current - last_logged_at) >= interval
+      end
+
       def stringify_keys(hash)
         hash.each_with_object({}) do |(key, value), result|
           result[key.to_s] = value.is_a?(Hash) ? stringify_keys(value) : value
@@ -13462,6 +13612,9 @@ module Meringue
           "state" => settle_poll_state(settled: settled, settle_failure: settle_failure),
           "session_ref" => state_ref,
           "events" => events,
+          # Only a session that is still running has mid-work progress worth reporting; a settled
+          # turn is about to log its real result instead.
+          "progress" => settled ? [] : session_progress_items(agent, client, events),
           "last_assistant_text" => assistant_text
         }
         result["settle_failure"] = settle_failure if settle_failure
@@ -13559,6 +13712,7 @@ module Meringue
           agent["updated_at"] = now
           refresh_worker_parent_statuses!(state, agent, now) if agent.fetch("type", nil) == "worker"
           log_ids = append_harness_event_logs(state, agent, poll_result.fetch("events", []))
+          log_ids.concat(record_worker_progress!(state, agent, poll_result.fetch("progress", []), now))
           log_ids.concat(append_recovery_success_log(state, agent, poll_result))
           touch_state!(state, now)
           store.save(state)

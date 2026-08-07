@@ -138,6 +138,39 @@ module Meringue
         end
       end
 
+      # Mid-work progress items for the main Meringue log, derived from raw Pi RPC events the
+      # kernel already drained. Only two Pi events carry usable progress:
+      #
+      #   * `message_end` — the *complete* assistant message, including its text blocks, emitted
+      #     before its tool calls execute. This is the model saying what it is about to do and
+      #     why, which is exactly the "decision" signal the log is missing.
+      #   * `tool_execution_start` — the tool name and arguments, used only as a fallback when a
+      #     long stretch of work produced no assistant text at all.
+      #
+      # Everything else is either noise (`message_update` fires per token) or already handled as
+      # a lifecycle/harness event by the kernel.
+      def progress_items(events)
+        Array(events).flat_map { |event| progress_items_for_event(event) }.compact
+      end
+
+      def progress_items_for_event(event)
+        return [] unless event.is_a?(Hash)
+
+        case event["type"].to_s
+        when "message_end"
+          message = event["message"].is_a?(Hash) ? event["message"] : {}
+          return [] unless message["role"].to_s == "assistant"
+
+          item = SessionProgress.assistant_text(message_content(message).fetch("text"))
+          item ? [item] : []
+        when "tool_execution_start"
+          item = SessionProgress.tool_call(event["toolName"], summary: SessionProgress.tool_summary(event["args"]))
+          item ? [item] : []
+        else
+          []
+        end
+      end
+
       def normalize_messages(messages)
         Array(messages).filter_map.with_index do |message, index|
           normalize_message(message, id: message["id"] || "message-#{index}") if message.is_a?(Hash)
