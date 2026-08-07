@@ -797,6 +797,8 @@ module Meringue
           # queued dependent looks identical to a worker whose session is still being provisioned.
           waiting = deferred_wait_marker(worker)
           return waiting unless waiting.empty?
+          completion_wait = completion_wait_marker(worker)
+          return completion_wait unless completion_wait.empty?
           return "replaces #{short_id(worker.fetch("replaces_agent_id"))}" if worker["replaces_agent_id"]
           return "after #{short_id(worker.fetch("follow_up_of_agent_id"))}" if unstarted_follow_up?(worker)
           return "replaced by #{short_id(worker.fetch("replaced_by_agent_id"))}" if worker["replaced_by_agent_id"]
@@ -831,6 +833,15 @@ module Meringue
           return verb.split.first if predecessor_id.empty?
 
           "#{verb} #{relationship_id(worker, predecessor_id)}"
+        end
+
+        def completion_wait_marker(worker)
+          metadata = worker["harness_metadata"]
+          continuation = metadata.is_a?(Hash) ? metadata["completion_continuation"] : nil
+          return "" unless continuation.is_a?(Hash) && continuation["state"].to_s == "waiting"
+
+          gate = gate_wait_label(continuation)
+          gate ? "routing after #{gate}" : ""
         end
 
         # A script-gated queued worker must read honestly in the tree: it is not "waiting on W1",

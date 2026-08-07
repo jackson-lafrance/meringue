@@ -232,6 +232,8 @@ Heads must not paper over sequencing inside a worker prompt. Never instruct a wo
 
 A queued worker may wait on two kinds of condition, and both live on the worker record rather than in a prompt or a timer: another agent settling (`after_agent_id`) and a bounded shell command the kernel polls until it passes (`after_command`). The second exists for events Meringue cannot observe as an agent settling, such as a review landing on a PR or an external job finishing. Both are the same queued-worker concept resolved by the same kernel seam; do not add a second scheduler for either.
 
+A completion-triggered head may wait on that same bounded predicate by putting `after_command` and its existing options inside the `completion_head` object. The worker completes, but its continuation remains queued on the completed worker record until the condition passes; no head or checker worker is spawned early. Queued workers and completion continuations share one kernel wait-gate evaluator and its timeout/cadence policies, while their existing owner-specific resolvers remain the only places that start workers or heads. This wait, including the eventual exactly-once continuation claim, must survive restarts.
+
 Do not introduce a parallel conversation-history model merely to route follow-ups. Pi or another harness owns detailed session history; Meringue should expose compact, generic routing metadata and lifecycle logs.
 
 ### Head project discovery
