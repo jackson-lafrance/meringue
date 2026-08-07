@@ -131,7 +131,7 @@ Agents should include the outcome of this review in their final response, especi
 
 ## Terminology
 AgentTree means the UI hierarchy of projects, issues, heads, and workers.
-Workspace means the filesystem directory where a worker harness session runs. To support multiple workers/subagents editing safely at the same time, prefer a dedicated git worktree per worker when the managed project is a git repository. A workspace may fall back to the project root or a dedicated directory only when worktrees are unavailable or explicitly disabled.
+Workspace means the filesystem directory where a worker harness session runs. To support multiple workers/subagents editing safely at the same time, prefer a dedicated git worktree per worker when the managed project is a git repository, except that a worker continuing a settled predecessor's line of work on the same issue shares that predecessor's worktree and branch. A workspace may fall back to the project root or a dedicated directory only when worktrees are unavailable or explicitly disabled.
 Harness means the underlying coding agent backend. Pi is the only required harness for the MVP, but the core architecture should not hard-code Pi outside the harness integration layer.
 Do not use WorkTree to mean AgentTree.
 
@@ -231,6 +231,8 @@ One durable goal is one issue, even when it needs several sequential steps. An i
 Heads must not paper over sequencing inside a worker prompt. Never instruct a worker to poll `~/.meringue/state.json`, sleep between checks, or wait hours for another worker to settle; the kernel owns dependent scheduling and hands the predecessor's report to the dependent worker itself.
 
 A queued worker may wait on two kinds of condition, and both live on the worker record rather than in a prompt or a timer: another agent settling (`after_agent_id`) and a bounded shell command the kernel polls until it passes (`after_command`). The second exists for events Meringue cannot observe as an agent settling, such as a review landing on a PR or an external job finishing. Both are the same queued-worker concept resolved by the same kernel seam; do not add a second scheduler for either.
+
+A completion-triggered head may wait on that same bounded predicate by putting `after_command` and its existing options inside the `completion_head` object. The worker completes, but its continuation remains queued on the completed worker record until the condition passes; no head or checker worker is spawned early. Queued workers and completion continuations share one kernel wait-gate evaluator and its timeout/cadence policies, while their existing owner-specific resolvers remain the only places that start workers or heads. This wait, including the eventual exactly-once continuation claim, must survive restarts.
 
 Do not introduce a parallel conversation-history model merely to route follow-ups. Pi or another harness owns detailed session history; Meringue should expose compact, generic routing metadata and lifecycle logs.
 
@@ -404,6 +406,8 @@ The logs pane should show:
 - important harness events such as Pi RPC `agent_start`, `agent_end`, tool execution start/end, and process exits
 - clarifying questions created and answered
 
+A live worker is not allowed to be silent for the whole length of its session either. While a worker session is streaming, the kernel derives a small number of mid-work progress lines from the session events reconciliation has *already* drained, attributed to that worker and its issue. `session_progress(events)` is a pure transform of that array rather than a second read, because some transports share one drain cursor and a second read would steal events from settle classification; a harness that cannot describe its own activity returns nothing and stays quiet. Progress is heavily floored (model-authored text at most once every two minutes per worker, a Meringue-authored tool-activity fallback at most once every five, consecutive duplicates dropped, each line truncated to a headline) so it can never bury kernel and user lines in the bounded log window. See `docs/agent-output.md`.
+
 Do not persist every streamed token from the harness as a log entry.
 Streaming output can be rendered live in the TUI, while durable logs should store important lifecycle events,
 final summaries, errors, and kernel state changes. Expected TUI unavailability (for example repeatedly clicking a pending head that has no focused worker workspace yet) must not append durable or visible chat/log messages; use a silent no-op or transient UI affordance, while preserving real operation failures.
@@ -471,8 +475,10 @@ Worker isolation is a kernel-owned responsibility.
 
 The kernel should allocate worker workspaces before spawning harness sessions, then pass the resolved workspace path to the harness client as `cwd`.
 For git-backed projects, the preferred allocation strategy is one git worktree per worker using a Meringue-owned, human-facing branch name derived from the issue/task title, such as `meringue/fix-signup-validation-a1b2c3d4`. Do not expose Meringue agent ids, worker ids, Pi ids, or subagent implementation details in workspace branch names.
+Sequential steps of one issue are the exception: a worker that continues a predecessor's line of work (queued behind it, its follow-up, its replacement, or the kernel's restart of an unreplayable session) keeps working in that predecessor's worktree and branch rather than provisioning a second checkout on a suffixed branch. Two live harness sessions must never share one worktree, so the kernel refuses to share and provisions a fresh worktree whenever the predecessor is not settled, the checkout is missing/unregistered/locked/moved to another branch, or its pull request already merged; every refusal is logged with its reason. Uncommitted work is not a refusal reason, because inheriting it is the point.
 Workspace metadata should be persisted on the agent record so sessions can be reconciled, resumed, killed, or cleaned up later.
-When pruning an issue or worker record, the kernel must ask the workspace manager to remove its associated Meringue-managed git worktree first. Cleanup must verify the configured workspace root, repository registration, persisted branch/path ownership, the main checkout, and other worker references. It must never force dirty or locked worktrees: retain the state bundle, log the structured failure, and allow a later prune to retry. Missing/already-removed worktrees are idempotent successes, and cleanup retains the delivery branch.
+When pruning an issue or worker record, the kernel must ask the workspace manager to remove its associated Meringue-managed git worktree first. Cleanup must verify the configured workspace root, repository registration, persisted branch/path ownership, the main checkout, and other worker references. It must never force dirty or locked worktrees: preserve the failed worktree and branch, log the structured failure, and still allow eligible terminal state records to be pruned. Missing/already-removed worktrees are idempotent successes, and cleanup retains the delivery branch.
+When pruning an issue or worker record, the kernel must ask the workspace manager to remove its associated Meringue-managed git worktree first. Cleanup must verify the configured workspace root, repository registration, persisted branch/path ownership, the main checkout, and other worker references. A shared worktree is removed only once no retained worker still needs it; the record of a settled sharer is pruned immediately, and the directory goes with the last sharer. It must never force dirty or locked worktrees: retain the state bundle, log the structured failure, and allow a later prune to retry. Missing/already-removed worktrees are idempotent successes, and cleanup retains the delivery branch.
 The TUI, heads, and harness clients should not directly create, prune, or mutate worktrees.
 
 ## Harness integration
@@ -491,6 +497,7 @@ The harness client should expose operations shaped like:
 - `set_session_thinking_level(session_ref, level)`
 - `available_models()`
 - `read_events(session_ref)`
+- `session_progress(events)`
 - `attach_session(session_ref)`
 
 Model catalogs are asked of the harness, never hand-maintained in Meringue. `available_models` returns a harness-neutral catalog (models plus each model's supported thinking levels) or an explicit unavailable/unsupported result. The kernel caches the snapshot in state metadata so input completion can offer every model for the selected harness without starting a harness process while the user types. `/models` opens the TUI model picker over that cached snapshot (searchable, keyboard-navigable, and applying a selection as `/model <provider>/<model-id>`), and `/models refresh` re-asks the harness through `GetModelCatalog` and reports the snapshot's state. Catalog listings belong in the picker, not in the log.

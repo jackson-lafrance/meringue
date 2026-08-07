@@ -157,6 +157,12 @@ module Meringue
         process.drain_events
       end
 
+      # `ManagedProcess` keeps one shared drain cursor, so progress is derived from the array the
+      # caller already drained instead of reading events a second time.
+      def session_progress(events)
+        SessionProgress.from_process_events(events)
+      end
+
       def attach_session(session_ref)
         session_ref.merge(
           "metadata" => metadata_with(session_ref, "attach_supported" => false, "attach_note" => "#{harness_name} terminal attach is handled by TerminalSessionOpener")

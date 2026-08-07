@@ -142,8 +142,12 @@ class KernelWorkersDeferredChainingTest < Minitest::Test
     engine.mark_worker_completed(agent_id: predecessor_id, last_assistant_text: "Secret findings.")
     spawn_prompt = @harness_client.spawns.last.fetch("prompt")
 
-    assert_equal "Do the independent follow-up.", spawn_prompt
+    assert_includes spawn_prompt, "Do the independent follow-up."
     refute_includes spawn_prompt, "Secret findings."
+    refute_includes spawn_prompt, "Original assignment"
+    # Turning the *handover* off says nothing about the workspace: this worker still continues in
+    # its settled predecessor's worktree, and is still told so.
+    assert_includes spawn_prompt, "--- Shared workspace ---"
   end
 
   def test_naming_an_already_completed_worker_starts_immediately_with_the_handover

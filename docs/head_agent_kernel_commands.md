@@ -267,7 +267,7 @@ Write the two prompts for the handover the kernel performs:
 
 - The research prompt says the step is investigation-only, whether a PR is expected, and that its **final message must be a self-contained report** (findings, recommendation, `file:line` citations), because that final message is what the kernel hands to the next worker.
 - The implementation prompt is just the instruction for its own step. The predecessor's report is appended automatically as a handover block, so refer to those findings freely instead of telling the worker where to look for them.
-- Both workers stay in their own kernel-assigned workspace. The implementer reads the handover, not the researcher's workspace.
+- The implementer continues in the researcher's worktree and branch, so anything the researcher left uncommitted is already in front of it. It still reads the handover for the findings; it does not go looking through Meringue state for them.
 
 Spawning only the researcher now and attaching the implementer in a later head turn (with `SpawnWorker` on that existing issue plus `follow_up_of_agent_id`) is still valid — for example when the user has not yet decided that implementation should follow. It is no longer the way to express "wait for the report": queue that with `after_from_command` in the same batch.
 
@@ -674,6 +674,8 @@ Example:
 
 Spawns a real worker harness session for an issue. The kernel owns workspace allocation before calling the harness. For git-backed projects, the kernel creates a dedicated Meringue-owned worktree/branch and passes that workspace to the harness. When the preferred `meringue/<slug>` branch or worktree path already exists, the kernel reuses the existing workspace when it belongs to that worker, and otherwise provisions a uniquified branch/path instead of failing the spawn, so the delivered branch name can carry a short numeric suffix. Use this directly on an existing issue for follow-up prompts instead of creating nested issues.
 
+A worker that continues another worker's line of work is different: it keeps working in that predecessor's worktree and branch instead of getting one of its own. See "Sharing one worktree between related workers".
+
 Workers receive standing guidance that they do not need to ask for user permission before editing files, committing, pushing, or opening/updating a PR when the assigned issue asks for those actions. Do not add worker prompts that tell them to wait for routine git/PR approval; do include requested delivery actions in the prompt, and let the worker report only true blockers such as missing auth, remote setup problems, branch/worktree collisions, unrelated work that would be overwritten, or unsafe/destructive operations. Workers should stay in the kernel-assigned workspace/branch unless it is unusable or the user explicitly asks for a different branch/worktree.
 
 Meringue must never be the author of a commit. A worker that commits must use the user's configured repository identity, never a Meringue/Meringue Worker identity or a Meringue `--author` override. If no non-Meringue identity is available, the worker must leave the change uncommitted and report that as a blocker. The harness environment preserves valid user identity settings and fails closed when the only available identity is Meringue; see [`commit-authorship.md`](commit-authorship.md).
@@ -684,7 +686,7 @@ Never write a prompt that makes a worker wait by polling: no reading `~/.meringu
 
 When the worker belongs to an issue this same HeadResult creates, set `issue_from_command` (or an `"@<command_id>"`/`"@index:<position>"` value in `issue_id`) instead of predicting the new issue id. See "Referencing an issue created in the same HeadResult".
 
-When the predecessor worker is spawned by this same HeadResult, reference its `SpawnWorker` command instead of predicting its agent id: set `follow_up_of_command` (a `command_id` or 0-based position), or write `follow_up_of_agent_id: "@<command_id>"`/`"@index:<position>"`. `replace_agent_id` accepts the same reference form through `replace_agent_from_command`, though a replaced worker almost always already exists. The referenced `SpawnWorker` must appear earlier in `commands`; the kernel resolves it to the worker id it minted and rejects an unresolvable reference with `batch_agent_reference_not_found`, `batch_agent_reference_out_of_order`, or `batch_agent_reference_unresolved`.
+When the predecessor worker is spawned by this same HeadResult, reference its `SpawnWorker` command instead of predicting its agent id: set `follow_up_of_command` (a `command_id` or 0-based position), or write `follow_up_of_agent_id: "@<command_id>"`/`"@index:<position>"`. `replace_agent_id` and `reuse_workspace_of_agent_id` accept the same reference form through `replace_agent_from_command` and `reuse_workspace_from_command`, though a replaced worker almost always already exists. The referenced `SpawnWorker` must appear earlier in `commands`; the kernel resolves it to the worker id it minted and rejects an unresolvable reference with `batch_agent_reference_not_found`, `batch_agent_reference_out_of_order`, or `batch_agent_reference_unresolved`.
 
 Worker delivery names should be human-facing. When a head supplies a worker title or prompt, prefer the issue/task title or requested change that should become the branch/PR name. Do not ask workers to put Meringue agent ids, worker ids, Pi ids, or subagent implementation details in branch names, PR titles, or PR metadata.
 
@@ -702,11 +704,14 @@ Payload:
   "follow_up_of_command": "Optional SpawnWorker command id or index in this batch instead of follow_up_of_agent_id",
   "replace_agent_id": "Optional worker on this issue to replace after spawn",
   "replace_agent_from_command": "Optional SpawnWorker command id or index in this batch instead of replace_agent_id",
+  "reuse_workspace_of_agent_id": "Optional worker on this issue whose worktree/branch this worker continues in, or \"@<command_id>\" for a worker this batch spawns",
+  "reuse_workspace_from_command": "Optional SpawnWorker command id or index in this batch instead of reuse_workspace_of_agent_id",
+  "share_workspace": "Optional false to keep a continuation worker in its own fresh worktree instead of the predecessor's",
   "after_agent_id": "Optional worker this one waits for before it starts, or \"@<command_id>\" for a worker this batch spawns",
   "after_from_command": "Optional SpawnWorker command id or index in this batch instead of after_agent_id",
   "if_predecessor_fails": "Optional cancel (default) or run",
   "include_predecessor_result": "Optional false to omit the predecessor's final report from this worker's prompt",
-  "completion_head": "Optional string or object with prompt: spawn a fresh head after this worker completes, with the worker's final report as context",
+  "completion_head": "Optional string or object with prompt: spawn a fresh head after this worker completes; the object may carry the same after_command gate fields to hold routing until an external condition passes",
   "after_command": "Optional shell command the kernel polls until it says go; the worker stays queued until then",
   "after_command_label": "Optional short human label for that condition, shown in the AgentTree and logs",
   "after_command_expect": "Optional exit_zero (default) or output_matches",
@@ -735,6 +740,48 @@ Example:
 }
 ```
 
+### Sharing one worktree between related workers
+
+One durable goal is one issue, and one issue often needs several sequential workers. Giving each of them its own worktree on its own `meringue/<slug>-2` branch splits one goal's delivery across several branches and several PRs, and leaves the successor unable to see what its predecessor had not committed yet.
+
+So a worker that continues a predecessor's line of work on the same issue **keeps working in that predecessor's worktree and branch**. That is the default; heads do not ask for it. It applies when the new worker is:
+
+- queued behind that worker (`after_agent_id`/`after_from_command`),
+- marked as its follow-up (`follow_up_of_agent_id`/`follow_up_of_command`),
+- replacing it (`replace_agent_id`),
+- or the kernel's own restart of a session the provider refuses to replay.
+
+When several of those point at different workers, the kernel prefers `after_agent_id`, then `follow_up_of_agent_id`, then `replace_agent_id`.
+
+Two extra fields exist for the cases the default cannot infer:
+
+- `reuse_workspace_of_agent_id` (or `reuse_workspace_from_command`) names the worker to continue from when there is no other relationship to read it from — for example a second implementation pass that is neither a queued successor nor a formal follow-up. The named worker must be on the same issue (`reuse_workspace_agent_not_found`, `reuse_workspace_agent_issue_mismatch`).
+- `share_workspace: false` opts a continuation worker out, and is the right field when two steps must be able to run against different checkouts — for example trying a second, competing approach while the first is still on the branch. `share_workspace: true` is only an explicit way to ask for the default, and is rejected when there is no related worker to share with (`share_workspace_requires_a_related_worker`).
+
+An explicit `workspace_path` always wins; a caller that chose a directory is not overridden. `share_workspace` cannot be combined with `reuse_workspace_of_agent_id` (`share_workspace_conflicts_with_reuse_workspace_of_agent_id`) or with `workspace_path` (`workspace_path_conflicts_with_reuse_workspace_of_agent_id`).
+
+#### When the kernel refuses to share
+
+Two live harness sessions must never write one worktree. Whenever the kernel cannot prove the checkout is free and healthy it provisions a fresh worktree instead, logs one line saying which worker it did not share with and why, and the spawn succeeds. A refusal is never an error a head has to handle. The reasons are:
+
+- the predecessor is still `queued`, `working`, `idle`, or `blocked`, or another worker already took that worktree over,
+- its worktree is gone from disk, is no longer registered with the repository, moved to another branch, is detached, or is locked,
+- the branch's pull request is already merged, so continuing on it would deliver nothing,
+- the predecessor never had a worktree (a project-root or caller-supplied workspace),
+- git could not be inspected in time.
+
+A dirty worktree is *not* a refusal reason: uncommitted work is exactly what a successor is meant to inherit.
+
+That is also why `replace_agent_id` usually does *not* share: the worker being replaced is normally still live when the replacement spawns, so the replacement gets its own worktree. It shares only when the replaced session had already settled.
+
+#### What the shared worker is told
+
+The prompt gains a short `--- Shared workspace ---` block naming the worker whose worktree it is, the path, the branch, and any open pull request on it, with the instruction to **update that pull request rather than open a second one**. One branch is one PR, however many workers worked on it.
+
+#### Lifecycle
+
+A shared worktree is removed by `/prune` only once no worker still needs it. Pruning a settled sharer while another worker is still using the checkout removes the record and leaves the directory alone; the worktree is removed on the pass that prunes the last sharer, and the branch survives as always.
+
 ### Completion-triggered head routing
 
 Use `completion_head` when the next routing decision depends on the worker's final report, not when the next step is already known. For example, spawn one investigation worker to list app sections, then have a completion head read that report and decide how many follow-up workers to spawn. The continuation is kernel-owned: the worker does not poll Meringue state, sleep, or wait for another session.
@@ -752,7 +799,32 @@ Use `completion_head` when the next routing decision depends on the worker's fin
 
 When the worker completes, the kernel records the final report, claims the continuation exactly once, spawns a fresh stateless head, and includes a bounded worker-result block in that head's prompt. If Meringue was down when the worker was marked completed, the next `ReconcileSessions` pass triggers the same continuation. The spawned head routes normal kernel commands (`SpawnWorker`, `PromptAgent`, questions, etc.) through the usual validation and journaling path.
 
-Use `after_agent_id` instead when the next worker is already known and only needs the predecessor's handover. Use `completion_head` when a head must inspect the result and choose dynamic fan-out or a different follow-on route.
+When that routing decision must not happen until an external condition changes, put the ordinary `after_command` fields **inside** the `completion_head` object:
+
+```json
+{
+  "completion_head": {
+    "prompt": "Read the delivery report and route the work needed after the pair review lands.",
+    "include_worker_result": true,
+    "after_command": "gh pr view --json reviewDecision --jq .reviewDecision | grep -qE 'APPROVED|CHANGES_REQUESTED'",
+    "after_command_label": "pair review on the delivery PR",
+    "after_command_cwd": "workspace",
+    "after_command_interval_seconds": 120,
+    "after_command_max_wait_seconds": 14400
+  }
+}
+```
+
+The worker may complete, but no head or checker worker starts yet. Its completed worker record keeps the continuation plus the disarmed gate; completion arms the gate, and the shared kernel wait-gate pass polls it under the same bounds as a queued worker's `after_command`. On success, the head receives both the worker report and the gate's bounded last output. The issue remains `working` while this continuation is queued. The persisted command, deadline, check count, next-check time, and continuation claim survive restarts. The ownership claim prevents concurrent spawns, the existing-head lookup recovers a crash after spawn, and applying that head checkpoints the source continuation in the same state transaction before removing the head, so the eventual routing is exactly once even across the apply/cleanup crash window.
+
+All ordinary gate options and policies have the same meaning here: `after_command_expect`/`after_command_pattern`, `after_command_cwd`, interval, per-check timeout, max wait, and `if_gate_expires`. The wait budget starts when the worker completes, not when it starts. Default expiry cancels the continuation with a warning; `if_gate_expires: "run"` starts the head anyway and tells it the condition did not resolve. Invalid nested gates reject `SpawnWorker` before a harness session starts rather than silently dropping the wait.
+
+Choose where the condition belongs:
+
+- Use `after_agent_id` when the next worker is already known and only needs the predecessor's handover.
+- Use top-level `after_command` when the next worker is known but should not start until the external condition passes.
+- Use `completion_head.after_command` when a head must inspect the worker result and make a dynamic routing decision, but even that decision must wait for a known external condition.
+- If a completion head can only discover the condition from the final report (for example the report contains the new PR URL), have that head queue the **real follow-up worker** with top-level `after_command`. Do not launch a worker whose only job is to check once and recursively request another completion head; that is the short-lived-worker churn kernel gates exist to avoid.
 
 ### Chaining a worker after another agent
 
@@ -811,6 +883,8 @@ Naming the predecessor:
 Handover is automatic, not something you template. When the queued worker starts, the kernel appends a bounded `--- Handover from <predecessor id> ---` block to the prompt you supplied, containing the predecessor's settle status, issue, delivery branch, and its final report text. Write the dependent's `prompt` as the instruction for its own step, and refer to the predecessor's findings freely; they will be in front of it.
 
 Set `"include_predecessor_result": false` when the second worker must not see the first one's output (for example genuinely independent work that only needs to run afterwards for workspace reasons).
+
+The queued worker also starts in the predecessor's own worktree and branch, because by the time it runs that predecessor has settled and its checkout is free. Turning the report off does not turn that off; use `"share_workspace": false` for that. See "Sharing one worktree between related workers".
 
 #### What happens when the predecessor does not complete
 
@@ -1339,7 +1413,7 @@ What is retained:
 - An issue whose worker is the predecessor of a worker that is still queued behind it (`pending_deferred_dependents`), so a queued dependent can never lose the agent it is waiting for.
 - An issue whose subtree has an open question.
 - An issue with an attached PR that is open (including a draft) or whose status cannot be resolved. Merged and closed-without-merge PRs are settled and do not block pruning.
-- A bundle whose managed worktree cannot be removed safely. Dirty and locked worktrees are never forced; ownership/path/branch mismatches and git failures also retain the record so a later `/prune` can retry.
+- A managed worktree is never removed when cleanup is unsafe. Dirty and locked worktrees are never forced; ownership/path/branch mismatches and git failures preserve the worktree while the otherwise-eligible records are pruned.
 
 How a merged PR is resolved:
 
@@ -1353,10 +1427,10 @@ One pass, one line:
 - Retention sentences are appended to that same line, so `/prune` stays one visible line even when it retains records.
 - The killed-record cleanup inside `ReconcileSessions` reports the same counts with a `Pruned killed records:` prefix, and only when it actually removed something.
 
-Why a record was retained is always reported:
+Why a record was retained or a worktree was preserved is always reported:
 
-- The prune log details carry `retained_issue_ids`, `retention_reasons` (per-issue blockers, unverified/open PR URLs, blocking workers, questions, worktree blockers), and a `forge_lookup` summary (`budget_seconds`, `elapsed_seconds`, `budget_exhausted`, `status_lookup_count`, `branch_lookup_count`, `trusted_from_state_urls`, `unavailable_urls`).
-- The prune message names the reasons the user cannot see in the AgentTree: `Retained 2 issues because Meringue could not verify their pull request status: P1-I20, P1-I21 (the 15s forge lookup budget was exhausted).` and `Retained 1 worker because their managed worktree could not be removed: P1-I1-W1 (worktree_dirty).` Those retentions are logged at `warning`; nonterminal issues, live workers, and open questions stay `info` because they are visible in the tree.
+- The prune log details carry `retained_issue_ids`, `retention_reasons` (per-issue lifecycle/PR blockers, unverified/open PR URLs, blocking workers, and questions), `workspace_cleanup_outcomes` (including failures that did not retain eligible records), and a `forge_lookup` summary (`budget_seconds`, `elapsed_seconds`, `budget_exhausted`, `status_lookup_count`, `branch_lookup_count`, `trusted_from_state_urls`, `unavailable_urls`).
+- The prune message names the reasons the user cannot see in the AgentTree: `Retained 2 issues because Meringue could not verify their pull request status: P1-I20, P1-I21 (the 15s forge lookup budget was exhausted).` and `Preserved 1 managed worktree because cleanup was not safe: P1-I1-W1 (worktree_dirty).` Cleanup failures are logged at `warning`; nonterminal issues, live workers, and open questions stay `info` because they are visible in the tree.
 
 Worktree cleanup safety and outcomes:
 
@@ -1364,7 +1438,7 @@ Worktree cleanup safety and outcomes:
 - The persisted worktree path must still be registered to the persisted `meringue/…` branch in the expected repository and must not be the main checkout or overlap a path referenced by another worker.
 - Clean, unlocked worktrees are removed with `git worktree remove` **without** `--force`. The branch is not deleted.
 - A missing but still-registered worktree is safely deregistered. A worktree already absent from both disk and git's registry is an idempotent success.
-- Dirty, locked, ambiguous, or failed cleanups leave the issue/worker record in state, and each one is logged individually at `warning`. Successful cleanups are counted by the pass summary instead of getting a line each. Every worker stores its latest `harness_metadata.workspace_cleanup` result, and the `Prune` result and log details expose `workspace_cleanup_outcomes`, `removed_worktree_agent_ids`, and the blocked agent/issue/project IDs.
+- Dirty, locked, ambiguous, or failed cleanups leave the worktree and branch untouched, and each one is logged individually at `warning`; the eligible issue/worker records still leave state. Successful cleanups are counted by the pass summary instead of getting a line each. Every attempted worker stores its latest `harness_metadata.workspace_cleanup` result before removal, and the `Prune` result and log details expose `workspace_cleanup_outcomes`, `removed_worktree_agent_ids`, and the cleanup-blocked agent/issue/project IDs.
 
 PR checks are conservative and bounded. The kernel performs them outside the state lock,
 looks up each URL once, seeds the cache with pull requests already recorded as merged, and
@@ -1384,7 +1458,9 @@ Example:
 
 ### Recount
 
-Compacts project, issue, worker, and question ids after records are removed, and backs the user-facing `/recount` command. "renumber the tree", "recount the ids", and "tidy the numbering after that prune" all map here. Head ids are never renamed.
+Compacts project, issue, worker, question, and goal ids after records are removed, and backs the user-facing `/recount` command. "renumber the tree", "recount the ids", and "tidy the numbering after that prune" all map here. Head ids are never renamed.
+
+Compacting reuses ids, so the pass also resolves every id already written about a record: references and narrative text follow a renamed record, and an id whose record is gone is cleared in live slots and marked `(old id)` in history so it cannot be read as the record that inherited the id. See `docs/recount.md`.
 
 Takes no payload. The kernel rejects the pass while another head's result is still in flight; the head that proposed the command does not block itself. Because Recount renames existing ids, propose it as the only command in the batch, or as the last one, and never mix it with commands that reference ids that are about to change.
 

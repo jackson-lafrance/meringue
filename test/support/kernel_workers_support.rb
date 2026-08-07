@@ -45,6 +45,13 @@ module KernelWorkersSupport
       Array(@events)
     end
 
+    # Mirrors a harness that can derive mid-work progress from its own event stream. Events are
+    # supplied to this client in raw Pi RPC shape, so kernel tests drive the real extractor
+    # instead of a hand-written progress list.
+    def session_progress(events)
+      Meringue::Harness::PiSessionView.progress_items(events)
+    end
+
     # Read-only transcript view used by the worker session UI boundary. The
     # reported session_state is what drives automatic prompt-mode selection.
     def open_session_view(session_ref)
@@ -281,14 +288,15 @@ module KernelWorkersSupport
   end
 
   def build_engine(harness_client: @harness_client, head_runner: Meringue::Heads::FakeRunner.new,
-                   workspace_manager: self.workspace_manager, cwd: tmpdir)
+                   workspace_manager: self.workspace_manager, cwd: tmpdir,
+                   forge_client: OfflineForgeClient.new)
     Meringue::Kernel::Engine.new(
       store: store,
       harness_client: harness_client,
       head_runner: head_runner,
       workspace_manager: workspace_manager,
       cwd: cwd,
-      forge_client: OfflineForgeClient.new,
+      forge_client: forge_client,
       config_path: tmp_path("config.toml")
     )
   end

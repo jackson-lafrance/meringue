@@ -74,6 +74,20 @@ module Meringue
         raise NotImplementedError, "harness clients must implement #read_events"
       end
 
+      # Mid-work progress derived from events the caller already drained.
+      #
+      # This is deliberately a *pure* transform of an event array rather than another read: some
+      # transports (see `ProcessClient::ManagedProcess`) keep a single shared drain cursor, so a
+      # second `read_events` call for progress would steal events from reconciliation and break
+      # settle classification. The kernel therefore drains once and hands the same array here.
+      #
+      # Returns `Harness::SessionProgress` items. The default is `[]`: a harness that cannot
+      # supply session events simply has no derived progress, and every other behaviour (settle
+      # classification, logging, the workspace pane) is unaffected.
+      def session_progress(_events)
+        []
+      end
+
       # Harness-neutral outcome of the session's most recent turn.
       #
       # A session that is no longer streaming has not necessarily finished its

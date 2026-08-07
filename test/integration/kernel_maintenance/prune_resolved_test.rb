@@ -321,7 +321,7 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     assert_includes p3.fetch("blockers"), "project_not_terminal"
   end
 
-  def test_prune_retains_a_worker_when_managed_worktree_ownership_cannot_be_verified
+  def test_prune_removes_worker_when_managed_worktree_ownership_cannot_be_verified
     workspace = make_dir("workspaces", "acme", "fix-signup-a1b2c3d4")
     File.write(File.join(workspace, "NOTES.md"), "worker output\n")
     write_state(
@@ -343,12 +343,15 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
 
     result = apply_command(engine, "Prune", "selector" => "resolved")
 
-    assert_empty result.dig("result", "removed_agent_ids")
+    assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
+    assert_equal ["P1-I1-W1"], result.dig("result", "removed_agent_ids")
     assert_equal ["P1-I1-W1"], result.dig("result", "workspace_cleanup_blocked_agent_ids")
     assert_equal "branch_not_meringue_managed", result.dig("result", "workspace_cleanup_outcomes", 0, "reason")
+    assert_equal "Pruned 1 issue, 1 agent, 0 worktrees, and 0 projects. Preserved 1 managed worktree " \
+                 "because cleanup was not safe: P1-I1-W1 (branch_not_meringue_managed).", result.fetch("message")
     assert Dir.exist?(workspace), "prune must not guess that an unverified directory is safe to delete"
     assert_equal "worker output\n", File.read(File.join(workspace, "NOTES.md"))
-    assert_equal ["P1-I1-W1"], ids(read_state.fetch("agents"))
+    assert_empty read_state.fetch("agents")
   end
 
   def test_prune_removes_head_records_related_to_pruned_work
