@@ -29,4 +29,5 @@ Gem::Specification.new do |spec|
   spec.bindir = "bin"
   spec.executables = ["meringue"]
   spec.require_paths = ["lib"]
+  spec.add_runtime_dependency "base64", ">= 0.2"
 end

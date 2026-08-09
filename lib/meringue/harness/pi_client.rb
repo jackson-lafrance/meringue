@@ -19,6 +19,10 @@ module Meringue
       # How long a takeover waits for another instance's in-flight turn to
       # settle before reporting an actionable conflict.
       DEFAULT_TAKEOVER_SETTLE_TIMEOUT = 5.0
+      INTERACTIVE_HANDOFF_TIMEOUT = 10.0
+      INTERACTIVE_HANDOFF_PROMPT = "Continue the interrupted worker turn from this saved Pi session. " \
+                                   "Review the partial assistant/tool state, preserve the user's original intent, " \
+                                   "and finish or continue the task without repeating completed work."
       TAKEOVER_POLL_INTERVAL = 0.25
       TAKEOVER_EXIT_TIMEOUT = 5.0
 
@@ -536,7 +540,7 @@ module Meringue
 
       def attach_session(session_ref)
         process = process_for(session_ref, required: false)
-        return get_state(session_ref) if process
+        return preserve_session_identity(get_state(session_ref), session_ref) if process
         if unmanaged_process_alive?(session_ref)
           raise SessionTransportUnavailableError,
                 "Refusing to start a second Pi process while the saved process is still alive"
@@ -560,7 +564,7 @@ module Meringue
         state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
         resumed_ref = build_session_ref(process, state, kind: metadata_value(session_ref, "kind"), cwd: expanded_cwd,
                                                         session_name: session_name)
-        attached_ref = resumed_ref.merge(
+        attached_ref = preserve_session_identity(resumed_ref, session_ref).merge(
           "metadata" => metadata_with(
             session_ref,
             resumed_ref.fetch("metadata", {}).merge(
@@ -578,6 +582,58 @@ module Meringue
           process.terminate(timeout: shutdown_timeout)
         end
         raise
+      end
+
+      def interactive_session_supported?
+        true
+      end
+
+      # Quiesce the dashboard-owned RPC process before a native Pi interactive process is started.
+      # Pi has no transfer API: an active turn is aborted and its durable session is then reopened
+      # with a deterministic continuation prompt. The caller must not launch the returned argv until
+      # this method succeeds; at that point the RPC writer has been terminated and released.
+      def prepare_interactive_session(session_ref)
+        current_ref = preserve_session_identity(get_state(session_ref), session_ref)
+        was_streaming = current_ref.fetch("is_streaming", false)
+        events = []
+
+        if was_streaming
+          process = process_for(current_ref)
+          rpc_data(process.request({ "type" => "abort" }, timeout: command_timeout), allow_nil_data: true)
+          settled_ref = preserve_session_identity(get_state(current_ref), current_ref)
+          if settled_ref.fetch("is_streaming", false)
+            wait_for_event(current_ref, type: "agent_settled", timeout: INTERACTIVE_HANDOFF_TIMEOUT)
+          end
+          current_ref = preserve_session_identity(get_state(current_ref), current_ref)
+        end
+
+        events.concat(read_events(current_ref))
+        raise SessionTransportUnavailableError, "Pi session did not settle before interactive handoff" if current_ref.fetch("is_streaming", false)
+
+        handoff_prompt = was_streaming ? INTERACTIVE_HANDOFF_PROMPT : nil
+        killed_ref = kill_session(current_ref)
+        detached_ref = killed_ref.merge(
+          "pid" => nil,
+          "is_streaming" => false,
+          "metadata" => metadata_with(
+            current_ref,
+            "interactive_handoff_ready" => true,
+            "interactive_handoff_prompt" => handoff_prompt,
+            "interactive_handoff_event_count" => events.length,
+            "killed" => nil,
+            "kill_note" => nil
+          ).compact
+        )
+        {
+          "session_ref" => detached_ref,
+          "interactive_argv" => interactive_session_argv(detached_ref, handoff_prompt: handoff_prompt),
+          "interactive_env" => process_environment(detached_ref.fetch("cwd", Dir.pwd)),
+          "handoff" => interactive_handoff_metadata(was_streaming: was_streaming, events: events, prompt: handoff_prompt)
+        }
+      end
+
+      def resume_dashboard_session(session_ref)
+        attach_session(session_ref)
       end
 
       def wait_for_event(session_ref, type:, timeout: event_timeout)
@@ -1036,6 +1092,46 @@ module Meringue
 
       def monotonic_time
         Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      def preserve_session_identity(current_ref, previous_ref)
+        current_ref.merge(
+          "session_file" => current_ref.fetch("session_file", nil) || previous_ref.fetch("session_file", nil),
+          "session_id" => current_ref.fetch("session_id", nil) || previous_ref.fetch("session_id", nil),
+          "cwd" => current_ref.fetch("cwd", nil) || previous_ref.fetch("cwd", nil)
+        ).compact
+      end
+
+      def interactive_session_argv(session_ref, handoff_prompt: nil)
+        session = resume_session_argument(session_ref)
+        argv = Array(command).map(&:to_s)
+        argv += ["--session-dir", File.expand_path(session_dir)] if present?(session_dir)
+        argv += ["--session", session]
+        session_name = metadata_value(session_ref, "session_name")
+        argv += ["--name", session_name.to_s] if present?(session_name)
+        argv += without_options(extra_args, "--model", "--thinking")
+        argv << handoff_prompt.to_s if present?(handoff_prompt)
+        argv
+      end
+
+      def interactive_handoff_metadata(was_streaming:, events:, prompt:)
+        progress = PiSessionView.progress_items(events)
+        {
+          "mode" => "native_interactive",
+          "transfer" => "checkpointed_abort",
+          "exact_stream_transfer" => false,
+          "was_streaming" => !!was_streaming,
+          "prompt" => prompt,
+          "captured_event_count" => events.length,
+          "last_progress" => progress.last(20),
+          "tool_call_ids" => events.filter_map do |event|
+            next unless event.is_a?(Hash)
+
+            event["toolCallId"] || event.dig("message", "content")&.filter_map do |part|
+              part["id"] if part.is_a?(Hash) && part["type"] == "toolCall"
+            end
+          end.flatten.uniq.last(50)
+        }.compact
       end
 
       def build_argv(session_name:, system_prompt:, session: nil)
