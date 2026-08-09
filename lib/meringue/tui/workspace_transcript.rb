@@ -66,6 +66,20 @@ module Meringue
       timestamp = item.fetch("timestamp", nil)
       entries = []
 
+      # Control records from a Pi session (compaction, branch summaries, model changes, and
+      # visible extension messages) are already normalized by the harness adapter. They are
+      # session output, not Meringue log entries, so render them in the same stream without
+      # trying to infer a fake assistant message.
+      if item.fetch("kind", nil).to_s == "notice" && item.fetch("content", item.fetch("text", "")).to_s.strip != ""
+        entries << transcript_entry(role, item.fetch("content", item.fetch("text", "")), item, timestamp: timestamp, part: "notice")
+        return entries
+      end
+
+      if role == "custom"
+        text = item.fetch("content", item.fetch("text", "")).to_s.strip
+        return text.empty? ? entries : [transcript_entry("system", text, item, timestamp: timestamp, part: "custom")]
+      end
+
       # Streaming deltas are fragments of the message that is being built.
       # They must never be attributed to another category: a reasoning delta
       # rendered as assistant output is what produced stray tail fragments
@@ -104,7 +118,8 @@ module Meringue
 
       text = item.fetch("content", item.fetch("text", "")).to_s.strip
       text_partial = false
-      if text.empty? && streaming_delta && !reasoning_delta
+      tool_call_delta = delta_type.start_with?("toolcall_") || delta_type.start_with?("tool_call_")
+      if text.empty? && streaming_delta && !reasoning_delta && !tool_call_delta
         text = delta_text.strip
         text_partial = true
       end
@@ -123,6 +138,17 @@ module Meringue
         next unless call.is_a?(Hash)
 
         entries << tool_call_entry(call, timestamp: timestamp)
+      end
+
+      if tool_call_delta
+        call = {
+          "id" => item.fetch("tool_call_id", nil),
+          "name" => item.fetch("tool_name", nil),
+          "arguments" => item.fetch("tool_arguments", delta_text)
+        }.compact
+        unless call.empty? || (call.fetch("name", "").to_s.empty? && call.fetch("arguments", "").to_s.empty?)
+          entries << tool_call_entry(call, timestamp: timestamp)
+        end
       end
 
       if item.fetch("is_error", false)
