@@ -2459,7 +2459,16 @@ module Meringue
         @workspace_leader_pending = false
         @agent_workspace_notice = nil
         @agent_workspace_error = nil
-        @chat_mutex.synchronize { @agent_workspace_events[agent.fetch("id")] = [] }
+        @chat_mutex.synchronize do
+          event_key = agent.fetch("id").to_s
+          @agent_workspace_events[event_key] = []
+          # A reopened view has a fresh journal cursor and will replay the managed
+          # session's retained events. Invalidate the old frozen presentation too;
+          # otherwise a worker with no new events can briefly render fragments from
+          # the previous focus session instead of the fresh replay.
+          @agent_workspace_events_revision[event_key] += 1
+          @agent_workspace_events_cache.delete(event_key)
+        end
         @selected_agent_id = agent.fetch("id")
         @agent_tree_navigation_active = true
         @focused_pane = "agent_tree"

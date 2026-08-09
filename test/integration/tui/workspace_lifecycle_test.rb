@@ -106,4 +106,21 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     assert_equal 1, view.resumed
     assert_equal 0, view.cancelled
   end
+
+  def test_reentering_focus_drops_stale_transient_events_before_replay
+    assert @app.send(:open_agent_workspace_by_id, @state, "P1-I1-W1")
+    @app.send(
+      :reduce_agent_workspace_events,
+      "P1-I1-W1",
+      [{ "kind" => "message", "id" => "old-fragment", "role" => "assistant", "content" => "old fragment" }]
+    )
+    assert_equal ["old-fragment"], @app.send(:frozen_agent_workspace_events, "P1-I1-W1").map { |event| event.fetch("id") }
+
+    @app.send(:close_agent_workspace)
+    assert @app.send(:open_agent_workspace_by_id, @state, "P1-I1-W1")
+
+    # The new read-only view will replay retained Pi events on its first poll. Until
+    # then it must not render the prior view's frozen event array.
+    assert_empty @app.send(:frozen_agent_workspace_events, "P1-I1-W1")
+  end
 end
