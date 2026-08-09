@@ -102,9 +102,9 @@ The default on `Harness::Client` is `[]`, so a backend that cannot describe its 
 - the *first* authored line a worker produces is never delayed;
 - authored text is then floored at one line per **2 minutes** per worker (at most 30/hour);
 - consecutive identical text is dropped outright, so a repeated sentence never spends a slot;
-- each line is collapsed to one line and truncated to 240 characters with a trailing `…`.
+- each update is normalized to one readable line, but its authored content is retained; the logs pane wraps the complete line to the available width.
 
-These floors exist because the retained log window is bounded at 500 entries (see [`log-retention.md`](log-retention.md)). Without them, three concurrent narrating workers would evict every kernel and user line within the hour.
+The time floor exists because the retained log window is bounded at 500 entries (see [`log-retention.md`](log-retention.md)). Without it, three concurrent narrating workers would evict every kernel and user line within the hour. The content is not shortened for the dashboard: the complete authored update is retained and the logs pane wraps it to the available width. Harness/state safety limits still apply at their own boundaries.
 
 **Persistence and lifecycle.** Progress lines are ordinary durable log entries: `source_type: "worker"`, `source_id` the worker id, `level: "info"`, and `details.kind == "worker_progress"` (plus `progress_kind`, `issue_id`, and `project_id`). They are attributed to the worker exactly like its completion line, so the logs pane renders them with the worker's own colour and the `✦` progress marker, the AgentTree log scope filters them with the rest of that worker's history, and `details.kind` makes them identifiable for any future filter. They age out through the normal 500-entry window; `/prune` does not remove log entries at all, and `/recount` rewrites their `source_id` and `details` ids through the same reference walk it applies to every other record.
 

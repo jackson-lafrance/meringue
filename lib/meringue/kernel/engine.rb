@@ -96,10 +96,9 @@ module Meringue
       # (<= 30/hour). Raw tool activity is never turned into Meringue-authored progress; when the
       # agent has not emitted a semantic update, the log truthfully stays quiet.
       # Consecutive identical text is dropped outright, so a repeated message never spends a slot.
+      # Content is kept intact here; the log pane wraps it to the available width. Rate limiting
+      # bounds log volume without making a worker's report unreadable.
       WORKER_PROGRESS_LOG_INTERVAL_SECONDS = 120
-      # Progress is a headline, not a transcript: the focused workspace pane and the harness
-      # session file already hold the full text.
-      WORKER_PROGRESS_MESSAGE_MAX_CHARS = 240
       # A harness turn that ends is not automatically a turn that finished. These are the
       # harness-reported turn outcomes that mean the work stopped without a result, so the
       # agent must settle as `errored` with a visible reason instead of as `completed`.
@@ -13234,11 +13233,7 @@ module Meringue
       end
 
       def worker_progress_text(text)
-        collapsed = present_string(text.to_s.gsub(/\s+/, " "))
-        return nil unless collapsed
-        return collapsed if collapsed.length <= WORKER_PROGRESS_MESSAGE_MAX_CHARS
-
-        "#{collapsed[0, WORKER_PROGRESS_MESSAGE_MAX_CHARS - 1].rstrip}\u2026"
+        present_string(text.to_s.gsub(/\s+/, " "))
       end
 
       def worker_progress_log_due?(previous, candidate, now)
