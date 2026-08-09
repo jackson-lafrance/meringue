@@ -8,6 +8,31 @@ require "support/workspace_support"
 class WorkspaceControllerTest < Minitest::Test
   include WorkspaceSupport
 
+  class InteractiveFocusDouble
+    attr_reader :begun, :started, :ended
+
+    def initialize
+      @begun = []
+      @started = []
+      @ended = []
+    end
+
+    def begin_agent_interactive_focus(agent_id)
+      @begun << agent_id
+      { "status" => "accepted", "result" => { "interactive_argv" => ["pi", "--session", "session.json"], "interactive_env" => {} }, "message" => "prepared" }
+    end
+
+    def mark_agent_interactive_focus_started(agent_id, pid:)
+      @started << [agent_id, pid]
+      { "status" => "accepted", "message" => "started" }
+    end
+
+    def end_agent_interactive_focus(agent_id)
+      @ended << agent_id
+      { "status" => "accepted", "message" => "resumed" }
+    end
+  end
+
   def setup
     @sessions = []
     @editor = WorkspaceSupport::FakeEditorLauncher.new
@@ -23,6 +48,49 @@ class WorkspaceControllerTest < Minitest::Test
 
       assert_equal "opened", result.fetch("status")
       assert_equal "Focused P1-I1-W1 in #{workspace}.", result.fetch("message")
+    ensure
+      controller&.close
+    end
+  end
+
+  def test_open_workspace_runs_native_pi_in_the_focus_pty_and_resumes_on_close
+    with_workspace_tmpdir do |tmp|
+      workspace = File.join(tmp, "worktree")
+      FileUtils.mkdir_p(workspace)
+      focus = InteractiveFocusDouble.new
+      controller = Meringue::Workspace::Controller.new(
+        terminal_manager: Meringue::Workspace::TerminalManager.new(
+          session_factory: lambda {
+            session = WorkspaceSupport::FakeTerminalSession.new(output: "Pi ready\r\n")
+            @sessions << session
+            session
+          }
+        ),
+        editor_launcher: @editor,
+        focus_session_service: focus,
+        interactive_session_factory: lambda { |command:, env:|
+          assert_equal ["pi", "--session", "session.json"], command
+          assert_equal({}, env)
+          session = WorkspaceSupport::FakeTerminalSession.new(output: "Pi ready\r\n")
+          @sessions << session
+          session
+        }
+      )
+      agent = worker_agent(workspace_path: workspace, **{ "harness" => "pi" })
+
+      opened = controller.open_workspace(agent: agent, rows: 10, columns: 30)
+      assert_equal "active", opened.fetch("status")
+      assert_equal true, opened.fetch("interactive")
+      assert_equal [[agent.fetch("id"), 4242]], focus.started
+
+      snapshot = controller.agent_snapshot(agent: agent, rows: 10, columns: 30)
+      assert_equal true, snapshot.fetch("interactive")
+      assert_equal ["Pi ready", ""], snapshot.fetch("lines")
+      assert_equal({ "status" => "written", "bytes" => 2 }, controller.handle_agent_key(key: "x\n", agent: agent))
+
+      closed = controller.close_workspace(agent: agent)
+      assert_equal "closed", closed.fetch("status")
+      assert_equal [agent.fetch("id")], focus.ended
     ensure
       controller&.close
     end

@@ -43,6 +43,36 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     end
   end
 
+  class InteractiveController
+    attr_reader :keys, :closed
+
+    def initialize
+      @keys = []
+      @closed = 0
+    end
+
+    def open_workspace(agent:, state:, rows:, columns:)
+      _ = [agent, state, rows, columns]
+      { "status" => "active", "interactive" => true, "message" => "native Pi focus" }
+    end
+
+    def agent_snapshot(agent:, state:, rows:, columns:)
+      _ = [agent, state, rows, columns]
+      { "interactive" => true, "lines" => ["Pi output"], "styled_lines" => [[ ["Pi output", nil] ]], "cursor" => [0, 2], "revision" => 7, "status" => "running" }
+    end
+
+    def handle_agent_key(key:, agent:, state:)
+      _ = [agent, state]
+      @keys << key
+      { "status" => "written", "bytes" => key.to_s.bytesize }
+    end
+
+    def close_workspace(agent:)
+      @closed += 1
+      { "status" => "closed", "message" => "resumed" }
+    end
+  end
+
   class RecordingService
     attr_reader :views
 
@@ -105,6 +135,34 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     @app.send(:switch_agent_workspace_view, @state)
     assert_equal 1, view.resumed
     assert_equal 0, view.cancelled
+  end
+
+  def test_native_pi_focus_uses_controller_screen_and_forwards_input_without_custom_view
+    controller = InteractiveController.new
+    app = Meringue::TUI::App.new(
+      layout: Meringue::TUI::Layout.new,
+      terminal: TUISupport::FakeTerminal.new,
+      workspace_controller: controller,
+      agent_session_service: @service
+    )
+    state = @state.merge("agents" => [agent_record("P1-I1-W1", "harness" => "pi", "project_id" => "P1", "issue_id" => "P1-I1")])
+
+    assert app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+    assert_equal true, app.instance_variable_get(:@agent_workspace_interactive)
+    assert_empty @service.views
+
+    snapshot = app.send(:agent_workspace_snapshot, state, "", 0)
+    assert_equal true, snapshot.fetch("interactive")
+    assert_equal ["Pi output"], snapshot.fetch("agent_session").fetch("lines")
+
+    app.send(:handle_agent_workspace_key, "x", "", 0, nil, nil, state)
+    assert_equal ["x"], controller.keys
+    app.send(:switch_agent_workspace_view, state)
+    assert_equal "terminal", app.instance_variable_get(:@agent_workspace_view)
+    assert_equal 0, @service.views.length
+
+    app.send(:close_agent_workspace)
+    assert_equal 1, controller.closed
   end
 
   def test_reentering_focus_drops_stale_transient_events_before_replay

@@ -138,6 +138,25 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_equal attached.fetch("pid"), ownership.record_for("pi-sess-1").fetch("pid")
   end
 
+  def test_prepare_interactive_session_aborts_rpc_and_returns_the_same_saved_session_for_pi_tui
+    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-1", "is_streaming" => true })
+    session_file = pi_session_file(tmpdir, session_id: "sess-1")
+    ref = pi_session_ref(session_file: session_file, cwd: tmpdir)
+    managed = client.attach_session(ref)
+    @harness_sessions << [client, managed]
+
+    prepared = client.prepare_interactive_session(managed)
+
+    assert_equal false, prepared.fetch("session_ref").fetch("is_streaming")
+    assert_nil prepared.fetch("session_ref").fetch("pid")
+    assert_equal false, prepared.dig("handoff", "exact_stream_transfer")
+    assert_equal "native_interactive", prepared.dig("handoff", "mode")
+    assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--session", session_file]
+    refute_includes prepared.fetch("interactive_argv"), "--mode"
+    assert_equal %w[get_state abort get_state get_state], stub_commands(stub).map { |command| command.fetch("type") }.last(4)
+    refute process_alive?(managed.fetch("pid")), "the RPC writer must be gone before the PTY launches"
+  end
+
   def test_attach_session_refuses_to_start_a_second_process_while_the_saved_one_lives
     client, = build_pi_client(tmpdir)
     live_pid = spawn_idle_ruby_process

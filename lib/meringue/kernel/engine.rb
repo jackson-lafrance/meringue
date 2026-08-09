@@ -692,6 +692,199 @@ module Meringue
         end
       end
 
+      # Native Pi focus is a kernel-owned transport transition, not a TUI-side attach. The managed
+      # RPC writer is quiesced before the workspace controller launches the interactive PTY, and a
+      # durable marker makes reconciliation stand down while that PTY owns the session file.
+      def begin_agent_interactive_focus(agent_id)
+        agent = synchronized_state do
+          state = normalized_state
+          candidate = find_agent(state, agent_id.to_s)
+          return rejected_result(nil, "BeginInteractiveFocus", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless candidate
+          return rejected_result(nil, "BeginInteractiveFocus", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless candidate.fetch("type", nil) == "worker"
+
+          metadata = candidate.fetch("harness_metadata", {}) || {}
+          existing = metadata.fetch("interactive_handoff", nil)
+          if existing.is_a?(Hash) && %w[preparing interactive resuming].include?(existing.fetch("state", nil).to_s)
+            if interactive_focus_active?(candidate)
+              return rejected_result(nil, "BeginInteractiveFocus", "Worker #{agent_id} already has an interactive focus transition in progress.", ["interactive_focus_active"])
+            end
+
+            # The previous owner died without completing the return path. Its interactive process
+            # is gone too, so discard only the stale lifecycle marker and recover the same session.
+            metadata = metadata.dup
+            metadata.delete("interactive_handoff")
+            candidate["harness_metadata"] = metadata
+          end
+
+          client = harness_client_for_agent(candidate)
+          unless client.respond_to?(:interactive_session_supported?) && client.interactive_session_supported?
+            return rejected_result(nil, "BeginInteractiveFocus", "The selected harness does not provide a native interactive session.", ["interactive_session_unsupported"])
+          end
+
+          now = timestamp
+          candidate["harness_metadata"] = metadata.merge(
+            "interactive_handoff" => {
+              "state" => "preparing",
+              "owner_instance_id" => instance_id,
+              "owner_instance_pid" => instance_pid,
+              "started_at" => now
+            }
+          )
+          candidate["updated_at"] = now
+          touch_state!(state, now)
+          store.save(state)
+          deep_copy(candidate)
+        end
+        return agent if kernel_command_result?(agent)
+
+        client = harness_client_for_agent(agent)
+        prepared = client.prepare_interactive_session(agent_session_ref(agent))
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, agent.fetch("id"))
+          return rejected_result(nil, "BeginInteractiveFocus", "Agent #{agent.fetch("id")} disappeared during interactive handoff.", ["agent_not_found"]) unless current
+
+          now = timestamp
+          handoff = prepared.fetch("handoff", {}) || {}
+          marker = (current.fetch("harness_metadata", {}) || {}).fetch("interactive_handoff", {}) || {}
+          current["pid"] = nil
+          current["harness_metadata"] = (current.fetch("harness_metadata", {}) || {}).merge(
+            "is_streaming" => false,
+            "interactive_handoff" => marker.merge(
+              "state" => "interactive_pending",
+              "session_ref" => prepared.fetch("session_ref", {}),
+              "handoff" => handoff
+            )
+          )
+          current["updated_at"] = now
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: current.fetch("id"),
+            level: handoff.fetch("exact_stream_transfer", true) ? "info" : "warning",
+            message: "Prepared worker #{current.fetch("id")} for native interactive Pi focus; the managed RPC session is quiesced.",
+            details: handoff.merge("agent_id" => current.fetch("id"), "routing_action" => "interactive_focus")
+          )
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(
+            nil,
+            "BeginInteractiveFocus",
+            current.fetch("id"),
+            "Prepared worker #{current.fetch("id")} for native interactive focus.",
+            {
+              "interactive_argv" => prepared.fetch("interactive_argv"),
+              "interactive_env" => prepared.fetch("interactive_env", nil),
+              "handoff" => handoff,
+              "session_ref" => prepared.fetch("session_ref")
+            },
+            log_ids
+          )
+        end
+      rescue StandardError => e
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, agent_id.to_s)
+          if current
+            metadata = current.fetch("harness_metadata", {}) || {}
+            metadata.delete("interactive_handoff")
+            current["harness_metadata"] = metadata
+            current["updated_at"] = timestamp
+            touch_state!(state)
+            store.save(state)
+          end
+          error = error_payload(e)
+          failed_result(nil, "BeginInteractiveFocus", "Could not prepare worker #{agent_id} for interactive focus: #{error.fetch("message")}", [error.fetch("class"), error.fetch("message")])
+        end
+      end
+
+      def mark_agent_interactive_focus_started(agent_id, pid:)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id.to_s)
+          return rejected_result(nil, "MarkInteractiveFocusStarted", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
+
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          marker = metadata.fetch("interactive_handoff", {}) || {}
+          return rejected_result(nil, "MarkInteractiveFocusStarted", "Agent #{agent_id} is not awaiting interactive focus.", ["interactive_focus_not_pending"]) unless marker.fetch("state", nil) == "interactive_pending"
+
+          now = timestamp
+          marker = marker.merge("state" => "interactive", "interactive_pid" => pid, "interactive_started_at" => now)
+          agent["harness_metadata"] = metadata.merge("interactive_handoff" => marker)
+          agent["updated_at"] = now
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(nil, "MarkInteractiveFocusStarted", agent.fetch("id"), "Native interactive focus is active for worker #{agent.fetch("id")}.", agent, [])
+        end
+      end
+
+      # Called only after the interactive PTY has exited. Reattaching before that point would create
+      # two Pi writers against one JSONL session and is explicitly rejected by the lifecycle seam.
+      def end_agent_interactive_focus(agent_id)
+        agent = synchronized_state do
+          state = normalized_state
+          candidate = find_agent(state, agent_id.to_s)
+          return rejected_result(nil, "EndInteractiveFocus", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless candidate
+
+          marker = (candidate.fetch("harness_metadata", {}) || {}).fetch("interactive_handoff", {}) || {}
+          unless %w[interactive interactive_pending resume_failed].include?(marker.fetch("state", nil).to_s)
+            return accepted_result(nil, "EndInteractiveFocus", candidate.fetch("id"), "Worker #{candidate.fetch("id")} has no active interactive focus.", candidate, [])
+          end
+
+          now = timestamp
+          candidate["harness_metadata"] = (candidate.fetch("harness_metadata", {}) || {}).merge(
+            "interactive_handoff" => marker.merge("state" => "resuming", "resume_started_at" => now)
+          )
+          candidate["updated_at"] = now
+          touch_state!(state, now)
+          store.save(state)
+          deep_copy(candidate)
+        end
+        return agent if kernel_command_result?(agent)
+
+        client = harness_client_for_agent(agent)
+        resumed = client.resume_dashboard_session(agent_session_ref(agent))
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, agent.fetch("id"))
+          return rejected_result(nil, "EndInteractiveFocus", "Agent #{agent.fetch("id")} disappeared while resuming dashboard operation.", ["agent_not_found"]) unless current
+
+          now = timestamp
+          merge_session_ref_into_agent!(current, resumed)
+          metadata = current.fetch("harness_metadata", {}) || {}
+          metadata.delete("interactive_handoff")
+          current["harness_metadata"] = metadata.merge("is_streaming" => resumed.fetch("is_streaming", false)).compact
+          current["status"] = "working" unless TERMINAL_AGENT_STATUSES.include?(current.fetch("status", nil))
+          current["updated_at"] = now
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: current.fetch("id"),
+            level: "info",
+            message: "Resumed dashboard-managed session for worker #{current.fetch("id")} after native interactive focus.",
+            details: { "agent_id" => current.fetch("id"), "routing_action" => "interactive_focus_return" }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(nil, "EndInteractiveFocus", current.fetch("id"), "Resumed worker #{current.fetch("id")} in the dashboard.", current, log_ids)
+        end
+      rescue StandardError => e
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, agent_id.to_s)
+          if current
+            metadata = current.fetch("harness_metadata", {}) || {}
+            marker = metadata.fetch("interactive_handoff", {}) || {}
+            current["harness_metadata"] = metadata.merge("interactive_handoff" => marker.merge("state" => "resume_failed", "resume_error" => e.message))
+            current["updated_at"] = timestamp
+            touch_state!(state)
+            store.save(state)
+          end
+          error = error_payload(e)
+          failed_result(nil, "EndInteractiveFocus", "Could not resume dashboard operation for worker #{agent_id}: #{error.fetch("message")}", [error.fetch("class"), error.fetch("message")])
+        end
+      end
+
       def apply(command)
         normalized = normalize_command(command)
         command_type = normalized.fetch("type", nil)
@@ -5733,7 +5926,22 @@ module Meringue
           )
         end
         return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
+        if interactive_focus_active?(agent)
+          return rejected_result(
+            command_id,
+            command_type,
+            "Agent #{agent_id} is owned by its native interactive focus; return to the dashboard before prompting it.",
+            ["interactive_focus_active"]
+          )
+        end
         metadata = agent.fetch("harness_metadata", {}) || {}
+        if metadata.fetch("interactive_handoff", nil).is_a?(Hash)
+          metadata = metadata.dup
+          metadata.delete("interactive_handoff")
+          agent["harness_metadata"] = metadata
+          touch_state!(state)
+          store.save(state)
+        end
         delivered_prompt_ids = Array(metadata.fetch("prompt_command_ids", [])).map(&:to_s)
         if present_string(command_id) && delivered_prompt_ids.include?(command_id.to_s)
           return accepted_result(
@@ -13687,6 +13895,9 @@ module Meringue
         return false if blank?(agent.fetch("harness", nil)) || agent.fetch("harness", nil) == "fake"
         return false unless agent_has_session_reference?(agent) || recoverable_untracked_head?(agent)
         return false if %w[completed killed].include?(agent.fetch("status", nil))
+        # The native interactive process is the sole session writer during a focus handoff. Do not
+        # let the background reconciler read or resume the same JSONL file until focus returns.
+        return false if interactive_focus_active?(agent)
         # A record whose failure was already recorded as terminal is settled: `/prompt` refuses
         # to continue it and reconciliation has no repair left to try. Re-polling it would only
         # re-observe the same dead session, rewrite state, and append the same error log on
@@ -13700,6 +13911,32 @@ module Meringue
 
       # The durable "reconciliation is done trying" marker: an errored record whose persisted
       # reconcile details already say `terminal_error`.
+      def interactive_focus_active?(agent)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        marker = metadata.fetch("interactive_handoff", {}) || {}
+        return false unless marker.is_a?(Hash) && %w[preparing interactive_pending interactive resuming].include?(marker.fetch("state", nil).to_s)
+
+        owner_id = marker.fetch("owner_instance_id", nil)
+        recorded_owner_pid = marker.fetch("owner_instance_pid", nil).to_i
+        return true if present_string(owner_id) && owner_id.to_s == instance_id
+        return true if recorded_owner_pid.positive? && recorded_owner_pid == instance_pid
+
+        owner_pid = other_live_instance_pid(
+          owner_id,
+          recorded_owner_pid,
+          marker.fetch("owner_instance_started_at", nil)
+        )
+        return true if owner_pid
+
+        interactive_pid = marker.fetch("interactive_pid", nil).to_i
+        return owner_process_alive?(interactive_pid) if interactive_pid.positive?
+
+        # A pending marker owned by a process that is gone is recoverable: its RPC process was
+        # already quiesced, and no interactive pid was recorded, so the next reconciliation/prompt
+        # may safely repair the durable session. Be conservative for legacy markers with no owner.
+        marker.key?("owner_instance_id") || marker.key?("owner_instance_pid") ? false : true
+      end
+
       def terminal_reconcile_error_recorded?(agent)
         return false unless agent.fetch("status", nil) == "errored"
 

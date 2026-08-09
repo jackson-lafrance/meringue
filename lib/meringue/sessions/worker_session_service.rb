@@ -21,6 +21,20 @@ module Meringue
         raise Error, "Unable to open agent #{agent_id}: #{e.message}"
       end
 
+      # Focus uses the same application service as transcript views, but remains a
+      # process transition owned by the kernel rather than by a pane renderer.
+      def begin_agent_interactive_focus(agent_id)
+        engine.begin_agent_interactive_focus(agent_id)
+      end
+
+      def mark_agent_interactive_focus_started(agent_id, pid:)
+        engine.mark_agent_interactive_focus_started(agent_id, pid: pid)
+      end
+
+      def end_agent_interactive_focus(agent_id)
+        engine.end_agent_interactive_focus(agent_id)
+      end
+
       private
 
       attr_reader :engine
