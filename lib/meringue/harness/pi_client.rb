@@ -593,6 +593,10 @@ module Meringue
       def last_assistant_text(session_ref)
         process = process_for(session_ref, required: false)
         if process
+          # Pi's RPC can still expose the previous turn's answer after a new prompt has been
+          # accepted. Never let that stale answer settle the current turn as completed.
+          return nil if current_turn_pending?(session_ref)
+
           data = rpc_data(process.request({ "type" => "get_last_assistant_text" }, timeout: command_timeout))
           return data["text"]
         end
@@ -1163,10 +1167,13 @@ module Meringue
           "session_name" => metadata_value(session_ref, "session_name")
         }
         last_assistant = nil
+        last_assistant_index = nil
+        last_user_index = nil
         records = []
 
         File.foreach(path) do |line|
           record = JSON.parse(line)
+          record_index = records.length
           records << record
           summary["last_event_at"] = record["timestamp"] if record["timestamp"]
           if record["type"] == "session"
@@ -1174,18 +1181,28 @@ module Meringue
             summary["cwd"] ||= record["cwd"]
           elsif record["type"] == "session_info"
             summary["session_name"] = record["name"] if record["name"]
-          elsif record["type"] == "message" && record.dig("message", "role") == "assistant"
-            last_assistant = record
-            text = assistant_text_from_message(record)
-            summary["last_assistant_text"] = text if present?(text)
-            stop_reason = record["stopReason"] || record.dig("message", "stopReason")
-            summary["last_stop_reason"] = stop_reason if present?(stop_reason)
+          elsif record["type"] == "message"
+            case record.dig("message", "role")
+            when "user"
+              last_user_index = record_index
+            when "assistant"
+              last_assistant = record
+              last_assistant_index = record_index
+              text = assistant_text_from_message(record)
+              summary["last_assistant_text"] = text if present?(text)
+              stop_reason = record["stopReason"] || record.dig("message", "stopReason")
+              summary["last_stop_reason"] = stop_reason if present?(stop_reason)
+            end
           end
         rescue JSON::ParserError
           next
         end
 
-        summary["completed"] = assistant_message_completed?(last_assistant)
+        turn_pending = last_user_index && (!last_assistant_index || last_user_index > last_assistant_index)
+        summary["turn_pending"] = !!turn_pending
+        summary["last_assistant_text"] = nil if turn_pending
+        summary["last_stop_reason"] = nil if turn_pending
+        summary["completed"] = !turn_pending && assistant_message_completed?(last_assistant)
         summary["session_settings"] = session_settings_from_session_records(records)
         summary
       end
@@ -1318,16 +1335,27 @@ module Meringue
         path = session_file_path(session_ref)
         return nil unless present?(path) && File.file?(path)
 
-        session_file_tail_lines(path).reverse_each do |line|
+        records = session_file_tail_lines(path).filter_map do |line|
           record = parse_session_line(line)
-          next unless record.is_a?(Hash)
-          next unless record["type"].nil? || record["type"] == "message"
-          next unless record.dig("message", "role") == "assistant"
-
-          return record
+          record if record.is_a?(Hash)
         end
+        assistant_index = nil
+        user_index = nil
+        records.each_with_index do |record, index|
+          next unless record["type"].nil? || record["type"] == "message"
 
-        nil
+          case record.dig("message", "role")
+          when "assistant"
+            assistant_index = index
+          when "user"
+            user_index = index
+          end
+        end
+        # A session can retain a perfectly good answer from the previous turn after the next user
+        # prompt has been written. It is not evidence for the current turn.
+        return nil if user_index && (!assistant_index || user_index > assistant_index)
+
+        assistant_index && records.fetch(assistant_index)
       end
 
       def session_file_tail_lines(path)
@@ -1347,6 +1375,15 @@ module Meringue
         JSON.parse(line)
       rescue JSON::ParserError
         nil
+      end
+
+      def current_turn_pending?(session_ref)
+        path = session_file_path(session_ref)
+        return false unless present?(path) && File.file?(path)
+
+        session_file_summary(session_ref).fetch("turn_pending", false)
+      rescue ProcessNotFoundError
+        false
       end
 
       def assistant_message_completed?(record)

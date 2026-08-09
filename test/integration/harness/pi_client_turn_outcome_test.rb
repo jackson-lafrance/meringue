@@ -14,7 +14,7 @@ class HarnessPiClientTurnOutcomeTest < HarnessIntegrationTest
     @client ||= PiClient.new(session_dir: File.join(tmpdir, "pi-sessions"))
   end
 
-  def assistant_line(stop_reason:, text: nil, error_message: nil, id: "m9", parent_id: "m2")
+  def assistant_line(stop_reason:, text: nil, error_message: nil, id: "m9", parent_id: "m2", timestamp: "2026-01-01T00:05:00Z")
     message = { "role" => "assistant" }
     message["content"] = text ? [{ "type" => "text", "text" => text }] : []
     message["stopReason"] = stop_reason if stop_reason
@@ -23,8 +23,18 @@ class HarnessPiClientTurnOutcomeTest < HarnessIntegrationTest
       "type" => "message",
       "id" => id,
       "parentId" => parent_id,
-      "timestamp" => "2026-01-01T00:05:00Z",
+      "timestamp" => timestamp,
       "message" => message
+    )
+  end
+
+  def user_line(text: "continue", id: "m10", parent_id: "m9", timestamp: "2026-01-01T00:06:00Z")
+    JSON.generate(
+      "type" => "message",
+      "id" => id,
+      "parentId" => parent_id,
+      "timestamp" => timestamp,
+      "message" => { "role" => "user", "content" => [{ "type" => "text", "text" => text }] }
     )
   end
 
@@ -103,6 +113,37 @@ class HarnessPiClientTurnOutcomeTest < HarnessIntegrationTest
     assert_equal "completed", outcome.fetch("state")
     assert_equal "endTurn", outcome.fetch("stop_reason")
     assert_equal "worker finished the task", outcome.fetch("last_assistant_text")
+  end
+
+  def test_a_previous_turn_result_is_not_used_after_a_new_prompt_without_a_result
+    path = pi_session_file(tmpdir, extra_lines: [user_line])
+    ref = pi_session_ref(session_file: path)
+
+    assert_nil client.turn_outcome(ref), "the previous assistant message is not the current turn's result"
+    assert_nil client.last_assistant_text(ref), "stale previous-turn text must not settle the worker"
+    error = assert_raises(PiClient::ProcessExitedError) { client.get_state(ref) }
+    assert_match(/no live process and no completed assistant response/, error.message)
+  end
+
+  def test_a_result_after_the_new_prompt_is_still_reported_as_the_current_completion
+    path = pi_session_file(
+      tmpdir,
+      extra_lines: [
+        user_line,
+        assistant_line(
+          stop_reason: "endTurn",
+          text: "finished the continuation",
+          id: "m11",
+          parent_id: "m10",
+          timestamp: "2026-01-01T00:07:00Z"
+        )
+      ]
+    )
+
+    outcome = client.turn_outcome(pi_session_ref(session_file: path))
+
+    assert_equal "completed", outcome.fetch("state")
+    assert_equal "finished the continuation", outcome.fetch("last_assistant_text")
   end
 
   def test_a_turn_stopped_on_a_pending_tool_call_is_incomplete_but_not_a_failure
