@@ -60,6 +60,7 @@ This repository also uses that workflow while developing Meringue itself, but se
 Gemfile                            # Bundler setup for running the executable from a clone
 meringue.gemspec                   # local gem metadata that exposes the meringue executable
 bin/meringue                       # executable CLI entrypoint
+bin/meringue-record                # macOS proof-video helper
 lib/meringue/cli.rb                # command parsing and runtime setup
 lib/meringue/app.rb                # TUI application lifecycle
 lib/meringue/kernel/               # command validation and state mutation
@@ -69,6 +70,7 @@ lib/meringue/tui/                  # terminal rendering, panes, navigation, styl
 lib/meringue/state/                # JSON persistence models and store
 lib/meringue/goals/                # goal-loop record, decisions, judge, and metric probe
 docs/config.md                     # config and harness provider reference
+docs/video-recording.md             # macOS proof-video workflow
 docs/commit-authorship.md          # worker commit identity policy and history audit
 docs/head_agent_kernel_commands.md # compact head-agent command contract
 docs/keybindings.md                # TUI keyboard and jump-mode controls
