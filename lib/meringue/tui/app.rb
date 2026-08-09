@@ -428,7 +428,7 @@ module Meringue
           return insert_pasted_text(buffer, cursor, paste_text(key)) + [NO_SLASH_SELECTION]
         end
 
-        mouse_result = handle_mouse_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        mouse_result = handle_mouse_key(key, input_buffer, input_cursor, slash_suggestion_index, state, on_submit)
         return mouse_result if mouse_result
 
         selection_command_result = handle_selection_command_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
@@ -685,11 +685,11 @@ module Meringue
         @focused_pane != "chat"
       end
 
-      def handle_mouse_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+      def handle_mouse_key(key, input_buffer, input_cursor, slash_suggestion_index, state, on_submit = nil)
         return nil unless mouse_event?(key)
         return handle_mouse_wheel_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_wheel?(key)
         return handle_mouse_right_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_right_button_press?(key)
-        return handle_mouse_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_button_press?(key)
+        return handle_mouse_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state, on_submit) if mouse_button_press?(key)
         return handle_mouse_drag_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_drag?(key)
         return handle_mouse_release_key(input_buffer, input_cursor, slash_suggestion_index, state) if mouse_button_release?(key)
 
@@ -713,7 +713,7 @@ module Meringue
         [input_buffer, input_cursor, slash_suggestion_index]
       end
 
-      def handle_mouse_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+      def handle_mouse_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state, on_submit = nil)
         pane = pane_at_mouse_position(key, state)
         return [input_buffer, input_cursor, slash_suggestion_index] unless pane
 
@@ -725,7 +725,7 @@ module Meringue
           # before and after a tree click never pair up into a word selection.
           @last_text_click = nil
           item_id = agent_tree_item_at_mouse_position(key, state)
-          opened = handle_agent_tree_item_click(item_id, key, state)
+          opened = handle_agent_tree_item_click(item_id, key, state, on_submit)
           if opened
             draft = @workspace_draft.to_s.dup
             return [draft, draft.chars.length, NO_SLASH_SELECTION]
@@ -1417,8 +1417,9 @@ module Meringue
       # A single left click selects the clicked AgentTree row and scopes the logs
       # pane to it. Clicking the already-selected row, or empty space inside the
       # tree, is the explicit deselect gesture. A double-click is node-specific:
-      # issues open their delivery PR and workers open their focused workspace.
-      def handle_agent_tree_item_click(item_id, key, state)
+      # issues open their delivery PR, workers open their focused workspace, and
+      # retryable heads submit an explicit retry command.
+      def handle_agent_tree_item_click(item_id, key, state, on_submit = nil)
         if item_id.to_s.empty?
           @last_worker_click = nil
           deselect_agent_tree_item
@@ -1442,6 +1443,8 @@ module Meringue
           double_click && open_pr_by_agent_id(state, item_id)
         when :workspace
           double_click && open_agent_workspace_by_id(state, item_id)
+        when :retry
+          double_click && submit_head_retry_from_tree(item_id, on_submit, state)
         else
           false
         end
@@ -1457,6 +1460,8 @@ module Meringue
             track_click: workspace_openable,
             double_click: workspace_openable && worker_double_click?(item_id, key)
           }
+        elsif record["type"].to_s == "head" && State::Models.head_retry_target?(record)
+          { kind: :retry, track_click: true, double_click: worker_double_click?(item_id, key) }
         else
           { kind: :none, track_click: false, double_click: false }
         end
@@ -1477,6 +1482,17 @@ module Meringue
 
       def issue_tree_record?(record)
         AgentTreeNavigation.issue_record?(record)
+      end
+
+      def submit_head_retry_from_tree(item_id, on_submit, state)
+        @workspace_draft = ""
+        unless on_submit
+          append_jump_response("Retry #{item_id} with /retry #{item_id}.")
+          return true
+        end
+
+        submit_prompt("/retry #{item_id}", on_submit, state)
+        true
       end
 
       def select_agent_tree_item(state, item_id)
@@ -2186,6 +2202,7 @@ module Meringue
         text = input_buffer.to_s.strip
         return handle_local_jump_command(text, state) if jump_command?(text)
         return handle_local_models_command(text, state) if models_picker_command?(text)
+        return handle_local_open_session_command(text, state) if open_session_command?(text)
         return handle_local_setup_command(state) if setup_command?(text)
         return handle_local_keybind_command if keybind_command?(text)
         return handle_local_config_command if config_command?(text)
@@ -2223,8 +2240,8 @@ module Meringue
         <<~TEXT.strip
           Keybindings (from [tui.keybindings], with defaults for omitted actions):
           Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels a selection first, then the AgentTree log/chat target and jump mode.
-          Focus: click a dashboard section to focus it; double-clicking an issue opens its delivery PR (or shows a transient no-PR notice), while double-clicking a worker with a workspace opens its focused workspace. Workers without workspaces stay quiet. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
-          AgentTree selection and chat target: single-click a project, issue, head, or worker row to select it and filter the logs pane to that node (a worker shows its own logs, an issue adds all of its workers and child issues, a project adds its whole subtree). Right-click an issue to open its associated delivery PR; workers do not duplicate that affordance, and an issue without one shows a transient notice. An issue also targets subsequent natural-language chat to that issue; a worker selection resolves chat to its owning issue. A fresh head still routes every message using that explicit target context. The selection stays highlighted, is scrolled back into view when it changes, and keeps filtering while you work in the logs or chat pane; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} in jump mode retarget it. Double-click an issue to open its PR, or double-click a worker with an assigned workspace to open that worker's focused workspace. Click the highlighted row again, click empty space in the AgentTree, or press #{keys_for("cancel_navigation")} to clear it. Heads without an owning issue, projects, and workers without workspaces remain log-only filters for these mouse actions.
+          Focus: click a dashboard section to focus it; double-clicking an issue opens its delivery PR (or shows a transient no-PR notice), double-clicking a worker with a workspace opens its focused workspace, and double-clicking a retryable head submits /retry for a fresh head. Unavailable rows stay quiet. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
+          AgentTree selection and chat target: single-click a project, issue, head, or worker row to select it and filter the logs pane to that node (a worker shows its own logs, an issue adds all of its workers and child issues, a project adds its whole subtree). Right-click an issue to open its associated delivery PR; workers do not duplicate that affordance, and an issue without one shows a transient notice. An issue also targets subsequent natural-language chat to that issue; a worker selection resolves chat to its owning issue. A fresh head still routes every message using that explicit target context. Head rows and projects remain log-only filters; retry a failed/blocked head explicitly with /retry H<n> or by double-clicking its "retry me" row. Use /open-session <agent_id> to open an underlying harness session for debugging, including a head session. The selection stays highlighted, is scrolled back into view when it changes, and keeps filtering while you work in the logs or chat pane; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} in jump mode retarget it. Double-click an issue to open its PR, or double-click a worker with an assigned workspace to open that worker's focused workspace. Click the highlighted row again, click empty space in the AgentTree, or press #{keys_for("cancel_navigation")} to clear it. Heads without an owning issue, projects, and workers without workspaces remain log-only filters for these mouse actions.
           Selection: drag with the mouse in the logs pane or the composer to select text; double-click selects a word, and triple-click selects a complete logs paragraph; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
           Logs selection (keyboard): focus the logs pane, then #{keys_for("logs_selection_mode")} toggles the selection cursor or any Shift+movement starts it. #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor, #{keys_for("cursor_word_left")}/#{keys_for("cursor_word_right")} move by word, #{keys_for("cursor_home")}/#{keys_for("cursor_end")} jump to the line edges, and #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} move by page. #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")}, #{keys_for("select_home")}/#{keys_for("select_end")}, #{keys_for("select_word_left")}/#{keys_for("select_word_right")}, and #{keys_for("select_page_up")}/#{keys_for("select_page_down")} extend the selection. #{keys_for("copy_selection")} copies the selection (or the cursor line when nothing is extended); #{keys_for("cancel_navigation")} exits.
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
@@ -2234,6 +2251,7 @@ module Meringue
           Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
           Model picker: /models opens a searchable list of the models the harness reports (/models claude scopes it to another harness); type to filter, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} applies the model as the future-session default (same as /model), #{keys_for("refresh_model_catalog")} re-fetches the catalog, #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
+          Head/session debugging: /open-session <agent_id> opens the saved harness session externally without turning a head into a chat target.
           Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
         TEXT
       end
@@ -2298,6 +2316,10 @@ module Meringue
         text == "/keybind"
       end
 
+      def open_session_command?(text)
+        text == "/open-session" || text.start_with?("/open-session ")
+      end
+
       # `/models` is a local TUI command that opens the model picker. `/models
       # refresh` stays a kernel command (GetModelCatalog), so a forced re-fetch is
       # still journaled and logged like any other kernel command instead of being
@@ -2318,6 +2340,33 @@ module Meringue
         true
       end
 
+      def handle_local_open_session_command(text, state)
+        agent_id = text.split(/\s+/, 2)[1].to_s.strip
+        if agent_id.empty?
+          append_jump_response("Usage: /open-session <agent_id>")
+          return true
+        end
+
+        agent = Array(state.fetch("agents", [])).find { |record| record.is_a?(Hash) && record.fetch("id", nil).to_s == agent_id }
+        unless agent
+          append_jump_response("Agent #{agent_id} does not exist.")
+          return true
+        end
+        unless session_opener&.respond_to?(:open)
+          append_jump_response("Opening an external agent session is not configured.")
+          return true
+        end
+
+        result = session_opener.open(agent)
+        status = result.is_a?(Hash) ? result.fetch("status", nil).to_s : "failed"
+        message = result.is_a?(Hash) ? result.fetch("message", nil).to_s.strip : "Could not open the external agent session."
+        append_jump_response(message.empty? && status == "opened" ? "Opened agent session for #{agent.fetch("id")}." : message)
+        true
+      rescue StandardError => e
+        append_jump_response("Could not open the external agent session for #{agent_id}: #{e.message}")
+        true
+      end
+
       def config_command?(text)
         text == "/config"
       end
@@ -2327,7 +2376,7 @@ module Meringue
       end
 
       def local_navigation_command_without_id?(input_buffer)
-        ["/jump", "/models", "/setup"].include?(input_buffer.to_s.strip.downcase)
+        ["/jump", "/models", "/setup", "/open-session"].include?(input_buffer.to_s.strip.downcase)
       end
 
       def enter_agent_tree_navigation(state)

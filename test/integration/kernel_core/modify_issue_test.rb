@@ -81,7 +81,8 @@ class KernelCoreModifyIssueTest < Minitest::Test
     result = apply_command("ModifyIssue", "issue_id" => "P1-I99", "title" => "Nope")
 
     assert_rejected(result, "issue_not_found")
-    assert_equal "Issue P1-I99 does not exist.", result.fetch("message")
+    # A rejected edit is an edit the user asked for and did not get, so the message names it.
+    assert_equal "Issue P1-I99 does not exist. Dropped issue update (title \u2192 \"Nope\").", result.fetch("message")
     assert_equal before, domain_snapshot
   end
 
@@ -91,7 +92,7 @@ class KernelCoreModifyIssueTest < Minitest::Test
     result = apply_command("ModifyIssue", "issue_id" => "P1-I1", "title" => "Also ignored", "status" => "shipping")
 
     assert_rejected(result, "status must be one of")
-    assert_equal "Issue was not modified.", result.fetch("message")
+    assert_equal "Issue was not modified. Dropped issue update (status \u2192 shipping, title \u2192 \"Also ignored\").", result.fetch("message")
     assert_equal before, domain_snapshot
     assert_equal "Original title", persisted_issue("P1-I1").fetch("title")
   end
@@ -124,7 +125,7 @@ class KernelCoreModifyIssueTest < Minitest::Test
     result = apply_command("ModifyIssue", "issue_id" => "P1-I1", "parent_issue_id" => "P1-I1")
 
     assert_rejected(result, "invalid_parent_issue")
-    assert_equal "Issue cannot be its own parent.", result.fetch("message")
+    assert_equal "Issue cannot be its own parent. Dropped issue update (parent issue).", result.fetch("message")
     assert_nil persisted_issue("P1-I1").fetch("parent_issue_id")
   end
 

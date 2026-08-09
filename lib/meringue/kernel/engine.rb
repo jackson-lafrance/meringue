@@ -152,6 +152,10 @@ module Meringue
         "dismiss_question" => "DismissQuestion",
         "modify_issue" => "ModifyIssue",
         "prompt_agent" => "PromptAgent",
+        "retry" => "RetryHead",
+        "retry_head" => "RetryHead",
+        "noop" => "NoOp",
+        "no_op" => "NoOp",
         "create_goal" => "CreateGoal",
         "goal" => "CreateGoal",
         "modify_goal" => "ModifyGoal",
@@ -191,7 +195,8 @@ module Meringue
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
-        ["/prompt <agent_id> \"<message>\"", "Prompt an existing worker agent session, or retry a failed head (H<n>)."],
+        ["/prompt <agent_id> \"<message>\"", "Prompt an existing worker agent session."],
+        ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
         ["/model <provider>/<model-id>", "Persist the model used for all future Pi heads and workers; existing sessions are unchanged. The model id may itself contain / and :."],
@@ -204,6 +209,7 @@ module Meringue
         ["/goal stop <goal_id>", "Stop a goal loop for good, leaving its current attempt session alone."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "TUI local: open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
+        ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
         ["/setup", "TUI local: reopen first-run setup for the theme, harness, model, and thinking level."],
         ["/keybind", "TUI local: show all keybindings."],
         ["/config", "TUI local: show the active config, supported defaults, conflict policy, and keybindings."],
@@ -216,20 +222,20 @@ module Meringue
         ["/recount", "Compact project, issue, worker, and question IDs after records are removed."],
         ["/clear", "Reset persisted Meringue state and clear the visible logs."]
       ].freeze
-      # Every user-facing slash command that maps to a kernel command is also proposable by a
-      # head, so "prune the merged issues" is applied, journaled, and logged exactly like a typed
-      # `/prune`. Only the kernel/parser internals stay off limits: `ApplyHeadResult` is how the
-      # kernel applies a head batch in the first place, and `InvalidSlashCommand` only reports a
-      # typing mistake back to the person who typed it.
+      # Every user-facing slash command that maps to a kernel command is proposable by a head, and
+      # heads also get NoOp for deliberate no-work routing. Only kernel/parser internals and
+      # explicit user recovery actions stay off limits: `ApplyHeadResult` is how the kernel applies
+      # a head batch, `RetryHead` is manual recovery, and `InvalidSlashCommand` reports a typing
+      # mistake back to the person who typed it.
       HEAD_PROPOSABLE_COMMANDS = %w[
         ListAll GetState GetInfo Help ListQuestions
         GetSessionDefaults GetModelCatalog SetDefaultSessionModel SetDefaultSessionThinkingLevel
-        AddProject ModifyProject CreateIssue ModifyIssue SpawnWorker PromptAgent SpawnHead
+        AddProject ModifyProject CreateIssue ModifyIssue SpawnWorker PromptAgent SpawnHead NoOp
         CreateGoal ModifyGoal StopGoal ListGoals
         AskQuestion AnswerQuestion DismissQuestion
         Kill Prune Recount ClearState SetTheme SetHarness ReconcileSessions
       ].freeze
-      HEAD_BLOCKED_COMMANDS = %w[ApplyHeadResult InvalidSlashCommand].freeze
+      HEAD_BLOCKED_COMMANDS = %w[ApplyHeadResult InvalidSlashCommand RetryHead].freeze
       HEAD_UNPROPOSABLE_COMMAND_REASON = "command_not_proposable_by_head"
       # Destructive commands a head may only propose when the user's own message is an
       # unambiguous instruction and the head marks the command user-confirmed. Everything else
@@ -284,6 +290,24 @@ module Meringue
       # Command types where a wrong predicted issue id would silently route work onto another
       # head's issue, so the kernel verifies the reference before applying them.
       BATCH_ISSUE_GUARDED_COMMANDS = %w[SpawnWorker ModifyIssue].freeze
+      # A head batch command the kernel deliberately did not apply because the record it targeted
+      # existed in the head's spawn snapshot and was removed (pruned or killed) before the result
+      # was applied. Nothing mutated, so it is journaled as `rejected`, but it is not a head
+      # mistake: it is counted, worded, and logged as a skip instead of a rejection.
+      REMOVED_BATCH_ISSUE_TARGET_ERROR = "issue_removed_before_head_result_applied"
+      REMOVED_BATCH_AGENT_TARGET_ERROR = "agent_removed_before_head_result_applied"
+      HEAD_BATCH_SKIP_ERROR_CODES = [REMOVED_BATCH_ISSUE_TARGET_ERROR, REMOVED_BATCH_AGENT_TARGET_ERROR].freeze
+      # Head-batch commands whose entire target can be removed by a prune or kill while the batch is
+      # in flight. `ModifyIssue`/`SpawnWorker` are handled by the issue-target resolver; these two
+      # name a record directly and have no intra-batch reference form, so they are checked here.
+      BATCH_REMOVABLE_TARGET_COMMANDS = %w[PromptAgent Kill].freeze
+      # Bounded ledger of record ids the kernel removed, so a command that arrives after a prune or
+      # kill can say what happened to its target instead of guessing. State, not logs, owns this:
+      # logs are evicted on their own retention schedule and are not a source of truth. Issues and
+      # agents are kept in separate lists so pruning twenty workers cannot evict the issue history
+      # an in-flight head result still needs.
+      REMOVED_RECORD_LEDGER_LIMIT = 200
+      REMOVED_RECORD_LEDGER_KEYS = { "issue" => "removed_issues", "agent" => "removed_agents" }.freeze
       # Same idea for a project created earlier in the same batch: a head can point at the
       # AddProject command instead of predicting `P<n>`.
       BATCH_PROJECT_REFERENCE_KEYS = %w[
@@ -685,6 +709,8 @@ module Meringue
           answer_question_and_route(command_id, command_type, payload)
         elsif command_type == "PromptAgent"
           prompt_agent_command(command_id, command_type, payload)
+        elsif command_type == "RetryHead"
+          retry_head_command(command_id, command_type, payload)
         elsif command_type == "SpawnWorker"
           @worker_spawn_mutex.synchronize { spawn_worker(command_id, command_type, payload) }
         elsif command_type == "ApplyHeadResult"
@@ -758,6 +784,8 @@ module Meringue
           spawn_worker(command_id, command_type, payload)
         when "PromptAgent"
           prompt_agent(command_id, command_type, payload)
+        when "NoOp"
+          no_op(command_id, command_type, payload)
         when "CreateGoal"
           create_goal(command_id, command_type, payload)
         when "ModifyGoal"
@@ -2175,6 +2203,30 @@ module Meringue
         rejected_result(command_id, command_type, message.to_s, errors)
       end
 
+      def no_op(command_id, command_type, payload)
+        state = normalized_state
+        reason = present_string(value_at(payload, "reason", "Reason", "message", "Message", "summary", "Summary", "note", "Note")) || "No work was needed."
+        head_id = present_string(value_at(payload, "_head_id", "head_id", "HeadID", "headId"))
+        now = timestamp
+        message = head_id ? "Head #{head_id} intentionally routed no work: #{reason}" : "No-op: #{reason}"
+        log_ids = append_log(
+          state,
+          source_type: head_id ? "head" : "kernel",
+          source_id: head_id,
+          level: "info",
+          message: message,
+          details: {
+            "kind" => "no_op",
+            "head_id" => head_id,
+            "reason" => reason
+          }.compact
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, head_id, message, { "reason" => reason }.compact, log_ids)
+      end
+
       def set_theme(command_id, command_type, payload)
         requested_theme = value_at(payload, "theme", "Theme", "name", "Name")
         return rejected_result(command_id, command_type, "Theme was not changed.", ["theme is required"]) if blank?(requested_theme)
@@ -2481,13 +2533,6 @@ module Meringue
         errors << "user_message is required" if blank?(user_message)
         return synchronized_state { rejected_result(command_id, command_type, "Head was not spawned.", errors) } unless errors.empty?
 
-        # Selecting a failed head in the AgentTree and typing a message is a retry of that head,
-        # not an unrelated new goal. Resolved before the spawn so the retry owns the whole command
-        # (it may resume the failed head's own session instead of starting a new one).
-        if retry_of.nil? && (retry_target = selected_head_retry_target(requested_selected_target))
-          return retry_head(command_id, command_type, retry_target, instruction: user_message.to_s, log_message: log_message)
-        end
-
         head_id = nil
         selected_target = nil
         started = synchronized_state do
@@ -2544,7 +2589,6 @@ module Meringue
           # Lineage is recorded next to the prompt that caused it, so the log reads
           # "<your message>" then "Retrying head H13 as H14 ..." in order.
           log_ids.concat(record_head_retry_respawn!(state, retry_of, head_id)) if retry_of
-          log_ids.concat(log_unretryable_head_selection(state, selected_target, head_id))
           touch_state!(state, now)
           store.save(state)
 
@@ -2644,14 +2688,18 @@ module Meringue
         end
       end
 
-      # Retrying a head re-runs the request it never finished routing. Heads stay stateless per
-      # user message, so a retry is either the same session finishing its interrupted turn (when
-      # the head errored mid-turn and its harness session is still there) or a fresh head carrying
-      # the original request plus whatever the user just typed. The head contract is unchanged:
-      # the retry still returns HeadResult JSON and is never turned into a worker by this path.
-      #
-      # Both user entry points land here: selecting a failed head in the AgentTree and typing a
-      # message (SpawnHead with that selection) and `/prompt H13 "..."` (PromptAgent on a head id).
+      # `/retry H13` is the only kernel path that retries a head. It is a deliberate user recovery
+      # action: the old head/session is never prompted or resumed, and a fresh head receives the
+      # original request, the failed command journal, and instructions to route only the missing
+      # work. The head contract is unchanged: the retry still returns HeadResult JSON and is never
+      # turned into a worker by this path.
+      def retry_head_command(command_id, command_type, payload)
+        head_id = value_at(payload, "head_id", "HeadID", "headId", "agent_id", "AgentID", "agentId")
+        return synchronized_state { rejected_result(command_id, command_type, "Head was not retried.", ["head_id is required"]) } if blank?(head_id)
+
+        retry_head(command_id, command_type, head_id.to_s, instruction: value_at(payload, "prompt", "message", "instruction"), log_message: value_at(payload, "log_message", "LogMessage"))
+      end
+
       def retry_head(command_id, command_type, head, instruction: nil, log_message: nil)
         head_id = head.is_a?(Hash) ? head.fetch("id", nil).to_s : head.to_s
         plan = synchronized_state { head_retry_plan(normalized_state, head_id, instruction: instruction) }
@@ -2659,11 +2707,6 @@ module Meringue
           return synchronized_state do
             rejected_result(command_id, command_type, plan.fetch("message"), [plan.fetch("code")])
           end
-        end
-
-        if plan.fetch("strategy") == "resume"
-          resumed = resume_head_retry(command_id, command_type, plan, instruction: instruction, log_message: log_message)
-          return resumed if resumed
         end
 
         respawn_head_retry(command_id, command_type, plan, instruction: instruction, log_message: log_message)
@@ -2707,7 +2750,7 @@ module Meringue
           "status" => status,
           "case" => failure.fetch("case"),
           "reason" => failure.fetch("reason"),
-          "strategy" => failure.fetch("resumable") ? "resume" : "respawn",
+          "strategy" => "respawn",
           "user_message" => original_message,
           "question_id" => present_string(request.fetch("question_id", nil)),
           # What the failed batch already did, straight from its command journal. The retry head
@@ -2718,18 +2761,9 @@ module Meringue
         }
       end
 
-      # The distinct ways a head stops without routing, each of which needs a different recovery:
-      #   transport_failure  its turn died mid-flight and its session is still open -> resume it
-      #   session_released   it failed and the kernel already closed its session    -> fresh head
-      #   never_started      no harness session was ever opened for it              -> fresh head
-      #   killed             the user stopped it on purpose, so its session is gone -> fresh head
-      #   nothing_routed     its batch was applied and not one command landed       -> fresh head
-      #   partially_routed   its batch was applied and only part of it landed       -> fresh head
-      #
-      # The two applied cases are never resumed, even when the head's harness session is still
-      # open: that session already delivered a result, the kernel journaled and sealed the batch,
-      # and the exactly-once guard in `apply_head_result` would ignore a second result from it.
-      # Their retry is always a fresh head that routes what the batch left unrouted.
+      # The distinct ways a head stops without routing. Every retry is a fresh head; even an
+      # errored head whose harness session is still present is not resumed, because manual retry
+      # must not message an old head or replay the same failed turn.
       def head_retry_failure_case(head)
         metadata = head.fetch("harness_metadata", {}) || {}
         metadata = {} unless metadata.is_a?(Hash)
@@ -2751,7 +2785,7 @@ module Meringue
         {
           "case" => "transport_failure",
           "reason" => "its agent turn ended before it returned a result#{suffix}",
-          "resumable" => head_retry_session_resumable?(head)
+          "resumable" => false
         }
       end
 
@@ -2809,24 +2843,6 @@ module Meringue
         detail && truncate_for_state(detail, 200)
       end
 
-      # A head session is only resumable while it still exists: a released session was killed by
-      # the kernel when the head failed, and an unavailable one was never backed by a harness.
-      def head_retry_session_resumable?(head)
-        return false unless agent_has_session_reference?(head)
-
-        metadata = head.fetch("harness_metadata", {}) || {}
-        metadata = {} unless metadata.is_a?(Hash)
-        session_state = metadata.fetch("head_session_state", nil).to_s
-        return false if [HEAD_SESSION_STATE_RELEASED, HEAD_SESSION_STATE_UNAVAILABLE].include?(session_state)
-
-        client = begin
-          harness_client_for_agent(head)
-        rescue StandardError
-          nil
-        end
-        !!client && client.respond_to?(:prompt_session)
-      end
-
       def head_retry_rejection_code(head)
         case head.fetch("status", nil).to_s
         when "queued", "working", "idle" then "head_still_working"
@@ -2853,82 +2869,8 @@ module Meringue
         end
       end
 
-      # Resume path: the head's own session is still there, so the cheapest correct retry is to let
-      # it finish the turn that died. Returns nil when resuming is impossible, which makes the
-      # caller fall back to a fresh head instead of losing the user's message.
-      def resume_head_retry(command_id, command_type, plan, instruction: nil, log_message: nil)
-        head_id = plan.fetch("head_id")
-        head = synchronized_state do
-          record = find_agent(normalized_state, head_id)
-          record ? deep_copy(record) : nil
-        end
-        return nil unless head
-
-        client = harness_client_for_agent(head)
-        return nil unless client.respond_to?(:prompt_session)
-
-        session_ref = client.prompt_session(
-          agent_session_ref(head),
-          head_retry_resume_prompt(plan, instruction),
-          mode: "normal"
-        )
-
-        synchronized_state do
-          state = normalized_state
-          current = find_agent(state, head_id)
-          return nil unless current
-
-          now = timestamp
-          merge_session_ref_into_agent!(current, session_ref)
-          current["status"] = "working"
-          current["updated_at"] = now
-          mark_head_session_active!(current, now: now)
-          current["harness_metadata"] = clear_head_failure_metadata(current.fetch("harness_metadata", {}) || {}).merge(
-            "retry_strategy" => "resume",
-            "retry_case" => plan.fetch("case"),
-            "head_retry_count" => head_retry_count(current) + 1,
-            "head_retried_at" => now
-          )
-          message = "Retried head #{head_id} by resuming its agent session; it will return a new HeadResult."
-          log_ids = append_head_retry_prompt_log(state, head_id, instruction: instruction, log_message: log_message)
-          log_ids.concat(append_log(
-            state,
-            source_type: "head",
-            source_id: head_id,
-            level: "info",
-            message: message,
-            details: {
-              "head_id" => head_id,
-              "retry_strategy" => "resume",
-              "retry_case" => plan.fetch("case"),
-              "reason" => plan.fetch("reason"),
-              "routing_action" => "head_retry"
-            }
-          ))
-          touch_state!(state, now)
-          store.save(state)
-
-          accepted_result(command_id, command_type, head_id, message, deep_copy(current), log_ids)
-        end
-      rescue StandardError => e
-        synchronized_state do
-          state = normalized_state
-          append_log(
-            state,
-            source_type: "head",
-            source_id: plan.fetch("head_id"),
-            level: "warning",
-            message: "Could not resume head #{plan.fetch("head_id")}'s agent session (#{sanitized_error_message(e)}); retrying it with a fresh head.",
-            details: { "head_id" => plan.fetch("head_id"), "error" => error_payload(e), "routing_action" => "head_retry" }
-          )
-          touch_state!(state)
-          store.save(state)
-        end
-        nil
-      end
-
-      # Respawn path: a fresh head runs the failed head's original request plus whatever the user
-      # typed. This is the normal outcome, because the kernel closes a head's session when it fails.
+      # Respawn path: a fresh head runs the failed head's original request plus the failed command
+      # journal. This is the only manual retry strategy.
       def respawn_head_retry(command_id, command_type, plan, instruction: nil, log_message: nil)
         head_id = plan.fetch("head_id")
         result = spawn_head(
@@ -2950,7 +2892,7 @@ module Meringue
 
       # The retry head is a fresh stateless head, so everything it needs has to be in its message:
       # the request that was never routed, what the failed batch already applied (which it must not
-      # propose again), what never landed and why, the new instruction, and why it is running again.
+      # propose again), what never landed and why, and why it is running again.
       def head_retry_user_message(plan, instruction)
         original = present_string(plan.fetch("user_message", nil))
         extra = present_string(instruction)
@@ -3003,14 +2945,6 @@ module Meringue
         "Route only the part of this request that is still unrouted, reusing the records above."
       end
 
-      def head_retry_resume_prompt(plan, instruction)
-        extra = present_string(instruction)
-        extra = nil if extra && present_string(plan.fetch("user_message", nil))&.strip == extra.strip
-        prompt = HEAD_RESUME_PROMPT.dup
-        prompt << "\nNew instruction from the user: #{extra}\n" if extra
-        prompt
-      end
-
       # Retry lineage handed from `respawn_head_retry` to `spawn_head` through the payload.
       def head_retry_lineage(payload)
         head_id = present_string(value_at(payload, "_retry_of_head_id", "retry_of_head_id"))
@@ -3037,28 +2971,17 @@ module Meringue
       end
 
       # Links the failed head to its successor and says so once, in the log, at the point the
-      # retry happened.
+      # retry happened. The previous head leaves the active AgentTree immediately: its record was
+      # only a retry affordance, while the durable lineage lives on the new head and this log entry.
       def record_head_retry_respawn!(state, retry_of, new_head_id)
         previous_id = retry_of.fetch("head_id")
         previous = find_agent(state, previous_id)
+        previous_snapshot = previous ? deep_copy(previous) : nil
         now = timestamp
-        if previous
-          previous["harness_metadata"] = (previous.fetch("harness_metadata", {}) || {}).merge(
-            "retried_by_head_id" => new_head_id,
-            "head_retry_count" => head_retry_count(previous) + 1,
-            "head_retried_at" => now
-          )
-          previous["updated_at"] = now
-        end
 
-        # A head that already delivered a result can never deliver another one the kernel would
-        # accept: its batch is journaled and sealed by the exactly-once guard, and reconciliation
-        # stops polling it once `head_result_applied_at` is set. The harness session it still owns
-        # is therefore dead weight, so the retry hands the request to a fresh head and closes it
-        # instead of leaving a live session behind for every blocked head in the tree.
-        session_release = if previous && State::Models.head_result_applied?(previous)
-                            release_head_session!(previous, reason: "head_retried", now: now)
-                          end
+        session_release = release_head_session!(previous, reason: "head_retried", now: now) if previous
+        carry_retry_display_title!(state, previous_snapshot, new_head_id)
+        state.fetch("agents").delete(previous) if previous
 
         reason = retry_of.fetch("reason", nil)
         append_log(
@@ -3066,40 +2989,52 @@ module Meringue
           source_type: "kernel",
           source_id: previous_id,
           level: "info",
-          message: "Retrying head #{previous_id} as head #{new_head_id}#{reason ? ": #{reason}" : ""}. Re-running its original request.",
+          message: "Retrying head #{previous_id} as head #{new_head_id}#{reason ? ": #{reason}" : ""}. Re-running its original request with a fresh head.",
           details: {
             "head_id" => new_head_id,
             "retry_of_head_id" => previous_id,
             "retry_strategy" => "respawn",
             "retry_case" => retry_of.fetch("case", nil),
             "head_record_missing" => previous ? nil : true,
+            "previous_head_removed_from_active_tree" => previous ? true : nil,
             "previous_head_session_released" => session_release && session_release.fetch("changed", false) ? true : nil,
+            "previous_head" => retry_lineage_snapshot(previous_snapshot),
             "routing_action" => "head_retry"
           }.compact
         )
       end
 
-      # A selected head that cannot be retried must not silently swallow the user's message. The
-      # message is routed as a new request and the log says why the selection was not a retry.
-      def log_unretryable_head_selection(state, selected_target, head_id)
-        return [] unless selected_target.is_a?(Hash)
-        return [] unless selected_target.fetch("selected_type", nil) == "head"
+      def carry_retry_display_title!(state, previous_snapshot, new_head_id)
+        return unless previous_snapshot
 
-        note = present_string(selected_target.fetch("head_retry_note", nil))
-        return [] unless note
+        title = present_string(previous_snapshot.dig("harness_metadata", "title"))
 
-        append_log(
-          state,
-          source_type: "kernel",
-          source_id: selected_target.fetch("selected_id"),
-          level: "warning",
-          message: "#{note} Routed this message to new head #{head_id} instead.",
-          details: {
-            "head_id" => head_id,
-            "selected_target_id" => selected_target.fetch("selected_id"),
-            "routing_action" => "selected_target"
-          }
-        )
+        new_head = find_agent(state, new_head_id)
+        return unless new_head
+
+        metadata = new_head.fetch("harness_metadata", {}) || {}
+        lineage = {
+          "title" => title,
+          "head_retry_count" => head_retry_count(previous_snapshot) + 1,
+          "previous_head_status" => previous_snapshot.fetch("status", nil)
+        }.compact
+        new_head["harness_metadata"] = metadata.merge(lineage)
+      end
+
+      def retry_lineage_snapshot(previous_snapshot)
+        return nil unless previous_snapshot
+
+        metadata = previous_snapshot.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        {
+          "id" => previous_snapshot.fetch("id", nil),
+          "status" => previous_snapshot.fetch("status", nil),
+          "title" => present_string(metadata.fetch("title", nil)),
+          "head_session_state" => present_string(metadata.fetch("head_session_state", nil)),
+          "harness" => present_string(previous_snapshot.fetch("harness", nil)),
+          "harness_session_id" => present_string(previous_snapshot.fetch("harness_session_id", nil)),
+          "harness_session_file" => present_string(previous_snapshot.fetch("harness_session_file", nil))
+        }.compact
       end
 
       def head_retry_count(head)
@@ -3122,27 +3057,6 @@ module Meringue
         cleared.delete("reconcile_state")
         cleared["previous_head_failure"] = previous unless previous.empty?
         cleared
-      end
-
-      # The user's own words still belong in the visible chat log on the resume path, where no new
-      # head record (and therefore no `SpawnHead` prompt log) is created.
-      def append_head_retry_prompt_log(state, head_id, instruction:, log_message:)
-        message = present_string(log_message) || present_string(instruction)
-        return [] unless message
-
-        append_log(
-          state,
-          source_type: "user",
-          source_id: nil,
-          level: "info",
-          message: message,
-          details: {
-            "head_id" => head_id,
-            "agent_id" => head_id,
-            "retry_of_head_id" => head_id,
-            "routing_action" => "head_retry"
-          }
-        )
       end
 
       def apply_head_result(command_id, command_type, payload)
@@ -3287,8 +3201,20 @@ module Meringue
                        rejected_result(
                          value_at(command, "command_id", "id"),
                          canonical_command_type(value_at(command, "type", "command_type")),
-                         rejection.fetch("message"),
+                         with_dropped_intent(rejection.fetch("message"), command),
                          rejection.fetch("errors")
+                       )
+                     end
+                   elsif (skip = resolution.fetch("skip", nil))
+                     synchronized_state do
+                       skipped_result(
+                         value_at(command, "command_id", "id"),
+                         canonical_command_type(value_at(command, "type", "command_type")),
+                         skip.fetch("target_id", nil),
+                         with_dropped_intent(skip.fetch("message"), command),
+                         skip.fetch("errors"),
+                         level: skip.fetch("level", "info"),
+                         details: skip.fetch("details", {})
                        )
                      end
                    else
@@ -3345,8 +3271,13 @@ module Meringue
           end
 
           accepted_count = command_results.count { |result| result.fetch("status", nil) == "accepted" }
-          rejected_count = command_results.count { |result| result.fetch("status", nil) == "rejected" }
+          # A command whose target was removed under the head is not a rejection the head or the
+          # user can fix, so it is counted (and reported) separately and never makes the batch
+          # look partially applied.
+          skipped_count = command_results.count { |result| head_command_result_skipped?(result) }
+          rejected_count = command_results.count { |result| result.fetch("status", nil) == "rejected" } - skipped_count
           failed_count = command_results.count { |result| result.fetch("status", nil) == "failed" }
+          unapplied_count = rejected_count + failed_count
           question_ids = initialization.fetch("question_ids")
           if interrupted
             log_ids.concat(append_log(
@@ -3361,16 +3292,23 @@ module Meringue
           # Same visible output as the typed slash path: the kernel's own command output reaches
           # the user, so a head summary never has to restate "Pruned N issues, ...".
           log_ids.concat(append_head_command_output_logs(state, head_id.to_s, command_results))
-          summary_log_ids = if rejected_count.positive? || failed_count.positive?
+          summary_log_ids = if unapplied_count.positive? || skipped_count.positive?
                               append_log(
                                 state,
                                 source_type: "kernel",
                                 source_id: head_id.to_s,
-                                level: failed_count.positive? ? "error" : "warning",
-                                message: "Head result for #{head_id}: #{accepted_count} accepted, #{rejected_count} rejected, #{failed_count} failed.",
+                                level: head_batch_summary_level(rejected_count: rejected_count, failed_count: failed_count),
+                                message: head_batch_summary_message(
+                                  head_id: head_id.to_s,
+                                  accepted_count: accepted_count,
+                                  rejected_count: rejected_count,
+                                  failed_count: failed_count,
+                                  skipped_count: skipped_count
+                                ),
                                 details: {
                                   "head_id" => head_id.to_s,
                                   "question_ids" => question_ids,
+                                  "skipped_command_count" => skipped_count,
                                   "command_results" => command_results
                                 }
                               )
@@ -3386,11 +3324,12 @@ module Meringue
                              end
           now = timestamp
           metadata = head.fetch("harness_metadata", {}) || {}
-          metadata["head_result_apply_state"] = rejected_count.positive? || failed_count.positive? ? "partially_applied" : "applied"
-          metadata["head_result_apply_status"] = rejected_count.positive? || failed_count.positive? ? "partial" : "accepted"
+          metadata["head_result_apply_state"] = unapplied_count.positive? ? "partially_applied" : "applied"
+          metadata["head_result_apply_status"] = unapplied_count.positive? ? "partial" : "accepted"
           metadata["head_result_applied_at"] = now
+          metadata["head_result_skipped_command_count"] = skipped_count if skipped_count.positive?
           head["harness_metadata"] = metadata
-          head["status"] = rejected_count.positive? || failed_count.positive? ? "blocked" : "completed"
+          head["status"] = unapplied_count.positive? ? "blocked" : "completed"
           head["updated_at"] = now
           # A completion head and the worker continuation that spawned it are checkpointed in the
           # same state transaction. If the process dies after this save but before the synchronous
@@ -3401,7 +3340,7 @@ module Meringue
           log_ids.concat(command_results.flat_map { |result| result.fetch("log_entry_ids", []) })
           log_ids.concat(summary_log_ids)
           log_ids.concat(unrouted_log_ids)
-          cleanup = if cleanup_head && rejected_count.zero? && failed_count.zero?
+          cleanup = if cleanup_head && unapplied_count.zero?
                       cleanup_applied_head!(state, head_id.to_s, now: now)
                     elsif cleanup_head
                       { "changed" => false, "reason" => "partially_applied" }
@@ -5047,6 +4986,11 @@ module Meringue
         removed_goal_ids = goals_for_issue_ids(state, issue_ids_to_remove).map { |goal| goal.fetch("id", nil) }.compact
         state["goals"] = state.fetch("goals", []).reject { |goal| removed_goal_ids.include?(goal.fetch("id", nil)) }
         state["issues"] = state.fetch("issues").reject { |issue| issue_ids_to_remove.include?(issue.fetch("id", nil)) }
+        # Remember that these ids existed. A command already in flight (a head result being
+        # applied while a prune lands) can then be told its target was removed instead of being
+        # accused of inventing an id that was real when it was read.
+        record_removed_records!(state, "issue", issue_ids_to_remove, reason, now)
+        record_removed_records!(state, "agent", agent_ids_to_remove, reason, now)
         state["agents"] = state.fetch("agents").reject { |agent| agent_ids_to_remove.include?(agent.fetch("id", nil)) }
         state["projects"] = state.fetch("projects").reject { |project| removed_project_ids.include?(project.fetch("id", nil)) }
         state.fetch("issues").each do |issue|
@@ -5616,19 +5560,19 @@ module Meringue
 
         errors << "issue_id is required" if blank?(issue_id)
         errors << "status must be one of #{State::Models::LIFECYCLE_STATUSES.join(", ")}" if present_string(status) && !State::Models::LIFECYCLE_STATUSES.include?(status.to_s)
-        return rejected_result(command_id, command_type, "Issue was not modified.", errors) unless errors.empty?
+        return modify_issue_rejection(command_id, command_type, payload, "Issue was not modified.", errors) unless errors.empty?
 
         state = normalized_state
         issue = find_issue(state, issue_id)
-        return rejected_result(command_id, command_type, "Issue #{issue_id} does not exist.", ["issue_not_found"]) unless issue
+        return modify_issue_rejection(command_id, command_type, payload, missing_modify_issue_message(state, issue_id), ["issue_not_found"]) unless issue
 
         project = find_project(state, issue.fetch("project_id"))
-        return rejected_result(command_id, command_type, "Project #{issue.fetch("project_id")} does not exist.", ["project_not_found"]) unless project
+        return modify_issue_rejection(command_id, command_type, payload, "Project #{issue.fetch("project_id")} does not exist.", ["project_not_found"]) unless project
 
         if payload_has?(payload, "parent_issue_id", "ParentIssueID", "parentIssueId") && present_string(parent_issue_id)
           parent = find_issue(state, parent_issue_id)
-          return rejected_result(command_id, command_type, "Parent issue #{parent_issue_id} does not exist in #{project.fetch("id")}.", ["parent_issue_not_found"]) unless parent && parent.fetch("project_id") == project.fetch("id")
-          return rejected_result(command_id, command_type, "Issue cannot be its own parent.", ["invalid_parent_issue"]) if parent.fetch("id") == issue.fetch("id")
+          return modify_issue_rejection(command_id, command_type, payload, "Parent issue #{parent_issue_id} does not exist in #{project.fetch("id")}.", ["parent_issue_not_found"]) unless parent && parent.fetch("project_id") == project.fetch("id")
+          return modify_issue_rejection(command_id, command_type, payload, "Issue cannot be its own parent.", ["invalid_parent_issue"]) if parent.fetch("id") == issue.fetch("id")
         end
 
         now = timestamp
@@ -5670,31 +5614,49 @@ module Meringue
         accepted_result(command_id, command_type, issue.fetch("id"), "Modified issue #{issue.fetch("id")}.", issue, log_ids)
       end
 
-      # `/prompt <id>` accepts a worker id and a head id. A worker id prompts that harness session;
-      # a head id retries the head, which may spawn a fresh head session, so it is dispatched here
-      # rather than inside the state lock every other kernel section shares.
+      # A ModifyIssue that does not land is an edit the user asked for and did not get, so every
+      # rejection names the update it dropped rather than leaving "1 rejected" as the only trace.
+      def modify_issue_rejection(command_id, command_type, payload, message, errors)
+        rejected_result(
+          command_id,
+          command_type,
+          with_dropped_intent(message, "type" => "ModifyIssue", "payload" => payload),
+          errors
+        )
+      end
+
+      def missing_modify_issue_message(state, issue_id)
+        removal = removed_issue_record(state, issue_id)
+        return "Issue #{issue_id} does not exist." unless removal
+
+        "Issue #{issue_id} no longer exists: it was removed #{issue_removal_phrase(removal)}."
+      end
+
+      # `/prompt <id>` prompts worker sessions only. Retrying a head is a separate visible user
+      # action (`/retry H<n>`), so a prompt can never message or resume an old head by accident.
       def prompt_agent_command(command_id, command_type, payload)
         agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
         agent = present_string(agent_id) ? agent_record_snapshot(agent_id.to_s) : nil
-        head = agent && agent.fetch("type", nil) == "head" ? agent : nil
-        unless head
-          prompt = value_at(payload, "prompt", "Prompt", "message", "Message")
-          # Continuing a worker whose session the provider refuses to replay cannot be a prompt: the
-          # resume would send the same rejected transcript. It is the same intent though, so it is
-          # honoured as a fresh session on the worker's own worktree instead of a dead end.
-          if agent && worker_session_unreplayable?(agent) && present_string(prompt)
-            return continue_unreplayable_worker_session(command_id, command_type, agent, prompt.to_s)
+        if agent && agent.fetch("type", nil) == "head"
+          return synchronized_state do
+            rejected_result(
+              command_id,
+              command_type,
+              "Agent #{agent.fetch("id")} is a head. Use /retry #{agent.fetch("id")} to retry it with a fresh head; /prompt only targets worker sessions.",
+              ["agent_is_not_worker", "use_retry_head"]
+            )
           end
-
-          return synchronized_state { prompt_agent(command_id, command_type, payload) }
         end
 
         prompt = value_at(payload, "prompt", "Prompt", "message", "Message")
-        if blank?(prompt)
-          return synchronized_state { rejected_result(command_id, command_type, "Agent was not prompted.", ["prompt is required"]) }
+        # Continuing a worker whose session the provider refuses to replay cannot be a prompt: the
+        # resume would send the same rejected transcript. It is the same intent though, so it is
+        # honoured as a fresh session on the worker's own worktree instead of a dead end.
+        if agent && worker_session_unreplayable?(agent) && present_string(prompt)
+          return continue_unreplayable_worker_session(command_id, command_type, agent, prompt.to_s)
         end
 
-        retry_head(command_id, command_type, head, instruction: prompt.to_s)
+        synchronized_state { prompt_agent(command_id, command_type, payload) }
       end
 
       # `/prompt` (or a head's PromptAgent) aimed at a worker whose session cannot be replayed. The
@@ -5752,16 +5714,23 @@ module Meringue
 
         state = normalized_state
         agent = find_agent(state, agent_id)
-        return rejected_result(command_id, command_type, missing_agent_prompt_message(agent_id), ["agent_not_found"]) unless agent
-        # Heads are handled by `prompt_agent_command`, which retries them. Reaching this branch
-        # means a caller bypassed that dispatch, so the head contract is restated instead of
-        # turning the head into a worker session.
+        unless agent
+          return rejected_result(
+            command_id,
+            command_type,
+            with_dropped_intent(missing_agent_prompt_message(agent_id, state), "type" => "PromptAgent", "payload" => payload),
+            ["agent_not_found"]
+          )
+        end
+        # Heads are retried only through RetryHead. Reaching this branch means a caller bypassed
+        # `prompt_agent_command`, so the head contract is restated instead of turning the head into
+        # a worker session.
         if agent.fetch("type", nil) == "head"
           return rejected_result(
             command_id,
             command_type,
-            "Agent #{agent_id} is a head; prompting a head retries it and cannot be delivered as a worker prompt.",
-            ["agent_is_not_worker"]
+            "Agent #{agent_id} is a head. Use /retry #{agent.fetch("id")} to retry it with a fresh head; /prompt only targets worker sessions.",
+            ["agent_is_not_worker", "use_retry_head"]
           )
         end
         return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
@@ -5951,12 +5920,19 @@ module Meringue
 
       # A head id that no longer resolves is the common case after a kill or a prune, and the
       # generic "does not exist" line leaves the user guessing why their retry target vanished.
-      def missing_agent_prompt_message(agent_id)
+      def missing_agent_prompt_message(agent_id, state = nil)
         id = agent_id.to_s
-        return "Agent #{id} does not exist." unless id.match?(/\AH\d+\z/i)
+        if id.match?(/\AH\d+\z/i)
+          return "Head #{id.upcase} no longer exists. Heads are removed when they are killed, cleaned up " \
+                 "after routing, or pruned, so send your message as a new prompt instead."
+        end
 
-        "Head #{id.upcase} no longer exists. Heads are removed when they are killed, cleaned up " \
-          "after routing, or pruned, so send your message as a new prompt instead."
+        # A worker id that stopped resolving is usually a record a prune or kill removed, and the
+        # kernel knows which, so it says so instead of leaving the user to guess.
+        removal = state && removed_agent_record(state, id)
+        return "Agent #{id} does not exist." unless removal
+
+        "Agent #{id} no longer exists: it was removed #{issue_removal_phrase(removal)}."
       end
 
       # Harness clients report a mode they had to substitute through generic session metadata; an
@@ -11382,24 +11358,49 @@ module Meringue
         )
       end
 
+      # One line per head batch, and it has to be readable on its own: a skipped command is not a
+      # rejection, so it is named as what it is instead of inflating the rejected count.
+      def head_batch_summary_message(head_id:, accepted_count:, rejected_count:, failed_count:, skipped_count:)
+        message = "Head result for #{head_id}: #{accepted_count} accepted, #{rejected_count} rejected, #{failed_count} failed."
+        return message unless skipped_count.positive?
+
+        pronoun = skipped_count == 1 ? "its target" : "their targets"
+        "#{message} #{count_phrase(skipped_count, "command")} skipped because #{pronoun} #{skipped_count == 1 ? "was" : "were"} removed before this result was applied."
+      end
+
+      def head_batch_summary_level(rejected_count:, failed_count:)
+        return "error" if failed_count.positive?
+        return "warning" if rejected_count.positive?
+
+        "info"
+      end
+
       # Head batches that accept nothing used to leave only per-command error lines, so a correctly
       # captured user message could disappear from the conversation. This restates the message the
       # kernel stored for that head and says what to do with it, so nothing is silently dropped.
       def append_unrouted_user_message_log(state, head_id, command_results)
         user_message = head_request_user_message(state, head_id)
-        failures = Array(command_results).reject { |result| result.fetch("status", nil) == "accepted" }
+        results = Array(command_results)
+        failures = results.reject { |result| result.fetch("status", nil) == "accepted" }
+        skipped = failures.select { |result| head_command_result_skipped?(result) }
+        # A batch whose every command targeted a record that was pruned or killed under it routed
+        # nothing, but nothing failed either. Say that, rather than reporting an error the user
+        # cannot act on.
+        skipped_only = failures.any? && skipped.length == failures.length
         quoted = user_message ? ": #{single_line_excerpt(user_message).inspect}" : "."
         reason = if failures.empty?
                    "Head #{head_id} routed nothing for this message, so it still needs handling"
+                 elsif skipped_only
+                   "Every command from head #{head_id} targeted a record that was removed before its result was applied, so this message was not routed"
                  else
                    "No command from head #{head_id} was applied, so this message still needs handling"
                  end
-        message = "#{reason}#{quoted} Resend it, or route it yourself with /prompt or /worker spawn."
+        message = "#{reason}#{quoted} Retry it with /retry #{head_id}, resend it, or route it yourself with /prompt or /worker spawn."
         append_log(
           state,
           source_type: "kernel",
           source_id: head_id,
-          level: failures.empty? ? "warning" : "error",
+          level: failures.empty? || skipped_only ? "warning" : "error",
           message: message,
           details: {
             "kind" => "unrouted_user_message",
@@ -11614,6 +11615,11 @@ module Meringue
         payload = value_at(command, "payload")
         return { "command" => command } unless payload.is_a?(Hash)
 
+        if BATCH_REMOVABLE_TARGET_COMMANDS.include?(command_type)
+          removed_resolution = resolve_batch_removed_target(payload: payload, command_type: command_type, head_id: head_id)
+          return removed_resolution if removed_resolution
+        end
+
         plan = head_batch_plan(head_id: head_id, commands: commands, index: index)
         prompt_resolution = nil
         if BATCH_PROJECT_REFERENCE_COMMANDS.include?(command_type)
@@ -11788,7 +11794,10 @@ module Meringue
       #      somewhere else -> the batch is internally inconsistent, so bind to that orphan issue
       #      (single, same project) or reject rather than silently pile work onto another issue,
       #   4. the id was visible in the head's spawn snapshot -> deliberate pre-existing target,
-      #   5. anything else -> reject loudly.
+      #   5. the id was visible in that snapshot but the issue has since been removed (a prune or
+      #      kill landed while this head was routing) -> skip the command as a no-op; the head
+      #      read a real id and there is nothing left to apply it to,
+      #   6. anything else -> reject loudly.
       def resolve_batch_issue_target(command:, payload:, command_type:, requested:, head_id:, plan:)
         aliases = plan.fetch("issue_aliases")
         if plan.fetch("ambiguous_issue_aliases").include?(requested)
@@ -11828,15 +11837,142 @@ module Meringue
           }
         end
 
-        return { "command" => command } if head_could_see_issue?(head_id: head_id, issue_id: requested)
+        visibility = head_issue_visibility(head_id: head_id, issue_id: requested)
+        return { "command" => command } if visibility.fetch("visible")
+
+        # The target was real when the head read state and was removed under it. Blaming the head
+        # for "predicting" the id here is what dropped part of a head's intent behind a warning the
+        # user could not act on, so this is a no-op skip with an accurate line instead.
+        if visibility.fetch("removed_after_spawn")
+          return {
+            "skip" => {
+              "target_id" => requested,
+              "level" => command_type == "SpawnWorker" ? "warning" : "info",
+              "message" => removed_batch_issue_target_message(
+                command_type: command_type,
+                head_id: head_id,
+                issue_id: requested,
+                removal: visibility.fetch("removal", nil)
+              ),
+              "errors" => [REMOVED_BATCH_ISSUE_TARGET_ERROR],
+              "details" => {
+                "head_id" => head_id.to_s,
+                "issue_id" => requested,
+                "reason" => REMOVED_BATCH_ISSUE_TARGET_ERROR,
+                "issue_removal" => visibility.fetch("removal", nil),
+                "visibility_evidence" => visibility.fetch("evidence", nil)
+              }.compact
+            }
+          }
+        end
 
         {
           "rejection" => {
-            "message" => "#{command_type} targets issue #{requested}, which this head result did not create and the head could not have seen. " \
-                         "Reference the issue-creating command with issue_from_command instead of predicting an issue id.",
+            "message" => unseen_batch_issue_target_message(command_type, requested, head_id, visibility),
             "errors" => ["issue_id_not_created_by_this_head_result"]
           }
         }
+      end
+
+      # Several very different situations reach the final rejection, and only some of them are a head
+      # mistake, so they must never share a sentence:
+      #   - the id exists but belongs to work created after this head was spawned, or it never
+      #     existed at all -> the head predicted an id, which is the documented mistake,
+      #   - the id was removed before this head was even spawned (a stale id copied from an old log,
+      #     say) -> still not a legitimate target, but say what happened to it,
+      #   - the head record is gone, or it predates snapshot tracking, so the kernel has no
+      #     evidence either way -> say that plainly instead of asserting a prediction.
+      def unseen_batch_issue_target_message(command_type, requested, head_id, visibility)
+        removal = visibility.fetch("removal", nil)
+        if visibility.fetch("evidence", nil) == "no_snapshot_recorded"
+          "#{command_type} targets issue #{requested}, which no longer exists, and Meringue has no spawn snapshot for this head to tell whether it was removed after routing began. " \
+            "Nothing was applied."
+        elsif removal
+          "#{command_type} targets issue #{requested}, which was removed #{issue_removal_phrase(removal)}, before head #{head_id} was spawned, so it was never in this head's view of state. " \
+            "Nothing was applied."
+        else
+          "#{command_type} targets issue #{requested}, which this head result did not create and the head could not have seen. " \
+            "Reference the issue-creating command with issue_from_command instead of predicting an issue id."
+        end
+      end
+
+      def removed_batch_issue_target_message(command_type:, head_id:, issue_id:, removal:)
+        tail = if command_type == "SpawnWorker"
+                 "so no worker was started on it. Re-request the work if it is still wanted."
+               else
+                 "so there was nothing left to update. No state was changed."
+               end
+        "issue #{issue_id} was removed #{issue_removal_phrase(removal)} after head #{head_id} was spawned with it in view, #{tail}"
+      end
+
+      def issue_removal_phrase(removal)
+        reason = removal.is_a?(Hash) ? present_string(removal.fetch("reason", nil)) : nil
+        removed_at = removal.is_a?(Hash) ? present_string(removal.fetch("removed_at", nil)) : nil
+        phrase = case reason
+                 when "prune" then "by a prune"
+                 when "killed" then "by a kill"
+                 when nil then "(pruned or killed)"
+                 else "by #{reason.tr("_", " ")}"
+                 end
+        removed_at ? "#{phrase} at #{removed_at}" : phrase
+      end
+
+      # `PromptAgent` and `Kill` name a whole record, and the prune that removed 21 agents in one
+      # pass can land between a head reading state and its result being applied. Telling the user
+      # "Agent P3-I9-W2 does not exist" and blocking the head for that is the same failure as the
+      # issue case: the head read a real id, the record was removed under it, and there is nothing
+      # left to do. A target that was already gone when the head was spawned still falls through to
+      # normal validation, because that head really did name something it could not see.
+      def resolve_batch_removed_target(payload:, command_type:, head_id:)
+        requested = if command_type == "PromptAgent"
+                      present_string(value_at(payload, "agent_id", "AgentID", "agentId"))
+                    else
+                      present_string(value_at(payload, "target_id", "TargetID", "targetId"))
+                    end
+        return nil unless requested
+        return nil if requested.start_with?(BATCH_REFERENCE_PREFIX)
+
+        synchronized_state do
+          state = normalized_state
+          next nil if find_agent(state, requested) || find_issue(state, requested) || find_project(state, requested)
+
+          ledger = %w[agent issue].filter_map { |kind| removed_under_head_result(state, head_id, kind, requested) }.first
+          next nil unless ledger && ledger.fetch("after_spawn")
+
+          removal = ledger.fetch("removal")
+          kind = removal.fetch("kind", "issue").to_s
+          error = kind == "agent" ? REMOVED_BATCH_AGENT_TARGET_ERROR : REMOVED_BATCH_ISSUE_TARGET_ERROR
+          {
+            "skip" => {
+              "target_id" => requested,
+              "level" => command_type == "Kill" ? "info" : "warning",
+              "message" => removed_batch_record_target_message(
+                command_type: command_type,
+                head_id: head_id,
+                record_id: requested,
+                kind: kind,
+                removal: removal
+              ),
+              "errors" => [error],
+              "details" => {
+                "head_id" => head_id.to_s,
+                "target_id" => requested,
+                "reason" => error,
+                "removed_record" => removal
+              }.compact
+            }
+          }
+        end
+      end
+
+      def removed_batch_record_target_message(command_type:, head_id:, record_id:, kind:, removal:)
+        noun = kind == "agent" ? "agent" : "issue"
+        tail = if command_type == "Kill"
+                 "so there was nothing left to kill."
+               else
+                 "so the prompt was not delivered. Re-send it if the work is still wanted."
+               end
+        "#{noun} #{record_id} was removed #{issue_removal_phrase(removal)} after head #{head_id} was spawned, #{tail}"
       end
 
       def batch_issue_remap(command, payload, command_type, requested, issue_id, reason)
@@ -12405,41 +12541,119 @@ module Meringue
         end
       end
 
-      # An issue is visible to a head when the head's spawn snapshot contained it, when this head's
-      # own batch created it, or when a head already visible and still unapplied at spawn time
-      # created it before this head returned its result. The last case covers natural-language
-      # refinements that arrive while the original routing head is still landing: the refinement
-      # head may read the updated state file and route to that just-minted issue without leaving a
-      # spurious "could not have seen it" rejection.
-      def head_could_see_issue?(head_id:, issue_id:)
+      # What this head could see, answered from the head's own spawn snapshot rather than from live
+      # state. Live state answers a different question: an issue can be pruned or killed while a
+      # head is still routing, and treating "it is not in state now" as "the head could not have
+      # seen it" turned every prune-during-routing race into a bogus "you predicted this id"
+      # rejection that silently dropped part of the head's intent.
+      #
+      # Returns:
+      #   "visible"             - the issue exists now and this head was entitled to target it,
+      #   "removed_after_spawn" - the head saw it at spawn and it has since been removed,
+      #   "removal"             - the ledger record of that removal when the kernel has one,
+      #   "evidence"            - which fact decided it, for the log details.
+      def head_issue_visibility(head_id:, issue_id:)
         synchronized_state do
           state = normalized_state
           issue = find_issue(state, issue_id)
-          next false unless issue
-          next true if issue.fetch("originating_head_id", nil).to_s == head_id.to_s
-
           head = find_agent(state, head_id)
-          next true unless head
-
-          metadata = head.fetch("harness_metadata", {}) || {}
+          metadata = head.is_a?(Hash) ? (head.fetch("harness_metadata", {}) || {}) : {}
           snapshot_issue_ids = metadata.fetch("snapshot_issue_ids", nil)
-          snapshot_ids_tracked = snapshot_issue_ids.is_a?(Array)
-          next true if snapshot_ids_tracked && Array(snapshot_issue_ids).include?(issue.fetch("id"))
+          in_snapshot = if snapshot_issue_ids.is_a?(Array)
+                          Array(snapshot_issue_ids).map { |id| Ids.canonical(id.to_s) }.include?(Ids.canonical(issue_id.to_s))
+                        end
 
-          originating_head_id = present_string(issue.fetch("originating_head_id", nil))
-          snapshot_unapplied_head_ids = metadata.fetch("snapshot_unapplied_head_ids", nil)
-          if originating_head_id && snapshot_unapplied_head_ids.is_a?(Array)
-            next true if snapshot_unapplied_head_ids.map(&:to_s).include?(originating_head_id)
+          if issue
+            next issue_visibility(true, "created_by_this_head") if issue.fetch("originating_head_id", nil).to_s == head_id.to_s
+            # A head record that is already gone cannot be held to a snapshot nobody kept.
+            next issue_visibility(true, "head_record_missing") unless head
+            next issue_visibility(true, "spawn_snapshot") if in_snapshot
+
+            # A refinement head can legitimately route to an issue created by a head that was
+            # already visible and still applying when this head spawned.
+            originating_head_id = present_string(issue.fetch("originating_head_id", nil))
+            snapshot_unapplied_head_ids = metadata.fetch("snapshot_unapplied_head_ids", nil)
+            if originating_head_id && snapshot_unapplied_head_ids.is_a?(Array)
+              if snapshot_unapplied_head_ids.map(&:to_s).include?(originating_head_id)
+                next issue_visibility(true, "visible_unapplied_head")
+              end
+            end
+            next issue_visibility(false, "not_in_spawn_snapshot") unless in_snapshot.nil?
+
+            # Heads recorded before snapshot ids were tracked fall back to creation order.
+            issue_created = parse_time_or_nil(issue.fetch("created_at", nil))
+            head_created = parse_time_or_nil(head.fetch("created_at", nil))
+            next issue_visibility(true, "creation_time_unknown") unless issue_created && head_created
+
+            next issue_visibility(issue_created <= head_created, "creation_order")
           end
-          next false if snapshot_ids_tracked
 
-          # Heads recorded before snapshot ids were tracked fall back to creation order.
-          issue_created = parse_time_or_nil(issue.fetch("created_at", nil))
-          head_created = parse_time_or_nil(head.fetch("created_at", nil))
-          next true unless issue_created && head_created
+          # The issue is not in state. Whether that is a removed target or an invented id is the
+          # whole distinction, so decide it from recorded facts: the head's snapshot first, then
+          # the kernel's own record of what it removed.
+          ledger = removed_under_head_result(state, head_id, "issue", issue_id)
+          removal = ledger && ledger.fetch("removal")
+          next issue_visibility(false, "spawn_snapshot", removed_after_spawn: true, removal: removal) if in_snapshot
+          next issue_visibility(false, "not_in_spawn_snapshot", removal: removal) unless in_snapshot.nil?
+          next issue_visibility(false, "no_snapshot_recorded") unless ledger
 
-          issue_created <= head_created
+          next issue_visibility(false, "removed_issue_ledger", removed_after_spawn: ledger.fetch("after_spawn"), removal: removal)
         end
+      end
+
+      def issue_visibility(visible, evidence, removed_after_spawn: false, removal: nil)
+        {
+          "visible" => !!visible,
+          "removed_after_spawn" => !visible && removed_after_spawn,
+          "removal" => removal,
+          "evidence" => evidence
+        }
+      end
+
+      # The kernel's own record of issues it removed. Prune and kill both funnel through
+      # `remove_issue_bundles_and_agents!`, so this ledger is the durable answer to "did this id
+      # ever exist" once the issue record itself is gone.
+      def removed_issue_record(state, issue_id)
+        removed_record(state, "issue", issue_id)
+      end
+
+      def removed_agent_record(state, agent_id)
+        removed_record(state, "agent", agent_id)
+      end
+
+      def removed_record(state, kind, record_id)
+        canonical = Ids.canonical(record_id.to_s)
+        key = REMOVED_RECORD_LEDGER_KEYS.fetch(kind)
+        Array(state.fetch("metadata", {}).fetch(key, nil)).reverse.find do |entry|
+          entry.is_a?(Hash) && Ids.canonical(entry.fetch("id", entry.fetch("issue_id", nil)).to_s) == canonical
+        end
+      end
+
+      def record_removed_records!(state, kind, record_ids, reason, now)
+        ids = Array(record_ids).compact.map(&:to_s).uniq
+        return if ids.empty?
+
+        key = REMOVED_RECORD_LEDGER_KEYS.fetch(kind)
+        metadata = (state["metadata"] ||= {})
+        ledger = metadata[key]
+        ledger = [] unless ledger.is_a?(Array)
+        ledger += ids.map do |record_id|
+          { "id" => record_id, "kind" => kind, "reason" => reason.to_s, "removed_at" => now }
+        end
+        metadata[key] = ledger.last(REMOVED_RECORD_LEDGER_LIMIT)
+      end
+
+      # Was this record removed after the head was spawned? That is the difference between "the
+      # world changed under an in-flight result" and "this head named something it never saw".
+      def removed_under_head_result(state, head_id, kind, record_id)
+        removal = removed_record(state, kind, record_id)
+        return nil unless removal
+
+        head = find_agent(state, head_id)
+        head_created = head.is_a?(Hash) ? parse_time_or_nil(head.fetch("created_at", nil)) : nil
+        removed_at = parse_time_or_nil(removal.fetch("removed_at", nil))
+        after_spawn = head_created.nil? || removed_at.nil? || removed_at >= head_created
+        { "removal" => removal, "after_spawn" => after_spawn }
       end
 
       def head_batch_remap_message(remap)
@@ -13289,9 +13503,10 @@ module Meringue
 
       # Resolve a UI selection against the kernel's current snapshot. The input
       # layer intentionally sends only selected_id, so a worker/agent can never
-      # smuggle an arbitrary issue id into head context. Agent selections resolve
-      # to their durable owning issue; issue selections target themselves; a head
-      # is a top-level node that resolves to itself (see `head_selected_target`).
+      # smuggle an arbitrary issue id into head context. Issue selections target
+      # themselves and worker selections resolve to their durable owning issue.
+      # Heads are top-level log-only nodes: retrying one is an explicit RetryHead
+      # command, not ambient chat routing context.
       def resolve_selected_head_target(state, requested_target)
         return [nil, nil] if requested_target.nil?
 
@@ -13309,10 +13524,7 @@ module Meringue
             return [nil, { "code" => "selected_target_not_found", "message" => "selected target #{selected_id} no longer exists." }]
           end
 
-          # A head owns no issue, so it is its own target. A failed head is retried before the
-          # spawn ever gets here; a head that is still routing keeps its identity on the message
-          # instead of the message being dropped for having "no issue".
-          return [head_selected_target(state, agent, selected_id), nil] if agent.fetch("type", nil) == "head"
+          return [nil, nil] if agent.fetch("type", nil) == "head"
 
           issue_id = present_string(agent.fetch("issue_id", nil))
           unless issue_id
@@ -13360,37 +13572,6 @@ module Meringue
                       end
         selected_id = selected_id.to_s.strip
         selected_id.empty? ? nil : selected_id
-      end
-
-      # The head record a selection names when that head can be retried right now, or nil. Used to
-      # turn "select the failed head and type a message" into a retry before a new head is spawned.
-      def selected_head_retry_target(requested_target)
-        selected_id = selected_target_id(requested_target)
-        return nil unless selected_id
-
-        synchronized_state do
-          agent = find_agent(normalized_state, selected_id)
-          next nil unless agent && agent.fetch("type", nil) == "head"
-          next nil unless State::Models.head_retry_target?(agent)
-
-          deep_copy(agent)
-        end
-      end
-
-      def head_selected_target(state, head, selected_id)
-        metadata = head.fetch("harness_metadata", {}) || {}
-        metadata = {} unless metadata.is_a?(Hash)
-        plan = head_retry_plan(state, head.fetch("id"))
-        {
-          "selected_id" => selected_id,
-          "selected_type" => "head",
-          "selected_agent_id" => head.fetch("id"),
-          "selected_agent_type" => "head",
-          "selected_agent_title" => metadata.fetch("title", nil),
-          "selected_head_status" => head.fetch("status", nil),
-          "head_retry_eligible" => plan.fetch("eligible"),
-          "head_retry_note" => plan.fetch("eligible") ? nil : plan.fetch("message", nil)
-        }.compact
       end
 
       # Scalar ids make the selected prompt visible under both issue and exact
@@ -15211,6 +15392,90 @@ module Meringue
         ).to_h
       end
 
+      # A command the kernel deliberately did not apply because its target disappeared between the
+      # decision and the application. Nothing mutated, so the journaled status stays `rejected` and
+      # the batch cannot re-run it, but the user-visible line says "Skipped", carries the reason,
+      # and names the intent that had nowhere to land. See `HEAD_BATCH_SKIP_ERROR_CODES`.
+      def skipped_result(command_id, command_type, target_id, message, errors, level: "info", details: {})
+        log_entry_ids = record_result_log(
+          command_id: command_id,
+          command_type: command_type,
+          status: "rejected",
+          level: level,
+          message: message,
+          errors: errors,
+          label: "Skipped",
+          extra_details: details
+        )
+
+        Result.new(
+          command_id: command_id,
+          command_type: command_type,
+          status: "rejected",
+          target_id: target_id,
+          message: message,
+          result: { "skipped" => errors.first, "details" => details },
+          errors: errors,
+          log_entry_ids: log_entry_ids
+        ).to_h
+      end
+
+      def head_command_result_skipped?(result)
+        return false unless result.is_a?(Hash)
+
+        Array(result.fetch("errors", [])).any? { |error| HEAD_BATCH_SKIP_ERROR_CODES.include?(error.to_s) }
+      end
+
+      # A rejected or skipped command is a piece of the user's intent that did not land, so the line
+      # the user reads must say what was dropped. "1 rejected" with no consequence is exactly how a
+      # head's issue update disappeared without anyone being able to tell what it was.
+      def with_dropped_intent(message, command)
+        intent = dropped_command_intent(command)
+        return message unless intent
+
+        "#{message} Dropped #{intent}."
+      end
+
+      def dropped_command_intent(command)
+        command_type = canonical_command_type(value_at(command, "type", "command_type"))
+        payload = value_at(command, "payload")
+        return nil unless payload.respond_to?(:[])
+
+        case command_type
+        when "ModifyIssue" then modify_issue_dropped_intent(payload)
+        when "SpawnWorker" then worker_dropped_intent(payload)
+        when "PromptAgent" then prompt_dropped_intent(payload)
+        end
+      end
+
+      def modify_issue_dropped_intent(payload)
+        changes = []
+        changes << "status → #{present_string(value_at(payload, "status", "Status"))}" if present_string(value_at(payload, "status", "Status"))
+        changes << "title → #{single_line_excerpt(value_at(payload, "title", "Title"), limit: 60).inspect}" if payload_has?(payload, "title", "Title")
+        changes << "description" if payload_has?(payload, "description", "Description")
+        changes << "parent issue" if payload_has?(payload, "parent_issue_id", "ParentIssueID", "parentIssueId")
+        return "issue update" if changes.empty?
+
+        "issue update (#{changes.join(", ")})"
+      end
+
+      def worker_dropped_intent(payload)
+        title = present_string(value_at(payload, "title", "Title"))
+        return "worker #{single_line_excerpt(title, limit: 60).inspect}" if title
+
+        prompt = present_string(value_at(payload, "prompt", "Prompt"))
+        return "worker" unless prompt
+
+        "worker for #{single_line_excerpt(prompt, limit: 60).inspect}"
+      end
+
+      def prompt_dropped_intent(payload)
+        prompt = present_string(value_at(payload, "prompt", "Prompt", "message", "Message"))
+        return "prompt" unless prompt
+
+        "prompt #{single_line_excerpt(prompt, limit: 60).inspect}"
+      end
+
       def failed_result(command_id, command_type, message, errors)
         log_entry_ids = record_result_log(
           command_id: command_id,
@@ -15231,20 +15496,20 @@ module Meringue
         ).to_h
       end
 
-      def record_result_log(command_id:, command_type:, status:, level:, message:, errors: [])
+      def record_result_log(command_id:, command_type:, status:, level:, message:, errors: [], label: nil, extra_details: {})
         state = normalized_state
         log_ids = append_log(
           state,
           source_type: "kernel",
           source_id: nil,
           level: level,
-          message: "#{status.capitalize} #{command_type || "unknown"}: #{message}",
+          message: "#{label || status.capitalize} #{command_type || "unknown"}: #{message}",
           details: {
             "command_id" => command_id,
             "command_type" => command_type,
             "status" => status,
             "errors" => errors
-          }
+          }.merge(extra_details.is_a?(Hash) ? extra_details : {})
         )
         touch_state!(state)
         store.save(state)

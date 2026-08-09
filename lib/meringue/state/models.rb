@@ -36,9 +36,8 @@ module Meringue
 
       module_function
 
-      # Shared by the kernel (which performs the retry) and the TUI (which offers the selected
-      # head as a chat target, and marks the row as recoverable), so every layer agrees on which
-      # head rows can be reprompted.
+      # Shared by the kernel (which performs explicit /retry) and the TUI (which marks the row as
+      # recoverable and double-clickable), so every layer agrees on which head rows can be retried.
       def head_retry_target?(agent)
         return false unless agent.is_a?(Hash)
         return false unless agent.fetch("type", nil).to_s == "head"

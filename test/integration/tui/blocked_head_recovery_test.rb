@@ -2,37 +2,44 @@
 
 require "test_helper"
 require "support/tui_support"
+require "timeout"
 
 # What the user sees for a head that stopped without routing its request.
 #
 # A `blocked` head is the common stranded case: the kernel applied its batch, rejected or failed
 # part of it, and the request inside it went nowhere. Those heads sit in the AgentTree, so every
-# presentation layer has to agree that selecting one and typing re-runs the request, rather than
-# leaving the row looking like dead state whose only affordance is /kill.
+# presentation layer has to agree that retry is a deliberate visible action (`/retry` or
+# double-click), while ordinary selection only filters logs.
 class TuiBlockedHeadRecoveryTest < Minitest::Test
   include TUISupport
 
   Pane = Meringue::TUI::Panes::AgentTreePane
+  WIDTH = 100
+  HEIGHT = 32
+
+  class RecordingSessionOpener
+    attr_reader :opened
+
+    def initialize
+      @opened = []
+    end
+
+    def open(agent)
+      @opened << agent.fetch("id")
+      { "status" => "opened", "message" => "Opened #{agent.fetch("id")}." }
+    end
+  end
 
   def setup
     @pane = Pane.new
+    @layout = Meringue::TUI::Layout.new
+    @app = Meringue::TUI::App.new(layout: @layout, out: StringIO.new, terminal: TUISupport::FakeTerminal.new)
   end
 
-  def test_a_blocked_head_row_says_it_can_be_reprompted
+  def test_a_blocked_head_row_shows_the_retry_affordance
     rendered = plain_lines(@pane.lines(tree_state(agents: [blocked_head("H26")]), width: 60))
 
-    assert_includes rendered, "  └─ ! H26  Fix the slow query prompt to retry"
-  end
-
-  # Once a head has been retried, the successor is the more useful fact on the row: the user needs
-  # to know their request is running again rather than being invited to retry it a second time.
-  def test_a_retried_head_row_names_its_successor
-    head = blocked_head("H26")
-    head.fetch("harness_metadata")["retried_by_head_id"] = "H41"
-
-    rendered = plain_lines(@pane.lines(tree_state(agents: [head]), width: 60))
-
-    assert_includes rendered, "  └─ ! H26  Fix the slow query retried as H41"
+    assert_includes rendered, "  └─ ! H26  Fix the slow query retry me"
   end
 
   # A head that routed every command it proposed is finished, not stranded, so it must not
@@ -46,38 +53,86 @@ class TuiBlockedHeadRecoveryTest < Minitest::Test
     rendered = plain_lines(@pane.lines(tree_state(agents: [head]), width: 60))
 
     assert_includes rendered, "  └─ ✓ H26  Fix the slow query"
-    refute_includes rendered.join("\n"), "prompt to retry"
+    refute_includes rendered.join("\n"), "retry me"
   end
 
-  # Selecting the row has to resolve to a head chat target, which is what makes the next typed
-  # message a retry instead of an unrelated new request.
-  def test_selecting_a_blocked_head_targets_chat_at_a_retry
+  # Selecting the row filters logs only. It must not turn the next typed message into a head
+  # prompt or retry; retry stays explicit.
+  def test_selecting_a_blocked_head_is_log_only
     state = selected_tree_state("H26", blocked_head("H26"))
-    target = Meringue::TUI::LogScope.chat_target(state)
 
-    refute_nil target, "a blocked head must be a chat target, not a log-only filter"
-    assert_equal "H26", target.fetch("selected_id")
-    assert_equal "head", target.fetch("selected_type")
-    assert_equal "blocked", target.fetch("selected_head_status")
+    assert_nil Meringue::TUI::LogScope.chat_target(state)
 
     pane = Meringue::TUI::Panes::ChatPane.new
-    assert_equal "chat → retry H26 · blocked", pane.composer_pane_title(state)
-    assert_equal "retry H26", Meringue::TUI::ChatTarget.placeholder(state)
-    assert_includes plain_line(pane.bottom_hint_line(state)), "retries this head"
+    assert_equal "chat · head routes · H26 logs only", pane.composer_pane_title(state)
+    assert_equal "enter a prompt", Meringue::TUI::ChatTarget.placeholder(state)
+    assert_includes plain_line(pane.bottom_hint_line(state)), "head routes"
   end
 
-  # `/prompt` is the explicit entry point for the same recovery, so its completion has to offer
-  # blocked heads too.
-  def test_prompt_completion_offers_a_blocked_head
+  # `/retry` is the explicit command entry point, so its completion offers blocked heads while
+  # `/prompt` remains worker-only.
+  def test_retry_completion_offers_a_blocked_head_and_prompt_does_not
     state = { "agents" => [blocked_head("H26")] }
 
-    records = Meringue::Input::SlashCommandParser.command_suggestion_records("/prompt ", limit: 5, state: state)
+    retry_records = Meringue::Input::SlashCommandParser.command_suggestion_records("/retry ", limit: 5, state: state)
+    assert_equal ["H26"], retry_records.map { |record| record.fetch("usage") }
+    assert_includes retry_records.first.fetch("description"), "retry"
 
-    assert_equal ["H26"], records.map { |record| record.fetch("usage") }
-    assert_includes records.first.fetch("description"), "retry"
+    prompt = Meringue::Input::SlashCommandParser.command_suggestion_records("/prompt ", limit: 5, state: state)
+    assert_empty prompt
+  end
+
+  def test_double_clicking_a_retryable_head_submits_retry_command
+    state = tree_state(agents: [blocked_head("H26")])
+    submissions = Queue.new
+    handler = lambda do |text, **_kwargs|
+      submissions << text
+      { "event" => "slash_command_applied", "command_results" => [] }
+    end
+
+    send_left_click(state, "H26")
+    send_left_click(state, "H26", handler: handler)
+
+    assert_equal "/retry H26", Timeout.timeout(5) { submissions.pop }
+  end
+
+  def test_open_session_command_can_open_a_head_session_for_debugging
+    opener = RecordingSessionOpener.new
+    app = Meringue::TUI::App.new(layout: @layout, out: StringIO.new, terminal: TUISupport::FakeTerminal.new, session_opener: opener)
+    state = tree_state(agents: [blocked_head("H26")])
+
+    result = app.send(:handle_key, "\r", "/open-session H26", "/open-session H26".length, -1, nil, state)
+
+    assert_equal ["", 0, -1], result
+    assert_equal ["H26"], opener.opened
   end
 
   private
+
+  def send_left_click(state, item_id, handler: nil)
+    position = screen_position_for_item(state, item_id)
+    key = {
+      "type" => "mouse",
+      "kind" => "button",
+      "pressed" => true,
+      "button" => 0,
+      "x" => position.fetch("x"),
+      "y" => position.fetch("y")
+    }
+    @app.send(:handle_key, key, "", 0, -1, handler, state)
+  end
+
+  def screen_position_for_item(state, item_id)
+    HEIGHT.times do |y|
+      WIDTH.times do |x|
+        next unless @layout.agent_tree_item_at(state, width: WIDTH, height: HEIGHT, x: x, y: y) == item_id
+
+        return { "x" => x + 1, "y" => y + 1 }
+      end
+    end
+
+    flunk "no screen position maps to AgentTree item #{item_id}"
+  end
 
   # The AgentTree selection as the App composes it for a frame: the sticky log scope the kernel
   # snapshot is resolved against.
