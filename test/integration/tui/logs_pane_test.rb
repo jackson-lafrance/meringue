@@ -148,6 +148,27 @@ class TuiLogsPaneTest < Minitest::Test
     refute_includes progress_header, "· warn"
   end
 
+  def test_long_worker_progress_reports_are_wrapped_without_cutting_their_content
+    report = "The worker found the shared cursor bug and is preserving the complete report. " * 8
+    logs = [
+      log_record(
+        "L1",
+        "source_type" => "worker",
+        "source_id" => "P1-I1-W1",
+        "message" => report,
+        "details" => { "kind" => "worker_progress", "progress_kind" => "assistant_text", "issue_id" => "P1-I1" }
+      )
+    ]
+    state = composed_state(empty_state.merge("logs" => logs, "agents" => [agent_record("P1-I1-W1")]))
+    lines = plain_lines(@pane.log_lines(state, width: 50))
+    body = lines.select { |line| line.start_with?("▌ ") }.map { |line| line.delete_prefix("▌ ") }.join(" ")
+
+    assert_operator body.length, :>, 240, "the rendered report must not fall back to the old headline limit"
+    assert_includes body, "shared cursor bug"
+    assert_includes body, "preserving the complete report"
+    refute_includes body, "…"
+  end
+
   def test_conversation_messages_and_durable_logs_interleave_by_instant
     logs = [
       log_record("L1", "message" => "utc entry", "timestamp" => "2026-07-11T12:00:00Z"),

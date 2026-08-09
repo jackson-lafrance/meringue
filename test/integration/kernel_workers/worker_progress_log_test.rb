@@ -103,7 +103,7 @@ class KernelWorkersProgressLogTest < Minitest::Test
     assert_equal ["Now writing the failing test."], progress_messages(engine, worker_id)
   end
 
-  def test_a_long_message_is_truncated_to_a_headline
+  def test_a_long_message_is_kept_intact_in_the_progress_log
     long_text = "Investigating the reconcile tick. " * 40
     client = streaming_client
     client.events = [assistant_message(long_text)]
@@ -113,11 +113,8 @@ class KernelWorkersProgressLogTest < Minitest::Test
 
     apply!(engine, "ReconcileSessions", {})
 
-    message = progress_messages(engine, worker_id).fetch(0)
-    assert_operator message.length, :<=, Meringue::Kernel::Engine::WORKER_PROGRESS_MESSAGE_MAX_CHARS
-    assert_operator message.length, :>, Meringue::Kernel::Engine::WORKER_PROGRESS_MESSAGE_MAX_CHARS - 10
-    assert message.end_with?("…"), "a truncated progress line should say so"
-    assert message.start_with?("Investigating the reconcile tick.")
+    expected = long_text.gsub(/\s+/, " ").strip
+    assert_equal expected, progress_messages(engine, worker_id).fetch(0)
   end
 
   def test_tool_only_work_stays_silent_instead_of_fabricating_semantic_progress
