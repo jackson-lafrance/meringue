@@ -102,7 +102,7 @@ module Meringue
       # A harness turn that ends is not automatically a turn that finished. These are the
       # harness-reported turn outcomes that mean the work stopped without a result, so the
       # agent must settle as `errored` with a visible reason instead of as `completed`.
-      SETTLE_FAILURE_TURN_STATES = %w[failed errored].freeze
+      SETTLE_FAILURE_TURN_STATES = %w[failed errored incomplete].freeze
       # Session events that prove the turn died rather than finished. Only consulted when the
       # settled turn produced no final assistant message, so a genuine completion that happens
       # to be followed by a clean process exit is still a completion.

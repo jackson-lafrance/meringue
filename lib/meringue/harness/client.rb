@@ -103,8 +103,8 @@ module Meringue
       #     "error_message" => harness error text }
       #
       # Returning nil means "no evidence available"; the kernel then falls back to
-      # the session events it already has. Only an explicit "failed" state makes
-      # the kernel settle an agent as `errored` instead of `completed`.
+      # the session events it already has. An explicit "failed" or "incomplete" state
+      # makes the kernel settle an agent as `errored` instead of `completed`.
       def turn_outcome(_session_ref)
         nil
       end
