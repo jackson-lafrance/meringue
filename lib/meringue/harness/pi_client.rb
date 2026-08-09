@@ -183,7 +183,11 @@ module Meringue
           # the pipes. Take the transport over instead of failing forever, then
           # continue on the resumed session.
           takeover = take_over_transport(current_ref)
-          if normalized_mode != "normal" && !takeover.fetch("resumable", false)
+          # A follow-up is still a valid continuation when the saved turn did not finish: after
+          # reconciliation has discovered a dead Pi process, the only meaningful delivery is a
+          # normal prompt into the resumed transcript. Steer is different because it promises to
+          # interrupt a live turn, so keep rejecting it when there is no active transport.
+          if normalized_mode == "steer" && !takeover.fetch("resumable", false)
             raise InvalidModeError,
                   "Pi session is not active; resume it with mode: \"normal\" before using #{normalized_mode.inspect}"
           end

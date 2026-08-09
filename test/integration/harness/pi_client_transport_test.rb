@@ -189,6 +189,37 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_empty stub_argv(stub, wait: false), "no Pi process should have been started"
   end
 
+  # Regression for the reconciliation path: PR #207 correctly stopped treating a stale assistant
+  # result as completion when a newer follow-up turn had not finished. That leaves a resumable Pi
+  # transcript with no completed result, so a follow-up must be downgraded to a normal continuation
+  # after reattaching instead of being rejected by the mode guard.
+  def test_following_up_an_unresumable_saved_turn_reattaches_as_a_normal_continuation
+    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-1" })
+    session_file = pi_session_file(
+      tmpdir,
+      session_id: "sess-1",
+      extra_lines: [
+        JSON.generate(
+          "type" => "message",
+          "id" => "follow-up-user",
+          "parentId" => "m2",
+          "timestamp" => "2026-01-01T00:00:03Z",
+          "message" => { "role" => "user", "content" => [{ "type" => "text", "text" => "continue" }] }
+        )
+      ]
+    )
+    ref = pi_session_ref(session_file: session_file, cwd: tmpdir)
+
+    prompted = track_session(client, client.prompt_session(ref, "continue the interrupted work", mode: "follow_up"))
+
+    assert_equal ["continue the interrupted work"], stub_commands_of_type(stub, "prompt").map { |command| command.fetch("message") }
+    assert_empty stub_commands_of_type(stub, "follow_up"), "a resumed session has no live turn to queue behind"
+    assert_equal "follow_up", prompted.fetch("metadata").fetch("prompt_mode_downgraded_from")
+    assert_equal "normal", prompted.fetch("metadata").fetch("delivered_prompt_mode")
+    assert_match(/resumed and this follow-up was delivered as a normal continuation/, prompted.fetch("metadata").fetch("prompt_mode_note"))
+    assert_includes stub_argv(stub).each_cons(2).to_a, ["--session", session_file]
+  end
+
   def test_prompting_a_session_owned_by_another_live_instance_mid_turn_is_transient
     client, stub = build_pi_client(
       tmpdir,
