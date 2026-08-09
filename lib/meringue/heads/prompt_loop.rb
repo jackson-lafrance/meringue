@@ -106,7 +106,7 @@ module Meringue
         payload
       end
 
-      # `/prompt H13 "try again"` retries a failed head, and a synchronous head runner hands back its
+      # `/retry H13` starts a fresh retry head, and a synchronous head runner hands back its
       # HeadResult inside that command result. Applying it here is what makes the typed retry
       # converge with the natural-language head loop; when heads run asynchronously there is no
       # result yet and the kernel's own polling applies it, so this does nothing.

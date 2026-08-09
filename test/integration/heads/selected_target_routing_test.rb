@@ -73,9 +73,9 @@ class HeadsSelectedTargetRoutingTest < Minitest::Test
     assert_empty runner.calls
   end
 
-  # A head that is still routing has nothing to retry, but the user's message must not be dropped
-  # for it: it routes as a new request and the log says why the selection was not a retry.
-  def test_selecting_a_head_that_is_still_routing_routes_the_message_as_a_new_request
+  # Head selections are log-only. A selected head must not become retry or routing context; the
+  # user's message routes as an ordinary new request.
+  def test_selecting_a_head_routes_the_message_as_a_new_unscoped_request
     runner = ScriptedHeadRunner.new(results: [head_result(summary: "Routed as a new request.")])
     environment = build_head_environment(runner: runner, initial_state: head_snapshot)
 
@@ -88,10 +88,9 @@ class HeadsSelectedTargetRoutingTest < Minitest::Test
     assert_equal 1, runner.calls.length
     refute_equal "H7", result.fetch("target_id")
 
-    note = environment.state.fetch("logs").find { |entry| entry.fetch("message").include?("still working") }
-    refute_nil note, "the log should explain that the selected head was not retried"
-    assert_equal "warning", note.fetch("level")
-    assert_includes note.fetch("message"), "Routed this message to new head #{result.fetch("target_id")}"
+    target = runner.calls.first.fetch("context").to_prompt_h.dig("routing_context", "selected_target")
+    assert_nil target
+    refute environment.state.fetch("logs").any? { |entry| entry.fetch("message").include?("not retried") }
   end
 
   # A blank selection carries no destination, so it means "nothing is selected"

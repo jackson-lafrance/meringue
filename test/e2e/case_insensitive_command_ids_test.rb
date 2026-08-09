@@ -154,7 +154,9 @@ class E2eCaseInsensitiveCommandIdsTest < Minitest::Test
       "/kill h83" => "Target h83 does not exist.",
       "/kill nope" => "Target nope does not exist.",
       "/dismiss q9" => "Question q9 does not exist.",
-      %(/prompt p1-i1-w1 "hello") => "Agent p1-i1-w1 does not exist."
+      # The rejection also names the prompt that did not land, so a dropped instruction is never
+      # just an id the user has to reconstruct.
+      %(/prompt p1-i1-w1 "hello") => "Agent p1-i1-w1 does not exist. Dropped prompt \"hello\"."
     }.each do |input, expected_message|
       result = prompt_loop.call(input)
 

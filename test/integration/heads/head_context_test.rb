@@ -450,6 +450,17 @@ class HeadContextTest < Minitest::Test
     assert(rules.any? { |rule| rule.include?("follow_up_of_agent_id together with after_agent_id is still allowed") })
   end
 
+  # Heads were being told they had predicted an id when a /prune removed their target mid-flight, so
+  # the routing rules now state what the kernel does and that hedging is not the answer.
+  def test_routing_rules_explain_a_target_removed_while_routing
+    rules = build_head_context.to_prompt_h.dig("routing_context", "decision_rules")
+    rule = rules.find { |entry| entry.include?("issue_removed_before_head_result_applied") }
+
+    refute_nil rule, "expected a routing rule for a target removed while the head is routing"
+    assert_includes rule, "skips that one command as a no-op"
+    assert_includes rule, "Never re-check state at the last moment"
+  end
+
   def test_routing_rules_explain_how_to_retry_an_errored_worker
     rules = build_head_context.to_prompt_h.dig("routing_context", "decision_rules")
     retry_rule = rules.find { |rule| rule.start_with?("To retry a worker that errored") }
