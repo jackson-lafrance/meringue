@@ -486,7 +486,12 @@ module Meringue
         process = process_for(session_ref, required: false)
         return history_session_view(session_ref) unless process
 
-        initial_cursor = process.event_cursor
+        # A focused view is disposable UI state, not the owner of the Pi stream. Start at the
+        # beginning of the retained journal so a view opened after leaving the dashboard can
+        # catch up on transient deltas that have not been written to get_entries yet. The journal
+        # reports a gap when its bounded history has already rolled over; the durable snapshot is
+        # still the repair path in that case.
+        initial_cursor = 0
         transcript_mutex = Mutex.new
         transcript_entries = []
         transcript_leaf_id = nil

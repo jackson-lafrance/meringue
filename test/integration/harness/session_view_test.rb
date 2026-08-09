@@ -132,6 +132,33 @@ class HarnessSessionViewTest < HarnessIntegrationTest
     assert_match(/Saved agent session history is unavailable/, snapshot.fetch("warning"))
   end
 
+  def test_history_snapshot_keeps_pi_control_entries_on_the_active_branch
+    path = File.join(tmpdir, "controls.jsonl")
+    File.open(path, "w") do |file|
+      [
+        { "type" => "session", "id" => "sess-controls", "cwd" => tmpdir },
+        { "type" => "message", "id" => "m1", "parentId" => nil,
+          "message" => { "role" => "user", "content" => "before compaction" } },
+        { "type" => "compaction", "id" => "c1", "parentId" => "m1", "timestamp" => "2026-01-01T00:00:01Z",
+          "summary" => "Earlier context was summarized.", "tokensBefore" => 42 },
+        { "type" => "model_change", "id" => "model1", "parentId" => "c1", "timestamp" => "2026-01-01T00:00:02Z",
+          "provider" => "openai", "modelId" => "gpt-5" },
+        { "type" => "custom_message", "id" => "custom1", "parentId" => "model1", "timestamp" => "2026-01-01T00:00:03Z",
+          "customType" => "progress", "display" => true, "content" => "Extension checkpoint" },
+        { "type" => "message", "id" => "m2", "parentId" => "custom1",
+          "message" => { "role" => "assistant", "content" => [{ "type" => "text", "text" => "continuing" }], "stopReason" => "stop" } }
+      ].each { |record| file.puts(JSON.generate(record)) }
+    end
+
+    snapshot = PiSessionView.history_snapshot(session_ref: { "session_file" => path })
+
+    assert_equal ["message", "compaction", "model_change", "custom_message", "message"], snapshot.fetch("items").map { |item| item.fetch("entry_type") }
+    assert_equal "Context compacted: Earlier context was summarized.", snapshot.fetch("items")[1].fetch("content")
+    assert_equal 42, snapshot.fetch("items")[1].fetch("tokens_before")
+    assert_equal "Model changed: openai/gpt-5", snapshot.fetch("items")[2].fetch("content")
+    assert_equal "custom", snapshot.fetch("items")[3].fetch("role")
+  end
+
   def test_history_snapshot_only_renders_the_active_branch
     path = File.join(tmpdir, "branched.jsonl")
     File.open(path, "w") do |file|
@@ -254,6 +281,14 @@ class HarnessSessionViewTest < HarnessIntegrationTest
     assert_equal ["a"], queue.fetch("steering")
     assert_equal ["b"], queue.fetch("follow_up")
 
+    tool_delta = normalized(
+      "message_update",
+      "message" => { "role" => "assistant", "timestamp" => 1234, "content" => [] },
+      "assistantMessageEvent" => { "type" => "toolcall_delta", "delta" => "{\\\"command\\\":\\\"rake test\\\"}" }
+    ).first
+    assert_equal "toolcall_delta", tool_delta.fetch("delta_type")
+    assert_equal "1234", tool_delta.fetch("id")
+
     assert_empty normalized("some_future_pi_event")
   end
 
@@ -315,6 +350,31 @@ class HarnessSessionViewTest < HarnessIntegrationTest
     assert_operator poll.fetch("cursor"), :>, 0
     # The kernel consumer keeps its own cursor, so the view did not steal events.
     assert_equal %w[agent_start agent_settled], client.read_events(ref).map { |event| event.fetch("type") }
+  end
+
+  def test_pi_client_view_replays_retained_events_when_opened_after_streaming_started
+    client, stub = build_pi_client(
+      tmpdir,
+      stub_config: {
+        "session_id" => "sess-replay",
+        "events_before_response" => { "prompt" => [{ "type" => "agent_start" }, { "type" => "message_update", "message" => { "role" => "assistant", "timestamp" => 7 }, "assistantMessageEvent" => { "type" => "text_delta", "delta" => "still working" } }] }
+      }
+    )
+    ref = track_session(client, client.spawn_session(kind: "worker", cwd: tmpdir, prompt: "", system_prompt: nil, session_name: "Replay"))
+
+    client.prompt_session(ref, "continue")
+    first_view = client.open_session_view(ref)
+    replay = first_view.poll_events
+
+    assert_equal %w[streaming update], replay.fetch("events").map { |event| event.fetch("phase", event.fetch("delta_type", nil)) }
+    first_view.close
+
+    client.prompt_session(ref, "continue again")
+    second_view = client.open_session_view(ref)
+    assert_operator second_view.poll_events.fetch("events").length, :>=, 4
+    commands = stub_commands_of_type(stub, "abort") + stub_commands_of_type(stub, "kill")
+    assert_empty commands, "opening and closing a view must not stop the managed Pi session"
+    second_view.close
   end
 
   def test_pi_client_live_session_view_falls_back_to_get_messages
