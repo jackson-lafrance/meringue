@@ -89,6 +89,19 @@ A harness process only answers the Meringue instance holding its stdin/stdout pi
 
 The kernel remains the only mutator of orchestration state; the client only reports the resulting session ref.
 
+## Why focus does not hand off to Pi InteractiveMode
+
+A tempting alternative is to stop or suspend the managed `pi --mode rpc` process, open the same session with Pi's native InteractiveMode, and restore the RPC process when focus closes. This is **not** a safe or supported session transfer in the current Pi API:
+
+- **Suspending is not quiescing.** `SIGSTOP` leaves the RPC runtime, provider request, timers, and tool children alive while another process could start from the same session file. Pi's RPC `abort` is a turn cancellation, not a checkpoint: it waits for the agent to become idle and may discard the in-memory partial response. Pi runtime disposal also aborts retries, compaction, bash, and the agent; it does not export a resumable in-flight turn.
+- **The session file is not a writer lease.** Pi's `SessionManager` stores an append-only tree in JSONL, but its persistence implementation uses ordinary `appendFileSync` and, for initial flushes or rewrites, opens the file with `w`. There is no documented interprocess lock, ownership token, or flush/handshake protocol. Two runtimes loaded at the same leaf can therefore append competing entries or race a rewrite. Streaming deltas and pending tool state are not durable session entries until message completion, so reopening the file cannot transfer the live turn anyway.
+- **InteractiveMode owns the terminal and renderer.** Its public constructor accepts a private `AgentSessionRuntime`; `run()` owns the input loop, terminal UI, and process lifetime. The exported low-level components do not expose a native session pane that Meringue can mount in its Ruby canvas. Starting native Pi in a second terminal gives that process ownership of its own UI, not Meringue's leader/navigation/terminal controls.
+- **The lifecycle would leave Meringue blind.** A native process launched during a handoff would not publish the managed RPC event stream used for reconciliation, progress logs, and focused rendering. Restoring RPC would require proving the native process is gone, reloading only its durable file state, reclaiming transport ownership, and rebuilding status/cursors without losing or duplicating prompts. Pi exposes no atomic operation for that sequence.
+
+Stopping the old process first would avoid simultaneous writers only in the narrow, unenforceable case where it has fully settled, flushed, exited, and released every child/resource before native Pi starts. It does not solve renderer ownership, active-turn continuity, or return-to-dashboard lifecycle tracking. The external session opener therefore remains a separate user-owned native process action, **not** a transfer path; it must not be used to prompt the same active session while Meringue still owns its managed RPC transport.
+
+The safe design remains one kernel-managed Pi RPC writer plus a disposable, read-only `SessionView` handle. Pi's `get_entries`/session file provide durable active-branch history, and the managed event journal provides replayable transient streaming updates when focus is reopened. Closing focus closes only that view handle; switching to the terminal pauses transcript refreshes, and neither action aborts or kills the worker. A future native handoff would need an upstream Pi session lease/checkpoint protocol and an embeddable InteractiveMode/IPC renderer before it should be reconsidered.
+
 ## Manual integration verification
 
 Start with the automated suite: `rake test` covers the parts of this integration that do not need a live terminal, a real harness process, or network access (see `docs/testing.md`). Put any repeatable assertions in `test/` and run the suite rather than a one-off script.
