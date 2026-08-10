@@ -127,7 +127,7 @@ module Meringue
         "logs_selection_mode" => "Toggle logs selection cursor",
         "agent_select_previous" => "Select previous agent",
         "agent_select_next" => "Select next agent",
-        "open_agent_workspace" => "Open optional focused worker workspace",
+        "open_agent_workspace" => "Open focused worker workspace or selected head session",
         "workspace_leader" => "Focused workspace command leader",
         "workspace_switch_view" => "After workspace leader: switch between terminal and agent view",
         "workspace_cycle_filter" => "After workspace leader: cycle transcript filter",
