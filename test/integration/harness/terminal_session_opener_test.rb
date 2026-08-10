@@ -79,6 +79,25 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
     assert_includes argv.each_cons(2).to_a, ["--session", session_file]
   end
 
+  def test_opening_a_persisted_head_pi_session_uses_the_heads_recorded_cwd
+    session_file = pi_session_file(@session_dir, session_id: "head-sess-1")
+    head = {
+      "id" => "H1",
+      "type" => "head",
+      "harness" => "pi",
+      "harness_session_file" => session_file,
+      "harness_session_id" => "head-sess-1",
+      "harness_metadata" => { "cwd" => tmpdir, "head_session_state" => "released" }
+    }
+
+    result = opener(commands: { "pi" => "pi-dev" }).open(head)
+
+    assert_equal "opened", result.fetch("status")
+    argv = launches.fetch(0)
+    assert_equal ["--working-directory", tmpdir, "-e", "pi-dev"], argv.first(4)
+    assert_includes argv.each_cons(2).to_a, ["--session", session_file]
+  end
+
   def test_pi_session_file_is_discovered_from_the_session_directory
     discovered = pi_session_file(@session_dir, session_id: "sess-discovered")
 
@@ -104,7 +123,7 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
 
     assert_equal "rejected", result.fetch("status")
     assert_match(/saved session file is missing/, result.fetch("message"))
-    assert_match(/The saved Meringue agent record, logs, and any captured worker output remain unchanged/,
+    assert_match(/The saved Meringue agent record, logs, and any captured agent output remain unchanged/,
                  result.fetch("message"))
     assert_empty launches
   end
