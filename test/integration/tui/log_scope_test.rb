@@ -55,6 +55,33 @@ class TuiLogScopeTest < Minitest::Test
     assert_equal %w[L1 L2], LogScope.filter(scope, entries).map { |entry| entry.fetch("id") }
   end
 
+  def test_routed_user_prompt_is_retained_by_issue_and_worker_scopes
+    state = scoped_tree_state
+    routed_prompt = log_record(
+      "L1",
+      "source_type" => "user",
+      "source_id" => nil,
+      "message" => "Fix the retry race",
+      "details" => {
+        "head_id" => "H9",
+        "routed_issue_ids" => ["P1-I1"],
+        "routed_agent_ids" => ["P1-I1-W1"]
+      }
+    )
+    unrelated_prompt = log_record(
+      "L2",
+      "source_type" => "user",
+      "source_id" => nil,
+      "message" => "Clean up the sibling",
+      "details" => { "head_id" => "H10", "routed_issue_ids" => ["P1-I3"] }
+    )
+    entries = [routed_prompt, unrelated_prompt]
+
+    assert_equal [routed_prompt], LogScope.filter(LogScope.snapshot(state, "P1-I1"), entries)
+    assert_equal [routed_prompt], LogScope.filter(LogScope.snapshot(state, "P1-I1-W1"), entries)
+    assert_equal [unrelated_prompt], LogScope.filter(LogScope.snapshot(state, "P1-I3"), entries)
+  end
+
   def test_worker_issue_project_and_unbound_head_chat_targets
     state = scoped_tree_state
 

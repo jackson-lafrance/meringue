@@ -88,6 +88,56 @@ class KernelHeadsLoggingTest < KernelHeadsTestCase
     )
   end
 
+  def test_user_prompt_gains_accepted_issue_and_worker_routes_after_head_application
+    project_id = add_project!
+    head_id = spawn_head!("Fix the retry race")
+    apply_head_result(
+      head_id,
+      head_result(
+        commands: [
+          create_issue_command(project_id: project_id, title: "Fix retry race"),
+          spawn_worker_command(issue_id: "#{project_id}-I1", title: "Fix retry race")
+        ]
+      )
+    )
+
+    worker_id = agents(type: "worker").fetch(0).fetch("id")
+    prompt_log = logs.find { |entry| entry.fetch("source_type") == "user" && entry.fetch("message") == "Fix the retry race" }
+    assert_equal ["#{project_id}-I1"], prompt_log.fetch("details").fetch("routed_issue_ids")
+    assert_equal [worker_id], prompt_log.fetch("details").fetch("routed_agent_ids")
+    routed_state = state
+    issue_scope = Meringue::TUI::LogScope.snapshot(routed_state, "#{project_id}-I1")
+    worker_scope = Meringue::TUI::LogScope.snapshot(routed_state, worker_id)
+    assert_includes Meringue::TUI::LogScope.filter(issue_scope, routed_state.fetch("logs")), prompt_log
+    assert_includes Meringue::TUI::LogScope.filter(worker_scope, routed_state.fetch("logs")), prompt_log
+
+    follow_up_head = spawn_head!("Also cover queued retries")
+    apply_head_result(
+      follow_up_head,
+      head_result(
+        commands: [
+          {
+            "type" => "PromptAgent",
+            "payload" => { "agent_id" => worker_id, "prompt" => "Also cover queued retries", "mode" => "follow_up" }
+          },
+          create_issue_command(project_id: "P404", title: "Rejected route")
+        ]
+      )
+    )
+
+    follow_up_log = logs.find do |entry|
+      entry.fetch("source_type") == "user" && entry.fetch("message") == "Also cover queued retries"
+    end
+    assert_equal ["#{project_id}-I1"], follow_up_log.fetch("details").fetch("routed_issue_ids")
+    assert_equal [worker_id], follow_up_log.fetch("details").fetch("routed_agent_ids")
+    refute_includes follow_up_log.fetch("details").fetch("routed_issue_ids"), "P404-I1"
+    follow_up_state = state
+    issue_scope = Meringue::TUI::LogScope.snapshot(follow_up_state, "#{project_id}-I1")
+    worker_scope = Meringue::TUI::LogScope.snapshot(follow_up_state, worker_id)
+    assert_includes Meringue::TUI::LogScope.filter(issue_scope, follow_up_state.fetch("logs")), follow_up_log
+    assert_includes Meringue::TUI::LogScope.filter(worker_scope, follow_up_state.fetch("logs")), follow_up_log
+  end
+
   def test_rejected_head_commands_log_the_reason_and_command_id
     head_id = spawn_head!("Propose an impossible command")
     result = apply_head_result(

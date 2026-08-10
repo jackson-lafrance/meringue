@@ -26,9 +26,13 @@ module Meringue
       STATE_KEY = "_log_scope"
       # Single-id routing fields that kernel/harness logs already carry.
       ROUTING_KEYS = %w[agent_id issue_id project_id head_id target_id].freeze
-      # Routing fields that carry several ids at once, such as cascading kills.
+      # Routing fields that carry several ids at once, such as a head routing one
+      # prompt to issue/worker targets or a cascading kill affecting many records.
       ROUTING_LIST_KEYS = %w[
         agent_ids
+        issue_ids
+        routed_agent_ids
+        routed_issue_ids
         killed_agent_ids
         removed_agent_ids
         removed_issue_ids
