@@ -425,10 +425,8 @@ module Meringue
       DEFERRED_WORKER_DEFAULT_FAILURE_POLICY = "cancel"
       # Bounds how long a chain of queued workers may be, so one batch cannot schedule work forever.
       DEFERRED_WORKER_MAX_CHAIN_DEPTH = 5
-      # The handover is a bounded excerpt of the predecessor's final report, never a transcript.
-      DEFERRED_WORKER_HANDOVER_MAX_CHARS = 4_000
       # A worker can ask the kernel to spawn a fresh head after it completes. That head receives
-      # the worker's bounded final report in its prompt and routes whatever follow-on kernel
+      # the worker's complete final report in its prompt and routes whatever follow-on kernel
       # commands are appropriate. This is a durable continuation record on the worker, not a
       # worker-side poll/sleep loop.
       COMPLETION_CONTINUATION_KEYS = %w[
@@ -448,7 +446,6 @@ module Meringue
       COMPLETION_CONTINUATION_STATE_APPLIED = "applied"
       COMPLETION_CONTINUATION_STATE_FAILED = "failed"
       COMPLETION_CONTINUATION_STATE_CANCELLED = "cancelled"
-      COMPLETION_CONTINUATION_HANDOVER_MAX_CHARS = 4_000
       DEFERRED_STATE_WAITING = "waiting"
       DEFERRED_STATE_ACTIVATING = "activating"
       DEFERRED_STATE_ACTIVATED = "activated"
@@ -8654,7 +8651,7 @@ module Meringue
           lines.concat([
             "",
             "Worker final result:",
-            truncate_for_state(present_string(metadata.fetch("last_assistant_text", nil)) || "(no final assistant text was recorded)", COMPLETION_CONTINUATION_HANDOVER_MAX_CHARS)
+            present_string(metadata.fetch("last_assistant_text", nil)) || "(no final assistant text was recorded)"
           ])
         end
         gate = completion_continuation_gate(continuation)
@@ -9194,7 +9191,7 @@ module Meringue
           present_string(predecessor.fetch("workspace_branch", nil)) ? "Branch: #{predecessor.fetch("workspace_branch")}" : nil,
           "",
           report ? "Final report:" : "Final report: none was captured.",
-          report ? truncate_handover_text(report) : nil,
+          report,
           "",
           if status == "completed"
             "Use that as input for the work described above. Verify anything you rely on instead of assuming it is still true."
@@ -9243,13 +9240,6 @@ module Meringue
         return value if value.length <= DEFERRED_WORKER_GATE_OUTPUT_MAX_CHARS
 
         "#{value[0, DEFERRED_WORKER_GATE_OUTPUT_MAX_CHARS].rstrip}\n… [output truncated]"
-      end
-
-      def truncate_handover_text(text)
-        value = text.to_s.strip
-        return value if value.length <= DEFERRED_WORKER_HANDOVER_MAX_CHARS
-
-        "#{value[0, DEFERRED_WORKER_HANDOVER_MAX_CHARS].rstrip}\n… [handover truncated]"
       end
 
       # One reconcile pass over every armed, pending command gate. Both queued workers and

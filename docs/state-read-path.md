@@ -59,15 +59,18 @@ is the whole kernel snapshot the head was given. On the measured state file two 
 Nothing reads it back. It was re-read, re-parsed, re-compacted, and re-serialized on every frame
 and every save, and it never shrank.
 
-`Compactor::ARRAY_ELEMENT_KEY_LIMITS` caps each argv element at
-`COMMAND_ARGUMENT_MAX_BYTES` (2,000), which keeps the program and its flags readable and drops the
-prompt body. Compacting the real state file with this limit shrank it by **21.8%**.
+`Compactor::COMMAND_ARGUMENT_MAX_BYTES` identifies an oversized argv element and replaces that
+*entire diagnostic argument* with an omission record carrying its original byte count. The program
+and normal flags stay readable while the duplicated prompt body is discarded as one bounded field;
+Meringue never keeps a prefix that could be mistaken for a complete message. Compacting the real
+state file with this limit shrank it by **21.8%**.
 
-The limit is deliberately scoped to the *array* form. `goal.metric.command` and
-`goal.guardrails[].command` are scalar strings under the same key name, and they are commands
-Meringue still has to run: silently truncating one would corrupt a goal loop. `KEY_LIMITS` applies
-to scalars, `ARRAY_ELEMENT_KEY_LIMITS` applies only to strings inside an array, and
-`Compactor.limit_for_key` keeps the two apart.
+The rule is deliberately scoped to strings inside the diagnostic argv array. `goal.metric.command`
+and `goal.guardrails[].command` are scalar strings under the same key name, and they are commands
+Meringue still has to run, so they remain verbatim. All other scalar state strings remain verbatim
+too: user prompts, worker final reports, conversation messages, and retained log messages are never
+partially truncated. Durable logs reclaim space by evicting whole oldest records at the retention
+boundary, while head routing uses count-bounded candidate/activity windows of complete messages.
 
 ## Verifying
 
