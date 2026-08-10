@@ -39,6 +39,9 @@ Files:
   (`process_exit`, `rpc_parse_error`) become `harness`-sourced logs.
 - `Store#compact!` persists the retention bound immediately, returns `false` for a state
   that is already bounded, and is a no-op when the file does not exist.
+- State compaction preserves user prompts, worker reports, conversation text, and retained
+  log messages verbatim. Log storage shrinks only by evicting whole oldest records; the one
+  field-level exception is diagnostic spawn argv, whose oversized argument is omitted whole.
 
 ## Sharp edges and probable bugs (asserted as-is, not fixed)
 
@@ -69,26 +72,16 @@ Files:
    into Integer` from normalization. There is no quarantine/backup-and-reset path. Note that
    `Store#save` *does* tolerate a corrupt file on disk: `merge_persisted_log_buffer!`
    rescues `JSON::ParserError`, so a save repairs the file.
-5. **`Compactor.compact!` is convergent but not idempotent in one pass.** The
-   `"… [truncated N bytes …]"` marker counts toward the byte limit, so a value that was
-   just compacted is still over its limit and is re-trimmed on the next pass (`5000 →
-   4056 → 4054 → 4054`, `changed` reports `true, true, true, false, ...`). The marker never
-   accumulates and the value stabilizes after three passes, but `compact!` reporting
-   `changed == true` for an already compacted state causes extra `Store#compact!` writes.
-6. **Array elements are compacted using the array's key, not a per-element key.** A long
-   string inside `"line" => [...]` is trimmed at 4KB because the key `line` has a limit,
-   while an unknown array key keeps the 100KB default. This is consistent but easy to
-   misread as per-string limits.
-7. **Normalization does not validate vocabularies.** `LIFECYCLE_STATUSES`,
+5. **Normalization does not validate vocabularies.** `LIFECYCLE_STATUSES`,
    `QUESTION_STATUSES`, `LOG_LEVELS` and `LOG_SOURCE_TYPES` exist, but
    `Models.ensure_state_shape!` accepts and preserves out-of-vocabulary values such as an
    agent status of `sleeping` or a log level of `trace`. Validation only happens on the write
    path in `Kernel::Engine#append_log` (which raises `ArgumentError` for an unknown level or
    source type). Loading a hand-edited state cannot surface such a value as an error.
-8. **An unknown future `schema_version` is loaded as-is.** `ensure_state_shape!` only fills
+6. **An unknown future `schema_version` is loaded as-is.** `ensure_state_shape!` only fills
    in a missing version, so a `schema_version: 99` file is read with version 1 semantics
    rather than being rejected or migrated.
-9. **Rejected kernel commands still append durable logs.** A rejected `AddProject`
+7. **Rejected kernel commands still append durable logs.** A rejected `AddProject`
    ("Project is already registered.") consumes a log id and occupies a slot in the retained
    window. Noticed while porting the benchmark's append assertions.
 

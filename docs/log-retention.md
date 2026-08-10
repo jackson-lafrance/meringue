@@ -27,7 +27,7 @@ A replay of the measured log mix through the pre-retention store showed approxim
 
 A 250-entry limit would preserve only the already-observed six-day window. A 1,000-entry limit would roughly double bounded storage and recurring persistence work for older events whose detailed diagnostic source is normally the harness session. The 500-entry limit leaves headroom over the observed workload while preventing multi-megabyte, tens-of-milliseconds steady-state persistence.
 
-The limit is count-based so entries remain whole and TUI history has a predictable row-level bound. Existing per-field state compaction still limits large messages and captured assistant output. The tradeoff is that an unusually verbose retained window can be larger than the measured average, and old warnings or errors eventually age out rather than receiving status-based special treatment.
+The limit is count-based so entries remain whole and TUI history has a predictable row-level bound. State compaction never slices a retained log message or captured worker report: when history must shrink, the oldest record is removed as a whole. The tradeoff is that an unusually verbose retained window can be larger than the measured average, and old warnings or errors eventually age out rather than receiving status-based special treatment. Diagnostic-only spawn argv remains separately bounded by omitting an oversized argument in full.
 
 ## Compatibility and identifiers
 
