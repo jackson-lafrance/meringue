@@ -184,7 +184,7 @@ module Meringue
       end
 
       def preserved_record_note
-        "The saved Meringue agent record, logs, and any captured worker output remain unchanged."
+        "The saved Meringue agent record, logs, and any captured agent output remain unchanged."
       end
 
       def open_alacritty(alacritty, cwd, command_argv)
