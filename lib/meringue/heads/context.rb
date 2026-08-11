@@ -313,8 +313,8 @@ module Meringue
             "head_id" => question.fetch("head_id", nil),
             "project_id" => question.fetch("project_id", nil),
             "issue_id" => question.fetch("issue_id", nil),
-            "question" => bounded_text(question.fetch("question", nil)),
-            "context" => bounded_text(question.fetch("context", nil)),
+            "question" => complete_text(question.fetch("question", nil)),
+            "context" => complete_text(question.fetch("context", nil)),
             "status" => question.fetch("status", nil),
             "original_user_message" => original_user_message_for(question),
             "explicitly_referenced_in_user_message" => referenced.include?(question.fetch("id", nil)),
@@ -352,13 +352,13 @@ module Meringue
       end
 
       def original_user_message_for(question)
-        stored = bounded_text(question.fetch("original_user_message", nil))
+        stored = complete_text(question.fetch("original_user_message", nil))
         return stored if stored
 
         head = snapshot.fetch("agents", []).find do |agent|
           agent.fetch("type", nil) == "head" && agent.fetch("id", nil) == question.fetch("head_id", nil)
         end
-        bounded_text((head&.fetch("harness_metadata", nil) || {}).dig("head_request", "user_message"))
+        complete_text((head&.fetch("harness_metadata", nil) || {}).dig("head_request", "user_message"))
       end
 
       def routing_issue_candidates
@@ -409,7 +409,7 @@ module Meringue
             "prompt_count" => metadata.fetch("prompt_count", 0).to_i,
             "last_prompt_mode" => metadata.fetch("last_prompt_mode", nil),
             "context_utilization" => context_utilization(metadata),
-            "last_result" => bounded_text(metadata.fetch("last_assistant_text", nil)),
+            "last_result" => complete_text(metadata.fetch("last_assistant_text", nil)),
             "workspace_branch" => agent.fetch("workspace_branch", nil),
             "has_delivery_pull_request" => issue_delivery?(issue_for_agent(agent)),
             "follow_up_of_agent_id" => agent.fetch("follow_up_of_agent_id", nil),
@@ -449,7 +449,7 @@ module Meringue
           "state", "prompt", "include_worker_result", "created_at", "triggered_at", "head_id",
           "cancel_reason", "cancelled_at"
         ).compact
-        summary["prompt"] = bounded_text(summary["prompt"]) if summary.key?("prompt")
+        summary["prompt"] = complete_text(summary["prompt"]) if summary.key?("prompt")
         gate = continuation.fetch("command_gate", nil)
         summary["command_gate"] = gate.slice(
           "command", "label", "expect", "state", "checks", "armed_at", "expires_at", "if_gate_expires", "last_problem"
@@ -475,7 +475,7 @@ module Meringue
             "source_type" => log.fetch("source_type", nil),
             "source_id" => log.fetch("source_id", nil),
             "level" => log.fetch("level", nil),
-            "message" => bounded_text(log.fetch("message", nil)),
+            "message" => complete_text(log.fetch("message", nil)),
             "routing" => routing_log_details(log.fetch("details", nil))
           }.compact
         end
@@ -570,6 +570,16 @@ module Meringue
         [record.fetch("updated_at", "").to_s, record.fetch("created_at", "").to_s, record.fetch("id", "").to_s]
       end
 
+      # Where routing history is bounded, it is bounded by candidate/activity record
+      # counts, never by slicing an individual message. Every selected message reaches
+      # the head as complete retained text.
+      def complete_text(value)
+        text = value.to_s
+        text.strip.empty? ? nil : text
+      end
+
+      # Non-message descriptive context may still be summarized in the prompt. The
+      # complete durable value remains available through the read-only state path.
       def bounded_text(value)
         text = value.to_s.strip
         return nil if text.empty?

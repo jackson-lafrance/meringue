@@ -84,6 +84,26 @@ class KernelWorkersCompletionTriggeredHeadTest < Minitest::Test
     assert_equal "applied", agent(engine, worker_id).fetch("harness_metadata").fetch("completion_continuation").fetch("state")
   end
 
+  def test_completion_head_receives_the_workers_complete_final_message
+    head_runner = RoutingHeadRunner.new(commands: [])
+    engine = build_engine(head_runner: head_runner)
+    context = project_with_issue(engine, title: "Route a detailed report")
+    worker_id = spawn_worker(
+      engine,
+      context.fetch("issue_id"),
+      prompt: "Produce the detailed report.",
+      completion_head: "Route every finding in the completed report."
+    ).fetch("target_id")
+    complete_report = "REPORT START\n#{"finding\n" * 1_000}REPORT END"
+
+    engine.mark_worker_completed(agent_id: worker_id, last_assistant_text: complete_report)
+
+    head_prompt = head_runner.calls.first.fetch("user_message")
+    assert_includes head_prompt, complete_report
+    assert_includes head_prompt, "REPORT END"
+    refute_includes head_prompt, "[truncated"
+  end
+
   # Regression for the short-lived checker loop: `completion_head.after_command` used to be
   # discarded while normalizing the continuation. The worker would complete, a head would spawn
   # immediately, and that head could launch another checker worker long before the review/deploy it

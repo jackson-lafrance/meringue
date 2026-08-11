@@ -220,7 +220,42 @@ class HeadContextTest < Minitest::Test
     assert_equal "L40", activity.last.fetch("id")
   end
 
-  def test_long_text_is_truncated_before_reaching_the_head
+  def test_routing_context_bounds_records_without_slicing_their_messages
+    snapshot = head_snapshot
+    worker_message = "WORKER START\n#{"w" * 5_000}\nWORKER END"
+    original_user_message = "USER START\n#{"u" * 5_000}\nUSER END"
+    snapshot.fetch("agents").first.fetch("harness_metadata")["last_assistant_text"] = worker_message
+    snapshot.fetch("questions").first["original_user_message"] = original_user_message
+    complete_log_messages = (1..(Meringue::Heads::Context::ROUTING_ACTIVITY_LIMIT + 1)).to_h do |index|
+      [index, "LOG #{index} START\n#{index.to_s * 2_500}\nLOG #{index} END"]
+    end
+    snapshot["logs"] = complete_log_messages.map do |index, message|
+      {
+        "id" => "L#{index}",
+        "timestamp" => "2024-01-03T00:00:00Z",
+        "source_type" => "worker",
+        "source_id" => "P1-I1-W1",
+        "level" => "info",
+        "message" => message,
+        "details" => {}
+      }
+    end
+
+    routing = build_head_context(snapshot: snapshot).to_prompt_h.fetch("routing_context")
+
+    assert_equal worker_message, routing.fetch("worker_candidates").first.fetch("last_result")
+    assert_equal original_user_message, routing.fetch("open_questions").first.fetch("original_user_message")
+    activity = routing.fetch("recent_activity")
+    assert_equal Meringue::Heads::Context::ROUTING_ACTIVITY_LIMIT, activity.length
+    refute_includes activity.map { |entry| entry.fetch("id") }, "L1"
+    activity.each do |entry|
+      index = entry.fetch("id").delete_prefix("L").to_i
+      assert_equal complete_log_messages.fetch(index), entry.fetch("message")
+    end
+    refute_includes JSON.generate(routing), "[truncated"
+  end
+
+  def test_long_non_message_context_is_summarized_before_reaching_the_head
     snapshot = head_snapshot
     snapshot.fetch("issues").first["description"] = "x" * 5_000
 

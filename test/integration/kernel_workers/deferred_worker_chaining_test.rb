@@ -112,6 +112,26 @@ class KernelWorkersDeferredChainingTest < Minitest::Test
     assert_includes spawn_prompt, "The bug is in SessionController#create."
   end
 
+  def test_handover_preserves_the_predecessors_complete_final_message
+    engine = build_engine
+    context = project_with_issue(engine)
+    predecessor_id = spawn_worker(engine, context.fetch("issue_id"), prompt: "Investigate.").fetch("target_id")
+    spawn_worker(
+      engine,
+      context.fetch("issue_id"),
+      prompt: "Implement every finding.",
+      after_agent_id: predecessor_id
+    )
+    complete_report = "REPORT START\n#{"finding\n" * 1_000}REPORT END"
+
+    engine.mark_worker_completed(agent_id: predecessor_id, last_assistant_text: complete_report)
+
+    spawn_prompt = @harness_client.spawns.last.fetch("prompt")
+    assert_includes spawn_prompt, complete_report
+    assert_includes spawn_prompt, "REPORT END"
+    refute_includes spawn_prompt, "[handover truncated]"
+  end
+
   def test_activation_is_logged_as_a_started_queued_worker
     engine = build_engine
     context = project_with_issue(engine)
