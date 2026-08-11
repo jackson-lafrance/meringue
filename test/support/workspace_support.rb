@@ -230,9 +230,10 @@ module WorkspaceSupport
       @workspace_path = nil
     end
 
-    def start(workspace_path:, rows: 24, columns: 80)
+    def start(workspace_path:, rows: 24, columns: 80, on_started: nil)
       @starts << { "workspace_path" => workspace_path, "rows" => rows, "columns" => columns }
       @workspace_path = workspace_path
+      on_started&.call(4242)
       @start_status || {
         "status" => "active",
         "message" => "Started terminal in #{workspace_path}.",

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "fileutils"
 require "json"
 require "open3"
 require "securerandom"
@@ -610,9 +611,31 @@ module Meringue
         events.concat(read_events(current_ref))
         raise SessionTransportUnavailableError, "Pi session did not settle before interactive handoff" if current_ref.fetch("is_streaming", false)
 
-        handoff_prompt = was_streaming ? INTERACTIVE_HANDOFF_PROMPT : nil
-        killed_ref = kill_session(current_ref)
+        session_summary = safe_session_file_summary(current_ref)
+        handoff_summary = bounded_handoff_summary(session_summary)
+        handoff_intent = handoff_summary.fetch("last_user_text", nil) || latest_user_intent(events)
+        handoff_prompt = was_streaming ? interactive_handoff_prompt(handoff_intent) : nil
+        # Validate the resumable session and construct the native command while RPC still owns the
+        # process. If Pi cannot identify a durable session, leave the dashboard writer untouched.
+        replacement = nil
+        rpc_ref = current_ref
+        begin
+          interactive_argv = interactive_session_argv(current_ref, handoff_prompt: handoff_prompt)
+        rescue ProcessNotFoundError
+          replacement = create_replacement_session_from_rpc(current_ref)
+          handoff_intent = replacement.fetch("latest_user_intent", nil) unless present?(handoff_intent)
+          handoff_prompt = was_streaming ? interactive_handoff_prompt(handoff_intent) : nil
+          current_ref = current_ref.merge(
+            "session_id" => replacement.fetch("session_id"),
+            "session_file" => replacement.fetch("session_file"),
+            "metadata" => metadata_with(current_ref, "interactive_replacement" => replacement)
+          )
+          interactive_argv = interactive_session_argv(current_ref, handoff_prompt: handoff_prompt)
+        end
+        killed_ref = kill_session(rpc_ref)
         detached_ref = killed_ref.merge(
+          "session_id" => current_ref.fetch("session_id", nil),
+          "session_file" => current_ref.fetch("session_file", nil),
           "pid" => nil,
           "is_streaming" => false,
           "metadata" => metadata_with(
@@ -626,10 +649,36 @@ module Meringue
         )
         {
           "session_ref" => detached_ref,
-          "interactive_argv" => interactive_session_argv(detached_ref, handoff_prompt: handoff_prompt),
+          "interactive_argv" => interactive_argv,
           "interactive_env" => process_environment(detached_ref.fetch("cwd", Dir.pwd)),
-          "handoff" => interactive_handoff_metadata(was_streaming: was_streaming, events: events, prompt: handoff_prompt)
+          "handoff" => interactive_handoff_metadata(
+            was_streaming: was_streaming,
+            events: events,
+            prompt: handoff_prompt,
+            latest_user_intent: handoff_intent,
+            session_summary: handoff_summary,
+            replacement: replacement
+          )
         }
+      end
+
+      def reclaim_interactive_session(session_ref, pid:)
+        numeric_pid = Integer(pid)
+        return true unless process_alive?(numeric_pid)
+
+        marker = (session_ref.dig("metadata", "interactive_handoff") || {})
+        started_at = marker["reclaim_interactive_started_at"] || marker["interactive_started_at"]
+        unless ProcessIdentity.matches?(numeric_pid, command: Array(command).first, started_at: started_at)
+          raise SessionTransportUnavailableError,
+                "Refusing to reclaim interactive Pi pid #{numeric_pid}: it no longer matches the configured Pi command"
+        end
+
+        terminate_unowned_process(numeric_pid)
+        return true unless process_alive?(numeric_pid)
+
+        raise SessionTransportUnavailableError, "Interactive Pi process #{numeric_pid} did not stop during crash recovery"
+      rescue ArgumentError, TypeError
+        true
       end
 
       def resume_dashboard_session(session_ref)
@@ -1102,6 +1151,96 @@ module Meringue
         ).compact
       end
 
+      def create_replacement_session_from_rpc(session_ref)
+        process = process_for(session_ref)
+        data = rpc_data(process.request({ "type" => "get_entries" }, timeout: command_timeout))
+        entries = Array(data.fetch("entries", []))
+        replacement_id = SecureRandom.uuid
+        cwd = session_ref.fetch("cwd", nil) || Dir.pwd
+        directory = File.expand_path(session_dir || File.join(cwd, ".meringue", "pi-sessions"))
+        FileUtils.mkdir_p(directory)
+        path = File.join(directory, "#{Time.now.utc.strftime("%Y%m%d_%H%M%S")}_#{replacement_id}.jsonl")
+        temporary = "#{path}.tmp-#{Process.pid}-#{SecureRandom.hex(4)}"
+        header = {
+          "type" => "session",
+          "version" => 3,
+          "id" => replacement_id,
+          "timestamp" => Time.now.utc.iso8601,
+          "cwd" => cwd,
+          "parentSession" => session_ref.fetch("session_file", nil)
+        }.compact
+        File.open(temporary, "w", 0o600) do |file|
+          file.puts(JSON.generate(header))
+          entries.each { |entry| file.puts(JSON.generate(entry)) }
+        end
+        File.rename(temporary, path)
+        {
+          "session_id" => replacement_id,
+          "session_file" => path,
+          "entry_count" => entries.length,
+          "source_session_id" => session_ref.fetch("session_id", nil),
+          "latest_user_intent" => entries.reverse_each.filter_map do |entry|
+            message = entry.is_a?(Hash) ? entry["message"] : nil
+            next unless message.is_a?(Hash) && message.fetch("role", nil).to_s == "user"
+
+            message_text_from_message(message)
+          end.first,
+          "reason" => "rpc_session_file_unavailable"
+        }.compact
+      rescue StandardError
+        File.delete(temporary) if defined?(temporary) && temporary && File.file?(temporary)
+        raise
+      end
+
+      def safe_session_file_summary(session_ref)
+        session_file_summary(session_ref)
+      rescue StandardError
+        {}
+      end
+
+      def bounded_handoff_summary(summary)
+        return {} unless summary.is_a?(Hash)
+
+        summary.slice(
+          "session_file", "session_id", "turn_pending", "last_stop_reason", "last_event_at", "session_name",
+          "last_user_text", "last_assistant_text"
+        ).each_with_object({}) do |(key, value), bounded|
+          bounded[key] = value.is_a?(String) ? value.byteslice(0, 4000).to_s.scrub : value
+        end.compact
+      end
+
+      def interactive_handoff_prompt(latest_user_intent)
+        return INTERACTIVE_HANDOFF_PROMPT unless present?(latest_user_intent)
+
+        [
+          INTERACTIVE_HANDOFF_PROMPT,
+          "The latest worker request was:",
+          latest_user_intent.to_s.byteslice(0, 4000).to_s.scrub,
+          "Continue that request from the saved transcript and do not repeat completed work."
+        ].join("\n\n")
+      end
+
+      def latest_user_intent(events)
+        Array(events).reverse_each do |entry|
+          event = entry.is_a?(Hash) ? (entry["event"] || entry) : {}
+          message = event["message"] || event
+          next unless message.is_a?(Hash) && message.fetch("role", nil).to_s == "user"
+
+          text = message_text_from_message(message)
+          return text if present?(text)
+        end
+        nil
+      end
+
+      def message_text_from_message(message)
+        content = message.fetch("content", nil)
+        return content.to_s.strip if content.is_a?(String)
+
+        Array(content).filter_map do |part|
+          part["text"] if part.is_a?(Hash) && part["type"].to_s == "text"
+        end.join("\n").strip
+      end
+
       def interactive_session_argv(session_ref, handoff_prompt: nil)
         session = resume_session_argument(session_ref)
         argv = Array(command).map(&:to_s)
@@ -1114,7 +1253,7 @@ module Meringue
         argv
       end
 
-      def interactive_handoff_metadata(was_streaming:, events:, prompt:)
+      def interactive_handoff_metadata(was_streaming:, events:, prompt:, latest_user_intent:, session_summary:, replacement:)
         progress = PiSessionView.progress_items(events)
         {
           "mode" => "native_interactive",
@@ -1122,6 +1261,9 @@ module Meringue
           "exact_stream_transfer" => false,
           "was_streaming" => !!was_streaming,
           "prompt" => prompt,
+          "latest_user_intent" => latest_user_intent,
+          "session_file_summary" => session_summary,
+          "replacement" => replacement,
           "captured_event_count" => events.length,
           "last_progress" => progress.last(20),
           "tool_call_ids" => events.filter_map do |event|
@@ -1290,6 +1432,8 @@ module Meringue
             case record.dig("message", "role")
             when "user"
               last_user_index = record_index
+              user_text = message_text_from_message(record.fetch("message", {}))
+              summary["last_user_text"] = user_text.byteslice(0, 4000).to_s.scrub if present?(user_text)
             when "assistant"
               last_assistant = record
               last_assistant_index = record_index

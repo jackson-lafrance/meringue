@@ -44,11 +44,22 @@ module Meringue
         end
 
         session = interactive_session_factory.call(command: command, env: transition.dig("result", "interactive_env"))
-        result = session.start(workspace_path: path, rows: rows, columns: columns)
+        started = nil
+        start_callback = lambda do |pid|
+          started = focus_session_service.mark_agent_interactive_focus_started(agent.fetch("id"), pid: pid)
+        rescue StandardError => e
+          started = failed("Could not claim native Pi focus: #{e.message}")
+        end
+        result = session.start(workspace_path: path, rows: rows, columns: columns, on_started: start_callback)
         unless result.fetch("status", nil).to_s == "active"
           session.close
           focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
           return result
+        end
+        if started && started.fetch("status", nil) != "accepted"
+          session.close
+          focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          return started
         end
 
         key = agent_key(agent)
@@ -56,7 +67,7 @@ module Meringue
           @interactive_sessions[key] = { "agent" => agent.dup, "session" => session }
           @interactive_screens[key] = TerminalScreen.new(rows: rows, columns: columns)
         end
-        started = focus_session_service.mark_agent_interactive_focus_started(agent.fetch("id"), pid: result.fetch("pid", nil))
+        started ||= focus_session_service.mark_agent_interactive_focus_started(agent.fetch("id"), pid: result.fetch("pid", nil))
         unless started.fetch("status", nil) == "accepted"
           close_interactive(agent)
           focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
