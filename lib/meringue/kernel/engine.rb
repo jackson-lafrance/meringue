@@ -696,6 +696,8 @@ module Meringue
       # RPC writer is quiesced before the workspace controller launches the interactive PTY, and a
       # durable marker makes reconciliation stand down while that PTY owns the session file.
       def begin_agent_interactive_focus(agent_id)
+        reclaim_pid = nil
+        reclaim_started_at = nil
         agent = synchronized_state do
           state = normalized_state
           candidate = find_agent(state, agent_id.to_s)
@@ -704,16 +706,22 @@ module Meringue
 
           metadata = candidate.fetch("harness_metadata", {}) || {}
           existing = metadata.fetch("interactive_handoff", nil)
-          if existing.is_a?(Hash) && %w[preparing interactive resuming].include?(existing.fetch("state", nil).to_s)
-            if interactive_focus_active?(candidate)
+          if existing.is_a?(Hash) && %w[preparing interactive interactive_pending resuming reclaiming reclaim_failed].include?(existing.fetch("state", nil).to_s)
+            retrying_reclaim = existing.fetch("state", nil).to_s == "reclaim_failed"
+            if interactive_focus_owner_alive?(existing) && !retrying_reclaim
               return rejected_result(nil, "BeginInteractiveFocus", "Worker #{agent_id} already has an interactive focus transition in progress.", ["interactive_focus_active"])
             end
 
-            # The previous owner died without completing the return path. Its interactive process
-            # is gone too, so discard only the stale lifecycle marker and recover the same session.
-            metadata = metadata.dup
-            metadata.delete("interactive_handoff")
-            candidate["harness_metadata"] = metadata
+            if interactive_process_alive?(existing)
+              reclaim_pid = (existing["interactive_pid"] || existing["reclaim_interactive_pid"]).to_i
+              reclaim_started_at = existing["interactive_started_at"] || existing["reclaim_interactive_started_at"]
+            else
+              # The previous owner died without leaving a live interactive process. Discard only the
+              # stale lifecycle marker and recover the same durable session.
+              metadata = metadata.dup
+              metadata.delete("interactive_handoff")
+              candidate["harness_metadata"] = metadata
+            end
           end
 
           client = harness_client_for_agent(candidate)
@@ -727,8 +735,10 @@ module Meringue
               "state" => "preparing",
               "owner_instance_id" => instance_id,
               "owner_instance_pid" => instance_pid,
-              "started_at" => now
-            }
+              "started_at" => now,
+              "reclaim_interactive_pid" => reclaim_pid,
+              "reclaim_interactive_started_at" => reclaim_started_at
+            }.compact
           )
           candidate["updated_at"] = now
           touch_state!(state, now)
@@ -738,6 +748,9 @@ module Meringue
         return agent if kernel_command_result?(agent)
 
         client = harness_client_for_agent(agent)
+        if reclaim_pid
+          client.reclaim_interactive_session(agent_session_ref(agent), pid: reclaim_pid)
+        end
         prepared = client.prepare_interactive_session(agent_session_ref(agent))
         synchronized_state do
           state = normalized_state
@@ -746,6 +759,8 @@ module Meringue
 
           now = timestamp
           handoff = prepared.fetch("handoff", {}) || {}
+          prepared_ref = prepared.fetch("session_ref", {})
+          merge_session_ref_into_agent!(current, prepared_ref) unless prepared_ref.empty?
           marker = (current.fetch("harness_metadata", {}) || {}).fetch("interactive_handoff", {}) || {}
           current["pid"] = nil
           current["harness_metadata"] = (current.fetch("harness_metadata", {}) || {}).merge(
@@ -787,8 +802,15 @@ module Meringue
           current = find_agent(state, agent_id.to_s)
           if current
             metadata = current.fetch("harness_metadata", {}) || {}
-            metadata.delete("interactive_handoff")
-            current["harness_metadata"] = metadata
+            marker = metadata.fetch("interactive_handoff", {}) || {}
+            if reclaim_pid && marker.is_a?(Hash)
+              current["harness_metadata"] = metadata.merge(
+                "interactive_handoff" => marker.merge("state" => "reclaim_failed", "reclaim_error" => e.message)
+              )
+            else
+              metadata.delete("interactive_handoff")
+              current["harness_metadata"] = metadata
+            end
             current["updated_at"] = timestamp
             touch_state!(state)
             store.save(state)
@@ -809,7 +831,13 @@ module Meringue
           return rejected_result(nil, "MarkInteractiveFocusStarted", "Agent #{agent_id} is not awaiting interactive focus.", ["interactive_focus_not_pending"]) unless marker.fetch("state", nil) == "interactive_pending"
 
           now = timestamp
-          marker = marker.merge("state" => "interactive", "interactive_pid" => pid, "interactive_started_at" => now)
+          process = Harness::ProcessIdentity.describe(pid)
+          marker = marker.merge(
+            "state" => "interactive",
+            "interactive_pid" => pid,
+            "interactive_started_at" => process&.fetch("started_at", nil)&.iso8601 || now
+          )
+          marker.delete("reclaim_interactive_pid")
           agent["harness_metadata"] = metadata.merge("interactive_handoff" => marker)
           agent["updated_at"] = now
           touch_state!(state, now)
@@ -13914,27 +13942,34 @@ module Meringue
       def interactive_focus_active?(agent)
         metadata = agent.fetch("harness_metadata", {}) || {}
         marker = metadata.fetch("interactive_handoff", {}) || {}
-        return false unless marker.is_a?(Hash) && %w[preparing interactive_pending interactive resuming].include?(marker.fetch("state", nil).to_s)
+        return false unless marker.is_a?(Hash)
+        return false unless %w[preparing interactive_pending interactive resuming reclaiming reclaim_failed].include?(marker.fetch("state", nil).to_s)
 
-        owner_id = marker.fetch("owner_instance_id", nil)
-        recorded_owner_pid = marker.fetch("owner_instance_pid", nil).to_i
-        return true if present_string(owner_id) && owner_id.to_s == instance_id
-        return true if recorded_owner_pid.positive? && recorded_owner_pid == instance_pid
-
-        owner_pid = other_live_instance_pid(
-          owner_id,
-          recorded_owner_pid,
-          marker.fetch("owner_instance_started_at", nil)
-        )
-        return true if owner_pid
-
-        interactive_pid = marker.fetch("interactive_pid", nil).to_i
-        return owner_process_alive?(interactive_pid) if interactive_pid.positive?
+        if marker.fetch("state", nil).to_s == "reclaim_failed"
+          return interactive_process_alive?(marker)
+        end
+        return true if interactive_focus_owner_alive?(marker)
+        return interactive_process_alive?(marker) if marker["interactive_pid"] || marker["reclaim_interactive_pid"]
 
         # A pending marker owned by a process that is gone is recoverable: its RPC process was
         # already quiesced, and no interactive pid was recorded, so the next reconciliation/prompt
         # may safely repair the durable session. Be conservative for legacy markers with no owner.
         marker.key?("owner_instance_id") || marker.key?("owner_instance_pid") ? false : true
+      end
+
+      def interactive_focus_owner_alive?(marker)
+        owner_id = marker.fetch("owner_instance_id", nil)
+        owner_pid = marker.fetch("owner_instance_pid", nil).to_i
+        return true if present_string(owner_id) && owner_id.to_s == instance_id
+        return true if owner_pid.positive? && owner_pid == instance_pid
+        return false unless owner_pid.positive?
+
+        instance_alive?(owner_pid, marker.fetch("owner_instance_started_at", nil))
+      end
+
+      def interactive_process_alive?(marker)
+        pid = (marker["interactive_pid"] || marker["reclaim_interactive_pid"]).to_i
+        pid.positive? && owner_process_alive?(pid)
       end
 
       def terminal_reconcile_error_recorded?(agent)

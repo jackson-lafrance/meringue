@@ -44,10 +44,11 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
   end
 
   class InteractiveController
-    attr_reader :keys, :closed
+    attr_reader :keys, :terminal_keys, :closed
 
     def initialize
       @keys = []
+      @terminal_keys = []
       @closed = 0
     end
 
@@ -64,6 +65,22 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     def handle_agent_key(key:, agent:, state:)
       _ = [agent, state]
       @keys << key
+      { "status" => "written", "bytes" => key.to_s.bytesize }
+    end
+
+    def open_terminal(agent:, state:, rows:, columns:)
+      _ = [agent, state, rows, columns]
+      { "status" => "active", "started" => true, "message" => "terminal" }
+    end
+
+    def resize_terminal(agent:, rows:, columns:)
+      _ = [agent, rows, columns]
+      { "status" => "resized" }
+    end
+
+    def handle_terminal_key(key:, agent:, state:)
+      _ = [agent, state]
+      @terminal_keys << key
       { "status" => "written", "bytes" => key.to_s.bytesize }
     end
 
@@ -160,6 +177,12 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     app.send(:switch_agent_workspace_view, state)
     assert_equal "terminal", app.instance_variable_get(:@agent_workspace_view)
     assert_equal 0, @service.views.length
+    app.send(:handle_agent_workspace_key, "ls\n", "", 0, nil, nil, state)
+    assert_equal ["ls\n"], controller.terminal_keys
+
+    app.send(:switch_agent_workspace_view, state)
+    app.send(:handle_agent_workspace_key, "y", "", 0, nil, nil, state)
+    assert_equal ["x", "y"], controller.keys
 
     app.send(:close_agent_workspace)
     assert_equal 1, controller.closed

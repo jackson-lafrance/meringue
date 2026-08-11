@@ -140,6 +140,12 @@ module Meringue
         raise NotImplementedError, "harness clients must implement #prepare_interactive_session"
       end
 
+      # Reclaims a native interactive process left behind by a crashed Meringue instance. Providers
+      # must verify the recorded pid still belongs to their own interactive command before signaling.
+      def reclaim_interactive_session(_session_ref, pid:)
+        raise NotImplementedError, "harness clients must implement #reclaim_interactive_session"
+      end
+
       def resume_dashboard_session(session_ref)
         attach_session(session_ref)
       end

@@ -82,6 +82,7 @@ class WorkspaceControllerTest < Minitest::Test
       assert_equal "active", opened.fetch("status")
       assert_equal true, opened.fetch("interactive")
       assert_equal [[agent.fetch("id"), 4242]], focus.started
+      assert_equal({ "workspace_path" => workspace, "rows" => 10, "columns" => 30 }, @sessions.last.starts.last)
 
       snapshot = controller.agent_snapshot(agent: agent, rows: 10, columns: 30)
       assert_equal true, snapshot.fetch("interactive")
