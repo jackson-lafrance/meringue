@@ -20,13 +20,14 @@ class TuiBlockedHeadRecoveryTest < Minitest::Test
   class RecordingSessionOpener
     attr_reader :opened
 
-    def initialize
+    def initialize(result: nil)
       @opened = []
+      @result = result
     end
 
     def open(agent)
       @opened << agent.fetch("id")
-      { "status" => "opened", "message" => "Opened #{agent.fetch("id")}." }
+      @result || { "status" => "opened", "message" => "Opened #{agent.fetch("id")}." }
     end
   end
 
@@ -105,6 +106,42 @@ class TuiBlockedHeadRecoveryTest < Minitest::Test
 
     assert_equal ["", 0, -1], result
     assert_equal ["H26"], opener.opened
+  end
+
+  def test_pressing_a_on_a_selected_head_opens_its_persisted_session
+    opener = RecordingSessionOpener.new
+    app = Meringue::TUI::App.new(layout: @layout, out: StringIO.new, terminal: TUISupport::FakeTerminal.new, session_opener: opener)
+    head = blocked_head("H26").merge(
+      "harness" => "pi",
+      "harness_session_id" => "pi-head-session-26",
+      "harness_session_file" => "/tmp/pi-head-session-26.jsonl"
+    )
+    state = tree_state(agents: [head])
+    assert app.send(:select_agent_tree_item, state, "H26")
+
+    result = app.send(:handle_key, "a", "", 0, -1, nil, state)
+
+    assert_equal ["", 0, -1], result
+    assert_equal ["H26"], opener.opened
+    assert_equal "Opened H26.", app.send(:selection_status_text)
+    refute app.instance_variable_get(:@agent_workspace_active), "a head must not gain a focused worker workspace"
+  end
+
+  def test_pressing_a_on_a_head_with_unavailable_history_is_a_transient_notice
+    opener = RecordingSessionOpener.new(
+      result: { "status" => "rejected", "message" => "Agent session history for H26 is unavailable." }
+    )
+    app = Meringue::TUI::App.new(layout: @layout, out: StringIO.new, terminal: TUISupport::FakeTerminal.new, session_opener: opener)
+    state = tree_state(agents: [blocked_head("H26")])
+    assert app.send(:select_agent_tree_item, state, "H26")
+
+    result = app.send(:handle_key, "a", "", 0, -1, nil, state)
+
+    assert_equal ["", 0, -1], result
+    assert_equal ["H26"], opener.opened
+    assert_equal "Agent session history for H26 is unavailable.", app.send(:selection_status_text)
+    assert_empty app.instance_variable_get(:@messages), "expected unavailability must not become durable chat history"
+    refute app.instance_variable_get(:@agent_workspace_active)
   end
 
   private

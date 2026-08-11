@@ -2021,20 +2021,8 @@ module Meringue
         if harness.empty?
           return @agent_workspace_error = "The selected worker has no recorded agent session to open."
         end
-        unless session_opener&.respond_to?(:open)
-          return @agent_workspace_error = "Opening an external agent session is not configured."
-        end
-
-        result = session_opener.open(agent)
-        unless result.is_a?(Hash)
-          @agent_workspace_notice = nil
-          @agent_workspace_error = "Could not open the external agent session."
-          return
-        end
+        result = external_agent_session_result(agent)
         apply_workspace_controller_result(result)
-      rescue StandardError => e
-        @agent_workspace_notice = nil
-        @agent_workspace_error = "Could not open the external agent session: #{e.message}"
       end
 
       def open_agent_workspace_editor(state)
@@ -2250,8 +2238,8 @@ module Meringue
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode. In the AgentTree, #{keys_for("rename_selected")} starts a quick rename for the selected project or issue by pre-filling `/project rename` or `/issue rename`; type its new name in the composer and press Enter.
           Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
           Model picker: /models opens a searchable list of the models the harness reports (/models claude scopes it to another harness); type to filter, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} applies the model as the future-session default (same as /model), #{keys_for("refresh_model_catalog")} re-fetches the catalog, #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker.
-          Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
-          Head/session debugging: /open-session <agent_id> opens the saved harness session externally without turning a head into a chat target.
+          Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace or a selected head's saved harness session; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
+          Head/session debugging: select a head and press #{keys_for("open_agent_workspace")}, or use /open-session <agent_id>, to open its saved harness session externally without turning it into a chat target.
           Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
         TEXT
       end
@@ -2352,19 +2340,37 @@ module Meringue
           append_jump_response("Agent #{agent_id} does not exist.")
           return true
         end
+
+        result = external_agent_session_result(agent)
+        status = result.fetch("status", "failed").to_s
+        message = result.fetch("message", nil).to_s.strip
+        append_jump_response(message.empty? && status == "opened" ? "Opened agent session for #{agent.fetch("id")}." : message)
+        true
+      end
+
+      # One detached-session boundary serves `/open-session`, the head-row
+      # shortcut, and the focused worker command. It never attaches to or takes
+      # ownership of the kernel-managed harness process.
+      def external_agent_session_result(agent)
         unless session_opener&.respond_to?(:open)
-          append_jump_response("Opening an external agent session is not configured.")
-          return true
+          return {
+            "status" => "rejected",
+            "message" => "Opening an external agent session is not configured."
+          }
         end
 
         result = session_opener.open(agent)
-        status = result.is_a?(Hash) ? result.fetch("status", nil).to_s : "failed"
-        message = result.is_a?(Hash) ? result.fetch("message", nil).to_s.strip : "Could not open the external agent session."
-        append_jump_response(message.empty? && status == "opened" ? "Opened agent session for #{agent.fetch("id")}." : message)
-        true
+        return result if result.is_a?(Hash)
+
+        {
+          "status" => "failed",
+          "message" => "Could not open the external agent session for #{agent.fetch("id", "unknown")}."
+        }
       rescue StandardError => e
-        append_jump_response("Could not open the external agent session for #{agent_id}: #{e.message}")
-        true
+        {
+          "status" => "failed",
+          "message" => "Could not open the external agent session for #{agent.fetch("id", "unknown")}: #{e.message}"
+        }
       end
 
       def config_command?(text)
@@ -2394,7 +2400,7 @@ module Meringue
         # Entering jump mode by itself does not retarget the filter; moving the
         # cursor does.
         @selected_agent_id = [@log_scope_id, @selected_agent_id].find { |id| ids.include?(id) } || ids.first
-        append_jump_response("Agent tree navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects issues and agents, filters their logs, and targets dashboard chat through a fresh head when an issue can be resolved (kernel events are skipped). Enter opens PRs, #{keys_for("open_agent_workspace")} opens the focused workspace, and #{keys_for("cancel_navigation")} clears the selection.")
+        append_jump_response("Agent tree navigation active. #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects issues and agents, filters their logs, and targets dashboard chat through a fresh head when an issue can be resolved (kernel events are skipped). Enter opens PRs, #{keys_for("open_agent_workspace")} opens a worker workspace or selected head session, and #{keys_for("cancel_navigation")} clears the selection.")
       end
 
       def exit_agent_tree_navigation(message = nil)
@@ -2420,8 +2426,27 @@ module Meringue
         selected_id = normalized_selected_agent_id(state)
         return exit_agent_tree_navigation("No agents are available to jump into yet.") unless selected_id
 
+        selected_agent = Meringue::Ids.find_record(Array(state.fetch("agents", [])), selected_id)
+        if selected_agent&.fetch("type", nil) == "head"
+          open_head_session_for_debugging(selected_agent)
+          return false
+        end
+
         remember_workspace_agent(state, selected_id)
         open_agent_workspace_by_id(state, selected_id)
+      end
+
+      # Heads never gain a focused workspace or become chat targets. `a` is only
+      # a debugging affordance over the persisted harness history. Expected
+      # unavailability is transient dashboard feedback, not a durable log line.
+      def open_head_session_for_debugging(head)
+        result = external_agent_session_result(head)
+        status = result.fetch("status", "failed").to_s
+        message = result.fetch("message", nil).to_s.strip
+        message = "Opened agent session for #{head.fetch("id")}." if status == "opened" && message.empty?
+        message = "Agent session for #{head.fetch("id")} is unavailable." if message.empty?
+        set_selection_status(message)
+        status == "opened"
       end
 
       def open_selected_agent_pr(state)
