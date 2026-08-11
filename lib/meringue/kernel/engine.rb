@@ -3288,6 +3288,10 @@ module Meringue
               details: { "head_id" => head_id.to_s, "applied_command_count" => command_results.length }
             ))
           end
+          # The prompt was logged before the stateless head knew where it belonged. Complete its
+          # routing metadata only from commands that actually landed, so AgentTree issue/worker
+          # filters keep the originating user line without treating rejected intent as a route.
+          attribute_user_prompt_routes!(state, head_id.to_s, command_results)
           # Same visible output as the typed slash path: the kernel's own command output reaches
           # the user, so a head summary never has to restate "Pruned N issues, ...".
           log_ids.concat(append_head_command_output_logs(state, head_id.to_s, command_results))
@@ -3404,6 +3408,9 @@ module Meringue
       # Commands that already ran still count as applied work, so this reports what
       # happened as a warning rather than a command failure.
       def interrupted_head_result(command_id, command_type, state, head_id, command_results, log_ids)
+        # Commands that landed before another instance removed the head still routed the request.
+        # Preserve that attribution even though this batch cannot reach its ordinary finalizer.
+        attribute_user_prompt_routes!(state, head_id, command_results)
         log_ids.concat(command_results.flat_map { |result| result.fetch("log_entry_ids", []) })
         log_ids.concat(append_log(
           state,
@@ -3589,6 +3596,48 @@ module Meringue
             log_ids.uniq
           )
         end
+      end
+
+      # A user prompt exists before its head chooses a route, so its initial log can carry only the
+      # head id (unless the dashboard selection supplied a target up front). Once the batch lands,
+      # add the accepted AgentTree destinations to that same originating line. Arrays are required:
+      # one head may staff several workers, and every selected worker must retain the prompt.
+      #
+      # This deliberately ignores rejected/failed commands and non-AgentTree targets. A worker
+      # contributes both itself and its durable issue, which keeps the prompt in either filter.
+      def attribute_user_prompt_routes!(state, head_id, command_results)
+        issue_ids = []
+        agent_ids = []
+        Array(command_results).each do |result|
+          next unless result.is_a?(Hash) && result.fetch("status", nil) == "accepted"
+
+          target_id = present_string(result.fetch("target_id", nil))
+          next unless target_id
+
+          if (agent = find_agent(state, target_id)) && agent.fetch("type", nil).to_s == "worker"
+            agent_ids << agent.fetch("id").to_s
+            issue_id = present_string(agent.fetch("issue_id", nil))
+            issue_ids << issue_id if issue_id
+          elsif (issue = find_issue(state, target_id))
+            issue_ids << issue.fetch("id").to_s
+          end
+        end
+        issue_ids.uniq!
+        agent_ids.uniq!
+        return false if issue_ids.empty? && agent_ids.empty?
+
+        prompt_log = state.fetch("logs", []).reverse.find do |entry|
+          next false unless entry.is_a?(Hash) && entry.fetch("source_type", nil).to_s == "user"
+
+          details = entry.fetch("details", nil)
+          details.is_a?(Hash) && details.fetch("head_id", nil).to_s == head_id.to_s
+        end
+        return false unless prompt_log
+
+        details = prompt_log.fetch("details")
+        details["routed_issue_ids"] = (Array(details["routed_issue_ids"]) + issue_ids).map(&:to_s).uniq unless issue_ids.empty?
+        details["routed_agent_ids"] = (Array(details["routed_agent_ids"]) + agent_ids).map(&:to_s).uniq unless agent_ids.empty?
+        true
       end
 
       # Head-proposed commands must reach the user the way typed slash command output does. This
