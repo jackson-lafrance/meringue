@@ -3532,12 +3532,12 @@ module Meringue
                                   failed_count: failed_count,
                                   skipped_count: skipped_count
                                 ),
-                                details: {
+                                details: State::Compactor.head_command_diagnostic_details(
                                   "head_id" => head_id.to_s,
                                   "question_ids" => question_ids,
                                   "skipped_command_count" => skipped_count,
                                   "command_results" => command_results
-                                }
+                                )
                               )
                             else
                               []
@@ -11003,19 +11003,24 @@ module Meringue
             project = issue && find_project(state, issue.fetch("project_id", nil))
             update_issue_status_from_workers!(state, issue, now) if issue
             update_project_status_from_issues!(state, project, now) if project
+            diagnostic = State::Compactor.workspace_diagnostic_log(
+              message,
+              {
+                "issue_id" => agent.fetch("issue_id", nil),
+                "errors" => Array(errors),
+                "provisioning_state" => degradation.fetch("provisioning_state"),
+                "provisioning_attempts" => degradation.fetch("attempts"),
+                "recovery_guidance" => degradation.fetch("next_step", nil),
+                "workspace" => workspace
+              }
+            )
             append_log(
               state,
               source_type: "kernel",
               source_id: agent.fetch("id"),
               level: degradation.fetch("log_level"),
-              message: message,
-              details: {
-                "issue_id" => agent.fetch("issue_id", nil),
-                "errors" => Array(errors),
-                "provisioning_state" => degradation.fetch("provisioning_state"),
-                "provisioning_attempts" => degradation.fetch("attempts"),
-                "workspace" => workspace
-              }
+              message: diagnostic.fetch("message"),
+              details: diagnostic.fetch("details")
             )
             log_workspace_cleanup_warnings(state, agent.fetch("id"), workspace)
             touch_state!(state, now)
