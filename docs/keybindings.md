@@ -133,7 +133,7 @@ The single row under the chat bar is shared, left to right, and truncated at the
 | a worker/issue is selected, or jump mode is on a row, and it has a verified PR | `PR #145 open` (`· stale` or `status unavailable` when the last refresh could not confirm it) | opens that PR |
 | that node has no verified PR yet | `no PR yet` | reports why it cannot open one |
 | that node's tracked PR metadata is not a usable GitHub URL | `PR link unusable` | reports the same |
-| nothing is selected and the tree has open PRs | `3 open PRs` | opens the open-PR picker |
+| nothing is selected and the tree has open PRs | `3 open PRs` | opens the open-PR picker; double-clicking the count does too |
 | nothing is selected and every tracked PR is merged/closed | `no open PRs` | says nothing is open |
 | nothing is selected and no PR has ever been tracked | *(silent)* | says nothing is tracked yet |
 
@@ -141,7 +141,7 @@ The single row under the chat bar is shared, left to right, and truncated at the
 
 Delivery PR records are owned by issues, so an issue selection shows the newest PR that is still live, falling back to the newest settled one so a finished issue still says what it delivered. A worker selection resolves to that owning issue for the same action and never gets a second worker-owned marker or record. Every one of these facts comes from state the kernel already persisted (`delivery_pull_requests` on the issue); rendering never runs `gh`.
 
-The open-PR picker opens in the same popup slot as the slash-command list, above the composer, and lists every PR that is not merged or closed, newest number first: `#145  Fix signup validation  P1-I9 · open`. Open it with `/prs` from any dashboard selection, or with `Ctrl-B` while chat is unscoped. A PR the kernel has not verified yet is listed as `unverified` rather than hidden. Rows are named by their issue title, because delivery records do not carry a PR title of their own.
+The open-PR picker opens in the same popup slot as the slash-command list, above the composer, and lists every PR that is not merged or closed, newest number first: `#145  Fix signup validation  P1-I9 · open`. Open it with `/prs` from any dashboard selection, with `Ctrl-B` while chat is unscoped, or by double-clicking the unscoped `1 open PR` / `N open PRs` summary. Only the count is clickable: a single click and neighboring summary controls keep their existing behavior, and `no open PRs` or a tree that has never tracked one stays inert. A PR the kernel has not verified yet is listed as `unverified` rather than hidden. Rows are named by their issue title, because delivery records do not carry a PR title of their own.
 
 The selection is sticky and independent of focus:
 
