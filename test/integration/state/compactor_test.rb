@@ -215,6 +215,22 @@ class StateCompactorTest < Minitest::Test
     end
   end
 
+  def test_typed_unrouted_user_log_keeps_its_actionable_kind
+    details = {
+      "kind" => "unrouted_user_message",
+      "head_id" => "H1",
+      "user_message" => "Please finish routing this request.",
+      "accepted_command_count" => 0,
+      "command_count" => 1,
+      "command_results" => [{ "command_type" => "SpawnWorker", "status" => "failed", "message" => "session failed" }]
+    }
+    state = { "logs" => [{ "id" => "L1", "message" => "Still needs handling", "details" => details }] }
+
+    refute Compactor.compact!(state)
+    assert_equal details, state.dig("logs", 0, "details")
+    assert_equal "unrouted_user_message", state.dig("logs", 0, "details", "kind")
+  end
+
   def test_head_command_log_summary_is_bounded_without_changing_source_of_truth
     report = "FINAL REPORT\n#{"r" * 40_000}\nEND REPORT"
     goal_command = "bundle exec #{"test " * 10_000}"

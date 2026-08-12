@@ -2,6 +2,7 @@
 
 require "test_helper"
 require "support/tui_support"
+require "support/active_workload_support"
 require "fileutils"
 require "stringio"
 require "tmpdir"
@@ -20,10 +21,9 @@ class TuiStateReloadCostTest < Minitest::Test
   WIDTH = 140
   HEIGHT = 45
   FRAMES = 30
-  # Big enough that re-normalizing per frame is clearly visible, small enough to stay fast.
-  ISSUE_COUNT = 120
-  AGENT_COUNT = 120
-  LOG_COUNT = 200
+  ISSUE_COUNT = ActiveWorkloadSupport::AGENT_COUNT
+  AGENT_COUNT = ActiveWorkloadSupport::AGENT_COUNT
+  LOG_COUNT = ActiveWorkloadSupport::LOG_COUNT
   # A frame that takes longer than this is broken, not merely slow. Deliberately generous: this
   # guards against per-frame O(state) work, not against machine-to-machine timing differences.
   MAX_WARM_AVERAGE_SECONDS = 0.25
@@ -70,20 +70,42 @@ class TuiStateReloadCostTest < Minitest::Test
                     format("warm avg %.1fms over %d frames", average * 1_000, seconds.length)
   end
 
-  def test_an_external_durable_change_is_visible_by_the_refresh_bound
+  def test_external_writes_and_completions_are_visible_by_the_refresh_bound
     typing_frame("typing")
 
     marker = "a worker settled while the user was typing"
     other_store = Meringue::State::Store.new(path: @path)
     updated = other_store.load
+    completed_worker = updated.fetch("agents").find { |agent| agent.fetch("id") == "P1-I1-W1" }
+    completed_worker["status"] = "completed"
+    completed_worker["harness_metadata"]["last_assistant_text"] = marker
     updated.fetch("logs") << log_record("L#{LOG_COUNT + 1}", "source_type" => "worker", "message" => marker)
     other_store.save(updated, preserve_log_buffer: false)
 
-    refute typing_state("still responsive").fetch("logs").any? { |log| log.fetch("message", nil) == marker }
+    stale = typing_state("still responsive")
+    refute stale.fetch("logs").any? { |log| log.fetch("message", nil) == marker }
+    refute_equal "completed", stale.fetch("agents").find { |agent| agent.fetch("id") == "P1-I1-W1" }.fetch("status")
     advance_to_refresh_bound
 
-    assert typing_state("still responsive").fetch("logs").any? { |log| log.fetch("message", nil) == marker }
+    refreshed = typing_state("still responsive")
+    assert refreshed.fetch("logs").any? { |log| log.fetch("message", nil) == marker }
+    assert_equal "completed", refreshed.fetch("agents").find { |agent| agent.fetch("id") == "P1-I1-W1" }.fetch("status")
     assert_equal 2, @provider_calls
+  end
+
+  def test_active_workload_diagnostic_is_actionable_and_bounded_after_one_snapshot_load
+    typing_frame("typing")
+
+    diagnostic = typing_state("still typing").fetch("logs").find { |log| log.fetch("level") == "error" }
+    details = diagnostic.fetch("details")
+    stderr = details.dig("workspace", "stderr")
+    assert_equal 1, @provider_calls
+    assert_equal ActiveWorkloadSupport::LOG_COUNT, typing_state("still typing").fetch("logs").length
+    assert_operator JSON.generate(details).bytesize, :<=, Meringue::State::Compactor::DIAGNOSTIC_DETAILS_MAX_BYTES
+    assert_equal "Prompt this worker to retry provisioning, or kill it.", details.fetch("recovery_guidance")
+    assert_includes stderr.fetch("head"), "checkout failed at beginning"
+    assert_includes stderr.fetch("tail"), "lock remains at end"
+    assert_operator stderr.fetch("omitted_bytes"), :>, 100_000
   end
 
   def test_a_pruned_selection_is_cleared_when_the_base_state_refreshes
@@ -133,32 +155,6 @@ class TuiStateReloadCostTest < Minitest::Test
   end
 
   def large_state
-    state = empty_state
-    state["projects"] << project_record("P1")
-    ISSUE_COUNT.times do |index|
-      state["issues"] << issue_record("P1-I#{index + 1}", "description" => "Seeded issue body. " * 40)
-    end
-    AGENT_COUNT.times do |index|
-      state["agents"] << agent_record(
-        "P1-I#{index + 1}-W1",
-        "status" => "completed",
-        "issue_id" => "P1-I#{index + 1}",
-        "project_id" => "P1",
-        "harness_metadata" => {
-          "title" => "Worker #{index + 1}",
-          "last_assistant_text" => "Reported result text. " * 100
-        }
-      )
-    end
-    LOG_COUNT.times do |index|
-      state["logs"] << log_record(
-        "L#{index + 1}",
-        "source_type" => "worker",
-        "source_id" => "P1-I1-W1",
-        "message" => "Worker P1-I1-W1 completed.",
-        "details" => { "last_assistant_text" => "Durable log detail. " * 50 }
-      )
-    end
-    state
+    ActiveWorkloadSupport.state
   end
 end
