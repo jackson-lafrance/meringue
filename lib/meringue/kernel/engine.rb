@@ -6358,7 +6358,7 @@ module Meringue
           prompt: prompt.to_s,
           mode: mode
         )
-        if receipt_entry && client.prompt_delivery_receipts_supported?
+        if receipt_entry && client.respond_to?(:prompt_delivery_receipts_supported?) && client.prompt_delivery_receipts_supported?
           receipt = client.prompt_delivery_status(
             agent_session_ref(agent),
             delivery_id: receipt_entry.fetch("delivery_id"),
@@ -6468,13 +6468,15 @@ module Meringue
         session_ref = agent_session_ref(agent)
         begin
           prompt_options = { mode: mode }
-          prompt_options[:delivery_id] = delivery_id if client.prompt_delivery_receipts_supported?
+          if client.respond_to?(:prompt_delivery_receipts_supported?) && client.prompt_delivery_receipts_supported?
+            prompt_options[:delivery_id] = delivery_id
+          end
           session_ref = client.prompt_session(session_ref, prompt.to_s, **prompt_options)
         rescue StandardError => e
           # A timeout after Pi accepted a prompt is not proof that delivery failed. Keep the
           # deterministic receipt pending until the Pi JSONL transcript either contains it or the
           # process exits without it; retrying while the original process lives can duplicate work.
-          if client.ambiguous_prompt_delivery_error?(e)
+          if client.respond_to?(:ambiguous_prompt_delivery_error?) && client.ambiguous_prompt_delivery_error?(e)
             return queue_ambiguous_prompt(
               command_id: command_id,
               command_type: command_type,
