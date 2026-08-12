@@ -43,6 +43,14 @@ livelock on a record it can never repair: after the ladder below is exhausted, t
 record costs one pass, not one pass every two seconds. Reconciliation picks the record
 back up only if a command moves it out of `errored`.
 
+**Healthy records only write meaningful changes.** A successful poll still merges fresh
+session evidence, clears stale failure state, records progress, and repairs parent statuses.
+`Engine#refresh_agent_session_state` compares those results with the persisted record before
+it changes timestamps. If the agent and its parent statuses are unchanged and the poll adds
+no log, the pass returns without changing `updated_at`, touching state metadata, or saving
+`state.json`. The next poll still runs, so this removes disk churn without weakening session
+monitoring.
+
 **A terminally failed head releases its session.** Marking a head terminally errored
 now calls `Engine#release_head_session!` with reason `head_reconcile_error`, matching
 the `AGENTS.md` rule that the kernel closes a head's harness session when the head

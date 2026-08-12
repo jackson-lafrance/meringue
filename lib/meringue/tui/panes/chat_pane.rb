@@ -561,20 +561,63 @@ module Meringue
           [[OpenPullRequests.summary_label(state), total.positive? ? Style::ACCENT_BOLD : Style::MUTED]]
         end
 
-        # Input editing only changes _chat.input_buffer, but the layout asks for
-        # the complete, wrapped log history twice per frame (scroll bounds and
-        # drawing). Cache that expensive work by the state that can affect log
-        # presentation so a keystroke only redraws the composer.
+        # Input editing and reconciliation metadata do not change the logs pane,
+        # but the layout asks for the complete wrapped history twice per frame.
+        # Key the cache by compact presentation fields instead of deep-hashing
+        # every retained log and complete agent record on each request.
         def log_lines_cache_key(state, width)
           chat = chat_state(state)
           [
             width,
-            Array(state.fetch("logs", [])).hash,
-            Array(state.fetch("agents", [])).hash,
-            Array(chat.fetch("messages", [])).hash,
+            log_records_cache_key(state.fetch("logs", [])),
+            log_agents_cache_key(state.fetch("agents", [])),
+            message_records_cache_key(chat.fetch("messages", [])),
             AgentTreeNavigation.selected_agent_id(state),
-            LogScope.id(state),
+            log_scope_cache_key(state),
+            state.dig("metadata", "last_recount", "recounted_at"),
             Style.current_colorscheme
+          ]
+        end
+
+        # Durable logs are append-only, and retention only removes entries from
+        # the front. Their boundary ids therefore identify the retained window
+        # without reading the Markdown-heavy details of every entry.
+        def log_records_cache_key(logs)
+          records = Array(logs)
+          [records.length, log_record_id(records.first), log_record_id(records.last)]
+        end
+
+        def log_record_id(record)
+          record.is_a?(Hash) ? record.fetch("id", nil) : record
+        end
+
+        def message_records_cache_key(messages)
+          Array(messages).map do |message|
+            next message unless message.is_a?(Hash)
+
+            message.values_at("id", "role", "text", "status", "visible", "timestamp", "source_id")
+          end
+        end
+
+        def log_agents_cache_key(agents)
+          Array(agents).map do |agent|
+            next agent unless agent.is_a?(Hash)
+
+            [
+              agent.fetch("id", nil),
+              agent.fetch("type", nil),
+              agent_title(agent),
+              !AgentTreeNavigation.active_agent_pr_url(agent).nil?
+            ]
+          end
+        end
+
+        def log_scope_cache_key(state)
+          scope = LogScope.scope(state)
+          [
+            scope.fetch("id", nil),
+            scope.fetch("label", nil),
+            Array(scope.fetch("member_ids", [])).map(&:to_s)
           ]
         end
 
