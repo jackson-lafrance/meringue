@@ -10,8 +10,9 @@ module Meringue
     #
     # Membership is derived from data the kernel already writes: each log
     # record's `source_type`/`source_id` plus the routing ids it carries in
-    # `details` (`project_id`, `issue_id`, `agent_id`, `head_id`, and the
-    # cascading id lists used by kills and prunes). No new log fields are needed.
+    # `details` (`project_id`, `issue_id`, `agent_id`, `head_id`,
+    # `command_author_id`, and the cascading id lists used by kills and prunes).
+    # No new top-level log fields are needed.
     #
     # The subtree is assembled exactly like the rendered AgentTree hierarchy:
     # heads are top-level nodes, workers hang off their issue, child issues nest
@@ -25,7 +26,7 @@ module Meringue
       # Key the TUI composes into the rendered state.
       STATE_KEY = "_log_scope"
       # Single-id routing fields that kernel/harness logs already carry.
-      ROUTING_KEYS = %w[agent_id issue_id project_id head_id target_id].freeze
+      ROUTING_KEYS = %w[agent_id issue_id project_id head_id command_author_id target_id].freeze
       # Routing fields that carry several ids at once, such as a head routing one
       # prompt to issue/worker targets or a cascading kill affecting many records.
       ROUTING_LIST_KEYS = %w[

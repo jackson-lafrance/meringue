@@ -48,11 +48,13 @@ class TuiLogScopeTest < Minitest::Test
       log_record("L1", "source_type" => "user", "source_id" => nil, "details" => { "head_id" => "H1" }),
       log_record("L2", "source_type" => "head", "source_id" => "H1"),
       log_record("L3", "source_type" => "kernel", "source_id" => nil, "details" => { "project_id" => "P1" }),
-      log_record("L4", "source_type" => "head", "source_id" => "H2")
+      log_record("L4", "source_type" => "head", "source_id" => "H2"),
+      log_record("L5", "source_type" => "kernel", "source_id" => "P1-I1",
+                       "details" => { "command_author_type" => "head", "command_author_id" => "H1" })
     ]
 
     assert_equal ["H1"], scope.fetch("member_ids")
-    assert_equal %w[L1 L2], LogScope.filter(scope, entries).map { |entry| entry.fetch("id") }
+    assert_equal %w[L1 L2 L5], LogScope.filter(scope, entries).map { |entry| entry.fetch("id") }
   end
 
   def test_routed_user_prompt_is_retained_by_issue_and_worker_scopes

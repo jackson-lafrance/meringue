@@ -827,9 +827,9 @@ module Meringue
           style = entry_style(entry)
           segments = [
             ["[#{timestamp(entry)}] ", Style::DIM],
-            [entry_icon(entry), style],
-            [" #{participant_label(entry)}", style]
+            [entry_icon(entry), style]
           ]
+          segments.concat(participant_segments(entry, style))
           segments.concat(agent_title_segments(entry, selected_agent_id: selected_agent_id))
           segments.concat(log_level_segments(entry))
           segments
@@ -925,6 +925,20 @@ module Meringue
           [AGENT_GUTTER, agent_body_style(entry)]
         end
 
+        def participant_segments(entry, style)
+          segments = [[" #{participant_label(entry)}", style]]
+          author_id = head_command_author_id(entry)
+          return segments unless author_id
+
+          # Keep the kernel as the speaking/applying participant, then show the proposing head as
+          # secondary provenance in that head's identity color. The wording matters: H127 did not
+          # apply state itself; the command reached the user through Meringue.
+          segments + [
+            [" · via ", Style::DIM],
+            [author_id, Style.agent_style(author_id, kind: "head")]
+          ]
+        end
+
         def participant_label(entry)
           return "you" if entry.fetch("role", nil) == "you"
           return "meringue" unless entry.fetch("role", nil) == "agent"
@@ -933,6 +947,25 @@ module Meringue
           return "agent" if agent_id.empty?
 
           agent_id
+        end
+
+        def head_command_author_id(entry)
+          return nil unless entry.fetch("role", nil) == "meringue"
+
+          details = entry.fetch("details", nil)
+          return nil unless details.is_a?(Hash)
+
+          author_type = details.fetch("command_author_type", nil).to_s
+          author_id = details.fetch("command_author_id", nil).to_s
+          # Compatibility for command-output rows persisted before explicit author metadata was
+          # added: those rows already carried the proposing head in `details.head_id`.
+          if author_id.empty? && details.fetch("kind", nil).to_s == "kernel_command_output"
+            author_type = "head"
+            author_id = details.fetch("head_id", nil).to_s
+          end
+          return nil unless author_type == "head" && author_id.match?(/\AH\d+\z/)
+
+          author_id
         end
 
         def agent_title_segments(entry, selected_agent_id: nil)
