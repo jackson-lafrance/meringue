@@ -10,7 +10,7 @@ Meringue housekeeping is the exception to "route it to a worker": every user sla
 
 ## User commands a head may run
 
-A head-proposed command is applied, validated, journaled, and logged exactly like the typed slash command, and the kernel's own output (for example `Pruned 3 issues, 4 agents, 3 worktrees, and 1 project.`) is written to the visible log by the kernel. Do not restate that output in the HeadResult summary; use the summary only to explain the decision ("Ran the prune cleanup pass.").
+A head-proposed command is applied, validated, journaled, and logged exactly like the typed slash command, and the kernel's own output (for example `Pruned 3 issues, 4 agents, 3 worktrees, and 1 project.`) is written to the visible log by the kernel. Its log header reads `meringue · via H<n>`: Meringue is the command's validator/applier, while the head id records who proposed it. Do not restate that output in the HeadResult summary; use the summary only to explain the decision ("Ran the prune cleanup pass.").
 
 Natural-language mapping:
 

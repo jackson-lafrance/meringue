@@ -47,6 +47,30 @@ class TuiLogsPaneTest < Minitest::Test
     assert_includes lines.join("\n"), "✓ P1-I1-W1 · Worker title · done"
   end
 
+  def test_head_authored_kernel_commands_show_both_meringue_and_the_proposing_head
+    logs = [
+      log_record(
+        "L1",
+        "message" => "Created issue P1-I1.",
+        "details" => {
+          "command_author_type" => "head",
+          "command_author_id" => "H127",
+          "kind" => "kernel_command_applied",
+          "presentation" => "cmd"
+        }
+      ),
+      log_record("L2", "message" => "Reconciled sessions.")
+    ]
+    lines = @pane.log_lines(composed_state(empty_state.merge("logs" => logs)), width: 70)
+    attributed = lines.find { |line| plain_line(line).include?("via H127") }
+    generic = lines.find { |line| plain_line(line).include?("▪ meringue") && !plain_line(line).include?("via H127") }
+
+    assert_includes plain_line(attributed), "▪ meringue · via H127 · cmd"
+    assert_includes styles_in(attributed), Style::ACCENT_BOLD
+    assert_includes styles_in(attributed), Style.agent_style("H127", kind: "head")
+    assert_equal "[#{Timestamps.format("2026-07-11T00:00:00Z", "%H:%M")}] ▪ meringue", plain_line(generic)
+  end
+
   def test_log_levels_render_status_labels_and_semantic_styles
     lines = @pane.log_lines(mixed_state, width: 70)
 

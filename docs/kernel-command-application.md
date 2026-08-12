@@ -85,9 +85,15 @@ and a head result whose batch already finished is never applied again. This is w
 keeps one clarification to one question and one `SpawnWorker` to one worker.
 
 **A per-command journal.** Each command in a batch is journaled with its command
-id and terminal status. Re-applying a batch replays journaled results instead of
-re-running commands, which is how a genuine crash mid-batch resumes without
-duplicating the commands that already ran.
+id, terminal status, and authoring head. Re-applying a batch replays journaled
+results instead of re-running commands, which is how a genuine crash mid-batch
+resumes without duplicating the commands that already ran. Kernel log entries
+emitted by those commands retain the same author as
+`details.command_author_type: head` and `details.command_author_id: H<n>`, while
+their top-level `source_type` remains `kernel`: the head proposed the command,
+but Meringue validated and applied it. The logs pane renders that distinction as
+`meringue · via H<n>`. Kernel actions not proposed by a head have no command-author
+metadata and keep the ordinary `meringue` header.
 
 **Concurrent project registration.** A head batch carries its head id on each proposed command.
 If its `AddProject` reaches the kernel after another head has registered the same normalized root,
