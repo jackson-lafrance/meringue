@@ -77,7 +77,7 @@ The focused workspace is split so each layer has one job:
 
 ## Cross-instance harness transport ownership
 
-A harness process only answers the Meringue instance holding its stdin/stdout pipes, so prompting must never produce two writers on one session. `Harness::TransportOwnership` records the owning instance per session under `~/.meringue/transport-locks` (override with `MERINGUE_TRANSPORT_LOCK_DIR`) and guards takeover with an advisory file lock.
+A harness process only answers the Meringue instance holding its stdin/stdout pipes, so prompting must never produce two writers on one session. `Harness::TransportOwnership` records the owning instance per session under `~/.meringue/transport-locks` (override with `MERINGUE_TRANSPORT_LOCK_DIR`) and guards takeover with an advisory file lock. Each claim persists both the harness and owner PID plus their process-start timestamps, so PID reuse cannot make a dead owner look current.
 
 `PiClient#prompt_session` uses it whenever the local process registry has no transport for the session:
 
@@ -87,7 +87,9 @@ A harness process only answers the Meringue instance holding its stdin/stdout pi
 - only a live owner that is still mid-turn is refused, with an actionable message naming the owning instance pid and stating that prompting takes over once the turn settles;
 - a takeover records `transport_reclaimed_at`, `transport_reclaimed_pid`, `transport_previous_owner_pid`, and a `transport_note` on the worker, and `abort_session` reports the owning instance instead of a bare missing-process error.
 
-The kernel remains the only mutator of orchestration state; the client only reports the resulting session ref.
+The lease is also durable supervision evidence. Pi RPC processes are direct children using anonymous pipes; if the dashboard exits, every child can exit together when its stdin closes. When both the recorded harness identity and its Meringue owner identity are gone, `PiClient#session_supervision_evidence` proves this shared-supervisor failure to reconciliation. The kernel then durably claims one continuation per worker, reattaches the same saved Pi session on the same workspace, and records the replacement PID. A live owner still means an isolated child exit and is never auto-prompted. See [Session reconciliation](session-reconciliation.md#a-meringue-supervisor-exit).
+
+The kernel remains the only mutator of orchestration state; the client only reports the resulting session ref and supervision evidence.
 
 ## Native Pi focus handoff
 

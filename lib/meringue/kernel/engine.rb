@@ -40,6 +40,7 @@ module Meringue
         First inspect the current repository state, then continue the assigned issue from the last incomplete step.
         If the issue is already complete, summarize the final status and include any pull request link.
       PROMPT
+      SUPERVISOR_RECOVERY_PROMPT_ID_LABEL = "Meringue supervisor recovery id".freeze
       HEAD_RESUME_PROMPT = <<~PROMPT.freeze
         Continue the interrupted Meringue head request from this session's existing context.
         Return exactly one valid HeadResult JSON object and no other text. Do not repeat tool work that is already complete.
@@ -514,6 +515,10 @@ module Meringue
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
       HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
+      # A shared Meringue process exit can strand every Pi RPC child at once. Each recovery attempt
+      # is claimed durably before attach/prompt I/O, and the same bound as ordinary session repair
+      # prevents a broken transcript from creating an unbounded restart loop.
+      WORKER_SUPERVISOR_RECOVERY_MAX_ATTEMPTS = WORKER_RECONCILE_RESUME_MAX_ATTEMPTS
       DELIVERY_PULL_REQUEST_REFRESH_INTERVAL_SECONDS = 5 * 60
       # Refreshing a batch stamps every record with the same `last_checked_at`, which would make
       # them all fall due together on one later tick. Each URL gets a deterministic extra delay
@@ -6139,6 +6144,88 @@ module Meringue
             )
           end
         end
+        client = harness_client_for_agent(agent)
+        retrying_ambiguous_delivery = false
+        receipt_entry = ambiguous_prompt_receipt_entry(
+          metadata,
+          command_id: command_id,
+          pending_prompt_id: pending_prompt_id,
+          prompt: prompt.to_s,
+          mode: mode
+        )
+        if receipt_entry && client.prompt_delivery_receipts_supported?
+          receipt = client.prompt_delivery_status(
+            agent_session_ref(agent),
+            delivery_id: receipt_entry.fetch("delivery_id"),
+            prompt: prompt.to_s,
+            started_at: receipt_entry.fetch("delivery_started_at", nil)
+          )
+          case receipt.fetch("status", "unknown")
+          when "delivered"
+            return confirm_ambiguous_prompt_delivery(
+              state: state,
+              command_id: command_id,
+              command_type: command_type,
+              agent: agent,
+              mode: mode,
+              pending_prompt_id: pending_prompt_id,
+              receipt: receipt
+            )
+          when "pending", "unknown"
+            if receipt_entry.fetch("source", nil) == "pending_prompt"
+              return ambiguous_prompt_wait_result(
+                command_id: command_id,
+                command_type: command_type,
+                agent: agent,
+                mode: mode,
+                pending_prompt_id: pending_prompt_id,
+                receipt: receipt
+              )
+            end
+
+            return queue_ambiguous_prompt(
+              command_id: command_id,
+              command_type: command_type,
+              agent_id: agent.fetch("id"),
+              prompt: prompt.to_s,
+              mode: mode,
+              pending_prompt_id: pending_prompt_id,
+              delivery_id: receipt_entry.fetch("delivery_id"),
+              delivery_started_at: receipt_entry.fetch("delivery_started_at", nil),
+              error: StandardError.new(receipt.fetch("error", nil) || "Prompt receipt is not available yet")
+            )
+          when "not_delivered"
+            retrying_ambiguous_delivery = true
+          end
+        end
+
+        if !retrying_ambiguous_delivery && Array(metadata.fetch("pending_prompts", [])).any? { |entry|
+          entry.is_a?(Hash) && entry.fetch("delivery_state", nil) == "awaiting_receipt"
+        }
+          return queue_transient_prompt(
+            command_id: command_id,
+            command_type: command_type,
+            agent_id: agent.fetch("id"),
+            prompt: prompt.to_s,
+            mode: mode,
+            pending_prompt_id: pending_prompt_id,
+            error: StandardError.new("an earlier Pi prompt is still awaiting its durable delivery receipt")
+          )
+        end
+
+        supervisor_recovery = metadata.fetch("supervisor_recovery", nil)
+        if supervisor_recovery.is_a?(Hash) && supervisor_recovery.fetch("state", nil) == "claimed"
+          return queue_transient_prompt(
+            command_id: command_id,
+            command_type: command_type,
+            agent_id: agent.fetch("id"),
+            prompt: prompt.to_s,
+            mode: mode,
+            pending_prompt_id: pending_prompt_id,
+            error: StandardError.new("Meringue is recovering this worker after its session supervisor exited")
+          )
+        end
+
         claim = metadata.fetch("prompt_delivery_claim", nil)
         if claim.is_a?(Hash) && other_live_instance_pid(
           claim.fetch("owner_instance_id", nil),
@@ -6157,12 +6244,14 @@ module Meringue
         end
 
         claim_token = SecureRandom.hex(8)
+        delivery_id = prompt_delivery_id(command_id, claim_token)
         metadata = metadata.merge(
           "prompt_delivery_claim" => {
             "token" => claim_token,
             "command_id" => present_string(command_id),
             "prompt" => prompt.to_s,
             "mode" => mode,
+            "delivery_id" => delivery_id,
             "claimed_at" => timestamp,
             **instance_ownership_metadata
           }.compact
@@ -6171,11 +6260,29 @@ module Meringue
         touch_state!(state)
         store.save(state)
 
-        client = harness_client_for_agent(agent)
         session_ref = agent_session_ref(agent)
         begin
-          session_ref = client.prompt_session(session_ref, prompt.to_s, mode: mode)
+          prompt_options = { mode: mode }
+          prompt_options[:delivery_id] = delivery_id if client.prompt_delivery_receipts_supported?
+          session_ref = client.prompt_session(session_ref, prompt.to_s, **prompt_options)
         rescue StandardError => e
+          # A timeout after Pi accepted a prompt is not proof that delivery failed. Keep the
+          # deterministic receipt pending until the Pi JSONL transcript either contains it or the
+          # process exits without it; retrying while the original process lives can duplicate work.
+          if client.ambiguous_prompt_delivery_error?(e)
+            return queue_ambiguous_prompt(
+              command_id: command_id,
+              command_type: command_type,
+              agent_id: agent.fetch("id"),
+              prompt: prompt.to_s,
+              mode: mode,
+              pending_prompt_id: pending_prompt_id,
+              delivery_id: delivery_id,
+              delivery_started_at: metadata.dig("prompt_delivery_claim", "claimed_at"),
+              error: e
+            )
+          end
+
           # A session that is busy elsewhere is a timing condition, not a failure: queue the
           # prompt and let reconciliation deliver it once the current turn settles.
           if Harness.transient_session_error?(e)
@@ -6305,6 +6412,201 @@ module Meringue
         return requested_mode.to_s unless reported && PROMPT_MODES.include?(reported)
 
         reported
+      end
+
+      def prompt_delivery_id(command_id, fallback_token)
+        "meringue:#{present_string(command_id) || fallback_token}"
+      end
+
+      def ambiguous_prompt_receipt_entry(metadata, command_id:, pending_prompt_id:, prompt:, mode:)
+        pending = Array(metadata.fetch("pending_prompts", [])).select { |entry| entry.is_a?(Hash) }
+        entry = pending.find do |candidate|
+          next false unless candidate.fetch("delivery_state", nil) == "awaiting_receipt"
+
+          (pending_prompt_id && candidate.fetch("id", nil).to_s == pending_prompt_id) ||
+            (present_string(command_id) && candidate.fetch("command_id", nil).to_s == command_id.to_s)
+        end
+        return entry.merge("source" => "pending_prompt") if entry && present_string(entry.fetch("delivery_id", nil))
+
+        claim = metadata.fetch("prompt_delivery_claim", nil)
+        return nil unless claim.is_a?(Hash) && present_string(claim.fetch("delivery_id", nil))
+        return nil if present_string(command_id) && claim.fetch("command_id", nil).to_s != command_id.to_s
+        return nil unless claim.fetch("prompt", nil).to_s == prompt.to_s && claim.fetch("mode", nil).to_s == mode.to_s
+
+        {
+          "source" => "delivery_claim",
+          "delivery_id" => claim.fetch("delivery_id"),
+          "delivery_started_at" => claim.fetch("claimed_at", nil)
+        }
+      end
+
+      def ambiguous_prompt_wait_result(command_id:, command_type:, agent:, mode:, pending_prompt_id:, receipt:)
+        accepted_result(
+          command_id,
+          command_type,
+          agent.fetch("id"),
+          "Waiting for Pi to confirm the timed-out #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")}; it will not be sent twice.",
+          {
+            "agent_id" => agent.fetch("id"),
+            "queued" => true,
+            "awaiting_receipt" => true,
+            "pending_prompt_id" => pending_prompt_id,
+            "receipt_status" => receipt.fetch("status", "unknown")
+          }.compact,
+          []
+        )
+      end
+
+      # Persist an ambiguous RPC outcome before releasing the delivery claim. Reconciliation polls
+      # the durable Pi transcript through PromptAgent, but does not poll or resume the worker itself
+      # until this receipt settles; doing either could write a duplicate continuation into the same
+      # long-running compaction request.
+      def queue_ambiguous_prompt(command_id:, command_type:, agent_id:, prompt:, mode:, pending_prompt_id:,
+                                 delivery_id:, delivery_started_at:, error:)
+        state = normalized_state
+        agent = find_agent(state, agent_id)
+        return failed_result(command_id, command_type, "Agent #{agent_id} disappeared before its prompt receipt could be tracked.", ["agent_not_found"]) unless agent
+
+        now = timestamp
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        pending = Array(metadata.fetch("pending_prompts", [])).select { |entry| entry.is_a?(Hash) }
+        existing = pending.find do |entry|
+          (pending_prompt_id && entry.fetch("id", nil).to_s == pending_prompt_id) ||
+            (present_string(command_id) && entry.fetch("command_id", nil).to_s == command_id.to_s) ||
+            entry.fetch("delivery_id", nil).to_s == delivery_id.to_s
+        end
+        entry = existing || {
+          "id" => next_pending_prompt_id(agent, pending),
+          "command_id" => present_string(command_id),
+          "prompt" => prompt,
+          "mode" => mode.to_s,
+          "queued_at" => now
+        }.compact
+        entry.merge!(
+          "delivery_state" => "awaiting_receipt",
+          "delivery_id" => delivery_id,
+          "delivery_started_at" => delivery_started_at || now,
+          "last_attempted_at" => now,
+          "last_error" => error.message,
+          "last_error_class" => error.class.name
+        )
+        if error.respond_to?(:command_type) && %w[prompt steer follow_up].include?(error.command_type)
+          entry["delivered_mode"] = error.command_type == "prompt" ? "normal" : error.command_type
+        end
+        pending << entry unless existing
+        metadata["pending_prompts"] = pending
+        metadata["prompt_delivery_claim"] = nil
+        metadata["last_ambiguous_prompt_delivery"] = {
+          "delivery_id" => delivery_id,
+          "pending_prompt_id" => entry.fetch("id"),
+          "timed_out_at" => now,
+          "error" => error.message
+        }
+        agent["harness_metadata"] = metadata
+        agent["updated_at"] = now
+
+        log_ids = if existing
+                    []
+                  else
+                    append_log(
+                      state,
+                      source_type: "kernel",
+                      source_id: agent.fetch("id"),
+                      level: "warning",
+                      message: "The Pi RPC timed out while delivering the #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")}; waiting for its durable session receipt instead of retrying it.",
+                      details: {
+                        "agent_id" => agent.fetch("id"),
+                        "issue_id" => agent.fetch("issue_id", nil),
+                        "mode" => mode.to_s,
+                        "pending_prompt_id" => entry.fetch("id"),
+                        "delivery_id" => delivery_id,
+                        "error_class" => error.class.name,
+                        "error" => error.message
+                      }.compact
+                    )
+                  end
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(
+          command_id,
+          command_type,
+          agent.fetch("id"),
+          "Tracking the timed-out #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} until Pi confirms whether it landed.",
+          {
+            "agent_id" => agent.fetch("id"),
+            "queued" => true,
+            "awaiting_receipt" => true,
+            "pending_prompt_id" => entry.fetch("id"),
+            "delivery_id" => delivery_id
+          },
+          log_ids
+        )
+      end
+
+      def confirm_ambiguous_prompt_delivery(state:, command_id:, command_type:, agent:, mode:, pending_prompt_id:, receipt:)
+        now = receipt.fetch("delivered_at", nil) || timestamp
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        pending = Array(metadata.fetch("pending_prompts", [])).select { |entry| entry.is_a?(Hash) }
+        receipt_entry = pending.find do |entry|
+          (pending_prompt_id && entry.fetch("id", nil).to_s == pending_prompt_id) ||
+            (present_string(command_id) && entry.fetch("command_id", nil).to_s == command_id.to_s)
+        end
+        delivered_mode = receipt_entry&.fetch("delivered_mode", nil) || mode
+        delivered_ids = Array(metadata.fetch("prompt_command_ids", [])).map(&:to_s)
+        delivered_ids = (delivered_ids + [command_id.to_s]).uniq.last(PROMPT_COMMAND_ID_HISTORY_LIMIT) if present_string(command_id)
+        metadata = metadata.merge(
+          "prompt_count" => metadata.fetch("prompt_count", 0).to_i + 1,
+          "last_prompt_mode" => delivered_mode,
+          "requested_prompt_mode" => delivered_mode != mode ? mode : nil,
+          "delivered_prompt_mode" => delivered_mode != mode ? delivered_mode : nil,
+          "last_prompted_at" => now,
+          "routing_action" => prompt_routing_action(delivered_mode),
+          "prompt_command_ids" => present_string(command_id) ? delivered_ids : nil,
+          "prompt_delivery_claim" => nil,
+          "last_prompt_delivery_receipt" => receipt.merge("confirmed_at" => timestamp)
+        ).compact
+        agent["harness_metadata"] = metadata
+        agent["pid"] = receipt.fetch("pid") if receipt.fetch("pid", nil)
+        agent["status"] = "working"
+        agent["updated_at"] = timestamp
+        clear_settle_failure!(agent)
+        remove_pending_prompts!(agent, pending_prompt_id: pending_prompt_id, command_id: command_id)
+
+        issue = find_issue(state, agent.fetch("issue_id", nil))
+        project = issue && find_project(state, issue.fetch("project_id", nil))
+        if issue
+          issue["status"] = "working"
+          issue["last_agent_id"] = agent.fetch("id")
+          issue["last_routing_action"] = prompt_routing_action(delivered_mode)
+          issue["last_routed_at"] = timestamp
+          issue["updated_at"] = timestamp
+        end
+        if project
+          project["status"] = "working"
+          project["updated_at"] = timestamp
+        end
+
+        message = prompt_log_message(agent, delivered_mode, requested_mode: delivered_mode != mode ? mode : nil)
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: agent.fetch("id"),
+          level: "info",
+          message: message,
+          details: {
+            "agent_id" => agent.fetch("id"),
+            "issue_id" => agent.fetch("issue_id", nil),
+            "mode" => delivered_mode,
+            "requested_mode" => mode,
+            "delivery_confirmation" => "pi_session_transcript",
+            "delivery_id" => receipt_entry&.fetch("delivery_id", nil),
+            "delivered_at" => receipt.fetch("delivered_at", nil)
+          }.compact
+        )
+        touch_state!(state)
+        store.save(state)
+        accepted_result(command_id, command_type, agent.fetch("id"), message, agent, log_ids)
       end
 
       # A session that is momentarily owned by another instance mid-turn is not a command failure.
@@ -6438,11 +6740,15 @@ module Meringue
             end
 
             metadata = agent.fetch("harness_metadata", {}) || {}
-            Array(metadata.fetch("pending_prompts", [])).filter_map do |entry|
-              next nil unless entry.is_a?(Hash) && present_string(entry.fetch("prompt", nil))
-
-              { "agent_id" => agent.fetch("id"), "entry" => deep_copy(entry) }
+            entries = Array(metadata.fetch("pending_prompts", [])).select do |entry|
+              entry.is_a?(Hash) && present_string(entry.fetch("prompt", nil))
             end
+            awaiting_receipt = entries.find { |entry| entry.fetch("delivery_state", nil) == "awaiting_receipt" }
+            # While one Pi request has an ambiguous outcome, no later queued prompt may pass it.
+            # Reconciliation checks only that receipt; after it settles, remaining prompts are
+            # delivered in their existing order on the next pass.
+            entries = [awaiting_receipt] if awaiting_receipt
+            entries.map { |entry| { "agent_id" => agent.fetch("id"), "entry" => deep_copy(entry) } }
           end
         end
 
@@ -14107,6 +14413,12 @@ module Meringue
         # The native interactive process is the sole session writer during a focus handoff. Do not
         # let the background reconciler read or resume the same JSONL file until focus returns.
         return false if interactive_focus_active?(agent)
+        # A prompt RPC can time out while Pi is still compacting and before its response reaches us.
+        # Pending-prompt delivery checks the durable receipt first; ordinary polling/resume is
+        # suppressed because it could race that live request and write a duplicate continuation.
+        return false if Array(metadata.fetch("pending_prompts", [])).any? { |entry|
+          entry.is_a?(Hash) && entry.fetch("delivery_state", nil) == "awaiting_receipt"
+        }
         # A record whose failure was already recorded as terminal is settled: `/prompt` refuses
         # to continue it and reconciliation has no repair left to try. Re-polling it would only
         # re-observe the same dead session, rewrite state, and append the same error log on
@@ -14220,11 +14532,16 @@ module Meringue
         result["settle_failure"] = settle_failure if settle_failure
         result
       rescue StandardError => e
-        # Checked before the resume ladder on purpose. A worker whose harness process is gone has
-        # nothing to resume: re-attaching and re-prompting it burns the resume budget on `prompt`
-        # RPCs that can only time out, and the timeout is then what the user reads instead of the
-        # process exit that actually happened.
-        return harness_process_gone_poll_result(agent, client, session_ref, e) if worker_harness_process_gone?(agent, e)
+        if worker_harness_process_gone?(agent, e)
+          # An isolated child crash still settles immediately. A dead *supervisor* is different:
+          # every child lost the same pipe owner together, while their sessions/workspaces remain
+          # valid. The transport lease proves that shared cause, and a durable recovery claim keeps
+          # concurrent dashboards from sending the continuation twice.
+          supervisor_recovery = recover_worker_after_supervisor_exit(agent, client, session_ref, e)
+          return supervisor_recovery if supervisor_recovery
+
+          return harness_process_gone_poll_result(agent, client, session_ref, e)
+        end
         return resume_worker_session_from_poll_error(agent, client, session_ref, e) if worker_reconcile_resume_eligible?(agent, client)
         return recover_head_session_from_poll_error(agent, client, session_ref, e) if head_reconcile_recovery_eligible?(agent)
 
@@ -14296,6 +14613,10 @@ module Meringue
           end
         when "settle_failed"
           apply_settle_failure_from_poll(poll_result)
+        when "recovered"
+          # Supervisor recovery checkpoints the new transport and its one continuation prompt before
+          # returning to the poll loop. Applying it again would duplicate its log/state transition.
+          poll_result
         when "errored"
           apply_reconcile_error_from_poll(poll_result)
         else
@@ -14639,6 +14960,335 @@ module Meringue
       # observes it, named for what it is.
       def worker_harness_process_gone?(agent, error)
         agent.fetch("type", nil) == "worker" && Harness.session_process_gone_error?(error)
+      end
+
+      # Recover only the shared-supervisor failure mode. A lone Pi crash while its Meringue owner is
+      # alive still follows the normal process-exit settle path, so an arbitrary harness failure can
+      # never turn into an automatic prompt. Transport ownership is the causal proof: both the
+      # recorded child and the Meringue process that owned its pipes are gone.
+      def recover_worker_after_supervisor_exit(agent, client, session_ref, original_error)
+        supervision = safe_session_supervision_evidence(client, session_ref)
+        return nil unless supervision&.fetch("supervisor_exited", false)
+        return nil unless supervisor_exit_recovery_eligible?(agent, client)
+
+        claim = claim_worker_supervisor_recovery(agent, session_ref, supervision)
+        unless claim.fetch("claimed", false)
+          return nil if claim.fetch("reason", nil) == "attempts_exhausted"
+
+          # Another live Meringue instance already owns the durable claim, or this poll used a stale
+          # pid after that instance recovered it. Leave the worker untouched; the claimant is the
+          # only process allowed to attach or prompt.
+          return supervisor_recovery_deferred_poll_result(agent, session_ref, claim)
+        end
+
+        resumed_ref = nil
+        prompted = false
+        begin
+          resumed_ref = client.attach_session(session_ref)
+          unless resumed_ref.fetch("is_streaming", false)
+            resumed_ref = client.prompt_session(
+              resumed_ref,
+              supervisor_recovery_prompt(claim.fetch("recovery_id")),
+              mode: "normal"
+            )
+            prompted = true
+          end
+          completion = complete_worker_supervisor_recovery(
+            agent,
+            resumed_ref,
+            claim: claim,
+            supervision: supervision,
+            prompted: prompted
+          )
+          safely_kill_recovery_session(client, resumed_ref) if completion.fetch("recovery_session_cleanup_required", false)
+          completion
+        rescue StandardError => recovery_error
+          # attach_session may already have created a replacement RPC child. A failed attempt never
+          # leaves that untracked child writing the same session file.
+          safely_kill_recovery_session(client, resumed_ref) if resumed_ref
+          failed_recovery = record_worker_supervisor_recovery_failure(
+            agent,
+            claim: claim,
+            supervision: supervision,
+            error: recovery_error
+          )
+          # The final failed attempt falls through to ordinary process-exit settlement in this same
+          # poll. Keep that poll's session metadata at least as new as the just-saved claim, or its
+          # stale snapshot would overwrite attempt N with attempt N-1 while merging the settle.
+          if failed_recovery
+            session_ref["metadata"] = (session_ref.fetch("metadata", {}) || {}).merge(
+              "supervisor_recovery" => failed_recovery
+            )
+          end
+          return nil if claim.fetch("attempt") >= WORKER_SUPERVISOR_RECOVERY_MAX_ATTEMPTS
+
+          supervisor_recovery_failed_poll_result(
+            agent,
+            session_ref,
+            original_error,
+            recovery_error,
+            claim,
+            supervision
+          )
+        end
+      end
+
+      def safe_session_supervision_evidence(client, session_ref)
+        return nil unless client.respond_to?(:session_supervision_evidence)
+
+        evidence = client.session_supervision_evidence(session_ref)
+        evidence.is_a?(Hash) ? stringify_keys(evidence) : nil
+      rescue StandardError
+        nil
+      end
+
+      def supervisor_exit_recovery_eligible?(agent, client)
+        return false unless agent.fetch("type", nil) == "worker"
+        return false if %w[completed killed].include?(agent.fetch("status", nil))
+        return false unless client.respond_to?(:attach_session) && client.respond_to?(:prompt_session)
+        return false unless agent_has_session_reference?(agent)
+        return false if worker_session_unreplayable?(agent)
+        return false if interactive_focus_active?(agent)
+
+        true
+      end
+
+      # One recovery episode is one dead transport owner. When the replacement Meringue process
+      # itself later exits, the transport lease names that newer owner and therefore creates a new
+      # episode rather than replaying an old claim.
+      def supervisor_recovery_episode_id(agent, session_ref, supervision)
+        identity = [
+          agent.fetch("id", nil),
+          session_ref.fetch("session_id", nil),
+          supervision.fetch("owner_pid", nil),
+          supervision.fetch("owner_started_at", nil),
+          supervision.fetch("harness_pid", nil),
+          supervision.fetch("harness_started_at", nil)
+        ].map(&:to_s).join("|")
+        "supervisor-#{Digest::SHA256.hexdigest(identity)[0, 20]}"
+      end
+
+      # The claim is persisted before process or prompt I/O. It is the single-flight boundary for
+      # two dashboards reconciling one state file, and its deterministic attempt id is included in
+      # the continuation prompt for diagnostics.
+      def claim_worker_supervisor_recovery(agent, session_ref, supervision)
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, agent.fetch("id", nil))
+          return { "claimed" => false, "reason" => "agent_not_found" } unless current
+          return { "claimed" => false, "reason" => "terminal_status" } if %w[completed killed].include?(current.fetch("status", nil))
+
+          # A prompt or another recovery may have replaced the process after this poll took its
+          # snapshot. Never let stale exit evidence take that newer transport over.
+          persisted_pid = current.fetch("pid", nil).to_s
+          polled_pid = agent.fetch("pid", nil).to_s
+          if !persisted_pid.empty? && !polled_pid.empty? && persisted_pid != polled_pid
+            return { "claimed" => false, "reason" => "stale_poll" }
+          end
+
+          episode_id = supervisor_recovery_episode_id(current, session_ref, supervision)
+          metadata = current.fetch("harness_metadata", {}) || {}
+          previous = metadata.fetch("supervisor_recovery", {}) || {}
+          previous = {} unless previous.is_a?(Hash)
+          previous = {} unless previous.fetch("episode_id", nil).to_s == episode_id
+
+          if previous.fetch("state", nil) == "claimed"
+            owner = other_live_instance_pid(
+              previous.fetch("owner_instance_id", nil),
+              previous.fetch("owner_instance_pid", nil),
+              previous.fetch("owner_instance_started_at", nil)
+            )
+            return { "claimed" => false, "reason" => "claimed_by_live_instance", "owner_pid" => owner } if owner
+          end
+          return { "claimed" => false, "reason" => "already_recovered" } if previous.fetch("state", nil) == "resumed"
+
+          attempt = previous.fetch("attempt_count", 0).to_i + 1
+          if attempt > WORKER_SUPERVISOR_RECOVERY_MAX_ATTEMPTS
+            return { "claimed" => false, "reason" => "attempts_exhausted" }
+          end
+
+          now = timestamp
+          recovery_id = "#{episode_id}-attempt-#{attempt}"
+          recovery = previous.merge(
+            "state" => "claimed",
+            "episode_id" => episode_id,
+            "recovery_id" => recovery_id,
+            "attempt_count" => attempt,
+            "claimed_at" => now,
+            "previous_pid" => current.fetch("pid", nil),
+            "supervision" => bounded_supervision_evidence(supervision),
+            **instance_ownership_metadata
+          ).compact
+          current["harness_metadata"] = metadata.merge("supervisor_recovery" => recovery)
+          current["updated_at"] = now
+          touch_state!(state, now)
+          store.save(state)
+          {
+            "claimed" => true,
+            "attempt" => attempt,
+            "episode_id" => episode_id,
+            "recovery_id" => recovery_id
+          }
+        end
+      end
+
+      def bounded_supervision_evidence(supervision)
+        return {} unless supervision.is_a?(Hash)
+
+        supervision.slice(
+          "source", "transport_key", "owner_pid", "owner_started_at", "owner_alive",
+          "harness_pid", "harness_started_at", "harness_alive", "supervisor_exited", "observed_at"
+        )
+      end
+
+      def supervisor_recovery_prompt(recovery_id)
+        "#{WORKER_RESUME_PROMPT.rstrip}\n\n#{SUPERVISOR_RECOVERY_PROMPT_ID_LABEL}: #{recovery_id}"
+      end
+
+      def complete_worker_supervisor_recovery(agent, resumed_ref, claim:, supervision:, prompted:)
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, agent.fetch("id", nil))
+          unless current
+            return supervisor_recovery_deferred_poll_result(agent, resumed_ref, "reason" => "agent_not_found").merge(
+              "recovery_session_cleanup_required" => true
+            )
+          end
+
+          metadata = current.fetch("harness_metadata", {}) || {}
+          recovery = metadata.fetch("supervisor_recovery", {}) || {}
+          claim_current = recovery.is_a?(Hash) && recovery.fetch("recovery_id", nil).to_s == claim.fetch("recovery_id")
+          if !claim_current || %w[completed killed].include?(current.fetch("status", nil)) || interactive_focus_active?(current)
+            reason = if !claim_current
+                       "claim_replaced"
+                     elsif interactive_focus_active?(current)
+                       "interactive_focus_active"
+                     else
+                       "terminal_status"
+                     end
+            return supervisor_recovery_deferred_poll_result(agent, resumed_ref, "reason" => reason).merge(
+              "recovery_session_cleanup_required" => true
+            )
+          end
+
+          now = timestamp
+          merge_session_ref_into_agent!(current, resumed_ref)
+          metadata = current.fetch("harness_metadata", {}) || {}
+          recovery = recovery.merge(
+            "state" => "resumed",
+            "resumed_at" => now,
+            "new_pid" => resumed_ref.fetch("pid", nil),
+            "prompt_delivered" => !!prompted,
+            "owner_instance_id" => instance_id,
+            "owner_instance_pid" => instance_pid,
+            "owner_instance_started_at" => instance_started_at
+          ).compact
+          metadata = metadata.merge("supervisor_recovery" => recovery)
+          if prompted
+            metadata = metadata.merge(
+              "prompt_count" => metadata.fetch("prompt_count", 0).to_i + 1,
+              "last_prompt_mode" => "normal",
+              "last_prompted_at" => now,
+              "routing_action" => "resume_session"
+            )
+          end
+          current["harness_metadata"] = metadata
+          clear_settle_failure!(current)
+          current["status"] = "working"
+          current["updated_at"] = now
+          refresh_worker_parent_statuses!(state, current, now)
+          log_ids = append_log(
+            state,
+            source_type: "worker",
+            source_id: current.fetch("id"),
+            level: "warning",
+            message: "Automatically resumed worker #{current.fetch("id")} after its supervising Meringue process exited; " \
+                     "its existing session and workspace were preserved.",
+            details: {
+              "recovery_id" => claim.fetch("recovery_id"),
+              "attempt" => claim.fetch("attempt"),
+              "prompt_delivered" => !!prompted,
+              "workspace_path" => current.fetch("workspace_path", nil),
+              "workspace_branch" => current.fetch("workspace_branch", nil),
+              "supervision" => bounded_supervision_evidence(supervision)
+            }.compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+          {
+            "agent_id" => current.fetch("id"),
+            "agent_type" => "worker",
+            "state" => "recovered",
+            "session_ref" => resumed_ref,
+            "supervisor_recovered" => true,
+            "changed" => true,
+            "recovery_id" => claim.fetch("recovery_id"),
+            "log_entry_ids" => log_ids
+          }
+        end
+      end
+
+      def record_worker_supervisor_recovery_failure(agent, claim:, supervision:, error:)
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, agent.fetch("id", nil))
+          next nil unless current
+
+          metadata = current.fetch("harness_metadata", {}) || {}
+          recovery = metadata.fetch("supervisor_recovery", {}) || {}
+          next nil unless recovery.is_a?(Hash) && recovery.fetch("recovery_id", nil).to_s == claim.fetch("recovery_id")
+
+          now = timestamp
+          failed_recovery = recovery.merge(
+            "state" => "failed",
+            "failed_at" => now,
+            "error_class" => error.class.name,
+            "error_message" => sanitized_error_message(error),
+            "supervision" => bounded_supervision_evidence(supervision)
+          )
+          current["harness_metadata"] = metadata.merge("supervisor_recovery" => failed_recovery)
+          current["updated_at"] = now
+          touch_state!(state, now)
+          store.save(state)
+          deep_copy(failed_recovery)
+        end
+      end
+
+      def supervisor_recovery_failed_poll_result(agent, session_ref, original_error, recovery_error, claim, supervision)
+        attempt = claim.fetch("attempt")
+        {
+          "agent_id" => agent.fetch("id", nil),
+          "agent_type" => "worker",
+          "state" => "errored",
+          "session_ref" => session_ref,
+          "error" => error_payload(recovery_error),
+          "reconcile" => {
+            "state" => RECONCILE_STATE_RESUME_FAILED,
+            "kind" => "supervisor_exit_recovery",
+            "resume_attempt_count" => attempt,
+            "resume_attempts_remaining" => [WORKER_SUPERVISOR_RECOVERY_MAX_ATTEMPTS - attempt, 0].max,
+            "resume_attempted_at" => timestamp,
+            "recovery_id" => claim.fetch("recovery_id"),
+            "original_error_class" => original_error.class.name,
+            "original_error_message" => sanitized_error_message(original_error),
+            "error_class" => recovery_error.class.name,
+            "error_message" => sanitized_error_message(recovery_error),
+            "supervision" => bounded_supervision_evidence(supervision)
+          }
+        }
+      end
+
+      def supervisor_recovery_deferred_poll_result(agent, session_ref, claim)
+        {
+          "agent_id" => agent.fetch("id", nil),
+          "agent_type" => "worker",
+          "state" => "unchanged",
+          "session_ref" => session_ref,
+          "changed" => false,
+          "supervisor_recovery_deferred" => true,
+          "recovery_claim" => claim,
+          "log_entry_ids" => []
+        }
       end
 
       def harness_process_gone_poll_result(agent, client, session_ref, error)

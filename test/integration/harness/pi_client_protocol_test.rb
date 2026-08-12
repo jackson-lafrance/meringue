@@ -59,6 +59,10 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     assert_equal "worker", ref.fetch("metadata").fetch("kind")
     assert_equal "Fix login redirect", ref.fetch("metadata").fetch("session_name")
     assert_equal "sess-42", ref.fetch("metadata").fetch("pi_state").fetch("sessionId")
+    assert_equal Process.pid, ref.dig("metadata", "supervision", "owner_pid")
+    assert_equal ref.fetch("pid"), ref.dig("metadata", "supervision", "harness_pid")
+    assert ref.dig("metadata", "supervision", "owner_started_at").to_s.start_with?("20")
+    assert ref.dig("metadata", "supervision", "harness_started_at").to_s.start_with?("20")
 
     argv = stub_argv(stub)
     assert_equal %w[--mode rpc], argv.first(2)
@@ -311,6 +315,82 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
                  stub_commands_of_type(stub, "follow_up").map { |c| [c["type"], c["message"]] }
   end
 
+  def test_prompt_delivery_id_is_persistable_as_a_durable_transcript_receipt
+    session_file = File.join(tmpdir, "pi-sessions", "sess-receipt.jsonl")
+    client, stub = build_pi_client(
+      tmpdir,
+      stub_config: { "session_id" => "sess-receipt", "session_file" => session_file }
+    )
+    ref = spawn(client)
+    FileUtils.mkdir_p(File.dirname(session_file))
+    File.write(session_file, JSON.generate("type" => "session", "id" => "sess-receipt", "cwd" => tmpdir) + "\n")
+
+    client.prompt_session(ref, "continue after compaction", delivery_id: "meringue:H138-C5")
+    wire_prompt = stub_commands_of_type(stub, "prompt").fetch(0).fetch("message")
+
+    assert_equal "continue after compaction\n\n<!-- meringue-prompt-delivery:meringue:H138-C5 -->", wire_prompt
+    assert_equal "pending", client.prompt_delivery_status(
+      ref,
+      delivery_id: "meringue:H138-C5",
+      prompt: "continue after compaction"
+    ).fetch("status")
+
+    File.write(
+      session_file,
+      [
+        { "type" => "session", "id" => "sess-receipt", "cwd" => tmpdir },
+        {
+          "type" => "message",
+          "id" => "m1",
+          "timestamp" => "2026-01-01T00:00:05Z",
+          "message" => { "role" => "user", "content" => [{ "type" => "text", "text" => wire_prompt }] }
+        }
+      ].map { |entry| JSON.generate(entry) }.join("\n") + "\n"
+    )
+    delivered = client.prompt_delivery_status(
+      ref,
+      delivery_id: "meringue:H138-C5",
+      prompt: "continue after compaction"
+    )
+
+    assert_equal "delivered", delivered.fetch("status")
+    assert_equal "2026-01-01T00:00:05Z", delivered.fetch("delivered_at")
+
+    client.kill_session(ref)
+    absent = client.prompt_delivery_status(
+      ref,
+      delivery_id: "meringue:H138-C6",
+      prompt: "a different prompt"
+    )
+    assert_equal "not_delivered", absent.fetch("status")
+    assert_equal false, absent.fetch("process_alive")
+  end
+
+  def test_acknowledged_prompt_is_not_failed_when_only_the_state_refresh_times_out
+    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-acknowledged" })
+    ref = spawn(client)
+    original_get_state = client.method(:get_state)
+    reads = 0
+    client.define_singleton_method(:get_state) do |session_ref|
+      reads += 1
+      if reads == 2
+        raise PiClient::RpcTimeoutError.new(
+          "Timed out waiting for Pi RPC response to \"get_state\"",
+          command_type: "get_state"
+        )
+      end
+
+      original_get_state.call(session_ref)
+    end
+
+    prompted = client.prompt_session(ref, "deliver once", delivery_id: "meringue:H138-C5")
+
+    assert_equal 2, reads
+    assert_equal true, prompted.dig("metadata", "prompt_delivery_acknowledged")
+    assert_equal PiClient::RpcTimeoutError.name, prompted.dig("metadata", "prompt_state_refresh_error_class")
+    assert_equal 1, stub_commands_of_type(stub, "prompt").length
+  end
+
   def test_unknown_prompt_mode_is_rejected
     client, = build_pi_client(tmpdir)
     ref = spawn(client)
@@ -438,7 +518,9 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     client, = build_pi_client(
       tmpdir,
       stub_config: { "session_id" => "sess-slow", "ignore_commands" => ["never_answered"] },
-      command_timeout: 0.2
+      # Process startup is unrelated to this assertion and can exceed 0.2s on a loaded host. The
+      # request below keeps the narrow timeout that this test exercises.
+      command_timeout: 2
     )
     ref = spawn(client)
     process = client.send(:process_for, ref)
@@ -448,6 +530,8 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     end
 
     assert_match(/Timed out waiting for Pi RPC response/, error.message)
+    assert_equal "never_answered", error.command_type
+    refute client.ambiguous_prompt_delivery_error?(error)
   end
 
   def test_pending_request_fails_when_the_process_exits_mid_turn

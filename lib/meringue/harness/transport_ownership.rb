@@ -26,14 +26,17 @@ module Meringue
 
       attr_reader :directory, :lock_timeout
 
-      def initialize(directory: DEFAULT_DIRECTORY, lock_timeout: DEFAULT_LOCK_TIMEOUT, owner_pid: Process.pid)
+      def initialize(directory: DEFAULT_DIRECTORY, lock_timeout: DEFAULT_LOCK_TIMEOUT, owner_pid: Process.pid,
+                     owner_started_at: nil)
         @directory = File.expand_path(directory.to_s)
         @lock_timeout = Float(lock_timeout)
         @owner_pid = Integer(owner_pid)
+        described = ProcessIdentity.describe(@owner_pid)
+        @owner_started_at = owner_started_at || described&.fetch("started_at", nil)&.iso8601
         @mutex = Mutex.new
       end
 
-      attr_reader :owner_pid
+      attr_reader :owner_pid, :owner_started_at
 
       # Serializes transport takeover across Meringue instances. The block
       # receives a Lease for reading and updating the durable record.
@@ -45,7 +48,13 @@ module Meringue
         @mutex.synchronize do
           File.open(path, File::RDWR | File::CREAT, 0o600) do |file|
             acquire_lock!(file, key, timeout)
-            lease = Lease.new(file: file, key: key.to_s, owner_pid: owner_pid, record: read_record(file))
+            lease = Lease.new(
+              file: file,
+              key: key.to_s,
+              owner_pid: owner_pid,
+              owner_started_at: owner_started_at,
+              record: read_record(file)
+            )
             begin
               yield lease
             ensure
@@ -66,8 +75,14 @@ module Meringue
       end
 
       def claim(key, pid:, session_id: nil, note: nil)
+        harness_started_at = ProcessIdentity.describe(pid)&.fetch("started_at", nil)&.iso8601 if pid
         with_lease(key) do |lease|
-          lease.claim!(pid: pid, session_id: session_id, note: note)
+          lease.claim!(
+            pid: pid,
+            session_id: session_id,
+            note: note,
+            harness_started_at: harness_started_at
+          )
         end
       rescue LockTimeout
         false
@@ -120,15 +135,16 @@ module Meringue
 
       # Mutable view of one session's ownership record while its lock is held.
       class Lease
-        def initialize(file:, key:, owner_pid:, record:)
+        def initialize(file:, key:, owner_pid:, owner_started_at:, record:)
           @file = file
           @key = key
           @owner_pid = owner_pid
+          @owner_started_at = owner_started_at
           @record = record
           @dirty = false
         end
 
-        attr_reader :key, :owner_pid, :record
+        attr_reader :key, :owner_pid, :owner_started_at, :record
 
         def harness_pid
           value = record["pid"]
@@ -148,13 +164,15 @@ module Meringue
           recorded_owner_pid == owner_pid
         end
 
-        def claim!(pid:, session_id: nil, note: nil)
+        def claim!(pid:, session_id: nil, note: nil, harness_started_at: nil)
           @record = {
             "session_id" => session_id.nil? ? record["session_id"] : session_id.to_s,
             "pid" => pid.nil? ? nil : Integer(pid),
+            "harness_started_at" => harness_started_at,
             "owner_pid" => owner_pid,
+            "owner_started_at" => owner_started_at,
             "note" => note,
-            "updated_at" => Time.now.utc.iso8601
+            "updated_at" => Time.now.utc.iso8601(6)
           }.compact
           @dirty = true
           true
@@ -166,7 +184,7 @@ module Meringue
           @record = {
             "session_id" => record["session_id"],
             "released_by" => owner_pid,
-            "updated_at" => Time.now.utc.iso8601
+            "updated_at" => Time.now.utc.iso8601(6)
           }.compact
           @dirty = true
           true
