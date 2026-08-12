@@ -11,6 +11,34 @@ class TuiAppWiringTest < Minitest::Test
   App = Meringue::TUI::App
   Models = Meringue::State::Models
 
+  class BlockingLogStore
+    attr_reader :write_started, :write_finished
+
+    def initialize
+      @write_started = Queue.new
+      @write_finished = Queue.new
+      @release_write = Queue.new
+      @mutex = Mutex.new
+      @write_count = 0
+    end
+
+    def save_log_buffer(messages:, next_message_id:)
+      first_write = @mutex.synchronize do
+        @write_count += 1
+        @write_count == 1
+      end
+      return unless first_write
+
+      write_started << { "messages" => messages, "next_message_id" => next_message_id }
+      @release_write.pop
+      write_finished << true
+    end
+
+    def release_first_write
+      @release_write << true
+    end
+  end
+
   def setup
     @out = StringIO.new
     @terminal = TUISupport::FakeTerminal.new
@@ -211,6 +239,35 @@ class TuiAppWiringTest < Minitest::Test
 
     assert_equal ["", 0, -1], @app.send(:handle_key, "\r", "do it", 5, -1, handler, state)
     assert_equal "do it", Timeout.timeout(5) { submitted.pop }
+  end
+
+  def test_submitting_a_prompt_stays_responsive_while_conversation_persistence_is_blocked
+    store = BlockingLogStore.new
+    prompt = "retry all failed heads and workers"
+    terminal = TUISupport::FakeTerminal.new(keys: prompt.chars + ["\r"] + "/quit".chars + ["\r"], interactive: true)
+    app = App.new(layout: Meringue::TUI::Layout.new, out: StringIO.new, terminal: terminal, log_store: store)
+    submitted = Queue.new
+    handler = lambda do |text|
+      submitted << text
+      { "summary" => "routed" }
+    end
+    run_result = Queue.new
+    run_thread = Thread.new do
+      run_result << app.run(state_provider: -> { empty_state }, on_submit: handler)
+    end
+
+    persisted = Timeout.timeout(2) { store.write_started.pop }
+    write_blocked = true
+
+    assert_equal prompt, Timeout.timeout(2) { submitted.pop }
+    assert_equal 0, Timeout.timeout(2) { run_result.pop }
+    assert_equal ["routed"], persisted.fetch("messages").map { |message| message.fetch("text") }
+  ensure
+    if write_blocked
+      store.release_first_write
+      Timeout.timeout(2) { store.write_finished.pop }
+    end
+    run_thread&.join(2)
   end
 
   def test_config_overview_includes_supported_settings_and_active_keybindings
