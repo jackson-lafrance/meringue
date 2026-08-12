@@ -8,6 +8,56 @@ require "support/kernel_workers_support"
 class KernelWorkersPromptAgentTest < Minitest::Test
   include KernelWorkersSupport
 
+  class ReceiptHarnessClient < KernelWorkersSupport::RecordingHarnessClient
+    attr_accessor :receipt_status
+    attr_reader :delivery_ids, :receipt_checks, :state_reads
+
+    def initialize
+      super(streaming: true, provider: "pi")
+      @receipt_status = "pending"
+      @delivery_ids = []
+      @receipt_checks = 0
+      @state_reads = 0
+      @timeout_next_prompt = true
+    end
+
+    def prompt_delivery_receipts_supported?
+      true
+    end
+
+    def ambiguous_prompt_delivery_error?(error)
+      error.is_a?(Meringue::Harness::PiClient::RpcTimeoutError) && error.command_type == "follow_up"
+    end
+
+    def prompt_session(session_ref, prompt, mode: "normal", delivery_id: nil)
+      @delivery_ids << delivery_id
+      result = super(session_ref, prompt, mode: mode)
+      if @timeout_next_prompt
+        @timeout_next_prompt = false
+        raise Meringue::Harness::PiClient::RpcTimeoutError.new(
+          "Timed out waiting for Pi RPC response to \"follow_up\"",
+          command_type: "follow_up"
+        )
+      end
+      result
+    end
+
+    def prompt_delivery_status(session_ref, delivery_id:, prompt:, started_at: nil)
+      @receipt_checks += 1
+      {
+        "status" => receipt_status,
+        "process_alive" => receipt_status != "not_delivered",
+        "pid" => receipt_status == "delivered" ? session_ref.fetch("pid", nil) : nil,
+        "delivered_at" => receipt_status == "delivered" ? "2026-01-01T00:00:05Z" : nil
+      }.compact
+    end
+
+    def get_state(session_ref)
+      @state_reads += 1
+      super
+    end
+  end
+
   def test_normal_prompt_continues_the_existing_session
     engine = build_engine
     worker_id = spawned_worker(engine)
@@ -62,6 +112,115 @@ class KernelWorkersPromptAgentTest < Minitest::Test
     assert_equal true, result.dig("result", "queued")
     assert_empty @harness_client.prompts
     assert_equal ["Wait for the active delivery."], worker.fetch("harness_metadata").fetch("pending_prompts").map { |entry| entry.fetch("prompt") }
+  end
+
+  def test_timed_out_prompt_waits_for_durable_receipt_and_is_not_replayed
+    @harness_client = ReceiptHarnessClient.new
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+
+    result = apply_raw(
+      engine,
+      "PromptAgent",
+      { "agent_id" => worker_id, "prompt" => "Continue after compaction." },
+      command_id: "H138-C5"
+    )
+    worker = agent(engine, worker_id)
+    pending = worker.fetch("harness_metadata").fetch("pending_prompts").fetch(0)
+
+    assert_equal "accepted", result.fetch("status"), "an unacknowledged delivery must not fail its command journal entry"
+    assert_equal true, result.dig("result", "awaiting_receipt")
+    assert_equal "awaiting_receipt", pending.fetch("delivery_state")
+    assert_equal "meringue:H138-C5", pending.fetch("delivery_id")
+    assert_equal ["meringue:H138-C5"], @harness_client.delivery_ids
+    assert_equal 1, logs_matching(engine, /durable session receipt/).length
+
+    apply!(engine, "ReconcileSessions", {})
+
+    assert_equal 1, @harness_client.receipt_checks
+    assert_equal 0, @harness_client.state_reads,
+                 "ordinary polling must not race a live prompt whose acknowledgement timed out"
+    assert_equal 1, @harness_client.prompts.length
+    assert_equal 0, agent(engine, worker_id).fetch("harness_metadata").fetch("prompt_count", 0)
+
+    @harness_client.receipt_status = "delivered"
+    apply!(engine, "ReconcileSessions", {})
+    apply!(engine, "ReconcileSessions", {})
+    worker = agent(engine, worker_id)
+
+    assert_equal 1, @harness_client.prompts.length, "the transcript receipt must replace RPC replay"
+    assert_equal 1, worker.fetch("harness_metadata").fetch("prompt_count")
+    assert_includes worker.fetch("harness_metadata").fetch("prompt_command_ids"), "H138-C5"
+    assert_empty worker.fetch("harness_metadata").fetch("pending_prompts")
+    assert state(engine).fetch("logs").any? { |entry|
+      entry.fetch("details", {}).fetch("delivery_confirmation", nil) == "pi_session_transcript"
+    }
+  end
+
+  def test_later_prompts_cannot_pass_a_timed_out_prompt_awaiting_receipt
+    @harness_client = ReceiptHarnessClient.new
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+
+    apply_raw(
+      engine,
+      "PromptAgent",
+      { "agent_id" => worker_id, "prompt" => "First, continue after compaction." },
+      command_id: "H138-C5"
+    )
+    later = apply_raw(
+      engine,
+      "PromptAgent",
+      { "agent_id" => worker_id, "prompt" => "Then report the result." },
+      command_id: "H139-C1"
+    )
+
+    assert_equal "accepted", later.fetch("status")
+    assert_equal 1, @harness_client.prompts.length
+    assert_equal [
+      "First, continue after compaction.",
+      "Then report the result."
+    ], agent(engine, worker_id).dig("harness_metadata", "pending_prompts").map { |entry| entry.fetch("prompt") }
+
+    apply!(engine, "ReconcileSessions", {})
+    assert_equal 1, @harness_client.prompts.length
+
+    @harness_client.receipt_status = "delivered"
+    apply!(engine, "ReconcileSessions", {})
+    assert_equal 1, @harness_client.prompts.length,
+                 "the pending-delivery snapshot must not send a later prompt in the receipt-confirmation pass"
+
+    apply!(engine, "ReconcileSessions", {})
+    assert_equal [
+      "First, continue after compaction.",
+      "Then report the result."
+    ], @harness_client.prompts.map { |call| call.fetch("prompt") }
+  end
+
+  def test_timed_out_prompt_retries_only_after_dead_process_and_durable_absence
+    @harness_client = ReceiptHarnessClient.new
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+
+    apply_raw(
+      engine,
+      "PromptAgent",
+      { "agent_id" => worker_id, "prompt" => "Continue after compaction." },
+      command_id: "H138-C5"
+    )
+    @harness_client.receipt_status = "not_delivered"
+    second_engine = build_engine
+
+    [engine, second_engine].map { |candidate|
+      Thread.new { apply!(candidate, "ReconcileSessions", {}) }
+    }.each(&:value)
+    worker = agent(engine, worker_id)
+
+    assert_equal 2, @harness_client.prompts.length,
+                 "concurrent reconcilers may issue only one retry after proving durable absence"
+    assert_equal ["meringue:H138-C5", "meringue:H138-C5"], @harness_client.delivery_ids
+    assert_equal 1, worker.fetch("harness_metadata").fetch("prompt_count")
+    assert_empty worker.fetch("harness_metadata").fetch("pending_prompts")
   end
 
   def test_steer_mode_is_forwarded_to_the_active_session

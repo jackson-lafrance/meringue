@@ -22,6 +22,28 @@ module Meringue
         raise NotImplementedError, "harness clients must implement #prompt_session"
       end
 
+      # Some RPC transports can accept a prompt before their acknowledgement reaches Meringue (for
+      # example Pi compacts a large saved session before persisting the user message). A timeout in
+      # that window is an ambiguous outcome, not proof of failure. Receipt-capable clients receive a
+      # stable delivery id, persist it with the harness prompt, and can later report:
+      #
+      #   { "status" => "delivered" | "pending" | "not_delivered" | "unknown",
+      #     "process_alive" => true | false, "delivered_at" => "...", "pid" => 123 }
+      #
+      # The kernel never retries `pending`/`unknown`; `not_delivered` is safe to retry only because
+      # the original process is gone and the durable transcript lacks the delivery id.
+      def prompt_delivery_receipts_supported?
+        false
+      end
+
+      def ambiguous_prompt_delivery_error?(_error)
+        false
+      end
+
+      def prompt_delivery_status(_session_ref, delivery_id:, prompt:, started_at: nil)
+        { "status" => "unknown" }
+      end
+
       def abort_session(session_ref)
         raise NotImplementedError, "harness clients must implement #abort_session"
       end
