@@ -12,7 +12,7 @@ For every workload the parent process:
 4. runs the real `Meringue::App` and `Meringue::TUI::App` event/render loop behind a JSON protocol terminal;
 5. runs synthetic reconciliation concurrently at the requested cadence. It calls `Harness::FakeClient#get_state`, advances every active session revision, appends uniquely identified lifecycle activity, and atomically saves state. It never starts Pi, another harness CLI, a network request, or a model turn;
 6. writes one input and waits for the child to acknowledge the frame rendered from that input. Elapsed time therefore includes input transport, state refresh/composition, layout, Canvas rendering, and frame output—not just a key handler;
-7. records median, p95, p99, and maximum independently for typing and mouse-wheel scrolling, samples child RSS, and verifies that typed text rendered, all active revisions reached the final update, and synthetic event IDs remained exactly once.
+7. records median, p95, p99, and maximum independently for typing and mouse-wheel scrolling and samples child RSS. Frame acknowledgements include revision and viewport digests extracted from the bytes the child rendered: every wheel sample must change the visible logs viewport, at least one committed reconciliation revision must appear onscreen, every active agent must converge, and retained event IDs must equal the complete ordered suffix of committed revisions (not merely be unique).
 
 The default budget is p95 below 50 ms for both interaction types and no measured sample above 100 ms. A workload is `fast` only if all three checks pass. Logs use the real 500-entry retention boundary. Generated descriptions add state payload rather than relying on a developer's history.
 
@@ -48,42 +48,44 @@ The baseline profile found three costs that multiplied one another:
 
 - presentation refreshed by parsing a complete unchanged JSON snapshot;
 - AgentTree found workers by scanning every agent once for every issue (`O(issues × agents)`) and laid out identical rows for every keystroke;
-- appending one log invalidated the complete wrapped-log cache, re-normalizing and re-wrapping the other 499 immutable retained entries.
+- the existing immutable-log fragment cache kept log formatting bounded, but whole-state parsing and AgentTree work still dominated as issue/agent counts grew.
 
 The implementation now:
 
 - gives presentation a deeply frozen, identity-cached `Store#load_readonly` snapshot while preserving independent mutable `Store#load` copies for the kernel;
-- indexes workers by issue in one pass and caches AgentTree rows using only presentation-relevant fields, so heartbeat-only updates do not invalidate layout;
-- caches formatted log rows per immutable log ID, width, selection, and colorscheme, so one append formats one entry rather than the entire retained window;
+- indexes workers by issue in one pass and caches AgentTree rows. Its key includes every rendered record field and all non-heartbeat harness metadata, so reconciliation-visible provisioning, settlement, continuation, PR, and lineage changes invalidate immediately while volatile heartbeat-only updates reuse layout;
+- retains the merge base's existing formatted-log fragment cache unchanged;
 - makes the reconciliation interval injectable for deterministic process stress without changing the production two-second default.
 
 Atomic state publication, cross-process fingerprint invalidation, mutable kernel snapshots, complete state visibility, and unique event application remain checked by Store concurrency/cache tests, existing kernel exactly-once/reconciliation tests, and the process harness.
 
 ## Results
 
-Measured on the development machine with Ruby 3.4, 140×45 frames, 60 typing plus 60 scrolling samples per workload, a 100 ms synthetic reconcile interval, 256-byte issue payloads, and an otherwise available machine. Values are milliseconds.
+Measured on the development machine with Ruby 4.0.6, 140×45 frames, 60 typing plus 60 scrolling samples per workload, a 100 ms synthetic reconcile interval, 256-byte issue payloads, and an otherwise available machine. Values are milliseconds. The exact baseline is merge base `3e14d9f5f415a3c2aadba3cc0a4a8b14ab2556f1`; the optimized measurements were taken from the identical candidate tree committed as `4986e6949723b79221ad27d63ca0ebaf062113fe`. Raw outputs are `/tmp/baseline-scale.json`, `/tmp/optimized-scale.json`, and `/tmp/optimized-scale-large.json` when reproduced with the commands above.
 
-A same-harness baseline from `origin/main` established a largest fast workload of **100 issues/tasks and agents (60 active)**. At 250 it exceeded the p95 budget; at 500 it became visibly non-interactive:
+The corrected same-harness baseline established a largest fast workload of **100 issues/tasks and agents (60 active)**. At 250 it exceeded the p95 budget; at 500 both p95 and maximum were non-interactive:
 
 | Workload (agents / active) | State | Before typing median / p95 / p99 / max | Before scroll median / p95 / p99 / max | Peak RSS |
 |---:|---:|---:|---:|---:|
-| 100 / 60 | 0.16 MB | 11.87 / 18.35 / 25.99 / 25.99 | 16.82 / 24.19 / 27.16 / 27.16 | 49.0 MB |
-| 250 / 150 | 0.39 MB | 38.58 / 67.05 / 71.57 / 71.57 | 54.16 / 76.89 / 79.78 / 79.78 | 59.1 MB |
-| 500 / 300 | 0.65 MB | 106.01 / 571.71 / 955.50 / 955.50 | 159.16 / 191.18 / 1954.80 / 1954.80 | 73.6 MB |
+| 100 / 60 | 0.16 MB | 11.92 / 20.28 / 29.36 / 29.36 | 16.80 / 23.11 / 25.59 / 25.59 | 50.5 MB |
+| 250 / 150 | 0.39 MB | 36.50 / 51.86 / 81.30 / 81.30 | 52.78 / 67.32 / 72.00 / 72.00 | 62.8 MB |
+| 500 / 300 | 0.65 MB | 104.31 / 125.38 / 227.63 / 227.63 | 155.39 / 171.72 / 179.60 / 179.60 | 74.2 MB |
+| 1,000 / 600 | 1.17 MB | 329.42 / 353.48 / 674.47 / 674.47 | 486.47 / 507.92 / 514.69 / 514.69 | 106.4 MB |
 
-After the changes, the largest tested workload satisfying both p95 < 50 ms and max < 100 ms was **1,250 issues/tasks, 1,250 mocked agents, 750 concurrently active agents, 500 retained logs, and a 1.42 MB state file**:
+After the changes, the largest tested workload satisfying both p95 < 50 ms and max < 100 ms was **1,500 issues/tasks, 1,500 mocked agents, 900 concurrently active agents, 500 retained logs, and a 1.68 MB state file**:
 
 | Workload (agents / active) | State | After typing median / p95 / p99 / max | After scroll median / p95 / p99 / max | Peak RSS |
 |---:|---:|---:|---:|---:|
-| 250 / 150 | 0.39 MB | 3.87 / 9.31 / 13.71 / 13.71 | 4.64 / 14.72 / 16.63 / 16.63 | 53.8 MB |
-| 500 / 300 | 0.65 MB | 5.56 / 22.10 / 37.57 / 37.57 | 7.23 / 21.86 / 36.03 / 36.03 | 59.7 MB |
-| 1,000 / 600 | 1.16 MB | 8.86 / 24.71 / 27.50 / 27.50 | 11.63 / 33.37 / 51.43 / 51.43 | 77.2 MB |
-| **1,250 / 750** | **1.42 MB** | **10.46 / 30.46 / 39.17 / 39.17** | **14.15 / 33.36 / 48.09 / 48.09** | **83.1 MB** |
+| 250 / 150 | 0.39 MB | 3.99 / 13.51 / 19.21 / 19.21 | 5.04 / 14.85 / 15.93 / 15.93 | 56.4 MB |
+| 500 / 300 | 0.65 MB | 6.04 / 23.52 / 28.46 / 28.46 | 7.67 / 21.59 / 22.17 / 22.17 | 64.9 MB |
+| 1,000 / 600 | 1.16 MB | 10.26 / 28.90 / 38.72 / 38.72 | 14.09 / 34.93 / 35.54 / 35.54 | 86.2 MB |
+| 1,250 / 750 | 1.42 MB | 12.74 / 38.84 / 44.98 / 44.98 | 17.24 / 38.68 / 41.66 / 41.66 | 93.9 MB |
+| **1,500 / 900** | **1.68 MB** | **14.74 / 40.49 / 43.48 / 43.48** | **19.53 / 49.66 / 61.70 / 61.70** | **102.6 MB** |
 
-Every row reported state visibility and exactly-once synthetic events as true. At the fast limit, 10 reconciliation writes completed during the 120 measured interactions.
+Every row reported rendered state visibility, complete ordered exactly-once retained events, and clean exit as true. At the fast limit, 12 reconciliation writes completed during the measured run.
 
 ### Beyond the limit
 
-At 1,500 agents, a steady-state scrolling/GC spike produced 233.95 ms p95 and 328.94 ms max. At 2,000, both p95 values crossed 50 ms (typing 52.98 ms, scrolling 53.63 ms), though max remained below 100 ms in that run. At 3,000 (3.24 MB state, 1,800 active), typing p95/max reached 657.54/725.79 ms and scrolling p95/max reached 117.21/187.64 ms, with 144.0 MB peak RSS. The process remained correct and completed cleanly; degradation is latency and allocation/GC pressure, not missing state, duplicated activity, corruption, or a crash.
+At 2,000 agents, typing/scrolling p95 reached 54.78/54.52 ms (72.18 ms maximum), crossing the interactive p95 budget. At 2,500, scrolling max reached 128.48 ms. At 4,000 (4.27 MB state, 2,400 active), typing p95/max reached 107.69/156.59 ms and scrolling p95/max reached 110.84/127.33 ms with 188.0 MB peak RSS. Every run still rendered committed activity, retained the exact event sequence, converged all active revisions, and exited cleanly: failure beyond the limit is steadily rising layout/allocation latency, not hidden state, duplication, corruption, or a crash.
 
-The boundary is workload- and machine-sensitive, so **1,250 is a measured fast operating point, not a hard product cap**. Run the sweep on the target machine when planning materially larger deployments.
+The boundary is workload- and machine-sensitive, so **1,500 is a measured fast operating point, not a hard product cap**. Run the sweep on the target machine when planning materially larger deployments.
