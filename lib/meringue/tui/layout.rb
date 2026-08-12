@@ -631,7 +631,21 @@ module Meringue
         pane_width = width - (OUTER_MARGIN * 2)
         hint_y = height - BOTTOM_HINT_HEIGHT
 
-        if view == "terminal"
+        if workspace.fetch("interactive", false)
+          draw_pane(
+            canvas,
+            pane_x,
+            0,
+            pane_width,
+            hint_y,
+            agent_workspace_pane.title(state),
+            agent_workspace_pane.content_lines(state, width: pane_width - 4),
+            active: true,
+            overflow: :terminal,
+            scroll_offset: 0,
+            title_style: agent_workspace_title_style(state)
+          )
+        elsif view == "terminal"
           draw_pane(
             canvas,
             pane_x,

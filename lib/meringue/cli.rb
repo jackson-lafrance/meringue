@@ -58,8 +58,8 @@ module Meringue
       registry = Harness::Registry.new(config: config)
       store = state_store(path: options.fetch(:state_path))
       engine = enable_agents ? tui_engine(store, registry, config: config, config_path: options.fetch(:config_path)) : nil
-      workspace_controller = Workspace::Controller.from_config(config)
       agent_session_service = engine ? Sessions::WorkerSessionService.new(engine: engine) : nil
+      workspace_controller = Workspace::Controller.from_config(config, focus_session_service: agent_session_service)
       App.new(
         input: input,
         out: out,

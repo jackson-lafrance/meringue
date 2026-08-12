@@ -25,7 +25,13 @@ module Meringue
         def title(state)
           workspace = workspace_state(state)
           agent = workspace_agent(state)
-          view = workspace.fetch("view", "agent") == "terminal" ? "worktree terminal" : "focused worker"
+          view = if workspace.fetch("interactive", false)
+                   "Pi interactive"
+                 elsif workspace.fetch("view", "agent") == "terminal"
+                   "worktree terminal"
+                 else
+                   "focused worker"
+                 end
           id = agent&.fetch("id", nil) || workspace.fetch("agent_id", "worker")
           "#{view} · #{id}"
         end
@@ -51,7 +57,9 @@ module Meringue
           cached = @line_cache[view]
           return cached.fetch("lines") if signature && cached && cached.fetch("signature") == signature
 
-          lines = if view == "terminal"
+          lines = if workspace.fetch("interactive", false)
+                    interactive_lines(workspace, width: width)
+                  elsif view == "terminal"
                     terminal_lines(workspace, width: width)
                   else
                     agent_lines(state, workspace, width: width)
@@ -171,6 +179,7 @@ module Meringue
             view,
             width.to_i,
             workspace.fetch("agent_id", nil).to_s,
+            workspace.fetch("interactive", false),
             workspace.fetch("filter", "all").to_s,
             revision,
             agent&.fetch("updated_at", nil).to_s,
@@ -437,6 +446,10 @@ module Meringue
           Timestamps.format(timestamp, "%H:%M:%S") || value.to_s
         rescue ArgumentError, RangeError, TypeError
           value.to_s
+        end
+
+        def interactive_lines(workspace, width:)
+          terminal_lines({ "terminal" => workspace.fetch("agent_session", {}) || {}, "error" => workspace.fetch("error", nil), "notice" => workspace.fetch("notice", nil) }, width: width)
         end
 
         def terminal_lines(workspace, width:)

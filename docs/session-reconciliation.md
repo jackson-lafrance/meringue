@@ -274,6 +274,11 @@ resumable transcript, and a fresh session would throw away the turn the worker w
 of - the opposite trade from the unreplayable case below, where the transcript is the thing that is
 broken.
 
+A follow-up prompt remains valid recovery input after that process exit. Pi cannot queue a
+`follow_up` RPC until a live turn exists, so `PiClient` reattaches the saved transcript and delivers
+the follow-up as a normal continuation. `steer` remains rejected in this state because it
+specifically promises to interrupt an active turn.
+
 ## A session that cannot be replayed
 
 One dead turn is different: the model provider rejects the *saved transcript* itself, not the

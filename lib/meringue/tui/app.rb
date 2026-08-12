@@ -184,6 +184,7 @@ module Meringue
         @agent_workspace_active = false
         @agent_workspace_agent_id = nil
         @agent_workspace_session = nil
+        @agent_workspace_interactive = false
         @agent_workspace_view = "agent"
         @agent_workspace_filter = "all"
         @agent_workspace_notice = nil
@@ -340,7 +341,11 @@ module Meringue
         # a step was previewing on screen. Nothing else about setup is persisted.
         close_onboarding if @onboarding_active
         persist_agent_workspace if @agent_workspace_active
-        close_agent_workspace_session
+        if @agent_workspace_active
+          close_agent_workspace
+        else
+          close_agent_workspace_session
+        end
         if workspace_controller&.respond_to?(:shutdown)
           workspace_controller.shutdown
         elsif workspace_controller&.respond_to?(:close)
@@ -1660,6 +1665,11 @@ module Meringue
         return [input_buffer, input_cursor, slash_suggestion_index] if remainder.nil?
 
         key = remainder
+        if @agent_workspace_interactive && @agent_workspace_view != "terminal"
+          forward_agent_workspace_interactive_key(key, state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
         @workspace_pastes.sync!(input_buffer)
         if workspace_scroll_key?(key)
           scroll_agent_workspace(key, state)
@@ -1950,10 +1960,10 @@ module Meringue
         @agent_workspace_notice = nil
         @agent_workspace_error = nil
         if @agent_workspace_view == "terminal"
-          @agent_workspace_session.pause if @agent_workspace_session&.respond_to?(:pause)
+          @agent_workspace_session.pause if !@agent_workspace_interactive && @agent_workspace_session&.respond_to?(:pause)
           prepare_workspace_terminal(state)
         else
-          @agent_workspace_session.resume if @agent_workspace_session&.respond_to?(:resume)
+          @agent_workspace_session.resume if !@agent_workspace_interactive && @agent_workspace_session&.respond_to?(:resume)
         end
         persist_agent_workspace
       end
@@ -2014,10 +2024,30 @@ module Meringue
         @agent_workspace_error = "Terminal input failed: #{e.message}"
       end
 
+      def forward_agent_workspace_interactive_key(key, state)
+        unless workspace_controller&.respond_to?(:handle_agent_key)
+          @agent_workspace_error = "Native Pi focus is unavailable."
+          return
+        end
+
+        agent = agent_workspace_agent(state)
+        return @agent_workspace_error = "Selected agent is no longer available." unless agent
+
+        result = workspace_controller.handle_agent_key(key: key, agent: agent, state: state)
+        apply_workspace_controller_result(result)
+      rescue StandardError => e
+        @agent_workspace_error = "Pi interactive input failed: #{e.message}"
+      end
+
       # Reuses the established detached terminal launcher. It validates the
       # saved harness session and starts an external UI without attaching to,
       # replacing, signaling, or taking ownership of Meringue's RPC process.
       def open_agent_workspace_harness_session(state)
+        if @agent_workspace_interactive
+          @agent_workspace_notice = "The native Pi session is already open in this workspace."
+          return
+        end
+
         agent = agent_workspace_agent(state)
         return @agent_workspace_error = "Selected agent is no longer available." unless agent
 
@@ -2471,6 +2501,12 @@ module Meringue
           return false
         end
 
+        if @agent_workspace_active && @agent_workspace_agent_id.to_s != agent.fetch("id").to_s
+          close_agent_workspace
+        elsif @agent_workspace_active
+          return true
+        end
+
         restored_view = @agent_workspace_agent_id.to_s == agent.fetch("id").to_s ? @agent_workspace_view : "agent"
         # The logs caret belongs to the dashboard logs pane, so opening the
         # focused workspace disarms it instead of leaving Ctrl-C bound to copy.
@@ -2481,6 +2517,7 @@ module Meringue
         close_model_picker
         close_onboarding if @onboarding_active
         @agent_workspace_active = true
+        @agent_workspace_interactive = false
         @force_full_redraw = true
         @agent_workspace_agent_id = agent.fetch("id")
         @agent_workspace_view = restored_view
@@ -2488,16 +2525,40 @@ module Meringue
         @workspace_leader_pending = false
         @agent_workspace_notice = nil
         @agent_workspace_error = nil
-        @chat_mutex.synchronize { @agent_workspace_events[agent.fetch("id")] = [] }
+        @chat_mutex.synchronize do
+          event_key = agent.fetch("id").to_s
+          @agent_workspace_events[event_key] = []
+          # A reopened view has a fresh journal cursor and will replay the managed
+          # session's retained events. Invalidate the old frozen presentation too;
+          # otherwise a worker with no new events can briefly render fragments from
+          # the previous focus session instead of the fresh replay.
+          @agent_workspace_events_revision[event_key] += 1
+          @agent_workspace_events_cache.delete(event_key)
+        end
         @selected_agent_id = agent.fetch("id")
         @agent_tree_navigation_active = true
         @focused_pane = "agent_tree"
         if workspace_controller&.respond_to?(:open_workspace)
-          apply_workspace_controller_result(workspace_controller.open_workspace(agent: agent, state: state))
+          workspace_result = begin
+            workspace_controller.open_workspace(
+              agent: agent,
+              state: state,
+              rows: [(@last_render_height || DEFAULT_HEIGHT) - 3, 1].max,
+              columns: [(@last_render_width || DEFAULT_WIDTH) - 6, 1].max
+            )
+          rescue ArgumentError
+            workspace_controller.open_workspace(agent: agent, state: state)
+          end
+          apply_workspace_controller_result(workspace_result)
+          if %w[failed rejected errored].include?(workspace_result.fetch("status", nil).to_s)
+            @agent_workspace_active = false
+            return false
+          end
+          @agent_workspace_interactive = workspace_result.fetch("interactive", false)
         end
-        open_agent_workspace_session(agent)
+        open_agent_workspace_session(agent) unless @agent_workspace_interactive
         if @agent_workspace_view == "terminal"
-          @agent_workspace_session.pause if @agent_workspace_session&.respond_to?(:pause)
+          @agent_workspace_session.pause if !@agent_workspace_interactive && @agent_workspace_session&.respond_to?(:pause)
           prepare_workspace_terminal(state)
         end
         persist_agent_workspace
@@ -2529,9 +2590,12 @@ module Meringue
 
       def close_agent_workspace(preserve_terminal: false)
         close_agent_workspace_session
-        if !preserve_terminal && workspace_controller&.respond_to?(:close_terminal)
+        if @agent_workspace_interactive && workspace_controller&.respond_to?(:close_workspace)
+          apply_workspace_controller_result(workspace_controller.close_workspace(agent: @agent_workspace_agent_id))
+        elsif !preserve_terminal && workspace_controller&.respond_to?(:close_terminal)
           workspace_controller.close_terminal(agent: @agent_workspace_agent_id)
         end
+        @agent_workspace_interactive = false
         @agent_workspace_active = false
         @agent_workspace_view = "agent"
         @force_full_redraw = true
@@ -3977,6 +4041,7 @@ module Meringue
           {
             "active" => @agent_workspace_active,
             "agent_id" => @agent_workspace_agent_id,
+            "interactive" => @agent_workspace_interactive,
             "view" => @agent_workspace_view,
             "filter" => @agent_workspace_filter,
             "input_buffer" => input_buffer,
@@ -4060,10 +4125,18 @@ module Meringue
 
       def reconcile_workspace_selection!(state)
         return if @agent_workspace_agent_id.to_s.empty?
-        return if Array(state.fetch("agents", [])).any? { |agent| agent.is_a?(Hash) && agent["type"] == "worker" && agent["id"].to_s == @agent_workspace_agent_id.to_s }
+        current = Array(state.fetch("agents", [])).find do |agent|
+          agent.is_a?(Hash) && agent["type"] == "worker" && agent["id"].to_s == @agent_workspace_agent_id.to_s
+        end
+        return if current && !%w[completed killed].include?(current.fetch("status", nil).to_s)
 
-        close_agent_workspace_session
+        if @agent_workspace_interactive && workspace_controller&.respond_to?(:close_workspace)
+          workspace_controller.close_workspace(agent: @agent_workspace_agent_id)
+        else
+          close_agent_workspace_session
+        end
         @force_full_redraw = true if @agent_workspace_active
+        @agent_workspace_interactive = false
         @agent_workspace_active = false
         @agent_workspace_agent_id = nil
         @agent_workspace_view = "agent"
@@ -4106,7 +4179,10 @@ module Meringue
         agent = agent_workspace_agent(state)
         return { "error" => "Selected worker is no longer available." } unless agent
 
-        result = if @agent_workspace_session&.respond_to?(:snapshot)
+        result = if @agent_workspace_interactive && workspace_controller&.respond_to?(:agent_snapshot)
+                   rows, columns = agent_workspace_terminal_dimensions
+                   workspace_controller.agent_snapshot(agent: agent, state: state, rows: rows, columns: columns)
+                 elsif @agent_workspace_session&.respond_to?(:snapshot)
                    snapshot = @agent_workspace_session.snapshot
                    polled = @agent_workspace_session.respond_to?(:poll_events) ? @agent_workspace_session.poll_events(limit: 200) : {}
                    reduce_agent_workspace_events(agent.fetch("id"), Array(polled["events"]))

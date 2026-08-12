@@ -14,11 +14,7 @@ module Meringue
 
       def live_snapshot(pi_state:, messages: nil, entries: nil, leaf_id: nil, session_ref:)
         items = if entries
-                  active_session_records(Array(entries), leaf_id: leaf_id).filter_map do |record|
-                    next unless record["type"] == "message" && record["message"].is_a?(Hash)
-
-                    normalize_message(record.fetch("message"), id: record["id"], timestamp: record["timestamp"])
-                  end
+                  normalize_records(entries, leaf_id: leaf_id)
                 else
                   normalize_messages(messages)
                 end
@@ -53,13 +49,9 @@ module Meringue
         session_id = session_ref["session_id"] || session_ref[:session_id] || header["id"]
         session_name = records.reverse_each.find { |record| record["type"] == "session_info" && record["name"] }&.fetch("name", nil) ||
           metadata_value(session_ref, "session_name")
-        messages = active_session_records(records).filter_map do |record|
-          next unless record["type"] == "message" && record["message"].is_a?(Hash)
-
-          normalize_message(record.fetch("message"), id: record["id"], timestamp: record["timestamp"])
-        end
-        last_message = messages.last || {}
-        completed = last_message["role"] == "assistant" && completed_stop_reason?(last_message["stop_reason"])
+        messages = normalize_records(records)
+        last_message = messages.reverse_each.find { |item| item["role"] == "assistant" } || {}
+        completed = completed_stop_reason?(last_message["stop_reason"])
         availability = process_alive ? "history_follow" : "history"
         warning = if process_alive
                     "The agent process is still running, but this Meringue instance does not own its RPC transport. Showing persisted history without attaching a second process."
@@ -128,11 +120,23 @@ module Meringue
         when "compaction_start", "compaction_end"
           [base.merge("kind" => "notice", "phase" => type.delete_prefix("compaction_"), "notice_type" => "compaction", "reason" => event["reason"], "error" => event["errorMessage"])]
         when "auto_retry_start", "auto_retry_end", "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished"
-          [base.merge("kind" => "notice", "phase" => type, "notice_type" => "retry", "message" => event["errorMessage"] || event["finalError"])]
+          [base.merge(
+            "kind" => "notice",
+            "phase" => type,
+            "notice_type" => "retry",
+            "message" => event["errorMessage"] || event["finalError"] || event["reason"] || event["message"],
+            "details" => compact_event(event)
+          )]
         when "extension_ui_request"
-          [base.merge("kind" => "interaction_request", "phase" => "unsupported", "message" => "Pi requested extension UI input that is not available in the managed worker view.")]
+          [base.merge(
+            "kind" => "interaction_request",
+            "phase" => "unsupported",
+            "message" => "Pi requested extension UI input that is not available in the managed worker view.",
+            "request_type" => event["requestType"] || event["type"],
+            "details" => compact_event(event)
+          )]
         when "extension_error", "rpc_parse_error", "process_exit"
-          [base.merge("kind" => "transport", "phase" => type == "process_exit" ? "closed" : "error", "message" => event["error"], "details" => compact_event(event))]
+          [base.merge("kind" => "transport", "phase" => type == "process_exit" ? "closed" : "error", "message" => event["error"] || event["message"], "details" => compact_event(event))]
         else
           []
         end
@@ -160,10 +164,72 @@ module Meringue
         item ? [item] : []
       end
 
+      # Pi's durable session is an append-only tree, not a flat message list. Keep the active
+      # branch (the same branch InteractiveMode would show), but retain the control and extension
+      # entries that explain compaction, branch changes, and model/thinking changes in that view.
+      # Hidden custom entries remain hidden because their renderer belongs to the extension that
+      # created them; displaying their opaque state would be less faithful than omitting it.
+      def normalize_records(records, leaf_id: nil)
+        active_session_records(Array(records), leaf_id: leaf_id).flat_map do |record|
+          normalize_record(record)
+        end
+      end
+
       def normalize_messages(messages)
         Array(messages).filter_map.with_index do |message, index|
           normalize_message(message, id: message["id"] || "message-#{index}") if message.is_a?(Hash)
         end
+      end
+
+      def normalize_record(record)
+        return [] unless record.is_a?(Hash)
+
+        case record.fetch("type", nil).to_s
+        when "message"
+          message = record["message"]
+          message.is_a?(Hash) ? [normalize_message(message, id: record["id"], timestamp: record["timestamp"]).merge("entry_type" => "message")] : []
+        when "compaction"
+          [control_item(record, "compaction", "Context compacted", record["summary"],
+                        extra: { "tokens_before" => record["tokensBefore"] || record["tokens_before"] })]
+        when "branch_summary"
+          [control_item(record, "branch_summary", "Branch summary", record["summary"],
+                        extra: { "from_id" => record["fromId"] || record["from_id"] })]
+        when "model_change"
+          provider = record["provider"].to_s
+          model = record["modelId"] || record["model_id"]
+          value = [provider, model].reject { |part| part.to_s.empty? }.join("/")
+          [control_item(record, "model_change", "Model changed", value)]
+        when "thinking_level_change"
+          [control_item(record, "thinking_level_change", "Thinking level changed", record["thinkingLevel"] || record["thinking_level"])]
+        when "custom_message"
+          return [] unless record.fetch("display", true)
+
+          message = {
+            "role" => "custom",
+            "content" => record["content"],
+            "customType" => record["customType"]
+          }
+          [normalize_message(message, id: record["id"], timestamp: record["timestamp"]).merge(
+            "entry_type" => "custom_message",
+            "custom_type" => record["customType"]
+          ).compact]
+        else
+          []
+        end
+      end
+
+      def control_item(record, entry_type, heading, value, extra: {})
+        text = value.to_s.strip
+        text = heading if text.empty?
+        {
+          "id" => record["id"],
+          "kind" => "notice",
+          "role" => "system",
+          "content" => text.empty? ? heading : "#{heading}: #{text}",
+          "entry_type" => entry_type,
+          "notice_type" => entry_type,
+          "timestamp" => record["timestamp"]
+        }.merge(extra).compact
       end
 
       def normalize_message(message, id:, timestamp: nil)
@@ -171,7 +237,7 @@ module Meringue
         content = message_content(message)
         content["text"] = truncate_tool_content(content.fetch("text")) if role == "toolResult"
         {
-          "id" => id || message_identity(message),
+          "id" => id.nil? ? message_identity(message) : id.to_s,
           "kind" => role == "toolResult" ? "tool" : "message",
           "role" => normalize_role(role),
           "content" => content.fetch("text"),
@@ -189,13 +255,26 @@ module Meringue
 
       def message_event(base, event, type)
         message = event["message"].is_a?(Hash) ? event["message"] : {}
-        normalized = normalize_message(message, id: message_identity(message))
-        phase = { "message_start" => "start", "message_update" => "update", "message_end" => "end" }.fetch(type)
         delta = event.fetch("assistantMessageEvent", {}) || {}
+        delta = {} unless delta.is_a?(Hash)
+        phase = { "message_start" => "start", "message_update" => "update", "message_end" => "end" }.fetch(type)
+        delta_type = delta["type"].to_s
+        tool_call = delta["toolCall"].is_a?(Hash) ? delta["toolCall"] : {}
+        tool_call = message_content(message).fetch("tool_calls", []).last || {} if tool_call.empty? && delta_type.start_with?("toolcall_")
+        # RPC events do not carry a separate event id. Pi's partial message timestamp is stable
+        # across updates in practice; a tool-call id is the next-best stable identity for an
+        # argument stream. The journal sequence is only the final fallback. Never use object_id:
+        # reopening a view must not turn one streamed response into duplicate message blocks.
+        partial_timestamp = delta["partial"].is_a?(Hash) ? delta["partial"]["timestamp"] : nil
+        message_id = event["messageId"] || message["id"] || message["timestamp"] || partial_timestamp || tool_call["id"] || base["sequence"]
+        normalized = normalize_message(message, id: message_id)
         [base.merge(normalized).merge(
           "phase" => phase,
           "delta" => delta["delta"],
-          "delta_type" => delta["type"]
+          "delta_type" => delta_type.empty? ? nil : delta_type,
+          "tool_call_id" => tool_call["id"],
+          "tool_name" => tool_call["name"],
+          "tool_arguments" => tool_call["arguments"]
         ).compact]
       end
 
@@ -280,10 +359,15 @@ module Meringue
         { "toolResult" => "tool", "bashExecution" => "tool" }.fetch(role, role)
       end
 
-      def message_identity(message)
+      def message_identity(message, fallback: nil)
         role = message.fetch("role", "message")
         timestamp = message["timestamp"]
-        "#{role}-#{timestamp || message.object_id}"
+        return "#{role}-#{timestamp}" unless timestamp.to_s.empty?
+
+        tool_call_id = message["toolCallId"]
+        return "#{role}-#{tool_call_id}" unless tool_call_id.to_s.empty?
+
+        fallback || role.to_s
       end
 
       def normalize_timestamp(value)

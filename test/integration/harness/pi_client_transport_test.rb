@@ -138,6 +138,70 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_equal attached.fetch("pid"), ownership.record_for("pi-sess-1").fetch("pid")
   end
 
+  def test_prepare_interactive_session_aborts_rpc_and_returns_the_same_saved_session_for_pi_tui
+    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-1", "is_streaming" => true })
+    session_file = pi_session_file(tmpdir, session_id: "sess-1")
+    ref = pi_session_ref(session_file: session_file, cwd: tmpdir)
+    managed = client.attach_session(ref)
+    @harness_sessions << [client, managed]
+
+    prepared = client.prepare_interactive_session(managed)
+
+    assert_equal false, prepared.fetch("session_ref").fetch("is_streaming")
+    assert_nil prepared.fetch("session_ref").fetch("pid")
+    assert_equal false, prepared.dig("handoff", "exact_stream_transfer")
+    assert_equal "native_interactive", prepared.dig("handoff", "mode")
+    assert_includes prepared.dig("handoff", "latest_user_intent"), "please fix the redirect"
+    assert_includes prepared.fetch("interactive_argv").last, "please fix the redirect"
+    assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--session", session_file]
+    refute_includes prepared.fetch("interactive_argv"), "--mode"
+    assert_equal %w[get_state abort get_state get_state], stub_commands(stub).map { |command| command.fetch("type") }.last(4)
+    refute process_alive?(managed.fetch("pid")), "the RPC writer must be gone before the PTY launches"
+  end
+
+  def test_prepare_interactive_session_rebuilds_a_replacement_jsonl_when_rpc_has_no_session_path
+    entry = {
+      "type" => "message",
+      "id" => "entry-1",
+      "parentId" => nil,
+      "timestamp" => "2026-01-01T00:00:01Z",
+      "message" => { "role" => "user", "content" => "preserve this request" }
+    }
+    client, = build_pi_client(
+      tmpdir,
+      stub_config: { "session_id" => nil, "is_streaming" => true, "entries" => [entry] }
+    )
+    source_file = pi_session_file(tmpdir, session_id: "source-session")
+    ref = pi_session_ref(session_file: source_file, session_id: nil, cwd: tmpdir)
+    managed = client.attach_session(ref)
+    @harness_sessions << [client, managed]
+    managed = managed.merge("session_id" => nil, "session_file" => nil)
+
+    prepared = client.prepare_interactive_session(managed)
+    replacement = prepared.dig("handoff", "replacement")
+
+    assert_equal "rpc_session_file_unavailable", replacement.fetch("reason")
+    assert_equal 1, replacement.fetch("entry_count")
+    assert_equal "preserve this request", replacement.fetch("latest_user_intent")
+    assert_includes prepared.fetch("interactive_argv").last, "preserve this request"
+    replacement_lines = File.readlines(replacement.fetch("session_file"), chomp: true).map { |line| JSON.parse(line) }
+    assert_equal "session", replacement_lines.first.fetch("type")
+    assert_equal entry, replacement_lines.last
+    assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--session", replacement.fetch("session_file")]
+  end
+
+  def test_reclaim_interactive_session_only_signals_a_matching_orphaned_pi_process
+    client, = build_pi_client(tmpdir)
+    orphan_pid = spawn_idle_ruby_process
+    ref = pi_session_ref(session_file: pi_session_file(tmpdir, session_id: "sess-1"), cwd: tmpdir)
+    ref.fetch("metadata")["interactive_handoff"] = {
+      "interactive_started_at" => Meringue::Harness::ProcessIdentity.describe(orphan_pid).fetch("started_at").iso8601
+    }
+
+    assert client.reclaim_interactive_session(ref, pid: orphan_pid)
+    refute process_alive?(orphan_pid)
+  end
+
   def test_attach_session_refuses_to_start_a_second_process_while_the_saved_one_lives
     client, = build_pi_client(tmpdir)
     live_pid = spawn_idle_ruby_process
@@ -187,6 +251,37 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
 
     assert_match(/resume it with mode: "normal"/, error.message)
     assert_empty stub_argv(stub, wait: false), "no Pi process should have been started"
+  end
+
+  # Regression for the reconciliation path: PR #207 correctly stopped treating a stale assistant
+  # result as completion when a newer follow-up turn had not finished. That leaves a resumable Pi
+  # transcript with no completed result, so a follow-up must be downgraded to a normal continuation
+  # after reattaching instead of being rejected by the mode guard.
+  def test_following_up_an_unresumable_saved_turn_reattaches_as_a_normal_continuation
+    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-1" })
+    session_file = pi_session_file(
+      tmpdir,
+      session_id: "sess-1",
+      extra_lines: [
+        JSON.generate(
+          "type" => "message",
+          "id" => "follow-up-user",
+          "parentId" => "m2",
+          "timestamp" => "2026-01-01T00:00:03Z",
+          "message" => { "role" => "user", "content" => [{ "type" => "text", "text" => "continue" }] }
+        )
+      ]
+    )
+    ref = pi_session_ref(session_file: session_file, cwd: tmpdir)
+
+    prompted = track_session(client, client.prompt_session(ref, "continue the interrupted work", mode: "follow_up"))
+
+    assert_equal ["continue the interrupted work"], stub_commands_of_type(stub, "prompt").map { |command| command.fetch("message") }
+    assert_empty stub_commands_of_type(stub, "follow_up"), "a resumed session has no live turn to queue behind"
+    assert_equal "follow_up", prompted.fetch("metadata").fetch("prompt_mode_downgraded_from")
+    assert_equal "normal", prompted.fetch("metadata").fetch("delivered_prompt_mode")
+    assert_match(/resumed and this follow-up was delivered as a normal continuation/, prompted.fetch("metadata").fetch("prompt_mode_note"))
+    assert_includes stub_argv(stub).each_cons(2).to_a, ["--session", session_file]
   end
 
   def test_prompting_a_session_owned_by_another_live_instance_mid_turn_is_transient

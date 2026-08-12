@@ -8,6 +8,26 @@ require "support/workspace_support"
 class WorkspaceTerminalSessionTest < Minitest::Test
   include WorkspaceSupport
 
+  def test_builds_a_literal_pty_buffer_for_the_native_pi_command
+    with_workspace_tmpdir do |tmp|
+      pi = stub_executable(File.join(tmp, "bin", "pi"))
+      workspace = File.join(tmp, "worktree")
+      FileUtils.mkdir_p(workspace)
+      pty = WorkspaceSupport::RecordingPty.new
+      session = Meringue::Workspace::TerminalSession.new(
+        command: [pi, "--session", File.join(tmp, "session.jsonl")],
+        env: { "PATH" => File.join(tmp, "bin") },
+        pty: pty
+      )
+
+      result = session.start(workspace_path: workspace, rows: 32, columns: 120)
+
+      assert_equal [pi, "--session", File.join(tmp, "session.jsonl")], pty.last_call.fetch("argv")
+      assert_equal({ chdir: workspace }, pty.last_call.fetch("options"))
+      assert_equal "failed", result.fetch("status")
+    end
+  end
+
   def test_builds_the_pty_spawn_call_from_the_configured_shell_command
     with_workspace_tmpdir do |tmp|
       shell = stub_executable(File.join(tmp, "bin", "fake shell"))
