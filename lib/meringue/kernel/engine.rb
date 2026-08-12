@@ -13895,18 +13895,23 @@ module Meringue
           return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if %w[completed killed].include?(agent.fetch("status", nil))
 
           now = timestamp
+          previous_agent = deep_copy(agent)
+          previous_parent_statuses = worker_parent_statuses(state, agent)
           merge_session_ref_into_agent!(agent, poll_result.fetch("session_ref", {}))
           # The session is streaming again, so a recorded dead-turn reason is stale.
           clear_settle_failure!(agent)
           agent["status"] = "working"
-          agent["updated_at"] = now
-          refresh_worker_parent_statuses!(state, agent, now) if agent.fetch("type", nil) == "worker"
           log_ids = append_harness_event_logs(state, agent, poll_result.fetch("events", []))
           log_ids.concat(record_worker_progress!(state, agent, poll_result.fetch("progress", []), now))
           log_ids.concat(append_recovery_success_log(state, agent, poll_result))
+          refresh_worker_parent_statuses!(state, agent, now) if agent.fetch("type", nil) == "worker"
+          changed = agent != previous_agent || worker_parent_statuses(state, agent) != previous_parent_statuses || log_ids.any?
+          return poll_result.merge("changed" => false, "log_entry_ids" => []) unless changed
+
+          agent["updated_at"] = now
           touch_state!(state, now)
           store.save(state)
-          poll_result.merge("changed" => poll_result.fetch("resumed", false) || log_ids.any?, "log_entry_ids" => log_ids)
+          poll_result.merge("changed" => true, "log_entry_ids" => log_ids)
         end
       end
 
@@ -14743,6 +14748,14 @@ module Meringue
         Time.iso8601(value.to_s)
       rescue ArgumentError, TypeError
         nil
+      end
+
+      def worker_parent_statuses(state, agent)
+        return nil unless agent.fetch("type", nil) == "worker"
+
+        issue = find_issue(state, agent.fetch("issue_id", nil))
+        project = issue && find_project(state, issue.fetch("project_id", nil))
+        [issue&.fetch("status", nil), project&.fetch("status", nil)]
       end
 
       def refresh_worker_parent_statuses!(state, agent, now)
