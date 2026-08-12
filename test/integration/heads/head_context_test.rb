@@ -409,6 +409,53 @@ class HeadContextTest < Minitest::Test
     assert_includes prompt, File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md")).lines.first.strip
   end
 
+  # Number-based labels hide which GitHub work an issue represents. The exact-title rule belongs
+  # in the durable reference that every harness-backed head receives, for both issue and PR routes.
+  def test_github_backed_issue_naming_uses_the_exact_relevant_github_title
+    context = build_head_context
+    prompt = context.system_prompt
+    rules = context.to_prompt_h.dig("routing_context", "decision_rules")
+    reference = File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md"))
+    architecture = File.read(Meringue.root_path("AGENTS.md"))
+
+    assert_includes prompt, "relevant GitHub issue or pull request's exact current title"
+    assert_includes prompt, "use that title unchanged as the Meringue issue title"
+    assert_includes prompt, "Fix PR #123"
+    assert_includes prompt, "Rebase PR #123"
+    assert_includes prompt, "GitHub issue #123"
+
+    naming_rule = rules.find { |rule| rule.include?("Before CreateIssue, or an issue-creating CreateGoal, for GitHub-backed work") }
+    refute_nil naming_rule, "expected exact GitHub title guidance in routing rules"
+    assert_includes naming_rule, "GitHub issue or pull request's exact current title"
+    assert_includes naming_rule, "including capitalization and punctuation"
+    assert_includes naming_rule, "ask a clarifying question"
+    refute_includes naming_rule, "filename"
+
+    assert_includes reference, "## GitHub issue and pull-request titles"
+    assert_includes reference, "use the exact GitHub title in `CreateIssue.title`"
+    assert_includes reference, "`CreateGoal.issue_title`"
+    refute_includes reference, "monotonic-skill"
+    assert_includes architecture, "Every new GitHub-backed Meringue issue"
+    assert_includes architecture, "exact current title of the relevant GitHub issue or pull request unchanged"
+  end
+
+  def test_github_title_discovery_stays_read_only
+    context = build_head_context
+    discovery = context.to_prompt_h.fetch("project_discovery")
+    allowed = discovery.fetch("allowed_read_only_discovery").join("\n")
+    forbidden = discovery.fetch("forbidden_discovery").join("\n")
+
+    assert_includes allowed, "gh issue view"
+    assert_includes allowed, "gh pr view"
+    assert_includes allowed, "--json title"
+    refute_includes allowed, "--json files"
+    assert_includes forbidden, "GitHub mutations"
+    assert_includes forbidden, "gh issue edit/comment/close/reopen"
+    assert_includes forbidden, "gh pr edit/comment/review/merge/close/reopen"
+    assert_includes context.system_prompt,
+                    "Do not mutate files, git state, dependencies, databases, remote services, or Meringue state directly."
+  end
+
   def test_system_prompt_keeps_a_multi_step_goal_on_one_issue
     prompt = build_head_context.system_prompt
 
