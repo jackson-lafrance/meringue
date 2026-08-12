@@ -73,6 +73,50 @@ class KernelMaintenanceReconcileSessionsTest < Minitest::Test
     assert_includes client.calls, ["get_state", "sess-1"]
   end
 
+  def test_repeated_healthy_poll_does_not_rewrite_unchanged_state
+    state_with_worker(
+      pid: Process.pid.to_s,
+      session_file: live_session_file,
+      harness_metadata: {
+        "kind" => "worker",
+        "completed" => false,
+        "is_streaming" => true,
+        "reconcile_state" => "healthy"
+      }
+    )
+    engine, client = stub_engine({ "sess-1" => { "streaming" => true } })
+    apply_command(engine, "ReconcileSessions", {})
+    unchanged_state_json = File.read(state_path)
+    unchanged_state_inode = File.stat(state_path).ino
+    worker_updated_at = agent_by_id(read_state, "P1-I1-W1").fetch("updated_at")
+
+    result = apply_command(engine, "ReconcileSessions", {})
+
+    assert_equal 1, result.dig("result", "checked_count")
+    assert_equal 0, result.dig("result", "changed_count")
+    refute result.dig("result", "poll_results").first.fetch("changed")
+    assert_equal unchanged_state_json, File.read(state_path)
+    assert_equal unchanged_state_inode, File.stat(state_path).ino
+    assert_equal worker_updated_at, agent_by_id(read_state, "P1-I1-W1").fetch("updated_at")
+    assert_equal 2, client.calls.count { |call| call == ["get_state", "sess-1"] }
+  end
+
+  def test_healthy_poll_repairs_stale_parent_statuses
+    state_with_worker(pid: Process.pid.to_s, session_file: live_session_file)
+    state = read_state
+    state.fetch("issues").first["status"] = "blocked"
+    state.fetch("projects").first["status"] = "blocked"
+    write_state(state)
+    engine, = stub_engine({ "sess-1" => { "streaming" => true } })
+
+    result = apply_command(engine, "ReconcileSessions", {})
+
+    assert result.dig("result", "poll_results").first.fetch("changed")
+    state = read_state
+    assert_equal "working", issue_by_id(state, "P1-I1").fetch("status")
+    assert_equal "working", state.fetch("projects").first.fetch("status")
+  end
+
   def test_settled_session_completes_the_worker_and_rolls_status_up
     state_with_worker(pid: Process.pid.to_s, session_file: live_session_file)
     engine, = stub_engine({ "sess-1" => { "streaming" => false, "completed" => true, "last_assistant_text" => "done" } })
