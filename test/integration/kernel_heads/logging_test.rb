@@ -353,7 +353,7 @@ class KernelHeadsLoggingTest < KernelHeadsTestCase
     assert_equal "queue_follow_up", issues.fetch(0).fetch("last_routing_action")
   end
 
-  def test_head_batch_summary_log_carries_every_command_result
+  def test_head_batch_summary_log_carries_concise_command_results
     head_id = spawn_head!("Mix good and bad commands")
     project_id = add_project!
     apply_head_result(
@@ -380,6 +380,12 @@ class KernelHeadsLoggingTest < KernelHeadsTestCase
       [%w[CreateIssue accepted], %w[CreateIssue rejected], %w[Frobnicate rejected]],
       Array(details.fetch("command_results")).map { |result| [result.fetch("command_type"), result.fetch("status")] }
     )
+    assert_equal "head_commands_v1", details.fetch("diagnostic_compaction")
+    assert_operator JSON.generate(details).bytesize, :<=, Meringue::State::Compactor::DIAGNOSTIC_DETAILS_MAX_BYTES
+    details.fetch("command_results").each do |command_result|
+      refute command_result.key?("result"), "summary logs must not recursively embed command result envelopes"
+      refute command_result.key?("log_entry_ids"), "individual command logs already retain their own IDs"
+    end
   end
 
   def test_user_slash_command_style_rejections_are_logged_without_a_head

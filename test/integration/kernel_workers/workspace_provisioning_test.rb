@@ -42,6 +42,31 @@ class KernelWorkersWorkspaceProvisioningTest < Minitest::Test
     assert_includes log_messages(engine), "Failed SpawnWorker: #{result.fetch("message")}"
   end
 
+  def test_large_workspace_failure_persists_bounded_actionable_log_details
+    fixture = JSON.parse(File.read(File.expand_path("../../fixtures/large_workspace_diagnostic.json", __dir__)))
+    manager = FailingWorkspaceManager.new(errors: fixture.dig("workspace", "errors"), root_path: workspace_root)
+    workspace = fixture.fetch("workspace")
+    manager.define_singleton_method(:allocate_worker_workspace) do |**_arguments|
+      Marshal.load(Marshal.dump(workspace))
+    end
+    engine = build_engine(workspace_manager: manager)
+    context = project_with_issue(engine)
+
+    result = apply_raw(engine, "SpawnWorker", { "issue_id" => context.fetch("issue_id"), "prompt" => "Go." })
+    entry = worker_scoped_logs(engine, "P1-I1-W1").first
+    details = entry.fetch("details")
+    stderr = details.dig("workspace", "stderr")
+
+    assert_equal "failed", result.fetch("status")
+    assert_operator JSON.generate(details).bytesize, :<=, Meringue::State::Compactor::DIAGNOSTIC_DETAILS_MAX_BYTES
+    assert_equal workspace.fetch("workspace_path"), details.dig("workspace", "workspace_path")
+    assert_equal workspace.fetch("exit_status"), details.dig("workspace", "exit_status")
+    assert_equal "Prompt this worker to retry provisioning, or kill it.", details.fetch("recovery_guidance")
+    assert_includes stderr.fetch("head"), "checkout failed at beginning"
+    assert_includes stderr.fetch("tail"), "lock remains at end"
+    assert_operator stderr.fetch("omitted_bytes"), :>, 300_000
+  end
+
   def test_worktree_path_collision_falls_back_to_a_uniquified_branch_and_path
     engine = build_engine
     context = project_with_issue(engine)

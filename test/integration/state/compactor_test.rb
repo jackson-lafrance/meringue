@@ -152,6 +152,118 @@ class StateCompactorTest < Minitest::Test
     assert_equal snapshot, JSON.generate(state)
   end
 
+  def test_large_workspace_diagnostic_is_actionable_and_byte_bounded
+    fixture = JSON.parse(File.read(File.join(REPO_ROOT, "test", "fixtures", "large_workspace_diagnostic.json")))
+    stderr = fixture.dig("workspace", "stderr")
+    oversized_message = "#{fixture.fetch("message")}\n#{"repeated failure " * 10_000}\n#{fixture.fetch("recovery_guidance")}"
+    state = {
+      "logs" => [{
+        "id" => "L1",
+        "message" => oversized_message,
+        "details" => {
+          "issue_id" => "P1-I1",
+          "provisioning_state" => "retry_exhausted",
+          "recovery_guidance" => fixture.fetch("recovery_guidance"),
+          "errors" => fixture.dig("workspace", "errors"),
+          "workspace" => fixture.fetch("workspace")
+        }
+      }]
+    }
+
+    assert Compactor.compact!(state)
+
+    log = state.fetch("logs").first
+    details = log.fetch("details")
+    output = details.dig("workspace", "stderr")
+    assert_operator JSON.generate(details).bytesize, :<=, Compactor::DIAGNOSTIC_DETAILS_MAX_BYTES
+    assert_operator log.fetch("message").bytesize, :<=, Compactor::DIAGNOSTIC_MESSAGE_MAX_BYTES + 64
+    assert_includes log.fetch("message"), fixture.fetch("message")
+    assert_includes log.fetch("message"), fixture.fetch("recovery_guidance")
+    assert_equal oversized_message.bytesize, details.fetch("message_original_bytes")
+    assert_operator details.fetch("message_omitted_bytes"), :>, 100_000
+    assert_equal 128, details.dig("workspace", "exit_status")
+    assert_equal fixture.fetch("recovery_guidance"), details.fetch("recovery_guidance")
+    assert_equal fixture.dig("workspace", "workspace_path"), details.dig("workspace", "workspace_path")
+    assert_includes output.fetch("head"), "checkout failed at beginning"
+    assert_includes output.fetch("tail"), "lock remains at end"
+    assert_equal stderr.bytesize, output.fetch("original_bytes")
+    assert_equal stderr.bytesize - Compactor::DIAGNOSTIC_TEXT_HEAD_BYTES - Compactor::DIAGNOSTIC_TEXT_TAIL_BYTES,
+                 output.fetch("omitted_bytes")
+  end
+
+  def test_legacy_oversized_diagnostic_compaction_is_idempotent_on_disk
+    with_store do |store, path|
+      fixture = JSON.parse(File.read(File.join(REPO_ROOT, "test", "fixtures", "large_workspace_diagnostic.json")))
+      state = sample_state
+      state["logs"] = [{
+        "id" => "L99",
+        "message" => fixture.fetch("message"),
+        "details" => {
+          "provisioning_state" => "failed",
+          "workspace" => fixture.fetch("workspace"),
+          "errors" => [fixture.dig("workspace", "stderr")]
+        }
+      }]
+      write_state_file(path, state)
+
+      assert store.compact!
+      first = File.binread(path)
+      refute store.compact!
+      assert_equal first, File.binread(path)
+      assert_operator JSON.generate(read_state_file(path).dig("logs", 0, "details")).bytesize,
+                      :<=, Compactor::DIAGNOSTIC_DETAILS_MAX_BYTES
+    end
+  end
+
+  def test_typed_unrouted_user_log_keeps_its_actionable_kind
+    details = {
+      "kind" => "unrouted_user_message",
+      "head_id" => "H1",
+      "user_message" => "Please finish routing this request.",
+      "accepted_command_count" => 0,
+      "command_count" => 1,
+      "command_results" => [{ "command_type" => "SpawnWorker", "status" => "failed", "message" => "session failed" }]
+    }
+    state = { "logs" => [{ "id" => "L1", "message" => "Still needs handling", "details" => details }] }
+
+    refute Compactor.compact!(state)
+    assert_equal details, state.dig("logs", 0, "details")
+    assert_equal "unrouted_user_message", state.dig("logs", 0, "details", "kind")
+  end
+
+  def test_head_command_log_summary_is_bounded_without_changing_source_of_truth
+    report = "FINAL REPORT\n#{"r" * 40_000}\nEND REPORT"
+    goal_command = "bundle exec #{"test " * 10_000}"
+    commands = 30.times.map do |index|
+      {
+        "command_id" => "H1-C#{index + 1}",
+        "command_type" => "SpawnWorker",
+        "status" => index.zero? ? "failed" : "accepted",
+        "message" => "command #{index}: #{"detail " * 2_000}",
+        "errors" => ["failure #{index}: #{"stderr " * 2_000}"]
+      }
+    end
+    journal = Marshal.load(Marshal.dump(commands))
+    state = {
+      "agents" => [
+        { "type" => "worker", "harness_metadata" => { "last_assistant_text" => report } },
+        { "type" => "head", "harness_metadata" => { "head_result_command_journal" => journal } }
+      ],
+      "goals" => [{ "metric" => { "command" => goal_command } }],
+      "logs" => [{ "message" => "Head result for H1", "details" => { "head_id" => "H1", "command_results" => commands } }]
+    }
+
+    assert Compactor.compact!(state)
+
+    details = state.dig("logs", 0, "details")
+    assert_operator JSON.generate(details).bytesize, :<=, Compactor::DIAGNOSTIC_DETAILS_MAX_BYTES
+    assert_equal 30, details.fetch("command_results").length + details.fetch("omitted_command_result_count")
+    assert_equal "failed", details.dig("command_results", 0, "status")
+    assert_equal report, state.dig("agents", 0, "harness_metadata", "last_assistant_text")
+    assert_equal journal, state.dig("agents", 1, "harness_metadata", "head_result_command_journal")
+    assert_equal goal_command, state.dig("goals", 0, "metric", "command")
+  end
+
   # A goal's metric and guardrail commands are scalars under the same key name, and
   # Meringue still has to run them. Diagnostic argv compaction must never reach them.
   def test_an_executable_command_string_is_preserved

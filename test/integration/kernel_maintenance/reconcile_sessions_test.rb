@@ -2,6 +2,7 @@
 
 require "test_helper"
 require "support/kernel_maintenance_support"
+require "support/active_workload_support"
 
 # ReconcileSessions inspects tracked harness sessions and updates lifecycle state
 # from the evidence it can observe: live vs dead pids, readable vs missing
@@ -99,6 +100,220 @@ class KernelMaintenanceReconcileSessionsTest < Minitest::Test
     assert_equal unchanged_state_inode, File.stat(state_path).ino
     assert_equal worker_updated_at, agent_by_id(read_state, "P1-I1-W1").fetch("updated_at")
     assert_equal 2, client.calls.count { |call| call == ["get_state", "sess-1"] }
+  end
+
+  def test_active_workload_coalesces_events_ignores_heartbeats_and_applies_completion_once
+    workload = ActiveWorkloadSupport.state
+    write_state(workload)
+    active_session_ids = workload.fetch("agents").filter_map do |agent|
+      agent["harness_session_id"] if agent.fetch("status") == "working"
+    end
+    client = ActiveWorkloadSupport::HeartbeatClient.new(active_session_ids)
+    store = CountingStore.new(path: state_path)
+    engine = build_engine(store: store, harness_client_resolver: ->(_agent) { client })
+    engine.send(:persist_normalized_state_if_changed)
+    store.reset_save_count!
+
+    first = apply_command(engine, "ReconcileSessions", {})
+
+    assert_equal ActiveWorkloadSupport::AGENT_COUNT, read_state.fetch("agents").length
+    assert_equal ActiveWorkloadSupport::WORKING_WORKER_COUNT, first.dig("result", "checked_count")
+    assert_equal ActiveWorkloadSupport::WORKING_WORKER_COUNT,
+                 first.dig("result", "poll_results").count { |poll| poll.fetch("changed", false) }
+    assert_equal 1, store.save_count, "N streaming workers must publish at most one reconciliation snapshot"
+    active_session_ids.each do |session_id|
+      assert_equal 1, client.read_counts.fetch(session_id), "each transport cursor must be drained once per tick"
+    end
+    state_after_events = read_state
+    active_session_ids.each do |session_id|
+      worker_id = "P1-I#{session_id.delete_prefix("active-session-")}-W1"
+      assert_equal 1, state_after_events.fetch("logs").count { |log| log.fetch("source_id", nil) == worker_id && log.fetch("message", "").include?("rpc_parse_error") }
+    end
+
+    store.reset_save_count!
+    before_heartbeat = File.binread(state_path)
+    second = apply_command(engine, "ReconcileSessions", {})
+    assert_equal 0, second.dig("result", "poll_results").count { |poll| poll.fetch("changed", false) }
+    assert_equal 0, store.save_count, "heartbeat and message-count movement must not publish state"
+    assert_equal before_heartbeat, File.binread(state_path)
+
+    completed_session = active_session_ids.first
+    client.complete!(completed_session)
+    completion = apply_command(engine, "ReconcileSessions", {})
+    completed_worker_id = "P1-I#{completed_session.delete_prefix("active-session-")}-W1"
+    assert completion.dig("result", "poll_results").any? { |poll| poll.fetch("state") == "completed" }
+    assert_equal "completed", agent_by_id(read_state, completed_worker_id).fetch("status")
+    assert_equal 1, read_state.fetch("logs").count { |log| log.fetch("source_id", nil) == completed_worker_id && log.fetch("message", "").include?("process_exit") }
+
+    apply_command(engine, "ReconcileSessions", {})
+    final_state = read_state
+    assert_equal 1, final_state.fetch("logs").count { |log| log.fetch("source_id", nil) == completed_worker_id && log.fetch("message", "").include?("process_exit") }
+    assert_equal 1, final_state.fetch("logs").count { |log| log.fetch("source_id", nil) == completed_worker_id && log.fetch("message", "").include?("completed") }
+  end
+
+  def test_one_save_persists_meaningful_changes_for_many_streaming_workers
+    agents = 5.times.map do |index|
+      worker_record(
+        id: "P1-I1-W#{index + 1}",
+        issue_id: "P1-I1",
+        project_id: "P1",
+        status: "working",
+        harness: "pi",
+        pid: Process.pid.to_s,
+        session_id: "sess-#{index + 1}",
+        harness_metadata: { "kind" => "worker", "is_streaming" => true }
+      )
+    end
+    write_state(
+      state_fixture(
+        projects: [project_record(id: "P1", status: "working")],
+        issues: [issue_record(id: "P1-I1", project_id: "P1", status: "working", agent_ids: agents.map { |agent| agent.fetch("id") })],
+        agents: agents
+      )
+    )
+    sessions = agents.to_h do |agent|
+      [agent.fetch("harness_session_id"), { "streaming" => true, "events" => [{ "type" => "agent_start" }] }]
+    end
+    store = CountingStore.new(path: state_path)
+    client = StubHarnessClient.new(sessions: sessions)
+    engine = build_engine(store: store, harness_client_resolver: ->(_agent) { client })
+    engine.send(:persist_normalized_state_if_changed)
+    store.reset_save_count!
+
+    result = apply_command(engine, "ReconcileSessions", {})
+
+    assert_equal 5, result.dig("result", "poll_results").count { |poll| poll.fetch("changed", false) }
+    assert_equal 1, store.save_count
+    assert_equal 5, read_state.fetch("agents").count { |agent| agent.dig("harness_metadata", "reconcile_state") == "healthy" }
+  end
+
+  def test_heartbeat_only_ticks_do_not_save_or_change_any_durable_timestamp
+    state_with_worker(
+      pid: Process.pid.to_s,
+      session_file: live_session_file,
+      harness_metadata: {
+        "kind" => "worker",
+        "completed" => false,
+        "is_streaming" => true,
+        "last_event_at" => "2026-01-01T00:00:01Z",
+        "reconcile_state" => "healthy"
+      }
+    )
+    before = read_state
+    sessions = {
+      "sess-1" => {
+        "streaming" => true,
+        "last_event_at" => "2026-01-01T00:00:02Z",
+        "metadata" => { "messageCount" => 42 }
+      }
+    }
+    client_class = Class.new(StubHarnessClient) do
+      def get_state(session_ref)
+        super.merge(
+          "last_event_at" => config_for(session_ref).fetch("last_event_at"),
+          "metadata" => config_for(session_ref).fetch("metadata")
+        )
+      end
+    end
+    store = CountingStore.new(path: state_path)
+    client = client_class.new(sessions: sessions)
+    engine = build_engine(store: store, harness_client_resolver: ->(_agent) { client })
+    engine.send(:persist_normalized_state_if_changed)
+    before_json = File.read(state_path)
+    store.reset_save_count!
+
+    3.times { apply_command(engine, "ReconcileSessions", {}) }
+
+    assert_equal 0, store.save_count
+    assert_equal before_json, File.read(state_path)
+    after = read_state
+    assert_equal before.fetch("metadata").fetch("updated_at"), after.fetch("metadata").fetch("updated_at")
+    assert_equal before.fetch("projects").first.fetch("updated_at"), after.fetch("projects").first.fetch("updated_at")
+    assert_equal before.fetch("issues").first.fetch("updated_at"), after.fetch("issues").first.fetch("updated_at")
+    assert_equal before.fetch("agents").first.fetch("updated_at"), after.fetch("agents").first.fetch("updated_at")
+  end
+
+  def test_session_identity_transition_is_persisted_immediately
+    state_with_worker(pid: Process.pid.to_s, session_file: live_session_file)
+    store = CountingStore.new(path: state_path)
+    client = StubHarnessClient.new(sessions: { "sess-1" => { "streaming" => true } })
+    client.define_singleton_method(:get_state) do |session_ref|
+      super(session_ref).merge("session_id" => "sess-replaced")
+    end
+    engine = build_engine(store: store, harness_client_resolver: ->(_agent) { client })
+    engine.send(:persist_normalized_state_if_changed)
+    store.reset_save_count!
+
+    result = apply_command(engine, "ReconcileSessions", {})
+
+    assert result.dig("result", "poll_results").first.fetch("changed")
+    assert_equal 1, store.save_count
+    assert_equal "sess-replaced", agent_by_id(read_state, "P1-I1-W1").fetch("harness_session_id")
+  end
+
+  def test_concurrent_create_issue_during_poll_is_preserved_by_the_merge_transaction
+    state_with_worker(
+      pid: Process.pid.to_s,
+      session_file: live_session_file,
+      harness_metadata: { "kind" => "worker", "is_streaming" => true, "reconcile_state" => "healthy" }
+    )
+    entered = Queue.new
+    release = Queue.new
+    client = StubHarnessClient.new(sessions: { "sess-1" => { "streaming" => true, "events" => [{ "type" => "agent_start" }] } })
+    client.define_singleton_method(:get_state) do |session_ref|
+      entered << true
+      release.pop
+      super(session_ref)
+    end
+    reconcile_engine = build_engine(harness_client_resolver: ->(_agent) { client })
+    command_engine = build_engine(harness_client_resolver: ->(_agent) { client })
+
+    reconcile_thread = Thread.new { reconcile_engine.reconcile_sessions }
+    entered.pop
+    prompted = apply_command(command_engine, "PromptAgent", {
+      "agent_id" => "P1-I1-W1",
+      "prompt" => "Preserve this concurrent prompt."
+    })
+    created = apply_command(command_engine, "CreateIssue", {
+      "project_id" => "P1",
+      "title" => "Concurrent issue",
+      "description" => "Created while polling was outside the state lock."
+    })
+    release << true
+    reconcile = reconcile_thread.value
+
+    assert_equal "accepted", prompted.fetch("status")
+    assert_equal "accepted", created.fetch("status")
+    assert_equal "accepted", reconcile.fetch("status")
+    state = read_state
+    assert_equal "Concurrent issue", state.fetch("issues").find { |issue| issue.fetch("id") == created.fetch("target_id") }.fetch("title")
+    assert_equal 1, agent_by_id(state, "P1-I1-W1").dig("harness_metadata", "prompt_count")
+  end
+
+  def test_restart_after_coalesced_completion_does_not_repeat_events_or_transition
+    state_with_worker(pid: Process.pid.to_s, session_file: live_session_file)
+    sessions = {
+      "sess-1" => {
+        "streaming" => false,
+        "completed" => true,
+        "last_assistant_text" => "done",
+        "events" => [{ "type" => "agent_end" }]
+      }
+    }
+    first_engine, = stub_engine(sessions)
+
+    first = apply_command(first_engine, "ReconcileSessions", {})
+    after_first = File.read(state_path)
+    restarted_engine, restarted_client = stub_engine(sessions)
+    second = apply_command(restarted_engine, "ReconcileSessions", {})
+
+    assert first.dig("result", "poll_results").first.fetch("changed")
+    assert_equal 0, second.dig("result", "checked_count")
+    assert_empty restarted_client.calls
+    assert_equal after_first, File.read(state_path)
+    state = read_state
+    assert_equal "completed", agent_by_id(state, "P1-I1-W1").fetch("status")
+    assert_equal 1, state.fetch("logs").count { |log| log.fetch("message", "").include?("completed") }
   end
 
   def test_healthy_poll_repairs_stale_parent_statuses
