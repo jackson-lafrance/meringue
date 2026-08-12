@@ -68,9 +68,10 @@ module ScalabilityBenchmark
   class ProtocolTerminal
     attr_reader :rendered_revisions, :rendered_scroll_markers
 
-    def initialize(input: $stdin, output: $stdout)
+    def initialize(input: $stdin, output: $stdout, on_sync: nil)
       @input = input
       @output = output
+      @on_sync = on_sync
       @sequence = nil
       @typed = +""
       @rendered_revisions = []
@@ -92,6 +93,12 @@ module ScalabilityBenchmark
 
       request = JSON.parse(line)
       @sequence = request.fetch("sequence")
+      if request["sync"]
+        @on_sync&.call
+        # Store presentation refreshes on a bounded cadence. This unmeasured barrier
+        # lets the next frame consume the final paused reconciliation snapshot.
+        sleep 0.25
+      end
       key = request.fetch("key")
       @typed << key if key.is_a?(String) && key.match?(/\A[[:print:]]+\z/)
       key
@@ -125,9 +132,19 @@ module ScalabilityBenchmark
       @store = store
       @updates = 0
       @fake = Meringue::Harness::FakeClient.new
+      @mutex = Mutex.new
+      @paused = false
+    end
+
+    def pause!
+      @mutex.synchronize { @paused = true }
     end
 
     def call
+      @mutex.synchronize { reconcile_once unless @paused }
+    end
+
+    def reconcile_once
       state = @store.load
       @updates += 1
       active = state.fetch("agents").select { |agent| agent["status"] == "working" }
@@ -155,7 +172,7 @@ module ScalabilityBenchmark
   def child(path:, interval:)
     store = Meringue::State::Store.new(path: path)
     reconciler = SyntheticReconciler.new(store)
-    terminal = ProtocolTerminal.new
+    terminal = ProtocolTerminal.new(on_sync: -> { reconciler.pause! })
     tui = Meringue::TUI::App.new(terminal: terminal, out: $stdout, log_store: store)
     app_options = { state_path: path, state_store: store, tui_app: tui, reconciler: reconciler }
     supports_interval = Meringue::App.instance_method(:initialize).parameters.any? { |_kind, name| name == :reconcile_interval }
@@ -186,6 +203,7 @@ module ScalabilityBenchmark
       "all_active_current" => revisions.all? { |revision| revision == reconciler.updates },
       "events_complete_exactly_once" => events == expected_events,
       "activity_rendered" => rendered_revisions.any?,
+      "latest_revision_rendered" => rendered_revisions.max == reconciler.updates,
       "exit_code" => exit_code
     ))
   end
@@ -253,6 +271,15 @@ module ScalabilityBenchmark
           raise "scroll input did not change rendered viewport" if marker.empty? || marker == previous_scroll_marker
           previous_scroll_marker = marker
         end
+        # Pause reconciliation and force one final, unmeasured frame. This makes
+        # visibility exact: the last committed revision must be in rendered bytes.
+        sequence += 1
+        stdin.puts(JSON.generate("sequence" => sequence, "key" => " ", "sync" => true))
+        stdin.flush
+        begin
+          synced = JSON.parse(stdout.gets || raise("child exited before visibility barrier"))
+        end until synced["sequence"] == sequence
+        raise "final committed revision was not rendered" unless synced["rendered_revision"]
         sequence += 1
         stdin.puts(JSON.generate("sequence" => sequence, "key" => "\u0004"))
         stdin.flush
@@ -262,6 +289,9 @@ module ScalabilityBenchmark
         summary = JSON.parse(stderr.read.lines.last || "{}")
         raise "child failed: #{status}" unless status.success?
         raise "synthetic activity never rendered" unless summary["activity_rendered"]
+        unless summary["latest_revision_rendered"]
+          raise "final committed revision never rendered: updates=#{summary["updates"]} rendered=#{summary["rendered_revisions"].inspect}"
+        end
         raise "active revisions did not converge" unless summary["all_active_current"]
         raise "reconciliation event sequence was incomplete or duplicated" unless summary["events_complete_exactly_once"]
       end
@@ -278,7 +308,7 @@ module ScalabilityBenchmark
         "active_revisions" => summary.fetch("active_revisions"),
         "expected_retained_events" => summary.fetch("expected_retained_events"),
         "retained_events" => summary.fetch("retained_events"),
-        "state_visibility" => summary.fetch("all_active_current") && summary.fetch("activity_rendered"),
+        "state_visibility" => summary.fetch("all_active_current") && summary.fetch("latest_revision_rendered"),
         "exactly_once" => summary.fetch("events_complete_exactly_once"),
         "fast" => percentile(typing, 0.95) < 50 && percentile(scrolling, 0.95) < 50 &&
           [typing.max, scrolling.max].max < 100
