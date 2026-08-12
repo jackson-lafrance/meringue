@@ -218,6 +218,7 @@ module Meringue
         @selection_anchor_word = nil
         @selection_anchor_paragraph = nil
         @last_text_click = nil
+        @last_open_pull_requests_summary_click = nil
         @selection_status = nil
         @selection_status_at = nil
         @log_event_keys = {}
@@ -718,6 +719,22 @@ module Meringue
       end
 
       def handle_mouse_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state, on_submit = nil)
+        if layout.open_pull_requests_summary_hit?(
+          state,
+          width: render_width,
+          height: render_height,
+          x: mouse_x(key),
+          y: mouse_y(key)
+        )
+          # Crossing between the summary and another mouse surface must not join
+          # two unrelated presses into that surface's double-click gesture.
+          @last_worker_click = nil
+          @last_text_click = nil
+          open_delivery_pr_picker(state) if open_pull_requests_summary_double_click?(key)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+        @last_open_pull_requests_summary_click = nil
+
         pane = pane_at_mouse_position(key, state)
         return [input_buffer, input_cursor, slash_suggestion_index] unless pane
 
@@ -1578,6 +1595,26 @@ module Meringue
         end
       end
 
+      # The open-PR count is not an AgentTree node and must never enter jump mode
+      # or change the sticky log/chat selection. It therefore keeps an isolated
+      # click tracker rather than borrowing the node-specific one above.
+      def open_pull_requests_summary_double_click?(key)
+        now = monotonic_time
+        click = { x: key.fetch("x", nil).to_i, y: key.fetch("y", nil).to_i, at: now }
+        previous = @last_open_pull_requests_summary_click
+        @last_open_pull_requests_summary_click = click
+        return false unless previous
+        return false unless previous.fetch(:y) == click.fetch(:y)
+        return false unless (previous.fetch(:x) - click.fetch(:x)).abs <= DOUBLE_CLICK_COLUMN_TOLERANCE
+
+        if now - previous.fetch(:at, 0.0) <= DOUBLE_CLICK_INTERVAL_SECONDS
+          @last_open_pull_requests_summary_click = nil
+          true
+        else
+          false
+        end
+      end
+
       def monotonic_time
         Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
@@ -2273,7 +2310,7 @@ module Meringue
         <<~TEXT.strip
           Keybindings (from [tui.keybindings], with defaults for omitted actions):
           Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels a selection first, then the AgentTree log/chat target and jump mode.
-          Focus: click a dashboard section to focus it; double-clicking an issue opens its delivery PR (or shows a transient no-PR notice), double-clicking a worker with a workspace opens its focused workspace, and double-clicking a retryable head submits /retry for a fresh head. Unavailable rows stay quiet. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
+          Focus: click a dashboard section to focus it; double-clicking the `N open PR` / `N open PRs` summary opens the global pull-request picker, double-clicking an issue opens its delivery PR (or shows a transient no-PR notice), double-clicking a worker with a workspace opens its focused workspace, and double-clicking a retryable head submits /retry for a fresh head. Unavailable rows stay quiet. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
           AgentTree selection and chat target: single-click a project, issue, head, or worker row to select it and filter the logs pane to that node (a worker shows its own logs, an issue adds all of its workers and child issues, a project adds its whole subtree). Right-click an issue to open its associated delivery PR; workers do not duplicate that affordance, and an issue without one shows a transient notice. An issue also targets subsequent natural-language chat to that issue; a worker selection resolves chat to its owning issue. A fresh head still routes every message using that explicit target context. Head rows and projects remain log-only filters; retry a failed/blocked head explicitly with /retry H<n> or by double-clicking its "retry me" row. Use /open-session <agent_id> to open an underlying harness session for debugging, including a head session. The selection stays highlighted, is scrolled back into view when it changes, and keeps filtering while you work in the logs or chat pane; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} in jump mode retarget it. Double-click an issue to open its PR, or double-click a worker with an assigned workspace to open that worker's focused workspace. Click the highlighted row again, click empty space in the AgentTree, or press #{keys_for("cancel_navigation")} to clear it. Heads without an owning issue, projects, and workers without workspaces remain log-only filters for these mouse actions.
           Selection: drag with the mouse in the logs pane or the composer to select text; double-click selects a word, and triple-click selects a complete logs paragraph; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
           Logs selection (keyboard): focus the logs pane, then #{keys_for("logs_selection_mode")} toggles the selection cursor or any Shift+movement starts it. #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor, #{keys_for("cursor_word_left")}/#{keys_for("cursor_word_right")} move by word, #{keys_for("cursor_home")}/#{keys_for("cursor_end")} jump to the line edges, and #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} move by page. #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")}, #{keys_for("select_home")}/#{keys_for("select_end")}, #{keys_for("select_word_left")}/#{keys_for("select_word_right")}, and #{keys_for("select_page_up")}/#{keys_for("select_page_down")} extend the selection. #{keys_for("copy_selection")} copies the selection (or the cursor line when nothing is extended); #{keys_for("cancel_navigation")} exits.

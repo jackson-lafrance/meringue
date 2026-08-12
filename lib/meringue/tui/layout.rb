@@ -133,6 +133,35 @@ module Meringue
         end&.first
       end
 
+      # The all-open-PR count is one actionable segment in the dashboard summary
+      # row, not a target covering the whole row. Map only the cells actually
+      # rendered for "1 open PR" / "N open PRs"; neighboring status and key hints
+      # retain their existing mouse behavior. A scoped issue shows its own PR
+      # instead, and zero/untracked PRs have no picker to open.
+      def open_pull_requests_summary_hit?(state, width:, height:, x:, y:)
+        return false if onboarding_active?(state) || agent_workspace_active?(state)
+        return false unless DeliveryPullRequest.scoped_id(state).empty?
+        return false unless OpenPullRequests.count(state).positive?
+
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        return false unless y.to_i == metrics.fetch(:hint_y)
+
+        label = OpenPullRequests.summary_label(state)
+        offset = 0
+        chat_pane.bottom_hint_line(state).each do |segment|
+          text = segment.is_a?(Array) ? segment.fetch(0, "").to_s : segment.to_s
+          if text == label
+            visible_width = [text.length, hint_left_width(metrics.fetch(:hint_width), chat_pane.bottom_right_status_line(state)) - offset].min
+            return false unless visible_width.positive?
+
+            start_x = metrics.fetch(:hint_x) + offset
+            return x.to_i >= start_x && x.to_i < start_x + visible_width
+          end
+          offset += text.length
+        end
+        false
+      end
+
       # Logs selection points are content coordinates (index into the wrapped log
       # lines plus a column) so a highlight follows the content while scrolling.
       # Coordinates are clamped into the logs text area, which is what keeps a
@@ -991,13 +1020,18 @@ module Meringue
 
       def draw_hint_line(canvas, x, y, width, line, right_line = [])
         right_width = segment_text_width(right_line)
+        left_width = hint_left_width(width, right_line)
         if right_width.positive? && right_width < width
-          left_width = [width - right_width - 2, 0].max
           canvas.write_segments(x, y, line, max_width: left_width, default_style: Style::MUTED)
           canvas.write_segments(x + width - right_width, y, right_line, max_width: right_width, default_style: Style::MUTED)
         else
           canvas.write_segments(x, y, line, max_width: width, default_style: Style::MUTED)
         end
+      end
+
+      def hint_left_width(width, right_line)
+        right_width = segment_text_width(right_line)
+        right_width.positive? && right_width < width ? [width - right_width - 2, 0].max : width
       end
 
       def segment_text_width(segments)
