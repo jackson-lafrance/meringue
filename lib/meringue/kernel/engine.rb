@@ -1780,44 +1780,92 @@ module Meringue
       end
 
       def prune_killed_records
-        synchronized_state do
+        operation_id = "reconcile-prune-#{instance_id}-#{Thread.current.object_id}-#{(monotonic_time * 1_000_000).to_i}"
+        preparation = synchronized_state do
           state = normalized_state
-          killed_project_ids = state.fetch("projects").select { |project| project.fetch("status", nil) == "killed" }.map { |project| project.fetch("id") }
-          killed_issue_ids = state.fetch("issues").select { |issue| issue.fetch("status", nil) == "killed" }.map { |issue| issue.fetch("id") }
-          killed_agent_ids = state.fetch("agents").select { |agent| agent.fetch("status", nil) == "killed" }.map { |agent| agent.fetch("id") }
-          if killed_project_ids.empty? && killed_issue_ids.empty? && killed_agent_ids.empty?
-            return {
-              "changed" => false,
-              "removed_issue_ids" => [],
-              "removed_agent_ids" => [],
-              "removed_standalone_agent_ids" => [],
-              "removed_project_ids" => [],
-              "log_entry_ids" => []
-            }
+          plan = killed_record_prune_plan(state)
+          if plan.values.all?(&:empty?)
+            next nil
           end
 
+          worker_ids = workers_removed_by_record_plan(state, plan)
+          next nil if worker_ids.any? { |worker_id| worker_prune_cleanup_claimed?(find_agent(state, worker_id)) }
+
+          now = timestamp
+          worker_ids.each do |worker_id|
+            worker = find_agent(state, worker_id)
+            next unless worker
+
+            metadata = worker.fetch("harness_metadata", {}) || {}
+            worker["harness_metadata"] = metadata.merge(
+              "prune_cleanup_claim" => prune_cleanup_claim(operation_id, now)
+            )
+          end
+          touch_state!(state, now)
+          store.save(state)
+          { "plan" => plan, "worker_ids" => worker_ids, "state" => deep_copy(state), "claimed_at" => now }
+        end
+        return empty_killed_record_prune_result unless preparation
+
+        workspace_cleanups = cleanup_prune_workspace_plan(preparation)
+        synchronized_state do
+          state = normalized_state
+          current = killed_record_prune_plan(state)
+          initial = preparation.fetch("plan")
+          plan = current.to_h do |key, ids|
+            [key, ids & initial.fetch(key)]
+          end
           now = timestamp
           prune_result = remove_issue_bundles_and_agents!(
             state,
-            issue_ids: killed_issue_ids,
-            project_ids: killed_project_ids,
-            extra_agent_ids: killed_agent_ids,
+            issue_ids: plan.fetch("issue_ids"),
+            project_ids: plan.fetch("project_ids"),
+            extra_agent_ids: plan.fetch("agent_ids"),
             reason: "killed",
             now: now,
             remove_empty_projects: false,
-            cleanup_worker_workspaces: true
+            prepared_workspace_cleanups: workspace_cleanups
           )
-          removed_project_ids = prune_result.fetch("removed_project_ids", [])
+          clear_prune_cleanup_claims!(state, operation_id)
           log_ids = prune_result.fetch("workspace_cleanup_log_entry_ids", []).dup
           log_ids.concat(append_killed_records_prune_log(state, prune_result))
           touch_state!(state, now)
           store.save(state)
-          prune_result.merge(
-            "changed" => true,
-            "removed_project_ids" => removed_project_ids,
-            "log_entry_ids" => log_ids.uniq
-          )
+          prune_result.merge("changed" => true, "log_entry_ids" => log_ids.uniq)
         end
+      rescue StandardError
+        release_prune_cleanup_claims(operation_id)
+        raise
+      end
+
+      def killed_record_prune_plan(state)
+        {
+          "project_ids" => state.fetch("projects").filter_map { |record| record.fetch("id", nil) if record.fetch("status", nil) == "killed" },
+          "issue_ids" => state.fetch("issues").filter_map { |record| record.fetch("id", nil) if record.fetch("status", nil) == "killed" },
+          "agent_ids" => state.fetch("agents").filter_map { |record| record.fetch("id", nil) if record.fetch("status", nil) == "killed" }
+        }
+      end
+
+      def workers_removed_by_record_plan(state, plan)
+        issue_ids = (plan.fetch("issue_ids") + project_issue_ids(state, plan.fetch("project_ids"))).uniq
+        subtree_ids = issue_ids.flat_map { |issue_id| issue_subtree_ids(state, issue_id) }.uniq
+        state.fetch("agents").filter_map do |agent|
+          next unless agent.fetch("type", nil) == "worker"
+          next unless subtree_ids.include?(agent.fetch("issue_id", nil)) || plan.fetch("agent_ids").include?(agent.fetch("id", nil))
+
+          agent.fetch("id", nil)
+        end.compact.uniq
+      end
+
+      def empty_killed_record_prune_result
+        {
+          "changed" => false,
+          "removed_issue_ids" => [],
+          "removed_agent_ids" => [],
+          "removed_standalone_agent_ids" => [],
+          "removed_project_ids" => [],
+          "log_entry_ids" => []
+        }
       end
 
       # Reconciliation removes killed records with the same helper `/prune` uses, so it also lost
@@ -4275,16 +4323,112 @@ module Meringue
       # compatibility and recorded for traceability, but it never changes what is pruned.
       def prune(command_id, command_type, payload)
         requested_selector = present_string(value_at(payload, "selector", "Selector", "kind", "status").to_s.downcase)
-        # Never hold the global state/file lock while `gh` or another forge client performs
-        # external I/O. First populate a short-lived, per-command cache from a state snapshot.
-        # Then reacquire the lock and apply the prune against current state using only cached
-        # results. A PR introduced after the snapshot is treated as unknown and retained.
+        started_at = monotonic_time
+        # Forge I/O and git worktree cleanup are both unbounded from the state layer's point of
+        # view. Neither may run while the shared state lock is held: reconciliation and later TUI
+        # commands must remain able to read and mutate state throughout a large prune.
         lookup_context = prepare_prune_forge_lookups
-        synchronized_state do
+        forge_finished_at = monotonic_time
+        operation_id = present_string(command_id) || "prune-#{instance_id}-#{Thread.current.object_id}-#{(started_at * 1_000_000).to_i}"
+        lookup_context["operation_id"] = operation_id
+        preparation = synchronized_state do
           with_prune_forge_lookup_context(lookup_context) do
-            prune_records(command_id, command_type, requested_selector: requested_selector)
+            prepare_prune_workspace_cleanup(operation_id)
           end
         end
+        planning_finished_at = monotonic_time
+        workspace_cleanups = cleanup_prune_workspace_plan(preparation)
+        cleanup_finished_at = monotonic_time
+        synchronized_state do
+          with_prune_forge_lookup_context(lookup_context) do
+            prune_records(
+              command_id,
+              command_type,
+              requested_selector: requested_selector,
+              prepared_plan: preparation.fetch("plan"),
+              prepared_workspace_cleanups: workspace_cleanups,
+              prune_operation_id: operation_id,
+              timings: {
+                "forge_lookup_seconds" => forge_finished_at - started_at,
+                "planning_seconds" => planning_finished_at - forge_finished_at,
+                "workspace_cleanup_seconds" => cleanup_finished_at - planning_finished_at,
+                "commit_seconds" => monotonic_time - cleanup_finished_at,
+                "total_seconds" => monotonic_time - started_at
+              }
+            )
+          end
+        end
+      rescue StandardError
+        release_prune_cleanup_claims(operation_id)
+        raise
+      end
+
+      def release_prune_cleanup_claims(operation_id)
+        return if blank?(operation_id)
+
+        synchronized_state do
+          state = normalized_state
+          clear_prune_cleanup_claims!(state, operation_id)
+          touch_state!(state)
+          store.save(state)
+        end
+      rescue StandardError
+        nil
+      end
+
+      def prepare_prune_workspace_cleanup(operation_id)
+        state = normalized_state
+        plan = prune_removal_plan(state)
+        worker_ids = prune_plan_worker_ids(state, plan)
+        now = timestamp
+        worker_ids.each do |worker_id|
+          worker = find_agent(state, worker_id)
+          next unless worker
+
+          metadata = worker.fetch("harness_metadata", {}) || {}
+          worker["harness_metadata"] = metadata.merge(
+            "prune_cleanup_claim" => prune_cleanup_claim(operation_id, now)
+          )
+        end
+        if worker_ids.any?
+          touch_state!(state, now)
+          store.save(state)
+        end
+        { "plan" => plan, "worker_ids" => worker_ids, "state" => deep_copy(state), "claimed_at" => now }
+      end
+
+      def cleanup_prune_workspace_plan(preparation)
+        cleanup_pruned_worker_workspaces!(
+          preparation.fetch("state"),
+          preparation.fetch("worker_ids"),
+          preparation.fetch("claimed_at"),
+          append_logs: false
+        )
+      end
+
+      def prune_removal_plan(state)
+        delivery_refreshes = refresh_worker_delivery_pull_requests!(state)
+        pull_request_checks = prune_pull_request_checks(state)
+        issue_decisions = issue_prune_decisions(state, pull_request_checks)
+        project_decisions = project_prune_decisions(state, issue_decisions)
+        removable_project_ids = project_decisions.select { |decision| decision.fetch("prunable", false) }.map { |decision| decision.fetch("project_id") }
+        {
+          "delivery_refreshes" => delivery_refreshes,
+          "pull_request_checks" => pull_request_checks,
+          "issue_decisions" => issue_decisions,
+          "project_decisions" => project_decisions,
+          "removable_project_ids" => removable_project_ids,
+          "removable_issue_ids" => issue_prune_roots(issue_decisions, removable_project_ids)
+        }
+      end
+
+      def prune_plan_worker_ids(state, plan)
+        project_issue_ids = project_issue_ids(state, plan.fetch("removable_project_ids"))
+        root_ids = (plan.fetch("removable_issue_ids") + project_issue_ids).uniq
+        issue_ids = root_ids.flat_map { |issue_id| issue_subtree_ids(state, issue_id) }.uniq
+        state.fetch("agents").filter_map do |agent|
+          agent.fetch("id", nil) if agent.fetch("type", nil) == "worker" && issue_ids.include?(agent.fetch("issue_id", nil))
+        end.compact.uniq
       end
 
       def prepare_prune_forge_lookups
@@ -4490,14 +4634,23 @@ module Meringue
       # in the same pass. Managed worktree cleanup is attempted before worker records leave state,
       # but a cleanup failure never changes logical eligibility: the unsafe worktree is preserved
       # and its structured outcome is reported for manual/future cleanup.
-      def prune_records(command_id, command_type, requested_selector: nil)
+      def prune_records(command_id, command_type, requested_selector: nil, prepared_plan: nil,
+                        prepared_workspace_cleanups: nil, prune_operation_id: nil, timings: nil)
         state = normalized_state
-        delivery_refreshes = refresh_worker_delivery_pull_requests!(state)
-        pull_request_checks = prune_pull_request_checks(state)
-        issue_decisions = issue_prune_decisions(state, pull_request_checks)
-        project_decisions = project_prune_decisions(state, issue_decisions)
-        removable_project_ids = project_decisions.select { |decision| decision.fetch("prunable", false) }.map { |decision| decision.fetch("project_id") }
-        removable_issue_ids = issue_prune_roots(issue_decisions, removable_project_ids)
+        current_plan = prune_removal_plan(state)
+        delivery_refreshes = current_plan.fetch("delivery_refreshes")
+        pull_request_checks = current_plan.fetch("pull_request_checks")
+        issue_decisions = current_plan.fetch("issue_decisions")
+        project_decisions = current_plan.fetch("project_decisions")
+        removable_project_ids = current_plan.fetch("removable_project_ids")
+        removable_issue_ids = current_plan.fetch("removable_issue_ids")
+        if prepared_plan
+          # State may advance while cleanup runs. Never widen a pass after its cleanup safety set was
+          # captured; newly eligible records wait for the next prune. Records that ceased to be
+          # eligible are retained by intersecting with the freshly recomputed plan.
+          removable_project_ids &= Array(prepared_plan.fetch("removable_project_ids", []))
+          removable_issue_ids &= Array(prepared_plan.fetch("removable_issue_ids", []))
+        end
         errored_head_ids = state.fetch("agents").select do |agent|
           agent.fetch("type", nil) == "head" && agent.fetch("status", nil) == "errored" && !head_applying_batch?(agent)
         end.map { |agent| agent.fetch("id") }
@@ -4510,7 +4663,8 @@ module Meringue
           reason: "prune",
           now: now,
           remove_empty_projects: false,
-          cleanup_worker_workspaces: true
+          cleanup_worker_workspaces: prepared_workspace_cleanups.nil?,
+          prepared_workspace_cleanups: prepared_workspace_cleanups
         )
         checked_urls = pull_request_checks.flat_map { |check| check.fetch("statuses", []).map { |status| status.fetch("url", nil) } }.compact.uniq
         blocked_urls = issue_decisions.flat_map do |decision|
@@ -4529,7 +4683,8 @@ module Meringue
           "delivery_pull_request_refreshes" => delivery_refreshes,
           "retained_issue_ids" => retention.fetch("retained_issue_ids"),
           "retention_reasons" => retention.fetch("reasons"),
-          "forge_lookup" => forge_lookup
+          "forge_lookup" => forge_lookup,
+          "timings" => timings
         ).compact
         log_ids = prune_result.fetch("workspace_cleanup_log_entry_ids", []).dup
         log_ids.concat(append_log(
@@ -4540,6 +4695,7 @@ module Meringue
           message: message,
           details: details
         ))
+        clear_prune_cleanup_claims!(state, prune_operation_id)
         touch_state!(state, now)
         store.save(state)
 
@@ -4877,6 +5033,7 @@ module Meringue
             agent.fetch("type", nil) == "worker" && subtree_ids.include?(agent.fetch("issue_id", nil))
           end
           blocking_workers = workers.select { |worker| PRUNE_BLOCKING_WORKER_STATUSES.include?(worker.fetch("status", nil).to_s) }
+          cleanup_claimed_workers = workers.select { |worker| worker_prune_cleanup_claimed?(worker) }
           open_questions = state.fetch("questions").select do |question|
             question.fetch("status", nil) == "open" && subtree_ids.include?(question.fetch("issue_id", nil))
           end
@@ -4901,6 +5058,7 @@ module Meringue
           blockers = []
           blockers << "nonterminal_issues" if nonterminal_issue_ids.any?
           blockers << "unresolved_workers" if blocking_workers.any?
+          blockers << "workspace_cleanup_in_progress" if cleanup_claimed_workers.any?
           blockers << "open_questions" if open_questions.any?
           blockers << "unsettled_pull_requests" if pull_request_blockers.any?
           blockers << "pending_deferred_dependents" if deferred_dependents.any?
@@ -4916,6 +5074,7 @@ module Meringue
             "blockers" => blockers,
             "nonterminal_issue_ids" => nonterminal_issue_ids,
             "blocking_worker_ids" => blocking_workers.map { |worker| worker.fetch("id", nil) }.compact,
+            "workspace_cleanup_claimed_worker_ids" => cleanup_claimed_workers.map { |worker| worker.fetch("id", nil) }.compact,
             "deferred_dependent_worker_ids" => deferred_dependents.map { |dependent| dependent.fetch("id", nil) }.compact,
             "completion_continuation_worker_ids" => completion_continuations.map { |worker| worker.fetch("id", nil) }.compact,
             "open_question_ids" => open_questions.map { |question| question.fetch("id", nil) }.compact,
@@ -4974,8 +5133,10 @@ module Meringue
 
       def verified_worker_pull_requests(agent:, project:, candidate_urls:)
         branch = worker_delivery_branch(agent)
+        return [] if blank?(branch)
+
         project_repository = project && project_github_repository(project)
-        return [] if blank?(branch) || blank?(project_repository)
+        return [] if blank?(project_repository)
 
         Array(candidate_urls).filter_map do |url|
           status = pull_request_status(url)
@@ -5006,8 +5167,10 @@ module Meringue
         return [] unless forge_client.respond_to?(:pull_request_urls_for_branch)
 
         branch = normalized_branch_name(persisted_worker_delivery_branch(agent))
+        return [] if blank?(branch)
+
         repository = project_github_repository(project)
-        return [] if blank?(branch) || blank?(repository)
+        return [] if blank?(repository)
         # A merged delivery pull request is already recorded for this exact branch, so discovery can
         # only re-derive URLs Meringue already has. Skipping it stops a slow or unreachable forge
         # from manufacturing an `unknown` blocker for settled work, and leaves the budget for
@@ -5268,7 +5431,8 @@ module Meringue
       end
 
       def remove_issue_bundles_and_agents!(state, issue_ids:, extra_agent_ids:, reason:, now:, remove_empty_projects: true,
-                                           project_ids: [], cleanup_worker_workspaces: false)
+                                           project_ids: [], cleanup_worker_workspaces: false,
+                                           prepared_workspace_cleanups: nil)
         requested_project_ids = Array(project_ids).compact.uniq
         requested_issue_ids = Array(issue_ids).compact.uniq
         initial_project_issue_ids = project_issue_ids(state, requested_project_ids)
@@ -5281,7 +5445,9 @@ module Meringue
           agent.fetch("id", nil)
         end.compact.uniq
 
-        workspace_cleanups = if cleanup_worker_workspaces
+        workspace_cleanups = if prepared_workspace_cleanups
+                               apply_prepared_workspace_cleanups!(state, initial_worker_ids, prepared_workspace_cleanups)
+                             elsif cleanup_worker_workspaces
                                cleanup_pruned_worker_workspaces!(state, initial_worker_ids, now)
                              else
                                []
@@ -5382,7 +5548,37 @@ module Meringue
         end.map { |issue| issue.fetch("id") }
       end
 
-      def cleanup_pruned_worker_workspaces!(state, worker_ids, now)
+      def apply_prepared_workspace_cleanups!(state, worker_ids, prepared)
+        allowed_ids = Array(worker_ids).compact
+        Array(prepared).filter_map do |raw_outcome|
+          outcome = deep_copy(raw_outcome)
+          agent_id = outcome.fetch("agent_id", nil)
+          next unless allowed_ids.include?(agent_id)
+
+          worker = find_agent(state, agent_id)
+          next unless worker && worker.fetch("type", nil) == "worker"
+
+          metadata = worker.fetch("harness_metadata", {}) || {}
+          worker["harness_metadata"] = metadata.merge("workspace_cleanup" => outcome.reject { |key, _value| key == "log_entry_ids" })
+          outcome.merge("log_entry_ids" => append_workspace_cleanup_log(state, worker, outcome))
+        end
+      end
+
+      def clear_prune_cleanup_claims!(state, operation_id)
+        return if blank?(operation_id)
+
+        state.fetch("agents").each do |agent|
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          claim = metadata.fetch("prune_cleanup_claim", nil)
+          next unless claim.is_a?(Hash) && claim.fetch("operation_id", nil) == operation_id
+
+          metadata = metadata.dup
+          metadata.delete("prune_cleanup_claim")
+          agent["harness_metadata"] = metadata
+        end
+      end
+
+      def cleanup_pruned_worker_workspaces!(state, worker_ids, now, append_logs: true)
         pruned_ids = Array(worker_ids).compact
         Array(worker_ids).filter_map do |agent_id|
           worker = find_agent(state, agent_id)
@@ -5429,7 +5625,7 @@ module Meringue
             "checked_at" => now
           )
           worker["harness_metadata"] = (worker.fetch("harness_metadata", {}) || {}).merge("workspace_cleanup" => outcome)
-          log_ids = append_workspace_cleanup_log(state, worker, outcome)
+          log_ids = append_logs ? append_workspace_cleanup_log(state, worker, outcome) : []
           outcome.merge("log_entry_ids" => log_ids)
         rescue StandardError => e
           outcome = {
@@ -5444,7 +5640,8 @@ module Meringue
             "checked_at" => now
           }.compact
           worker["harness_metadata"] = (worker.fetch("harness_metadata", {}) || {}).merge("workspace_cleanup" => outcome) if worker
-          outcome.merge("log_entry_ids" => worker ? append_workspace_cleanup_log(state, worker, outcome) : [])
+          log_ids = worker && append_logs ? append_workspace_cleanup_log(state, worker, outcome) : []
+          outcome.merge("log_entry_ids" => log_ids)
         end
       end
 
@@ -6087,6 +6284,14 @@ module Meringue
           )
         end
         return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
+        if worker_prune_cleanup_claimed?(agent)
+          return rejected_result(
+            command_id,
+            command_type,
+            "Agent #{agent_id} is being safely pruned; its workspace cannot be resumed during cleanup.",
+            ["agent_prune_in_progress"]
+          )
+        end
         if interactive_focus_active?(agent)
           return rejected_result(
             command_id,
@@ -11016,6 +11221,8 @@ module Meringue
         predecessor = predecessor_id ? find_agent(state, predecessor_id) : nil
         workspace = nil
         if predecessor.is_a?(Hash) && predecessor.fetch("type", nil) == "worker"
+          return workspace_reuse_refusal(request, "predecessor_prune_in_progress") if worker_prune_cleanup_claimed?(predecessor)
+
           unless predecessor.fetch("issue_id", nil) == issue.fetch("id")
             return workspace_reuse_refusal(request, "predecessor_on_another_issue")
           end
@@ -11069,6 +11276,28 @@ module Meringue
           "worktree_root_path" => root,
           "workspace" => workspace
         }.compact
+      end
+
+      def prune_cleanup_claim(operation_id, claimed_at)
+        {
+          "operation_id" => operation_id,
+          "claimed_at" => claimed_at,
+          "owner_pid" => instance_pid,
+          "owner_host" => kernel_host_name
+        }
+      end
+
+      def worker_prune_cleanup_claimed?(worker)
+        metadata = worker.is_a?(Hash) ? (worker.fetch("harness_metadata", {}) || {}) : {}
+        claim = metadata.fetch("prune_cleanup_claim", nil)
+        return false unless claim.is_a?(Hash)
+        return false if claim.fetch("operation_id", nil) == prune_forge_lookup_context&.fetch("operation_id", nil)
+
+        owner_host = claim.fetch("owner_host", nil).to_s
+        owner_pid = claim.fetch("owner_pid", 0).to_i
+        return true if owner_host.empty? || owner_host != kernel_host_name
+
+        owner_pid.positive? && owner_process_alive?(owner_pid)
       end
 
       def workspace_reuse_refusal(request, reason, details = {})
