@@ -42,16 +42,78 @@ module Meringue
           else
             selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
             entries.each do |entry|
-              gutter = gutter_segment(entry)
-              append_log_paragraph(lines, paragraph_ranges, role_lines(entry, selected_agent_id: selected_agent_id, width: width))
-              append_log_body_paragraphs(lines, paragraph_ranges, body_lines(entry, width: width, gutter: gutter))
-              if entry.fetch("kind", nil) == "message" && entry.fetch("status", nil)
-                append_log_paragraph(lines, paragraph_ranges, [status_line(entry.fetch("status"), gutter)])
-              end
+              fragment = cached_log_entry_fragment(entry, width: width, selected_agent_id: selected_agent_id)
+              append_log_fragment(lines, paragraph_ranges, fragment)
             end
           end
           @log_lines_cache = { key: cache_key, lines: lines, paragraph_ranges: paragraph_ranges }
           lines
+        end
+
+        # Durable logs are append-only inside a sliding retention window. A new worker update used
+        # to invalidate the whole-pane cache and re-run Markdown layout for all 500 retained logs.
+        # Keep each entry's wrapped rows independently so an append lays out only the new record;
+        # assembling the complete scrollback remains cheap and preserves selection coordinates.
+        def cached_log_entry_fragment(entry, width:, selected_agent_id:)
+          @log_entry_fragment_cache ||= {}
+          key = log_entry_fragment_cache_key(entry, width, selected_agent_id)
+          return @log_entry_fragment_cache.fetch(key) if @log_entry_fragment_cache.key?(key)
+
+          fragment_lines = []
+          fragment_ranges = {}
+          gutter = gutter_segment(entry)
+          append_log_paragraph(
+            fragment_lines,
+            fragment_ranges,
+            role_lines(entry, selected_agent_id: selected_agent_id, width: width)
+          )
+          append_log_body_paragraphs(
+            fragment_lines,
+            fragment_ranges,
+            body_lines(entry, width: width, gutter: gutter)
+          )
+          if entry.fetch("kind", nil) == "message" && entry.fetch("status", nil)
+            append_log_paragraph(fragment_lines, fragment_ranges, [status_line(entry.fetch("status"), gutter)])
+          end
+
+          @log_entry_fragment_cache[key] = { lines: fragment_lines, paragraph_ranges: fragment_ranges }
+          # Keep more than two full retained windows so normal append/evict traffic never causes a
+          # synchronized cache cliff. Hash insertion order lets us discard only the oldest fragments.
+          @log_entry_fragment_cache.shift while @log_entry_fragment_cache.length > 1_200
+          @log_entry_fragment_cache.fetch(key)
+        end
+
+        def append_log_fragment(lines, paragraph_ranges, fragment)
+          offset = lines.length
+          lines.concat(fragment.fetch(:lines))
+          fragment.fetch(:paragraph_ranges).each do |line_index, range|
+            paragraph_ranges[line_index + offset] = {
+              "start_line" => range.fetch("start_line") + offset,
+              "end_line" => range.fetch("end_line") + offset
+            }
+          end
+        end
+
+        def log_entry_fragment_cache_key(entry, width, selected_agent_id)
+          agent = entry.fetch("agent", nil)
+          metadata = agent.is_a?(Hash) ? (agent.fetch("harness_metadata", {}) || {}) : {}
+          [
+            width,
+            entry.fetch("kind", nil),
+            entry.fetch("record_id", nil),
+            entry.fetch("timestamp", nil),
+            entry.fetch("role", nil),
+            entry.fetch("source_type", nil),
+            entry.fetch("source_id", nil),
+            entry.fetch("text", nil),
+            entry.fetch("status", nil),
+            entry.fetch("level", nil),
+            entry.fetch("presentation", nil),
+            agent.is_a?(Hash) ? agent.fetch("status", nil) : nil,
+            metadata.fetch("title", nil),
+            selected_agent_id,
+            Style.current_colorscheme
+          ]
         end
 
         # Inclusive wrapped-row bounds for the displayed paragraph containing a
@@ -716,6 +778,7 @@ module Meringue
           role = log_role(source_type, source_id)
           {
             "kind" => "log",
+            "record_id" => entry.fetch("id", nil),
             "timestamp" => entry.fetch("timestamp", nil),
             "role" => role,
             "source_type" => source_type,

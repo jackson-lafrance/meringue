@@ -55,6 +55,28 @@ class TuiTypingThroughputTest < Minitest::Test
     assert_includes typing_frame("still responsive"), marker
   end
 
+  def test_frequent_log_appends_do_not_relayout_the_retained_window
+    state = history_state
+    provider = -> { state }
+    typing_frame_from(provider, "warm")
+    layouts = 0
+    pane = @app.instance_variable_get(:@layout).instance_variable_get(:@chat_pane)
+    original = pane.method(:body_lines)
+    pane.define_singleton_method(:body_lines) do |entry, **arguments|
+      layouts += 1
+      original.call(entry, **arguments)
+    end
+
+    10.times do |index|
+      state = state.merge(
+        "logs" => state.fetch("logs") + [log_record("L#{LOG_COUNT + index + 1}", "message" => "live update #{index}")]
+      )
+      typing_frame_from(provider, "typing #{index}")
+    end
+
+    assert_equal 10, layouts, "each append should lay out only its new log entry"
+  end
+
   def test_a_keystroke_only_changes_the_composer_rows
     first = typing_frame("ab").split("\n", -1)
     second = typing_frame("abc").split("\n", -1)
@@ -83,7 +105,11 @@ class TuiTypingThroughputTest < Minitest::Test
   private
 
   def typing_frame(text)
-    state = compose_app_state(@app, @provider, text, -1, text.length)
+    typing_frame_from(@provider, text)
+  end
+
+  def typing_frame_from(provider, text)
+    state = compose_app_state(@app, provider, text, -1, text.length)
     @app.render(state, width: WIDTH, height: HEIGHT, color: true)
   end
 
