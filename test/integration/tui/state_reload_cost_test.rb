@@ -6,15 +6,14 @@ require "fileutils"
 require "stringio"
 require "tmpdir"
 
-# App#run hands the TUI `-> { state_store.load }` as its state provider, so this runs for every
-# rendered frame and every keystroke. `typing_throughput_test.rb` covers the render half of a
-# frame against an in-memory provider; this covers the half that touches disk, which is the half
-# whose cost grows with how much work the user has accumulated.
+# App#run hands the TUI `-> { state_store.load }` as its state provider. The dashboard keeps that
+# large, read-only orchestration snapshot independent from transient composer state and refreshes
+# it on a bounded cadence. `typing_throughput_test.rb` covers rendering against an in-memory
+# provider; this covers the Store-facing half whose cost grows with accumulated state.
 #
-# The reported slowdown had this as its steady drag: a 1 MB state file was re-read, re-normalized,
-# and deep string-compacted on every frame even though nothing had changed. The invariant pinned
-# here is structural rather than a stopwatch: an idle Meringue must normalize state once, not once
-# per frame, so per-keystroke cost stops scaling with total state size.
+# The invariants here are structural rather than stopwatch-only: a typing burst must acquire and
+# parse one base snapshot, while writes from this or another Meringue instance become visible by
+# the next refresh and invalidate selections whose records were pruned or recounted.
 class TuiStateReloadCostTest < Minitest::Test
   include TUISupport
 
@@ -37,17 +36,25 @@ class TuiStateReloadCostTest < Minitest::Test
     @app = build_app(terminal: TUISupport::FakeTerminal.new(width: WIDTH, height: HEIGHT))
     @app.instance_variable_set(:@last_render_width, WIDTH)
     @app.instance_variable_set(:@last_render_height, HEIGHT)
+    @clock = 0.0
+    @provider_calls = 0
+    @provider = lambda do
+      @provider_calls += 1
+      @store.load
+    end
   end
 
   def teardown
     FileUtils.remove_entry(@dir) if @dir && File.exist?(@dir)
   end
 
-  def test_an_idle_dashboard_normalizes_state_once_no_matter_how_many_frames_it_renders
+  def test_repeated_typing_acquires_and_parses_one_base_state_within_the_refresh_window
     FRAMES.times { |index| typing_frame("typing #{index}") }
 
+    assert_equal 1, @provider_calls,
+                 "#{FRAMES} typing frames inside one refresh window must acquire one base snapshot"
     assert_equal 1, @store.snapshot_misses,
-                 "#{FRAMES} frames over an unchanged state file must not re-normalize it #{FRAMES} times"
+                 "#{FRAMES} frames over an unchanged state file must normalize it only once"
   end
 
   def test_frames_over_a_large_state_file_stay_cheap
@@ -63,22 +70,66 @@ class TuiStateReloadCostTest < Minitest::Test
                     format("warm avg %.1fms over %d frames", average * 1_000, seconds.length)
   end
 
-  def test_a_durable_state_change_is_still_visible_on_the_next_frame
-    FRAMES.times { |index| typing_frame("typing #{index}") }
+  def test_an_external_durable_change_is_visible_by_the_refresh_bound
+    typing_frame("typing")
 
     marker = "a worker settled while the user was typing"
-    updated = @store.load
+    other_store = Meringue::State::Store.new(path: @path)
+    updated = other_store.load
     updated.fetch("logs") << log_record("L#{LOG_COUNT + 1}", "source_type" => "worker", "message" => marker)
-    @store.save(updated, preserve_log_buffer: false)
+    other_store.save(updated, preserve_log_buffer: false)
 
-    assert_includes strip_ansi(typing_frame("still responsive")), marker
+    refute typing_state("still responsive").fetch("logs").any? { |log| log.fetch("message", nil) == marker }
+    advance_to_refresh_bound
+
+    assert typing_state("still responsive").fetch("logs").any? { |log| log.fetch("message", nil) == marker }
+    assert_equal 2, @provider_calls
+  end
+
+  def test_a_pruned_selection_is_cleared_when_the_base_state_refreshes
+    assert @app.send(:select_agent_tree_item, @store.load, "P1-I1-W1")
+    @app.send(:exit_agent_tree_navigation)
+    typing_frame("typing")
+
+    updated = @store.load
+    updated.fetch("agents").reject! { |agent| agent.fetch("id") == "P1-I1-W1" }
+    @store.save(updated, preserve_log_buffer: false)
+    advance_to_refresh_bound
+
+    composed = typing_state("after prune")
+    assert_empty Meringue::TUI::LogScope.id(composed)
+    assert_nil Meringue::TUI::LogScope.chat_target(composed)
+  end
+
+  def test_a_recounted_selection_is_cleared_when_its_old_id_disappears
+    assert @app.send(:select_agent_tree_item, @store.load, "P1-I2-W1")
+    @app.send(:exit_agent_tree_navigation)
+    typing_frame("typing")
+
+    updated = @store.load
+    agent = updated.fetch("agents").find { |candidate| candidate.fetch("id") == "P1-I2-W1" }
+    agent["id"] = "P1-I2-W9"
+    @store.save(updated, preserve_log_buffer: false)
+    advance_to_refresh_bound
+
+    composed = typing_state("after recount")
+    assert_empty Meringue::TUI::LogScope.id(composed)
+    assert_nil Meringue::TUI::LogScope.chat_target(composed)
   end
 
   private
 
   def typing_frame(text)
-    state = compose_app_state(@app, -> { @store.load }, text, -1, text.length)
-    @app.render(state, width: WIDTH, height: HEIGHT, color: true)
+    @app.render(typing_state(text), width: WIDTH, height: HEIGHT, color: true)
+  end
+
+  def typing_state(text)
+    base_state = @app.send(:read_only_base_state, @provider, now: @clock)
+    compose_app_state(@app, -> { base_state }, text, -1, text.length)
+  end
+
+  def advance_to_refresh_bound
+    @clock += Meringue::TUI::App::REFRESH_INTERVAL
   end
 
   def large_state
