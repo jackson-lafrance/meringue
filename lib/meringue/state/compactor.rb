@@ -81,7 +81,9 @@ module Meringue
       end
 
       def head_command_diagnostic?(details)
-        details.key?("head_id") && details["command_results"].is_a?(Array)
+        # Typed log records such as `unrouted_user_message` also carry concise command results.
+        # Their `kind` is part of the user-facing lookup contract, not redundant diagnostics.
+        !details.key?("kind") && details.key?("head_id") && details["command_results"].is_a?(Array)
       end
 
       def spawn_failure_diagnostic?(details)

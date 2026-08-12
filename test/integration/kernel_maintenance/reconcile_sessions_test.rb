@@ -2,6 +2,7 @@
 
 require "test_helper"
 require "support/kernel_maintenance_support"
+require "support/active_workload_support"
 
 # ReconcileSessions inspects tracked harness sessions and updates lifecycle state
 # from the evidence it can observe: live vs dead pids, readable vs missing
@@ -99,6 +100,55 @@ class KernelMaintenanceReconcileSessionsTest < Minitest::Test
     assert_equal unchanged_state_inode, File.stat(state_path).ino
     assert_equal worker_updated_at, agent_by_id(read_state, "P1-I1-W1").fetch("updated_at")
     assert_equal 2, client.calls.count { |call| call == ["get_state", "sess-1"] }
+  end
+
+  def test_active_workload_coalesces_events_ignores_heartbeats_and_applies_completion_once
+    workload = ActiveWorkloadSupport.state
+    write_state(workload)
+    active_session_ids = workload.fetch("agents").filter_map do |agent|
+      agent["harness_session_id"] if agent.fetch("status") == "working"
+    end
+    client = ActiveWorkloadSupport::HeartbeatClient.new(active_session_ids)
+    store = CountingStore.new(path: state_path)
+    engine = build_engine(store: store, harness_client_resolver: ->(_agent) { client })
+    engine.send(:persist_normalized_state_if_changed)
+    store.reset_save_count!
+
+    first = apply_command(engine, "ReconcileSessions", {})
+
+    assert_equal ActiveWorkloadSupport::AGENT_COUNT, read_state.fetch("agents").length
+    assert_equal ActiveWorkloadSupport::WORKING_WORKER_COUNT, first.dig("result", "checked_count")
+    assert_equal ActiveWorkloadSupport::WORKING_WORKER_COUNT,
+                 first.dig("result", "poll_results").count { |poll| poll.fetch("changed", false) }
+    assert_equal 1, store.save_count, "N streaming workers must publish at most one reconciliation snapshot"
+    active_session_ids.each do |session_id|
+      assert_equal 1, client.read_counts.fetch(session_id), "each transport cursor must be drained once per tick"
+    end
+    state_after_events = read_state
+    active_session_ids.each do |session_id|
+      worker_id = "P1-I#{session_id.delete_prefix("active-session-")}-W1"
+      assert_equal 1, state_after_events.fetch("logs").count { |log| log.fetch("source_id", nil) == worker_id && log.fetch("message", "").include?("rpc_parse_error") }
+    end
+
+    store.reset_save_count!
+    before_heartbeat = File.binread(state_path)
+    second = apply_command(engine, "ReconcileSessions", {})
+    assert_equal 0, second.dig("result", "poll_results").count { |poll| poll.fetch("changed", false) }
+    assert_equal 0, store.save_count, "heartbeat and message-count movement must not publish state"
+    assert_equal before_heartbeat, File.binread(state_path)
+
+    completed_session = active_session_ids.first
+    client.complete!(completed_session)
+    completion = apply_command(engine, "ReconcileSessions", {})
+    completed_worker_id = "P1-I#{completed_session.delete_prefix("active-session-")}-W1"
+    assert completion.dig("result", "poll_results").any? { |poll| poll.fetch("state") == "completed" }
+    assert_equal "completed", agent_by_id(read_state, completed_worker_id).fetch("status")
+    assert_equal 1, read_state.fetch("logs").count { |log| log.fetch("source_id", nil) == completed_worker_id && log.fetch("message", "").include?("process_exit") }
+
+    apply_command(engine, "ReconcileSessions", {})
+    final_state = read_state
+    assert_equal 1, final_state.fetch("logs").count { |log| log.fetch("source_id", nil) == completed_worker_id && log.fetch("message", "").include?("process_exit") }
+    assert_equal 1, final_state.fetch("logs").count { |log| log.fetch("source_id", nil) == completed_worker_id && log.fetch("message", "").include?("completed") }
   end
 
   def test_one_save_persists_meaningful_changes_for_many_streaming_workers
