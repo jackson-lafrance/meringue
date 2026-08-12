@@ -59,6 +59,11 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_equal "interactive_pending", agent(engine, worker_id).dig("harness_metadata", "interactive_handoff", "state")
     assert_equal 1, client.prepared.length
 
+    repeated = engine.begin_agent_interactive_focus(worker_id)
+    assert_equal "rejected", repeated.fetch("status")
+    assert_equal "interactive_focus_active", repeated.fetch("errors").first
+    assert_equal 1, client.prepared.length
+
     # A background tick cannot read or settle the same JSONL while the native PTY owns it.
     before = agent(engine, worker_id).fetch("updated_at")
     engine.reconcile_sessions
@@ -80,6 +85,10 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_equal 1, client.resumed.length
     refute agent(engine, worker_id).fetch("harness_metadata").key?("interactive_handoff")
     assert_equal 49_999, agent(engine, worker_id).fetch("pid")
+
+    already_resumed = engine.end_agent_interactive_focus(worker_id)
+    assert_equal "accepted", already_resumed.fetch("status")
+    assert_equal 1, client.resumed.length, "dashboard ownership must be resumed exactly once"
 
     patch_agent!(worker_id) do |record|
       record.fetch("harness_metadata")["interactive_handoff"] = {

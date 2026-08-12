@@ -2609,7 +2609,12 @@ module Meringue
           end
           apply_workspace_controller_result(workspace_result)
           if %w[failed rejected errored].include?(workspace_result.fetch("status", nil).to_s)
+            # The focused pane is about to disappear, so keep its actionable failure visible on the
+            # restored dashboard instead of stranding it in @agent_workspace_error.
+            message = workspace_result.fetch("message", "Could not open focused workspace.").to_s
+            set_selection_status(message)
             @agent_workspace_active = false
+            @force_full_redraw = true
             return false
           end
           @agent_workspace_interactive = workspace_result.fetch("interactive", false)
