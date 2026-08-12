@@ -6,6 +6,18 @@ require "support/tui_support"
 class TuiLogsPaneTest < Minitest::Test
   include TUISupport
 
+  class HashProbe < Hash
+    def initialize(counter)
+      super()
+      @counter = counter
+    end
+
+    def hash
+      @counter[:calls] += 1
+      super
+    end
+  end
+
   Pane = Meringue::TUI::Panes::ChatPane
   Style = Meringue::TUI::Style
   Timestamps = Meringue::TUI::Timestamps
@@ -259,6 +271,67 @@ class TuiLogsPaneTest < Minitest::Test
     typed = composed_state(demo_state, chat: { "input_buffer" => "typing", "input_cursor" => 6 })
 
     assert_same first, @pane.log_lines(typed, width: 60)
+  end
+
+  def test_agent_timestamp_changes_do_not_invalidate_the_log_line_cache
+    state = composed_state(demo_state)
+    first = @pane.log_lines(state, width: 60)
+    updated_agents = state.fetch("agents").map do |agent|
+      agent.merge("updated_at" => "2026-07-11T00:10:00Z")
+    end
+
+    assert_same first, @pane.log_lines(state.merge("agents" => updated_agents), width: 60)
+  end
+
+  def test_a_same_length_log_rewrite_invalidates_the_log_line_cache
+    state = composed_state(empty_state.merge("logs" => [log_record("L1", "message" => "before recount")]))
+    first = @pane.log_lines(state, width: 60)
+    rewritten_metadata = state.fetch("metadata").merge(
+      "last_recount" => { "recounted_at" => "2026-07-11T00:10:00Z" }
+    )
+    rewritten = state.merge(
+      "logs" => [log_record("L1", "message" => "after recount")],
+      "metadata" => rewritten_metadata
+    )
+    refreshed = @pane.log_lines(rewritten, width: 60)
+
+    refute_same first, refreshed
+    assert_includes plain_lines(refreshed).join("\n"), "after recount"
+  end
+
+  def test_agent_title_changes_invalidate_the_log_line_cache
+    state = composed_state(mixed_state)
+    first = @pane.log_lines(state, width: 70)
+    updated_agents = state.fetch("agents").map do |agent|
+      next agent unless agent.fetch("id") == "H1"
+
+      metadata = agent.fetch("harness_metadata").merge("title" => "Renamed head")
+      agent.merge("harness_metadata" => metadata)
+    end
+    refreshed = @pane.log_lines(state.merge("agents" => updated_agents), width: 70)
+
+    refute_same first, refreshed
+    assert_includes plain_lines(refreshed).join("\n"), "Renamed head"
+  end
+
+  def test_log_cache_key_does_not_deep_hash_log_payloads
+    hash_calls = { calls: 0 }
+    details = HashProbe.new(hash_calls)
+    details["last_assistant_text"] = "# Costly Markdown\n\nRendered once."
+    log = log_record(
+      "L1",
+      "source_type" => "worker",
+      "source_id" => "P1-I1-W1",
+      "message" => "Worker P1-I1-W1 completed.",
+      "details" => details
+    )
+    state = composed_state(empty_state.merge("logs" => [log], "agents" => [agent_record("P1-I1-W1")]))
+
+    first = @pane.log_lines(state, width: 60)
+    second = @pane.log_lines(state, width: 60)
+
+    assert_same first, second
+    assert_equal 0, hash_calls.fetch(:calls)
   end
 
   def test_selected_agent_highlight_is_reflected_in_log_titles
