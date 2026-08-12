@@ -208,6 +208,7 @@ module Meringue
         ["/goal stop <goal_id>", "Stop a goal loop for good, leaving its current attempt session alone."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "TUI local: open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
+        ["/prs", "TUI local: open the picker for every tracked pull request that is still open."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
         ["/setup", "TUI local: reopen first-run setup for the theme, harness, model, and thinking level."],
         ["/keybind", "TUI local: show all keybindings."],

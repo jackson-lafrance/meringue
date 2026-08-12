@@ -282,7 +282,7 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   def test_local_tui_commands_are_reported_as_not_kernel_commands
-    %w[/quit /jump /keybind /config /setup /open-session].each do |input|
+    %w[/quit /jump /prs /keybind /config /setup /open-session].each do |input|
       parsed = parse_slash(input)
       assert_equal "InvalidSlashCommand", parsed.fetch("type")
       assert_match(/local TUI command/, parsed.fetch("payload").fetch("message"))
@@ -343,7 +343,18 @@ class InputSlashCommandParserTest < Minitest::Test
       ['/answer <question_id> "<answer>"'],
       Meringue::Input::SlashCommandParser.command_suggestions("/ans", limit: 5).map(&:first)
     )
+    assert_equal ["/prs"], Meringue::Input::SlashCommandParser.command_suggestions("/prs", limit: 5).map(&:first)
     assert_equal 3, Meringue::Input::SlashCommandParser.command_suggestions("/", limit: 3).length
+  end
+
+  def test_prs_is_in_parser_discovery_and_slash_help
+    parser_entry = Meringue::Input::SlashCommandParser::COMMAND_SPECS.find { |usage, _description| usage == "/prs" }
+    help_entry = Meringue::Kernel::Engine::HELP_COMMANDS.find { |usage, _description| usage == "/prs" }
+
+    refute_nil parser_entry
+    assert_includes parser_entry.fetch(1), "picker"
+    refute_nil help_entry
+    assert_includes help_entry.fetch(1), "TUI local"
   end
 
   def test_answer_and_dismiss_suggestions_only_offer_open_questions
