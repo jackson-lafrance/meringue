@@ -93,6 +93,39 @@ class StateStoreSnapshotCacheTest < Minitest::Test
     end
   end
 
+  def test_readonly_load_reuses_one_frozen_object_without_weakening_mutable_load
+    with_store do |store, path|
+      write_state_file(path, seeded_state)
+
+      first = store.load_readonly
+      second = store.load_readonly
+
+      assert_same first, second
+      assert_predicate first, :frozen?
+      assert_predicate first.fetch("issues"), :frozen?
+      assert_raises(FrozenError) { first.fetch("issues").first["title"] = "unsafe" }
+      mutable = store.load
+      mutable.fetch("issues").first["title"] = "safe kernel mutation"
+      assert_equal "safe kernel mutation", mutable.fetch("issues").first.fetch("title")
+    end
+  end
+
+  def test_readonly_load_observes_an_external_atomic_write
+    with_store do |store, path|
+      write_state_file(path, seeded_state)
+      original = store.load_readonly
+      other = Store.new(path: path)
+      changed = other.load
+      changed.fetch("projects").first["name"] = "externally changed"
+      other.save(changed, preserve_log_buffer: false)
+
+      refreshed = store.load_readonly
+
+      refute_same original, refreshed
+      assert_equal "externally changed", refreshed.fetch("projects").first.fetch("name")
+    end
+  end
+
   def test_a_missing_state_file_still_loads_an_empty_state
     with_store do |store, path|
       refute_path_exists path
