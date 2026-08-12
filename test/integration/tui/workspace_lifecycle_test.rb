@@ -90,6 +90,16 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     end
   end
 
+  class RejectedInteractiveController
+    def open_workspace(agent:, state:, rows:, columns:)
+      _ = [agent, state, rows, columns]
+      {
+        "status" => "rejected",
+        "message" => "Worker is still running a turn. Wait for it to settle; the active turn was left untouched."
+      }
+    end
+  end
+
   class RecordingService
     attr_reader :views
 
@@ -186,6 +196,21 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
 
     app.send(:close_agent_workspace)
     assert_equal 1, controller.closed
+  end
+
+  def test_rejected_native_focus_restores_the_dashboard_with_an_actionable_status
+    app = Meringue::TUI::App.new(
+      layout: Meringue::TUI::Layout.new,
+      terminal: TUISupport::FakeTerminal.new,
+      workspace_controller: RejectedInteractiveController.new
+    )
+    state = @state.merge("agents" => [agent_record("P1-I1-W1", "harness" => "pi", "project_id" => "P1", "issue_id" => "P1-I1")])
+
+    refute app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+    refute app.instance_variable_get(:@agent_workspace_active)
+    assert app.instance_variable_get(:@force_full_redraw)
+    assert_includes app.send(:selection_status_text), "active turn was left untouched"
+    assert_equal "P1-I1-W1", app.instance_variable_get(:@selected_agent_id)
   end
 
   def test_reentering_focus_drops_stale_transient_events_before_replay
