@@ -20,12 +20,9 @@ module Meringue
       # How long a takeover waits for another instance's in-flight turn to
       # settle before reporting an actionable conflict.
       DEFAULT_TAKEOVER_SETTLE_TIMEOUT = 5.0
-      INTERACTIVE_HANDOFF_TIMEOUT = 10.0
-      INTERACTIVE_HANDOFF_PROMPT = "Continue the interrupted worker turn from this saved Pi session. " \
-                                   "Review the partial assistant/tool state, preserve the user's original intent, " \
-                                   "and finish or continue the task without repeating completed work."
       TAKEOVER_POLL_INTERVAL = 0.25
       TAKEOVER_EXIT_TIMEOUT = 5.0
+      INTERACTIVE_RPC_SHUTDOWN_TIMEOUT = 0.1
       PROMPT_DELIVERY_MARKER_PREFIX = "<!-- meringue-prompt-delivery:".freeze
 
       MODE_ALIASES = {
@@ -718,31 +715,22 @@ module Meringue
       end
 
       # Quiesce the dashboard-owned RPC process before a native Pi interactive process is started.
-      # Pi has no transfer API: an active turn is aborted and its durable session is then reopened
-      # with a deterministic continuation prompt. The caller must not launch the returned argv until
-      # this method succeeds; at that point the RPC writer has been terminated and released.
+      # Pi cannot transfer a live turn between frontends. Aborting it here corrupts worker lifecycle
+      # evidence and can repeat partially completed tool work, so focus fails fast until the turn has
+      # naturally settled. A settled RPC process has no in-flight state to drain and can be stopped
+      # on a short bound before native Pi becomes the sole writer of the durable session.
       def prepare_interactive_session(session_ref)
         current_ref = preserve_session_identity(get_state(session_ref), session_ref)
-        was_streaming = current_ref.fetch("is_streaming", false)
-        events = []
-
-        if was_streaming
-          process = process_for_session(current_ref)
-          rpc_data(process.request({ "type" => "abort" }, timeout: command_timeout), allow_nil_data: true)
-          settled_ref = preserve_session_identity(get_state(current_ref), current_ref)
-          if settled_ref.fetch("is_streaming", false)
-            wait_for_event(current_ref, type: "agent_settled", timeout: INTERACTIVE_HANDOFF_TIMEOUT)
-          end
-          current_ref = preserve_session_identity(get_state(current_ref), current_ref)
+        if current_ref.fetch("is_streaming", false)
+          raise SessionBusyError,
+                "Worker is still running a turn. Wait for it to settle before opening native Pi focus; the active turn was left untouched."
         end
 
-        events.concat(read_events(current_ref))
-        raise SessionTransportUnavailableError, "Pi session did not settle before interactive handoff" if current_ref.fetch("is_streaming", false)
-
+        events = read_events(current_ref)
         session_summary = safe_session_file_summary(current_ref)
         handoff_summary = bounded_handoff_summary(session_summary)
         handoff_intent = handoff_summary.fetch("last_user_text", nil) || latest_user_intent(events)
-        handoff_prompt = was_streaming ? interactive_handoff_prompt(handoff_intent) : nil
+        handoff_prompt = nil
         # Validate the resumable session and construct the native command while RPC still owns the
         # process. If Pi cannot identify a durable session, leave the dashboard writer untouched.
         replacement = nil
@@ -752,7 +740,6 @@ module Meringue
         rescue ProcessNotFoundError
           replacement = create_replacement_session_from_rpc(current_ref)
           handoff_intent = replacement.fetch("latest_user_intent", nil) unless present?(handoff_intent)
-          handoff_prompt = was_streaming ? interactive_handoff_prompt(handoff_intent) : nil
           current_ref = current_ref.merge(
             "session_id" => replacement.fetch("session_id"),
             "session_file" => replacement.fetch("session_file"),
@@ -760,8 +747,7 @@ module Meringue
           )
           interactive_argv = interactive_session_argv(current_ref, handoff_prompt: handoff_prompt)
         end
-        killed_ref = kill_session(rpc_ref)
-        detached_ref = killed_ref.merge(
+        detached_ref = quiesce_interactive_rpc(rpc_ref).merge(
           "session_id" => current_ref.fetch("session_id", nil),
           "session_file" => current_ref.fetch("session_file", nil),
           "pid" => nil,
@@ -780,7 +766,7 @@ module Meringue
           "interactive_argv" => interactive_argv,
           "interactive_env" => process_environment(detached_ref.fetch("cwd", Dir.pwd)),
           "handoff" => interactive_handoff_metadata(
-            was_streaming: was_streaming,
+            was_streaming: false,
             events: events,
             prompt: handoff_prompt,
             latest_user_intent: handoff_intent,
@@ -869,6 +855,19 @@ module Meringue
       private
 
       attr_reader :transport_ownership, :takeover_settle_timeout
+
+      def quiesce_interactive_rpc(session_ref)
+        process = process_for_session(session_ref)
+        process.terminate(timeout: INTERACTIVE_RPC_SHUTDOWN_TIMEOUT)
+        unregister_process(process)
+        release_transport(session_ref, pid: process.pid)
+        session_ref.merge(
+          "pid" => nil,
+          "is_streaming" => false,
+          "last_event_at" => process.last_event_at,
+          "metadata" => metadata_with(session_ref, "interactive_rpc_quiesced" => true)
+        )
+      end
 
       def prompt_delivery_marker(delivery_id)
         value = delivery_id.to_s.strip
@@ -1400,17 +1399,6 @@ module Meringue
         end.compact
       end
 
-      def interactive_handoff_prompt(latest_user_intent)
-        return INTERACTIVE_HANDOFF_PROMPT unless present?(latest_user_intent)
-
-        [
-          INTERACTIVE_HANDOFF_PROMPT,
-          "The latest worker request was:",
-          latest_user_intent.to_s.byteslice(0, 4000).to_s.scrub,
-          "Continue that request from the saved transcript and do not repeat completed work."
-        ].join("\n\n")
-      end
-
       def latest_user_intent(events)
         Array(events).reverse_each do |entry|
           event = entry.is_a?(Hash) ? (entry["event"] || entry) : {}
@@ -1448,8 +1436,8 @@ module Meringue
         progress = PiSessionView.progress_items(events)
         {
           "mode" => "native_interactive",
-          "transfer" => "checkpointed_abort",
-          "exact_stream_transfer" => false,
+          "transfer" => "settled_session",
+          "exact_stream_transfer" => true,
           "was_streaming" => !!was_streaming,
           "prompt" => prompt,
           "latest_user_intent" => latest_user_intent,

@@ -260,25 +260,41 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_equal attached.fetch("pid"), ownership.record_for("pi-sess-1").fetch("pid")
   end
 
-  def test_prepare_interactive_session_aborts_rpc_and_returns_the_same_saved_session_for_pi_tui
+  def test_prepare_interactive_session_rejects_an_active_turn_without_aborting_or_stopping_it
     client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-1", "is_streaming" => true })
     session_file = pi_session_file(tmpdir, session_id: "sess-1")
     ref = pi_session_ref(session_file: session_file, cwd: tmpdir)
     managed = client.attach_session(ref)
     @harness_sessions << [client, managed]
 
-    prepared = client.prepare_interactive_session(managed)
+    error = assert_raises(PiClient::SessionBusyError) { client.prepare_interactive_session(managed) }
 
+    assert_includes error.message, "active turn was left untouched"
+    assert process_alive?(managed.fetch("pid"))
+    assert_equal ["get_state"], stub_commands(stub).map { |command| command.fetch("type") }.last(1)
+    assert_empty stub_commands_of_type(stub, "abort")
+  end
+
+  def test_prepare_interactive_session_quiesces_a_settled_rpc_quickly_and_opens_the_same_session
+    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-1", "is_streaming" => false })
+    session_file = pi_session_file(tmpdir, session_id: "sess-1")
+    managed = client.attach_session(pi_session_ref(session_file: session_file, cwd: tmpdir))
+    @harness_sessions << [client, managed]
+
+    started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    prepared = client.prepare_interactive_session(managed)
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
+    assert_operator elapsed, :<, 0.75
     assert_equal false, prepared.fetch("session_ref").fetch("is_streaming")
     assert_nil prepared.fetch("session_ref").fetch("pid")
-    assert_equal false, prepared.dig("handoff", "exact_stream_transfer")
-    assert_equal "native_interactive", prepared.dig("handoff", "mode")
-    assert_includes prepared.dig("handoff", "latest_user_intent"), "please fix the redirect"
-    assert_includes prepared.fetch("interactive_argv").last, "please fix the redirect"
+    assert_equal true, prepared.dig("handoff", "exact_stream_transfer")
+    assert_equal "settled_session", prepared.dig("handoff", "transfer")
+    assert_nil prepared.dig("handoff", "prompt")
     assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--session", session_file]
     refute_includes prepared.fetch("interactive_argv"), "--mode"
-    assert_equal %w[get_state abort get_state get_state], stub_commands(stub).map { |command| command.fetch("type") }.last(4)
     refute process_alive?(managed.fetch("pid")), "the RPC writer must be gone before the PTY launches"
+    assert_empty stub_commands_of_type(stub, "abort")
   end
 
   def test_prepare_interactive_session_rebuilds_a_replacement_jsonl_when_rpc_has_no_session_path
@@ -291,7 +307,7 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     }
     client, = build_pi_client(
       tmpdir,
-      stub_config: { "session_id" => nil, "is_streaming" => true, "entries" => [entry] }
+      stub_config: { "session_id" => nil, "is_streaming" => false, "entries" => [entry] }
     )
     source_file = pi_session_file(tmpdir, session_id: "source-session")
     ref = pi_session_ref(session_file: source_file, session_id: nil, cwd: tmpdir)
@@ -305,7 +321,7 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_equal "rpc_session_file_unavailable", replacement.fetch("reason")
     assert_equal 1, replacement.fetch("entry_count")
     assert_equal "preserve this request", replacement.fetch("latest_user_intent")
-    assert_includes prepared.fetch("interactive_argv").last, "preserve this request"
+    refute_includes prepared.fetch("interactive_argv"), "preserve this request"
     replacement_lines = File.readlines(replacement.fetch("session_file"), chomp: true).map { |line| JSON.parse(line) }
     assert_equal "session", replacement_lines.first.fetch("type")
     assert_equal entry, replacement_lines.last
