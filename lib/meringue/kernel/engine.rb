@@ -2207,7 +2207,7 @@ module Meringue
         message = head_id ? "Head #{head_id} intentionally routed no work: #{reason}" : "No-op: #{reason}"
         log_ids = append_log(
           state,
-          source_type: head_id ? "head" : "kernel",
+          source_type: "kernel",
           source_id: head_id,
           level: "info",
           message: message,
@@ -3192,35 +3192,41 @@ module Meringue
             index: index,
             commands: head_result.fetch("commands")
           )
-          result = if (rejection = resolution.fetch("rejection", nil))
-                     synchronized_state do
-                       rejected_result(
-                         value_at(command, "command_id", "id"),
-                         canonical_command_type(value_at(command, "type", "command_type")),
-                         with_dropped_intent(rejection.fetch("message"), command),
-                         rejection.fetch("errors")
-                       )
-                     end
-                   elsif (skip = resolution.fetch("skip", nil))
-                     synchronized_state do
-                       skipped_result(
-                         value_at(command, "command_id", "id"),
-                         canonical_command_type(value_at(command, "type", "command_type")),
-                         skip.fetch("target_id", nil),
-                         with_dropped_intent(skip.fetch("message"), command),
-                         skip.fetch("errors"),
-                         level: skip.fetch("level", "info"),
-                         details: skip.fetch("details", {})
-                       )
-                     end
-                   else
-                     resolved_command = resolution.fetch("command")
-                     guard_result = head_command_guard_result(resolved_command, head: head_snapshot)
-                     unless guard_result
-                       log_ids.concat(log_head_batch_issue_remap(head_id.to_s, resolution))
-                     end
-                     guard_result || apply(resolved_command)
-                   end
+          # The journal establishes the author of this command before the kernel applies it.
+          # Keep that provenance active while validation, remapping, and application emit their
+          # logs; `source_type: kernel` still says who applied the command, while details retain
+          # which head proposed it.
+          result = with_head_command_log_attribution(head_id.to_s) do
+            if (rejection = resolution.fetch("rejection", nil))
+              synchronized_state do
+                rejected_result(
+                  value_at(command, "command_id", "id"),
+                  canonical_command_type(value_at(command, "type", "command_type")),
+                  with_dropped_intent(rejection.fetch("message"), command),
+                  rejection.fetch("errors")
+                )
+              end
+            elsif (skip = resolution.fetch("skip", nil))
+              synchronized_state do
+                skipped_result(
+                  value_at(command, "command_id", "id"),
+                  canonical_command_type(value_at(command, "type", "command_type")),
+                  skip.fetch("target_id", nil),
+                  with_dropped_intent(skip.fetch("message"), command),
+                  skip.fetch("errors"),
+                  level: skip.fetch("level", "info"),
+                  details: skip.fetch("details", {})
+                )
+              end
+            else
+              resolved_command = resolution.fetch("command")
+              guard_result = head_command_guard_result(resolved_command, head: head_snapshot)
+              unless guard_result
+                log_ids.concat(log_head_batch_issue_remap(head_id.to_s, resolution))
+              end
+              guard_result || apply(resolved_command)
+            end
+          end
           command_results << result
           # ClearState removes the journal along with everything else, so it is the last command
           # the kernel can honestly journal. Report the batch as applied instead of treating the
@@ -3406,7 +3412,8 @@ module Meringue
       # happened as a warning rather than a command failure.
       def interrupted_head_result(command_id, command_type, state, head_id, command_results, log_ids)
         # Commands that landed before another instance removed the head still routed the request.
-        # Preserve that attribution even though this batch cannot reach its ordinary finalizer.
+        # Preserve that routing attribution even though this batch cannot reach its ordinary
+        # finalizer. Command authorship was attached when each log entry was created.
         attribute_user_prompt_routes!(state, head_id, command_results)
         log_ids.concat(command_results.flat_map { |result| result.fetch("log_entry_ids", []) })
         log_ids.concat(append_log(
@@ -3658,7 +3665,7 @@ module Meringue
                 "command_type" => result.fetch("command_type", nil),
                 "kind" => "kernel_command_output",
                 "presentation" => "cmd"
-              }.compact
+              }.merge(head_command_author_details(head_id)).compact
             )
           end
         end
@@ -11497,13 +11504,21 @@ module Meringue
           command = command_with_default_id(proposed_command, head_id: head_id, index: index)
           command_id = value_at(command, "command_id", "id").to_s
           prior = existing_by_id[command_id]
-          next prior.merge("index" => index) if prior
+          if prior
+            next prior.merge(
+              "index" => index,
+              "command_author_type" => "head",
+              "command_author_id" => head_id.to_s
+            )
+          end
 
           inferred = recovering && infer_legacy_head_command_result(state, head_id, command)
           {
             "command_id" => command_id,
             "index" => index,
             "command_type" => canonical_command_type(value_at(command, "type", "command_type")),
+            "command_author_type" => "head",
+            "command_author_id" => head_id.to_s,
             "status" => inferred ? inferred.fetch("status") : "pending",
             "target_id" => inferred && inferred.fetch("target_id", nil),
             "message" => inferred && inferred.fetch("message", nil),
@@ -13516,6 +13531,12 @@ module Meringue
         raise ArgumentError, "invalid log source_type: #{source_type}" unless State::Models::LOG_SOURCE_TYPES.include?(source_type)
         raise ArgumentError, "invalid log level: #{level}" unless State::Models::LOG_LEVELS.include?(level)
 
+        log_details = details.is_a?(Hash) ? details.dup : {}
+        author = current_head_command_log_author
+        # `source_type` remains kernel: Meringue validated and applied the action. Authorship is
+        # separate provenance, present only while a head journal command is executing.
+        log_details.merge!(author) if source_type == "kernel" && author
+
         now = timestamp
         state.fetch("counters")["logs"] = state.fetch("counters").fetch("logs", 0).to_i + 1
         log_id = "L#{state.fetch("counters").fetch("logs")}"
@@ -13526,9 +13547,40 @@ module Meringue
           "source_id" => source_id,
           "level" => level,
           "message" => message,
-          "details" => details
+          "details" => log_details
         }
         [log_id]
+      end
+
+      def with_head_command_log_attribution(head_id)
+        author_id = present_string(head_id)
+        return yield unless author_id
+
+        contexts = Thread.current.thread_variable_get(:meringue_command_log_authors)
+        unless contexts.is_a?(Hash)
+          contexts = {}
+          Thread.current.thread_variable_set(:meringue_command_log_authors, contexts)
+        end
+        key = object_id
+        previous = contexts[key]
+        contexts[key] = head_command_author_details(author_id)
+        begin
+          yield
+        ensure
+          previous ? contexts[key] = previous : contexts.delete(key)
+        end
+      end
+
+      def current_head_command_log_author
+        contexts = Thread.current.thread_variable_get(:meringue_command_log_authors)
+        contexts.is_a?(Hash) ? contexts[object_id] : nil
+      end
+
+      def head_command_author_details(head_id)
+        {
+          "command_author_type" => "head",
+          "command_author_id" => head_id.to_s
+        }
       end
 
       def touch_state!(state, now = timestamp)

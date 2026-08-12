@@ -222,7 +222,7 @@ Log rows use compact, color-coded headers so agent output is easy to separate fr
 - `✦ P1-I1-W1` — worker progress in that worker's stable color.
 - `✓ P1-I1-W1 · done` — a completed worker result.
 - `! P1-I1-W1 · warn/err` — an actionable warning or error.
-- `▪ meringue` — kernel, command, and system logs, in the theme accent color.
+- `▪ meringue` — kernel and system logs, in the theme accent color. When a head proposed the kernel command, the header reads `▪ meringue · via H127`: Meringue still applied it, and `H127` identifies where it originated.
 - `● you` — your own prompts.
 
 ### Identifying agents at a glance
