@@ -50,6 +50,9 @@ module Meringue
         Do not include markdown, prose, code fences, or tool calls.
       PROMPT
       PULL_REQUEST_URL_PATTERN = /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+(?:[\/?#][^\s<>"'\])}]*)?/.freeze
+      PULL_REQUEST_ASSOCIATING_COMMANDS = %w[
+        CreateIssue ModifyIssue SpawnWorker PromptAgent CreateGoal
+      ].freeze
       # `/prune` is one combined cleanup pass: resolved (completed/killed) and errored records
       # are eligible together, so an errored record is terminal rather than a retention blocker.
       PRUNE_ELIGIBLE_STATUSES = %w[completed killed errored].freeze
@@ -3449,6 +3452,10 @@ module Meringue
             end
           end
           command_results << result
+          # Persist a request-linked PR as soon as this command establishes an issue route. A later
+          # SpawnWorker may spend minutes provisioning a workspace, and neither that wait nor a
+          # worker's eventual completion should delay the issue association.
+          associate_head_request_pull_requests!(head_snapshot, result)
           # ClearState removes the journal along with everything else, so it is the last command
           # the kernel can honestly journal. Report the batch as applied instead of treating the
           # deliberate wipe as an interrupted batch.
@@ -3634,7 +3641,8 @@ module Meringue
       def interrupted_head_result(command_id, command_type, state, head_id, command_results, log_ids)
         # Commands that landed before another instance removed the head still routed the request.
         # Preserve that routing attribution even though this batch cannot reach its ordinary
-        # finalizer. Command authorship was attached when each log entry was created.
+        # finalizer. Command authorship was attached when each log entry was created, and
+        # request-linked PRs were checkpointed beside each accepted routing command.
         attribute_user_prompt_routes!(state, head_id, command_results)
         log_ids.concat(command_results.flat_map { |result| result.fetch("log_entry_ids", []) })
         log_ids.concat(append_log(
@@ -3820,6 +3828,72 @@ module Meringue
             },
             log_ids.uniq
           )
+        end
+      end
+
+      # Pull request links in a user's request are routing metadata: when the head routes that
+      # request to an issue, the issue should expose the linked PR immediately rather than waiting
+      # for a worker to finish and mention it again. We intentionally store the links as
+      # unverified delivery records. The normal refresh path can enrich their lifecycle state, and
+      # the worker-completion path can merge branch/repository verification into the same URL.
+      def associate_head_request_pull_requests!(head, command_result)
+        return [] unless head.is_a?(Hash)
+        return [] unless command_result.is_a?(Hash) && command_result.fetch("status", nil) == "accepted"
+        return [] unless PULL_REQUEST_ASSOCIATING_COMMANDS.include?(command_result.fetch("command_type", nil).to_s)
+
+        metadata = head.fetch("harness_metadata", {}) || {}
+        # Completion continuations contain worker output, not a new user request. Associating a URL
+        # from one here would bypass the existing branch/repository verification performed when the
+        # worker settles.
+        return [] if metadata.is_a?(Hash) && metadata.fetch("completion_trigger", nil).is_a?(Hash)
+
+        urls = extract_linked_pull_request_urls(head_record_user_message(head))
+        return [] if urls.empty?
+
+        synchronized_state do
+          state = normalized_state
+          issue_id = routed_issue_id(state, command_result)
+          issue = issue_id && find_issue(state, issue_id)
+          next [] unless issue
+
+          existing_urls = State::Models.pull_request_records_from(issue).filter_map do |record|
+            canonical_pull_request_url(State::Models.pull_request_record_url(record))
+          end
+          records = urls.reject { |url| existing_urls.include?(canonical_pull_request_url(url)) }.map do |url|
+            {
+              "url" => url,
+              "matched_by" => "user_request",
+              "associated_at" => timestamp
+            }
+          end
+          next [] if records.empty?
+
+          now = timestamp
+          State::Models.attach_pull_requests_to_issue!(
+            issue,
+            delivery_pull_requests: records,
+            reported_urls: urls
+          )
+          issue["updated_at"] = now
+          touch_state!(state, now)
+          store.save(state)
+          [{
+            "issue_id" => issue.fetch("id"),
+            "pull_request_urls" => records.map { |record| record.fetch("url") }
+          }]
+        end
+      end
+
+      def routed_issue_id(state, command_result)
+        target_id = present_string(command_result.fetch("target_id", nil))
+        return nil unless target_id
+
+        if (issue = find_issue(state, target_id))
+          issue.fetch("id")
+        elsif (agent = find_agent(state, target_id))
+          present_string(agent.fetch("issue_id", nil))
+        elsif (goal = find_goal(state, target_id))
+          present_string(goal.fetch("issue_id", nil))
         end
       end
 
@@ -13546,6 +13620,16 @@ module Meringue
         text.to_s.scan(PULL_REQUEST_URL_PATTERN).map do |url|
           url.sub(/[.,;:]+\z/, "")
         end
+      end
+
+      def extract_linked_pull_request_urls(text)
+        extract_pull_request_urls(text).map { |url| canonical_pull_request_url(url) }.uniq
+      end
+
+      def canonical_pull_request_url(url)
+        cleaned = url.to_s.sub(/[.,;:]+\z/, "")
+        match = cleaned.match(%r{\A(https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+)})
+        match ? match[1] : cleaned
       end
 
       def serializable_text(value)
