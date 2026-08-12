@@ -289,6 +289,28 @@ class TuiLogsPaneTest < Minitest::Test
     assert_includes plain_lines(refreshed).join("\n"), "new event"
   end
 
+  def test_appending_one_log_reuses_wrapped_fragments_for_the_retained_history
+    calls = Hash.new(0)
+    pane = Class.new(Pane) do
+      define_method(:body_lines) do |entry, **arguments|
+        calls[entry.fetch("record_id", entry.fetch("text", nil))] += 1
+        super(entry, **arguments)
+      end
+    end.new
+    logs = 20.times.map do |index|
+      log_record("L#{index + 1}", "message" => "## Result #{index + 1}\n\nMarkdown body")
+    end
+    state = composed_state(empty_state.merge("logs" => logs))
+
+    pane.log_lines(state, width: 60)
+    updated = state.merge("logs" => logs + [log_record("L21", "message" => "## New result\n\nMarkdown body")])
+    pane.log_lines(updated, width: 60)
+
+    assert_equal 1, calls.fetch("L1"), "an append must not lay out retained Markdown again"
+    assert_equal 1, calls.fetch("L20")
+    assert_equal 1, calls.fetch("L21")
+  end
+
   def test_typing_does_not_invalidate_the_log_line_cache
     state = composed_state(demo_state)
     first = @pane.log_lines(state, width: 60)
