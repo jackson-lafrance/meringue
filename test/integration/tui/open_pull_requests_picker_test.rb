@@ -152,6 +152,74 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
     assert_includes frame, "#151"
   end
 
+  def test_double_clicking_the_plural_summary_opens_the_same_picker_and_preserves_selection
+    assert @app.send(:select_agent_tree_item, @state, "P1")
+    @app.instance_variable_set(:@focused_pane, "agent_tree")
+    state = compose_app_state(@app, @state)
+    positions = screen_positions_for_open_pr_summary(state)
+
+    assert_equal "2 open PRs".length, positions.length
+    send_summary_click(state, positions.first)
+    refute @pane.delivery_pr_picker?(compose_app_state(@app, @state)), "one click stays inert"
+    send_summary_click(state, positions.fetch(1)) # one-column trackpad wobble still counts
+
+    picker = compose_app_state(@app, @state)
+    assert @pane.delivery_pr_picker?(picker)
+    assert_equal ["› #151  Add the open PR picker  P1-I2 · unverified", "  #145  Fix signup validation  P1-I1 · open"],
+                 plain_lines(@pane.popup_lines(picker))
+    assert_equal "P1", Meringue::TUI::LogScope.id(picker), "the log/chat selection stays on the project"
+    assert_equal "agent_tree", picker.dig("_scroll", "active_pane"), "the summary click does not steal focus"
+    assert_empty @opener.opened
+  end
+
+  def test_double_clicking_a_singular_unavailable_summary_opens_the_unverified_pr
+    state = empty_state.merge(
+      "issues" => [
+        issue_record(
+          "P1-I1",
+          "title" => "Waiting for forge status",
+          "delivery_pull_request" => pull_request("88", "availability" => "unavailable")
+        )
+      ]
+    )
+    composed = compose_app_state(@app, state)
+    positions = screen_positions_for_open_pr_summary(composed)
+
+    assert_equal "1 open PR".length, positions.length
+    2.times { send_summary_click(composed, positions.first) }
+
+    picker = compose_app_state(@app, state)
+    assert @pane.delivery_pr_picker?(picker)
+    assert_equal ["› #88  Waiting for forge status  P1-I1 · unverified"], plain_lines(@pane.popup_lines(picker))
+  end
+
+  def test_empty_untracked_and_scoped_summaries_are_not_actionable
+    settled = empty_state.merge(
+      "issues" => [issue_record("P1-I1", "delivery_pull_request" => pull_request("70", "state" => "merged"))]
+    )
+    settled_state = compose_app_state(@app, settled)
+    assert_includes plain_line(@pane.bottom_hint_line(settled_state)), "no open PRs"
+    assert_empty screen_positions_for_open_pr_summary(settled_state)
+
+    no_pr_state = compose_app_state(@app, empty_state)
+    refute_includes plain_line(@pane.bottom_hint_line(no_pr_state)), "PR"
+    assert_empty screen_positions_for_open_pr_summary(no_pr_state)
+
+    scoped = select("P1-I1-W2")
+    assert_includes plain_line(@pane.bottom_hint_line(scoped)), "PR #145 open"
+    assert_empty screen_positions_for_open_pr_summary(scoped)
+  end
+
+  def test_an_intervening_click_outside_the_count_does_not_complete_a_double_click
+    state = compose_app_state(@app, @state)
+    position = screen_positions_for_open_pr_summary(state).first
+    send_summary_click(state, position)
+    send_summary_click(state, "x" => position.fetch("x") + "2 open PRs".length + 3, "y" => position.fetch("y"))
+    send_summary_click(state, position)
+
+    refute @pane.delivery_pr_picker?(compose_app_state(@app, @state))
+  end
+
   # Unlike Ctrl-B, the explicit plural command always means the global list. A
   # selected worker must stay selected without narrowing `/prs` to that worker's
   # own delivery PR, and the local command must never reach the kernel/head path.
@@ -354,6 +422,20 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
 
   def press_event(position)
     { "type" => "mouse", "kind" => "button", "pressed" => true, "button" => 0 }.merge(position)
+  end
+
+  def send_summary_click(state, position)
+    @app.send(:handle_key, press_event(position), "", 0, -1, nil, state)
+  end
+
+  def screen_positions_for_open_pr_summary(state)
+    HEIGHT.times.flat_map do |y|
+      WIDTH.times.filter_map do |x|
+        next unless @layout.open_pull_requests_summary_hit?(state, width: WIDTH, height: HEIGHT, x: x, y: y)
+
+        { "x" => x + 1, "y" => y + 1 }
+      end
+    end
   end
 
   def screen_position_for_row(state, index)
