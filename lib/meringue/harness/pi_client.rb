@@ -26,6 +26,7 @@ module Meringue
                                    "and finish or continue the task without repeating completed work."
       TAKEOVER_POLL_INTERVAL = 0.25
       TAKEOVER_EXIT_TIMEOUT = 5.0
+      PROMPT_DELIVERY_MARKER_PREFIX = "<!-- meringue-prompt-delivery:".freeze
 
       MODE_ALIASES = {
         "normal" => "normal",
@@ -51,7 +52,14 @@ module Meringue
       end
       class UnmanagedProcessError < Error; end
       class RpcError < Error; end
-      class RpcTimeoutError < Error; end
+      class RpcTimeoutError < Error
+        attr_reader :command_type
+
+        def initialize(message = nil, command_type: nil)
+          @command_type = command_type&.to_s
+          super(message)
+        end
+      end
       class InvalidModeError < Error; end
       class InvalidModelReferenceError < Error; end
       class InvalidThinkingLevelError < Error; end
@@ -141,6 +149,8 @@ module Meringue
         @processes_by_pid = {}
         @processes_by_transport_key = {}
         @processes_mutex = Mutex.new
+        @prompt_receipt_cache = {}
+        @prompt_receipt_mutex = Mutex.new
       end
 
       def extra_args
@@ -178,9 +188,9 @@ module Meringue
         raise
       end
 
-      def prompt_session(session_ref, prompt, mode: "normal")
+      def prompt_session(session_ref, prompt, mode: "normal", delivery_id: nil)
         normalized_mode = normalize_mode!(mode)
-        message = prompt.to_s
+        message = prompt_with_delivery_marker(prompt.to_s, delivery_id)
         current_ref = session_ref
         recovery_metadata = {}
         process = process_for_session(current_ref, required: false)
@@ -246,12 +256,87 @@ module Meringue
                   end
 
         rpc_data(process.request(command, timeout: command_timeout), allow_nil_data: true)
-        prompted_ref = get_state(current_ref)
+        prompted_ref = begin
+          get_state(current_ref)
+        rescue RpcTimeoutError => e
+          # The prompt RPC itself was acknowledged. A follow-up state refresh cannot turn that
+          # known delivery back into a failed PromptAgent command; reconciliation will refresh (or
+          # settle) the session later without replaying the accepted prompt.
+          current_ref.merge(
+            "pid" => process.pid,
+            "is_streaming" => true,
+            "metadata" => metadata_with(
+              current_ref,
+              "prompt_delivery_acknowledged" => true,
+              "prompt_state_refresh_error_class" => e.class.name,
+              "prompt_state_refresh_error" => e.message
+            )
+          )
+        end
         # get_state rebuilds metadata from the live process, so recovery details
         # are re-applied here to stay visible in state and logs.
         return prompted_ref if recovery_metadata.empty?
 
         prompted_ref.merge("metadata" => metadata_with(prompted_ref, recovery_metadata))
+      end
+
+      def prompt_delivery_receipts_supported?
+        true
+      end
+
+      # A prompt RPC timeout does not cancel Pi's request. Pi may still be compacting a restored
+      # transcript and can persist the user message well after Meringue's response deadline. Only
+      # prompt-like RPCs therefore have an ambiguous delivery outcome; a get_state timeout happened
+      # before prompt_session wrote anything and remains an ordinary command failure.
+      def ambiguous_prompt_delivery_error?(error)
+        error.is_a?(RpcTimeoutError) && %w[prompt steer follow_up].include?(error.command_type)
+      end
+
+      def prompt_delivery_status(session_ref, delivery_id:, prompt:, started_at: nil)
+        marker = prompt_delivery_marker(delivery_id)
+        path = session_file_path(session_ref)
+        delivered, delivered_at = path && marker ? scan_prompt_delivery_receipt(path, marker) : [false, nil]
+
+        process_error = nil
+        live_pid = begin
+          process = process_for_session(session_ref, required: false)
+          process&.pid || unmanaged_process_pid(session_ref)
+        rescue StandardError => e
+          process_error = e
+          nil
+        end
+        return {
+          "status" => "delivered",
+          "delivered_at" => delivered_at,
+          "process_alive" => !live_pid.nil?,
+          "pid" => live_pid,
+          "session_file" => path
+        }.compact if delivered
+
+        # The session file is the durable delivery ledger. Once the process that owned the request
+        # is gone, absence from that file proves that this delivery id can no longer appear.
+        status = if process_error
+                   "unknown"
+                 elsif live_pid
+                   "pending"
+                 elsif path || present?(session_ref["session_file"] || session_ref[:session_file]) ||
+                       present?(session_ref["session_id"] || session_ref[:session_id])
+                   "not_delivered"
+                 else
+                   "unknown"
+                 end
+        {
+          "status" => status,
+          "process_alive" => !live_pid.nil?,
+          "pid" => live_pid,
+          "session_file" => path,
+          "checked_at" => Time.now.utc.iso8601,
+          "started_at" => started_at,
+          "prompt_bytes" => prompt.to_s.bytesize,
+          "error" => process_error && "#{process_error.class}: #{process_error.message}"
+        }.compact
+      rescue StandardError => e
+        { "status" => "unknown", "error" => "#{e.class}: #{e.message}" }
       end
 
       def abort_session(session_ref)
@@ -784,6 +869,65 @@ module Meringue
       private
 
       attr_reader :transport_ownership, :takeover_settle_timeout
+
+      def prompt_delivery_marker(delivery_id)
+        value = delivery_id.to_s.strip
+        return nil if value.empty?
+
+        safe_id = value.gsub(/[^A-Za-z0-9_.:@\/-]/, "_")
+        "#{PROMPT_DELIVERY_MARKER_PREFIX}#{safe_id} -->"
+      end
+
+      def prompt_with_delivery_marker(prompt, delivery_id)
+        marker = prompt_delivery_marker(delivery_id)
+        return prompt unless marker
+        return prompt if prompt.include?(marker)
+
+        "#{prompt}\n\n#{marker}"
+      end
+
+      # Receipt checks run every reconciliation tick while Pi may be compacting a large transcript.
+      # Scan only bytes appended since the prior check (plus enough overlap for a split marker)
+      # instead of repeatedly parsing the entire multi-megabyte JSONL history.
+      def scan_prompt_delivery_receipt(path, marker)
+        @prompt_receipt_mutex.synchronize do
+          stat = File.stat(path)
+          key = [File.expand_path(path), marker]
+          cached = @prompt_receipt_cache[key]
+          return [true, cached["delivered_at"]] if cached&.fetch("delivered", false)
+
+          offset = if cached && cached.fetch("inode", nil) == stat.ino && cached.fetch("size", 0).to_i <= stat.size
+                     [cached.fetch("size", 0).to_i - marker.bytesize, 0].max
+                   else
+                     0
+                   end
+          bytes = File.open(path, "rb") do |file|
+            file.seek(offset)
+            file.read.to_s
+          end
+          marker_offset = bytes.index(marker)
+          delivered = !marker_offset.nil?
+          delivered_at = if delivered
+                           line_start = bytes.rindex("\n", marker_offset) || -1
+                           line_end = bytes.index("\n", marker_offset) || bytes.bytesize
+                           line = bytes.byteslice(line_start + 1, line_end - line_start - 1)
+                           begin
+                             entry = JSON.parse(line)
+                             message = entry.is_a?(Hash) ? entry["message"] : nil
+                             entry.fetch("timestamp", nil) || (message.is_a?(Hash) && message.fetch("timestamp", nil)) || stat.mtime.utc.iso8601
+                           rescue JSON::ParserError
+                             stat.mtime.utc.iso8601
+                           end
+                         end
+          @prompt_receipt_cache[key] = {
+            "inode" => stat.ino,
+            "size" => stat.size,
+            "delivered" => delivered,
+            "delivered_at" => delivered_at
+          }
+          [delivered, delivered_at]
+        end
+      end
 
       def compatible_thinking_level(current_level, available_levels)
         current_index = THINKING_LEVELS.index(current_level)
@@ -1995,7 +2139,10 @@ module Meringue
           result
         rescue Timeout::Error
           @pending_mutex.synchronize { @pending.delete(id) } if id
-          raise RpcTimeoutError, "Timed out waiting for Pi RPC response to #{command["type"].inspect}"
+          raise RpcTimeoutError.new(
+            "Timed out waiting for Pi RPC response to #{command["type"].inspect}",
+            command_type: command["type"]
+          )
         rescue IOError, Errno::EPIPE => e
           @pending_mutex.synchronize { @pending.delete(id) } if id
           raise ProcessExitedError, "Pi RPC stdin is closed: #{e.message}"

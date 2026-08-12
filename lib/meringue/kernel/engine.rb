@@ -6069,6 +6069,75 @@ module Meringue
             )
           end
         end
+        client = harness_client_for_agent(agent)
+        retrying_ambiguous_delivery = false
+        receipt_entry = ambiguous_prompt_receipt_entry(
+          metadata,
+          command_id: command_id,
+          pending_prompt_id: pending_prompt_id,
+          prompt: prompt.to_s,
+          mode: mode
+        )
+        if receipt_entry && client.prompt_delivery_receipts_supported?
+          receipt = client.prompt_delivery_status(
+            agent_session_ref(agent),
+            delivery_id: receipt_entry.fetch("delivery_id"),
+            prompt: prompt.to_s,
+            started_at: receipt_entry.fetch("delivery_started_at", nil)
+          )
+          case receipt.fetch("status", "unknown")
+          when "delivered"
+            return confirm_ambiguous_prompt_delivery(
+              state: state,
+              command_id: command_id,
+              command_type: command_type,
+              agent: agent,
+              mode: mode,
+              pending_prompt_id: pending_prompt_id,
+              receipt: receipt
+            )
+          when "pending", "unknown"
+            if receipt_entry.fetch("source", nil) == "pending_prompt"
+              return ambiguous_prompt_wait_result(
+                command_id: command_id,
+                command_type: command_type,
+                agent: agent,
+                mode: mode,
+                pending_prompt_id: pending_prompt_id,
+                receipt: receipt
+              )
+            end
+
+            return queue_ambiguous_prompt(
+              command_id: command_id,
+              command_type: command_type,
+              agent_id: agent.fetch("id"),
+              prompt: prompt.to_s,
+              mode: mode,
+              pending_prompt_id: pending_prompt_id,
+              delivery_id: receipt_entry.fetch("delivery_id"),
+              delivery_started_at: receipt_entry.fetch("delivery_started_at", nil),
+              error: StandardError.new(receipt.fetch("error", nil) || "Prompt receipt is not available yet")
+            )
+          when "not_delivered"
+            retrying_ambiguous_delivery = true
+          end
+        end
+
+        if !retrying_ambiguous_delivery && Array(metadata.fetch("pending_prompts", [])).any? { |entry|
+          entry.is_a?(Hash) && entry.fetch("delivery_state", nil) == "awaiting_receipt"
+        }
+          return queue_transient_prompt(
+            command_id: command_id,
+            command_type: command_type,
+            agent_id: agent.fetch("id"),
+            prompt: prompt.to_s,
+            mode: mode,
+            pending_prompt_id: pending_prompt_id,
+            error: StandardError.new("an earlier Pi prompt is still awaiting its durable delivery receipt")
+          )
+        end
+
         supervisor_recovery = metadata.fetch("supervisor_recovery", nil)
         if supervisor_recovery.is_a?(Hash) && supervisor_recovery.fetch("state", nil) == "claimed"
           return queue_transient_prompt(
@@ -6100,12 +6169,14 @@ module Meringue
         end
 
         claim_token = SecureRandom.hex(8)
+        delivery_id = prompt_delivery_id(command_id, claim_token)
         metadata = metadata.merge(
           "prompt_delivery_claim" => {
             "token" => claim_token,
             "command_id" => present_string(command_id),
             "prompt" => prompt.to_s,
             "mode" => mode,
+            "delivery_id" => delivery_id,
             "claimed_at" => timestamp,
             **instance_ownership_metadata
           }.compact
@@ -6114,11 +6185,29 @@ module Meringue
         touch_state!(state)
         store.save(state)
 
-        client = harness_client_for_agent(agent)
         session_ref = agent_session_ref(agent)
         begin
-          session_ref = client.prompt_session(session_ref, prompt.to_s, mode: mode)
+          prompt_options = { mode: mode }
+          prompt_options[:delivery_id] = delivery_id if client.prompt_delivery_receipts_supported?
+          session_ref = client.prompt_session(session_ref, prompt.to_s, **prompt_options)
         rescue StandardError => e
+          # A timeout after Pi accepted a prompt is not proof that delivery failed. Keep the
+          # deterministic receipt pending until the Pi JSONL transcript either contains it or the
+          # process exits without it; retrying while the original process lives can duplicate work.
+          if client.ambiguous_prompt_delivery_error?(e)
+            return queue_ambiguous_prompt(
+              command_id: command_id,
+              command_type: command_type,
+              agent_id: agent.fetch("id"),
+              prompt: prompt.to_s,
+              mode: mode,
+              pending_prompt_id: pending_prompt_id,
+              delivery_id: delivery_id,
+              delivery_started_at: metadata.dig("prompt_delivery_claim", "claimed_at"),
+              error: e
+            )
+          end
+
           # A session that is busy elsewhere is a timing condition, not a failure: queue the
           # prompt and let reconciliation deliver it once the current turn settles.
           if Harness.transient_session_error?(e)
@@ -6248,6 +6337,201 @@ module Meringue
         return requested_mode.to_s unless reported && PROMPT_MODES.include?(reported)
 
         reported
+      end
+
+      def prompt_delivery_id(command_id, fallback_token)
+        "meringue:#{present_string(command_id) || fallback_token}"
+      end
+
+      def ambiguous_prompt_receipt_entry(metadata, command_id:, pending_prompt_id:, prompt:, mode:)
+        pending = Array(metadata.fetch("pending_prompts", [])).select { |entry| entry.is_a?(Hash) }
+        entry = pending.find do |candidate|
+          next false unless candidate.fetch("delivery_state", nil) == "awaiting_receipt"
+
+          (pending_prompt_id && candidate.fetch("id", nil).to_s == pending_prompt_id) ||
+            (present_string(command_id) && candidate.fetch("command_id", nil).to_s == command_id.to_s)
+        end
+        return entry.merge("source" => "pending_prompt") if entry && present_string(entry.fetch("delivery_id", nil))
+
+        claim = metadata.fetch("prompt_delivery_claim", nil)
+        return nil unless claim.is_a?(Hash) && present_string(claim.fetch("delivery_id", nil))
+        return nil if present_string(command_id) && claim.fetch("command_id", nil).to_s != command_id.to_s
+        return nil unless claim.fetch("prompt", nil).to_s == prompt.to_s && claim.fetch("mode", nil).to_s == mode.to_s
+
+        {
+          "source" => "delivery_claim",
+          "delivery_id" => claim.fetch("delivery_id"),
+          "delivery_started_at" => claim.fetch("claimed_at", nil)
+        }
+      end
+
+      def ambiguous_prompt_wait_result(command_id:, command_type:, agent:, mode:, pending_prompt_id:, receipt:)
+        accepted_result(
+          command_id,
+          command_type,
+          agent.fetch("id"),
+          "Waiting for Pi to confirm the timed-out #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")}; it will not be sent twice.",
+          {
+            "agent_id" => agent.fetch("id"),
+            "queued" => true,
+            "awaiting_receipt" => true,
+            "pending_prompt_id" => pending_prompt_id,
+            "receipt_status" => receipt.fetch("status", "unknown")
+          }.compact,
+          []
+        )
+      end
+
+      # Persist an ambiguous RPC outcome before releasing the delivery claim. Reconciliation polls
+      # the durable Pi transcript through PromptAgent, but does not poll or resume the worker itself
+      # until this receipt settles; doing either could write a duplicate continuation into the same
+      # long-running compaction request.
+      def queue_ambiguous_prompt(command_id:, command_type:, agent_id:, prompt:, mode:, pending_prompt_id:,
+                                 delivery_id:, delivery_started_at:, error:)
+        state = normalized_state
+        agent = find_agent(state, agent_id)
+        return failed_result(command_id, command_type, "Agent #{agent_id} disappeared before its prompt receipt could be tracked.", ["agent_not_found"]) unless agent
+
+        now = timestamp
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        pending = Array(metadata.fetch("pending_prompts", [])).select { |entry| entry.is_a?(Hash) }
+        existing = pending.find do |entry|
+          (pending_prompt_id && entry.fetch("id", nil).to_s == pending_prompt_id) ||
+            (present_string(command_id) && entry.fetch("command_id", nil).to_s == command_id.to_s) ||
+            entry.fetch("delivery_id", nil).to_s == delivery_id.to_s
+        end
+        entry = existing || {
+          "id" => next_pending_prompt_id(agent, pending),
+          "command_id" => present_string(command_id),
+          "prompt" => prompt,
+          "mode" => mode.to_s,
+          "queued_at" => now
+        }.compact
+        entry.merge!(
+          "delivery_state" => "awaiting_receipt",
+          "delivery_id" => delivery_id,
+          "delivery_started_at" => delivery_started_at || now,
+          "last_attempted_at" => now,
+          "last_error" => error.message,
+          "last_error_class" => error.class.name
+        )
+        if error.respond_to?(:command_type) && %w[prompt steer follow_up].include?(error.command_type)
+          entry["delivered_mode"] = error.command_type == "prompt" ? "normal" : error.command_type
+        end
+        pending << entry unless existing
+        metadata["pending_prompts"] = pending
+        metadata["prompt_delivery_claim"] = nil
+        metadata["last_ambiguous_prompt_delivery"] = {
+          "delivery_id" => delivery_id,
+          "pending_prompt_id" => entry.fetch("id"),
+          "timed_out_at" => now,
+          "error" => error.message
+        }
+        agent["harness_metadata"] = metadata
+        agent["updated_at"] = now
+
+        log_ids = if existing
+                    []
+                  else
+                    append_log(
+                      state,
+                      source_type: "kernel",
+                      source_id: agent.fetch("id"),
+                      level: "warning",
+                      message: "The Pi RPC timed out while delivering the #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")}; waiting for its durable session receipt instead of retrying it.",
+                      details: {
+                        "agent_id" => agent.fetch("id"),
+                        "issue_id" => agent.fetch("issue_id", nil),
+                        "mode" => mode.to_s,
+                        "pending_prompt_id" => entry.fetch("id"),
+                        "delivery_id" => delivery_id,
+                        "error_class" => error.class.name,
+                        "error" => error.message
+                      }.compact
+                    )
+                  end
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(
+          command_id,
+          command_type,
+          agent.fetch("id"),
+          "Tracking the timed-out #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} until Pi confirms whether it landed.",
+          {
+            "agent_id" => agent.fetch("id"),
+            "queued" => true,
+            "awaiting_receipt" => true,
+            "pending_prompt_id" => entry.fetch("id"),
+            "delivery_id" => delivery_id
+          },
+          log_ids
+        )
+      end
+
+      def confirm_ambiguous_prompt_delivery(state:, command_id:, command_type:, agent:, mode:, pending_prompt_id:, receipt:)
+        now = receipt.fetch("delivered_at", nil) || timestamp
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        pending = Array(metadata.fetch("pending_prompts", [])).select { |entry| entry.is_a?(Hash) }
+        receipt_entry = pending.find do |entry|
+          (pending_prompt_id && entry.fetch("id", nil).to_s == pending_prompt_id) ||
+            (present_string(command_id) && entry.fetch("command_id", nil).to_s == command_id.to_s)
+        end
+        delivered_mode = receipt_entry&.fetch("delivered_mode", nil) || mode
+        delivered_ids = Array(metadata.fetch("prompt_command_ids", [])).map(&:to_s)
+        delivered_ids = (delivered_ids + [command_id.to_s]).uniq.last(PROMPT_COMMAND_ID_HISTORY_LIMIT) if present_string(command_id)
+        metadata = metadata.merge(
+          "prompt_count" => metadata.fetch("prompt_count", 0).to_i + 1,
+          "last_prompt_mode" => delivered_mode,
+          "requested_prompt_mode" => delivered_mode != mode ? mode : nil,
+          "delivered_prompt_mode" => delivered_mode != mode ? delivered_mode : nil,
+          "last_prompted_at" => now,
+          "routing_action" => prompt_routing_action(delivered_mode),
+          "prompt_command_ids" => present_string(command_id) ? delivered_ids : nil,
+          "prompt_delivery_claim" => nil,
+          "last_prompt_delivery_receipt" => receipt.merge("confirmed_at" => timestamp)
+        ).compact
+        agent["harness_metadata"] = metadata
+        agent["pid"] = receipt.fetch("pid") if receipt.fetch("pid", nil)
+        agent["status"] = "working"
+        agent["updated_at"] = timestamp
+        clear_settle_failure!(agent)
+        remove_pending_prompts!(agent, pending_prompt_id: pending_prompt_id, command_id: command_id)
+
+        issue = find_issue(state, agent.fetch("issue_id", nil))
+        project = issue && find_project(state, issue.fetch("project_id", nil))
+        if issue
+          issue["status"] = "working"
+          issue["last_agent_id"] = agent.fetch("id")
+          issue["last_routing_action"] = prompt_routing_action(delivered_mode)
+          issue["last_routed_at"] = timestamp
+          issue["updated_at"] = timestamp
+        end
+        if project
+          project["status"] = "working"
+          project["updated_at"] = timestamp
+        end
+
+        message = prompt_log_message(agent, delivered_mode, requested_mode: delivered_mode != mode ? mode : nil)
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: agent.fetch("id"),
+          level: "info",
+          message: message,
+          details: {
+            "agent_id" => agent.fetch("id"),
+            "issue_id" => agent.fetch("issue_id", nil),
+            "mode" => delivered_mode,
+            "requested_mode" => mode,
+            "delivery_confirmation" => "pi_session_transcript",
+            "delivery_id" => receipt_entry&.fetch("delivery_id", nil),
+            "delivered_at" => receipt.fetch("delivered_at", nil)
+          }.compact
+        )
+        touch_state!(state)
+        store.save(state)
+        accepted_result(command_id, command_type, agent.fetch("id"), message, agent, log_ids)
       end
 
       # A session that is momentarily owned by another instance mid-turn is not a command failure.
@@ -6381,11 +6665,15 @@ module Meringue
             end
 
             metadata = agent.fetch("harness_metadata", {}) || {}
-            Array(metadata.fetch("pending_prompts", [])).filter_map do |entry|
-              next nil unless entry.is_a?(Hash) && present_string(entry.fetch("prompt", nil))
-
-              { "agent_id" => agent.fetch("id"), "entry" => deep_copy(entry) }
+            entries = Array(metadata.fetch("pending_prompts", [])).select do |entry|
+              entry.is_a?(Hash) && present_string(entry.fetch("prompt", nil))
             end
+            awaiting_receipt = entries.find { |entry| entry.fetch("delivery_state", nil) == "awaiting_receipt" }
+            # While one Pi request has an ambiguous outcome, no later queued prompt may pass it.
+            # Reconciliation checks only that receipt; after it settles, remaining prompts are
+            # delivered in their existing order on the next pass.
+            entries = [awaiting_receipt] if awaiting_receipt
+            entries.map { |entry| { "agent_id" => agent.fetch("id"), "entry" => deep_copy(entry) } }
           end
         end
 
@@ -14035,6 +14323,12 @@ module Meringue
         # The native interactive process is the sole session writer during a focus handoff. Do not
         # let the background reconciler read or resume the same JSONL file until focus returns.
         return false if interactive_focus_active?(agent)
+        # A prompt RPC can time out while Pi is still compacting and before its response reaches us.
+        # Pending-prompt delivery checks the durable receipt first; ordinary polling/resume is
+        # suppressed because it could race that live request and write a duplicate continuation.
+        return false if Array(metadata.fetch("pending_prompts", [])).any? { |entry|
+          entry.is_a?(Hash) && entry.fetch("delivery_state", nil) == "awaiting_receipt"
+        }
         # A record whose failure was already recorded as terminal is settled: `/prompt` refuses
         # to continue it and reconciliation has no repair left to try. Re-polling it would only
         # re-observe the same dead session, rewrite state, and append the same error log on

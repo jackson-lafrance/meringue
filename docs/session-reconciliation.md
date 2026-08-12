@@ -328,6 +328,30 @@ A follow-up prompt remains valid recovery input after that process exit. Pi cann
 the follow-up as a normal continuation. `steer` remains rejected in this state because it
 specifically promises to interrupt an active turn.
 
+### A prompt timeout after recovery is an ambiguous delivery
+
+Reattaching a large Pi transcript can trigger compaction. Pi may accept a `prompt`, `steer`, or
+`follow_up` RPC, spend longer than Meringue's response deadline compacting, and persist the exact
+user message afterward. A timeout therefore proves only that the acknowledgement is missing—not
+that the prompt failed. Retrying immediately can duplicate work.
+
+For receipt-capable clients, Meringue appends a stable command delivery id to the harness prompt and
+saves `pending_prompts[].delivery_state: "awaiting_receipt"` when that prompt RPC times out. The
+head/user command is accepted into its journal as pending confirmation rather than incorrectly
+recorded as failed. Reconciliation then follows a strict boundary:
+
+- while the original Pi process is live and the marker is absent, only the JSONL receipt is checked;
+  ordinary session polling, automatic resume, and later pending prompts are held back;
+- once the marker appears, the same delivery is checkpointed and logged without another prompt RPC;
+- only when the process is gone **and** its durable transcript lacks that delivery id is retry safe;
+  the same id is used in the replacement process, preserving crash recovery and exactly-once
+  command behavior across concurrent Meringue instances.
+
+This is separate from a pre-delivery `get_state` timeout, which happens before `prompt_session`
+writes a prompt and remains an ordinary command error. If the prompt RPC was acknowledged and only
+the follow-up state refresh times out, PiClient returns the known delivery and lets reconciliation
+refresh it later. A proved process exit follows the supervisor rules above.
+
 ## A session that cannot be replayed
 
 One dead turn is different: the model provider rejects the *saved transcript* itself, not the
