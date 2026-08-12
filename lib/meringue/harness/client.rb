@@ -22,6 +22,28 @@ module Meringue
         raise NotImplementedError, "harness clients must implement #prompt_session"
       end
 
+      # Some RPC transports can accept a prompt before their acknowledgement reaches Meringue (for
+      # example Pi compacts a large saved session before persisting the user message). A timeout in
+      # that window is an ambiguous outcome, not proof of failure. Receipt-capable clients receive a
+      # stable delivery id, persist it with the harness prompt, and can later report:
+      #
+      #   { "status" => "delivered" | "pending" | "not_delivered" | "unknown",
+      #     "process_alive" => true | false, "delivered_at" => "...", "pid" => 123 }
+      #
+      # The kernel never retries `pending`/`unknown`; `not_delivered` is safe to retry only because
+      # the original process is gone and the durable transcript lacks the delivery id.
+      def prompt_delivery_receipts_supported?
+        false
+      end
+
+      def ambiguous_prompt_delivery_error?(_error)
+        false
+      end
+
+      def prompt_delivery_status(_session_ref, delivery_id:, prompt:, started_at: nil)
+        { "status" => "unknown" }
+      end
+
       def abort_session(session_ref)
         raise NotImplementedError, "harness clients must implement #abort_session"
       end
@@ -122,6 +144,25 @@ module Meringue
       # Returning nil means "no evidence available" (for example a session this process never
       # owned). The kernel then reports the exit without the exit status rather than guessing.
       def session_exit_evidence(_session_ref)
+        nil
+      end
+
+      # Harness-neutral evidence about the process supervising a session transport.
+      #
+      # Long-lived RPC harnesses may be children of the Meringue dashboard process. When that
+      # shared supervisor exits, every child loses its pipe owner together even though each durable
+      # session and workspace remains valid. Clients that persist transport ownership can report:
+      #
+      #   { "supervisor_exited" => true,
+      #     "owner_pid" => 123,
+      #     "owner_started_at" => "...",
+      #     "harness_pid" => 456,
+      #     "harness_started_at" => "...",
+      #     "source" => "transport_ownership" }
+      #
+      # The kernel only auto-recovers a process-gone worker when this evidence proves its shared
+      # supervisor also left. Returning nil preserves the ordinary isolated-process-exit behavior.
+      def session_supervision_evidence(_session_ref)
         nil
       end
 

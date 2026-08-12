@@ -120,20 +120,26 @@ Terminal is the last rung, not the first. These are in-flight session-repair ste
 3. **Head result repair** — an unparseable `HeadResult` is challenged up to
    `HEAD_RESULT_REPAIR_MAX_ATTEMPTS` times before it counts as a failure. A result the
    kernel refuses to apply has no retry and is terminal immediately.
-4. **Worker resume** — a worker whose session cannot be polled is re-attached and
+4. **Shared-supervisor recovery** — when a worker process is gone *and* its durable Pi
+   transport lease proves that the Meringue process owning its RPC pipes is gone too, the
+   kernel claims, re-attaches, and continues that saved session automatically. The claim and
+   prompt are exactly-once across concurrent dashboards; failures stay `blocked` while up to
+   `WORKER_SUPERVISOR_RECOVERY_MAX_ATTEMPTS` remain. See [A harness process that is
+   gone](#a-harness-process-that-is-gone).
+5. **Worker resume** — a worker whose session cannot be polled is re-attached and
    re-prompted up to `WORKER_RECONCILE_RESUME_MAX_ATTEMPTS` times, staying `blocked`
    (with one warning per attempt) rather than `errored` while attempts remain. A session
    the provider has already refused to replay is skipped here (see [A session that cannot
    be replayed](#a-session-that-cannot-be-replayed)): resuming it would send the same
-   rejected transcript. So is a session whose *process* is gone (see [A harness process that
-   is gone](#a-harness-process-that-is-gone)): there is nothing left to attach or prompt.
-   A resume attempt that fails *after* attaching kills the session it started
+   rejected transcript. So is an isolated session whose *process* is gone while its
+   Meringue owner remains alive: there is no proof that an operational continuation is
+   wanted. A resume attempt that fails *after* attaching kills the session it started
    (`safely_kill_recovery_session`), so a failed rung never leaves an untracked harness
    process writing to the session file.
-5. **Worker session restart** — a worker whose saved transcript the provider refuses is
+6. **Worker session restart** — a worker whose saved transcript the provider refuses is
    continued once in a *fresh* session on that same worktree and branch, instead of being
    resumed.
-6. **Terminal error** — recorded once, per the contract above.
+7. **Terminal error** — recorded once, per the contract above.
 
 ## Cleanup of terminal records
 
@@ -201,9 +207,11 @@ predecessor normally cancels its dependent, but a predecessor that only stopped 
 was cut short keeps the dependent waiting, because *reconciliation itself* resumes that session and
 the chain continues without anyone doing anything. That is the whole test
 (`deferred_predecessor_can_still_finish?`): waiting is only correct when Meringue is the one who
-will make the predecessor finish. A predecessor whose harness process is gone fails it, because
-nothing revives that worker without a user prompt, so its dependents are resolved by their
-`if_predecessor_fails` policy instead of waiting for a human for an unbounded time.
+will make the predecessor finish. A predecessor whose harness process alone is gone fails it,
+because nothing revives that worker without a user prompt, so its dependents are resolved by their
+`if_predecessor_fails` policy instead of waiting for a human for an unbounded time. A process lost
+with its shared supervisor is recovered before settle, so its dependent keeps its original queue
+position. If bounded supervisor recovery is exhausted, ordinary process-exit settlement applies.
 `if_predecessor_fails: "run"` still activates the dependent immediately, and killing the
 predecessor still cancels the chain.
 
@@ -246,14 +254,16 @@ happened, ~70 seconds and three orphaned harness processes later.
   a worktree that takes a minute to check out, a first turn that thinks for ten - can never be
   classified as a dead process.
 - **Classified on the first pass that sees it.** `Engine#worker_harness_process_gone?` is checked
-  *before* the resume ladder, so the worker settles as `errored` with
-  `settle_failure.kind: "harness_process_exited"`, `source: "harness_process_exit"`, and a reason
-  that names the exit (`… (exit code 1)`, `… (terminated by signal 9)`). Detection latency is one
-  reconcile pass - `RECONCILE_INTERVAL` is 2.0s - instead of "whenever a resume happened to be
-  attempted".
-- **Never re-prompted.** No `attach_session`, no `prompt_session`, no resume attempt counter, and
-  therefore no `RpcTimeoutError` standing in front of the real cause. The `error_class` and
-  `error_message` on the record are the harness's own process-exit error.
+  *before* the generic resume ladder. It then follows one of two proved causes: shared-supervisor
+  recovery below, or ordinary isolated-process settlement. The latter settles the worker as
+  `errored` with `settle_failure.kind: "harness_process_exited"`,
+  `source: "harness_process_exit"`, and a reason that names the exit (`… (exit code 1)`,
+  `… (terminated by signal 9)`). Detection latency is one reconcile pass -
+  `RECONCILE_INTERVAL` is 2.0s - instead of "whenever a resume happened to be attempted".
+- **An isolated exit is never re-prompted.** If the recorded Meringue transport owner is still
+  alive (or there is no shared-supervisor evidence), there is no `attach_session`,
+  `prompt_session`, or resume attempt counter. The `error_class` and `error_message` on the record
+  remain the harness's own process-exit error rather than an RPC timeout.
 - **Reported with the evidence the exit left behind.** `Client#session_exit_evidence` (implemented
   by `PiClient`) reports the exit status, the stderr tail, and when the process was last heard from;
   `read_events` now also drains the journal of an exited process, which is what finally puts the
@@ -265,19 +275,82 @@ happened, ~70 seconds and three orphaned harness processes later.
   process is gone. The record keeps its session reference, worktree, and branch,
   `worker_resumable_after_settle_failure?` stays true, and `/prompt` continues the work in a new
   process from the saved session. The log line says so.
-- **Not something to queue behind.** Because that revival needs a user, queued dependents are
-  resolved by their `if_predecessor_fails` policy instead of waiting (see "Settled is not
-  finished" above).
+- **An isolated exit is not something to queue behind.** Because that revival needs a user, queued
+  dependents are resolved by their `if_predecessor_fails` policy instead of waiting (see "Settled
+  is not finished" above).
 
-Meringue does not restart the session by itself here, deliberately. The session file is a valid
-resumable transcript, and a fresh session would throw away the turn the worker was in the middle
-of - the opposite trade from the unreplayable case below, where the transcript is the thing that is
-broken.
+For an **isolated** exit, Meringue does not restart the session by itself, deliberately. The session
+file is a valid resumable transcript, and guessing at the cause could duplicate or override the
+turn the worker was in the middle of - the opposite trade from the unreplayable case below, where
+the transcript is the thing that is broken.
+
+### A Meringue supervisor exit
+
+Pi RPC workers are long-lived direct children of the dashboard process. Their stdin/stdout are
+anonymous pipes owned by that one Meringue process. When the dashboard exits or is replaced, all
+pipe writers close together and Pi exits on EOF; a fleet of simultaneous child exits is therefore
+one supervisor lifecycle failure, not independent model-provider failures.
+
+Each Pi transport lease persists the harness PID and process-start timestamp together with the
+owning Meringue PID and start timestamp. `PiClient#session_supervision_evidence` reports a shared
+supervisor exit only when both recorded identities are gone. The start timestamps protect the
+decision from PID reuse. New Pi session refs also retain the same supervision identity as a
+fallback if the lease cannot be read.
+
+That proof enables automatic recovery without weakening the isolated-exit rule:
+
+1. Reconciliation delivers durable `pending_prompts` first. If one of those exactly-once commands
+   reattaches the session, the ordinary operational continuation is unnecessary and is not sent.
+2. Otherwise the kernel saves `harness_metadata.supervisor_recovery.state: "claimed"` before any
+   attach or prompt I/O. The record names the dead-owner episode, attempt, recovery id, claimant
+   instance identity, old PID, and bounded supervision evidence.
+3. Another live Meringue instance that sees the same state leaves the worker untouched. If its poll
+   has a stale PID while the lease already names a live replacement, `PiClient#get_state` reports
+   that replacement instead of launching a second writer. A user/head prompt arriving while the
+   claim is active joins `pending_prompts` and is delivered after recovery rather than racing the
+   operational continuation. These checks provide exactly-once behavior across concurrent
+   reconciliation and prompt delivery.
+4. The claimant reattaches the **same** Pi JSONL session in the **same** workspace and sends one
+   continuation containing its deterministic recovery id. Success checkpoints the replacement PID
+   and `state: "resumed"` and emits one diagnostic warning naming the shared-supervisor cause. The
+   issue, session id, worktree, branch, pending prompts, and dependent queue are unchanged.
+5. A failed attach/prompt kills any replacement it created and stays `blocked` while the bounded
+   recovery budget remains. After three failures, normal process-exit settlement applies; later
+   reconcile passes do not start another recovery loop, and `/prompt` remains available.
+
+If a claimant itself exits, its replacement Pi process loses a newer recorded transport owner. The
+next dashboard therefore sees a new dead-owner episode and can continue again without replaying
+the prior recovery id. This covers graceful replacement and abrupt supervisor death; it does not
+depend on a shutdown hook running.
 
 A follow-up prompt remains valid recovery input after that process exit. Pi cannot queue a
 `follow_up` RPC until a live turn exists, so `PiClient` reattaches the saved transcript and delivers
 the follow-up as a normal continuation. `steer` remains rejected in this state because it
 specifically promises to interrupt an active turn.
+
+### A prompt timeout after recovery is an ambiguous delivery
+
+Reattaching a large Pi transcript can trigger compaction. Pi may accept a `prompt`, `steer`, or
+`follow_up` RPC, spend longer than Meringue's response deadline compacting, and persist the exact
+user message afterward. A timeout therefore proves only that the acknowledgement is missing—not
+that the prompt failed. Retrying immediately can duplicate work.
+
+For receipt-capable clients, Meringue appends a stable command delivery id to the harness prompt and
+saves `pending_prompts[].delivery_state: "awaiting_receipt"` when that prompt RPC times out. The
+head/user command is accepted into its journal as pending confirmation rather than incorrectly
+recorded as failed. Reconciliation then follows a strict boundary:
+
+- while the original Pi process is live and the marker is absent, only the JSONL receipt is checked;
+  ordinary session polling, automatic resume, and later pending prompts are held back;
+- once the marker appears, the same delivery is checkpointed and logged without another prompt RPC;
+- only when the process is gone **and** its durable transcript lacks that delivery id is retry safe;
+  the same id is used in the replacement process, preserving crash recovery and exactly-once
+  command behavior across concurrent Meringue instances.
+
+This is separate from a pre-delivery `get_state` timeout, which happens before `prompt_session`
+writes a prompt and remains an ordinary command error. If the prompt RPC was acknowledged and only
+the follow-up state refresh times out, PiClient returns the known delivery and lets reconciliation
+refresh it later. A proved process exit follows the supervisor rules above.
 
 ## A session that cannot be replayed
 
@@ -383,8 +456,11 @@ ruby -Ilib -Itest test/integration/kernel_maintenance/reconcile_delivery_pull_re
 ruby -Ilib -Itest test/integration/kernel_workers/settle_classification_test.rb
 ruby -Ilib -Itest test/integration/kernel_workers/unreplayable_session_recovery_test.rb
 ruby -Ilib -Itest test/integration/kernel_workers/dead_harness_process_test.rb
+ruby -Ilib -Itest test/integration/kernel_workers/supervisor_exit_recovery_test.rb
 ruby -Ilib -Itest test/integration/harness/pi_client_turn_outcome_test.rb
 ruby -Ilib -Itest test/integration/harness/pi_client_process_exit_test.rb
+ruby -Ilib -Itest test/integration/harness/pi_client_transport_test.rb
+ruby -Ilib -Itest test/integration/harness/transport_ownership_test.rb
 ruby -Ilib -Itest test/integration/kernel_workers/command_gated_worker_test.rb
 ```
 
@@ -402,12 +478,17 @@ actionable reporting, never resumes it, continues the work in a fresh session on
 and branch without allocating a second worktree, repoints the queued dependent at the successor,
 spends at most one restart, and keeps the shared worktree when the replaced record is pruned.
 
-The dead-harness-process files cover the process-exit contract: the harness marks its own
+The dead-harness-process files cover the isolated process-exit contract: the harness marks its own
 process-gone error and keeps the exit status, stderr, and journalled `process_exit` event readable
-after the process is gone; the kernel settles the worker on the first pass that sees that evidence
-with the exit as the reason, never attaches or re-prompts it, records it once across repeated
-passes, keeps it promptable on its own workspace, resolves a queued dependent by policy instead of
-waiting on it, and leaves the ordinary transport-failure resume ladder unchanged.
+after the process is gone; absent dead-supervisor evidence, the kernel settles the worker on the
+first pass with the exit as the reason, never attaches or re-prompts it, records it once across
+repeated passes, keeps it promptable on its own workspace, resolves a queued dependent by policy,
+and leaves the ordinary transport-failure resume ladder unchanged.
+
+The supervisor-exit and transport-ownership files cover the shared failure: nine workers recover in
+one pass without changing session/workspace identity, two live reconcilers produce one continuation,
+a prompt arriving during that claim queues and lands once afterward, stale/reused PIDs never route
+to the wrong RPC pipes, failed attaches are bounded, and repeated passes do not restart the loop.
 
 The delivery-PR file covers the background-pass contract: a delivery PR refresh records forge state
 and never lets an unavailable forge overwrite the last known state, a blocked forge lookup does
