@@ -33,6 +33,7 @@ Entry bodies are wrapped to the indented body width, so no character is pushed p
 The surrounding transcript chrome is Meringue-owned:
 
 - `[14:30:01] ✦ agent P1-I9-W1 — …` was assembled by `ChatPane#role_line` from the durable log timestamp, source id, and agent title.
+- `▪ meringue · via H127` is a kernel-applied command carrying separate author metadata for the head that proposed it; non-head kernel actions remain `▪ meringue`.
 - `P1-I9-W1 output:` was assembled by the worker-completion branches in `ChatPane` and `TUI::App`.
 - Borders and layout characters can arrive inside assistant text when an agent quotes terminal output, but the outer logs-pane border is drawn separately by `TUI::Layout` and `TUI::Canvas`.
 

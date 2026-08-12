@@ -88,6 +88,51 @@ class KernelHeadsLoggingTest < KernelHeadsTestCase
     )
   end
 
+  def test_head_authored_kernel_command_logs_retain_the_proposing_head
+    project_id = add_project!
+    standalone_log = log_with_message("Added project #{project_id}")
+    head_id = spawn_head!("Create an issue, report the state, and try an invalid command")
+    result = apply_head_result(
+      head_id,
+      head_result(
+        commands: [
+          create_issue_command(project_id: project_id, title: "Attributed command"),
+          { "type" => "ListAll", "payload" => {} },
+          { "type" => "NoOp", "payload" => { "reason" => "The rest of the request is already satisfied." } },
+          { "type" => "Frobnicate", "payload" => {} }
+        ]
+      ),
+      cleanup_head: false
+    )
+
+    action_log = log_with_message("Created issue #{project_id}-I1")
+    output_log = log_with_message("Command output: ListAll: accepted")
+    no_op_log = log_with_message("Head #{head_id} intentionally routed no work")
+    rejection_log = log_with_message("Rejected Frobnicate:")
+    [action_log, output_log, no_op_log, rejection_log].each do |entry|
+      assert_equal "kernel", entry.fetch("source_type")
+      assert_equal "head", entry.dig("details", "command_author_type")
+      assert_equal head_id, entry.dig("details", "command_author_id")
+    end
+    assert_equal "#{project_id}-I1", action_log.fetch("source_id"), "the command target remains distinct from its author"
+    assert_nil rejection_log.fetch("source_id"), "the kernel remains the source of command validation"
+
+    journal = find_agent_record(head_id).dig("harness_metadata", "head_result_command_journal")
+    assert_equal ["head"], journal.map { |entry| entry.fetch("command_author_type") }.uniq
+    assert_equal [head_id], journal.map { |entry| entry.fetch("command_author_id") }.uniq
+
+    refute standalone_log.fetch("details").key?("command_author_type")
+    refute standalone_log.fetch("details").key?("command_author_id"),
+           "a non-head kernel action must keep the ordinary Meringue-only attribution"
+
+    apply_command("GetSessionDefaults")
+    standalone_after_head = log_with_message("Future Pi heads and workers use")
+    refute standalone_after_head.fetch("details").key?("command_author_type")
+    refute standalone_after_head.fetch("details").key?("command_author_id"),
+           "head command authorship must not leak into later kernel commands on the same thread"
+    assert_equal %w[accepted accepted accepted rejected], command_results(result).map { |entry| entry.fetch("status") }
+  end
+
   def test_user_prompt_gains_accepted_issue_and_worker_routes_after_head_application
     project_id = add_project!
     head_id = spawn_head!("Fix the retry race")
