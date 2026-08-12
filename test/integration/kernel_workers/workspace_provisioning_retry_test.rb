@@ -16,6 +16,35 @@ class KernelWorkersWorkspaceProvisioningRetryTest < Minitest::Test
 
   # Fails the first `failures` allocations with an injected classification, then provisions a real
   # worktree. No test ever waits for a timeout: the failure is injected, not produced.
+  class DiskExhaustedWorkspaceManager < Meringue::Workspace::Manager
+    attr_reader :attempts
+
+    def initialize(**options)
+      super(**options)
+      @attempts = 0
+    end
+
+    def allocate_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil, progress: nil)
+      @attempts += 1
+      plan_worker_workspace(
+        project_root: project_root, project_id: project_id, issue_id: issue_id,
+        agent_id: agent_id, task_title: task_title
+      ).merge(
+        "created" => false,
+        "errors" => [
+          "git worktree add failed: disk is full (no space left on device); " \
+            "free disk space, then prompt this worker to retry provisioning"
+        ],
+        "failure_kind" => "disk_exhausted",
+        "recovery" => Meringue::Workspace::Manager::RECOVERY_RESUME,
+        "stderr" => "Preparing worktree\n… output omitted …\nNo space left on device",
+        "stderr_bytes" => 100_054,
+        "diagnostics_truncated" => true,
+        "cleanup" => { "attempted" => true, "worktree_removed" => true, "warnings" => [] }
+      )
+    end
+  end
+
   class FlakyWorkspaceManager < Meringue::Workspace::Manager
     attr_reader :attempts
 
@@ -129,6 +158,49 @@ class KernelWorkersWorkspaceProvisioningRetryTest < Minitest::Test
 
   # A checkout that blew its absolute budget while still making progress is real work, so it is
   # not retried automatically: the worker goes straight to waiting for a human.
+  def test_disk_exhaustion_waits_for_headroom_instead_of_retrying_on_the_same_full_disk
+    manager = DiskExhaustedWorkspaceManager.new(root_path: workspace_root)
+    engine = build_engine(workspace_manager: manager)
+    context = project_with_issue(engine)
+
+    result = apply_raw(engine, "SpawnWorker", { "issue_id" => context.fetch("issue_id"), "prompt" => "Go." })
+    engine.reconcile_sessions
+
+    worker = agent(engine, "P1-I1-W1")
+    metadata = worker.fetch("harness_metadata")
+    assert_equal "failed", result.fetch("status")
+    assert_equal 1, manager.attempts, "reconciliation must not immediately fill the same disk again"
+    assert_equal "blocked", worker.fetch("status")
+    assert_equal "retry_exhausted", metadata.fetch("provisioning_state")
+    assert_equal "resume", metadata.fetch("provisioning_recovery")
+    assert_includes metadata.fetch("provisioning_errors").join(" "), "free disk space"
+    assert_includes metadata.fetch("provisioning_next_step"), "Prompt this worker to retry"
+    assert_nil worker.fetch("harness_session_id")
+    assert_empty @harness_client.spawns
+
+    info = apply_raw(engine, "GetInfo", { "target_id" => "P1-I1-W1" }).fetch("result").fetch("provisioning")
+    assert info.fetch("resumable")
+    assert_includes info.fetch("errors").join(" "), "no space left on device"
+  end
+
+  def test_prompting_after_disk_cleanup_requeues_the_same_reservation
+    manager = DiskExhaustedWorkspaceManager.new(root_path: workspace_root)
+    engine = build_engine(workspace_manager: manager)
+    context = project_with_issue(engine)
+    apply_raw(engine, "SpawnWorker", { "issue_id" => context.fetch("issue_id"), "prompt" => "Go." })
+
+    result = apply_raw(
+      engine, "PromptAgent", { "agent_id" => "P1-I1-W1", "prompt" => "Disk cleanup is complete; retry." }
+    )
+
+    assert_equal "accepted", result.fetch("status")
+    worker = agent(engine, "P1-I1-W1")
+    assert_equal "queued", worker.fetch("status")
+    assert_equal "retry_pending", worker.dig("harness_metadata", "provisioning_state")
+    assert_equal 0, worker.dig("harness_metadata", "provisioning_attempts")
+    assert_equal "Disk cleanup is complete; retry.", worker.dig("harness_metadata", "spawn_prompt")
+  end
+
   def test_a_blown_budget_is_not_retried_automatically
     manager = FlakyWorkspaceManager.new(
       failures: 5, recovery: Meringue::Workspace::Manager::RECOVERY_RESUME, root_path: workspace_root

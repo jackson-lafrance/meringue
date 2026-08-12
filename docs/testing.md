@@ -70,8 +70,12 @@ progressing or stuck, so `test/integration/workspace/manager_checkout_timeout_te
 second instead of the shipped 120s/1800s. Nothing waits for a production timeout, and the file runs
 in a few seconds. The rest of the behavior is injected rather than timed:
 `test/support/workspace_support.rb`'s `TimingOutManager` raises the manager's own `CommandTimeout`
-for kernel-level tests, and `test/integration/kernel_workers/workspace_provisioning_retry_test.rb`
-fails a scripted number of attempts before provisioning for real.
+for kernel-level tests, while `DiskExhaustedManager` completes a real small worktree registration
+and then injects Git's large repeated ENOSPC stderr without filling the developer's disk. The
+workspace and kernel recovery tests assert that output remains bounded, the owned partial attempt
+is removed, no immediate same-disk retry occurs, and an explicit post-cleanup prompt requeues the
+same reservation. `test/integration/kernel_workers/workspace_provisioning_retry_test.rb` also fails
+a scripted number of transient attempts before provisioning for real.
 
 Goal loops are covered without either of those: `test/integration/kernel_goals/` drives the real reconcile tick with a fake harness and a scripted metric probe, so a whole multi-iteration goal runs in milliseconds. Only `metric_probe_test.rb` runs real commands, and only harmless shell builtins inside `Dir.mktmpdir`. What stays manual there is a goal against a real repository metric (a real coverage or lint run) and its real harness sessions.
 
