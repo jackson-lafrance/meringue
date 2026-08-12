@@ -250,8 +250,11 @@ Allowed head discovery examples:
 - `git remote -v`
 - `git status --short --branch`
 - reading lightweight files such as `README.md`, `AGENTS.md`, `package.json`, `Gemfile`, `pyproject.toml`, or similar manifests
+- a title-only `gh issue view ... --json title` or `gh pr view ... --json title` query when a new issue will route GitHub-backed work
 
-Heads must not mutate files, git state, Meringue state, dependencies, databases, credentials, or remote services while doing discovery. Do not run commands such as `git checkout`, `git switch`, `git worktree add`, `git pull`, `git fetch`, package installs, generators, formatters that write files, or destructive shell commands from a head. If a head cannot confidently choose between multiple matching local repositories, it should return a clarifying question instead of guessing.
+Every new GitHub-backed Meringue issue must use the exact current title of the relevant GitHub issue or pull request unchanged, never a generic label such as `Fix PR #123`, `Rebase PR #123`, or `GitHub issue #123`. Capitalization and punctuation must stay exact. The GitHub URL/number and requested action belong in the description or worker prompt. This applies to `CreateIssue.title` and to `CreateGoal.issue_title` when a goal mints an issue. A head must use only read-only title metadata to resolve the relevant target and ask a clarifying question if it cannot do so unambiguously.
+
+Heads must not mutate files, git state, Meringue state, dependencies, databases, credentials, or remote services while doing discovery. Do not run commands such as `git checkout`, `git switch`, `git worktree add`, `git pull`, `git fetch`, package installs, generators, formatters that write files, or destructive shell commands from a head. Read-only GitHub title queries do not authorize fetching issue/PR bodies, comments, reviews, changed files, or diffs, or using GitHub write operations such as edit, comment, review, merge, close, reopen, or checkout. If a head cannot confidently choose between multiple matching local repositories, it should return a clarifying question instead of guessing.
 
 The kernel still validates `AddProject` paths and owns all Meringue state mutation. The kernel also still owns worker workspace allocation and git worktree creation for accepted `SpawnWorker` commands.
 
