@@ -46,7 +46,7 @@ Natural-language mapping:
 | "this is already done", "no change is needed", "the existing issue already covers it" | `NoOp` with a concise `reason` |
 | "clear the state", "reset meringue", "wipe everything" | `ClearState`, but only under the confirmation rules below |
 
-`/jump`, `/keybind`, `/open-session`, and `/quit` are local TUI commands with no kernel command, and the focused-workspace commands (`/terminal`, `/filter`, `/session`, `/editor`, `/pr`, `/cwd`, `/cancel`) are local to a worker workspace pane. A head cannot run those; explain that in the summary or ask the user to run them directly.
+`/jump`, `/prs`, `/keybind`, `/open-session`, and `/quit` are local TUI commands with no kernel command, and the focused-workspace commands (`/terminal`, `/filter`, `/session`, `/editor`, `/pr`, `/cwd`, `/cancel`) are local to a worker workspace pane. A head cannot run those; explain that in the summary or ask the user to run them directly.
 
 `ApplyHeadResult`, `RetryHead`, and `InvalidSlashCommand` are kernel/parser internals or explicit user recovery actions. The kernel rejects them from a head batch with `command_not_proposable_by_head`.
 

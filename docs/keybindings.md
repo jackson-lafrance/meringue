@@ -14,7 +14,7 @@ agent_select_next = ["j", "down", "right"]
 
 ## Global
 
-- `Ctrl-B`: open a delivery pull request. While an issue/worker is selected (or jump mode is on a row) it opens the owning issue's kernel-verified PR. With nothing selected it opens the **open pull requests** picker instead, because unscoped chat is not about one issue; `↑`/`↓` move, `Enter` opens the highlighted PR in the browser, and `Esc`, another `Ctrl-B`, a click outside the list, or any other key closes it. Clicking a row opens that row. If a PR is missing, malformed, or its status cannot be refreshed, Meringue reports that state without closing the dashboard or changing the selection.
+- `Ctrl-B`: open a delivery pull request. While an issue/worker is selected (or jump mode is on a row) it opens the owning issue's kernel-verified PR. With nothing selected it opens the **open pull requests** picker instead, because unscoped chat is not about one issue; `↑`/`↓` move, `Enter` opens the highlighted PR in the browser, and `Esc`, another `Ctrl-B`, a click outside the list, or any other key closes it. Clicking a row opens that row. If a PR is missing, malformed, or its status cannot be refreshed, Meringue reports that state without closing the dashboard or changing the selection. `/prs` opens this same all-open-PR picker directly, regardless of the current AgentTree selection.
 - `Ctrl-R`: while the `/models` **model picker** is open, re-fetch the harness model catalog (`refresh_model_catalog`). It has no effect anywhere else, so it stays available for normal typing.
 - `Ctrl-D`: quit.
 - `Ctrl-C`: clear input; quit when input is empty.
@@ -141,7 +141,7 @@ The single row under the chat bar is shared, left to right, and truncated at the
 
 Delivery PR records are owned by issues, so an issue selection shows the newest PR that is still live, falling back to the newest settled one so a finished issue still says what it delivered. A worker selection resolves to that owning issue for the same action and never gets a second worker-owned marker or record. Every one of these facts comes from state the kernel already persisted (`delivery_pull_requests` on the issue); rendering never runs `gh`.
 
-The open-PR picker opens in the same popup slot as the slash-command list, above the composer, and lists every PR that is not merged or closed, newest number first: `#145  Fix signup validation  P1-I9 · open`. A PR the kernel has not verified yet is listed as `unverified` rather than hidden. Rows are named by their issue title, because delivery records do not carry a PR title of their own.
+The open-PR picker opens in the same popup slot as the slash-command list, above the composer, and lists every PR that is not merged or closed, newest number first: `#145  Fix signup validation  P1-I9 · open`. Open it with `/prs` from any dashboard selection, or with `Ctrl-B` while chat is unscoped. A PR the kernel has not verified yet is listed as `unverified` rather than hidden. Rows are named by their issue title, because delivery records do not carry a PR title of their own.
 
 The selection is sticky and independent of focus:
 
@@ -260,7 +260,7 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 - `Enter`: insert the selected suggestion into the input. Press `Enter` again to run it.
 - `Tab`: complete the selected suggestion, or the first one when nothing is selected.
 - Commands that take a record id (`/kill`, `/prompt`, `/jump`, `/issue rename`, and friends) suggest matching ids **shortest first**: an id is offered before the ids nested under it. Typing `/kill p3` lists `P3`, then `P3-I10`, then `P3-I10-W1`, and typing `/kill i10` lists `P3-I10` above `P3-I10-W1`, so killing an issue never means arrowing past its own workers. Same depth sorts numerically (`P3-I2` before `P3-I10`), an exactly typed id stays on top, and with nothing typed after the command each list keeps its own order (`/prompt ` offers live workers before the failed heads it can retry).
-- The box shows a window of three entries and holds **commands only**. When the list is longer than the window, a dim caption renders on its own line *below* the box: `1–3 of 27 commands  ·  ↑↓ scroll · keep typing to filter`. It is a caption about the list, not a row in it, so the window never loses an entry to it; a list that fits the window has no caption at all. The same slot and the same caption placement are used by the `Ctrl-B` open-PR picker (`2 open PRs  ·  ↑↓ move · Enter opens · Esc closes`) and by the `/models` model picker. The focused-workspace `workspace commands` list is unwindowed and has no caption.
+- The box shows a window of three entries and holds **commands only**. When the list is longer than the window, a dim caption renders on its own line *below* the box: `1–3 of 27 commands  ·  ↑↓ scroll · keep typing to filter`. It is a caption about the list, not a row in it, so the window never loses an entry to it; a list that fits the window has no caption at all. The same slot and the same caption placement are used by the `/prs` / unscoped-`Ctrl-B` open-PR picker (`2 open PRs  ·  ↑↓ move · Enter opens · Esc closes`) and by the `/models` model picker. The focused-workspace `workspace commands` list is unwindowed and has no caption.
 
 ## First-run setup
 

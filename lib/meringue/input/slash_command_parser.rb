@@ -31,6 +31,7 @@ module Meringue
         ["/goal stop <goal_id>", "Stop a goal loop for good, leaving its current attempt session alone."],
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
+        ["/prs", "Open the picker for every tracked pull request that is still open."],
         ["/setup", "Reopen first-run setup: theme, harness, model, and thinking level."],
         ["/keybind", "Show all TUI keybindings."],
         ["/config", "Show the active config, supported defaults, conflict policy, and keybindings."],
@@ -681,6 +682,8 @@ module Meringue
           parse_setup(arguments)
         when "jump"
           invalid("/jump is a local TUI command. Run it in the interactive TUI to open an agent session.", usage: "/jump [agent_id]")
+        when "prs"
+          invalid("/prs is a local TUI command. Run it in the interactive TUI to open the pull-request picker.", usage: "/prs")
         when "keybind"
           invalid("/keybind is a local TUI command. Run it in the interactive TUI to show keybindings.", usage: "/keybind")
         when "config"
