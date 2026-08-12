@@ -3728,6 +3728,9 @@ module Meringue
             persist: false
           )
         end
+        submission = if on_submit&.respond_to?(:enqueue_submission)
+                       on_submit.enqueue_submission(text, selected_target: selected_target)
+                     end
         increment_pending_count
 
         Thread.new do
@@ -3739,7 +3742,11 @@ module Meringue
               visible: false,
               persist: false
             ) if assistant_message_id
-            result = if on_submit
+            result = if submission && on_submit.respond_to?(:deliver_submission)
+                       on_submit.deliver_submission(submission) do |event|
+                         update_message_from_event(assistant_message_id, event)
+                       end
+                     elsif on_submit
                        submit_to_prompt_handler(on_submit, text, selected_target) do |event|
                          update_message_from_event(assistant_message_id, event)
                        end

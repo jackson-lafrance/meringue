@@ -6,6 +6,8 @@ mutation is a load -> mutate -> save cycle against one JSON state file. That mak
 
 This document describes how a head's command batch is applied exactly once, why
 that matters, and what happens when the same logical command is delivered twice.
+Dashboard text is first protected by the write-ahead queue described in
+[durable input submissions](durable-input-submissions.md), before it reaches this layer.
 
 ## What went wrong before
 
@@ -56,7 +58,9 @@ remaining lookups are ordered by what retention depends on — statuses of PRs r
 an issue, then branch discovery for settled workers with an unknown delivery, then
 exploratory candidate URLs — so an exhausted budget degrades discovery instead of turning
 a known-merged PR into `unknown` and retaining the whole subtree. Each pass reports
-`forge_lookup` counters and every retained record's reason in the prune log details.
+`forge_lookup` counters and every retained record's reason in the prune log details. Workspace
+cleanup has a separate 30-second pass budget; remaining worktrees are conservatively retained and
+reported for a later pass rather than monopolizing one input delivery thread.
 
 **A batch apply lease.** The instance applying a head result holds a heartbeat lease
 on the head record (`head_result_apply_owner`, `head_result_apply_heartbeat`), so a

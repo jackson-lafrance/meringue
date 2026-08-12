@@ -60,6 +60,7 @@ module Meringue
       engine = enable_agents ? tui_engine(store, registry, config: config, config_path: options.fetch(:config_path)) : nil
       agent_session_service = engine ? Sessions::WorkerSessionService.new(engine: engine) : nil
       workspace_controller = Workspace::Controller.from_config(config, focus_session_service: agent_session_service)
+      prompt_loop = engine ? Heads::PromptLoop.new(engine: engine, wait_for_workers: false) : nil
       App.new(
         input: input,
         out: out,
@@ -80,7 +81,7 @@ module Meringue
           # has none and must never open it.
           onboarding_enabled: enable_agents
         ),
-        prompt_handler: engine ? Heads::PromptLoop.new(engine: engine, wait_for_workers: false) : nil,
+        prompt_handler: prompt_loop,
         reconciler: engine ? -> { engine.reconcile_sessions } : nil
       ).run
     rescue ArgumentError => e

@@ -11,6 +11,26 @@ class TuiAppWiringTest < Minitest::Test
   App = Meringue::TUI::App
   Models = Meringue::State::Models
 
+  class DurableBlockingHandler
+    attr_reader :enqueued, :delivered, :release
+
+    def initialize
+      @enqueued = Queue.new
+      @delivered = Queue.new
+      @release = Queue.new
+    end
+
+    def enqueue_submission(text, selected_target: nil)
+      { "id" => "input-1", "text" => text, "selected_target" => selected_target }.tap { |record| enqueued << record }
+    end
+
+    def deliver_submission(record)
+      delivered << record
+      release.pop
+      { "summary" => "routed" }
+    end
+  end
+
   class BlockingLogStore
     attr_reader :write_started, :write_finished
 
@@ -227,6 +247,20 @@ class TuiAppWiringTest < Minitest::Test
     assert @app.send(:select_agent_tree_item, state, "P1-I1")
     issue_draft = @app.send(:handle_key, "r", "", 0, -1, nil, state).first
     assert_equal "ModifyIssue", parser.parse("#{issue_draft}Renamed issue").to_h.fetch("type")
+  end
+
+  def test_composer_is_not_cleared_until_submission_is_durably_enqueued
+    state = composed_state(empty_state)
+    handler = DurableBlockingHandler.new
+
+    result = @app.send(:handle_key, "\r", "survive restart", 15, -1, handler, state)
+
+    assert_equal ["", 0, -1], result
+    submission = Timeout.timeout(2) { handler.enqueued.pop }
+    assert_equal "survive restart", submission.fetch("text")
+    assert_equal submission, Timeout.timeout(2) { handler.delivered.pop }
+  ensure
+    handler&.release&.push(true)
   end
 
   def test_submitting_a_prompt_hands_the_text_to_the_kernel_callback
