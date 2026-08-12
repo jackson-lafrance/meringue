@@ -152,6 +152,39 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
     assert_includes frame, "#151"
   end
 
+  # Unlike Ctrl-B, the explicit plural command always means the global list. A
+  # selected worker must stay selected without narrowing `/prs` to that worker's
+  # own delivery PR, and the local command must never reach the kernel/head path.
+  def test_slash_prs_opens_the_existing_global_picker_even_with_a_selection
+    select("P1-I1-W1")
+    submissions = []
+    handler = lambda do |text, **_options|
+      submissions << text
+      { "event" => "slash_command_applied", "command_results" => [] }
+    end
+
+    result = @app.send(:handle_key, "\r", "/prs", 4, -1, handler, compose_app_state(@app, @state, "/prs"))
+    picker = compose_app_state(@app, @state)
+
+    assert_equal ["", 0, -1], result
+    assert @pane.delivery_pr_picker?(picker)
+    assert_equal ["› #151  Add the open PR picker  P1-I2 · unverified", "  #145  Fix signup validation  P1-I1 · open"],
+                 plain_lines(@pane.popup_lines(picker))
+    assert_equal "P1-I1-W1", Meringue::TUI::LogScope.id(picker)
+    assert_empty submissions
+    assert_empty @opener.opened
+  end
+
+  def test_slash_prs_preserves_the_existing_empty_picker_feedback
+    state = empty_state.merge("issues" => [issue_record("P1-I1", "delivery_pull_request" => pull_request("70", "state" => "merged"))])
+
+    result = @app.send(:handle_key, "\r", "/prs", 4, -1, nil, composed_state(state, chat: { "input_buffer" => "/prs" }))
+
+    assert_equal ["", 0, -1], result
+    refute @pane.delivery_pr_picker?(compose_app_state(@app, state))
+    assert_includes @app.instance_variable_get(:@messages).map { |message| message.fetch("text") }.join("\n"), "No delivery pull requests are open"
+  end
+
   # The list box holds PRs only; the count and the keys are a caption under it.
   def test_the_picker_keys_are_captioned_below_the_list_not_inside_it
     picker = press_ctrl_b
