@@ -37,6 +37,12 @@ module Meringue
       # How often a long-running command reports progress to its caller.
       PROGRESS_REPORT_INTERVAL = 15
       READ_CHUNK_BYTES = 64 * 1024
+      # Git can emit one checkout-progress record per file and repeat the same failure thousands of
+      # times. Keep enough head/tail context to diagnose a failure without retaining an unbounded
+      # in-memory transcript or copying hundreds of kilobytes into state and logs.
+      DIAGNOSTIC_OUTPUT_LIMIT_BYTES = 16 * 1024
+      FAILURE_SUMMARY_LIMIT_BYTES = 2 * 1024
+      PROGRESS_DETAIL_LIMIT_BYTES = 1 * 1024
       TERMINATION_GRACE_SECONDS = 1
       # A worker branch/worktree can already exist when a previous attempt was interrupted or when
       # another actor provisioned the same worker concurrently. Reuse it when it is usable, and
@@ -68,6 +74,11 @@ module Meringue
       # Git failures that another attempt can plausibly get past: someone else held a lock, or an
       # index/ref lock file survived a crash. Distinct from a collision, which is deterministic.
       TRANSIENT_ERROR_PATTERN = /index\.lock|cannot lock ref|unable to create.*\.lock|another git process|resource temporarily unavailable|file exists/i
+      # Git normally reports filesystem exhaustion in stderr and exits 128 rather than surfacing a
+      # Ruby exception. Cover the portable errno spelling, the macOS/Linux message, quota failures,
+      # and the common Windows wording. This must be checked before generic git-error handling: an
+      # immediate retry cannot create space and can make the outage worse.
+      DISK_EXHAUSTION_PATTERN = /\bENOSPC\b|no space left on device|disk quota exceeded|not enough space (?:on (?:the )?disk|is available)|disk (?:is )?full/i
 
       # A command Meringue killed. `reason` separates the two bounds so the caller can say which
       # one fired, and so "stuck" can be retried while "legitimately enormous" is not retried
@@ -76,15 +87,16 @@ module Meringue
         STALLED = "stalled"
         BUDGET = "budget"
 
-        attr_reader :argv, :timeout, :stdout, :stderr, :reason, :elapsed
+        attr_reader :argv, :timeout, :stdout, :stderr, :reason, :elapsed, :diagnostics
 
-        def initialize(argv:, timeout:, stdout:, stderr:, reason: BUDGET, elapsed: nil)
+        def initialize(argv:, timeout:, stdout:, stderr:, reason: BUDGET, elapsed: nil, diagnostics: nil)
           @argv = argv
           @timeout = timeout
           @stdout = stdout
           @stderr = stderr
           @reason = reason.to_s
           @elapsed = elapsed
+          @diagnostics = diagnostics
           super(
             if stalled?
               "command produced no output for #{timeout} seconds: #{argv.join(" ")}"
@@ -107,6 +119,68 @@ module Meringue
         end
       end
 
+      # Retains a bounded head and tail while counting every byte the child produced. The head says
+      # what Git was doing, the tail carries the terminal errno, and the omission marker makes it
+      # impossible to mistake the diagnostic for a complete transcript. Output is normalized to
+      # UTF-8 at the process boundary so an odd filename cannot make state serialization fail.
+      class DiagnosticBuffer
+        attr_reader :bytes_seen
+
+        def initialize(limit: nil, on_match: nil)
+          @limit = limit && Integer(limit)
+          @head_limit = @limit && @limit / 4
+          @tail_limit = @limit && @limit - @head_limit
+          @on_match = on_match
+          @head = +""
+          @tail = +""
+          @bytes_seen = 0
+          @truncated = false
+        end
+
+        def <<(chunk)
+          raw = chunk.to_s
+          @on_match&.call(raw)
+          @bytes_seen += raw.bytesize
+          text = raw.encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "�")
+          if @limit.nil? || (!@truncated && @head.bytesize + text.bytesize <= @limit)
+            @head << text
+            return self
+          end
+
+          unless @truncated
+            combined = @head + text
+            @head = byteslice(combined, 0, @head_limit)
+            @tail = byteslice(combined, [combined.bytesize - @tail_limit, 0].max, @tail_limit)
+            @truncated = true
+            return self
+          end
+
+          @tail << text
+          @tail = byteslice(@tail, @tail.bytesize - @tail_limit, @tail_limit) if @tail.bytesize > @tail_limit
+          self
+        end
+
+        def truncated?
+          @truncated
+        end
+
+        def to_s
+          return @head.dup unless truncated?
+
+          retained = @head.bytesize + @tail.bytesize
+          omitted = [bytes_seen - retained, 1].max
+          marker = "\n… [#{omitted} output bytes omitted] …\n"
+          tail_budget = [@limit - @head.bytesize - marker.bytesize, 0].max
+          @head + marker + byteslice(@tail, [@tail.bytesize - tail_budget, 0].max, tail_budget)
+        end
+
+        private
+
+        def byteslice(value, start, length)
+          value.to_s.byteslice(start, length).to_s.force_encoding(Encoding::UTF_8).scrub
+        end
+      end
+
       # Records when a running command last wrote anything, so the watchdog can tell "slow but
       # progressing" from "stuck" without parsing git's output format.
       class OutputMonitor
@@ -117,10 +191,14 @@ module Meringue
         end
 
         def record(chunk)
-          line = chunk.to_s.split(/[\r\n]+/).reject { |part| part.strip.empty? }.last
+          text = chunk.to_s.encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "�")
+          line = text.split(/[\r\n]+/).reject { |part| part.strip.empty? }.last
           @mutex.synchronize do
             @last_at = Manager.monotonic_now
             @last_line = line if line
+            scan = @scan_tail.to_s + text
+            @disk_exhausted ||= scan.match?(Manager::DISK_EXHAUSTION_PATTERN)
+            @scan_tail = scan.byteslice([scan.bytesize - 256, 0].max, 256).to_s.force_encoding(Encoding::UTF_8).scrub
           end
         end
 
@@ -130,6 +208,10 @@ module Meringue
 
         def last_line
           @mutex.synchronize { @last_line }
+        end
+
+        def disk_exhausted?
+          @mutex.synchronize { !!@disk_exhausted }
         end
       end
 
@@ -221,10 +303,18 @@ module Meringue
         errors = []
         last_failure = nil
         candidate_branch = plan.fetch("workspace_branch")
+        candidate_created_branch = false
+        candidate_owned_attempt = false
         ALLOCATION_ATTEMPT_LIMIT.times do |attempt|
           candidate = candidate_allocation(plan, attempt)
           worktree_root = candidate.fetch("worktree_root")
           candidate_branch = candidate.fetch("branch")
+          candidate_created_branch = false
+          candidate_owned_attempt = false
+          attempt_started = lambda do |details|
+            candidate_created_branch = details.fetch("created_branch", false)
+            candidate_owned_attempt = true
+          end
           outcome = allocate_candidate_worktree(
             plan: plan,
             git_root: git_root,
@@ -232,7 +322,8 @@ module Meringue
             relative_project_path: relative_project_path,
             branch: candidate_branch,
             worktree_root: worktree_root,
-            progress: progress
+            progress: progress,
+            attempt_started: attempt_started
           )
           workspace = outcome.fetch("workspace", nil)
           return workspace if workspace
@@ -250,6 +341,9 @@ module Meringue
           base_ref: base_ref,
           stdout: last_failure && last_failure["stdout"],
           stderr: last_failure && last_failure["stderr"],
+          stdout_bytes: last_failure && last_failure["stdout_bytes"],
+          stderr_bytes: last_failure && last_failure["stderr_bytes"],
+          diagnostics_truncated: last_failure && last_failure["diagnostics_truncated"],
           exit_status: last_failure && last_failure["exit_status"],
           failure_kind: (last_failure && last_failure["failure_kind"]) || "worktree_unavailable",
           recovery: (last_failure && last_failure["recovery"]) || RECOVERY_NONE,
@@ -259,21 +353,39 @@ module Meringue
         # Cleanup must not inherit the exhausted allocation budget, or it would be killed on its
         # first command and leave exactly the mess it exists to remove.
         clear_allocation_deadline!
-        cleanup = cleanup_incomplete_allocation(
-          git_root: defined?(git_root) && git_root,
-          worktree_root: defined?(worktree_root) && worktree_root,
-          branch: (defined?(candidate_branch) && candidate_branch) || (plan && plan["workspace_branch"])
-        )
+        timeout_disk_exhausted = disk_exhaustion_output?(e.stderr) || disk_exhaustion_output?(e.stdout) ||
+                                 (e.diagnostics && e.diagnostics["disk_exhausted"])
+        cleanup = if defined?(candidate_owned_attempt) && candidate_owned_attempt
+                    cleanup_incomplete_allocation(
+                      git_root: defined?(git_root) && git_root,
+                      worktree_root: defined?(worktree_root) && worktree_root,
+                      branch: (defined?(candidate_branch) && candidate_branch) || (plan && plan["workspace_branch"]),
+                      created_branch: defined?(candidate_created_branch) && candidate_created_branch
+                    )
+                  else
+                    { "attempted" => false, "reason" => "allocation_not_started" }
+                  end
+        timeout_errors = if timeout_disk_exhausted
+                           [
+                             "git worktree add failed: disk is full (no space left on device); " \
+                               "free disk space, then prompt this worker to retry provisioning"
+                           ]
+                         else
+                           # Allocation runs several git commands, so name the one that actually
+                           # hung instead of always blaming `git worktree add`.
+                           [e.describe(command_label(e.argv))]
+                         end
         failed_workspace(
           plan,
-          # Allocation runs several git commands, so name the one that actually hung instead of
-          # always blaming `git worktree add`.
-          [e.describe(command_label(e.argv))],
+          timeout_errors,
           git_root: defined?(git_root) && git_root,
           worktree_root: defined?(worktree_root) && worktree_root,
           base_ref: defined?(base_ref) && base_ref,
           stdout: e.stdout,
           stderr: e.stderr,
+          stdout_bytes: e.diagnostics && e.diagnostics["stdout_bytes"],
+          stderr_bytes: e.diagnostics && e.diagnostics["stderr_bytes"],
+          diagnostics_truncated: e.diagnostics && e.diagnostics["truncated"],
           timed_out: true,
           timeout_seconds: e.timeout,
           # A stuck command is worth one more attempt: the usual causes (a file-system monitor
@@ -281,13 +393,40 @@ module Meringue
           # command that blew the absolute ceiling while still making progress is not retried
           # automatically, because the retry would cost the same half hour; the worker is left
           # resumable so a human decides.
-          failure_kind: e.stalled? ? "command_stalled" : "command_timed_out",
-          recovery: e.stalled? ? RECOVERY_RETRY : RECOVERY_RESUME,
+          failure_kind: timeout_disk_exhausted ? "disk_exhausted" : (e.stalled? ? "command_stalled" : "command_timed_out"),
+          recovery: timeout_disk_exhausted ? RECOVERY_RESUME : (e.stalled? ? RECOVERY_RETRY : RECOVERY_RESUME),
           cleanup: cleanup
         )
       rescue StandardError => e
         clear_allocation_deadline!
-        failed_workspace(plan, ["worker workspace allocation failed: #{e.message}"], failure_kind: "allocation_error")
+        disk_exhausted = e.is_a?(Errno::ENOSPC) || e.is_a?(Errno::EDQUOT) || disk_exhaustion_output?(e.message)
+        if disk_exhausted
+          cleanup = if defined?(candidate_owned_attempt) && candidate_owned_attempt
+                      cleanup_incomplete_allocation(
+                        git_root: defined?(git_root) && git_root,
+                        worktree_root: defined?(worktree_root) && worktree_root,
+                        branch: (defined?(candidate_branch) && candidate_branch) || (plan && plan["workspace_branch"]),
+                        created_branch: defined?(candidate_created_branch) && candidate_created_branch
+                      )
+                    else
+                      { "attempted" => false, "reason" => "allocation_not_started" }
+                    end
+          failed_workspace(
+            plan,
+            [
+              "worker workspace allocation failed: disk is full (no space left on device); " \
+                "free disk space, then prompt this worker to retry provisioning"
+            ],
+            git_root: defined?(git_root) && git_root,
+            worktree_root: defined?(worktree_root) && worktree_root,
+            base_ref: defined?(base_ref) && base_ref,
+            failure_kind: "disk_exhausted",
+            recovery: RECOVERY_RESUME,
+            cleanup: cleanup
+          )
+        else
+          failed_workspace(plan, ["worker workspace allocation failed: #{e.message}"], failure_kind: "allocation_error")
+        end
       ensure
         clear_allocation_deadline!
       end
@@ -577,7 +716,8 @@ module Meringue
         }
       end
 
-      def failed_workspace(plan, errors, git_root: nil, worktree_root: nil, base_ref: nil, stdout: nil, stderr: nil, exit_status: nil,
+      def failed_workspace(plan, errors, git_root: nil, worktree_root: nil, base_ref: nil, stdout: nil, stderr: nil,
+                           stdout_bytes: nil, stderr_bytes: nil, diagnostics_truncated: nil, exit_status: nil,
                            timed_out: false, timeout_seconds: nil, cleanup: nil, failure_kind: nil, recovery: RECOVERY_NONE)
         (plan || {}).merge(
           "git_root" => git_root,
@@ -588,6 +728,9 @@ module Meringue
           "errors" => Array(errors).compact,
           "stdout" => present_output(stdout),
           "stderr" => present_output(stderr),
+          "stdout_bytes" => stdout_bytes,
+          "stderr_bytes" => stderr_bytes,
+          "diagnostics_truncated" => diagnostics_truncated,
           "exit_status" => exit_status,
           "timed_out" => timed_out,
           "timeout_seconds" => timeout_seconds,
@@ -608,7 +751,8 @@ module Meringue
         { "branch" => "#{branch}#{suffix}", "worktree_root" => "#{worktree_root}#{suffix}" }
       end
 
-      def allocate_candidate_worktree(plan:, git_root:, base_ref:, relative_project_path:, branch:, worktree_root:, progress: nil)
+      def allocate_candidate_worktree(plan:, git_root:, base_ref:, relative_project_path:, branch:, worktree_root:,
+                                      progress: nil, attempt_started: nil)
         candidate_plan = plan.merge("workspace_branch" => branch, "workspace_path" => worktree_root)
         workspace_path = relative_project_path == "." ? worktree_root : File.join(worktree_root, relative_project_path)
 
@@ -628,6 +772,10 @@ module Meringue
           end
         end
 
+        # Remember whether the candidate branch existed before this attempt. The normal stale-empty
+        # branch cleanup may recreate it, but an ENOSPC failure must still preserve that name for a
+        # later retry rather than treating it as disposable debris created for this attempt.
+        branch_preexisting = branch_exists?(git_root, branch)
         remove_orphaned_owned_branch(git_root, branch)
         FileUtils.mkdir_p(File.dirname(worktree_root))
         created_branch = !branch_exists?(git_root, branch)
@@ -648,7 +796,17 @@ module Meringue
                  # reachable and "a branch named ... already exists" never fails the spawn.
                  ["git", "-C", git_root, "worktree", "add", worktree_root, branch]
                end
-        result = run_command(*argv, timeout: checkout_timeout, stall_timeout: checkout_stall_timeout, progress: progress)
+        # From this point onward the path is either absent/empty and Meringue-owned, and the branch
+        # ownership decision is known. Outer exception/timeout handling may therefore clean this
+        # exact attempt without inferring ownership from a similar path or branch name.
+        attempt_started&.call("created_branch" => created_branch)
+        result = run_command(
+          *argv,
+          timeout: checkout_timeout,
+          stall_timeout: checkout_stall_timeout,
+          output_limit: DIAGNOSTIC_OUTPUT_LIMIT_BYTES,
+          progress: progress
+        )
         stdout = result.fetch("stdout")
         stderr = result.fetch("stderr")
         status = result.fetch("status")
@@ -656,18 +814,54 @@ module Meringue
         unless status.success?
           output = present_output(stderr) || present_output(stdout)
           collision = collision_output?(output)
+          disk_exhausted = result.dig("diagnostics", "disk_exhausted") ||
+                           disk_exhaustion_output?(stderr) || disk_exhaustion_output?(stdout)
           # A failed attempt must not leave a half-provisioned directory or an unused branch behind,
           # otherwise the next attempt collides with this instance's own leftovers.
-          cleanup = cleanup_failed_attempt(git_root: git_root, worktree_root: worktree_root, branch: branch,
-                                           created_branch: created_branch, collision: collision)
+          cleanup = cleanup_failed_attempt(
+            git_root: git_root,
+            worktree_root: worktree_root,
+            branch: branch,
+            created_branch: created_branch,
+            collision: collision,
+            preserve_branch: disk_exhausted && branch_preexisting
+          )
+          failure_kind = if disk_exhausted
+                           "disk_exhausted"
+                         elsif collision
+                           "worktree_collision"
+                         else
+                           "git_error"
+                         end
+          recovery = if disk_exhausted
+                       # The checkout is safely cleaned, but an immediate retry would consume the
+                       # same full filesystem again. Preserve the worker for an explicit retry once
+                       # the operator has made headroom.
+                       RECOVERY_RESUME
+                     elsif transient_output?(output)
+                       RECOVERY_RETRY
+                     else
+                       RECOVERY_NONE
+                     end
+          error = if disk_exhausted
+                    "git worktree add failed: disk is full (no space left on device); " \
+                      "free disk space, then prompt this worker to retry provisioning"
+                  elsif collision
+                    "git worktree add failed: #{output || "exit #{status.exitstatus}"}"
+                  else
+                    "git worktree add failed: #{failure_summary(output) || "exit #{status.exitstatus}"}"
+                  end
           return {
             "retry" => collision,
-            "errors" => ["git worktree add failed: #{output || "exit #{status.exitstatus}"}"],
+            "errors" => [error],
             "stdout" => stdout,
             "stderr" => stderr,
+            "stdout_bytes" => result.dig("diagnostics", "stdout_bytes"),
+            "stderr_bytes" => result.dig("diagnostics", "stderr_bytes"),
+            "diagnostics_truncated" => result.dig("diagnostics", "truncated"),
             "exit_status" => status.exitstatus,
-            "failure_kind" => collision ? "worktree_collision" : "git_error",
-            "recovery" => transient_output?(output) ? RECOVERY_RETRY : RECOVERY_NONE,
+            "failure_kind" => failure_kind,
+            "recovery" => recovery,
             "cleanup" => cleanup
           }
         end
@@ -698,7 +892,11 @@ module Meringue
         output.to_s.match?(TRANSIENT_ERROR_PATTERN)
       end
 
-      def cleanup_failed_attempt(git_root:, worktree_root:, branch:, created_branch:, collision:)
+      def disk_exhaustion_output?(output)
+        output.to_s.match?(DISK_EXHAUSTION_PATTERN)
+      end
+
+      def cleanup_failed_attempt(git_root:, worktree_root:, branch:, created_branch:, collision:, preserve_branch: false)
         # A collision means the path or branch belongs to an existing worktree or another actor, so
         # nothing here may be removed. Anything else is this attempt's own debris.
         return { "attempted" => false, "reason" => "collision" } if collision
@@ -707,7 +905,8 @@ module Meringue
           git_root: git_root,
           worktree_root: worktree_root,
           branch: branch,
-          created_branch: created_branch
+          created_branch: created_branch,
+          preserve_branch: preserve_branch
         )
       rescue StandardError => e
         { "attempted" => true, "error" => e.message }
@@ -841,12 +1040,17 @@ module Meringue
       # which then pushed the next attempt onto a `-2` name. Cleanup therefore unlocks, uses
       # git's documented double `--force` override, deletes the directory it owns, prunes the
       # registration, verifies the result, and only then releases the branch.
-      def cleanup_incomplete_allocation(git_root:, worktree_root:, branch:, created_branch: true)
+      def cleanup_incomplete_allocation(git_root:, worktree_root:, branch:, created_branch: true, preserve_branch: false)
         return { "attempted" => false } unless git_root && worktree_root
 
         warnings = []
         outcome = remove_incomplete_worktree(git_root: git_root, worktree_root: worktree_root, warnings: warnings)
-        branch_result = if created_branch
+        branch_result = if outcome["worktree_removed"] == false
+                          warnings << "left branch #{branch} in place because the partial worktree could not be fully removed"
+                          "kept_worktree_remaining"
+                        elsif preserve_branch
+                          "kept_for_retry"
+                        elsif created_branch
                           release_owned_branch(git_root, branch, warnings: warnings)
                         else
                           "kept_pre_existing"
@@ -966,18 +1170,18 @@ module Meringue
       #
       # The command is polled rather than wrapped in Timeout.timeout, so the watchdog can look at
       # output activity, report progress, and kill the process group promptly.
-      def run_command(*argv, timeout: command_timeout, stall_timeout: nil, deadline: nil, progress: nil)
+      def run_command(*argv, timeout: command_timeout, stall_timeout: nil, deadline: nil, output_limit: nil, progress: nil)
         requested_argv = argv.map(&:to_s)
         # Every git command Meringue runs is spawned with the isolation flags, so no call site can
         # forget them. Timeouts still report the caller's argv, which reads better in logs.
         effective_argv = isolated_git_argv(requested_argv)
         ceiling = effective_ceiling(timeout, deadline)
-        stdout = +""
-        stderr = +""
+        monitor = OutputMonitor.new
+        stdout_buffer = DiagnosticBuffer.new(limit: output_limit, on_match: ->(chunk) { monitor.record(chunk) })
+        stderr_buffer = DiagnosticBuffer.new(limit: output_limit, on_match: ->(chunk) { monitor.record(chunk) })
         status = nil
         stdin = out = err = wait_thread = nil
         readers = []
-        monitor = OutputMonitor.new
         expiry = nil
 
         Open3.popen3(*effective_argv, pgroup: true) do |child_stdin, child_out, child_err, child_wait|
@@ -986,8 +1190,8 @@ module Meringue
           err = child_err
           wait_thread = child_wait
           stdin.close
-          readers << stream_reader(out, stdout, monitor)
-          readers << stream_reader(err, stderr, monitor)
+          readers << stream_reader(out, stdout_buffer)
+          readers << stream_reader(err, stderr_buffer)
           begin
             expiry = watch_command(
               wait_thread,
@@ -1009,6 +1213,14 @@ module Meringue
             readers.each(&:kill)
           end
         end
+        stdout = stdout_buffer.to_s
+        stderr = stderr_buffer.to_s
+        diagnostics = {
+          "stdout_bytes" => stdout_buffer.bytes_seen,
+          "stderr_bytes" => stderr_buffer.bytes_seen,
+          "truncated" => stdout_buffer.truncated? || stderr_buffer.truncated?,
+          "disk_exhausted" => monitor.disk_exhausted?
+        }
         if expiry
           raise CommandTimeout.new(
             argv: requested_argv,
@@ -1016,11 +1228,18 @@ module Meringue
             reason: expiry.fetch("reason"),
             elapsed: expiry.fetch("elapsed"),
             stdout: stdout,
-            stderr: stderr
+            stderr: stderr,
+            diagnostics: diagnostics
           )
         end
 
-        { "stdout" => stdout, "stderr" => stderr, "status" => status, "argv" => effective_argv }
+        {
+          "stdout" => stdout,
+          "stderr" => stderr,
+          "status" => status,
+          "argv" => effective_argv,
+          "diagnostics" => diagnostics
+        }
       ensure
         stdin.close if stdin && !stdin.closed?
       end
@@ -1062,18 +1281,16 @@ module Meringue
           "command" => label,
           "elapsed" => round_seconds(elapsed),
           "quiet_for" => round_seconds(silence),
-          "detail" => monitor.last_line
+          "detail" => bounded_tail(monitor.last_line, PROGRESS_DETAIL_LIMIT_BYTES)
         )
       rescue StandardError
         nil
       end
 
-      def stream_reader(io, buffer, monitor)
+      def stream_reader(io, buffer)
         Thread.new do
           loop do
-            chunk = io.readpartial(READ_CHUNK_BYTES)
-            buffer << chunk
-            monitor.record(chunk)
+            buffer << io.readpartial(READ_CHUNK_BYTES)
           end
         rescue EOFError, IOError, Errno::EIO
           nil
@@ -1118,6 +1335,21 @@ module Meringue
         Process.kill("KILL", -pid)
       rescue Errno::ESRCH, Errno::EPERM
         nil
+      end
+
+      def failure_summary(value)
+        text = present_output(value)
+        return nil unless text
+
+        bounded_tail(text, FAILURE_SUMMARY_LIMIT_BYTES)
+      end
+
+      def bounded_tail(value, limit)
+        text = value.to_s.encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "�")
+        return text if text.bytesize <= limit
+
+        tail = text.byteslice(text.bytesize - limit, limit).to_s.force_encoding(Encoding::UTF_8).scrub
+        "… [#{text.bytesize - tail.bytesize} earlier bytes omitted] …\n#{tail}"
       end
 
       def present_output(value)

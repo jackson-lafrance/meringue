@@ -89,8 +89,8 @@ class WorkspaceManagerFailedAllocationCleanupTest < Minitest::Test
       manager = TimingOutManager.new(
         run_add_first: true,
         root_path: File.join(tmp, "workspaces"),
-        checkout_timeout: 0.05,
-        checkout_stall_timeout: 0.05
+        checkout_timeout: 0.5,
+        checkout_stall_timeout: 0.5
       )
 
       workspace = allocate_workspace(manager, project, task_title: "Budget already gone")
@@ -124,6 +124,123 @@ class WorkspaceManagerFailedAllocationCleanupTest < Minitest::Test
       assert_equal "#{plan.fetch("workspace_branch")}-2", workspace.fetch("workspace_branch")
       assert branch_exists?(project, plan.fetch("workspace_branch")), "the colliding branch is not ours to delete"
       assert_path_exists File.join(other_worktree, "their-work.txt")
+    end
+  end
+
+  def test_disk_exhaustion_is_detected_cleaned_and_reported_with_bounded_diagnostics
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = DiskExhaustedManager.new(root_path: File.join(tmp, "workspaces"))
+
+      workspace = allocate_workspace(manager, project, task_title: "Disk fills during checkout")
+
+      refute workspace.fetch("created")
+      assert_equal "disk_exhausted", workspace.fetch("failure_kind")
+      assert_equal Meringue::Workspace::Manager::RECOVERY_RESUME, workspace.fetch("recovery"),
+                   "retrying immediately on the same full disk would only repeat the failure"
+      assert_equal [
+        "git worktree add failed: disk is full (no space left on device); " \
+          "free disk space, then prompt this worker to retry provisioning"
+      ], workspace.fetch("errors")
+      assert workspace.fetch("diagnostics_truncated")
+      assert_equal manager.injected_stderr_bytes, workspace.fetch("stderr_bytes")
+      assert_operator workspace.fetch("stderr").bytesize, :<=,
+                      Meringue::Workspace::Manager::DIAGNOSTIC_OUTPUT_LIMIT_BYTES
+      assert_includes workspace.fetch("stderr"), "output bytes omitted"
+      assert_includes workspace.fetch("stderr"), "No space left on device",
+                      "the bounded tail must retain the actual errno"
+
+      cleanup = workspace.fetch("cleanup")
+      assert cleanup.fetch("worktree_removed"), cleanup.inspect
+      assert cleanup.fetch("branch_removed"), cleanup.inspect
+      assert_empty cleanup.fetch("warnings")
+      refute Dir.exist?(workspace.fetch("worktree_root_path"))
+      refute branch_exists?(project, workspace.fetch("workspace_branch"))
+      refute_includes git_output(project, project.fetch("project_root"), "worktree", "list", "--porcelain"),
+                      workspace.fetch("worktree_root_path")
+    end
+  end
+
+  def test_preflight_enospc_does_not_clean_a_path_that_this_attempt_never_owned
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = PreflightDiskExhaustedManager.new(root_path: File.join(tmp, "workspaces"))
+      plan = manager.plan_worker_workspace(
+        project_root: project.fetch("project_root"), project_id: "P1", issue_id: "P1-I1",
+        agent_id: "P1-I1-W1", task_title: "Preflight ENOSPC"
+      )
+      FileUtils.mkdir_p(plan.fetch("workspace_path"))
+      keep = File.join(plan.fetch("workspace_path"), "user-owned.txt")
+      File.write(keep, "do not remove\n")
+
+      workspace = allocate_workspace(manager, project, task_title: "Preflight ENOSPC")
+
+      assert_equal "disk_exhausted", workspace.fetch("failure_kind")
+      assert_equal "allocation_not_started", workspace.dig("cleanup", "reason")
+      refute workspace.dig("cleanup", "attempted")
+      assert_equal "do not remove\n", File.read(keep)
+    end
+  end
+
+  def test_a_direct_enospc_exception_gets_the_same_recoverable_classification
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = RaisingDiskExhaustedManager.new(root_path: File.join(tmp, "workspaces"))
+
+      workspace = allocate_workspace(manager, project, task_title: "Ruby raises ENOSPC")
+
+      refute workspace.fetch("created")
+      assert_equal "disk_exhausted", workspace.fetch("failure_kind")
+      assert_equal Meringue::Workspace::Manager::RECOVERY_RESUME, workspace.fetch("recovery")
+      assert_includes workspace.fetch("errors").join(" "), "free disk space"
+      assert workspace.dig("cleanup", "attempted")
+      refute Dir.exist?(workspace.fetch("worktree_root_path"))
+      refute branch_exists?(project, workspace.fetch("workspace_branch"))
+    end
+  end
+
+  def test_cleanup_keeps_the_branch_when_the_partial_worktree_cannot_be_removed
+    manager = IncompleteCleanupManager.new(root_path: "/managed")
+
+    cleanup = manager.send(
+      :cleanup_incomplete_allocation,
+      git_root: "/repo",
+      worktree_root: "/managed/partial",
+      branch: "meringue/partial"
+    )
+
+    refute cleanup.fetch("branch_removed")
+    refute manager.branch_release_attempted, "a still-registered branch must not be deleted"
+    assert_equal "kept_worktree_remaining", cleanup.fetch("branch_result")
+    assert_includes cleanup.fetch("warnings").join(" "), "partial worktree could not be fully removed"
+  end
+
+  def test_disk_exhaustion_on_a_preexisting_worker_branch_keeps_it_for_the_retry
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = DiskExhaustedManager.new(
+        fail_once: true,
+        root_path: File.join(tmp, "workspaces")
+      )
+      plan = manager.plan_worker_workspace(
+        project_root: project.fetch("project_root"), project_id: "P1", issue_id: "P1-I1",
+        agent_id: "P1-I1-W1", task_title: "Retry existing branch"
+      )
+      git_output(
+        project, project.fetch("project_root"), "branch", plan.fetch("workspace_branch"), "origin/main"
+      )
+
+      failed = allocate_workspace(manager, project, task_title: "Retry existing branch")
+
+      assert_equal "disk_exhausted", failed.fetch("failure_kind")
+      assert_equal "kept_for_retry", failed.dig("cleanup", "branch_result")
+      assert branch_exists?(project, plan.fetch("workspace_branch"))
+      refute Dir.exist?(plan.fetch("workspace_path"))
+
+      retried = allocate_workspace(manager, project, task_title: "Retry existing branch")
+      assert retried.fetch("created"), retried.inspect
+      assert_equal plan.fetch("workspace_branch"), retried.fetch("workspace_branch")
+      assert_equal plan.fetch("workspace_path"), retried.fetch("workspace_path")
     end
   end
 
