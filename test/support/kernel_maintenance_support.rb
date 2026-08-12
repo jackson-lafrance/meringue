@@ -197,6 +197,26 @@ module KernelMaintenanceSupport
     undef_method :attach_session
   end
 
+  class CountingStore < Meringue::State::Store
+    attr_reader :save_count
+
+    def initialize(...)
+      super
+      @save_count = 0
+    end
+
+    def reset_save_count!
+      @save_count = 0
+    end
+
+    private
+
+    def save_unlocked(...)
+      @save_count += 1
+      super
+    end
+  end
+
   def kernel_maintenance_setup
     @kernel_maintenance_tmp = Dir.mktmpdir("meringue-kernel-maintenance")
     @kernel_maintenance_state_path = File.join(@kernel_maintenance_tmp, "state.json")
@@ -223,9 +243,10 @@ module KernelMaintenanceSupport
   def build_engine(forge_client: StubForgeClient.new, harness_client: Meringue::Harness::FakeClient.new,
                    harness_client_resolver: nil, head_runner: Meringue::Heads::FakeRunner.new,
                    prune_forge_lookup_budget: Meringue::Kernel::Engine::PRUNE_FORGE_LOOKUP_BUDGET_SECONDS,
-                   delivery_pull_request_refresh_budget: Meringue::Kernel::Engine::DELIVERY_PULL_REQUEST_REFRESH_BUDGET_SECONDS)
+                   delivery_pull_request_refresh_budget: Meringue::Kernel::Engine::DELIVERY_PULL_REQUEST_REFRESH_BUDGET_SECONDS,
+                   store: Meringue::State::Store.new(path: state_path))
     Meringue::Kernel::Engine.new(
-      store: Meringue::State::Store.new(path: state_path),
+      store: store,
       harness_client: harness_client,
       head_runner: head_runner,
       harness_client_resolver: harness_client_resolver,

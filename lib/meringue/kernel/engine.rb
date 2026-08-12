@@ -1412,7 +1412,7 @@ module Meringue
         end
 
         poll_results = agents.map { |agent| poll_agent_session(agent) }
-        applied_results = poll_results.map { |poll_result| apply_poll_result(poll_result) }
+        applied_results = apply_poll_results(poll_results)
         # Completion-triggered heads are resolved after polls so a worker that completed during
         # this pass can route follow-on commands immediately. A continuation carrying an external
         # gate is only armed here; it remains durable state on the completed worker until the shared
@@ -14119,6 +14119,7 @@ module Meringue
           "agent_id" => agent.fetch("id"),
           "agent_type" => agent.fetch("type", nil),
           "state" => settle_poll_state(settled: settled, settle_failure: settle_failure),
+          "polled_session_ref" => session_ref,
           "session_ref" => state_ref,
           "events" => events,
           # Only a session that is still running has mid-work progress worth reporting; a settled
@@ -14145,6 +14146,44 @@ module Meringue
           "error" => error_payload(e),
           "reconcile" => reconcile_error_model(agent, e)
         }
+      end
+
+      # Healthy streaming polls are compatible state-only merges: apply all of them against one
+      # freshly loaded snapshot while holding the cross-process writer lock, then publish that
+      # snapshot once. Terminal/head paths retain their existing immediate checkpoints because
+      # they can run follow-on commands or harness side effects after the lifecycle transition.
+      def apply_poll_results(poll_results)
+        indexed_results = Array(poll_results).each_with_index.to_a
+        working, other = indexed_results.partition { |poll_result, _index| poll_result.fetch("state", nil) == "working" }
+        applied = {}
+
+        unless working.empty?
+          synchronized_state do
+            store.coalesce_saves do
+              state = normalized_state
+              save_required = false
+              working.each do |poll_result, index|
+                result = refresh_agent_session_state_in(state, poll_result)
+                applied[index] = result
+                save_required ||= result.fetch("changed", false)
+              rescue StandardError => e
+                applied[index] = poll_result.merge(
+                  "changed" => false,
+                  "log_entry_ids" => [],
+                  "skipped" => "apply_error",
+                  "error" => error_payload(e)
+                )
+              end
+              store.save(state) if save_required
+            end
+          end
+        end
+
+        # Terminal paths checkpoint their lifecycle transition before running existing recovery,
+        # completion-head, deferred-worker, or head-command side effects. Do not hold the batch
+        # lock across those harness operations.
+        other.each { |poll_result, index| applied[index] = apply_poll_result(poll_result) }
+        indexed_results.map { |_poll_result, index| applied.fetch(index) }
       end
 
       def apply_poll_result(poll_result)
@@ -14214,29 +14253,38 @@ module Meringue
       def refresh_agent_session_state(poll_result)
         synchronized_state do
           state = normalized_state
-          agent = find_agent(state, poll_result.fetch("agent_id"))
-          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless agent
-          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if %w[completed killed].include?(agent.fetch("status", nil))
-
-          now = timestamp
-          previous_agent = deep_copy(agent)
-          previous_parent_statuses = worker_parent_statuses(state, agent)
-          merge_session_ref_into_agent!(agent, poll_result.fetch("session_ref", {}))
-          # The session is streaming again, so a recorded dead-turn reason is stale.
-          clear_settle_failure!(agent)
-          agent["status"] = "working"
-          log_ids = append_harness_event_logs(state, agent, poll_result.fetch("events", []))
-          log_ids.concat(record_worker_progress!(state, agent, poll_result.fetch("progress", []), now))
-          log_ids.concat(append_recovery_success_log(state, agent, poll_result))
-          refresh_worker_parent_statuses!(state, agent, now) if agent.fetch("type", nil) == "worker"
-          changed = agent != previous_agent || worker_parent_statuses(state, agent) != previous_parent_statuses || log_ids.any?
-          return poll_result.merge("changed" => false, "log_entry_ids" => []) unless changed
-
-          agent["updated_at"] = now
-          touch_state!(state, now)
-          store.save(state)
-          poll_result.merge("changed" => true, "log_entry_ids" => log_ids)
+          result = refresh_agent_session_state_in(state, poll_result)
+          store.save(state) if result.fetch("changed", false)
+          result
         end
+      end
+
+      def refresh_agent_session_state_in(state, poll_result)
+        agent = find_session_agent(
+          state,
+          agent_id: poll_result.fetch("agent_id", nil),
+          session_ref: poll_result.fetch("polled_session_ref", poll_result.fetch("session_ref", nil))
+        )
+        return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless agent
+        return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if %w[completed killed].include?(agent.fetch("status", nil))
+
+        now = timestamp
+        previous_agent = deep_copy(agent)
+        previous_parent_statuses = worker_parent_statuses(state, agent)
+        merge_session_ref_into_agent!(agent, poll_result.fetch("session_ref", {}), persist_heartbeat: false)
+        # The session is streaming again, so a recorded dead-turn reason is stale.
+        clear_settle_failure!(agent)
+        agent["status"] = "working"
+        log_ids = append_harness_event_logs(state, agent, poll_result.fetch("events", []))
+        log_ids.concat(record_worker_progress!(state, agent, poll_result.fetch("progress", []), now))
+        log_ids.concat(append_recovery_success_log(state, agent, poll_result))
+        refresh_worker_parent_statuses!(state, agent, now) if agent.fetch("type", nil) == "worker"
+        changed = agent != previous_agent || worker_parent_statuses(state, agent) != previous_parent_statuses || log_ids.any?
+        return poll_result.merge("agent_id" => agent.fetch("id"), "changed" => false, "log_entry_ids" => []) unless changed
+
+        agent["updated_at"] = now
+        touch_state!(state, now)
+        poll_result.merge("agent_id" => agent.fetch("id"), "changed" => true, "log_entry_ids" => log_ids)
       end
 
       def complete_polled_head(poll_result)
@@ -15649,8 +15697,29 @@ module Meringue
         end
       end
 
-      def merge_session_ref_into_agent!(agent, session_ref)
+      def merge_session_ref_into_agent!(agent, session_ref, persist_heartbeat: true)
         metadata = session_ref.fetch("metadata", {}) || {}
+        unless persist_heartbeat
+          # Harness freshness is runtime health evidence, not orchestration state. Pi's state
+          # summary also moves message counters and last-event fields while a turn streams; omit
+          # those volatile fields from routine polls so they cannot touch lifecycle timestamps or
+          # invalidate the durable snapshot. Visible drained events and progress are persisted by
+          # their dedicated journal paths below.
+          metadata = deep_copy(metadata)
+          metadata.delete("last_event_at")
+          metadata.delete("messageCount")
+          metadata.delete("message_count")
+          %w[pi_state session_file_summary].each do |container_key|
+            next unless metadata[container_key].is_a?(Hash)
+
+            persisted = agent.dig("harness_metadata", container_key)
+            persisted = {} unless persisted.is_a?(Hash)
+            volatile = persisted.select { |key, _value| heartbeat_session_metadata_key?(key) }
+            metadata[container_key] = volatile.merge(
+              metadata.fetch(container_key).reject { |key, _value| heartbeat_session_metadata_key?(key) }
+            )
+          end
+        end
         agent["harness"] = session_ref.fetch("harness", agent.fetch("harness", nil))
         agent["pid"] = session_ref.fetch("pid", agent.fetch("pid", nil))
         agent["harness_session_id"] = session_ref.fetch("session_id", agent.fetch("harness_session_id", nil))
@@ -15661,11 +15730,15 @@ module Meringue
           metadata,
           "cwd" => session_ref.fetch("cwd", metadata.fetch("cwd", nil)),
           "is_streaming" => session_ref.fetch("is_streaming", false),
-          "last_event_at" => session_ref.fetch("last_event_at", nil),
+          "last_event_at" => persist_heartbeat ? session_ref.fetch("last_event_at", nil) : agent.dig("harness_metadata", "last_event_at"),
           "reconcile_state" => RECONCILE_STATE_HEALTHY,
           "reconcile" => nil
         ).compact
         mark_head_session_active!(agent)
+      end
+
+      def heartbeat_session_metadata_key?(key)
+        %w[last_event_at lastEventAt messageCount message_count].include?(key.to_s)
       end
 
       def cleanup_applied_head!(state, head_id, now: timestamp)
