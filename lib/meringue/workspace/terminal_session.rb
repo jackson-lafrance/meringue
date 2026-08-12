@@ -56,7 +56,7 @@ module Meringue
 
       attr_reader :configuration_error
 
-      def start(workspace_path:, rows: DEFAULT_ROWS, columns: DEFAULT_COLUMNS)
+      def start(workspace_path:, rows: DEFAULT_ROWS, columns: DEFAULT_COLUMNS, on_started: nil)
         path = expanded_workspace_path(workspace_path)
         return rejected("This worker has no assigned workspace for its terminal.") unless path
         return rejected("Worker workspace is missing or is not a directory: #{path}") unless Dir.exist?(path)
@@ -109,6 +109,7 @@ module Meringue
           @output.clear
           @transcript.clear
         end
+        on_started&.call(child_pid)
         resize(rows: rows, columns: columns)
         start_background_threads(reader, child_pid)
         active_result("Started terminal in #{path}.", started: true)

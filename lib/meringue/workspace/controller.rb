@@ -3,29 +3,80 @@
 module Meringue
   module Workspace
     # Adapter used by the focused agent workspace UI. It coordinates UI-owned
-    # shell/editor processes without mutating kernel state or touching the
-    # selected worker's managed harness process.
+    # shell/editor processes and the native Pi PTY; the kernel service owns the
+    # session handoff and transport state, not this renderer/controller.
     class Controller
-      def self.from_config(config, env: ENV)
+      def self.from_config(config, env: ENV, focus_session_service: nil)
         new(
           terminal_manager: TerminalManager.from_config(config, env: env),
-          editor_launcher: EditorLauncher.from_config(config, env: env)
+          editor_launcher: EditorLauncher.from_config(config, env: env),
+          focus_session_service: focus_session_service
         )
       end
 
-      def initialize(terminal_manager: TerminalManager.new, editor_launcher: EditorLauncher.new)
+      def initialize(terminal_manager: TerminalManager.new, editor_launcher: EditorLauncher.new, focus_session_service: nil, interactive_session_factory: nil)
         @terminal_manager = terminal_manager
         @editor_launcher = editor_launcher
+        @focus_session_service = focus_session_service
+        @interactive_session_factory = interactive_session_factory || lambda { |command:, env:| TerminalSession.new(command: command, env: env || ENV) }
         @screens = {}
+        @interactive_sessions = {}
+        @interactive_screens = {}
         @mutex = Mutex.new
       end
 
-      def open_workspace(agent:, state: nil)
+      def open_workspace(agent:, state: nil, rows: TerminalSession::DEFAULT_ROWS, columns: TerminalSession::DEFAULT_COLUMNS)
         resolution = PathResolver.resolve(agent)
         path = resolution.fetch("path", nil)
         return rejected(resolution.fetch("message", "Selected worker has no assigned workspace.")) unless path
 
-        { "status" => "opened", "message" => "Focused #{agent.fetch("id", "worker")} in #{path}." }
+        unless focus_session_service && agent.fetch("harness", nil).to_s == "pi"
+          return { "status" => "opened", "message" => "Focused #{agent.fetch("id", "worker")} in #{path}." }
+        end
+
+        transition = focus_session_service.begin_agent_interactive_focus(agent.fetch("id"))
+        return transition unless transition.fetch("status", nil) == "accepted"
+
+        command = transition.dig("result", "interactive_argv")
+        unless command.is_a?(Array) && command.any?
+          focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          return failed("The Pi interactive handoff did not return a launch command.")
+        end
+
+        session = interactive_session_factory.call(command: command, env: transition.dig("result", "interactive_env"))
+        started = nil
+        start_callback = lambda do |pid|
+          started = focus_session_service.mark_agent_interactive_focus_started(agent.fetch("id"), pid: pid)
+        rescue StandardError => e
+          started = failed("Could not claim native Pi focus: #{e.message}")
+        end
+        result = session.start(workspace_path: path, rows: rows, columns: columns, on_started: start_callback)
+        unless result.fetch("status", nil).to_s == "active"
+          session.close
+          focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          return result
+        end
+        if started && started.fetch("status", nil) != "accepted"
+          session.close
+          focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          return started
+        end
+
+        key = agent_key(agent)
+        @mutex.synchronize do
+          @interactive_sessions[key] = { "agent" => agent.dup, "session" => session }
+          @interactive_screens[key] = TerminalScreen.new(rows: rows, columns: columns)
+        end
+        started ||= focus_session_service.mark_agent_interactive_focus_started(agent.fetch("id"), pid: result.fetch("pid", nil))
+        unless started.fetch("status", nil) == "accepted"
+          close_interactive(agent)
+          focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          return started
+        end
+        result.merge("interactive" => true, "message" => "Opened native Pi focus for #{agent.fetch("id", "worker")} in #{path}.")
+      rescue StandardError => e
+        focus_session_service&.end_agent_interactive_focus(agent.fetch("id")) if defined?(agent) && agent
+        failed("Could not open native Pi focus: #{e.message}")
       end
 
       def open_terminal(agent:, state: nil, rows: TerminalSession::DEFAULT_ROWS, columns: TerminalSession::DEFAULT_COLUMNS)
@@ -47,6 +98,64 @@ module Meringue
         return { "status" => "ignored" } if bytes.nil? || bytes.empty?
 
         session.write(bytes)
+      end
+
+      def handle_agent_key(key:, agent:, state: nil)
+        entry = interactive_entry(agent)
+        return failed("Native Pi focus is not running for this worker.") unless entry
+        return { "status" => "ignored" } unless entry.fetch("session").alive?
+
+        bytes = terminal_key_bytes(key)
+        return { "status" => "ignored" } if bytes.nil? || bytes.empty?
+
+        entry.fetch("session").write(bytes)
+      end
+
+      def agent_snapshot(agent:, state: nil, rows: TerminalSession::DEFAULT_ROWS, columns: TerminalSession::DEFAULT_COLUMNS)
+        entry = interactive_entry(agent)
+        return { "interactive" => false } unless entry
+
+        session = entry.fetch("session")
+        screen = interactive_screen(agent, rows: rows, columns: columns)
+        screen.feed(session.drain_output)
+        status = session.status
+        {
+          "interactive" => true,
+          "lines" => screen.lines,
+          "styled_lines" => screen.styled_lines,
+          "cursor" => screen.cursor,
+          "status" => status.fetch("state", nil),
+          "pid" => status.fetch("pid", nil),
+          "workspace_path" => status.fetch("workspace_path", nil),
+          "revision" => screen.revision,
+          "notice" => interactive_notice(status)
+        }.compact
+      end
+
+      def resize_agent(agent:, rows:, columns:)
+        entry = interactive_entry(agent)
+        return failed("Native Pi focus is not running for this worker.") unless entry
+
+        result = entry.fetch("session").resize(rows: rows, columns: columns)
+        interactive_screen(agent, rows: rows, columns: columns).resize(rows: rows, columns: columns) unless failed_result?(result)
+        result
+      end
+
+      def close_workspace(agent:)
+        entry = interactive_entry(agent)
+        return { "status" => "closed", "message" => "No native Pi focus was running." } unless entry
+
+        result = close_interactive(agent)
+        agent_id = agent.is_a?(Hash) ? agent.fetch("id") : agent.to_s
+        resume = focus_session_service&.end_agent_interactive_focus(agent_id)
+        return result unless resume
+        return resume unless resume.fetch("status", nil) == "accepted"
+
+        result.merge("message" => "Closed native Pi focus and resumed the dashboard session.")
+      end
+
+      def agent_interactive?(agent:)
+        !interactive_entry(agent).nil?
       end
 
       def terminal_snapshot(agent:, state: nil)
@@ -93,14 +202,57 @@ module Meringue
       end
 
       def close
-        @mutex.synchronize { @screens.clear }
+        interactive_agents = @mutex.synchronize { @interactive_sessions.values.map { |entry| entry.fetch("agent") } }
+        interactive_agents.each { |agent| close_workspace(agent: agent) }
+        @mutex.synchronize do
+          @screens.clear
+          @interactive_screens.clear
+          @interactive_sessions.clear
+        end
         terminal_manager.close_all
       end
       alias shutdown close
 
       private
 
-      attr_reader :terminal_manager, :editor_launcher
+      attr_reader :terminal_manager, :editor_launcher, :focus_session_service, :interactive_session_factory
+
+      def interactive_entry(agent)
+        @mutex.synchronize { @interactive_sessions[agent_key(agent)] }
+      end
+
+      def interactive_screen(agent, rows: TerminalScreen::DEFAULT_ROWS, columns: TerminalScreen::DEFAULT_COLUMNS)
+        key = agent_key(agent)
+        @mutex.synchronize do
+          screen = (@interactive_screens[key] ||= TerminalScreen.new(rows: rows, columns: columns))
+          screen.resize(rows: rows, columns: columns)
+          screen
+        end
+      end
+
+      def close_interactive(agent)
+        key = agent_key(agent)
+        entry = @mutex.synchronize { @interactive_sessions.delete(key) }
+        return { "status" => "closed", "message" => "Native Pi focus was already stopped." } unless entry
+
+        @mutex.synchronize { @interactive_screens.delete(key) }
+        session = entry.fetch("session")
+        # Leaving focus is a handoff too: ask Pi to abort its current interactive turn before
+        # terminating the PTY so the persisted session is settled before RPC reattaches.
+        begin
+          session.write("\u0003") if session.alive?
+        rescue StandardError
+          nil
+        end
+        session.close
+      end
+
+      def interactive_notice(status)
+        return nil if status.fetch("alive", false)
+        return "Pi interactive session exited. Returning to the dashboard will attempt session recovery." if status.fetch("state", nil) == "exited"
+
+        nil
+      end
 
       def ensure_screen(agent, rows: TerminalScreen::DEFAULT_ROWS, columns: TerminalScreen::DEFAULT_COLUMNS)
         key = agent_key(agent)
