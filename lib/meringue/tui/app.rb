@@ -222,6 +222,10 @@ module Meringue
         @log_event_keys = {}
         @started_at = Time.iso8601(Time.now.utc.iso8601)
         @chat_mutex = Mutex.new
+        @log_persist_mutex = Mutex.new
+        @log_persist_condition = ConditionVariable.new
+        @next_log_persist_sequence = 0
+        @completed_log_persist_sequence = 0
       end
 
       def render(state, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, color: false)
@@ -3587,11 +3591,14 @@ module Meringue
         selected_target = slash_command ? nil : LogScope.chat_target(state)
         assistant_message_id = nil
         unless slash_command
+          # This placeholder is presentation-only. Persisting it here can wait behind a kernel
+          # state write and block the input thread before the background head even starts.
           assistant_message_id = append_message(
             "meringue",
             "",
             status: "queued",
-            visible: false
+            visible: false,
+            persist: false
           )
         end
         increment_pending_count
@@ -3602,7 +3609,8 @@ module Meringue
               assistant_message_id,
               text: "",
               status: "head working",
-              visible: false
+              visible: false,
+              persist: false
             ) if assistant_message_id
             result = if on_submit
                        submit_to_prompt_handler(on_submit, text, selected_target) do |event|
@@ -3615,7 +3623,8 @@ module Meringue
               apply_slash_command_results(result.fetch("command_results", []) || []) if result.fetch("event", nil) == "slash_command_applied"
             else
               final_text = result_logged_to_kernel?(result) ? "" : log_text_for(result)
-              update_message(assistant_message_id, text: final_text, status: nil, visible: !final_text.to_s.strip.empty?)
+              visible = !final_text.to_s.strip.empty?
+              update_message(assistant_message_id, text: final_text, status: nil, visible: visible, persist: visible)
             end
           rescue StandardError => e
             if assistant_message_id
@@ -3679,18 +3688,18 @@ module Meringue
         case event.fetch("event", nil)
         when "head_completed"
           remember_log_event(head_completed_key(event.fetch("head_id", nil)))
-          update_message_status(message_id, "applying commands")
+          update_message_status(message_id, "applying commands", persist: false)
         when "head_result_applied"
           # A head may propose user commands such as /clear or /theme. Their local side effects
           # must match the typed slash path.
           apply_slash_command_results(event.fetch("command_results", []) || [])
-          update_message_status(message_id, worker_wait_status(event))
+          update_message_status(message_id, worker_wait_status(event), persist: false)
         when "slash_command_applied"
           apply_slash_command_results(event.fetch("command_results", []) || [])
         when "worker_wait_started"
-          update_message_status(message_id, "workers running")
+          update_message_status(message_id, "workers running", persist: false)
         when "worker_completed"
-          update_message_status(message_id, nil)
+          update_message_status(message_id, nil, persist: false)
         when "worker_wait_failed"
           append_user_facing_line(message_id, worker_wait_failed_line(event), status: "worker wait failed")
         end
@@ -3762,12 +3771,13 @@ module Meringue
       end
 
       def clear_logs!
-        @chat_mutex.synchronize do
+        snapshot = @chat_mutex.synchronize do
           @messages = []
           @next_message_id = 0
           @log_event_keys = {}
-          persist_logs_unlocked
+          log_buffer_snapshot_unlocked
         end
+        persist_log_snapshot(snapshot)
       end
 
       def apply_theme_command_results(command_results)
@@ -4331,12 +4341,16 @@ module Meringue
       def append_message_once(key, role, text, status: nil, source_id: nil)
         return if key.to_s.empty? || text.to_s.empty?
 
-        @chat_mutex.synchronize do
-          return if @log_event_keys[key]
+        message_id = nil
+        snapshot = @chat_mutex.synchronize do
+          next if @log_event_keys[key]
 
           @log_event_keys[key] = true
-          append_message_unlocked(role, text, status: status, source_id: source_id)
+          message_id = append_message_unlocked(role, text, status: status, source_id: source_id)
+          log_buffer_snapshot_unlocked
         end
+        persist_log_snapshot(snapshot)
+        message_id
       end
 
       def normalize_persisted_message(message)
@@ -4374,8 +4388,14 @@ module Meringue
         end
       end
 
-      def append_message(role, text, status: nil, visible: nil, source_id: nil)
-        @chat_mutex.synchronize { append_message_unlocked(role, text, status: status, visible: visible, source_id: source_id) }
+      def append_message(role, text, status: nil, visible: nil, source_id: nil, persist: true)
+        message_id = nil
+        snapshot = @chat_mutex.synchronize do
+          message_id = append_message_unlocked(role, text, status: status, visible: visible, source_id: source_id)
+          log_buffer_snapshot_unlocked if persist
+        end
+        persist_log_snapshot(snapshot)
+        message_id
       end
 
       def append_message_unlocked(role, text, status: nil, visible: nil, source_id: nil)
@@ -4389,14 +4409,13 @@ module Meringue
           "timestamp" => Time.now.utc.iso8601,
           "source_id" => source_id
         }.compact
-        persist_logs_unlocked
         @next_message_id
       end
 
-      def update_message(id, text:, status: nil, visible: nil)
-        @chat_mutex.synchronize do
+      def update_message(id, text:, status: nil, visible: nil, persist: true)
+        snapshot = @chat_mutex.synchronize do
           message = @messages.find { |candidate| candidate.fetch("id") == id }
-          return unless message
+          next unless message
 
           message["text"] = text
           if status
@@ -4405,14 +4424,15 @@ module Meringue
             message.delete("status")
           end
           apply_message_visibility(message, visible)
-          persist_logs_unlocked
+          log_buffer_snapshot_unlocked if persist
         end
+        persist_log_snapshot(snapshot)
       end
 
-      def append_to_message(id, line, status: nil, visible: nil)
-        @chat_mutex.synchronize do
+      def append_to_message(id, line, status: nil, visible: nil, persist: true)
+        snapshot = @chat_mutex.synchronize do
           message = @messages.find { |candidate| candidate.fetch("id") == id }
-          return unless message
+          next unless message
 
           existing = message.fetch("text", "").to_s
           addition = line.to_s
@@ -4421,18 +4441,20 @@ module Meringue
           end
           apply_message_status(message, status)
           apply_message_visibility(message, visible)
-          persist_logs_unlocked
+          log_buffer_snapshot_unlocked if persist
         end
+        persist_log_snapshot(snapshot)
       end
 
-      def update_message_status(id, status)
-        @chat_mutex.synchronize do
+      def update_message_status(id, status, persist: true)
+        snapshot = @chat_mutex.synchronize do
           message = @messages.find { |candidate| candidate.fetch("id") == id }
-          return unless message
+          next unless message
 
           apply_message_status(message, status)
-          persist_logs_unlocked
+          log_buffer_snapshot_unlocked if persist
         end
+        persist_log_snapshot(snapshot)
       end
 
       def duplicate_trailing_line?(existing, addition)
@@ -4460,15 +4482,36 @@ module Meringue
         end
       end
 
-      def persist_logs_unlocked
-        return unless log_store&.respond_to?(:save_log_buffer)
-
-        log_store.save_log_buffer(
-          messages: @messages,
+      def log_buffer_snapshot_unlocked
+        @next_log_persist_sequence += 1
+        {
+          sequence: @next_log_persist_sequence,
+          messages: @messages.map(&:dup),
           next_message_id: @next_message_id
-        )
-      rescue StandardError
-        nil
+        }
+      end
+
+      # State persistence can wait behind a kernel write. Keep that I/O outside the chat mutex so
+      # rendering, typing, and quitting stay available while another thread owns the state lock.
+      # Sequence numbers preserve mutation order when several prompt threads finish together.
+      def persist_log_snapshot(snapshot)
+        return unless snapshot
+
+        sequence = snapshot.fetch(:sequence)
+        @log_persist_mutex.synchronize do
+          @log_persist_condition.wait(@log_persist_mutex) until sequence == @completed_log_persist_sequence + 1
+          begin
+            log_store.save_log_buffer(
+              messages: snapshot.fetch(:messages),
+              next_message_id: snapshot.fetch(:next_message_id)
+            ) if log_store&.respond_to?(:save_log_buffer)
+          rescue StandardError
+            nil
+          ensure
+            @completed_log_persist_sequence = sequence
+            @log_persist_condition.broadcast
+          end
+        end
       end
 
       def increment_pending_count
