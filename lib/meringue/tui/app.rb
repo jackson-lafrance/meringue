@@ -275,8 +275,7 @@ module Meringue
         input_buffer = +""
         input_cursor = 0
         slash_suggestion_index = NO_SLASH_SELECTION
-        cached_base_state = nil
-        cached_base_state_at = 0.0
+        reset_base_state_cache
         terminal.with_screen do
           terminal.raw do
             last_frame = nil
@@ -286,17 +285,13 @@ module Meringue
               @last_render_width = width
               @last_render_height = height
               now = monotonic_time
-              base_state_provider = lambda do
-                terminal_fast_path = @agent_workspace_active && @agent_workspace_view == "terminal"
-                if terminal_fast_path && cached_base_state && (now - cached_base_state_at) < REFRESH_INTERVAL
-                  cached_base_state
-                else
-                  cached_base_state = state_provider.call || State::Models.empty_state
-                  cached_base_state_at = now
-                  cached_base_state
-                end
-              end
-              current_state = compose_state(base_state_provider, input_buffer, slash_suggestion_index, input_cursor)
+              # The orchestration snapshot is read-only presentation input. Keep it
+              # independent from the composer and other transient state so a burst
+              # of typing does not parse the whole Store snapshot per character.
+              # Refreshing on the dashboard cadence still observes this process's
+              # saves and atomic writes from other Store instances promptly.
+              base_state = read_only_base_state(state_provider, now: now)
+              current_state = compose_state(-> { base_state }, input_buffer, slash_suggestion_index, input_cursor)
               frame = render(current_state, width: width, height: height, color: color_output?)
               if @force_full_redraw
                 terminal.invalidate_frame! if terminal.respond_to?(:invalidate_frame!)
@@ -1585,6 +1580,21 @@ module Meringue
 
       def monotonic_time
         Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      def reset_base_state_cache
+        @cached_base_state = nil
+        @cached_base_state_at = nil
+      end
+
+      def read_only_base_state(state_provider, now: monotonic_time)
+        if @cached_base_state && @cached_base_state_at && (now - @cached_base_state_at) < REFRESH_INTERVAL
+          return @cached_base_state
+        end
+
+        @cached_base_state = state_provider.call || State::Models.empty_state
+        @cached_base_state_at = now
+        @cached_base_state
       end
 
       def mouse_wheel_up?(key)

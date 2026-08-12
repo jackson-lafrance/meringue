@@ -43,7 +43,36 @@ module Meringue
       # mutex is important because worker provisioning checkpoints state several
       # times while a completed head result is being applied.
       def load
+        transaction = coalesced_save_transaction
+        return deep_copy(transaction.fetch(:state)) if transaction && transaction[:state]
+
         load_unlocked
+      end
+
+      # Coalesce a related sequence of whole-state saves on the current thread. Callers still see
+      # each staged snapshot through +load+, but only the final snapshot is atomically published.
+      # The kernel uses this while applying one reconciliation poll batch under its state lock.
+      def coalesce_saves
+        transactions = (Thread.current[:meringue_store_save_transactions] ||= {})
+        existing = transactions[object_id]
+        return yield if existing
+
+        transaction = { state: nil, preserve_log_buffer: true }
+        transactions[object_id] = transaction
+        result = yield
+        transactions.delete(object_id)
+        if transaction[:state]
+          exclusive do
+            save_unlocked(
+              transaction.fetch(:state),
+              preserve_log_buffer: transaction.fetch(:preserve_log_buffer)
+            )
+          end
+        end
+        result
+      ensure
+        transactions&.delete(object_id) unless existing
+        Thread.current[:meringue_store_save_transactions] = nil if transactions&.empty?
       end
 
       def compact!
@@ -62,6 +91,12 @@ module Meringue
 
       def save(state, preserve_log_buffer: true, preserve_conversation: nil)
         preserve_log_buffer = preserve_conversation unless preserve_conversation.nil?
+        if (transaction = coalesced_save_transaction)
+          transaction[:state] = deep_copy(state)
+          transaction[:preserve_log_buffer] &&= preserve_log_buffer
+          return state
+        end
+
         exclusive do
           save_unlocked(state, preserve_log_buffer: preserve_log_buffer)
         end
@@ -96,6 +131,10 @@ module Meringue
       alias save_conversation save_log_buffer
 
       private
+
+      def coalesced_save_transaction
+        Thread.current[:meringue_store_save_transactions]&.fetch(object_id, nil)
+      end
 
       def exclusive(&block)
         file_lock.synchronize { @mutex.synchronize(&block) }
