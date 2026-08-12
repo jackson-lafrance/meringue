@@ -196,6 +196,40 @@ class KernelMaintenancePruneResponsivenessTest < Minitest::Test
     prune_thread&.kill if prune_thread&.alive?
   end
 
+  def test_cleanup_budget_bounds_a_pass_and_reports_every_unvisited_workspace
+    workers = (1..3).map do |index|
+      worker_record(
+        id: "P1-I#{index}-W1",
+        issue_id: "P1-I#{index}",
+        project_id: "P1",
+        extra: { "workspace_strategy" => "git_worktree", "workspace_path" => tmp_path("workspaces", index.to_s) }
+      )
+    end
+    write_state(
+      state_fixture(
+        projects: [project_record(id: "P1", status: "working")],
+        issues: workers.map.with_index(1) { |worker, index| issue_record(id: "P1-I#{index}", project_id: "P1", agent_ids: [worker.fetch("id")]) },
+        agents: workers
+      )
+    )
+    cleanup = BlockingCleanupManager.new
+    engine = build_engine(workspace_manager: cleanup, prune_workspace_cleanup_budget: 0.05)
+    thread = Thread.new { engine.apply("type" => "Prune", "payload" => {}) }
+    cleanup.entered.pop
+    sleep 0.08
+    cleanup.release << true
+
+    result = thread.value
+    outcomes = result.dig("result", "workspace_cleanup_outcomes")
+    assert_equal 3, outcomes.length
+    assert_operator outcomes.count { |outcome| outcome.fetch("reason") == "prune_cleanup_budget_exhausted" }, :>=, 2
+    assert_match(/Preserved 2 managed worktrees/, result.fetch("message"))
+  ensure
+    cleanup&.release&.push(true) if thread&.alive?
+    thread&.join(1)
+    thread&.kill if thread&.alive?
+  end
+
   def test_typed_prune_does_not_hold_the_state_lock_while_forge_lookup_blocks
     url = "https://github.com/acme/app/pull/7"
     # Repeating one URL across two records also proves that one prune pass memoizes status instead

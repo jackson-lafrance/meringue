@@ -516,7 +516,7 @@ module Meringue
       # persisted ownership record. Branches are retained so delivered commits remain reachable.
       # A structured result lets the kernel explain anything unsafe to remove instead of forcing
       # or guessing; the kernel decides separately whether the associated terminal record remains.
-      def cleanup_pruned_worker_workspace(workspace, protected_paths: [])
+      def cleanup_pruned_worker_workspace(workspace, protected_paths: [], deadline: nil)
         return cleanup_outcome("skipped", "invalid_workspace_record", success: true) unless workspace.is_a?(Hash)
 
         plan = workspace["plan"].is_a?(Hash) ? workspace.fetch("plan") : {}
@@ -556,7 +556,7 @@ module Meringue
           return cleanup_outcome("failed", "main_checkout_protected", success: false, **base)
         end
 
-        listed = run_command("git", "-C", git_root, "worktree", "list", "--porcelain")
+        listed = run_command("git", "-C", git_root, "worktree", "list", "--porcelain", deadline: deadline)
         unless listed.fetch("status").success?
           return cleanup_outcome(
             "failed",
@@ -585,7 +585,7 @@ module Meringue
         end
 
         if Dir.exist?(worktree_root)
-          dirty = run_command("git", "-C", worktree_root, "status", "--porcelain", "--untracked-files=all")
+          dirty = run_command("git", "-C", worktree_root, "status", "--porcelain", "--untracked-files=all", deadline: deadline)
           unless dirty.fetch("status").success?
             return cleanup_outcome(
               "failed",
@@ -600,7 +600,7 @@ module Meringue
           end
         end
 
-        removed = run_command("git", "-C", git_root, "worktree", "remove", worktree_root, timeout: cleanup_timeout, deadline: false)
+        removed = run_command("git", "-C", git_root, "worktree", "remove", worktree_root, timeout: cleanup_timeout, deadline: deadline)
         unless removed.fetch("status").success?
           output = present_output(removed.fetch("stderr")) || present_output(removed.fetch("stdout"))
           reason = output.to_s.match?(/locked/i) ? "worktree_locked" : "worktree_remove_failed"
