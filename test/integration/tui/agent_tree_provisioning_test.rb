@@ -115,6 +115,12 @@ class TuiAgentTreeProvisioningTest < Minitest::Test
     assert_includes render_state(state), "provisioning workspace"
     metadata["provisioning_progress"] = { "percent" => 37 }
     assert_includes render_state(state), "provisioning workspace 37%"
+    # Mutate the exact nested object captured by the prior key. A shallow key aliases
+    # this hash and incorrectly reuses the 37% row because both keys then read 38.
+    metadata.fetch("provisioning_progress")["percent"] = 38
+    refreshed = render_state(state)
+    assert_includes refreshed, "provisioning workspace 38%"
+    refute_includes refreshed, "provisioning workspace 37%"
     metadata["provisioning_state"] = "retry_pending"
     metadata["provisioning_attempts"] = 1
     metadata["provisioning_attempt_limit"] = 3
@@ -128,6 +134,10 @@ class TuiAgentTreeProvisioningTest < Minitest::Test
       "command_gate" => { "state" => "pending", "armed_at" => "2026-01-01T00:00:00Z", "label" => "CI" }
     }
     assert_includes render_state(state), "routing after CI"
+    metadata.dig("completion_continuation", "command_gate")["label"] = "checks"
+    refreshed = render_state(state)
+    assert_includes refreshed, "routing after checks"
+    refute_includes refreshed, "routing after CI"
     metadata.delete("completion_continuation")
     metadata["deferred_spawn"] = { "state" => "waiting", "after_agent_id" => "P1-I1-W0" }
     assert_includes render_state(state), "waiting on W0"

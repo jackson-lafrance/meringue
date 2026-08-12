@@ -114,9 +114,12 @@ module Meringue
 
         # Reconciliation changes heartbeat/session metadata frequently, but those
         # fields do not alter the tree. This compact O(records) signature lets all
-        # intervening typing and scrolling frames reuse the laid-out rows.
+        # intervening typing and scrolling frames reuse the laid-out rows. The final
+        # deep snapshot is essential: Store#load callers may mutate nested hashes in
+        # place, and retaining those references would mutate the previous cache key
+        # too, making changed presentation state compare equal to stale rows.
         def presentation_cache_key(state, width)
-          [
+          immutable_cache_snapshot([
             width,
             Style.current_colorscheme,
             AgentTreeNavigation.highlighted_ids_for(state),
@@ -153,7 +156,26 @@ module Meringue
               [item.values_at("id", "issue_id", "status", "stop_reason", "current_iteration", "paused"),
                item["budget"], item["metric"], item["baseline_metric"], item["last_metric"], item["review"]]
             end
-          ]
+          ])
+        end
+
+        # Canonical hash ordering plus copied/frozen strings makes the key both
+        # independent of the caller's mutable state and stable for equivalent data.
+        # Hashes are represented as sorted pairs so key insertion order cannot cause
+        # needless layout invalidation.
+        def immutable_cache_snapshot(value)
+          case value
+          when Hash
+            value.keys.sort_by { |key| [key.class.name, key.to_s] }.map do |key|
+              [immutable_cache_snapshot(key), immutable_cache_snapshot(value[key])].freeze
+            end.freeze
+          when Array
+            value.map { |item| immutable_cache_snapshot(item) }.freeze
+          when String
+            value.dup.freeze
+          else
+            value
+          end
         end
 
         def worker_agents_by_issue(agents)
