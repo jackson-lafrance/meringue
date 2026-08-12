@@ -139,6 +139,7 @@ module Meringue
         @event_timeout = event_timeout
         @shutdown_timeout = shutdown_timeout
         @processes_by_pid = {}
+        @processes_by_transport_key = {}
         @processes_mutex = Mutex.new
       end
 
@@ -182,7 +183,7 @@ module Meringue
         message = prompt.to_s
         current_ref = session_ref
         recovery_metadata = {}
-        process = process_for(current_ref, required: false)
+        process = process_for_session(current_ref, required: false)
         unless process
           # Another Meringue instance (or a previous run of this one) may hold
           # the pipes. Take the transport over instead of failing forever, then
@@ -202,7 +203,7 @@ module Meringue
           requested_mode = normalized_mode
           normalized_mode = "normal"
           current_ref = attach_session(current_ref)
-          process = process_for(current_ref)
+          process = process_for_session(current_ref)
           recovery_metadata = takeover_metadata(takeover)
           if requested_mode != normalized_mode
             recovery_metadata["prompt_mode_downgraded_from"] = requested_mode
@@ -254,7 +255,7 @@ module Meringue
       end
 
       def abort_session(session_ref)
-        process = process_for(session_ref, required: false)
+        process = process_for_session(session_ref, required: false)
         unless process
           if unmanaged_process_alive?(session_ref)
             owner_pid = transport_owner_pid(session_ref)
@@ -273,7 +274,7 @@ module Meringue
       end
 
       def kill_session(session_ref)
-        process = process_for(session_ref, required: false)
+        process = process_for_session(session_ref, required: false)
         unless process
           return session_ref.merge(
             "is_streaming" => false,
@@ -299,31 +300,40 @@ module Meringue
       end
 
       def get_state(session_ref)
-        process = process_for(session_ref, required: false)
+        process = process_for_session(session_ref)
         if process
-          state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
-          return build_session_ref(
-            process,
-            state,
-            kind: metadata_value(session_ref, "kind"),
-            cwd: session_ref.fetch("cwd", process.cwd),
-            session_name: metadata_value(session_ref, "session_name") || state["sessionName"]
-          )
+          begin
+            state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
+            return build_session_ref(
+              process,
+              state,
+              kind: metadata_value(session_ref, "kind"),
+              cwd: session_ref.fetch("cwd", process.cwd),
+              session_name: metadata_value(session_ref, "session_name") || state["sessionName"]
+            )
+          rescue ProcessExitedError
+            # The wait thread and an RPC-state read can cross by a few instructions. Once request
+            # proves the child is gone, continue through durable session-file classification rather
+            # than exposing a lower-level "RPC process is not running" race to reconciliation.
+          end
         end
 
-        if unmanaged_process_alive?(session_ref)
-          # RPC state belongs to the process that owns its pipes. Pi persists
-          # model/thinking changes as session entries, so refresh those values
-          # from the durable session instead of returning old spawn metadata.
-          persisted_ref = build_session_ref_from_file(session_ref)
+        if (unmanaged_pid = unmanaged_process_pid(session_ref))
+          # RPC state belongs to the process that owns its pipes. The transport lease is newer than
+          # the pid in state, so consult it too: a recovery process may have started after the last
+          # state write. Treating that live replacement as dead could launch a second writer and
+          # duplicate its continuation prompt.
+          current_ref = session_ref.merge("pid" => unmanaged_pid)
+          persisted_ref = build_session_ref_from_file(current_ref)
           return persisted_ref.merge(
             "harness" => "pi",
+            "pid" => unmanaged_pid,
             "is_streaming" => true,
             "metadata" => metadata_with(
               persisted_ref,
               "transport_available" => false,
-              "transport_owner_pid" => transport_owner_pid(session_ref),
-              "transport_note" => unowned_transport_note(session_ref)
+              "transport_owner_pid" => transport_owner_pid(current_ref),
+              "transport_note" => unowned_transport_note(current_ref)
             )
           )
         end
@@ -466,7 +476,7 @@ module Meringue
       # threw that evidence away: `get_state` raises first for a dead session, so the exit event was
       # never drained and nothing in Meringue ever said the process had gone.
       def read_events(session_ref)
-        process = process_for(session_ref, required: false) || exited_process_for(session_ref)
+        process = process_for_session(session_ref, required: false) || exited_process_for(session_ref)
         return [] unless process
 
         process.drain_events(consumer: "kernel")
@@ -486,13 +496,46 @@ module Meringue
         }.compact
       end
 
+      # A Pi RPC process is a child whose anonymous pipes are owned by one Meringue process. The
+      # durable transport lease lets reconciliation distinguish an isolated Pi crash (owner still
+      # alive) from the dashboard/supervisor disappearing (both owner and child gone). Only the
+      # second condition is safe to resume automatically across all affected workers.
+      def session_supervision_evidence(session_ref)
+        lease = transport_record(session_ref)
+        persisted = metadata_value(session_ref, "supervision")
+        persisted = {} unless persisted.is_a?(Hash)
+        source, source_name = newest_supervision_source(lease, persisted)
+        return nil unless source.is_a?(Hash) && source["owner_pid"]
+
+        owner_pid = integer_or_nil(source["owner_pid"])
+        harness_pid = integer_or_nil(source["pid"] || source["harness_pid"] || session_ref["pid"] || session_ref[:pid])
+        owner_started_at = source["owner_started_at"]
+        harness_started_at = source["harness_started_at"]
+        owner_alive = process_identity_alive?(owner_pid, started_at: owner_started_at)
+        harness_alive = live_harness_process_at?(harness_pid, started_at: harness_started_at)
+        {
+          "source" => source_name,
+          "transport_key" => transport_key(session_ref),
+          "owner_pid" => owner_pid,
+          "owner_started_at" => owner_started_at,
+          "owner_alive" => owner_alive,
+          "harness_pid" => harness_pid,
+          "harness_started_at" => harness_started_at,
+          "harness_alive" => harness_alive,
+          "supervisor_exited" => !!owner_pid && !owner_alive && !harness_alive,
+          "observed_at" => Time.now.utc.iso8601
+        }.compact
+      rescue StandardError
+        nil
+      end
+
       # Pi event names stop at this boundary, exactly like `read_events` and the session view.
       def session_progress(events)
         PiSessionView.progress_items(events)
       end
 
       def open_session_view(session_ref)
-        process = process_for(session_ref, required: false)
+        process = process_for_session(session_ref, required: false)
         return history_session_view(session_ref) unless process
 
         # A focused view is disposable UI state, not the owner of the Pi stream. Start at the
@@ -540,7 +583,7 @@ module Meringue
       end
 
       def attach_session(session_ref)
-        process = process_for(session_ref, required: false)
+        process = process_for_session(session_ref)
         return preserve_session_identity(get_state(session_ref), session_ref) if process
         if unmanaged_process_alive?(session_ref)
           raise SessionTransportUnavailableError,
@@ -599,7 +642,7 @@ module Meringue
         events = []
 
         if was_streaming
-          process = process_for(current_ref)
+          process = process_for_session(current_ref)
           rpc_data(process.request({ "type" => "abort" }, timeout: command_timeout), allow_nil_data: true)
           settled_ref = preserve_session_identity(get_state(current_ref), current_ref)
           if settled_ref.fetch("is_streaming", false)
@@ -686,7 +729,7 @@ module Meringue
       end
 
       def wait_for_event(session_ref, type:, timeout: event_timeout)
-        process = process_for(session_ref)
+        process = process_for_session(session_ref)
         deadline = Time.now + timeout
         events = []
 
@@ -705,7 +748,7 @@ module Meringue
       end
 
       def last_assistant_text(session_ref)
-        process = process_for(session_ref, required: false)
+        process = process_for_session(session_ref, required: false)
         if process
           # Pi's RPC can still expose the previous turn's answer after a new prompt has been
           # accepted. Never let that stale answer settle the current turn as completed.
@@ -823,14 +866,14 @@ module Meringue
       end
 
       def writable_session_state(session_ref)
-        if unmanaged_process_alive?(session_ref) && !process_for(session_ref, required: false)
+        if unmanaged_process_alive?(session_ref) && !process_for_session(session_ref, required: false)
           owner_pid = transport_owner_pid(session_ref)
           owner = owner_pid ? "Meringue instance #{owner_pid}" : "another Meringue instance"
           raise SessionTransportUnavailableError,
                 "This Pi session is owned by #{owner}; update it from that window or wait until it is resumable."
         end
 
-        existing_process = process_for(session_ref, required: false)
+        existing_process = process_for_session(session_ref, required: false)
         state_ref = if existing_process
                       get_state(session_ref)
                     else
@@ -959,6 +1002,10 @@ module Meringue
         key = transport_key(session_ref)
         return false unless key
 
+        # Bind the in-memory pipes to the durable session key before exposing the ref. Looking up
+        # transports by pid alone is unsafe during mass recovery because the OS may reuse one dead
+        # worker's pid for a different worker's replacement process.
+        associate_process_with_transport(session_ref)
         transport_ownership.claim(
           key,
           pid: session_ref["pid"] || session_ref[:pid],
@@ -1152,7 +1199,7 @@ module Meringue
       end
 
       def create_replacement_session_from_rpc(session_ref)
-        process = process_for(session_ref)
+        process = process_for_session(session_ref)
         data = rpc_data(process.request({ "type" => "get_entries" }, timeout: command_timeout))
         entries = Array(data.fetch("entries", []))
         replacement_id = SecureRandom.uuid
@@ -1348,7 +1395,14 @@ module Meringue
             "started_at" => process.started_at,
             "command" => process.argv,
             "pi_state" => pi_state,
-            "stderr_tail" => process.stderr_tail
+            "stderr_tail" => process.stderr_tail,
+            "supervision" => {
+              "owner_pid" => Process.pid,
+              "owner_started_at" => transport_ownership.owner_started_at,
+              "harness_pid" => process.pid,
+              "harness_started_at" => process.started_at,
+              "recorded_at" => Time.now.utc.iso8601(6)
+            }.compact
           }
         }
       end
@@ -1678,14 +1732,125 @@ module Meringue
       # hides it (callers must not send RPC to a dead process); this is for reading what it left
       # behind.
       def exited_process_for(session_ref)
-        pid = session_ref["pid"] || session_ref[:pid]
-        process = @processes_mutex.synchronize { @processes_by_pid[pid] }
+        process = managed_process_for_transport(session_ref)
         process && !process.alive? ? process : nil
       end
 
       def unmanaged_process_alive?(session_ref)
-        pid = session_ref["pid"] || session_ref[:pid]
-        process_alive?(pid) && process_for(session_ref, required: false).nil?
+        !unmanaged_process_pid(session_ref).nil?
+      end
+
+      # The transport lease may be one state write ahead of the agent record during recovery. Its
+      # pid is therefore considered after the persisted pid, but only when it still identifies a Pi
+      # process for this durable session and is not already managed by this client.
+      def unmanaged_process_pid(session_ref)
+        supervision = transport_record(session_ref)
+        candidates = [
+          [session_ref["pid"] || session_ref[:pid], metadata_value(session_ref, "started_at")],
+          [supervision["pid"], supervision["harness_started_at"]]
+        ].uniq
+        candidates.find do |pid, started_at|
+          next false unless pid
+          next false if process_for({ "pid" => integer_or_nil(pid) }, required: false)
+
+          live_harness_process_at?(pid, started_at: started_at)
+        end&.first&.to_i
+      end
+
+      def process_for_session(session_ref, required: false)
+        process = managed_process_for_transport(session_ref)
+        return process if process&.alive?
+
+        # Session-bearing refs must never fall back to a pid-only lookup: during recovery that pid
+        # can already belong to another session's newly attached process. Refs without a stable key
+        # are only used during initial process setup and retain the legacy lookup.
+        process = process_for(session_ref, required: false) unless stable_transport_key?(session_ref)
+        return process if process
+        return nil unless required
+
+        raise ProcessNotFoundError,
+              "No live Pi RPC process for session #{session_ref["session_id"] || session_ref[:session_id] || "unknown"}"
+      end
+
+      def stable_transport_key?(session_ref)
+        present?(session_ref["session_id"] || session_ref[:session_id]) ||
+          present?(session_ref["session_file"] || session_ref[:session_file])
+      end
+
+      def managed_process_for_transport(session_ref)
+        key = transport_key(session_ref)
+        return nil unless key
+
+        @processes_mutex.synchronize { @processes_by_transport_key[key] }
+      end
+
+      def associate_process_with_transport(session_ref)
+        key = transport_key(session_ref)
+        pid = integer_or_nil(session_ref["pid"] || session_ref[:pid])
+        return false unless key && pid
+
+        @processes_mutex.synchronize do
+          process = @processes_by_pid[pid]
+          return false unless process
+
+          @processes_by_transport_key[key] = process
+          true
+        end
+      end
+
+      def transport_record(session_ref)
+        key = transport_key(session_ref)
+        key ? transport_ownership.record_for(key) : {}
+      rescue StandardError
+        {}
+      end
+
+      # A transport claim normally happens just after a session ref is built, making its lease the
+      # newest source. If that claim could not be written, however, an older lease must not hide the
+      # newer supervision identity saved in state. Timestamp selection preserves both the
+      # attach-before-state-write crash window and the lock-write-failure fallback.
+      def newest_supervision_source(lease, persisted)
+        lease_available = lease.is_a?(Hash) && lease["owner_pid"]
+        persisted_available = persisted.is_a?(Hash) && persisted["owner_pid"]
+        return [lease, "transport_ownership"] if lease_available && !persisted_available
+        return [persisted, "session_metadata"] if persisted_available && !lease_available
+        return [{}, nil] unless lease_available && persisted_available
+
+        lease_time = parse_supervision_time(lease["updated_at"])
+        persisted_time = parse_supervision_time(persisted["recorded_at"])
+        if persisted_time && (!lease_time || persisted_time > lease_time)
+          [persisted, "session_metadata"]
+        else
+          [lease, "transport_ownership"]
+        end
+      end
+
+      def parse_supervision_time(value)
+        return nil unless present?(value)
+
+        Time.parse(value.to_s)
+      rescue ArgumentError, TypeError
+        nil
+      end
+
+      def live_harness_process_at?(pid, started_at: nil)
+        return false unless process_alive?(pid)
+
+        ProcessIdentity.matches?(pid, command: Array(command).first, started_at: started_at)
+      end
+
+      def process_identity_alive?(pid, started_at: nil)
+        return false unless pid
+        return ProcessIdentity.alive?(pid) unless present?(started_at)
+
+        ProcessIdentity.matches?(pid, started_at: started_at)
+      end
+
+      def integer_or_nil(value)
+        numeric = Integer(value)
+        numeric.positive? ? numeric : nil
+      rescue ArgumentError, TypeError
+        nil
       end
 
       def process_alive?(pid)
@@ -1756,6 +1921,7 @@ module Meringue
       def unregister_process(process)
         @processes_mutex.synchronize do
           @processes_by_pid.delete(process.pid)
+          @processes_by_transport_key.delete_if { |_key, registered| registered.equal?(process) }
         end
       end
 

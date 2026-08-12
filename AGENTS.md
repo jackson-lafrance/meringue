@@ -719,6 +719,13 @@ It should load JSON state, inspect tracked PIDs and harness session files,
 reconnect or mark sessions as resumable when possible,
 and mark missing/crashed processes as `errored` or `idle` depending on evidence.
 
+A long-lived RPC harness may be a direct child of the Meringue process. If a recorded child and the
+recorded Meringue owner of its stdin/stdout pipes are both gone, reconciliation should treat that as
+one shared-supervisor lifecycle failure: durably claim one continuation, reattach the same saved
+session in the same workspace, and preserve queued prompts. An isolated child exit whose supervisor
+is still alive must not be auto-prompted. Recovery claims must be single-flight across concurrent
+Meringue instances, bounded, and diagnostic.
+
 Because this pass repeats every couple of seconds, a failure it can never repair must be
 recorded exactly once. A record already recorded as terminally errored is not re-polled,
 not re-touched, and not re-logged, and a terminally errored head has its harness session

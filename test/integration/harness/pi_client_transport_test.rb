@@ -57,6 +57,128 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_match(/Meringue instance #{owner_pid} owns its RPC pipes/, state.fetch("metadata").fetch("transport_note"))
   end
 
+  def test_supervision_evidence_distinguishes_shared_owner_exit_from_an_isolated_pi_exit
+    owner_pid = spawn_idle_ruby_process
+    harness_pid = spawn_idle_ruby_process
+    ownership = build_transport_ownership(tmpdir, owner_pid: owner_pid)
+    ownership.claim("pi-sess-1", pid: harness_pid, session_id: "sess-1")
+    ref = pi_session_ref(
+      session_file: pi_session_file(tmpdir, session_id: "sess-1", completed: false),
+      pid: harness_pid,
+      cwd: tmpdir
+    )
+    client, = build_pi_client(tmpdir, transport_ownership: ownership)
+
+    isolated = client.session_supervision_evidence(ref)
+    assert_equal true, isolated.fetch("owner_alive")
+    assert_equal true, isolated.fetch("harness_alive")
+    assert_equal false, isolated.fetch("supervisor_exited")
+
+    reap_pid(harness_pid)
+    harness_pid = nil
+    child_only = client.session_supervision_evidence(ref)
+    assert_equal true, child_only.fetch("owner_alive")
+    assert_equal false, child_only.fetch("harness_alive")
+    assert_equal false, child_only.fetch("supervisor_exited"), "a lone Pi crash must not be auto-replayed"
+
+    reap_pid(owner_pid)
+    owner_pid = nil
+    shared_exit = client.session_supervision_evidence(ref)
+    assert_equal "transport_ownership", shared_exit.fetch("source")
+    assert_equal false, shared_exit.fetch("owner_alive")
+    assert_equal false, shared_exit.fetch("harness_alive")
+    assert_equal true, shared_exit.fetch("supervisor_exited")
+    assert shared_exit.fetch("owner_started_at").to_s.start_with?("20")
+    assert shared_exit.fetch("harness_started_at").to_s.start_with?("20")
+  ensure
+    reap_pid(harness_pid) if harness_pid
+    reap_pid(owner_pid) if owner_pid
+  end
+
+  def test_supervision_evidence_falls_back_to_the_saved_session_identity_when_no_lease_exists
+    dead_owner_pid = spawn_idle_ruby_process
+    dead_harness_pid = spawn_idle_ruby_process
+    owner_started_at = Meringue::Harness::ProcessIdentity.describe(dead_owner_pid).fetch("started_at").iso8601
+    harness_started_at = Meringue::Harness::ProcessIdentity.describe(dead_harness_pid).fetch("started_at").iso8601
+    reap_pid(dead_owner_pid)
+    reap_pid(dead_harness_pid)
+    client, = build_pi_client(tmpdir)
+    ref = pi_session_ref(session_file: pi_session_file(tmpdir, session_id: "sess-1"), cwd: tmpdir)
+    ref.fetch("metadata")["supervision"] = {
+      "owner_pid" => dead_owner_pid,
+      "owner_started_at" => owner_started_at,
+      "harness_pid" => dead_harness_pid,
+      "harness_started_at" => harness_started_at
+    }
+
+    evidence = client.session_supervision_evidence(ref)
+
+    assert_equal "session_metadata", evidence.fetch("source")
+    assert_equal dead_owner_pid, evidence.fetch("owner_pid")
+    assert_equal dead_harness_pid, evidence.fetch("harness_pid")
+    assert_equal true, evidence.fetch("supervisor_exited")
+  end
+
+  def test_a_reused_pid_cannot_route_one_session_to_another_sessions_managed_rpc_transport
+    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "session-b" })
+    session_b_file = pi_session_file(tmpdir, session_id: "session-b", completed: false)
+    session_b = client.attach_session(pi_session_ref(session_file: session_b_file, session_id: "session-b", cwd: tmpdir))
+    @harness_sessions << [client, session_b]
+    rpc_reads_before_collision = stub_commands_of_type(stub, "get_state").length
+    session_a_file = pi_session_file(tmpdir, session_id: "session-a", text: "session A result")
+    collided_ref = pi_session_ref(
+      session_file: session_a_file,
+      session_id: "session-a",
+      pid: session_b.fetch("pid"),
+      cwd: tmpdir
+    )
+
+    observed = client.get_state(collided_ref)
+
+    assert_equal "session-a", observed.fetch("session_id")
+    assert_equal "session A result", observed.dig("metadata", "session_file_summary", "last_assistant_text")
+    assert_equal rpc_reads_before_collision, stub_commands_of_type(stub, "get_state").length,
+                 "pid reuse must not read or command session B's pipes"
+    assert process_alive?(session_b.fetch("pid"))
+  end
+
+  def test_get_state_uses_a_newer_live_transport_lease_before_recovering_a_stale_pid
+    ownership = build_transport_ownership(tmpdir)
+    stub = write_pi_stub(tmpdir, "session_id" => "sess-1", "is_streaming" => true)
+    client_options = {
+      command: stub.fetch("command"),
+      env: stub.fetch("env"),
+      session_dir: File.join(tmpdir, "pi-sessions"),
+      command_timeout: 10,
+      shutdown_timeout: 1,
+      transport_ownership: ownership
+    }
+    first_client = PiClient.new(**client_options)
+    second_client = PiClient.new(**client_options)
+    old_pid = spawn_idle_ruby_process
+    stale_pid = old_pid
+    reap_pid(old_pid)
+    old_pid = nil
+    session_file = pi_session_file(tmpdir, session_id: "sess-1", completed: false)
+    stale_ref = pi_session_ref(session_file: session_file, pid: stale_pid, cwd: tmpdir)
+    attached = first_client.attach_session(stale_ref)
+    @harness_sessions << [first_client, attached]
+    rpc_state_reads_before_observer = stub_commands_of_type(stub, "get_state").length
+
+    observed = second_client.get_state(stale_ref)
+
+    assert_equal attached.fetch("pid"), observed.fetch("pid")
+    assert_equal true, observed.fetch("is_streaming")
+    assert_equal false, observed.dig("metadata", "transport_available")
+    assert_nil observed.dig("metadata", "transport_owner_pid"),
+               "both clients share this test process, so ownership is local at the PID boundary"
+    assert_equal rpc_state_reads_before_observer, stub_commands_of_type(stub, "get_state").length,
+                 "the observer cannot use another client's RPC pipes"
+    assert process_alive?(attached.fetch("pid"))
+  ensure
+    reap_pid(old_pid) if old_pid
+  end
+
   def test_get_state_raises_when_a_head_session_has_no_completed_response_and_no_process
     client, = build_pi_client(tmpdir)
     session_file = pi_session_file(tmpdir, session_id: "sess-1", completed: false)

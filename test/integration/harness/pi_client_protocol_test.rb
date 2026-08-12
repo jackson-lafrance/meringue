@@ -59,6 +59,10 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     assert_equal "worker", ref.fetch("metadata").fetch("kind")
     assert_equal "Fix login redirect", ref.fetch("metadata").fetch("session_name")
     assert_equal "sess-42", ref.fetch("metadata").fetch("pi_state").fetch("sessionId")
+    assert_equal Process.pid, ref.dig("metadata", "supervision", "owner_pid")
+    assert_equal ref.fetch("pid"), ref.dig("metadata", "supervision", "harness_pid")
+    assert ref.dig("metadata", "supervision", "owner_started_at").to_s.start_with?("20")
+    assert ref.dig("metadata", "supervision", "harness_started_at").to_s.start_with?("20")
 
     argv = stub_argv(stub)
     assert_equal %w[--mode rpc], argv.first(2)

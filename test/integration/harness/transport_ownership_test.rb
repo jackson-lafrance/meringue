@@ -26,6 +26,7 @@ class HarnessTransportOwnershipTest < HarnessIntegrationTest
     record = owner.record_for("pi-sess-1")
     assert_equal 4242, record.fetch("pid")
     assert_equal Process.pid, record.fetch("owner_pid")
+    assert record.fetch("owner_started_at").to_s.start_with?("20"), "PID reuse protection must be durable"
     assert_equal "sess-1", record.fetch("session_id")
     assert_equal "spawned", record.fetch("note")
     assert record.fetch("updated_at").to_s.start_with?("20")
