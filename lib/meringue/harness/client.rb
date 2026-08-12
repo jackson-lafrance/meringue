@@ -125,6 +125,25 @@ module Meringue
         nil
       end
 
+      # Harness-neutral evidence about the process supervising a session transport.
+      #
+      # Long-lived RPC harnesses may be children of the Meringue dashboard process. When that
+      # shared supervisor exits, every child loses its pipe owner together even though each durable
+      # session and workspace remains valid. Clients that persist transport ownership can report:
+      #
+      #   { "supervisor_exited" => true,
+      #     "owner_pid" => 123,
+      #     "owner_started_at" => "...",
+      #     "harness_pid" => 456,
+      #     "harness_started_at" => "...",
+      #     "source" => "transport_ownership" }
+      #
+      # The kernel only auto-recovers a process-gone worker when this evidence proves its shared
+      # supervisor also left. Returning nil preserves the ordinary isolated-process-exit behavior.
+      def session_supervision_evidence(_session_ref)
+        nil
+      end
+
       def attach_session(session_ref)
         raise NotImplementedError, "harness clients must implement #attach_session"
       end
