@@ -25,6 +25,28 @@ class KernelMaintenancePruneResponsivenessTest < Minitest::Test
     end
   end
 
+  class BlockingCleanupManager
+    attr_reader :entered, :release, :calls
+
+    def initialize
+      @entered = Queue.new
+      @release = Queue.new
+      @calls = []
+    end
+
+    def cleanup_pruned_worker_workspace(workspace, protected_paths: [])
+      @calls << [workspace, protected_paths]
+      entered << workspace.dig("plan", "agent_id")
+      release.pop
+      {
+        "status" => "already_removed",
+        "reason" => "worktree_already_removed",
+        "success" => true,
+        "attempted" => true
+      }
+    end
+  end
+
   class BlockingForgeClient
     attr_reader :entered, :release, :status_calls
 
@@ -104,6 +126,74 @@ class KernelMaintenancePruneResponsivenessTest < Minitest::Test
     assert_match(/branch discovery timed out/, blocker.fetch("error"))
     assert_equal 1, forge.branch_calls.length
     assert_operator forge.branch_calls.first.fetch(2), :>, 0
+  end
+
+  def test_expensive_workspace_cleanup_does_not_hold_state_lock_or_block_reconciliation
+    worker = worker_record(
+      id: "P1-I1-W1",
+      issue_id: "P1-I1",
+      project_id: "P1",
+      extra: {
+        "workspace_strategy" => "git_worktree",
+        "workspace_path" => tmp_path("workspaces", "repo", "task"),
+        "workspace_branch" => "meringue/task",
+        "harness_metadata" => {
+          "workspace_plan" => {
+            "strategy" => "git_worktree",
+            "agent_id" => "P1-I1-W1",
+            "git_root" => tmp_path("projects", "repo"),
+            "worktree_root_path" => tmp_path("workspaces", "repo", "task"),
+            "workspace_path" => tmp_path("workspaces", "repo", "task"),
+            "workspace_branch" => "meringue/task"
+          }
+        }
+      }
+    )
+    write_state(
+      state_fixture(
+        projects: [project_record(id: "P1", status: "working")],
+        issues: [issue_record(id: "P1-I1", project_id: "P1", agent_ids: [worker.fetch("id")])],
+        agents: [worker]
+      )
+    )
+    cleanup = BlockingCleanupManager.new
+    prune_engine = build_engine(workspace_manager: cleanup)
+    other_engine = build_engine
+    prune_thread = Thread.new do
+      prune_engine.apply("type" => "Prune", "command_id" => "prune-slow-cleanup", "payload" => {})
+    end
+
+    assert_equal "P1-I1-W1", cleanup.entered.pop
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    list_result = other_engine.apply("type" => "ListAll", "payload" => {})
+    list_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    reconcile_result = other_engine.apply("type" => "ReconcileSessions", "payload" => {})
+    reconcile_elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    prompt_result = other_engine.apply(
+      "type" => "PromptAgent",
+      "payload" => { "agent_id" => "P1-I1-W1", "prompt" => "Resume while cleanup is running" }
+    )
+
+    assert_equal "accepted", list_result.fetch("status")
+    assert_equal "accepted", reconcile_result.fetch("status")
+    assert_operator list_elapsed, :<, 0.2, "cleanup must not hold the cross-process state lock"
+    assert_operator reconcile_elapsed, :<, 0.2, "reconciliation must continue during cleanup"
+    assert_equal "rejected", prompt_result.fetch("status")
+    assert_includes prompt_result.fetch("errors"), "agent_prune_in_progress"
+
+    cleanup.release << true
+    result = prune_thread.value
+    assert_equal "accepted", result.fetch("status")
+    assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
+    assert_equal "already_removed", result.dig("result", "workspace_cleanup_outcomes", 0, "status")
+    timings = result.dig("result", "timings")
+    assert_operator timings.fetch("workspace_cleanup_seconds"), :>=, 0
+    assert_operator timings.fetch("total_seconds"), :>=, timings.fetch("workspace_cleanup_seconds")
+  ensure
+    cleanup&.release&.push(true) if prune_thread&.alive?
+    prune_thread&.join(1)
+    prune_thread&.kill if prune_thread&.alive?
   end
 
   def test_typed_prune_does_not_hold_the_state_lock_while_forge_lookup_blocks

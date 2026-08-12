@@ -242,6 +242,7 @@ module KernelMaintenanceSupport
 
   def build_engine(forge_client: StubForgeClient.new, harness_client: Meringue::Harness::FakeClient.new,
                    harness_client_resolver: nil, head_runner: Meringue::Heads::FakeRunner.new,
+                   workspace_manager: Meringue::Workspace::Manager.new(root_path: tmp_path("workspaces")),
                    prune_forge_lookup_budget: Meringue::Kernel::Engine::PRUNE_FORGE_LOOKUP_BUDGET_SECONDS,
                    delivery_pull_request_refresh_budget: Meringue::Kernel::Engine::DELIVERY_PULL_REQUEST_REFRESH_BUDGET_SECONDS,
                    store: Meringue::State::Store.new(path: state_path))
@@ -250,7 +251,7 @@ module KernelMaintenanceSupport
       harness_client: harness_client,
       head_runner: head_runner,
       harness_client_resolver: harness_client_resolver,
-      workspace_manager: Meringue::Workspace::Manager.new(root_path: tmp_path("workspaces")),
+      workspace_manager: workspace_manager,
       cwd: @kernel_maintenance_tmp,
       forge_client: forge_client,
       prune_forge_lookup_budget: prune_forge_lookup_budget,
