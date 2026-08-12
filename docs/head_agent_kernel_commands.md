@@ -77,12 +77,23 @@ Before choosing `AddProject`, `CreateIssue`, `SpawnWorker`, or `PromptAgent`, in
 - inspect repository identity with `git remote -v` and `git status --short --branch`
 - search nearby directories with `find` for `.git` folders, manifests, READMEs, and likely project names
 - use `rg` to find repo names or domain terms in nearby project metadata
+- when a new issue will route GitHub-backed work, resolve only the relevant GitHub issue or pull request's exact title metadata with `gh issue view <issue URL or number> [--repo OWNER/REPO] --json title --jq .title` or `gh pr view <PR URL or number> [--repo OWNER/REPO] --json title --jq .title`
 
-Discovery must be read-only and limited to routing/orchestration context. Do not investigate the substantive task, edit files, create branches or worktrees, run package installs, run generators, run formatters that write files, mutate git state, contact production/staging systems, or change Meringue JSON state directly.
+Discovery must be read-only and limited to routing/orchestration context. Do not investigate the substantive task, edit files, create branches or worktrees, run package installs, run generators, run formatters that write files, mutate git state, contact production/staging systems, or change Meringue JSON state directly. GitHub title lookups are read-only routing discovery; they do not permit fetching issue/PR bodies, comments, reviews, changed files, or diffs, and they do not permit using `gh issue edit`, `comment`, `close`, or `reopen`, `gh pr edit`, `comment`, `review`, `merge`, `close`, `reopen`, or `checkout` from a head.
 
 Prefer an already registered project when its id, name, root path, git root, or remote clearly matches the request. For prompts like "this project", "current project", "here", or "this repo", prefer the current git root from the supplied `project_discovery.current_directory.git_root`; if there is no git root, use `cwd`. If that local repository/directory is not registered, propose `AddProject` with the absolute root before creating issues or workers.
 
 If the app was launched outside the target project, use registered projects, explicit paths/names in the prompt, and `project_discovery.candidate_search_roots` to inspect likely local repositories. If multiple repositories are plausible and the user did not identify one clearly, ask a clarifying question instead of guessing.
+
+## GitHub issue and pull-request titles
+
+Whenever you create a Meringue issue to route GitHub-backed work, first identify the relevant GitHub issue or pull request and resolve its exact current GitHub title with the read-only title lookup above. Copy that title unchanged into the Meringue issue title. Preserve capitalization and punctuation. Add no prefix, suffix, action, issue/PR number, or branch name.
+
+This rule applies to every issue-creating route: use the exact GitHub title in `CreateIssue.title`, or in `CreateGoal.issue_title` when the goal's prompt form will mint the issue. Never invent a generic substitute such as `Fix PR #123`, `Rebase PR #123`, `Review pull request 123`, `GitHub issue #123`, or a branch-based title. Put the GitHub URL or number and the requested action in the issue description and worker prompt instead.
+
+If the request names several GitHub items and the relevant one is unclear, or if its exact title cannot be resolved reliably, ask a clarifying question instead of creating the issue. If an existing Meringue issue already represents the GitHub work, reuse it under the normal follow-up rules rather than creating a duplicate solely to rename it.
+
+The title-only GitHub queries are routing metadata discovery, not substantive issue or PR investigation. Do not inspect bodies, comments, reviews, changed files, or diffs. Do not diagnose the work, change git state, or write to GitHub from the head; route all such work to a worker.
 
 ## Head result envelope
 
@@ -134,6 +145,7 @@ Issue and worker selection rules for the MVP:
 - One goal that needs several steps is still one issue. A research step and the implementation step that consumes its findings are two workers on the same issue, ordered with `after_from_command`, not two issues. Deliverables do not define issues: a separate PR, a "no PR, findings only" step, and an implementation step can all live under one issue. See "One goal, two steps: research then implementation".
 - First classify the message as a genuinely new goal or a follow-up. Without a selected target, explicit project/issue/worker ids win. With one, explicit ids must be compatible with its resolved issue or treated as a target conflict. Otherwise compare the prompt with issue titles/descriptions, recent routing activity, latest worker results, and active session metadata in `routing_context`.
 - A refinement, correction, question about findings, or next step for an existing goal should reuse that issue. Use `CreateIssue` only when no existing issue represents the durable goal, and use `CreateGoal`'s prompt form instead when the request is an outcome to iterate towards rather than a task to perform once.
+- Before creating a GitHub-backed Meringue issue, resolve the exact current title of the relevant GitHub issue or pull request and copy it unchanged into `CreateIssue.title` or `CreateGoal.issue_title`. Never use a generic number-based title; ask a clarifying question if the relevant GitHub target or title cannot be resolved unambiguously.
 - On a reused issue, prefer `PromptAgent` when one healthy worker session has the relevant context. Do not spawn another worker merely because the user sent another message.
 - Use `PromptAgent` mode `steer` for an urgent correction that should affect active work, `follow_up` for related work that should wait until the active turn settles, and `normal` for a settled resumable session. Choose from the candidate's `is_streaming`, `supported_prompt_modes_now`, `recommended_prompt_mode`, and `prompt_mode_note` instead of defaulting to `normal`; a `normal` prompt to a mid-turn session is still accepted, but the kernel delivers it as a follow-up.
 - Spawn a new worker on the same issue only when the previous session is unavailable/unhealthy, its context is known to be over 50%, its delivered workspace should remain immutable, the next step is independent, or parallel work is intentional. Set `follow_up_of_agent_id` so that relationship is visible.
@@ -655,6 +667,8 @@ Payload:
 
 Give each `CreateIssue` a `command_id` when a worker in the same batch belongs to it, so the worker can reference it with `issue_from_command`.
 
+For GitHub-backed work, `title` must be the exact current title of the relevant GitHub issue or pull request. Do not use a generic number-based replacement such as `Fix PR #123`, `Rebase PR #123`, or `GitHub issue #123`. Keep the GitHub identity and requested operation in `description`.
+
 Example:
 
 ```json
@@ -1111,7 +1125,7 @@ Both halves matter, in both directions:
 
 With the prompt form:
 
-- The kernel derives the issue title from the first sentence of `prompt` (truncated) and keeps the prompt verbatim in the description along with the metric, target, and guardrails. Send `issue_title` when you have a better short title; send `title` for the goal's own display title.
+- The kernel derives the issue title from the first sentence of `prompt` (truncated) and keeps the prompt verbatim in the description along with the metric, target, and guardrails. Send `issue_title` when you have a better short title; send `title` for the goal's own display title. For GitHub-backed work, always set `issue_title` to the exact current title of the relevant GitHub issue or pull request. Never let the prompt derive a generic number-based issue title.
 - `success_criteria` defaults to `prompt`. Send it separately when the criteria are sharper than the prompt.
 - **Always set `project_id`** — you already know which project the work belongs to, and the kernel does not guess for you. Without it the kernel falls back to the project containing Meringue's own working directory, then to the only registered project, and otherwise rejects the command with `project_ambiguous`. Use `project_from_command` when the same batch registers the project with `AddProject`.
 - Do not pair the prompt form with a `CreateIssue` for the same work; that produces two issues for one goal.
