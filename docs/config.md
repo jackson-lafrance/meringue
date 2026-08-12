@@ -191,8 +191,19 @@ line per minute. When the harness starts, the progress marker is cleared and the
 
 When provisioning does fail, the worker is not thrown away: a stuck attempt is retried once
 automatically, and a worker that runs out of automatic attempts stays `blocked` with its prompt
-and failure reason intact. Prompting that worker retries provisioning with the new instruction;
-`/info <worker id>` reports the state, the attempts, the error, and the next step.
+and failure reason intact. Disk exhaustion is detected separately from a timeout or generic Git
+failure. Meringue cleans up only the partial worktree/branch created by that failed attempt, does
+**not** immediately retry against the same full disk, and leaves the worker blocked with an
+actionable `free disk space, then prompt this worker to retry provisioning` diagnosis. It never
+removes dirty, unrelated, or user-owned worktrees to manufacture headroom.
+
+Git can print one progress record per checked-out file and repeat `No space left on device` for
+thousands of paths. Command capture is therefore bounded to a 16 KiB head/tail diagnostic while
+recording the original byte counts and whether output was omitted. The beginning preserves the
+operation Git attempted, the tail preserves the terminal errno, and the concise worker error is
+not a copy of the per-file failure stream. Prompting a blocked worker after cleanup retries the
+same reservation with the new instruction; `/info <worker id>` reports the state, attempts, error,
+and next step.
 
 Commands may be either an argv array (recommended) or a shell-quoted string such as `editor_command = "code --reuse-window"`. Strings are split into arguments, but are **never executed by a shell**: redirects, substitutions, pipes, semicolons, and worktree paths cannot become shell code. `editor_args` is a string or array of strings and defaults to `["."]`.
 

@@ -180,6 +180,91 @@ module WorkspaceSupport
     end
   end
 
+  # Manager that reproduces Git's ENOSPC failure after it has registered and populated a
+  # worktree. The emitted stderr is deliberately much larger than production's diagnostic cap,
+  # but no filesystem is actually filled: the failure is injected after a normal small checkout.
+  class DiskExhaustedManager < Meringue::Workspace::Manager
+    attr_reader :injected_stderr_bytes
+
+    def initialize(repeated_errors: 2_000, fail_once: false, **options)
+      super(**options)
+      @repeated_errors = repeated_errors
+      @remaining_failures = fail_once ? 1 : Float::INFINITY
+      @injected_stderr_bytes = 0
+    end
+
+    private
+
+    def run_command(*argv, **options)
+      return super unless worktree_add?(argv)
+      return super unless @remaining_failures.positive?
+
+      @remaining_failures -= 1 unless @remaining_failures.infinite?
+      result = super
+      stderr = "Preparing worktree\n" + Array.new(
+        @repeated_errors,
+        "error: failed to open file 'large/path.rb': No space left on device\n"
+      ).join + "fatal: Could not reset index file to revision 'HEAD'.\n"
+      @injected_stderr_bytes = stderr.bytesize
+      buffer = Meringue::Workspace::Manager::DiagnosticBuffer.new(
+        limit: Meringue::Workspace::Manager::DIAGNOSTIC_OUTPUT_LIMIT_BYTES
+      )
+      buffer << stderr
+      result.merge(
+        "stderr" => buffer.to_s,
+        "status" => FailureStatus.new(128),
+        "diagnostics" => {
+          "stdout_bytes" => result.fetch("stdout").bytesize,
+          "stderr_bytes" => buffer.bytes_seen,
+          "truncated" => buffer.truncated?
+        }
+      )
+    end
+
+    FailureStatus = Struct.new(:exitstatus) do
+      def success? = false
+    end
+
+    def worktree_add?(argv)
+      tokens = argv.map(&:to_s)
+      tokens.include?("worktree") && tokens.include?("add")
+    end
+  end
+
+  class PreflightDiskExhaustedManager < Meringue::Workspace::Manager
+    private
+
+    def preferred_base_ref(*)
+      raise Errno::ENOSPC, "simulated preflight read"
+    end
+  end
+
+  class IncompleteCleanupManager < Meringue::Workspace::Manager
+    attr_reader :branch_release_attempted
+
+    private
+
+    def remove_incomplete_worktree(**)
+      { "worktree_removed" => false, "worktree_remove_status" => 128 }
+    end
+
+    def release_owned_branch(*)
+      @branch_release_attempted = true
+      "deleted"
+    end
+  end
+
+  class RaisingDiskExhaustedManager < Meringue::Workspace::Manager
+    private
+
+    def run_command(*argv, **options)
+      tokens = argv.map(&:to_s)
+      raise Errno::ENOSPC, "simulated allocation write" if tokens.include?("worktree") && tokens.include?("add")
+
+      super
+    end
+  end
+
   # ----------------------------------------------------------------- agents
 
   def worker_agent(id: "P1-I1-W1", workspace_path: nil, cwd: nil, plan: {}, **extra)
