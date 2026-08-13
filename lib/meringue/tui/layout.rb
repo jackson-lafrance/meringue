@@ -177,6 +177,23 @@ module Meringue
         Selection.point(row.fetch(:line_index), column)
       end
 
+      # Worker authored the actionable cell under this logs-pane coordinate.
+      # ChatPane owns the per-entry row metadata; Layout only resolves viewport
+      # geometry and never guesses an id from displayed prose.
+      def logs_worker_at(state, width:, height:, x:, y:)
+        dimensions = logs_content_dimensions(state, width: width, height: height)
+        position = logs_text_position(state, width: width, height: height, x: x, y: y)
+        return nil unless dimensions && position
+        return nil unless chat_pane.respond_to?(:log_worker_at)
+
+        chat_pane.log_worker_at(
+          state,
+          position.fetch("line"),
+          position.fetch("column"),
+          width: dimensions.fetch(:content_width)
+        )
+      end
+
       # Plain text of every wrapped logs content line. Keyboard selection uses
       # this to move a caret through the same coordinates the mouse produces.
       def logs_text_lines(state, width:, height:)
