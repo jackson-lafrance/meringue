@@ -37,16 +37,22 @@ module Meringue
           entries = log_entries(state)
           lines = []
           paragraph_ranges = {}
+          worker_click_targets = {}
           if entries.empty?
             append_log_body_paragraphs(lines, paragraph_ranges, empty_logs_lines(state, width: width))
           else
             selected_agent_id = AgentTreeNavigation.selected_agent_id(state)
             entries.each do |entry|
               fragment = cached_log_entry_fragment(entry, width: width, selected_agent_id: selected_agent_id)
-              append_log_fragment(lines, paragraph_ranges, fragment)
+              append_log_fragment(lines, paragraph_ranges, worker_click_targets, fragment)
             end
           end
-          @log_lines_cache = { key: cache_key, lines: lines, paragraph_ranges: paragraph_ranges }
+          @log_lines_cache = {
+            key: cache_key,
+            lines: lines,
+            paragraph_ranges: paragraph_ranges,
+            worker_click_targets: worker_click_targets
+          }
           lines
         end
 
@@ -62,28 +68,26 @@ module Meringue
           fragment_lines = []
           fragment_ranges = {}
           gutter = gutter_segment(entry)
-          append_log_paragraph(
-            fragment_lines,
-            fragment_ranges,
-            role_lines(entry, selected_agent_id: selected_agent_id, width: width)
-          )
-          append_log_body_paragraphs(
-            fragment_lines,
-            fragment_ranges,
-            body_lines(entry, width: width, gutter: gutter)
-          )
+          header_rows = role_lines(entry, selected_agent_id: selected_agent_id, width: width)
+          body_rows = body_lines(entry, width: width, gutter: gutter)
+          append_log_paragraph(fragment_lines, fragment_ranges, header_rows)
+          append_log_body_paragraphs(fragment_lines, fragment_ranges, body_rows)
           if entry.fetch("kind", nil) == "message" && entry.fetch("status", nil)
             append_log_paragraph(fragment_lines, fragment_ranges, [status_line(entry.fetch("status"), gutter)])
           end
 
-          @log_entry_fragment_cache[key] = { lines: fragment_lines, paragraph_ranges: fragment_ranges }
+          @log_entry_fragment_cache[key] = {
+            lines: fragment_lines,
+            paragraph_ranges: fragment_ranges,
+            worker_click_targets: worker_click_targets(entry, header_rows, body_rows)
+          }
           # Keep more than two full retained windows so normal append/evict traffic never causes a
           # synchronized cache cliff. Hash insertion order lets us discard only the oldest fragments.
           @log_entry_fragment_cache.shift while @log_entry_fragment_cache.length > 1_200
           @log_entry_fragment_cache.fetch(key)
         end
 
-        def append_log_fragment(lines, paragraph_ranges, fragment)
+        def append_log_fragment(lines, paragraph_ranges, worker_click_targets, fragment)
           offset = lines.length
           lines.concat(fragment.fetch(:lines))
           fragment.fetch(:paragraph_ranges).each do |line_index, range|
@@ -92,6 +96,71 @@ module Meringue
               "end_line" => range.fetch("end_line") + offset
             }
           end
+          fragment.fetch(:worker_click_targets, {}).each do |line_index, targets|
+            worker_click_targets[line_index + offset] = targets
+          end
+        end
+
+        # Clickable worker references are deliberately narrower than a whole log
+        # row. Header targets are the rendered worker id and title; body targets
+        # are nonblank authored text after the identity gutter. Timestamps, icons,
+        # separators, trailing whitespace, status rows, heads, and kernel
+        # provenance remain ordinary selectable text.
+        def worker_click_targets(entry, header_rows, body_rows)
+          return {} unless entry.fetch("role", nil) == "agent"
+          return {} unless agent_kind(entry) == "worker"
+
+          worker_id = entry.fetch("source_id", nil).to_s
+          return {} if worker_id.empty?
+
+          targets = {}
+          header_text = header_rows.map { |row| plain_text(row) }.join
+          id_start = header_text.index(worker_id)
+          add_wrapped_worker_target(targets, header_rows, id_start, worker_id.length, worker_id) if id_start
+
+          title = agent_title(entry.fetch("agent", nil))
+          title_start = title.empty? ? nil : header_text.index(title, id_start.to_i + worker_id.length)
+          add_wrapped_worker_target(targets, header_rows, title_start, title.length, worker_id) if title_start
+
+          body_offset = header_rows.length
+          body_rows.each_with_index do |row, index|
+            text = plain_text(row)
+            content_start = text.start_with?(AGENT_GUTTER) ? AGENT_GUTTER.length : 0
+            first = text.index(/\S/, content_start)
+            last = text.rindex(/\S/)
+            next unless first && last && last >= content_start
+
+            targets[body_offset + index] = [{ "start_column" => first, "end_column" => last + 1, "worker_id" => worker_id }]
+          end
+          targets
+        end
+
+        def add_wrapped_worker_target(targets, rows, absolute_start, length, worker_id)
+          cursor = 0
+          rows.each_with_index do |row, line_index|
+            row_length = plain_text(row).length
+            start_column = [absolute_start - cursor, 0].max
+            end_column = [absolute_start + length - cursor, row_length].min
+            if start_column < end_column
+              (targets[line_index] ||= []) << {
+                "start_column" => start_column,
+                "end_column" => end_column,
+                "worker_id" => worker_id
+              }
+            end
+            cursor += row_length
+          end
+        end
+
+        # Worker id for a rendered logs cell, or nil when the cell is selectable
+        # text but not an action target.
+        def log_worker_at(state, line_index, column, width: nil)
+          log_lines(state, width: width)
+          targets = @log_lines_cache.fetch(:worker_click_targets, {}).fetch(line_index.to_i, [])
+          target = targets.find do |candidate|
+            column.to_i >= candidate.fetch("start_column") && column.to_i < candidate.fetch("end_column")
+          end
+          target&.fetch("worker_id", nil)
         end
 
         def log_entry_fragment_cache_key(entry, width, selected_agent_id)

@@ -696,7 +696,7 @@ module Meringue
         return handle_mouse_right_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_right_button_press?(key)
         return handle_mouse_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state, on_submit) if mouse_button_press?(key)
         return handle_mouse_drag_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_drag?(key)
-        return handle_mouse_release_key(input_buffer, input_cursor, slash_suggestion_index, state) if mouse_button_release?(key)
+        return handle_mouse_release_key(key, input_buffer, input_cursor, slash_suggestion_index, state) if mouse_button_release?(key)
 
         nil
       end
@@ -755,7 +755,15 @@ module Meringue
           [input_buffer, input_cursor, slash_suggestion_index]
         when "logs"
           @last_worker_click = nil
-          begin_logs_selection(key, state, click_count: text_click_count(pane, key))
+          click_count = text_click_count(pane, key)
+          clicked_worker_id = logs_worker_at(key, state)
+          if click_count > 1 && clicked_worker_id && @logs_worker_click_rollback&.fetch(:worker_id, nil) == clicked_worker_id
+            @log_scope_id = @logs_worker_click_rollback.fetch(:previous_scope, nil)
+            @selected_agent_id = @logs_worker_click_rollback.fetch(:previous_selected_agent, nil) if @agent_tree_navigation_active
+            @logs_worker_click_rollback = nil
+          end
+          @logs_worker_click_candidate = click_count == 1 ? clicked_worker_id : nil
+          begin_logs_selection(key, state, click_count: click_count)
           [input_buffer, input_cursor, slash_suggestion_index]
         else
           @last_worker_click = nil
@@ -770,6 +778,7 @@ module Meringue
       def handle_mouse_drag_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return [input_buffer, input_cursor, slash_suggestion_index] unless @selection_dragging
 
+        @logs_worker_click_candidate = nil if @selection_pane == "logs"
         case @selection_pane
         when "logs"
           position = logs_text_position(key, state)
@@ -789,11 +798,16 @@ module Meringue
       # highlight goes straight to the system clipboard, so a double-click is one
       # gesture end to end; Ctrl-C still copies later, and the composer stays
       # copy-on-demand so selecting text to retype it cannot clobber a clipboard.
-      def handle_mouse_release_key(input_buffer, input_cursor, slash_suggestion_index, state)
+      def handle_mouse_release_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         completed_drag = @selection_dragging
+        worker_id = @logs_worker_click_candidate
+        @logs_worker_click_candidate = nil
         @selection_dragging = false
         if selection_active?
           copy_selection(state, input_buffer) if completed_drag && @selection_pane == "logs"
+        elsif worker_id && logs_worker_at(key, state) == worker_id
+          clear_selection
+          select_worker_from_logs(state, worker_id)
         else
           clear_selection
         end
@@ -878,6 +892,10 @@ module Meringue
 
       def logs_text_position(key, state)
         layout.logs_text_position(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+      end
+
+      def logs_worker_at(key, state)
+        layout.logs_worker_at(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
       end
 
       def composer_text_index(key, state)
@@ -1540,6 +1558,30 @@ module Meringue
         clear_log_scope
         exit_agent_tree_navigation if @agent_tree_navigation_active
         false
+      end
+
+      # A worker-authored logs cell is a direct filter gesture, not a pane or
+      # keyboard-mode transition. Keep logs focus and its viewport; if jump mode
+      # was already active, move its cursor to the same worker without toggling
+      # the mode. A stale/removed worker is deliberately inert.
+      def select_worker_from_logs(state, worker_id)
+        worker = Array(state.fetch("agents", [])).find do |record|
+          record.is_a?(Hash) && record.fetch("type", nil).to_s == "worker" && record.fetch("id", nil).to_s == worker_id.to_s
+        end
+        return false unless worker
+
+        @logs_worker_click_rollback = {
+          worker_id: worker.fetch("id").to_s,
+          previous_scope: @log_scope_id,
+          previous_selected_agent: @selected_agent_id
+        }
+        @log_scope_id = worker.fetch("id").to_s
+        if @agent_tree_navigation_active
+          @selected_agent_id = @log_scope_id
+          remember_workspace_agent(state, @log_scope_id)
+        end
+        @revealed_agent_tree_item_id = nil
+        true
       end
 
       # The logs filter follows the selection, so retargeting it also resets the
@@ -2312,6 +2354,7 @@ module Meringue
           Global: /quit or #{keys_for("quit")} quits; #{keys_for("clear_or_quit")} clears input or quits when input is empty; #{keys_for("cancel_navigation")} cancels a selection first, then the AgentTree log/chat target and jump mode.
           Focus: click a dashboard section to focus it; double-clicking the `N open PR` / `N open PRs` summary opens the global pull-request picker, double-clicking an issue opens its delivery PR (or shows a transient no-PR notice), double-clicking a worker with a workspace opens its focused workspace, and double-clicking a retryable head submits /retry for a fresh head. Unavailable rows stay quiet. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
           AgentTree selection and chat target: single-click a project, issue, head, or worker row to select it and filter the logs pane to that node (a worker shows its own logs, an issue adds all of its workers and child issues, a project adds its whole subtree). Right-click an issue to open its associated delivery PR; workers do not duplicate that affordance, and an issue without one shows a transient notice. An issue also targets subsequent natural-language chat to that issue; a worker selection resolves chat to its owning issue. A fresh head still routes every message using that explicit target context. Head rows and projects remain log-only filters; retry a failed/blocked head explicitly with /retry H<n> or by double-clicking its "retry me" row. Use /open-session <agent_id> to open an underlying harness session for debugging, including a head session. The selection stays highlighted, is scrolled back into view when it changes, and keeps filtering while you work in the logs or chat pane; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} in jump mode retarget it. Double-click an issue to open its PR, or double-click a worker with an assigned workspace to open that worker's focused workspace. Click the highlighted row again, click empty space in the AgentTree, or press #{keys_for("cancel_navigation")} to clear it. Heads without an owning issue, projects, and workers without workspaces remain log-only filters for these mouse actions.
+          Logs mouse target: click a worker id, worker title, or nonblank worker-authored body text to select that worker and filter its logs without changing logs focus or scroll position; removed workers and surrounding chrome are inert. Drag, double-click, and triple-click remain text-selection gestures and take precedence.
           Selection: drag with the mouse in the logs pane or the composer to select text; double-click selects a word, and triple-click selects a complete logs paragraph; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
           Logs selection (keyboard): focus the logs pane, then #{keys_for("logs_selection_mode")} toggles the selection cursor or any Shift+movement starts it. #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor, #{keys_for("cursor_word_left")}/#{keys_for("cursor_word_right")} move by word, #{keys_for("cursor_home")}/#{keys_for("cursor_end")} jump to the line edges, and #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} move by page. #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")}, #{keys_for("select_home")}/#{keys_for("select_end")}, #{keys_for("select_word_left")}/#{keys_for("select_word_right")}, and #{keys_for("select_page_up")}/#{keys_for("select_page_down")} extend the selection. #{keys_for("copy_selection")} copies the selection (or the cursor line when nothing is extended); #{keys_for("cancel_navigation")} exits.
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
