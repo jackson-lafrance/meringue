@@ -1188,9 +1188,7 @@ module Meringue
         # `bundle exec`'s RUBYOPT/BUNDLE_GEMFILE into them: in particular, invoking a system
         # Ruby would otherwise try to load this process's Bundler and exit before producing
         # the output the watchdog is responsible for capturing.
-        child_environment = defined?(Bundler) ? Bundler.unbundled_env : {}
-        child_environment = child_environment.merge("RUBYOPT" => nil, "RUBYLIB" => nil, "BUNDLE_GEMFILE" => nil)
-        Open3.popen3(child_environment, *effective_argv, pgroup: true) do |child_stdin, child_out, child_err, child_wait|
+        Open3.popen3(SubprocessEnvironment.clean, *effective_argv, pgroup: true) do |child_stdin, child_out, child_err, child_wait|
           stdin = child_stdin
           out = child_out
           err = child_err
