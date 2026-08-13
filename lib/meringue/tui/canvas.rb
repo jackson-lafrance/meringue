@@ -130,18 +130,34 @@ module Meringue
       def render_row(row, styles, color:)
         return row.join unless color
 
-        current_style = nil
-        row.each_with_index.each_with_object(String.new) do |(char, index), rendered|
+        # Styles normally change only at segment boundaries (borders, labels, and
+        # pane content). Appending one character at a time made the normal ANSI
+        # path scan and grow a Ruby String for every terminal cell on every
+        # keystroke; the scalability benchmark did not see it because it forced
+        # NO_COLOR. Emit complete same-style runs instead, keeping work tied to
+        # rendered segments rather than viewport area.
+        rendered = String.new
+        run_start = 0
+        current_style = styles.first
+        index = 1
+        while index < row.length
           next_style = styles[index]
           if next_style != current_style
+            append_styled_run(rendered, row, run_start, index, current_style)
             rendered << Style::RESET if current_style
-            rendered << next_style if next_style
+            run_start = index
             current_style = next_style
           end
-          rendered << char
-        end.tap do |rendered|
-          rendered << Style::RESET if current_style
+          index += 1
         end
+        append_styled_run(rendered, row, run_start, row.length, current_style)
+        rendered << Style::RESET if current_style
+        rendered
+      end
+
+      def append_styled_run(rendered, row, start_index, end_index, style)
+        rendered << style if style
+        rendered << row[start_index...end_index].join
       end
     end
   end
