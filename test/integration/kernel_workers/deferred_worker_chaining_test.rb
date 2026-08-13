@@ -82,6 +82,32 @@ class KernelWorkersDeferredChainingTest < Minitest::Test
 
   # --- Activation -----------------------------------------------------------------------------
 
+  def test_deferred_worker_preserves_session_settings_until_activation
+    engine = build_engine
+    context = project_with_issue(engine)
+    predecessor_id = spawn_worker(engine, context.fetch("issue_id"), prompt: "Investigate.").fetch("target_id")
+    dependent_id = spawn_worker(
+      engine,
+      context.fetch("issue_id"),
+      prompt: "Implement.",
+      after_agent_id: predecessor_id,
+      model: "openai/gpt-5.6-sol",
+      thinking_level: "medium"
+    ).fetch("target_id")
+
+    queued = agent(engine, dependent_id)
+    assert_nil queued.fetch("session_settings")
+    assert_equal "openai/gpt-5.6-sol", queued.dig("harness_metadata", "spawn_session_settings", "model")
+    assert_equal "medium", queued.dig("harness_metadata", "spawn_session_settings", "thinking_level")
+
+    engine.mark_worker_completed(agent_id: predecessor_id, last_assistant_text: "Done.")
+    activated = agent(engine, dependent_id)
+
+    assert_equal({ "model" => "openai/gpt-5.6-sol", "thinking_level" => "medium" }, @harness_client.spawns.last.fetch("session_settings"))
+    assert_equal "openai/gpt-5.6-sol", activated.dig("session_settings", "model", "reference")
+    assert_equal "medium", activated.dig("session_settings", "thinking_level")
+  end
+
   def test_predecessor_completion_starts_the_queued_worker_with_a_handover_prompt
     engine = build_engine
     context = project_with_issue(engine)

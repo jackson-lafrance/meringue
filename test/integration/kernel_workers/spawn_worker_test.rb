@@ -60,6 +60,57 @@ class KernelWorkersSpawnTest < Minitest::Test
     assert_equal "spawn_worker", worker.fetch("harness_metadata").fetch("routing_action")
   end
 
+  def test_spawn_applies_and_records_explicit_session_settings
+    engine = build_engine
+    context = project_with_issue(engine)
+
+    result = spawn_worker(
+      engine,
+      context.fetch("issue_id"),
+      model: "openai/gpt-5.6-sol",
+      thinking_level: "medium"
+    )
+    worker = agent(engine, result.fetch("target_id"))
+    spawn_call = @harness_client.spawns.fetch(0)
+
+    assert_equal({ "model" => "openai/gpt-5.6-sol", "thinking_level" => "medium" }, spawn_call.fetch("session_settings"))
+    assert_equal "openai/gpt-5.6-sol", worker.dig("session_settings", "model", "reference")
+    assert_equal "medium", worker.dig("session_settings", "thinking_level")
+  end
+
+  def test_spawn_omits_session_settings_to_retain_harness_defaults
+    engine = build_engine
+    context = project_with_issue(engine)
+
+    result = spawn_worker(engine, context.fetch("issue_id"))
+
+    assert_equal({}, @harness_client.spawns.fetch(0).fetch("session_settings"))
+    assert_nil agent(engine, result.fetch("target_id")).fetch("session_settings")
+  end
+
+  def test_spawn_rejects_invalid_session_settings_before_reserving_or_launching
+    engine = build_engine
+    context = project_with_issue(engine)
+
+    bad_model = apply_raw(
+      engine,
+      "SpawnWorker",
+      { "issue_id" => context.fetch("issue_id"), "prompt" => "Do it.", "model" => "bare-model" }
+    )
+    bad_thinking = apply_raw(
+      engine,
+      "SpawnWorker",
+      { "issue_id" => context.fetch("issue_id"), "prompt" => "Do it.", "thinking_level" => "ultra" }
+    )
+
+    assert_equal "rejected", bad_model.fetch("status")
+    assert_includes bad_model.fetch("errors").join(" "), "invalid model"
+    assert_equal "rejected", bad_thinking.fetch("status")
+    assert_includes bad_thinking.fetch("errors").join(" "), "thinking_level must be one of"
+    assert_empty @harness_client.spawns
+    assert_empty state(engine).fetch("agents")
+  end
+
   def test_spawn_records_the_harness_session_identity
     engine = build_engine
     context = project_with_issue(engine)

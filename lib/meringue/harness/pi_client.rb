@@ -161,9 +161,9 @@ module Meringue
         extra_args
       end
 
-      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:)
+      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {})
         expanded_cwd = validate_cwd!(cwd)
-        argv = build_argv(session_name: session_name, system_prompt: system_prompt)
+        argv = build_argv(session_name: session_name, system_prompt: system_prompt, session_settings: session_settings)
         process = start_rpc_process(argv: argv, cwd: expanded_cwd)
         register_process(process)
 
@@ -1455,7 +1455,7 @@ module Meringue
         }.compact
       end
 
-      def build_argv(session_name:, system_prompt:, session: nil)
+      def build_argv(session_name:, system_prompt:, session: nil, session_settings: {})
         argv = Array(command).map(&:to_s) + ["--mode", "rpc"]
         argv += ["--session-dir", File.expand_path(session_dir)] if present?(session_dir)
         argv += ["--session", session.to_s] if present?(session)
@@ -1466,6 +1466,18 @@ module Meringue
         # defaults while resuming an existing session would silently mutate the
         # very session that global commands promise to leave unchanged.
         session_arguments = without_options(session_arguments, "--model", "--thinking") if present?(session)
+        unless present?(session) || session_settings.empty?
+          model = session_settings["model"] || session_settings[:model]
+          thinking = session_settings["thinking_level"] || session_settings[:thinking_level]
+          if present?(model)
+            session_arguments = without_options(session_arguments, "--model")
+            session_arguments += ["--model", model.to_s]
+          end
+          if present?(thinking)
+            session_arguments = without_options(session_arguments, "--thinking")
+            session_arguments += ["--thinking", thinking.to_s]
+          end
+        end
         argv + session_arguments
       end
 

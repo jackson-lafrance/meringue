@@ -671,13 +671,14 @@ Updates an existing issue.
 
 This supports title/description edits, reparenting, and status changes such as `working`, `blocked`, `completed`, or `errored`.
 
-### `SpawnWorker(IssueID, Prompt, WorkspacePath?) -> Agent`
+### `SpawnWorker(IssueID, Prompt, WorkspacePath?, Model?, ThinkingLevel?) -> Agent`
 Spawns a real worker harness session for an issue. For the MVP, this is a Pi worker session.
 
 Workers are usually one-to-one with issues.
 If `WorkspacePath` is omitted, the kernel should allocate a worker-specific workspace through the workspace manager.
 Prefer a dedicated git worktree for git-backed projects so concurrent workers/subagents can edit safely.
 The harness should receive the allocated workspace as its `cwd`; harness clients should not create or mutate worktrees directly.
+`Model` and `ThinkingLevel` are optional per-worker overrides. When omitted, the configured future-session defaults apply; when supplied, they affect only this worker and must be persisted through queued/follow-up activation so the worker record exposes the effective session settings.
 The returned agent should include a Meringue id like `P1-I1-W1`, workspace metadata, pid, harness session id,
 and harness session file when available. `FollowUpOfAgentID` may identify a prior worker on the same issue when a new session continues its work; when that predecessor is spawned by the same head batch, the head references its `SpawnWorker` command instead of predicting the agent id, exactly as `issue_from_command` references a `CreateIssue` in that batch. `ReplaceAgentID` may identify a stale/unhealthy worker on the same issue; the kernel should spawn the successor successfully before killing the replaced worker, link both records, and emit a clear replacement log.
 
