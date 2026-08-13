@@ -68,8 +68,17 @@ module Meringue
           return cached if cached
         end
 
-        load_unlocked
-        @snapshot_mutex.synchronize { @readonly_snapshot } || deep_freeze(load_unlocked)
+        parsed = load_unlocked
+        # `read_state_unlocked` deliberately declines to cache when an atomic write
+        # changes the fingerprint during its read. In that case an older readonly
+        # snapshot may still exist: never return it merely because it is non-nil.
+        # A snapshot published concurrently is reusable only when it represents the
+        # file version visible now; otherwise freeze the complete state we just read.
+        current_fingerprint = file_fingerprint
+        cached = @snapshot_mutex.synchronize do
+          @readonly_snapshot if current_fingerprint && @snapshot_fingerprint == current_fingerprint
+        end
+        cached || deep_freeze(parsed)
       end
 
       # Coalesce a related sequence of whole-state saves on the current thread. Callers still see
