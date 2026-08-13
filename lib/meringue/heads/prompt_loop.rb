@@ -3,23 +3,55 @@
 module Meringue
   module Heads
     class PromptLoop
-      attr_reader :engine, :worker_wait_timeout
+      attr_reader :engine, :worker_wait_timeout, :submission_queue
 
       def initialize(engine:, wait_for_workers: false, worker_wait_timeout: 120,
-                     engine_mutex: Mutex.new, router: Input::Router.new)
+                     engine_mutex: Mutex.new, router: Input::Router.new, submission_queue: nil)
         @engine = engine
         @wait_for_workers = wait_for_workers
         @worker_wait_timeout = worker_wait_timeout
         @engine_mutex = engine_mutex
         @router = router
+        @submission_queue = submission_queue || Input::DurableSubmissionQueue.new(state_path: engine.store.path)
+      end
+
+      # Called synchronously by the TUI before it clears the composer. The append is a tiny fsynced
+      # sidecar write and never waits for the orchestration-state lock held by prune/reconciliation.
+      def enqueue_submission(text, selected_target: nil)
+        submission_queue.enqueue(text: text, selected_target: selected_target)
+      end
+
+      def deliver_submission(submission, &on_event)
+        record = submission.is_a?(Hash) ? submission : submission_queue.pending.find { |entry| entry.fetch("id") == submission.to_s }
+        return nil unless record
+
+        result = route_submission(
+          record.fetch("text"),
+          selected_target: record.fetch("selected_target", nil),
+          submission_id: record.fetch("id"),
+          &on_event
+        )
+        submission_queue.complete(record.fetch("id"))
+        result
+      end
+
+      def recover_pending_submissions(&on_event)
+        submission_queue.pending.map do |submission|
+          Thread.new { deliver_submission(submission, &on_event) }
+        end
       end
 
       def call(text, selected_target: nil, &on_event)
+        deliver_submission(enqueue_submission(text, selected_target: selected_target), &on_event)
+      end
+
+      def route_submission(text, selected_target: nil, submission_id: nil, &on_event)
         route = if selected_target
                   router.route(text, selected_target: selected_target)
                 else
                   router.route(text)
                 end
+        route = correlate_submission(route, submission_id)
         return handle_slash_command(route, on_event: on_event) if route.fetch("kind", nil) == "slash_command"
 
         handle_prompt(text, route: route, on_event: on_event)
@@ -80,6 +112,22 @@ module Meringue
       private
 
       attr_reader :router
+
+      def correlate_submission(route, submission_id)
+        return route unless submission_id
+
+        correlated = route.merge("submission_id" => submission_id.to_s)
+        correlated["commands"] = Array(route.fetch("commands", [])).each_with_index.map do |command, index|
+          command = command.to_h if command.respond_to?(:to_h)
+          payload = (command.fetch("payload", {}) || {}).dup
+          payload["_input_submission_id"] = submission_id.to_s
+          command.merge(
+            "command_id" => command.fetch("command_id", nil),
+            "payload" => payload
+          )
+        end
+        correlated
+      end
 
       def handle_slash_command(route, on_event: nil)
         record_user_kernel_command(route)

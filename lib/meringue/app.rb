@@ -36,6 +36,7 @@ module Meringue
       ui.restore_logs!(loaded_state) if ui.respond_to?(:restore_logs!)
       ui.restore_agent_workspace!(loaded_state) if ui.respond_to?(:restore_agent_workspace!)
       ui.remember_existing_log_events!(loaded_state) if ui.respond_to?(:remember_existing_log_events!)
+      prompt_handler.recover_pending_submissions if prompt_handler&.respond_to?(:recover_pending_submissions)
       ui.run(state_provider: -> { current_state }, on_submit: prompt_handler)
     rescue JSON::ParserError => e
       err.puts "Could not load Meringue state from #{state_path}: #{e.message}"

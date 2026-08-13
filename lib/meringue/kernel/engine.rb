@@ -538,6 +538,10 @@ module Meringue
       # already merged, so the user had to run `/prune` repeatedly), and the phase runs outside the
       # state lock on the submission thread, so a longer ceiling delays nothing but this command.
       PRUNE_FORGE_LOOKUP_BUDGET_SECONDS = 15.0
+      # Cleanup is retriable and conservative. Bound one user command so a large backlog cannot
+      # occupy a submission thread for ten minutes; unvisited worktrees remain claimed only until
+      # this pass commits and are retried by the next explicit prune.
+      PRUNE_WORKSPACE_CLEANUP_BUDGET_SECONDS = 30.0
       # Harness model catalogs change when a user logs into a provider, installs an
       # extension, or edits models.json, so a persisted snapshot is refreshed
       # periodically in the background instead of on every completion keystroke.
@@ -565,8 +569,9 @@ module Meringue
       HEAD_SESSION_STATE_UNAVAILABLE = "unavailable"
 
       attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path,
-                  :config, :state_lock, :instance_pid, :instance_id, :prune_forge_lookup_budget, :metric_probe,
-                  :goal_advance_budget, :delivery_pull_request_refresh_budget
+                  :config, :state_lock, :instance_pid, :instance_id, :prune_forge_lookup_budget,
+                  :prune_workspace_cleanup_budget, :metric_probe, :goal_advance_budget,
+                  :delivery_pull_request_refresh_budget
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
                      head_runner: Heads::FakeRunner.new,
@@ -585,6 +590,7 @@ module Meringue
                      config_path: Config::DEFAULT_PATH,
                      config: nil,
                      prune_forge_lookup_budget: PRUNE_FORGE_LOOKUP_BUDGET_SECONDS,
+                     prune_workspace_cleanup_budget: PRUNE_WORKSPACE_CLEANUP_BUDGET_SECONDS,
                      delivery_pull_request_refresh_budget: DELIVERY_PULL_REQUEST_REFRESH_BUDGET_SECONDS,
                      goal_advance_budget: GOAL_ADVANCE_BUDGET_SECONDS,
                      state_lock: nil,
@@ -608,6 +614,7 @@ module Meringue
         @config = config || Config.load(path: @config_path)
         @deferred_worker_default_failure_policy = @config.conflict_predecessor_failure
         @prune_forge_lookup_budget = Float(prune_forge_lookup_budget)
+        @prune_workspace_cleanup_budget = Float(prune_workspace_cleanup_budget)
         @delivery_pull_request_refresh_budget = Float(delivery_pull_request_refresh_budget)
         @goal_advance_budget = Float(goal_advance_budget)
         @harness_client_resolver = harness_client_resolver
@@ -2811,6 +2818,14 @@ module Meringue
         selected_target = nil
         started = synchronized_state do
           state = normalized_state
+          submission_id = present_string(value_at(payload, "_input_submission_id", "input_submission_id"))
+          if submission_id && (existing = head_for_input_submission(state, submission_id))
+            return accepted_result(
+              command_id, command_type, existing.fetch("id"),
+              "Input submission #{submission_id} was already routed to head #{existing.fetch("id")}.",
+              deep_copy(existing), []
+            )
+          end
           if present_string(question_id) && !find_question(state, question_id)
             return rejected_result(command_id, command_type, "Question #{question_id} does not exist.", ["question_not_found"])
           end
@@ -2840,6 +2855,7 @@ module Meringue
             selected_target: selected_target,
             retry_of: retry_of,
             completion_trigger: completion_trigger,
+            input_submission_id: submission_id,
             snapshot_issue_ids: state.fetch("issues").map { |issue| issue.fetch("id", nil) }.compact,
             snapshot_project_ids: state.fetch("projects").map { |project| project.fetch("id", nil) }.compact,
             snapshot_unapplied_head_ids: unapplied_head_ids_for_issue_visibility(state),
@@ -4137,6 +4153,15 @@ module Meringue
 
       # The user's own words are the authoritative evidence for a destructive command. A head
       # cannot manufacture them: the kernel reads the message it recorded when it spawned the head.
+      def head_for_input_submission(state, submission_id)
+        state.fetch("agents").find do |agent|
+          next false unless agent.fetch("type", nil) == "head"
+
+          request = (agent.fetch("harness_metadata", {}) || {}).fetch("head_request", {}) || {}
+          request.fetch("input_submission_id", nil).to_s == submission_id.to_s
+        end
+      end
+
       def head_record_user_message(head)
         metadata = head.is_a?(Hash) ? (head.fetch("harness_metadata", {}) || {}) : {}
         request = metadata.is_a?(Hash) ? (metadata.fetch("head_request", {}) || {}) : {}
@@ -4322,6 +4347,14 @@ module Meringue
       # that are eligible for cleanup. A legacy `selector` value is still accepted for
       # compatibility and recorded for traceability, but it never changes what is pruned.
       def prune(command_id, command_type, payload)
+        input_submission_id = present_string(value_at(payload, "_input_submission_id", "input_submission_id"))
+        if input_submission_id && (receipt = completed_prune_submission(input_submission_id))
+          return accepted_result(
+            command_id, command_type, nil,
+            "Prune submission #{input_submission_id} was already applied.",
+            receipt.fetch("details", {}), [receipt.fetch("id")]
+          )
+        end
         requested_selector = present_string(value_at(payload, "selector", "Selector", "kind", "status").to_s.downcase)
         started_at = monotonic_time
         # Forge I/O and git worktree cleanup are both unbounded from the state layer's point of
@@ -4337,7 +4370,10 @@ module Meringue
           end
         end
         planning_finished_at = monotonic_time
-        workspace_cleanups = cleanup_prune_workspace_plan(preparation)
+        workspace_cleanups = cleanup_prune_workspace_plan(
+          preparation,
+          deadline: monotonic_time + [prune_workspace_cleanup_budget, 0.0].max
+        )
         cleanup_finished_at = monotonic_time
         synchronized_state do
           with_prune_forge_lookup_context(lookup_context) do
@@ -4348,6 +4384,7 @@ module Meringue
               prepared_plan: preparation.fetch("plan"),
               prepared_workspace_cleanups: workspace_cleanups,
               prune_operation_id: operation_id,
+              input_submission_id: input_submission_id,
               timings: {
                 "forge_lookup_seconds" => forge_finished_at - started_at,
                 "planning_seconds" => planning_finished_at - forge_finished_at,
@@ -4361,6 +4398,16 @@ module Meringue
       rescue StandardError
         release_prune_cleanup_claims(operation_id)
         raise
+      end
+
+      def completed_prune_submission(input_submission_id)
+        synchronized_state do
+          normalized_state.fetch("logs").reverse.find do |log|
+            details = log.fetch("details", {}) || {}
+            details.fetch("kind", nil) == "prune_result" &&
+              details.fetch("input_submission_id", nil).to_s == input_submission_id.to_s
+          end
+        end
       end
 
       def release_prune_cleanup_claims(operation_id)
@@ -4397,12 +4444,13 @@ module Meringue
         { "plan" => plan, "worker_ids" => worker_ids, "state" => deep_copy(state), "claimed_at" => now }
       end
 
-      def cleanup_prune_workspace_plan(preparation)
+      def cleanup_prune_workspace_plan(preparation, deadline: nil)
         cleanup_pruned_worker_workspaces!(
           preparation.fetch("state"),
           preparation.fetch("worker_ids"),
           preparation.fetch("claimed_at"),
-          append_logs: false
+          append_logs: false,
+          deadline: deadline
         )
       end
 
@@ -4635,7 +4683,8 @@ module Meringue
       # but a cleanup failure never changes logical eligibility: the unsafe worktree is preserved
       # and its structured outcome is reported for manual/future cleanup.
       def prune_records(command_id, command_type, requested_selector: nil, prepared_plan: nil,
-                        prepared_workspace_cleanups: nil, prune_operation_id: nil, timings: nil)
+                        prepared_workspace_cleanups: nil, prune_operation_id: nil,
+                        input_submission_id: nil, timings: nil)
         state = normalized_state
         current_plan = prune_removal_plan(state)
         delivery_refreshes = current_plan.fetch("delivery_refreshes")
@@ -4674,6 +4723,8 @@ module Meringue
         retention = prune_retention_summary(issue_decisions, prune_result, forge_lookup)
         message = ([prune_summary_message(prune_result)] + retention.fetch("sentences")).join(" ")
         details = prune_result.merge(
+          "kind" => "prune_result",
+          "input_submission_id" => input_submission_id,
           "requested_selector" => requested_selector,
           "checked_pr_urls" => checked_urls,
           "blocked_pr_urls" => blocked_urls,
@@ -5578,9 +5629,20 @@ module Meringue
         end
       end
 
-      def cleanup_pruned_worker_workspaces!(state, worker_ids, now, append_logs: true)
+      def cleanup_pruned_worker_workspaces!(state, worker_ids, now, append_logs: true, deadline: nil)
         pruned_ids = Array(worker_ids).compact
         Array(worker_ids).filter_map do |agent_id|
+          if deadline && monotonic_time >= deadline
+            next {
+              "agent_id" => agent_id,
+              "status" => "failed",
+              "reason" => "prune_cleanup_budget_exhausted",
+              "success" => false,
+              "attempted" => false,
+              "checked_at" => now,
+              "log_entry_ids" => []
+            }
+          end
           worker = find_agent(state, agent_id)
           next unless worker && worker.fetch("type", nil) == "worker"
 
@@ -5615,9 +5677,12 @@ module Meringue
 
             worker_worktree_root_path(other)
           end
-          outcome = workspace_manager.cleanup_pruned_worker_workspace(
+          cleanup_options = { protected_paths: protected_paths }
+          method = workspace_manager.method(:cleanup_pruned_worker_workspace)
+          cleanup_options[:deadline] = deadline if method.parameters.any? { |kind, name| kind == :keyrest || name == :deadline }
+          outcome = method.call(
             worker_workspace_cleanup_record(state, worker),
-            protected_paths: protected_paths
+            **cleanup_options
           ).merge(
             "agent_id" => agent_id,
             "issue_id" => worker.fetch("issue_id", nil),
@@ -11701,7 +11766,7 @@ module Meringue
       end
 
       def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0, user_message: nil, question_id: nil,
-                           selected_target: nil, retry_of: nil, completion_trigger: nil,
+                           selected_target: nil, retry_of: nil, completion_trigger: nil, input_submission_id: nil,
                            snapshot_issue_ids: [], snapshot_project_ids: [], snapshot_unapplied_head_ids: [], snapshot_counters: {})
         retry_of = nil unless retry_of.is_a?(Hash)
         completion_trigger = nil unless completion_trigger.is_a?(Hash)
@@ -11743,6 +11808,7 @@ module Meringue
             "completion_trigger" => completion_trigger,
             "head_request" => {
               "user_message" => user_message,
+              "input_submission_id" => input_submission_id,
               "question_id" => question_id,
               "selected_target" => selected_target,
               "retry_of_head_id" => retry_of && retry_of.fetch("head_id", nil)
