@@ -126,6 +126,38 @@ class StateStoreSnapshotCacheTest < Minitest::Test
     end
   end
 
+  def test_readonly_load_never_falls_back_to_an_older_cache_when_file_changes_during_read
+    with_store do |store, path|
+      write_state_file(path, state_named("old cached snapshot"))
+      old_snapshot = store.load_readonly
+      publish_atomic(path, state_named("snapshot parsed during race"))
+
+      # Force the second atomic publication into the exact gap between parsing and
+      # cache publication. remember_snapshot must decline the now-unattributable
+      # parse, leaving the old readonly cache in place.
+      original_remember = store.method(:remember_snapshot)
+      publish = state_named("snapshot published during read")
+      raced = false
+      store.define_singleton_method(:remember_snapshot) do |fingerprint, state|
+        unless raced
+          raced = true
+          temp = "#{path}.racing"
+          File.write(temp, JSON.pretty_generate(publish) + "\n")
+          File.rename(temp, path)
+        end
+        original_remember.call(fingerprint, state)
+      end
+
+      raced_snapshot = store.load_readonly
+
+      refute_same old_snapshot, raced_snapshot
+      assert_equal "snapshot parsed during race", raced_snapshot.fetch("projects").first.fetch("name")
+      assert_predicate raced_snapshot, :frozen?
+      assert_predicate raced_snapshot.fetch("projects").first, :frozen?
+      assert_equal "snapshot published during read", store.load_readonly.fetch("projects").first.fetch("name")
+    end
+  end
+
   def test_a_missing_state_file_still_loads_an_empty_state
     with_store do |store, path|
       refute_path_exists path
@@ -147,6 +179,16 @@ class StateStoreSnapshotCacheTest < Minitest::Test
   end
 
   private
+
+  def state_named(name)
+    seeded_state.tap { |state| state.fetch("projects").first["name"] = name }
+  end
+
+  def publish_atomic(path, state)
+    temp = "#{path}.publish"
+    File.write(temp, JSON.pretty_generate(state) + "\n")
+    File.rename(temp, path)
+  end
 
   def seeded_state
     state = Models.empty_state
