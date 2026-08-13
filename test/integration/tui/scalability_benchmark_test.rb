@@ -23,6 +23,8 @@ class TuiScalabilityBenchmarkTest < Minitest::Test
 
     assert_equal 12, result.fetch("issues")
     assert_equal 12, result.fetch("agents")
+    assert_equal true, result.fetch("ansi_color"), "benchmark must cover the production ANSI typing path"
+    assert_includes report.fetch("methodology"), "ANSI rendered-frame"
     updates = result.fetch("synthetic_updates")
     assert_operator updates, :>, 0
     assert_equal true, result.fetch("state_visibility")

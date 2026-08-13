@@ -119,6 +119,7 @@ module ScalabilityBenchmark
       @output.puts(JSON.generate(
         "type" => "frame", "sequence" => @sequence, "bytes" => frame.bytesize,
         "digest" => Digest::SHA256.hexdigest(frame), "typed_visible" => frame.include?(@typed),
+        "ansi_color" => frame.include?("\e["),
         "rendered_revision" => rendered_revision, "scroll_marker" => scroll_marker
       ))
       @output.flush
@@ -231,9 +232,12 @@ module ScalabilityBenchmark
       scrolling = []
       peak_rss_kb = 0
       summary = nil
-      Open3.popen3({ "NO_COLOR" => "1" }, *command) do |stdin, stdout, stderr, wait|
+      # Exercise the production renderer. PR #226 forced NO_COLOR here, so its
+      # end-to-end latency numbers completely omitted the ANSI path users run.
+      Open3.popen3({ "NO_COLOR" => nil }, *command) do |stdin, stdout, stderr, wait|
         initial = JSON.parse(stdout.gets)
         raise "child did not render its initial frame" unless initial["type"] == "frame"
+        raise "child benchmark did not exercise ANSI rendering" unless initial["ansi_color"]
         # Let at least one reconciliation commit and the dashboard refresh window
         # elapse before measured inputs; warm-up is intentionally outside samples.
         sleep [interval * 2, 0.12].max
@@ -300,6 +304,7 @@ module ScalabilityBenchmark
         "issues" => count, "tasks" => count, "agents" => count,
         "active_agents" => (count * 0.6).ceil, "logs" => file_state.fetch("logs").length,
         "state_mb" => (File.size(path) / 1_048_576.0).round(2),
+        "ansi_color" => true,
         "typing" => distribution(typing), "scrolling" => distribution(scrolling),
         "peak_rss_mb" => (peak_rss_kb / 1024.0).round(1),
         "synthetic_updates" => summary.fetch("updates"),
@@ -328,7 +333,7 @@ module ScalabilityBenchmark
       break if !result["fast"] && options.fetch(:stop_at_limit)
     end
     output = {
-      "methodology" => "separate process; input write to rendered-frame acknowledgement; fake harness; concurrent isolated-state reconciliation",
+      "methodology" => "separate process; input write to ANSI rendered-frame acknowledgement; fake harness; concurrent isolated-state reconciliation",
       "responsiveness_budget" => { "p95_ms" => 50, "max_ms" => 100 },
       "samples_per_interaction" => options.fetch(:samples), "reconcile_interval_ms" => (options.fetch(:interval) * 1_000).round,
       "results" => results, "largest_fast_workload" => results.select { |item| item["fast"] }.last

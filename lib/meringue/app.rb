@@ -7,6 +7,11 @@ module Meringue
     DEMO_STATE_PATH = Meringue.root_path("fixtures", "demo_state.json")
 
     RECONCILE_INTERVAL = 2.0
+    # Reconciliation is background bookkeeping. Ruby's GVL means its JSON/state
+    # work can otherwise win scheduling quanta from the input/render thread even
+    # though the threads do not share a mutex. Keep it runnable, but always let
+    # interactive work take precedence when a key arrives.
+    RECONCILE_THREAD_PRIORITY = -2
 
     def initialize(input: $stdin, out: $stdout, err: $stderr,
                    state_path: State::Store::DEFAULT_PATH,
@@ -62,6 +67,7 @@ module Meringue
       @reconcile_mutex.synchronize { @stop_reconciliation = false }
       @reconcile_thread = Thread.new do
         Thread.current.name = "meringue-reconciler" if Thread.current.respond_to?(:name=)
+        Thread.current.priority = RECONCILE_THREAD_PRIORITY
         loop do
           break if reconciliation_stopping?
 
