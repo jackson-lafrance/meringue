@@ -1606,6 +1606,8 @@ module Meringue
                 "workspace_path" => metadata.fetch("requested_workspace_path", nil),
                 "follow_up_of_agent_id" => metadata.fetch("follow_up_of_agent_id", nil),
                 "replace_agent_id" => metadata.fetch("replace_agent_id", nil),
+                "model" => metadata.dig("spawn_session_settings", "model"),
+                "thinking_level" => metadata.dig("spawn_session_settings", "thinking_level"),
                 # An activation that was interrupted between the flip and the harness spawn resumes
                 # here; it must not be re-evaluated as a fresh deferral request.
                 "after_agent_id" => present_string(agent.fetch("after_agent_id", nil)),
@@ -8456,6 +8458,9 @@ module Meringue
         issue_id = value_at(payload, "issue_id", "IssueID", "issueId")
         prompt = value_at(payload, "prompt", "Prompt")
         worker_title = value_at(payload, "title", "Title", "worker_title", "workerTitle")
+        requested_model = value_at(payload, "model", "Model")
+        requested_thinking_level = value_at(payload, "thinking_level", "thinkingLevel", "ThinkingLevel")
+        session_settings_override = {}
         follow_up_of_agent_id = value_at(payload, "follow_up_of_agent_id", "followUpOfAgentID", "followUpOfAgentId")
         replace_agent_id = value_at(payload, "replace_agent_id", "replaceAgentID", "replaceAgentId")
         after_agent_id = value_at(payload, *DEFERRED_WORKER_AFTER_KEYS)
@@ -8484,6 +8489,22 @@ module Meringue
         # should continue in, or turn the continuation default off for a step that must be isolated.
         reuse_workspace_agent_id = present_string(value_at(payload, *WORKSPACE_REUSE_AGENT_KEYS))
         errors = []
+        if requested_model
+          reason = Meringue::Harness::ModelReference.rejection_reason(requested_model)
+          if reason
+            errors << "invalid model: #{reason}"
+          else
+            session_settings_override["model"] = Meringue::Harness::ModelReference.normalize(requested_model)
+          end
+        end
+        if requested_thinking_level
+          level = requested_thinking_level.to_s.strip.downcase
+          if Meringue::Harness::PiClient::THINKING_LEVELS.include?(level)
+            session_settings_override["thinking_level"] = level
+          else
+            errors << "thinking_level must be one of: #{Meringue::Harness::PiClient::THINKING_LEVELS.join(", ")}"
+          end
+        end
         share_workspace = normalized_share_workspace(payload, errors: errors)
         completion_continuation = normalized_completion_continuation(payload, errors: errors)
 
@@ -8630,6 +8651,7 @@ module Meringue
                   failure_policy: failure_policy,
                   include_predecessor_result: include_predecessor_result,
                   completion_continuation: completion_continuation,
+                  session_settings_override: session_settings_override,
                   command_gate: command_gate,
                   rerouted_from_issue_id: rerouted_from_issue_id,
                   # The workspace decision is deliberately not made here: a queued worker is
@@ -8665,6 +8687,7 @@ module Meringue
             # the record says "allocating" again instead of still showing the previous failure.
             mark_worker_provisioning_attempt!(existing, now)
             existing_metadata = existing.fetch("harness_metadata", {}) || {}
+            session_settings_override = existing_metadata.fetch("spawn_session_settings", session_settings_override)
             follow_up_of_agent_id = existing_metadata.fetch("follow_up_of_agent_id", follow_up_of_agent_id)
             replace_agent_id = existing_metadata.fetch("replace_agent_id", replace_agent_id)
             completion_continuation ||= worker_completion_continuation(existing)
@@ -8755,6 +8778,7 @@ module Meringue
               replace_agent_id: replace_agent_id,
               after_agent_id: present_string(after_agent_id),
               completion_continuation: completion_continuation,
+              session_settings_override: session_settings_override,
               workspace_reuse_request: reuse_request,
               now: now,
               harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
@@ -8796,6 +8820,7 @@ module Meringue
             "after_agent_id" => present_string(after_agent_id),
             "workspace_reuse" => workspace_reuse,
             "session_restart_of_agent_id" => session_restart_of_agent_id,
+            "session_settings_override" => session_settings_override,
             "prompt" => prompt.to_s
           }
         end
@@ -8845,13 +8870,16 @@ module Meringue
 
         session_ref = nil
         begin
-          session_ref = active_harness_client(provider: reservation.fetch("harness")).spawn_session(
+          spawn_options = {
             kind: "worker",
             cwd: workspace.fetch("workspace_path"),
             prompt: prompt.to_s,
             system_prompt: worker_system_prompt(reservation.fetch("issue")),
             session_name: worker_session_name(reservation.fetch("issue"), worker_title: worker_title)
-          )
+          }
+          override = reservation.fetch("session_settings_override", {})
+          spawn_options[:session_settings] = override unless override.empty?
+          session_ref = active_harness_client(provider: reservation.fetch("harness")).spawn_session(**spawn_options)
         rescue StandardError => e
           cleanup_worker_workspace_safely(workspace)
           return fail_worker_reservation(
@@ -8974,6 +9002,7 @@ module Meringue
               "title" => agent.fetch("harness_metadata", {}).fetch("title", nil),
               "rerouted_from_issue_id" => rerouted_from_issue_id,
               "workspace_reuse" => workspace_reuse,
+              "session_settings" => agent.fetch("session_settings", nil),
               "repointed_deferred_agent_ids" => repointed_dependents.fetch("agent_ids").empty? ? nil : repointed_dependents.fetch("agent_ids")
             }.compact
           ))
@@ -9985,7 +10014,8 @@ module Meringue
       def queue_deferred_worker(state, command_id:, command_type:, issue:, project:, prompt:, title:,
                                 requested_workspace_path:, follow_up_of_agent_id:, predecessor:,
                                 chain_depth:, failure_policy:, include_predecessor_result:, completion_continuation:,
-                                rerouted_from_issue_id:, command_gate: nil, workspace_reuse_request: nil)
+                                rerouted_from_issue_id:, command_gate: nil, workspace_reuse_request: nil,
+                                session_settings_override: {})
         now = timestamp
         agent_id = next_worker_id!(state, issue.fetch("id"))
         workspace = resolve_worker_workspace(
@@ -10016,6 +10046,7 @@ module Meringue
           replace_agent_id: nil,
           after_agent_id: predecessor && predecessor.fetch("id"),
           completion_continuation: completion_continuation,
+          session_settings_override: session_settings_override,
           workspace_reuse_request: workspace_reuse_request,
           now: now,
           harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
@@ -10832,6 +10863,8 @@ module Meringue
             "workspace_path" => metadata.fetch("requested_workspace_path", nil),
             "follow_up_of_agent_id" => metadata.fetch("follow_up_of_agent_id", nil),
             "after_agent_id" => predecessor && predecessor.fetch("id"),
+            "model" => metadata.dig("spawn_session_settings", "model"),
+            "thinking_level" => metadata.dig("spawn_session_settings", "thinking_level"),
             "_activate_deferred" => true,
             "_deferred_agent_id" => agent_id
           }
@@ -11162,7 +11195,8 @@ module Meringue
 
       def build_worker_reservation(agent_id:, issue:, project:, workspace:, provider:, command_id:, prompt:, title:,
                                    requested_workspace_path:, follow_up_of_agent_id:, replace_agent_id:, now:, harness_generation:,
-                                   after_agent_id: nil, completion_continuation: nil, workspace_reuse_request: nil)
+                                   after_agent_id: nil, completion_continuation: nil, workspace_reuse_request: nil,
+                                   session_settings_override: {})
         plan = workspace.fetch("plan", nil) || workspace
         {
           "id" => agent_id,
@@ -11178,10 +11212,15 @@ module Meringue
           "pid" => nil,
           "harness_session_id" => nil,
           "harness_session_file" => nil,
+          # A reservation has no effective session settings yet. Explicit spawn
+          # intent is persisted below and becomes session_settings only after
+          # the harness reports the launched session's effective values.
+          "session_settings" => nil,
           "harness_metadata" => {
             "title" => worker_display_title(title, issue),
             "spawn_command_id" => command_id,
             "spawn_prompt" => prompt.to_s,
+            "spawn_session_settings" => session_settings_override.empty? ? nil : deep_copy(session_settings_override),
             "requested_workspace_path" => present_string(requested_workspace_path),
             "follow_up_of_agent_id" => present_string(follow_up_of_agent_id),
             "replace_agent_id" => present_string(replace_agent_id),

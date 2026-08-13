@@ -552,6 +552,16 @@ class HeadContextTest < Minitest::Test
     assert_includes retry_rule, "harness_session_id is null"
   end
 
+  def test_head_can_translate_per_worker_model_and_thinking_requests
+    context = build_head_context(user_message: "Spawn openai/gpt-5.6-sol at medium thinking")
+    reference = File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md"))
+
+    assert_includes context.to_prompt_h.dig("routing_context", "decision_rules").join("\n"), "SpawnWorker.model"
+    assert_includes context.to_prompt_h.dig("routing_context", "decision_rules").join("\n"), "SpawnWorker.thinking_level"
+    assert_includes reference, '"model": "openai/gpt-5.6-sol", "thinking_level": "medium"'
+    assert_includes reference, "Omit either field to use the configured future-session default"
+  end
+
   def test_kernel_command_reference_documents_the_exclusive_relationship_fields
     reference = File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md"))
 

@@ -63,6 +63,12 @@ A default change does **not** mutate, reconnect, restart, or terminate an existi
 
 Model defaults must be an exact `<provider>/<model-id>` reference. Thinking defaults must be one of Pi's known levels. A provider extension can add models dynamically, so Meringue validates the model reference *shape* when saving it; the harness performs availability validation when the future session starts. Validation is deliberately independent of the catalog: a valid explicit id is still accepted when the catalog is stale, empty, or unavailable, and an id the catalog does not list is saved and labelled unverified rather than refused.
 
+### Per-worker overrides
+
+A head may put optional `model` and `thinking_level` fields on a `SpawnWorker` payload. They use the same model-reference grammar and thinking-level ladder documented below, but their scope is only the new worker session: they do not update `[harness.pi]`, another worker, a head session, or an existing session. The Pi client removes the configured `--model`/`--thinking` spawn arguments and substitutes only the supplied values for that process.
+
+Omission is meaningful. An omitted field remains late-bound to the configured future-session default when the worker actually starts. This applies to queued workers too, so a worker queued without overrides uses the defaults in force at activation rather than freezing a copy when it was queued. Explicit overrides are persisted as reservation intent and survive deferred activation and provisioning recovery. Before activation a queued worker has no effective `session_settings`; after launch the harness-reported effective pair is stored on the worker record and shown through the existing focused-workspace and `GetInfo` surfaces.
+
 ### The accepted model-reference grammar
 
 One place owns this rule (`Meringue::Harness::ModelReference`), and it is the harness's own rule rather than a stricter Meringue invention. Pi resolves a reference by splitting on the **first** slash (`resolveModel` / `findExactModelReferenceMatch`), so Meringue does too:
