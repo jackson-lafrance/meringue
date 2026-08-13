@@ -93,7 +93,9 @@ module Meringue
 
         stdin = stdout = stderr = wait_thread = nil
         stdout_reader = stderr_reader = nil
-        stdin, stdout, stderr, wait_thread = Open3.popen3("gh", *arguments, pgroup: true)
+        stdin, stdout, stderr, wait_thread = Open3.popen3(
+          SubprocessEnvironment.clean, "gh", *arguments, pgroup: true
+        )
         stdin.close
         stdout_reader = Thread.new { stdout.read }
         stderr_reader = Thread.new { stderr.read }

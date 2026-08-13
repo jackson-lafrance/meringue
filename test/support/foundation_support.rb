@@ -31,7 +31,9 @@ module FoundationSupport
   # Used only for entrypoint checks that cannot be done in-process.
   # Returns [status, stdout_string, stderr_string].
   def run_ruby(*args)
-    stdout, stderr, status = Open3.capture3(RbConfig.ruby, *args, chdir: REPO_ROOT)
+    stdout, stderr, status = Open3.capture3(
+      Meringue::SubprocessEnvironment.clean, RbConfig.ruby, *args, chdir: REPO_ROOT
+    )
     [status.exitstatus, stdout, stderr]
   end
 
