@@ -77,6 +77,7 @@ docs/keybindings.md                # TUI keyboard and jump-mode controls
 docs/onboarding.md                 # first-run setup flow, keys, and completion marker
 docs/kernel-command-application.md # exactly-once command application invariants
 docs/goal_loops.md                 # goal loops: metric, judge, budgets, and interruption
+docs/scalability.md                # hermetic process-level responsiveness sweep
 docs/testing.md                    # test-suite guide and coverage boundaries
 fixtures/config.example.toml       # example local config
 fixtures/demo_state.json           # demo state for the TUI
@@ -271,7 +272,7 @@ Default paths:
 
 The config supports TUI colorschemes, TUI keybinding overrides, default harness selection, role-specific head/worker harnesses, provider command overrides, and the first-run setup marker. See `docs/config.md` for the full reference. Workers may commit assigned work only under the user's repository identity; see [`docs/commit-authorship.md`](docs/commit-authorship.md) for the enforcement path and history audit.
 
-The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state. Durable logs retain the newest 500 entries so lifecycle history cannot grow without bound; see [`docs/log-retention.md`](docs/log-retention.md) for the measured rationale, compatibility behavior, and benchmark.
+The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state. Durable logs retain the newest 500 entries so lifecycle history cannot grow without bound; see [`docs/log-retention.md`](docs/log-retention.md) for the measured rationale and [`docs/scalability.md`](docs/scalability.md) for the hermetic process-level responsiveness sweep.
 
 The dashboard chat remains the primary workflow: describe new goals naturally and let head agents route the work. Double-click an issue to open its delivery PR when one is tracked; when one worker needs sustained direction, iterative plan discussion, research, investigation, or closer transparency, press `a` or double-click that worker to open its optional focused workspace. With a head row selected, the same `a` key instead opens that head's persisted harness session externally for debugging and leaves the dashboard in place; unavailable history is reported as a short-lived notice. The focused worker workspace continues that worker's existing context and shows the complete available Pi transcript, with distinct role/type header colors and filters for normal output, final output, reasoning, and tools/results while message bodies stay in the normal foreground. Focused commands use a configurable leader so shell/editor bindings remain available: by default press `Ctrl-Space`, then `t` to switch views, `f` to cycle transcript filters, `a` to open the worker's saved Pi session with the existing external launcher, `b` to launch the editor, `p` to open the verified delivery PR, or `q` to return to the AgentTree without stopping the worker or terminal. See `docs/keybindings.md` for the full interaction model.
 

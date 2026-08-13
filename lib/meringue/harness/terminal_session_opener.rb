@@ -189,8 +189,9 @@ module Meringue
 
       def open_alacritty(alacritty, cwd, command_argv)
         argv = alacritty + ["--working-directory", cwd, "-e"] + command_argv
-        environment = ENV.to_h.merge(
-          Git::CommitIdentity.environment(cwd: cwd, base_environment: ENV.to_h)
+        base_environment = SubprocessEnvironment.clean
+        environment = base_environment.merge(
+          Git::CommitIdentity.environment(cwd: cwd, base_environment: base_environment)
         )
         pid = Process.spawn(environment, *argv, in: File::NULL, out: File::NULL, err: File::NULL)
         status = wait_for_immediate_exit(pid)

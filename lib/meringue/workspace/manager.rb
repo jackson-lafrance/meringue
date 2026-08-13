@@ -1184,7 +1184,11 @@ module Meringue
         readers = []
         expiry = nil
 
-        Open3.popen3(*effective_argv, pgroup: true) do |child_stdin, child_out, child_err, child_wait|
+        # Provider, Git, and diagnostic commands are independent executables. Do not leak
+        # `bundle exec`'s RUBYOPT/BUNDLE_GEMFILE into them: in particular, invoking a system
+        # Ruby would otherwise try to load this process's Bundler and exit before producing
+        # the output the watchdog is responsible for capturing.
+        Open3.popen3(SubprocessEnvironment.clean, *effective_argv, pgroup: true) do |child_stdin, child_out, child_err, child_wait|
           stdin = child_stdin
           out = child_out
           err = child_err

@@ -24,7 +24,7 @@ module Meringue
         }
       end
 
-      def prompt_session(session_ref, prompt, mode: "normal")
+      def prompt_session(session_ref, prompt, mode: "normal", delivery_id: nil)
         session_ref.merge(
           "last_prompt" => prompt,
           "last_prompt_mode" => mode,
