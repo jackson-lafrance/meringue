@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "json"
+
 require_relative "../../goals/record"
 
 module Meringue
@@ -59,33 +61,41 @@ module Meringue
         end
 
         def lines(state, width: nil)
+          key = presentation_cache_key(state, width)
+          return @lines_cache.fetch(:value) if @lines_cache&.fetch(:key, nil) == key
+
           projects = records(state, "projects")
           issues = records(state, "issues")
           agents = records(state, "agents")
-          # Both the jump-mode cursor and the sticky logs selection render as a
-          # selected row, so the highlight survives focus changes.
           selected_agent_id = AgentTreeNavigation.highlighted_ids_for(state)
-
           goals = records(state, "goals")
+          agents_by_issue = worker_agents_by_issue(agents)
 
           output = []
           append_heads(output, agents, selected_agent_id, width)
-          append_projects(output, projects, issues, agents, selected_agent_id, width, goals)
-          output.empty? ? [[['No AgentTree data yet.', Style::MUTED]]] : output
+          append_projects(output, projects, issues, agents_by_issue, selected_agent_id, width, goals)
+          output = [[['No AgentTree data yet.', Style::MUTED]]] if output.empty?
+          @lines_cache = { key: key, value: output }
+          output
         end
 
         def line_item_ids(state, width: nil)
+          key = presentation_cache_key(state, width)
+          return @item_ids_cache.fetch(:value) if @item_ids_cache&.fetch(:key, nil) == key
+
           projects = records(state, "projects")
           issues = records(state, "issues")
           agents = records(state, "agents")
           selected_agent_id = AgentTreeNavigation.highlighted_ids_for(state)
-
           goals = records(state, "goals")
+          agents_by_issue = worker_agents_by_issue(agents)
 
           output = []
           append_head_worker_ids(output, agents, selected_agent_id, width)
-          append_project_worker_ids(output, projects, issues, agents, selected_agent_id, width, goals)
-          output.empty? ? [nil] : output
+          append_project_worker_ids(output, projects, issues, agents_by_issue, selected_agent_id, width, goals)
+          output = [nil] if output.empty?
+          @item_ids_cache = { key: key, value: output }
+          output
         end
 
         # Compatibility for callers from before issue/head rows became clickable.
@@ -102,6 +112,61 @@ module Meringue
           # Killed projects and issues are removed by the kernel, but state written by an older
           # Meringue version can still contain them. Never render a killed subtree.
           entries.reject { |entry| entry.is_a?(Hash) && entry["status"] == "killed" }
+        end
+
+        # Reconciliation changes heartbeat/session metadata frequently, but those
+        # fields do not alter the tree. This compact O(records) signature lets all
+        # intervening typing and scrolling frames reuse the laid-out rows. The final
+        # deep snapshot is essential: Store#load callers may mutate nested hashes in
+        # place, and retaining those references would mutate the previous cache key
+        # too, making changed presentation state compare equal to stale rows. JSON
+        # serialization snapshots the compact projection in native code without
+        # recursively allocating a second Ruby object graph on every frame.
+        def presentation_cache_key(state, width)
+          JSON.generate([
+            width,
+            Style.current_colorscheme,
+            AgentTreeNavigation.highlighted_ids_for(state),
+            Array(state["projects"]).map { |item| item.values_at("id", "name", "status") },
+            Array(state["issues"]).map do |item|
+              metadata = item["harness_metadata"] || {}
+              [
+                item.values_at(
+                  "id", "project_id", "parent_issue_id", "title", "status",
+                  "delivery_pull_request", "delivery_pull_requests", "reported_pr_urls"
+                ),
+                metadata.values_at("delivery_pull_request", "delivery_pull_requests", "reported_pr_urls")
+              ]
+            end,
+            Array(state["agents"]).map do |item|
+              metadata = item["harness_metadata"] || {}
+              [
+                item.values_at(
+                  "id", "type", "issue_id", "status", "follow_up_of_agent_id",
+                  "replaces_agent_id", "replaced_by_agent_id", "delivery_pull_request",
+                  "delivery_pull_requests", "reported_pr_urls"
+                ),
+                # Only known high-frequency heartbeat values are excluded. Keeping the
+                # remainder as a structural signature makes newly added row metadata safe
+                # by default instead of requiring every future marker to remember this cache.
+                metadata.reject do |key, _value|
+                  %w[synthetic_revision last_event_at lastEventAt messageCount message_count].include?(key.to_s)
+                end
+              ]
+            end,
+            Array(state["goals"]).map do |item|
+              next item unless item.is_a?(Hash)
+
+              [item.values_at("id", "issue_id", "status", "stop_reason", "current_iteration", "paused"),
+               item["budget"], item["metric"], item["baseline_metric"], item["last_metric"], item["review"]]
+            end
+          ])
+        end
+
+        def worker_agents_by_issue(agents)
+          agents.each_with_object(Hash.new { |hash, key| hash[key] = [] }) do |agent, grouped|
+            grouped[agent["issue_id"]] << agent if agent["type"] == "worker"
+          end
         end
 
         def append_heads(output, agents, selected_agent_id, width)
@@ -142,26 +207,26 @@ module Meringue
           output << nil
         end
 
-        def append_projects(output, projects, issues, agents, selected_agent_id, width, goals = [])
+        def append_projects(output, projects, issues, agents_by_issue, selected_agent_id, width, goals = [])
           sorted_projects = projects.sort_by { |project| sort_key(project["id"]) }
           sorted_projects.each_with_index do |project, index|
             output.concat(project_lines(project, width: width, selected: AgentTreeNavigation.selected_agent?(project, selected_agent_id)))
 
             project_issues = issues.select { |issue| issue["project_id"] == project["id"] }
             issues_by_parent = project_issues.group_by { |issue| issue["parent_issue_id"] }
-            render_issues(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: nil, prefix: "", width: width, goals: goals)
+            render_issues(output, issues_by_parent, agents_by_issue, selected_agent_id: selected_agent_id, parent_id: nil, prefix: "", width: width, goals: goals)
             output << spacer_line unless index == sorted_projects.length - 1
           end
         end
 
-        def render_issues(output, issues_by_parent, agents, selected_agent_id:, parent_id:, prefix:, width:, goals: [])
+        def render_issues(output, issues_by_parent, agents_by_issue, selected_agent_id:, parent_id:, prefix:, width:, goals: [])
           child_issues = issues_by_parent.fetch(parent_id, []).sort_by { |issue| sort_key(issue["id"]) }
 
           child_issues.each_with_index do |issue, issue_index|
             issue_last = issue_index == child_issues.length - 1
             connector = issue_last ? "└─" : "├─"
             next_prefix = "#{prefix}#{issue_last ? "  " : "│ "}"
-            workers = agents.select { |agent| agent["type"] == "worker" && agent["issue_id"] == issue["id"] }
+            workers = agents_by_issue.fetch(issue["id"], [])
 
             output.concat(item_lines(**issue_row_arguments(
               issue,
@@ -185,11 +250,11 @@ module Meringue
               ))
             end
 
-            render_issues(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: issue["id"], prefix: next_prefix, width: width, goals: goals)
+            render_issues(output, issues_by_parent, agents_by_issue, selected_agent_id: selected_agent_id, parent_id: issue["id"], prefix: next_prefix, width: width, goals: goals)
           end
         end
 
-        def append_project_worker_ids(output, projects, issues, agents, selected_agent_id, width, goals = [])
+        def append_project_worker_ids(output, projects, issues, agents_by_issue, selected_agent_id, width, goals = [])
           sorted_projects = projects.sort_by { |project| sort_key(project["id"]) }
           sorted_projects.each_with_index do |project, index|
             # Project rows are clickable, so they carry their own id for hit-testing.
@@ -200,19 +265,19 @@ module Meringue
 
             project_issues = issues.select { |issue| issue["project_id"] == project["id"] }
             issues_by_parent = project_issues.group_by { |issue| issue["parent_issue_id"] }
-            append_issue_worker_ids(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: nil, prefix: "", width: width, goals: goals)
+            append_issue_worker_ids(output, issues_by_parent, agents_by_issue, selected_agent_id: selected_agent_id, parent_id: nil, prefix: "", width: width, goals: goals)
             output << nil unless index == sorted_projects.length - 1
           end
         end
 
-        def append_issue_worker_ids(output, issues_by_parent, agents, selected_agent_id:, parent_id:, prefix:, width:, goals: [])
+        def append_issue_worker_ids(output, issues_by_parent, agents_by_issue, selected_agent_id:, parent_id:, prefix:, width:, goals: [])
           child_issues = issues_by_parent.fetch(parent_id, []).sort_by { |issue| sort_key(issue["id"]) }
 
           child_issues.each_with_index do |issue, issue_index|
             issue_last = issue_index == child_issues.length - 1
             connector = issue_last ? "└─" : "├─"
             next_prefix = "#{prefix}#{issue_last ? "  " : "│ "}"
-            workers = agents.select { |agent| agent["type"] == "worker" && agent["issue_id"] == issue["id"] }
+            workers = agents_by_issue.fetch(issue["id"], [])
 
             output.concat(Array.new(item_line_count(**issue_row_arguments(
               issue,
@@ -239,7 +304,7 @@ module Meringue
 
             # The goals must be carried into nested issues too: a goal chip changes how a row
             # wraps, so dropping it here would desynchronise the hit-test map from the render.
-            append_issue_worker_ids(output, issues_by_parent, agents, selected_agent_id: selected_agent_id, parent_id: issue["id"], prefix: next_prefix, width: width, goals: goals)
+            append_issue_worker_ids(output, issues_by_parent, agents_by_issue, selected_agent_id: selected_agent_id, parent_id: issue["id"], prefix: next_prefix, width: width, goals: goals)
           end
         end
 

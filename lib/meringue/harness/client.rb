@@ -18,7 +18,7 @@ module Meringue
       #   metadata["requested_prompt_mode"], metadata["delivered_prompt_mode"], metadata["prompt_mode_note"].
       # Errors that will succeed once a turn settles should include Harness::TransientSessionError so
       # the kernel queues and redelivers instead of failing the command.
-      def prompt_session(session_ref, prompt, mode: "normal")
+      def prompt_session(session_ref, prompt, mode: "normal", delivery_id: nil)
         raise NotImplementedError, "harness clients must implement #prompt_session"
       end
 

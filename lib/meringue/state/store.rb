@@ -34,6 +34,7 @@ module Meringue
         @snapshot_mutex = Mutex.new
         @snapshot_fingerprint = nil
         @snapshot_json = nil
+        @readonly_snapshot = nil
         @snapshot_misses = 0
       end
 
@@ -47,6 +48,37 @@ module Meringue
         return deep_copy(transaction.fetch(:state)) if transaction && transaction[:state]
 
         load_unlocked
+      end
+
+      # Presentation code only reads orchestration state and overlays transient UI
+      # fields with Hash#merge. Returning the frozen cached object avoids parsing a
+      # multi-megabyte unchanged snapshot on every dashboard refresh while making
+      # accidental mutation fail immediately. Kernel callers continue to use #load
+      # and receive independent mutable copies.
+      def load_readonly
+        transaction = coalesced_save_transaction
+        return deep_freeze(deep_copy(transaction.fetch(:state))) if transaction && transaction[:state]
+        return Models.empty_state.freeze unless File.exist?(path)
+
+        fingerprint = file_fingerprint
+        if fingerprint
+          cached = @snapshot_mutex.synchronize do
+            @readonly_snapshot if @snapshot_fingerprint == fingerprint
+          end
+          return cached if cached
+        end
+
+        parsed = load_unlocked
+        # `read_state_unlocked` deliberately declines to cache when an atomic write
+        # changes the fingerprint during its read. In that case an older readonly
+        # snapshot may still exist: never return it merely because it is non-nil.
+        # A snapshot published concurrently is reusable only when it represents the
+        # file version visible now; otherwise freeze the complete state we just read.
+        current_fingerprint = file_fingerprint
+        cached = @snapshot_mutex.synchronize do
+          @readonly_snapshot if current_fingerprint && @snapshot_fingerprint == current_fingerprint
+        end
+        cached || deep_freeze(parsed)
       end
 
       # Coalesce a related sequence of whole-state saves on the current thread. Callers still see
@@ -196,9 +228,11 @@ module Meringue
         return unless fingerprint == file_fingerprint
 
         json = JSON.generate(state)
+        readonly_snapshot = deep_freeze(JSON.parse(json))
         @snapshot_mutex.synchronize do
           @snapshot_fingerprint = fingerprint
           @snapshot_json = json
+          @readonly_snapshot = readonly_snapshot
         end
       end
 
@@ -261,6 +295,16 @@ module Meringue
 
       def deep_copy(value)
         JSON.parse(JSON.generate(value))
+      end
+
+      def deep_freeze(value)
+        case value
+        when Hash
+          value.each { |key, child| key.freeze; deep_freeze(child) }
+        when Array
+          value.each { |child| deep_freeze(child) }
+        end
+        value.freeze
       end
     end
   end

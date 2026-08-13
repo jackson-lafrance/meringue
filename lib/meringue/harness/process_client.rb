@@ -60,7 +60,7 @@ module Meringue
         raise
       end
 
-      def prompt_session(session_ref, prompt, mode: "normal")
+      def prompt_session(session_ref, prompt, mode: "normal", delivery_id: nil)
         current_process = process_for(session_ref, required: false)
         if current_process&.alive?
           raise InvalidModeError,

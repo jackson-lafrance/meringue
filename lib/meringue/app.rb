@@ -13,7 +13,8 @@ module Meringue
                    state_store: nil,
                    tui_app: nil,
                    prompt_handler: nil,
-                   reconciler: nil)
+                   reconciler: nil,
+                   reconcile_interval: RECONCILE_INTERVAL)
       @input = input
       @out = out
       @err = err
@@ -22,6 +23,7 @@ module Meringue
       @tui_app = tui_app
       @prompt_handler = prompt_handler
       @reconciler = reconciler
+      @reconcile_interval = reconcile_interval.to_f.positive? ? reconcile_interval.to_f : RECONCILE_INTERVAL
       @reconcile_mutex = Mutex.new
       @reconcile_condition = ConditionVariable.new
       @reconcile_thread = nil
@@ -50,7 +52,7 @@ module Meringue
     attr_reader :input, :out, :err, :state_path, :state_store, :tui_app, :prompt_handler, :reconciler
 
     def current_state
-      state_store.load
+      state_store.respond_to?(:load_readonly) ? state_store.load_readonly : state_store.load
     end
 
     def start_reconciliation
@@ -72,7 +74,7 @@ module Meringue
           @reconcile_mutex.synchronize do
             break if @stop_reconciliation
 
-            @reconcile_condition.wait(@reconcile_mutex, RECONCILE_INTERVAL)
+            @reconcile_condition.wait(@reconcile_mutex, @reconcile_interval)
           end
         end
       end
@@ -86,7 +88,7 @@ module Meringue
         @stop_reconciliation = true
         @reconcile_condition.broadcast
       end
-      thread.join(RECONCILE_INTERVAL + 0.5)
+      thread.join(@reconcile_interval + 0.5)
       thread.kill if thread.alive?
       @reconcile_thread = nil
     end
