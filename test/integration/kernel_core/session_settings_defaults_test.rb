@@ -83,32 +83,44 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
       @client = client
       @config_path = config_path
       @calls = []
+      @role_thinking = { "head" => "max", "worker" => "max" }
     end
 
     def defaults(_provider)
       model = @client.spawn_defaults.fetch("model")
-      thinking = @client.spawn_defaults.fetch("thinking_level")
+      thinking_values = @role_thinking.values.uniq
+      thinking = thinking_values.one? ? thinking_values.first : nil
       {
         "harness" => "pi",
         "model" => model,
         "thinking_level" => thinking,
         "consistency" => "consistent",
         "roles" => {
-          "head" => { "model" => model, "thinking_level" => thinking },
-          "worker" => { "model" => model, "thinking_level" => thinking }
+          "head" => { "model" => model, "thinking_level" => @role_thinking.fetch("head") },
+          "worker" => { "model" => model, "thinking_level" => @role_thinking.fetch("worker") }
         },
         "scope" => "future_pi_sessions"
       }
     end
 
-    def update(provider, model: nil, thinking_level: nil)
-      @calls << { "provider" => provider, "model" => model, "thinking_level" => thinking_level }
+    def update(provider, model: nil, thinking_level: nil, thinking_role: nil)
+      call = { "provider" => provider, "model" => model, "thinking_level" => thinking_level }
+      call["thinking_role"] = thinking_role if thinking_role
+      @calls << call
       Meringue::Config.save_pi_session_defaults!(
         model: model,
         thinking_level: thinking_level,
+        thinking_role: thinking_role,
         path: @config_path
       )
-      @client.configure_defaults(model: model, thinking_level: thinking_level)
+      if thinking_level
+        if thinking_role
+          @role_thinking[thinking_role] = thinking_level
+        else
+          @role_thinking.transform_values! { thinking_level }
+        end
+      end
+      @client.configure_defaults(model: model, thinking_level: thinking_level) if thinking_role.nil? || thinking_role == "worker"
       defaults(provider)
     end
   end
@@ -123,8 +135,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
       harness_client_resolver: ->(_agent) { @settings_client },
       default_harness_provider: "pi",
       session_defaults_provider: ->(provider) { @coordinator.defaults(provider) },
-      session_defaults_updater: lambda do |provider, model: nil, thinking_level: nil|
-        @coordinator.update(provider, model: model, thinking_level: thinking_level)
+      session_defaults_updater: lambda do |provider, model: nil, thinking_level: nil, thinking_role: nil|
+        @coordinator.update(provider, model: model, thinking_level: thinking_level, thinking_role: thinking_role)
       end
     )
   end
@@ -152,6 +164,37 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal "openai/gpt-5.6-sol", second.dig("session_settings", "model", "reference")
     assert_equal "xhigh", second.dig("session_settings", "thinking_level")
     assert_includes log_messages.last(4).join("\n"), "Existing Pi sessions were not changed"
+  end
+
+  def test_role_specific_commands_persist_independent_defaults_and_scope_their_results
+    head_result = apply_command("SetDefaultSessionThinkingLevel", "role" => "head", "level" => "low")
+    worker_result = apply_command("SetDefaultSessionThinkingLevel", "role" => "worker", "level" => "xhigh")
+
+    assert_accepted(head_result)
+    assert_accepted(worker_result)
+    assert_equal "future_pi_head_sessions", head_result.dig("result", "scope")
+    assert_equal "future_pi_worker_sessions", worker_result.dig("result", "scope")
+    assert_equal "low", worker_result.dig("result", "roles", "head", "thinking_level")
+    assert_equal "xhigh", worker_result.dig("result", "roles", "worker", "thinking_level")
+
+    config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
+    assert_equal "low", config.value("harness", "pi", "head_thinking_level")
+    assert_equal "xhigh", config.value("harness", "pi", "worker_thinking_level")
+  end
+
+  def test_shared_thinking_command_resets_role_specific_overrides
+    apply_command("SetDefaultSessionThinkingLevel", "role" => "head", "level" => "low")
+    apply_command("SetDefaultSessionThinkingLevel", "role" => "worker", "level" => "xhigh")
+
+    result = apply_command("SetDefaultSessionThinkingLevel", "level" => "high")
+
+    assert_accepted(result)
+    assert_equal "high", result.dig("result", "thinking_level")
+    assert_equal "high", result.dig("result", "roles", "head", "thinking_level")
+    assert_equal "high", result.dig("result", "roles", "worker", "thinking_level")
+    config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
+    assert_nil config.value("harness", "pi", "head_thinking_level")
+    assert_nil config.value("harness", "pi", "worker_thinking_level")
   end
 
   def test_spawn_worker_partial_override_uses_other_default_and_does_not_change_future_defaults

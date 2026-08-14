@@ -2394,8 +2394,10 @@ module Meringue
       # supported effective settings rather than dumping arbitrary TOML, which
       # keeps the overview useful and avoids accidentally echoing secrets.
       def configuration_help_text
-        pi_model = config.value("harness", "pi", "model") || Harness::Registry::DEFAULT_PI_MODEL
-        pi_thinking = config.value("harness", "pi", "thinking_level") || Harness::Registry::DEFAULT_PI_THINKING_LEVEL
+        pi_defaults = Harness::Registry.new(config: config).session_defaults(provider: "pi")
+        pi_model = pi_defaults.fetch("model", nil) || "mixed by role"
+        pi_head_thinking = pi_defaults.dig("roles", "head", "thinking_level")
+        pi_worker_thinking = pi_defaults.dig("roles", "worker", "thinking_level")
         provider = ENV["MERINGUE_HARNESS"] || config.value("harness", "provider") || Harness::Registry::DEFAULT_PROVIDER
         head_provider = ENV["MERINGUE_HEAD_HARNESS"] || config.value("harness", "head_provider") || provider
         worker_provider = ENV["MERINGUE_WORKER_HARNESS"] || config.value("harness", "worker_provider") || provider
@@ -2412,7 +2414,8 @@ module Meringue
           "  worker harness: #{worker_provider}",
           "  TUI colorscheme: #{colorscheme}",
           "  Pi default model: #{pi_model}",
-          "  Pi default thinking: #{pi_thinking}",
+          "  Pi head thinking: #{pi_head_thinking}",
+          "  Pi worker thinking: #{pi_worker_thinking}",
           "  conflict policy (predecessor failure): #{config.conflict_predecessor_failure}",
           "  workspace shell: #{format_config_value(shell)}",
           "  workspace editor: #{format_config_value(editor)}",

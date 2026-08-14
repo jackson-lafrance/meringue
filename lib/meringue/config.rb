@@ -47,10 +47,11 @@ module Meringue
       new(data, path: expanded_path, loaded: true)
     end
 
-    # Persists app-wide Pi spawn defaults without rewriting role-specific tool
-    # flags. Registry appends these scalar values after head/worker extra args,
-    # so they authoritatively apply to every future Pi session.
-    def self.save_pi_session_defaults!(model: nil, thinking_level: nil, path: DEFAULT_PATH)
+    # Persists Pi spawn defaults without rewriting role-specific tool flags.
+    # A role-specific thinking level overrides the legacy shared value for that
+    # role. Saving the shared value clears role overrides so `/thinking <level>`
+    # retains its historical meaning of changing every future Pi session.
+    def self.save_pi_session_defaults!(model: nil, thinking_level: nil, thinking_role: nil, path: DEFAULT_PATH)
       expanded_path = File.expand_path(path.to_s)
       config = load(path: expanded_path)
       data = config.to_h
@@ -58,7 +59,19 @@ module Meringue
       data.fetch("harness")["pi"] = {} unless data.fetch("harness")["pi"].is_a?(Hash)
       pi = data.fetch("harness").fetch("pi")
       pi["model"] = model.to_s unless model.nil?
-      pi["thinking_level"] = thinking_level.to_s unless thinking_level.nil?
+      unless thinking_level.nil?
+        role = thinking_role.to_s.strip.downcase
+        unless role.empty? || %w[head worker].include?(role)
+          raise ArgumentError, "thinking_role must be head or worker"
+        end
+        if !role.empty?
+          pi["#{role}_thinking_level"] = thinking_level.to_s
+        else
+          pi["thinking_level"] = thinking_level.to_s
+          pi.delete("head_thinking_level")
+          pi.delete("worker_thinking_level")
+        end
+      end
       write_toml(expanded_path, data)
       new(data, path: expanded_path, loaded: true)
     end
