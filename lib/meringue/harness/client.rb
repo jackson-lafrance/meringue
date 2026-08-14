@@ -5,7 +5,10 @@ module Meringue
     class Client
       class UnsupportedSessionSettingsError < StandardError; end
 
-      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:)
+      # session_settings contains optional per-session spawn overrides (currently
+      # model and thinking_level). An empty hash means the client must retain its
+      # configured future-session defaults.
+      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {})
         raise NotImplementedError, "harness clients must implement #spawn_session"
       end
 

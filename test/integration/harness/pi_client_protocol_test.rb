@@ -19,6 +19,51 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     track_session(client, ref)
   end
 
+  def test_spawn_session_overrides_default_model_and_thinking_arguments_for_one_session
+    client, stub = build_pi_client(
+      tmpdir,
+      extra_args: ["--model", "anthropic/default", "--thinking", "max", "--tools", "read"]
+    )
+
+    ref = client.spawn_session(
+      kind: "worker",
+      cwd: tmpdir,
+      prompt: "",
+      system_prompt: nil,
+      session_name: "Override settings",
+      session_settings: { "model" => "openai/gpt-5.6-sol", "thinking_level" => "medium" }
+    )
+    track_session(client, ref)
+    argv = stub_argv(stub)
+
+    assert_equal 1, argv.count("--model")
+    assert_equal "openai/gpt-5.6-sol", argv[argv.index("--model") + 1]
+    assert_equal 1, argv.count("--thinking")
+    assert_equal "medium", argv[argv.index("--thinking") + 1]
+    assert_includes argv, "--tools"
+  end
+
+  def test_partial_session_override_retains_the_other_configured_default
+    client, stub = build_pi_client(
+      tmpdir,
+      extra_args: ["--model", "anthropic/default", "--thinking", "max"]
+    )
+
+    ref = client.spawn_session(
+      kind: "worker",
+      cwd: tmpdir,
+      prompt: "",
+      system_prompt: nil,
+      session_name: "Partial override",
+      session_settings: { "thinking_level" => "medium" }
+    )
+    track_session(client, ref)
+    argv = stub_argv(stub)
+
+    assert_equal "anthropic/default", argv[argv.index("--model") + 1]
+    assert_equal "medium", argv[argv.index("--thinking") + 1]
+  end
+
   def test_pi_process_exports_the_repository_user_identity_to_the_child_process
     repo = File.join(tmpdir, "repo")
     FileUtils.mkdir_p(repo)

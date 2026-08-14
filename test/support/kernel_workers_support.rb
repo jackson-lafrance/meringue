@@ -82,13 +82,14 @@ module KernelWorkersSupport
       provider
     end
 
-    def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:)
+    def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {})
       call = {
         "kind" => kind,
         "cwd" => cwd,
         "prompt" => prompt,
         "system_prompt" => system_prompt,
-        "session_name" => session_name
+        "session_name" => session_name,
+        "session_settings" => session_settings
       }
       @spawns << call
       @calls << { "call" => "spawn_session", "session_name" => session_name, "cwd" => cwd }
@@ -103,6 +104,10 @@ module KernelWorkersSupport
         "session_file" => File.join(cwd.to_s, ".fake-session-#{@session_counter}.json"),
         "is_streaming" => streaming,
         "last_event_at" => nil,
+        "session_settings" => session_settings.empty? ? nil : {
+          "model" => session_settings["model"] && Meringue::Harness::ModelReference.parse(session_settings["model"]),
+          "thinking_level" => session_settings["thinking_level"]
+        }.compact,
         "metadata" => {
           "prompt" => prompt,
           "system_prompt" => system_prompt,

@@ -748,6 +748,8 @@ When the predecessor worker is spawned by this same HeadResult, reference its `S
 
 Worker delivery names should be human-facing. When a head supplies a worker title or prompt, prefer the issue/task title or requested change that should become the branch/PR name. Do not ask workers to put Meringue agent ids, worker ids, Pi ids, or subagent implementation details in branch names, PR titles, or PR metadata.
 
+When the user explicitly requests a model or thinking level for this worker, set `model` and/or `thinking_level` on `SpawnWorker`. For example, “spawn a worker using openai/gpt-5.6-sol at medium thinking” becomes `"model": "openai/gpt-5.6-sol", "thinking_level": "medium"`. These settings apply only to that worker. Omit either field to use the configured future-session default for that field; never copy defaults into the command speculatively. Model references use `<provider>/<model-id>` (the model id may contain additional `/` and `:` characters). Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
+
 Payload:
 
 ```json
@@ -757,6 +759,8 @@ Payload:
   "existing_issue": "Optional true to state that issue_id is a deliberate pre-existing target",
   "title": "Short worker title",
   "prompt": "Worker instructions",
+  "model": "Optional provider/model-id override for this worker only",
+  "thinking_level": "Optional off, minimal, low, medium, high, xhigh, or max override for this worker only",
   "workspace_path": "Optional preselected workspace path",
   "follow_up_of_agent_id": "Optional prior worker on this issue, or \"@<command_id>\" for a worker this batch spawns",
   "follow_up_of_command": "Optional SpawnWorker command id or index in this batch instead of follow_up_of_agent_id",
