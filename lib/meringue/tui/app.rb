@@ -3983,15 +3983,11 @@ module Meringue
       end
 
       def head_result_user_lines(head_result, question_ids: [])
-        commands = Array(head_result.fetch("commands", []))
+        response = head_result.fetch("response", "").to_s.strip
         questions = Array(head_result.fetch("questions", []))
         question_lines = question_user_lines(questions, question_ids: question_ids)
-        return question_lines unless question_lines.empty?
 
-        summary = head_result.fetch("summary", "").to_s.strip
-        return [summary] if commands.empty? && !summary.empty?
-
-        []
+        [response.empty? ? nil : response, *question_lines].compact
       end
 
       def question_user_lines(questions, question_ids: [])

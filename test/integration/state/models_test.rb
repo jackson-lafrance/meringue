@@ -268,6 +268,18 @@ class StateModelsShapeTest < Minitest::Test
       }
     )
     refute Models.head_retry_target?(asked_question)
+
+    # A plain response is also a complete handled result. It has no synthetic NoOp journal entry,
+    # but it must not become retryable merely because its command list is empty.
+    answered_directly = head_record(
+      status: "blocked",
+      metadata: {
+        "head_result_applied_at" => "2026-08-05T12:59:56Z",
+        "response" => "No action is needed; that label describes a queued dependency."
+      }
+    )
+    assert Models.head_routed_anything?(answered_directly)
+    refute Models.head_retry_target?(answered_directly)
   end
 
   def head_record(status:, metadata: {})

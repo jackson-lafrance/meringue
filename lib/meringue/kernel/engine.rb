@@ -49,8 +49,8 @@ module Meringue
       PROMPT
       HEAD_RESULT_REPAIR_PROMPT = <<~PROMPT.freeze
         Your previous response was not valid Meringue HeadResult JSON.
-        Return exactly one JSON object with string fields "title" and "summary", an array field "commands", and an array field "questions".
-        Do not include markdown, prose, code fences, or tool calls.
+        Return exactly one JSON object with string fields "title" and "summary", an optional string field "response" for plain user-visible text, an array field "commands", and an array field "questions".
+        Do not include markdown, prose, code fences, or tool calls outside the JSON object.
       PROMPT
       PULL_REQUEST_URL_PATTERN = /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+(?:[\/?#][^\s<>"'\])}]*)?/.freeze
       PULL_REQUEST_ASSOCIATING_COMMANDS = %w[
@@ -2955,6 +2955,7 @@ module Meringue
           agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
             "title" => head_result.is_a?(Hash) ? head_result["title"] : nil,
             "summary" => head_result.is_a?(Hash) ? head_result["summary"] : nil,
+            "response" => head_result.is_a?(Hash) ? head_result["response"] : nil,
             "head_result" => head_result,
             "is_streaming" => false
           ).compact
@@ -3407,6 +3408,7 @@ module Meringue
           metadata = metadata.merge(
             "title" => head_result.fetch("title"),
             "summary" => head_result.fetch("summary"),
+            "response" => present_string(head_result.fetch("response", nil)),
             "head_result" => head_result,
             "head_result_fingerprint" => fingerprint,
             "head_result_apply_state" => "applying",
@@ -3433,7 +3435,7 @@ module Meringue
           )
           unless already_initialized
             metadata["head_result_question_ids"] = ensure_head_questions!(state, head_id.to_s, head_result.fetch("questions"), log_ids)
-            log_ids.concat(append_head_summary_log(state, head_id, head_result))
+            log_ids.concat(append_head_response_log(state, head_id, head_result))
           end
           head["harness_metadata"] = metadata
           touch_state!(state, now)
@@ -3621,9 +3623,10 @@ module Meringue
                             else
                               []
                             end
-          # A batch that accepted nothing routed nothing, so the user's message would otherwise
-          # survive only as command error lines. Surface the message itself so it stays actionable.
-          unrouted_log_ids = if accepted_count.zero? && question_ids.empty?
+          # A direct response handles the message without orchestration. Only a truly empty or
+          # wholly failed result is unrouted and needs the retry warning.
+          direct_response = present_string(head_result.fetch("response", nil))
+          unrouted_log_ids = if accepted_count.zero? && question_ids.empty? && !direct_response
                                append_unrouted_user_message_log(state, head_id.to_s, command_results)
                              else
                                []
@@ -3666,6 +3669,7 @@ module Meringue
               "head_id" => head_id.to_s,
               "title" => head_result.fetch("title"),
               "summary" => head_result.fetch("summary"),
+              "response" => direct_response,
               "question_ids" => question_ids,
               "command_results" => command_results,
               "head_cleanup" => cleanup
@@ -3682,6 +3686,7 @@ module Meringue
           JSON.generate(
             "title" => head_result.fetch("title", nil).to_s,
             "summary" => head_result.fetch("summary", nil).to_s,
+            "response" => head_result.fetch("response", nil).to_s,
             "commands" => Array(head_result.fetch("commands", [])),
             "questions" => Array(head_result.fetch("questions", []))
           )
@@ -3699,6 +3704,7 @@ module Meringue
             "head_id" => head_id,
             "title" => metadata.fetch("title", nil),
             "summary" => metadata.fetch("summary", nil),
+            "response" => metadata.fetch("response", nil),
             "question_ids" => Array(metadata.fetch("head_result_question_ids", [])),
             "command_results" => journal.map { |entry| command_result_from_journal(entry) },
             "duplicate_apply" => true
@@ -3893,6 +3899,7 @@ module Meringue
               "head_id" => head_id,
               "title" => head_result.fetch("title", nil),
               "summary" => head_result.fetch("summary", nil),
+              "response" => head_result.fetch("response", nil),
               "question_ids" => [],
               "command_results" => command_results,
               "state_cleared" => true,
@@ -12357,6 +12364,9 @@ module Meringue
 
         errors << "head_result.title must be a string" unless head_result["title"].is_a?(String)
         errors << "head_result.summary must be a string" unless head_result["summary"].is_a?(String)
+        if head_result.key?("response") && !head_result["response"].is_a?(String)
+          errors << "head_result.response must be a string"
+        end
         validate_head_commands(head_result["commands"], errors)
         validate_head_questions(head_result["questions"], errors)
         errors
@@ -12395,12 +12405,9 @@ module Meringue
         end
       end
 
-      def append_head_summary_log(state, head_id, head_result)
-        return [] unless Array(head_result.fetch("commands", [])).empty?
-        return [] unless Array(head_result.fetch("questions", [])).empty?
-
-        summary = head_result.fetch("summary", "").to_s.strip
-        return [] if summary.empty?
+      def append_head_response_log(state, head_id, head_result)
+        response = present_string(head_result.fetch("response", nil))
+        return [] unless response
 
         head = find_agent(state, head_id.to_s)
         request = (head&.fetch("harness_metadata", nil) || {}).fetch("head_request", {}) || {}
@@ -12410,8 +12417,8 @@ module Meringue
           source_type: "head",
           source_id: head_id.to_s,
           level: "info",
-          message: summary,
-          details: { "kind" => "head_summary", **selected_target_log_details(selected_target) }
+          message: response,
+          details: { "kind" => "head_response", **selected_target_log_details(selected_target) }
         )
       end
 
