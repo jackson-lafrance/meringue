@@ -342,6 +342,7 @@ class TuiAppWiringTest < Minitest::Test
         "tui" => { "colorscheme" => "gruvbox" },
         "harness" => { "provider" => "claude", "pi" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "high" } },
         "conflicts" => { "predecessor_failure" => "run" },
+        "commands" => { "worker_blacklist" => ["*gh pr comment *"] },
         "workspace" => { "editor_command" => ["code", "--reuse-window"] }
       },
       path: "/tmp/meringue-test-config.toml",
@@ -361,6 +362,7 @@ class TuiAppWiringTest < Minitest::Test
     assert_includes overview, "harness: claude"
     assert_includes overview, "Pi default model: openai/gpt-5.6-sol"
     assert_includes overview, "conflict policy (predecessor failure): run"
+    assert_includes overview, "worker command blacklist: *gh pr comment *"
     assert_includes overview, "Submit / open selected item [submit]: ctrl-x"
     assert_includes overview, "Keybindings (action: configured keys"
   end

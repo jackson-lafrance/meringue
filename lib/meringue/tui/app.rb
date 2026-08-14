@@ -2403,6 +2403,7 @@ module Meringue
         shell = config.value("workspace", "shell_command") || ENV["MERINGUE_SHELL"] || ENV["SHELL"] || "/bin/sh"
         editor = config.value("workspace", "editor_command") || ENV["MERINGUE_EDITOR"] || ENV["VISUAL"] || ENV["EDITOR"] || "code"
         editor_args = config.value("workspace", "editor_args") || ["."]
+        worker_blacklist = CommandBlacklist.from_config(config).patterns
 
         lines = [
           "Configuration (read-only)",
@@ -2414,6 +2415,7 @@ module Meringue
           "  Pi default model: #{pi_model}",
           "  Pi default thinking: #{pi_thinking}",
           "  conflict policy (predecessor failure): #{config.conflict_predecessor_failure}",
+          "  worker command blacklist: #{worker_blacklist.empty? ? "(disabled)" : format_config_value(worker_blacklist)}",
           "  workspace shell: #{format_config_value(shell)}",
           "  workspace editor: #{format_config_value(editor)}",
           "  workspace editor args: #{format_config_value(editor_args)}",

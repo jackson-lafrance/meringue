@@ -125,6 +125,52 @@ predecessor_failure = "cancel"
 
 `[conflicts].predecessor_failure` accepts `cancel` or `run`. It applies only when a dependent worker does not provide its own `if_predecessor_fails` value; it does not change the handling of git merge conflicts or overwrite project files. `/config` reports the effective value and `/keybind` reports only keybindings.
 
+## Worker command blacklists
+
+Meringue can reject selected Pi worker `bash` tool calls before Pi starts the
+command. Configure full-command glob patterns under `[commands]`:
+
+```toml
+[commands]
+worker_blacklist = [
+  "*gh pr comment *",
+  "*gh api *pulls/*/comments/*/replies*",
+]
+```
+
+Matching has intentionally small and predictable semantics:
+
+- Meringue matches each pattern against the **complete raw command string** that
+  the worker gave to the `bash` tool. Prefixes such as `cd repo &&` and embedded
+  newlines are part of that string.
+- `*` matches zero or more characters, including newlines. `?` matches exactly
+  one character. Every other character is literal; these are not regular
+  expressions. Matching is case-sensitive.
+- The first matching pattern blocks the complete tool call. No part of a
+  compound shell command runs. Pi returns a tool error such as
+  `Command blocked by Meringue worker blacklist pattern "*gh pr comment *".`
+  to the worker.
+- An omitted key or an empty array disables the blacklist. Empty patterns,
+  non-string entries, control characters, more than 100 patterns, and patterns
+  longer than 512 characters are configuration errors.
+
+Patterns are intentionally conservative. For example,
+`"*gh api *pulls/*/comments/*/replies*"` also blocks a read command that names a
+review-reply endpoint. Prefer a narrow pattern when reads to the same endpoint
+must stay available. A pattern can also match text inside a quoted string or
+heredoc because Meringue does not parse or execute shell syntax before making
+the decision. This avoids unsafe shell interpretation and prevents a blocked
+compound command from running partially.
+
+This enforcement applies to isolated **Pi worker** sessions and to resumed Pi
+workers. Heads do not receive this policy, and shared read-only workers have no
+`bash` tool at all. If a worker blacklist is configured while the selected
+worker provider is Claude Code or Antigravity, worker startup fails closed with
+a clear unsupported-provider error instead of relying on prompt instructions.
+Restart Meringue after changing this setting so all future workers use the new
+configuration; an already-running worker keeps the policy loaded when its Pi
+process started.
+
 ## Worker workspace terminal and editor
 
 The optional focused worker workspace has mutually exclusive agent and worktree-terminal views. Commands use a configurable leader sequence so common shell/editor controls are not intercepted while the terminal is active. The default is `Ctrl-Space` followed by `t` to switch between terminal and agent view, `f` to cycle transcript filters, `a` to open the underlying harness session in the established external terminal UI, `b` to open the editor, `p` to open the verified delivery PR, or `q` to quit back to the AgentTree while preserving the worker and terminal. The focused workspace shows exactly this leader line under its chat box, including the active transcript filter. Configure the leader and suffixes under `[tui.keybindings]`:

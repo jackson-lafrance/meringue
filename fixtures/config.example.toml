@@ -45,6 +45,11 @@ thinking_level = "max"
 head_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 worker_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls,edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 
+[commands]
+# Full-command, case-sensitive globs for Pi worker bash calls. `*` matches any
+# characters (including newlines), `?` matches one, and all other text is literal.
+worker_blacklist = []
+
 [conflicts]
 # Dependent workers cancel if their predecessor fails; "run" starts them anyway.
 predecessor_failure = "cancel"
