@@ -35,7 +35,8 @@ class KernelWorkersSpawnTest < Minitest::Test
     assert_equal worker.fetch("workspace_path"), spawn_call.fetch("cwd")
     assert Dir.exist?(worker.fetch("workspace_path")), "worker workspace directory should exist"
     assert_equal "Fix the failing login spec.", spawn_call.fetch("prompt")
-    assert_includes spawn_call.fetch("system_prompt"), "P1-I1 - Fix the login bug"
+    assert_includes spawn_call.fetch("system_prompt"), "Product task title for delivery artifacts:\nFix the login bug"
+    refute_includes spawn_call.fetch("system_prompt"), "Assigned issue:\nP1-I1"
     assert_includes spawn_call.fetch("system_prompt"), "You are a Meringue worker agent."
     assert_includes spawn_call.fetch("system_prompt"), "Meringue must never be the author of a git commit."
     assert_includes spawn_call.fetch("system_prompt"), "repository's configured user.name and user.email identity"
@@ -46,6 +47,9 @@ class KernelWorkersSpawnTest < Minitest::Test
     assert_includes spawn_call.fetch("system_prompt"), "stop writing and report the exact ownership or checkout mismatch"
     assert_includes spawn_call.fetch("system_prompt"), "Recover from ordinary environment problems before abandoning"
     assert_includes spawn_call.fetch("system_prompt"), "run every safe narrower check you can"
+    assert_includes spawn_call.fetch("system_prompt"), "commit subjects or bodies"
+    assert_includes spawn_call.fetch("system_prompt"), "AI confidence scores"
+    assert_includes spawn_call.fetch("system_prompt"), "statements about which agents worked"
   end
 
   def test_spawn_persists_workspace_metadata_on_the_worker_record
@@ -56,7 +60,7 @@ class KernelWorkersSpawnTest < Minitest::Test
     worker = agent(engine, result.fetch("target_id"))
 
     assert_equal "git_worktree", worker.fetch("workspace_strategy")
-    assert_match(%r{\Ameringue/fix-the-login-bug-[0-9a-f]{8}\z}, worker.fetch("workspace_branch"))
+    assert_match(/\Afix-the-login-bug-[0-9a-f]{8}\z/, worker.fetch("workspace_branch"))
     assert worker.fetch("workspace_path").start_with?(workspace_root), "workspace should live under the configured root"
     assert_equal worker.fetch("workspace_path"), worker.fetch("harness_metadata").fetch("cwd")
     assert_equal "ready", worker.fetch("harness_metadata").fetch("provisioning_state")
@@ -129,20 +133,27 @@ class KernelWorkersSpawnTest < Minitest::Test
     assert_equal "working", worker.fetch("status")
   end
 
-  def test_workspace_branch_and_session_name_never_leak_meringue_or_pi_ids
+  def test_workspace_branch_and_session_name_never_leak_branding_or_orchestration_metadata
     engine = build_engine
     root = create_git_repo
     project_id = add_project(engine, root)
-    issue_id = create_issue(engine, project_id, title: "P1-I1-W1 H2 Q3 Rework the billing exporter")
+    issue_id = create_issue(
+      engine,
+      project_id,
+      title: "MERINGUE/ p1_i1_w1 H-2 Q#3 agent id 407 Confidence: 92% Rework the billing exporter"
+    )
 
     result = spawn_worker(engine, issue_id)
     worker = agent(engine, result.fetch("target_id"))
     session_name = @harness_client.spawns.fetch(0).fetch("session_name")
 
-    refute_match(/P\d+(-I\d+)?(-W\d+)?/i, worker.fetch("workspace_branch"))
-    refute_match(/\b[HQ]\d+\b/i, worker.fetch("workspace_branch"))
-    refute_match(/P\d+(-I\d+)?(-W\d+)?/i, session_name)
-    refute_match(/\b[HQ]\d+\b/i, session_name)
+    [worker.fetch("workspace_branch"), session_name].each do |value|
+      refute_match(/meringue/i, value)
+      refute_match(/p1[_\/-]i1[_\/-]w1/i, value)
+      refute_match(/\b[HQ][-_#]?\d+\b/i, value)
+      refute_match(/agent\s*id/i, value)
+      refute_match(/confidence/i, value)
+    end
     assert_includes session_name, "Rework the billing exporter"
     assert_includes worker.fetch("workspace_branch"), "rework-the-billing-exporter"
   end

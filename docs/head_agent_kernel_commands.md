@@ -731,7 +731,7 @@ Example:
 
 ### SpawnWorker
 
-Spawns a real worker harness session for an issue. The kernel owns workspace allocation before calling the harness. For git-backed projects, including projects registered at a bare common-repository root, the kernel creates a dedicated editable Meringue-owned worktree/branch and passes that workspace to the harness; a bare repository itself is never a worker cwd. Each candidate path/branch has a durable owner record protected by a per-candidate cross-process lock. When the preferred `meringue/<slug>` branch or worktree path already exists, the kernel reuses it only when that owner record belongs to the same worker, and otherwise provisions a uniquified branch/path instead of failing the spawn, so the delivered branch name can carry a short numeric suffix. Immediately before harness launch it validates editability, non-bare status, Git registration/branch/lock state, durable ownership, and live-worker occupancy. A failed check excludes that candidate and safely reallocates; an explicit caller-supplied path is rejected rather than silently overridden. Use `GetInfo` to inspect persisted reallocation reasons. Use SpawnWorker directly on an existing issue for follow-up prompts instead of creating nested issues.
+Spawns a real worker harness session for an issue. The kernel owns workspace allocation before calling the harness. For git-backed projects, including projects registered at a bare common-repository root, the kernel creates a dedicated editable allocator-owned worktree/branch and passes that workspace to the harness; a bare repository itself is never a worker cwd. The preferred name is a sanitized product-task slug plus a short opaque suffix (for example `fix-signup-validation-a1b2c3d4`), with no branded prefix or orchestration identity. Each candidate path/branch has a durable owner record protected by a per-candidate cross-process lock. When the preferred branch or worktree path already exists, the kernel reuses it only when that owner record belongs to the same worker, and otherwise provisions a uniquified branch/path instead of failing the spawn, so the delivered branch name can carry a short numeric suffix. Immediately before harness launch it validates editability, non-bare status, Git registration/branch/lock state, durable ownership, and live-worker occupancy. A failed check excludes that candidate and safely reallocates; an explicit caller-supplied path is rejected rather than silently overridden. Use `GetInfo` to inspect persisted reallocation reasons. Use SpawnWorker directly on an existing issue for follow-up prompts instead of creating nested issues.
 
 A worker that continues another worker's line of work is different: it keeps working in that predecessor's worktree and branch instead of getting one of its own. See "Sharing one worktree between related workers".
 
@@ -749,7 +749,7 @@ When the worker belongs to an issue this same HeadResult creates, set `issue_fro
 
 When the predecessor worker is spawned by this same HeadResult, reference its `SpawnWorker` command instead of predicting its agent id: set `follow_up_of_command` (a `command_id` or 0-based position), or write `follow_up_of_agent_id: "@<command_id>"`/`"@index:<position>"`. `replace_agent_id` and `reuse_workspace_of_agent_id` accept the same reference form through `replace_agent_from_command` and `reuse_workspace_from_command`, though a replaced worker almost always already exists. The referenced `SpawnWorker` must appear earlier in `commands`; the kernel resolves it to the worker id it minted and rejects an unresolvable reference with `batch_agent_reference_not_found`, `batch_agent_reference_out_of_order`, or `batch_agent_reference_unresolved`.
 
-Worker delivery names should be human-facing. When a head supplies a worker title or prompt, prefer the issue/task title or requested change that should become the branch/PR name. Do not ask workers to put Meringue agent ids, worker ids, Pi ids, or subagent implementation details in branch names, PR titles, or PR metadata.
+Worker delivery names and text must contain only the human product task. When supplying a worker title or prompt, use the actual issue/task title or requested change that should become the branch and PR title. Never request or suggest Meringue branding or a `meringue/` prefix; project/issue/worker/head ids in any formatting (including `P5-I2-W3`, `p5_i2_w3`, and `P5/I2/W3`); agent, Pi, harness, or session identities; AI confidence scores or authorship trailers; or descriptions of which agents worked on the change in branches, worktree names, commits, PR titles/bodies, release notes, or other delivery artifacts. Unsafe supplied/generated values must be sanitized rather than copied. See [`delivery-artifact-privacy.md`](delivery-artifact-privacy.md).
 
 When the user explicitly requests a model or thinking level for this worker, set `model` and/or `thinking_level` on `SpawnWorker`. For example, “spawn a worker using openai/gpt-5.6-sol at medium thinking” becomes `"model": "openai/gpt-5.6-sol", "thinking_level": "medium"`. These settings apply only to that worker. Omit either field to use the configured future-session default for that field; never copy defaults into the command speculatively. Model references use `<provider>/<model-id>` (the model id may contain additional `/` and `:` characters). Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
 
@@ -809,7 +809,7 @@ Example:
 
 ### Sharing one worktree between related workers
 
-One durable goal is one issue, and one issue often needs several sequential workers. Giving each of them its own worktree on its own `meringue/<slug>-2` branch splits one goal's delivery across several branches and several PRs, and leaves the successor unable to see what its predecessor had not committed yet.
+One durable goal is one issue, and one issue often needs several sequential workers. Giving each of them its own worktree on its own `<task-slug>-<opaque-suffix>-2` branch splits one goal's delivery across several branches and several PRs, and leaves the successor unable to see what its predecessor had not committed yet.
 
 So a worker that continues a predecessor's line of work on the same issue **keeps working in that predecessor's worktree and branch**. That is the default; heads do not ask for it. It applies when the new worker is:
 
@@ -843,7 +843,7 @@ That is also why `replace_agent_id` usually does *not* share: the worker being r
 
 #### What the shared worker is told
 
-The prompt gains a short `--- Shared workspace ---` block naming the worker whose worktree it is, the path, the branch, and any open pull request on it, with the instruction to **update that pull request rather than open a second one**. One branch is one PR, however many workers worked on it.
+The prompt gains a short internal `--- Shared workspace ---` block with the existing path, branch, and open pull request, plus the instruction to **update that pull request rather than open a second one**. That orchestration context is never copied into commit or PR metadata. One product change branch is one PR.
 
 #### Lifecycle
 
@@ -1502,7 +1502,7 @@ Why a record was retained or a worktree was preserved is always reported:
 Worktree cleanup safety and outcomes:
 
 - Only `git_worktree` workspaces under Meringue's configured workspace root are candidates. Project-root and dedicated-directory workspaces are left untouched.
-- The persisted worktree path must still be registered to the persisted `meringue/…` branch in the expected repository and must not be the main checkout or overlap a path referenced by another worker.
+- The persisted worktree path must still be registered to the persisted managed branch in the expected repository and must not be the main checkout or overlap a path referenced by another worker. Legacy prefixed branch names remain recognizable for safe upgrade cleanup but are never generated for new work.
 - Clean, unlocked worktrees are removed with `git worktree remove` **without** `--force`. The branch is not deleted.
 - A missing but still-registered worktree is safely deregistered. A worktree already absent from both disk and git's registry is an idempotent success.
 - Dirty, locked, ambiguous, or failed cleanups leave the worktree and branch untouched, and each one is logged individually at `warning`; the eligible issue/worker records still leave state. Successful cleanups are counted by the pass summary instead of getting a line each. Every attempted worker stores its latest `harness_metadata.workspace_cleanup` result before removal, and the `Prune` result and log details expose `workspace_cleanup_outcomes`, `removed_worktree_agent_ids`, and the cleanup-blocked agent/issue/project IDs.

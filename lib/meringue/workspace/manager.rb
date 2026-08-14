@@ -6,6 +6,8 @@ require "json"
 require "open3"
 require "pathname"
 
+require_relative "../delivery_artifact_policy"
+
 module Meringue
   module Workspace
     class Manager
@@ -262,13 +264,13 @@ module Meringue
       end
 
       def plan_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil)
-        safe_project_name = human_slug(File.basename(File.expand_path(project_root))) || "project"
-        safe_task_name = human_slug(task_title) || "task"
+        safe_project_name = project_slug(File.basename(File.expand_path(project_root))) || "project"
+        safe_task_name = DeliveryArtifactPolicy.slug(task_title)
         unique_suffix = Digest::SHA256.hexdigest(
           [File.expand_path(project_root), project_id, issue_id, agent_id, safe_task_name].join("\0")
         )[0, 8]
         workspace_name = [safe_task_name, unique_suffix].join("-")
-        branch = "meringue/#{workspace_name}"
+        branch = workspace_name
         workspace_path = File.join(root_path, safe_project_name, workspace_name)
 
         {
@@ -636,7 +638,7 @@ module Meringue
       # Reasons a shared worktree is refused:
       #   worktree_missing            the directory is gone
       #   outside_managed_workspace_root  not a Meringue-owned path, so Meringue makes no claims
-      #   branch_not_meringue_managed the recorded branch is not a `meringue/` branch
+      #   branch_not_delivery_managed the recorded branch does not match the managed delivery convention
       #   git_root_missing            the repository the worktree belongs to is gone
       #   worktree_list_failed        git could not be asked
       #   worktree_not_registered     the directory exists but git no longer knows it
@@ -648,7 +650,7 @@ module Meringue
         worktree_root = canonical_path(worktree_root)
         return reuse_outcome(false, "worktree_missing") unless Dir.exist?(worktree_root)
         return reuse_outcome(false, "outside_managed_workspace_root") unless owned_workspace_path?(worktree_root)
-        return reuse_outcome(false, "branch_not_meringue_managed") unless branch.to_s.start_with?("meringue/")
+        return reuse_outcome(false, "branch_not_delivery_managed") unless DeliveryArtifactPolicy.managed_branch?(branch)
         return reuse_outcome(false, "git_root_missing") if git_root.to_s.strip.empty? || !Dir.exist?(git_root.to_s)
 
         listed = run_command("git", "-C", canonical_path(git_root), "worktree", "list", "--porcelain")
@@ -713,8 +715,8 @@ module Meringue
         end
 
         branch = base["workspace_branch"]
-        unless branch.to_s.start_with?("meringue/")
-          return cleanup_outcome("failed", "branch_not_meringue_managed", success: false, **base)
+        unless DeliveryArtifactPolicy.managed_branch?(branch)
+          return cleanup_outcome("failed", "branch_not_delivery_managed", success: false, **base)
         end
 
         git_root = workspace["git_root"] || plan["git_root"] || workspace["project_root"] || plan["project_root"]
@@ -1352,8 +1354,8 @@ module Meringue
         end
       end
 
-      # Deletes a Meringue-owned branch only when losing it cannot lose work: it must be a
-      # `meringue/` branch, not checked out anywhere, and carry no commit that is unreachable from
+      # Deletes an allocator-owned branch only when losing it cannot lose work: it must match the
+      # managed delivery convention, not be checked out anywhere, and carry no commit unreachable from
       # every other ref. A branch with commits is always kept, even though that leaves a name
       # Meringue has to work around, because the alternative is destroying a worker's delivery.
       def remove_orphaned_owned_branch(git_root, branch, warnings: nil)
@@ -1361,7 +1363,7 @@ module Meringue
       end
 
       def release_owned_branch(git_root, branch, warnings: [])
-        return "not_owned" unless branch.to_s.start_with?("meringue/")
+        return "not_owned" unless DeliveryArtifactPolicy.managed_branch?(branch)
         return "absent" unless branch_exists?(git_root, branch)
 
         if branch_checked_out?(git_root, branch)
@@ -1744,11 +1746,9 @@ module Meringue
         text.empty? ? nil : text
       end
 
-      def human_slug(value)
-        text = value.to_s.gsub(/\bP\d+(?:-I\d+)?(?:-W\d+)?\b/i, " ")
-        text = text.gsub(/\b[HQ]\d+\b/i, " ")
-        slug = text.downcase.gsub(/[^a-z0-9]+/, "-").gsub(/\A-+|-+\z/, "")
-        slug = slug[0, 48].gsub(/-+\z/, "")
+      def project_slug(value)
+        slug = value.to_s.downcase.gsub(/[^a-z0-9]+/, "-").gsub(/\A-+|-+\z/, "")
+        slug = slug[0, DeliveryArtifactPolicy::MAX_SLUG_LENGTH].to_s.gsub(/-+\z/, "")
         slug.empty? ? nil : slug
       end
     end
