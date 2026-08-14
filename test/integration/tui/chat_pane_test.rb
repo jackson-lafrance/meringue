@@ -190,7 +190,27 @@ class TuiChatPaneTest < Minitest::Test
     )
 
     text = plain_line(@pane.bottom_right_status_line(state))
-    assert_equal "harness: Pi · Pi defaults: openai/gpt-5.6-sol · xhigh", text
+    assert_equal "harness: Pi · Pi defaults: openai/gpt-5.6-sol · head xhigh · worker xhigh", text
+  end
+
+  def test_bottom_right_status_shows_distinct_role_thinking_defaults
+    state = composed_state(
+      empty_state.merge(
+        "metadata" => {
+          "active_harness" => "pi",
+          "pi_session_defaults" => {
+            "model" => "anthropic/claude-opus-5",
+            "roles" => {
+              "head" => { "thinking_level" => "low" },
+              "worker" => { "thinking_level" => "max" }
+            }
+          }
+        }
+      )
+    )
+
+    text = plain_line(@pane.bottom_right_status_line(state))
+    assert_equal "harness: Pi · Pi defaults: anthropic/claude-opus-5 · head low · worker max", text
   end
 
   def test_slash_suggestions_only_activate_for_slash_prompts

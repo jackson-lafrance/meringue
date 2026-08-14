@@ -2394,8 +2394,10 @@ module Meringue
       # supported effective settings rather than dumping arbitrary TOML, which
       # keeps the overview useful and avoids accidentally echoing secrets.
       def configuration_help_text
-        pi_model = config.value("harness", "pi", "model") || Harness::Registry::DEFAULT_PI_MODEL
-        pi_thinking = config.value("harness", "pi", "thinking_level") || Harness::Registry::DEFAULT_PI_THINKING_LEVEL
+        pi_defaults = Harness::Registry.new(config: config).session_defaults(provider: "pi")
+        pi_model = pi_defaults.fetch("model", nil) || "mixed by role"
+        pi_head_thinking = pi_defaults.dig("roles", "head", "thinking_level")
+        pi_worker_thinking = pi_defaults.dig("roles", "worker", "thinking_level")
         provider = ENV["MERINGUE_HARNESS"] || config.value("harness", "provider") || Harness::Registry::DEFAULT_PROVIDER
         head_provider = ENV["MERINGUE_HEAD_HARNESS"] || config.value("harness", "head_provider") || provider
         worker_provider = ENV["MERINGUE_WORKER_HARNESS"] || config.value("harness", "worker_provider") || provider
@@ -2413,7 +2415,8 @@ module Meringue
           "  worker harness: #{worker_provider}",
           "  TUI colorscheme: #{colorscheme}",
           "  Pi default model: #{pi_model}",
-          "  Pi default thinking: #{pi_thinking}",
+          "  Pi head thinking: #{pi_head_thinking}",
+          "  Pi worker thinking: #{pi_worker_thinking}",
           "  conflict policy (predecessor failure): #{config.conflict_predecessor_failure}",
           "  worker command blacklist: #{worker_blacklist.empty? ? "(disabled)" : format_config_value(worker_blacklist)}",
           "  workspace shell: #{format_config_value(shell)}",
@@ -4250,7 +4253,10 @@ module Meringue
         @workspace_agent_scroll_offset = 0
         @workspace_terminal_scroll_offset = 0
         @workspace_draft = ""
-        persist_agent_workspace
+        # AgentTree movement is a transient filtering gesture. Remember the worker
+        # immediately in memory, but do not make the click wait for Store to load,
+        # lock, and rewrite the complete orchestration snapshot.
+        persist_agent_workspace(deferred: true)
         true
       end
 
@@ -4274,17 +4280,21 @@ module Meringue
         @agent_workspace_filter = "all"
         @workspace_leader_pending = false
         @workspace_draft = ""
-        persist_agent_workspace
+        persist_agent_workspace(deferred: true)
       end
 
-      # Saving rewrites the whole state file, so scroll steps only mark the
-      # workspace dirty. The run loop flushes on a slow cadence and lifecycle
-      # transitions flush immediately, which keeps wheel scrolling smooth
-      # without losing the persisted selection.
+      # Saving rewrites the whole state file, so high-frequency presentation
+      # changes only mark the workspace dirty. The run loop flushes on a slow,
+      # bounded cadence, while opening/closing a workspace and shutdown still
+      # persist immediately.
       def persist_agent_workspace(deferred: false)
         return unless log_store&.respond_to?(:save_agent_workspace)
 
         if deferred
+          # Start the bounded flush window with the first dirty change. Without
+          # this, a process whose last write was long ago flushes immediately on
+          # the next loop and merely moves the blocking rewrite one frame later.
+          @workspace_persisted_at = monotonic_time unless @workspace_persist_dirty
           @workspace_persist_dirty = true
           return nil
         end

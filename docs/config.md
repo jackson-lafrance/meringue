@@ -8,7 +8,7 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
-The interactive TUI updates this file with `/theme <name>`, `/model <provider>/<model-id>`, `/thinking <level>`, and the first-run setup flow (`/setup`), which applies those same commands.
+The interactive TUI updates this file with `/theme <name>`, `/model <provider>/<model-id>`, `/thinking <level>`, `/thinking head <level>`, `/thinking worker <level>`, and the first-run setup flow (`/setup`).
 
 ## First-run setup marker
 
@@ -115,7 +115,9 @@ The config file is intentionally small and only the settings described here are 
 ```toml
 [harness.pi]
 model = "anthropic/claude-opus-5"
-thinking_level = "max"
+thinking_level = "max"        # legacy/shared fallback
+# head_thinking_level = "low"  # optional role override
+# worker_thinking_level = "max"
 
 [conflicts]
 # A worker queued after a predecessor is cancelled when that predecessor fails.
@@ -201,7 +203,24 @@ editor_args = ["."]
 terminal_buffer_bytes = 4194304
 ```
 
-## Worker workspace provisioning timeouts
+## Worker workspace provisioning concurrency and timeouts
+
+`SpawnWorker` first writes a durable queued reservation and returns without waiting for workspace
+or harness I/O. A bounded background executor provisions independent reservations concurrently:
+
+```toml
+[workspace]
+# Default: 2. Values above 8 are capped at 8; invalid or non-positive values use the default.
+worker_provisioning_concurrency = 2
+```
+
+A value of 2 overlaps independent checkouts without turning one head batch into an unbounded burst
+of Git and disk work. The durable slot claim applies across Meringue processes sharing the state
+file, not just threads in one dashboard. The AgentTree says `waiting for provisioning slot` while a reservation waits
+for executor capacity, then changes to `provisioning workspace` when allocation starts. The durable
+reservation retains its owner identity, prompt, workspace plan, relationships, and command id; if
+Meringue exits, reconciliation lets a new live instance re-enqueue it rather than allocating a
+second worker.
 
 Provisioning a worker runs `git worktree add`, which checks the whole tree out. On a large
 monorepo that is minutes of honest work, so the checkout is bounded by how long it goes *quiet*
@@ -226,7 +245,7 @@ bound larger than the checkout ceiling is clamped to it so it can still fire. Ra
 `worktree_checkout_timeout` for an unusually large repository on slow storage; lower it if you
 would rather a giant checkout fail fast.
 
-While provisioning runs, its worker stays `queued` and the AgentTree shows live worktree telemetry.
+While provisioning is queued or runs, its worker stays `queued` and the AgentTree shows live worktree telemetry.
 The row first says `provisioning workspace`; once Git emits checkout progress it shows Git's actual
 percentage (for example, `provisioning workspace 35%`). Before a percentage is available it shows
 the checkout phase and elapsed time instead. This percentage covers only the worktree checkout, not
@@ -314,9 +333,12 @@ Each provider can set its executable command and role-specific extra args.
 [harness.pi]
 command = "pi"
 session_dir = "~/.meringue/pi-sessions"
-# Authoritative values for every future Pi head and worker:
+# Shared model and backward-compatible thinking fallback:
 model = "anthropic/claude-opus-5"
 thinking_level = "max"
+# Optional role-specific thinking overrides:
+# head_thinking_level = "low"
+# worker_thinking_level = "max"
 head_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls"]
 worker_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls,edit,write"]
 
@@ -332,11 +354,11 @@ head_extra_args = []
 worker_extra_args = []
 ```
 
-Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/model` and `/thinking`, or set `model` and `thinking_level` under `[harness.pi]`, to change both future roles without duplicating their tool flags. These scalar values are appended after `head_extra_args` / `worker_extra_args` and therefore win over model/thinking flags in those arrays. A configured role array still replaces that role's default array entirely, so include every other flag you need.
+Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/thinking head <level>` and `/thinking worker <level>`, or set `head_thinking_level` and `worker_thinking_level`, for distinct role defaults. The existing `/thinking <level>` command and `thinking_level` key remain the shared form; the command also clears role overrides. A role key wins over the shared key, and either scalar wins over a thinking flag in that role's argument array. A configured role array still replaces that role's default array entirely, so include every other flag you need.
 
 A model reference is `<provider>/<model-id>`, split on the first slash, so the model id may itself contain `/` and `:` (`model = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"` is valid). See [`session-settings.md`](session-settings.md#the-accepted-model-reference-grammar) for the exact grammar and for what is still rejected.
 
-`/config` and the dashboard status line show the future Pi pair. `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. An existing session's own effective pair has no slash command either: it is recorded on the agent record and shown in the focused worker workspace and raw `/state`. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
+`/config` and the dashboard status line show the shared model plus both future Pi thinking levels. `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. An existing session's own effective pair has no slash command either: it is recorded on the agent record and shown in the focused worker workspace and raw `/state`. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
 
 ### Model catalogs and provider resource flags
 
