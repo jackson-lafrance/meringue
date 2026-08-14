@@ -4248,7 +4248,10 @@ module Meringue
         @workspace_agent_scroll_offset = 0
         @workspace_terminal_scroll_offset = 0
         @workspace_draft = ""
-        persist_agent_workspace
+        # AgentTree movement is a transient filtering gesture. Remember the worker
+        # immediately in memory, but do not make the click wait for Store to load,
+        # lock, and rewrite the complete orchestration snapshot.
+        persist_agent_workspace(deferred: true)
         true
       end
 
@@ -4272,17 +4275,21 @@ module Meringue
         @agent_workspace_filter = "all"
         @workspace_leader_pending = false
         @workspace_draft = ""
-        persist_agent_workspace
+        persist_agent_workspace(deferred: true)
       end
 
-      # Saving rewrites the whole state file, so scroll steps only mark the
-      # workspace dirty. The run loop flushes on a slow cadence and lifecycle
-      # transitions flush immediately, which keeps wheel scrolling smooth
-      # without losing the persisted selection.
+      # Saving rewrites the whole state file, so high-frequency presentation
+      # changes only mark the workspace dirty. The run loop flushes on a slow,
+      # bounded cadence, while opening/closing a workspace and shutdown still
+      # persist immediately.
       def persist_agent_workspace(deferred: false)
         return unless log_store&.respond_to?(:save_agent_workspace)
 
         if deferred
+          # Start the bounded flush window with the first dirty change. Without
+          # this, a process whose last write was long ago flushes immediately on
+          # the next loop and merely moves the blocking rewrite one frame later.
+          @workspace_persisted_at = monotonic_time unless @workspace_persist_dirty
           @workspace_persist_dirty = true
           return nil
         end
