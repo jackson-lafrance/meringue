@@ -2203,6 +2203,17 @@ module Meringue
 
       def set_default_session_thinking_level(command_id, command_type, payload)
         requested = value_at(payload, "level", "thinking_level", "Level", "ThinkingLevel")
+        role_value = value_at(payload, "role", "Role")
+        role = role_value.to_s.strip.downcase
+        if !role.empty? && !%w[head worker].include?(role)
+          return rejected_result(
+            command_id,
+            command_type,
+            "Default Pi thinking level was not changed: role must be head or worker.",
+            ["role must be one of: head, worker"]
+          )
+        end
+        role = nil if role.empty?
         level = requested.to_s.strip.downcase
         unless Meringue::Harness::PiClient::THINKING_LEVELS.include?(level)
           return rejected_result(
@@ -2217,18 +2228,22 @@ module Meringue
           command_id,
           command_type,
           thinking_level: level,
+          thinking_role: role,
           changed_field: "thinking_level"
         )
       end
 
-      def update_pi_session_defaults(command_id, command_type, model: nil, thinking_level: nil, changed_field:)
+      def update_pi_session_defaults(command_id, command_type, model: nil, thinking_level: nil, thinking_role: nil, changed_field:)
         previous = configured_pi_session_defaults
         defaults = if @session_defaults_updater
-                     @session_defaults_updater.call("pi", model: model, thinking_level: thinking_level)
+                     keywords = { model: model, thinking_level: thinking_level }
+                     keywords[:thinking_role] = thinking_role unless thinking_role.nil?
+                     @session_defaults_updater.call("pi", **keywords)
                    else
                      saved = Config.save_pi_session_defaults!(
                        model: model,
                        thinking_level: thinking_level,
+                       thinking_role: thinking_role,
                        path: config_path
                      )
                      Meringue::Harness::Registry.new(config: saved).session_defaults(provider: "pi")
@@ -2237,11 +2252,19 @@ module Meringue
         state = normalized_state
         state.fetch("metadata")["pi_session_defaults"] = deep_copy(defaults)
         unchanged_ids = existing_pi_session_ids(state)
-        value = changed_field == "model" ? defaults.fetch("model", model) : defaults.fetch("thinking_level", thinking_level)
+        value = if changed_field == "model"
+                  defaults.fetch("model", model)
+                elsif thinking_role
+                  defaults.dig("roles", thinking_role, "thinking_level") || thinking_level
+                else
+                  defaults.fetch("thinking_level", thinking_level)
+                end
         label = changed_field == "model" ? "model" : "thinking level"
-        clamp_note = clamped_default_thinking_note(defaults, changed_field)
+        audience = thinking_role ? "future Pi #{thinking_role}s" : "all future Pi heads and workers"
+        scope = thinking_role ? "future_pi_#{thinking_role}_sessions" : "future_pi_sessions"
+        clamp_note = clamped_default_thinking_note(defaults, changed_field, role: thinking_role)
         unverified_note = unverified_default_model_note(defaults, changed_field)
-        message = "Set the default Pi #{label} to #{value} for all future Pi heads and workers. " \
+        message = "Set the default Pi #{label} to #{value} for #{audience}. " \
                   "Existing Pi sessions were not changed#{unchanged_ids.empty? ? "." : ": #{unchanged_ids.join(", ")}."}" \
                   "#{unverified_note ? " #{unverified_note}" : ""}" \
                   "#{clamp_note ? " #{clamp_note}" : ""}"
@@ -2255,7 +2278,7 @@ module Meringue
             "changed_field" => changed_field,
             "previous_defaults" => previous,
             "pi_session_defaults" => defaults,
-            "scope" => "future_pi_sessions",
+            "scope" => scope,
             "existing_session_ids_unchanged" => unchanged_ids,
             "config_path" => config_path
           }
@@ -2268,6 +2291,7 @@ module Meringue
           "pi",
           message,
           defaults.merge(
+            "scope" => scope,
             "config_path" => config_path,
             "existing_session_ids_unchanged" => unchanged_ids
           ),
@@ -2315,11 +2339,16 @@ module Meringue
       # clamps it at spawn time, and a provider extension can under-declare what
       # its model really supports. Saying which level Pi will actually run keeps
       # the accepted result honest without refusing a level the user may set.
-      def clamped_default_thinking_note(defaults, changed_field)
+      def clamped_default_thinking_note(defaults, changed_field, role: nil)
         return nil unless %w[thinking_level model].include?(changed_field)
 
         reference = defaults.fetch("model", nil).to_s.strip
-        level = defaults.fetch("thinking_level", nil).to_s.strip.downcase
+        level = if role
+                  defaults.dig("roles", role, "thinking_level")
+                else
+                  defaults.fetch("thinking_level", nil)
+                end
+        level = level.to_s.strip.downcase
         return nil if reference.empty? || level.empty?
 
         snapshot = persisted_model_catalog(Meringue::Harness::Registry.public_provider_name("pi"))
@@ -2396,10 +2425,16 @@ module Meringue
 
       def pi_session_defaults_message(defaults)
         model = defaults.fetch("model", nil) || "mixed by role"
-        thinking = defaults.fetch("thinking_level", nil) || "mixed by role"
+        head_thinking = defaults.dig("roles", "head", "thinking_level") || Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL
+        worker_thinking = defaults.dig("roles", "worker", "thinking_level") || Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL
         clamp_note = clamped_default_thinking_note(defaults, "thinking_level")
+        summary = if head_thinking == worker_thinking
+                    "Future Pi heads and workers use #{model} with thinking #{head_thinking}."
+                  else
+                    "Future Pi heads use #{model} with thinking #{head_thinking}; workers use #{model} with thinking #{worker_thinking}."
+                  end
         [
-          "Future Pi heads and workers use #{model} with thinking #{thinking}.",
+          summary,
           clamp_note,
           "Existing sessions keep their own effective settings."
         ].compact.join(" ")
