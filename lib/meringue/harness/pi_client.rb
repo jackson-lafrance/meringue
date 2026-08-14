@@ -738,12 +738,15 @@ module Meringue
       end
 
       # Quiesce the dashboard-owned RPC process before a native Pi interactive process is started.
-      # Pi cannot transfer a live provider request between frontends. Interactive focus prioritizes
-      # the user's immediate switch: snapshot already-available context, then stop the managed RPC
-      # process directly without waiting for an active prompt or tool call to settle. Native Pi
-      # resumes the durable transcript with an explicit, bounded continuation prompt.
+      # Pi cannot transfer a live provider request between frontends, so an active turn is first
+      # stopped through Pi's supported abort RPC and observed settled. Only then is the managed
+      # writer terminated. The handoff keeps a checkpoint and continuation obligation so leaving
+      # focus before a newer final answer can automatically resume the work on the dashboard.
       def prepare_interactive_session(session_ref)
-        current_ref = session_ref
+        current_ref = preserve_session_identity(get_state(session_ref), session_ref)
+        current_ref = current_ref.merge(
+          "metadata" => metadata_with(session_ref, current_ref.fetch("metadata", {}))
+        )
         was_streaming = current_ref.fetch("is_streaming", false)
         events = read_events(current_ref)
         rpc_ref = current_ref
@@ -751,6 +754,8 @@ module Meringue
         session_summary = safe_session_file_summary(current_ref)
         handoff_summary = bounded_handoff_summary(session_summary)
         handoff_intent = handoff_summary.fetch("last_user_text", nil) || latest_user_intent(events)
+        interrupted_turn_outcome = bounded_turn_outcome(turn_outcome(current_ref))
+        turn_checkpoint = interrupted_turn_outcome
         replacement = nil
         begin
           interactive_session_argv(current_ref, handoff_prompt: nil)
@@ -773,9 +778,16 @@ module Meringue
                            )
                          end
         interactive_argv = interactive_session_argv(current_ref, handoff_prompt: handoff_prompt)
-        # Resolve environment/commit-identity policy before stopping RPC. If that validation fails,
-        # the settled managed process remains available for the kernel's rollback path.
+        # Resolve environment/commit-identity policy before changing RPC ownership. If validation
+        # fails, the original managed turn remains untouched and available to the rollback path.
         interactive_env = process_environment(current_ref.fetch("cwd", Dir.pwd))
+        settled_ref = settle_interactive_rpc_turn(rpc_ref) if was_streaming
+        if settled_ref
+          rpc_ref = preserve_session_identity(settled_ref, rpc_ref)
+          # Pi may persist an explicit aborted assistant record. That post-abort record—not the
+          # earlier pending tool call—is the baseline a native final result must supersede.
+          turn_checkpoint = bounded_turn_outcome(turn_outcome(rpc_ref)) || turn_checkpoint
+        end
         quiesced_ref = quiesce_interactive_rpc(rpc_ref)
         detached_ref = quiesced_ref.merge(
           "session_id" => current_ref.fetch("session_id", nil),
@@ -789,7 +801,7 @@ module Meringue
               "interactive_handoff_prompt" => handoff_prompt,
               "interactive_handoff_event_count" => events.length,
               "interactive_turn_interrupted" => was_streaming,
-              "interactive_interruption_method" => was_streaming ? "process_termination" : nil,
+              "interactive_interruption_method" => was_streaming ? "rpc_abort" : nil,
               "killed" => nil,
               "kill_note" => nil
             ).compact
@@ -805,6 +817,8 @@ module Meringue
             prompt: handoff_prompt,
             latest_user_intent: handoff_intent,
             session_summary: handoff_summary,
+            interrupted_turn_outcome: interrupted_turn_outcome,
+            turn_checkpoint: turn_checkpoint,
             replacement: replacement
           )
         }
@@ -829,8 +843,20 @@ module Meringue
         true
       end
 
-      def resume_dashboard_session(session_ref)
-        attach_session(session_ref)
+      def resume_dashboard_session(session_ref, handoff: nil)
+        process = process_for_session(session_ref, required: false)
+        resumed_ref = process ? get_state(session_ref) : attach_session(session_ref)
+        return resumed_ref unless dashboard_continuation_required?(resumed_ref, handoff)
+
+        prompt = dashboard_continuation_prompt(handoff)
+        prompted_ref = prompt_session(resumed_ref, prompt, mode: "normal")
+        prompted_ref.merge(
+          "metadata" => metadata_with(
+            prompted_ref,
+            "interactive_dashboard_continuation" => "started",
+            "interactive_dashboard_continuation_prompt" => prompt
+          )
+        )
       end
 
       def wait_for_event(session_ref, type:, timeout: event_timeout)
@@ -889,6 +915,18 @@ module Meringue
       private
 
       attr_reader :transport_ownership, :takeover_settle_timeout
+
+      def settle_interactive_rpc_turn(session_ref)
+        settled_ref = abort_session(session_ref)
+        return settled_ref unless settled_ref.fetch("is_streaming", false)
+
+        wait_for_settled(settled_ref)
+        refreshed = get_state(settled_ref)
+        return refreshed unless refreshed.fetch("is_streaming", false)
+
+        raise SessionBusyError,
+              "Pi acknowledged the focus handoff abort but the managed turn is still active; the RPC writer was left untouched."
+      end
 
       def quiesce_interactive_rpc(session_ref)
         process = process_for_session(session_ref, required: false)
@@ -1515,17 +1553,20 @@ module Meringue
         argv
       end
 
-      def interactive_handoff_metadata(was_streaming:, events:, prompt:, latest_user_intent:, session_summary:, replacement:)
+      def interactive_handoff_metadata(was_streaming:, events:, prompt:, latest_user_intent:, session_summary:, interrupted_turn_outcome:, turn_checkpoint:, replacement:)
         progress = PiSessionView.progress_items(events)
         {
           "mode" => "native_interactive",
-          "transfer" => was_streaming ? "interrupted_turn" : "settled_session",
+          "transfer" => was_streaming ? "coordinated_turn_abort" : "settled_session",
           "exact_stream_transfer" => !was_streaming,
           "was_streaming" => !!was_streaming,
-          "interruption_method" => was_streaming ? "process_termination" : nil,
+          "continuation_required" => !!was_streaming,
+          "interruption_method" => was_streaming ? "rpc_abort" : nil,
           "prompt" => prompt,
           "latest_user_intent" => latest_user_intent,
           "session_file_summary" => session_summary,
+          "interrupted_turn_outcome" => interrupted_turn_outcome,
+          "turn_checkpoint" => turn_checkpoint,
           "replacement" => replacement,
           "captured_event_count" => events.length,
           "last_progress" => progress.last(20),
@@ -1537,6 +1578,41 @@ module Meringue
             end
           end.flatten.uniq.last(50)
         }.compact
+      end
+
+      def bounded_turn_outcome(outcome)
+        return nil unless outcome.is_a?(Hash)
+
+        outcome.slice("state", "kind", "stop_reason", "turn_ended_at", "last_assistant_text").transform_values do |value|
+          value.is_a?(String) ? value.byteslice(0, 4_000).to_s.scrub : value
+        end.compact
+      end
+
+      def dashboard_continuation_required?(session_ref, handoff)
+        details = handoff.is_a?(Hash) ? (handoff["handoff"] || handoff[:handoff] || handoff) : {}
+        return false unless details.is_a?(Hash) && details.fetch("continuation_required", false)
+
+        current = bounded_turn_outcome(turn_outcome(session_ref))
+        checkpoint = details.fetch("turn_checkpoint", nil)
+        return true unless current.is_a?(Hash)
+        return true unless current.fetch("state", nil) == "completed"
+        return true unless present?(current.fetch("last_assistant_text", nil))
+
+        turn_outcome_signature(current) == turn_outcome_signature(checkpoint)
+      end
+
+      def turn_outcome_signature(outcome)
+        return nil unless outcome.is_a?(Hash)
+
+        %w[state kind stop_reason turn_ended_at last_assistant_text].map { |key| outcome.fetch(key, nil).to_s }.join("|")
+      end
+
+      def dashboard_continuation_prompt(handoff)
+        details = handoff.is_a?(Hash) ? (handoff["handoff"] || handoff[:handoff] || handoff) : {}
+        original = details.is_a?(Hash) ? details.fetch("prompt", nil) : nil
+        return original if present?(original)
+
+        "Continue the focused task from the existing transcript and workspace. Inspect current files and any pending tool work before repeating actions, then finish with a final result."
       end
 
       def build_argv(session_name:, system_prompt:, session: nil, session_settings: {}, workspace_mode: "isolated")
