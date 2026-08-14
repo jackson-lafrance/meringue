@@ -27,6 +27,9 @@ class InputConfigTest < Minitest::Test
     use_json_schema = true
     retries = 3
 
+    [commands]
+    worker_blacklist = ["*gh pr comment *", "*gh api *pulls/*/comments/*/replies*"]
+
     [workspace]
     editor_args = ["."]
   TOML
@@ -59,6 +62,8 @@ class InputConfigTest < Minitest::Test
       assert_equal ["--model", "anthropic/claude-opus-5"], config.value("harness", "pi", "head_extra_args")
       assert_equal true, config.value("harness", "pi", "use_json_schema")
       assert_equal 3, config.value("harness", "pi", "retries")
+      assert_equal ["*gh pr comment *", "*gh api *pulls/*/comments/*/replies*"],
+                   config.value("commands", "worker_blacklist")
       assert_equal({ "agent_select_next" => %w[j down] }, config.section("tui", "keybindings"))
     end
   end
@@ -271,6 +276,7 @@ class InputConfigTest < Minitest::Test
     assert_includes config.value("harness", "pi", "head_extra_args"), "--thinking"
     assert_equal ["."], config.value("workspace", "editor_args")
     assert_equal "cancel", config.conflict_predecessor_failure
+    assert_equal [], config.value("commands", "worker_blacklist")
     assert_includes Meringue::TUI::Style.colorschemes, config.value("tui", "colorscheme")
   end
 

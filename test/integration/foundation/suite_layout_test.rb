@@ -83,6 +83,7 @@ class FoundationSuiteLayoutTest < Minitest::Test
       lib/meringue.rb
       lib/meringue/cli.rb
       lib/meringue/kernel/engine.rb
+      lib/meringue/harness/extensions/command_blacklist.js
     ].each do |path|
       assert_includes spec.files, path
     end

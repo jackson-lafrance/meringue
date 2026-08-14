@@ -245,6 +245,44 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_equal "openai/worker", defaults.dig("roles", "worker", "model")
   end
 
+  def test_worker_command_blacklist_adds_the_enforcement_extension_and_owned_environment
+    patterns = ["*gh pr comment *", "*gh api *pulls/*/comments/*/replies*"]
+    subject = registry(
+      "commands" => { "worker_blacklist" => patterns },
+      "harness" => { "pi" => { "env" => { "KEEP_ME" => "yes", Registry::COMMAND_BLACKLIST_ENV => "untrusted" } } }
+    )
+
+    worker = subject.client_for(provider: "pi", kind: "worker")
+    head = subject.client_for(provider: "pi", kind: "head")
+
+    assert_includes worker.extra_args.each_cons(2).to_a,
+                    ["--extension", Registry::COMMAND_BLACKLIST_EXTENSION]
+    assert_equal patterns, JSON.parse(worker.env.fetch(Registry::COMMAND_BLACKLIST_ENV))
+    assert_equal "yes", worker.env.fetch("KEEP_ME")
+    refute_includes head.extra_args, Registry::COMMAND_BLACKLIST_EXTENSION
+    refute head.env.key?(Registry::COMMAND_BLACKLIST_ENV)
+  end
+
+  def test_configured_blacklist_fails_closed_for_worker_providers_without_enforcement
+    subject = registry(
+      "commands" => { "worker_blacklist" => ["*gh pr comment *"] },
+      "harness" => { "worker_provider" => "claude" }
+    )
+
+    error = assert_raises(ArgumentError) { subject.worker_client }
+
+    assert_includes error.message, "cannot be enforced by Claude Code"
+    assert_includes error.message, "use Pi or remove the blacklist"
+  end
+
+  def test_invalid_blacklist_configuration_is_rejected_when_the_registry_loads
+    error = assert_raises(Meringue::CommandBlacklist::ConfigurationError) do
+      registry("commands" => { "worker_blacklist" => "*gh pr comment *" })
+    end
+
+    assert_includes error.message, "must be an array of glob strings"
+  end
+
   def test_client_for_builds_claude_and_antigravity_clients
     subject = registry(
       "harness" => {

@@ -23,7 +23,8 @@ Gem::Specification.new do |spec|
       "bin/*",
       "docs/**/*.md",
       "fixtures/**/*",
-      "lib/**/*.rb"
+      "lib/**/*.rb",
+      "lib/**/*.js"
     ].select { |path| File.file?(path) }
   end
   spec.bindir = "bin"
