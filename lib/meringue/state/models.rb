@@ -70,11 +70,12 @@ module Meringue
         head_command_journal(agent).reject { |entry| entry.fetch("status", nil).to_s == HEAD_COMMAND_LANDED_STATUS }
       end
 
-      # Did an applied batch put the request anywhere at all? An accepted command routed work,
-      # and a recorded question handed the request back to the user on purpose. A batch that did
-      # neither dropped the message, which is exactly the state a retry exists to recover.
+      # Did an applied batch handle the request at all? An accepted command routed work, a recorded
+      # question handed it back to the user, and a direct response answered it without orchestration.
+      # A batch that did none of those dropped the message, which is exactly what retry recovers.
       def head_routed_anything?(agent)
         return true if head_applied_commands(agent).any?
+        return true unless head_metadata(agent).fetch("response", nil).to_s.strip.empty?
 
         Array(head_metadata(agent).fetch("head_result_question_ids", nil)).any? { |id| !id.to_s.strip.empty? }
       end

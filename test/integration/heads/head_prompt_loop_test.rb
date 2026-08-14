@@ -48,6 +48,39 @@ class HeadPromptLoopTest < Minitest::Test
     assert_equal "accepted", events.last.dig("apply_result", "status")
   end
 
+  def test_full_text_only_head_cycle_answers_without_a_command_worker_or_no_op
+    runner = ScriptedHeadRunner.new(
+      results: [
+        head_result(
+          title: "Explain the label",
+          summary: "Answered from stable Meringue behavior.",
+          response: "“Waiting on W1” means the queued worker will start after W1 settles.",
+          commands: [],
+          questions: []
+        )
+      ]
+    )
+    env = build_head_environment(runner: runner)
+    events = []
+
+    payload = Meringue::Heads::PromptLoop.new(engine: env.engine).call("What does waiting on W1 mean?") { |event| events << event }
+
+    assert_equal "accepted", payload.dig("apply_head_result", "status")
+    assert_equal "“Waiting on W1” means the queued worker will start after W1 settles.", payload.dig("apply_head_result", "result", "response")
+    assert_empty payload.dig("apply_head_result", "result", "command_results")
+    assert_empty env.state.fetch("projects")
+    assert_empty env.state.fetch("issues")
+    assert_empty env.agents(type: "worker")
+    assert_empty env.agents(type: "head"), "the response-only head still has the normal short lifetime"
+    assert_equal %w[head_completed head_result_applied], events.map { |event| event.fetch("event") }
+
+    response_log = env.state.fetch("logs").find { |entry| entry.dig("details", "kind") == "head_response" }
+    refute_nil response_log
+    assert_equal "“Waiting on W1” means the queued worker will start after W1 settles.", response_log.fetch("message")
+    refute env.state.fetch("logs").any? { |entry| entry.dig("details", "kind") == "unrouted_user_message" }
+    refute env.state.fetch("logs").any? { |entry| entry.fetch("message", "").include?("intentionally routed no work") }
+  end
+
   def test_automatic_project_name_preserves_the_product_capitalization
     env = build_head_environment
     File.write(File.join(env.project_path, "README.md"), "# Meringue\n\nThe product description is not its name.\n")

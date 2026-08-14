@@ -31,15 +31,27 @@ class KernelHeadsApplyResultTest < KernelHeadsTestCase
     assert_equal "completed", find_agent_record(head_id).fetch("status")
   end
 
-  def test_summary_only_head_result_logs_the_summary_as_head_output
-    head_id = spawn_head!("Just tell me what you see")
-    apply_head_result(head_id, head_result(summary: "Nothing to route; state is empty."), cleanup_head: false)
+  def test_text_only_head_result_logs_and_returns_the_plain_response
+    head_id = spawn_head!("What does waiting on a worker mean?")
+    result = apply_head_result(
+      head_id,
+      head_result(
+        summary: "Answered from stable Meringue scheduling behavior.",
+        response: "It means the queued worker starts after its predecessor settles."
+      ),
+      cleanup_head: false
+    )
 
-    entry = logs.find { |log| log.fetch("message", nil) == "Nothing to route; state is empty." }
+    entry = logs.find { |log| log.fetch("message", nil) == "It means the queued worker starts after its predecessor settles." }
     refute_nil entry
     assert_equal "head", entry.fetch("source_type")
     assert_equal head_id, entry.fetch("source_id")
-    assert_equal "head_summary", entry.fetch("details").fetch("kind")
+    assert_equal "head_response", entry.fetch("details").fetch("kind")
+    assert_equal entry.fetch("message"), result.dig("result", "response")
+
+    metadata = find_agent_record(head_id).fetch("harness_metadata")
+    assert_equal entry.fetch("message"), metadata.fetch("response")
+    assert_equal "Answered from stable Meringue scheduling behavior.", metadata.fetch("summary")
   end
 
   def test_predicted_ids_chain_across_one_batch
@@ -309,6 +321,7 @@ class KernelHeadsApplyResultTest < KernelHeadsTestCase
         "head_result" => {
           "title" => 42,
           "summary" => nil,
+          "response" => ["not", "text"],
           "commands" => [{ "type" => "CreateIssue" }, "not-an-object"],
           "questions" => "not-an-array"
         }
@@ -318,6 +331,7 @@ class KernelHeadsApplyResultTest < KernelHeadsTestCase
     assert_equal "rejected", result.fetch("status")
     assert_includes result.fetch("errors"), "head_result.title must be a string"
     assert_includes result.fetch("errors"), "head_result.summary must be a string"
+    assert_includes result.fetch("errors"), "head_result.response must be a string"
     assert_includes result.fetch("errors"), "head_result.commands[0].payload must be an object"
     assert_includes result.fetch("errors"), "head_result.commands[1] must be an object"
     assert_includes result.fetch("errors"), "head_result.questions must be an array"

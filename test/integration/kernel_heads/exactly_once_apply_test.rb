@@ -46,6 +46,27 @@ class KernelHeadsExactlyOnceApplyTest < KernelHeadsTestCase
     assert_empty logs_matching { |log| log.fetch("level", nil) == "error" }
   end
 
+  def test_reapplying_a_text_only_result_logs_the_response_exactly_once
+    head_id = spawn_head!("What does queued mean?")
+    batch = head_result(
+      summary: "Answered directly.",
+      response: "Queued means the worker has not started yet.",
+      commands: [],
+      questions: []
+    )
+
+    first = apply_head_result(head_id, batch, cleanup_head: false)
+    second = apply_head_result(head_id, batch, cleanup_head: false)
+
+    assert_equal "accepted", first.fetch("status")
+    assert_equal "accepted", second.fetch("status")
+    assert second.dig("result", "duplicate_apply")
+    response_logs = logs_matching { |log| log.dig("details", "kind") == "head_response" }
+    assert_equal 1, response_logs.length
+    assert_equal "Queued means the worker has not started yet.", response_logs.first.fetch("message")
+    assert_empty logs_matching { |log| log.dig("details", "kind") == "unrouted_user_message" }
+  end
+
   def test_second_apply_replays_results_from_the_command_journal
     project_id = add_project!
     head_id = spawn_head!("Journal the batch")

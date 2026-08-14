@@ -65,6 +65,24 @@ class HeadResultParserTest < Minitest::Test
     assert_equal "follow_up", result.dig("commands", 0, "payload", "mode")
   end
 
+  def test_text_only_response_result_is_valid
+    raw = JSON.generate(
+      head_result(
+        title: "Answer directly",
+        summary: "The supplied context is sufficient, so no command is needed.",
+        response: "A queued worker waits until its predecessor settles; the kernel then starts it automatically.",
+        commands: [],
+        questions: []
+      )
+    )
+
+    result = Meringue::Heads::ResultParser.parse(raw)
+
+    assert_equal "A queued worker waits until its predecessor settles; the kernel then starts it automatically.", result.fetch("response")
+    assert_empty result.fetch("commands")
+    assert_empty result.fetch("questions")
+  end
+
   def test_questions_only_result_is_valid
     raw = JSON.generate(
       head_result(
@@ -190,6 +208,14 @@ class HeadResultParserTest < Minitest::Test
     assert_equal ["title must be a string", "summary must be a string"], error.validation_errors
   end
 
+  def test_non_string_response_is_rejected_when_present
+    error = assert_raises(Meringue::Heads::InvalidHeadResultError) do
+      Meringue::Heads::ResultParser.parse(JSON.generate(head_result.merge("response" => { "text" => "not plain text" })))
+    end
+
+    assert_equal ["response must be a string"], error.validation_errors
+  end
+
   def test_non_string_title_is_rejected
     error = assert_raises(Meringue::Heads::InvalidHeadResultError) do
       Meringue::Heads::ResultParser.parse(JSON.generate(head_result.merge("title" => 42)))
@@ -253,6 +279,8 @@ class HeadResultParserTest < Minitest::Test
 
     assert_equal "object", schema.fetch("type")
     assert_equal %w[title summary commands questions], schema.fetch("required")
+    assert_equal "string", schema.dig("properties", "response", "type")
+    refute_includes schema.fetch("required"), "response"
     assert_equal %w[type payload], schema.dig("properties", "commands", "items", "required")
     assert_equal ["question"], schema.dig("properties", "questions", "items", "required")
   end
