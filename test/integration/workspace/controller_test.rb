@@ -109,7 +109,43 @@ class WorkspaceControllerTest < Minitest::Test
 
       closed = controller.close_workspace(agent: agent)
       assert_equal "closed", closed.fetch("status")
+      assert_equal ["x\n", "\u0003"], @sessions.last.writes
+      assert_equal 1, @sessions.last.closes
       assert_equal [agent.fetch("id")], focus.ended
+    ensure
+      controller&.close
+    end
+  end
+
+  def test_dashboard_resume_can_be_retried_after_the_native_pty_is_already_closed
+    with_workspace_tmpdir do |tmp|
+      workspace = File.join(tmp, "worktree")
+      FileUtils.mkdir_p(workspace)
+      focus = InteractiveFocusDouble.new
+      focus.end_result = { "status" => "failed", "message" => "dashboard RPC could not resume" }
+      controller = Meringue::Workspace::Controller.new(
+        editor_launcher: @editor,
+        focus_session_service: focus,
+        interactive_session_factory: lambda { |command:, env:|
+          session = WorkspaceSupport::FakeTerminalSession.new
+          @sessions << session
+          session
+        }
+      )
+      agent = worker_agent(workspace_path: workspace, **{ "harness" => "pi" })
+      controller.open_workspace(agent: agent)
+
+      failed = controller.close_workspace(agent: agent)
+      assert_equal "failed", failed.fetch("status")
+      assert_equal 1, @sessions.last.closes
+      refute controller.agent_interactive?(agent: agent)
+
+      focus.end_result = nil
+      retried = controller.close_workspace(agent: agent)
+      assert_equal "closed", retried.fetch("status")
+      assert_equal "Resumed the dashboard session.", retried.fetch("message")
+      assert_equal [agent.fetch("id"), agent.fetch("id")], focus.ended
+      assert_equal 1, @sessions.last.closes, "retrying ownership must not signal the closed PTY again"
     ensure
       controller&.close
     end

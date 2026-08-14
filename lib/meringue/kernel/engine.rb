@@ -815,9 +815,9 @@ module Meringue
             source_id: current.fetch("id"),
             level: handoff.fetch("exact_stream_transfer", true) ? "info" : "warning",
             message: if handoff.fetch("was_streaming", false)
-                       "Interrupted worker #{current.fetch("id")}'s active managed turn and transferred sole session ownership to native interactive Pi focus."
+                       "Safely settled worker #{current.fetch("id")}'s active managed turn and transferred sole session ownership to native interactive focus."
                      else
-                       "Prepared worker #{current.fetch("id")} for native interactive Pi focus; the managed RPC session is quiesced."
+                       "Prepared worker #{current.fetch("id")} for native interactive focus; the managed session is quiesced."
                      end,
             details: handoff.merge("agent_id" => current.fetch("id"), "routing_action" => "interactive_focus")
           )
@@ -953,7 +953,7 @@ module Meringue
         return agent if kernel_command_result?(agent)
 
         client = harness_client_for_agent(agent)
-        resumed = client.resume_dashboard_session(agent_session_ref(agent))
+        resumed = client.resume_dashboard_session(agent_session_ref(agent), handoff: handoff_marker)
         synchronized_state do
           state = normalized_state
           current = find_agent(state, agent.fetch("id"))
@@ -963,7 +963,13 @@ module Meringue
           merge_session_ref_into_agent!(current, resumed)
           metadata = current.fetch("harness_metadata", {}) || {}
           metadata.delete("interactive_handoff")
-          handoff_outcome = handoff_marker.fetch("state", nil).to_s == "interactive_pending" ? "launch_not_started" : "interactive_closed"
+          handoff_outcome = if handoff_marker.fetch("state", nil).to_s == "interactive_pending"
+                              "launch_not_started"
+                            elsif resumed.dig("metadata", "interactive_dashboard_continuation") == "started"
+                              "dashboard_continuation_started"
+                            else
+                              "interactive_closed"
+                            end
           current["harness_metadata"] = metadata.merge(
             "is_streaming" => resumed.fetch("is_streaming", false),
             "last_interactive_handoff" => handoff_marker.merge(
