@@ -102,25 +102,30 @@ class KernelWorkersSharedReadOnlyWorkspaceTest < Minitest::Test
     assert_equal 0, manager.allocation_attempts
   end
 
-  def test_bare_root_without_existing_main_checkout_falls_back_to_isolated_worktree
+  def test_bare_root_without_existing_main_checkout_provisions_one_reusable_read_only_checkout
     root = create_git_repo
     bare = tmp_path("world.git")
     run_git(tmpdir, "clone", "--bare", root, bare)
     engine = build_engine
     project_id = add_project(engine, bare, name: "World")
-    issue_id = create_issue(engine, project_id, title: "Investigate World")
+    first_issue = create_issue(engine, project_id, title: "Investigate World")
+    second_issue = create_issue(engine, project_id, title: "Inspect World models")
 
-    result = spawn_worker(engine, issue_id, workspace_mode: "shared_read_only")
-    worker = agent(engine, result.fetch("target_id"))
+    first = spawn_worker(engine, first_issue, workspace_mode: "shared_read_only")
+    second = spawn_worker(engine, second_issue, workspace_mode: "shared_read_only")
+    first_worker = agent(engine, first.fetch("target_id"))
+    second_worker = agent(engine, second.fetch("target_id"))
 
-    assert_equal "shared_read_only", worker.fetch("workspace_mode")
-    assert_equal "isolated", worker.fetch("effective_workspace_mode")
-    assert_equal "bare_repository_has_no_shared_main_checkout", worker.fetch("workspace_mode_fallback_reason")
-    assert_equal "git_worktree", worker.fetch("workspace_strategy")
-    refute_equal File.realpath(bare), File.realpath(worker.fetch("workspace_path"))
-    assert_equal "isolated", @harness_client.spawns.fetch(0).fetch("workspace_mode")
-    assert_includes @harness_client.spawns.fetch(0).fetch("system_prompt"), "You may edit files, commit, push"
-    assert_includes result.fetch("message"), "Shared read-only checkout unavailable"
+    assert_equal "shared_read_only", first_worker.fetch("workspace_mode")
+    assert_equal "shared_read_only", first_worker.fetch("effective_workspace_mode")
+    assert_nil first_worker.fetch("workspace_mode_fallback_reason")
+    assert_equal "shared_checkout", first_worker.fetch("workspace_strategy")
+    assert_equal true, first_worker.dig("harness_metadata", "workspace_plan", "managed_shared_checkout")
+    refute_equal File.realpath(bare), File.realpath(first_worker.fetch("workspace_path"))
+    assert_equal first_worker.fetch("workspace_path"), second_worker.fetch("workspace_path")
+    assert_equal %w[shared_read_only shared_read_only], @harness_client.spawns.map { |spawn| spawn.fetch("workspace_mode") }
+    assert_includes @harness_client.spawns.fetch(0).fetch("system_prompt"), "Meringue read-only worker agent"
+    assert_includes first.fetch("message"), "Using a validated shared read-only checkout"
   end
 
   def test_harness_without_read_only_enforcement_falls_back_to_isolation
