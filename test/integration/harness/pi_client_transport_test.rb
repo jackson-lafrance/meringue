@@ -260,19 +260,72 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_equal attached.fetch("pid"), ownership.record_for("pi-sess-1").fetch("pid")
   end
 
-  def test_prepare_interactive_session_rejects_an_active_turn_without_aborting_or_stopping_it
-    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-1", "is_streaming" => true })
+  def test_prepare_interactive_session_preempts_an_active_turn_and_preserves_continuation_context
+    progress = {
+      "type" => "message_end",
+      "message" => {
+        "role" => "assistant",
+        "content" => [{ "type" => "text", "text" => "Found the race in the ownership transfer." }]
+      }
+    }
+    client, stub = build_pi_client(
+      tmpdir,
+      stub_config: {
+        "session_id" => "sess-1",
+        "is_streaming" => true,
+        "startup_events" => [progress]
+      }
+    )
     session_file = pi_session_file(tmpdir, session_id: "sess-1")
     ref = pi_session_ref(session_file: session_file, cwd: tmpdir)
+    ref.fetch("metadata")["interactive_handoff"] = {
+      "context" => {
+        "issue_id" => "P6-I24",
+        "issue_title" => "Allow interactive focus to preempt a turn",
+        "assignment" => "Implement preemptive native focus without losing progress.",
+        "workspace_path" => tmpdir,
+        "workspace_branch" => "focus-preemption"
+      }
+    }
     managed = client.attach_session(ref)
     @harness_sessions << [client, managed]
 
-    error = assert_raises(PiClient::SessionBusyError) { client.prepare_interactive_session(managed) }
+    started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    prepared = client.prepare_interactive_session(managed)
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
 
-    assert_includes error.message, "active turn was left untouched"
-    assert process_alive?(managed.fetch("pid"))
-    assert_equal ["get_state"], stub_commands(stub).map { |command| command.fetch("type") }.last(1)
-    assert_empty stub_commands_of_type(stub, "abort")
+    assert_operator elapsed, :<, 0.75
+    assert_empty stub_commands_of_type(stub, "abort"), "focus must not wait for an abort/settle round trip"
+    refute process_alive?(managed.fetch("pid")), "the interrupted RPC writer must exit before native Pi launches"
+    assert_equal false, prepared.fetch("session_ref").fetch("is_streaming")
+    assert_nil prepared.fetch("session_ref").fetch("pid")
+    assert_equal true, prepared.dig("handoff", "was_streaming")
+    assert_equal false, prepared.dig("handoff", "exact_stream_transfer")
+    assert_equal "interrupted_turn", prepared.dig("handoff", "transfer")
+    assert_equal "process_termination", prepared.dig("handoff", "interruption_method")
+    continuation = prepared.dig("handoff", "prompt")
+    assert_includes continuation, "P6-I24 — Allow interactive focus to preempt a turn"
+    assert_includes continuation, "Implement preemptive native focus without losing progress."
+    assert_includes continuation, "Found the race in the ownership transfer."
+    assert_includes continuation, tmpdir
+    assert_equal continuation, prepared.fetch("interactive_argv").last
+    assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--session", session_file]
+  end
+
+  def test_prepare_interactive_session_opens_a_settled_resumable_session_with_no_rpc_process
+    client, = build_pi_client(tmpdir)
+    session_file = pi_session_file(tmpdir, session_id: "settled-session", text: "Completed report")
+    ref = pi_session_ref(session_file: session_file, session_id: "settled-session", pid: nil, cwd: tmpdir)
+
+    prepared = client.prepare_interactive_session(ref)
+
+    assert_nil prepared.fetch("session_ref").fetch("pid")
+    assert_equal false, prepared.fetch("session_ref").fetch("is_streaming")
+    assert_equal true, prepared.dig("session_ref", "metadata", "interactive_rpc_already_stopped")
+    assert_equal "settled_session", prepared.dig("handoff", "transfer")
+    assert_equal true, prepared.dig("handoff", "exact_stream_transfer")
+    assert_nil prepared.dig("handoff", "prompt")
+    assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--session", session_file]
   end
 
   def test_prepare_interactive_session_quiesces_a_settled_rpc_quickly_and_opens_the_same_session

@@ -8,8 +8,26 @@ require "support/workspace_support"
 class WorkspaceControllerTest < Minitest::Test
   include WorkspaceSupport
 
+  class FailedInteractiveLaunch
+    attr_reader :closes
+
+    def initialize
+      @closes = 0
+    end
+
+    def start(workspace_path:, rows:, columns:, on_started: nil)
+      { "status" => "failed", "message" => "native Pi could not launch" }
+    end
+
+    def close
+      @closes += 1
+      { "status" => "closed" }
+    end
+  end
+
   class InteractiveFocusDouble
     attr_reader :begun, :started, :ended
+    attr_accessor :end_result
 
     def initialize
       @begun = []
@@ -29,7 +47,7 @@ class WorkspaceControllerTest < Minitest::Test
 
     def end_agent_interactive_focus(agent_id)
       @ended << agent_id
-      { "status" => "accepted", "message" => "resumed" }
+      @end_result || { "status" => "accepted", "message" => "resumed" }
     end
   end
 
@@ -92,6 +110,56 @@ class WorkspaceControllerTest < Minitest::Test
       closed = controller.close_workspace(agent: agent)
       assert_equal "closed", closed.fetch("status")
       assert_equal [agent.fetch("id")], focus.ended
+    ensure
+      controller&.close
+    end
+  end
+
+  def test_native_launch_failure_closes_the_pty_and_returns_ownership_exactly_once
+    with_workspace_tmpdir do |tmp|
+      workspace = File.join(tmp, "worktree")
+      FileUtils.mkdir_p(workspace)
+      focus = InteractiveFocusDouble.new
+      launch = FailedInteractiveLaunch.new
+      controller = Meringue::Workspace::Controller.new(
+        editor_launcher: @editor,
+        focus_session_service: focus,
+        interactive_session_factory: ->(command:, env:) { launch }
+      )
+      agent = worker_agent(workspace_path: workspace, **{ "harness" => "pi" })
+
+      result = controller.open_workspace(agent: agent)
+
+      assert_equal "failed", result.fetch("status")
+      assert_equal "native Pi could not launch", result.fetch("message")
+      assert_equal 1, launch.closes
+      assert_empty focus.started
+      assert_equal [agent.fetch("id")], focus.ended
+      refute controller.agent_interactive?(agent: agent)
+    ensure
+      controller&.close
+    end
+  end
+
+  def test_native_launch_failure_surfaces_a_failed_dashboard_ownership_rollback
+    with_workspace_tmpdir do |tmp|
+      workspace = File.join(tmp, "worktree")
+      FileUtils.mkdir_p(workspace)
+      focus = InteractiveFocusDouble.new
+      focus.end_result = { "status" => "failed", "message" => "dashboard RPC could not resume" }
+      launch = FailedInteractiveLaunch.new
+      controller = Meringue::Workspace::Controller.new(
+        editor_launcher: @editor,
+        focus_session_service: focus,
+        interactive_session_factory: ->(command:, env:) { launch }
+      )
+
+      result = controller.open_workspace(agent: worker_agent(workspace_path: workspace, **{ "harness" => "pi" }))
+
+      assert_equal "failed", result.fetch("status")
+      assert_equal "dashboard RPC could not resume", result.fetch("message")
+      assert_equal 1, launch.closes
+      assert_equal 1, focus.ended.length
     ensure
       controller&.close
     end
