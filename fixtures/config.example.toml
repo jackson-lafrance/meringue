@@ -64,6 +64,8 @@ worker_extra_args = []
 # alacritty_command = "/Applications/Alacritty.app/Contents/MacOS/alacritty"
 
 [workspace]
+# Independent durable worker reservations provision concurrently. Default: 2; maximum: 8.
+# worker_provisioning_concurrency = 2
 # Commands can be argv arrays (recommended) or safely split quoted strings.
 # Defaults: $MERINGUE_SHELL/$SHELL or /bin/sh; and
 # $MERINGUE_EDITOR/$VISUAL/$EDITOR or code.

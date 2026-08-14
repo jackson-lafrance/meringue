@@ -249,6 +249,25 @@ class InputConfigTest < Minitest::Test
     ).conflict_predecessor_failure
   end
 
+  def test_worker_provisioning_concurrency_defaults_validates_and_caps_the_bound
+    default = Meringue::Config::DEFAULT_WORKER_PROVISIONING_CONCURRENCY
+    maximum = Meringue::Config::MAX_WORKER_PROVISIONING_CONCURRENCY
+
+    assert_equal default, Meringue::Config.new({}, path: "/tmp/config.toml").worker_provisioning_concurrency
+    assert_equal 4, Meringue::Config.new(
+      { "workspace" => { "worker_provisioning_concurrency" => 4 } }, path: "/tmp/config.toml"
+    ).worker_provisioning_concurrency
+    assert_equal default, Meringue::Config.new(
+      { "workspace" => { "worker_provisioning_concurrency" => 0 } }, path: "/tmp/config.toml"
+    ).worker_provisioning_concurrency
+    assert_equal default, Meringue::Config.new(
+      { "workspace" => { "worker_provisioning_concurrency" => "many" } }, path: "/tmp/config.toml"
+    ).worker_provisioning_concurrency
+    assert_equal maximum, Meringue::Config.new(
+      { "workspace" => { "worker_provisioning_concurrency" => maximum + 100 } }, path: "/tmp/config.toml"
+    ).worker_provisioning_concurrency
+  end
+
   def test_saving_one_pi_session_default_preserves_the_other
     Dir.mktmpdir("meringue-config-test") do |dir|
       path = File.join(dir, "config.toml")

@@ -109,7 +109,13 @@ predicted project/issue references against the real project instead of being rej
 user's request had not routed.
 
 **Concurrent worker routing.** Issue and worker counters are allocated inside the shared state lock,
-and worker spawns persist a reservation before workspace or harness I/O. A `PromptAgent` may refer to
+and worker spawns persist a reservation before workspace or harness I/O. In the dashboard,
+`SpawnWorker` is complete for command-journal purposes once that reservation is durable: a bounded
+background executor claims the reservation and performs workspace allocation and harness startup,
+so independent spawns later in the same head batch are not serialized behind checkout. The
+in-memory executor queue is only an optimization; ownership and provisioning state remain durable,
+and reconciliation re-enqueues a reservation only when its prior owner is gone. Replaying the
+command acknowledges the existing reservation rather than submitting another allocation. A `PromptAgent` may refer to
 a worker spawned earlier in its own batch by command id/index, and a prompt aimed at a worker that was
 replaced while the head was routing is redirected only to that replacement on the same issue. Prompt
 command ids are retained on the worker for bounded replay protection; a stale reconciliation snapshot
