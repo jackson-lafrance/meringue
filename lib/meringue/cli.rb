@@ -191,6 +191,7 @@ module Meringue
         workspace_manager: config ? Workspace::Manager.from_config(config) : Workspace::Manager.new,
         cwd: Dir.pwd,
         async_heads: true,
+        async_worker_provisioning: true,
         config_path: config_path,
         config: config
       )

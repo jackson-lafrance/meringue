@@ -17,6 +17,8 @@ module Meringue
     ONBOARDING_SECTION = "onboarding"
     ONBOARDING_VERSION = 1
     ONBOARDING_OUTCOMES = %w[completed skipped].freeze
+    DEFAULT_WORKER_PROVISIONING_CONCURRENCY = 2
+    MAX_WORKER_PROVISIONING_CONCURRENCY = 8
 
     class ParseError < StandardError; end
 
@@ -124,6 +126,17 @@ module Meringue
       return DEFAULT_CONFLICT_PREDECESSOR_FAILURE unless CONFLICT_PREDECESSOR_FAILURES.include?(configured)
 
       configured
+    end
+
+    # Workspace allocation is expensive external I/O and independent worker reservations may run
+    # concurrently, but an unbounded fan-out can overwhelm Git and disk bandwidth. Invalid values
+    # retain the conservative default; very large values are capped at the documented safety bound.
+    def worker_provisioning_concurrency
+      configured = value("workspace", "worker_provisioning_concurrency")
+      parsed = Integer(configured, exception: false)
+      return DEFAULT_WORKER_PROVISIONING_CONCURRENCY unless parsed&.positive?
+
+      [parsed, MAX_WORKER_PROVISIONING_CONCURRENCY].min
     end
 
     # Which revision of the first-run flow this user finished, or 0 when setup

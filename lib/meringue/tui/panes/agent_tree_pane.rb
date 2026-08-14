@@ -860,6 +860,7 @@ module Meringue
           return "" unless metadata.is_a?(Hash)
 
           case metadata["provisioning_state"].to_s
+          when "provisioning_queued" then "waiting for provisioning slot"
           when "allocating_workspace" then ["provisioning workspace", provisioning_detail(metadata)].compact.join(" ")
           when "retry_pending" then "workspace retry #{provisioning_attempt(metadata)}"
           when "retry_exhausted" then "workspace failed: prompt to retry"

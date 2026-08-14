@@ -155,7 +155,24 @@ editor_args = ["."]
 terminal_buffer_bytes = 4194304
 ```
 
-## Worker workspace provisioning timeouts
+## Worker workspace provisioning concurrency and timeouts
+
+`SpawnWorker` first writes a durable queued reservation and returns without waiting for workspace
+or harness I/O. A bounded background executor provisions independent reservations concurrently:
+
+```toml
+[workspace]
+# Default: 2. Values above 8 are capped at 8; invalid or non-positive values use the default.
+worker_provisioning_concurrency = 2
+```
+
+A value of 2 overlaps independent checkouts without turning one head batch into an unbounded burst
+of Git and disk work. The durable slot claim applies across Meringue processes sharing the state
+file, not just threads in one dashboard. The AgentTree says `waiting for provisioning slot` while a reservation waits
+for executor capacity, then changes to `provisioning workspace` when allocation starts. The durable
+reservation retains its owner identity, prompt, workspace plan, relationships, and command id; if
+Meringue exits, reconciliation lets a new live instance re-enqueue it rather than allocating a
+second worker.
 
 Provisioning a worker runs `git worktree add`, which checks the whole tree out. On a large
 monorepo that is minutes of honest work, so the checkout is bounded by how long it goes *quiet*
@@ -180,7 +197,7 @@ bound larger than the checkout ceiling is clamped to it so it can still fire. Ra
 `worktree_checkout_timeout` for an unusually large repository on slow storage; lower it if you
 would rather a giant checkout fail fast.
 
-While provisioning runs, its worker stays `queued` and the AgentTree shows live worktree telemetry.
+While provisioning is queued or runs, its worker stays `queued` and the AgentTree shows live worktree telemetry.
 The row first says `provisioning workspace`; once Git emits checkout progress it shows Git's actual
 percentage (for example, `provisioning workspace 35%`). Before a percentage is available it shows
 the checkout phase and elapsed time instead. This percentage covers only the worktree checkout, not
