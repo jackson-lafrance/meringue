@@ -66,6 +66,20 @@ The focused workspace is split so each layer has one job:
 - `TUI::HintLine` owns the shared bottom-bar styling used by both the dashboard and the workspace.
 - `Workspace::PathResolver`, `Workspace::Controller`, and `Workspace::TerminalManager` own UI-side shell/editor processes; the kernel still owns all orchestration state.
 
+## Shared read-only worker workspaces
+
+`SpawnWorker.workspace_mode` is a persisted execution contract, not a guess based on phrases such as “investigate” or “findings only”:
+
+- `isolated` is the default and remains mandatory for implementation, delivery, dependency setup, and tests/builds that may write artifacts;
+- `shared_read_only` is for investigation/informational work that can finish with file reads and searches only;
+- the agent record stores both the requested `workspace_mode` and `effective_workspace_mode`; a safe fallback also stores `workspace_mode_fallback_reason`;
+- the workspace manager accepts only an existing readable, registered, unlocked, non-bare checkout on `main` or `master`. For a bare registered root it searches existing linked worktrees and never uses the bare repository as `cwd`;
+- concurrent readers may use the same checkout. It is not a Meringue-owned workspace and prune/cleanup never removes it;
+- Pi enforces the mode with `--tools read,grep,find,ls` on initial spawn, RPC resume, and native focus. Prompt guidance is defense in depth, not the enforcement boundary;
+- if checkout validation or harness enforcement is unavailable, the kernel provisions the usual isolated workspace before launch.
+
+A queued worker retains the request through activation and reconciliation. A read-only follow-up does not inherit a predecessor's editable worktree, while a later implementation follow-up must be a newly spawned isolated worker.
+
 ## Workspace directory resolution
 
 `Workspace::PathResolver` is the single place that decides where a UI-owned shell or editor starts. It is used by the terminal manager, the workspace controller, the editor launcher, and the external session opener so all four agree.
@@ -113,7 +127,8 @@ Start with the automated suite: `rake test` covers the parts of this integration
 
 The checks below still require the interactive TUI, real worktrees, or real harness processes, so verify them by hand:
 
-1. Select a worker with a verified open PR, restart Meringue, and confirm the worker selection and workspace view recover.
+1. Register a large repository at a normal main checkout, spawn a `shared_read_only` informational worker, and confirm it starts immediately in that checkout without a new directory/branch. Start a second reader and confirm both use the same path. Confirm Pi exposes only read/grep/find/ls and refuses write/edit/bash calls. Repeat with a bare registered root: confirm an existing linked main checkout is selected, then remove it and confirm Meringue falls back to an isolated non-bare worktree rather than launching in the bare repository.
+2. Select a worker with a verified open PR, restart Meringue, and confirm the worker selection and workspace view recover.
 2. Press the workspace leader followed by `p` and confirm the tracked PR opens from both focused views; confirm bare `Ctrl-B` still reaches the PTY. Replace the PR URL with malformed metadata and confirm a useful unavailable notice is shown instead.
 3. Remove/rename the worktree and harness session file, then render the workspace. Confirm notices are shown and state is not pruned or rewritten.
 4. Configure missing terminal/editor executables and confirm those actions fail in place without closing Meringue.

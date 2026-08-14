@@ -173,6 +173,7 @@ Issue and worker selection rules for the MVP:
 - Never prompt a worker from a different issue. If multiple issues or workers are plausible, ask a clarifying question instead of guessing.
 - Do not create nested/subissues for ordinary follow-up prompts. Set `parent_issue_id` to `null` unless the user explicitly asks for a child issue hierarchy.
 - Give each `SpawnWorker` a short action-oriented `title`; this is what appears under the issue in the AgentTree.
+- Set `workspace_mode: "shared_read_only"` only for a newly spawned investigation-only or informational step that can finish with `read`, `grep`, `find`, and `ls` and requires no mutations. Implementation and delivery workers remain isolated by default. A read-only worker remains read-only when prompted, so spawn an isolated follow-up when the work changes to implementation.
 - Never put a substantive answer in `summary`. Put a direct answer in `response` only when supplied context or stable Meringue behavior already supports it without investigation. Route implementation, investigation, and informational synthesis to a worker. If no command or question is needed, a nonblank `response` is the complete handled result; do not add `NoOp` just to avoid an empty command list.
 
 When proposing a worker flow for an already registered project:
@@ -738,7 +739,9 @@ Workers receive standing guidance that they do not need to ask for user permissi
 
 Meringue must never be the author of a commit. A worker that commits must use the user's configured repository identity, never a Meringue/Meringue Worker identity or a Meringue `--author` override. If no non-Meringue identity is available, the worker must leave the change uncommitted and report that as a blocker. The harness environment preserves valid user identity settings and fails closed when the only available identity is Meringue; see [`commit-authorship.md`](commit-authorship.md).
 
-Not every worker issue requires a PR. For investigation-only or informational work that does not require repository changes, tell the worker to return findings or an answer without opening a PR unless the user explicitly requested one. A step that produces no PR is still a worker on the goal's issue, not a reason to create a second issue.
+Not every worker issue requires a PR. For an investigation-only or informational worker that needs no file, Git, dependency, shell-command, or remote mutation, set `workspace_mode: "shared_read_only"` explicitly and tell it to return findings or an answer. The kernel may run it in a validated existing main checkout shared with concurrent readers, and Pi enforces the contract by exposing only `read`, `grep`, `find`, and `ls`. Never use this mode for implementation, delivery, test/build commands that write artifacts, dependency setup, or an investigation that requires shell commands. Omit the field for those tasks: `isolated` is the default. If a later follow-up changes from investigation to implementation, spawn an isolated worker instead of prompting the read-only session to edit. A step that produces no PR is still a worker on the goal's issue, not a reason to create a second issue.
+
+A shared checkout request is safe to make even when availability is uncertain. The kernel validates that the checkout already exists, is readable, non-bare, registered, unlocked, and on `main` or `master`. A project registered at a bare common repository root (such as World) uses an existing linked main checkout only; the bare repository itself is never a worker cwd. If validation fails, if the checkout disappears before launch, or if the selected harness cannot enforce read-only tools, the persisted request remains `shared_read_only` but `effective_workspace_mode` is `isolated`, with `workspace_mode_fallback_reason` explaining why a normal worktree was allocated. Do not try to discover or pass a shared path through `workspace_path`. `after_command` gates (including one inside `completion_head`) are also incompatible because the kernel cannot prove an arbitrary shell predicate is non-mutating; use an isolated worker whenever a command is required.
 
 Never write a prompt that makes a worker wait by polling: no reading `~/.meringue/state.json` in a loop, no sleeping between checks, no multi-hour wait budgets, no `while ! gh pr view ...; do sleep` loops, and no reading another worker's workspace. The kernel owns sequencing and handover through `after_agent_id`/`after_from_command` for agents and `after_command` for external conditions. See "Chaining a worker after another agent", "Chaining a worker after a script or command", and "One goal, two steps: research then implementation".
 
@@ -761,7 +764,8 @@ Payload:
   "prompt": "Worker instructions",
   "model": "Optional provider/model-id override for this worker only",
   "thinking_level": "Optional off, minimal, low, medium, high, xhigh, or max override for this worker only",
-  "workspace_path": "Optional preselected workspace path",
+  "workspace_mode": "Optional isolated (default) or shared_read_only for a strictly non-mutating investigation/informational worker",
+  "workspace_path": "Optional preselected workspace path; incompatible with shared_read_only",
   "follow_up_of_agent_id": "Optional prior worker on this issue, or \"@<command_id>\" for a worker this batch spawns",
   "follow_up_of_command": "Optional SpawnWorker command id or index in this batch instead of follow_up_of_agent_id",
   "replace_agent_id": "Optional worker on this issue to replace after spawn",
@@ -795,6 +799,7 @@ Example:
     "issue_id": "P1-I1",
     "title": "Fix signup validation",
     "prompt": "Investigate the signup validation bug, make the smallest safe fix, and summarize verification.",
+    "workspace_mode": "isolated",
     "workspace_path": null,
     "follow_up_of_agent_id": null,
     "replace_agent_id": null

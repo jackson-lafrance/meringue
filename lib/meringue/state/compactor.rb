@@ -161,6 +161,7 @@ module Meringue
       def workspace_summary(workspace)
         plan = workspace["plan"].is_a?(Hash) ? workspace.fetch("plan") : {}
         fields = %w[workspace_path workspace_root_path worktree_root_path workspace_strategy workspace_branch
+                    workspace_mode effective_workspace_mode workspace_mode_fallback_reason
                     git_root base_ref failure_kind exit_status timed_out timeout_seconds recovery]
         result = fields.each_with_object({}) do |field, summary|
           # A failed resolver points the worker at the project root while the nested plan

@@ -439,6 +439,22 @@ class HeadContextTest < Minitest::Test
     assert_includes reference, "Never treat raw status/dependency lines as the answer"
   end
 
+  def test_head_can_explicitly_route_safe_investigations_to_shared_read_only_mode
+    context = build_head_context
+    rules = context.to_prompt_h.dig("routing_context", "decision_rules")
+    reference = File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md"))
+
+    rule = rules.find { |candidate| candidate.include?("SpawnWorker.workspace_mode") }
+    refute_nil rule
+    assert_includes rule, "shared_read_only"
+    assert_includes rule, "only read/grep/find/ls tools"
+    assert_includes rule, "Never choose this mode for implementation"
+    assert_includes rule, "spawn an isolated worker"
+    assert_includes reference, '`workspace_mode: "shared_read_only"`'
+    assert_includes reference, "effective_workspace_mode"
+    assert_includes reference, "bare common repository root"
+  end
+
   # Number-based labels hide which GitHub work an issue represents. The exact-title rule belongs
   # in the durable reference that every harness-backed head receives, for both issue and PR routes.
   def test_github_backed_issue_naming_uses_the_exact_relevant_github_title
