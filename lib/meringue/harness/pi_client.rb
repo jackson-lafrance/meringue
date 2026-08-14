@@ -715,28 +715,22 @@ module Meringue
       end
 
       # Quiesce the dashboard-owned RPC process before a native Pi interactive process is started.
-      # Pi cannot transfer a live turn between frontends. Aborting it here corrupts worker lifecycle
-      # evidence and can repeat partially completed tool work, so focus fails fast until the turn has
-      # naturally settled. A settled RPC process has no in-flight state to drain and can be stopped
-      # on a short bound before native Pi becomes the sole writer of the durable session.
+      # Pi cannot transfer a live provider request between frontends. Interactive focus prioritizes
+      # the user's immediate switch: snapshot already-available context, then stop the managed RPC
+      # process directly without waiting for an active prompt or tool call to settle. Native Pi
+      # resumes the durable transcript with an explicit, bounded continuation prompt.
       def prepare_interactive_session(session_ref)
-        current_ref = preserve_session_identity(get_state(session_ref), session_ref)
-        if current_ref.fetch("is_streaming", false)
-          raise SessionBusyError,
-                "Worker is still running a turn. Wait for it to settle before opening native Pi focus; the active turn was left untouched."
-        end
-
+        current_ref = session_ref
+        was_streaming = current_ref.fetch("is_streaming", false)
         events = read_events(current_ref)
+        rpc_ref = current_ref
+
         session_summary = safe_session_file_summary(current_ref)
         handoff_summary = bounded_handoff_summary(session_summary)
         handoff_intent = handoff_summary.fetch("last_user_text", nil) || latest_user_intent(events)
-        handoff_prompt = nil
-        # Validate the resumable session and construct the native command while RPC still owns the
-        # process. If Pi cannot identify a durable session, leave the dashboard writer untouched.
         replacement = nil
-        rpc_ref = current_ref
         begin
-          interactive_argv = interactive_session_argv(current_ref, handoff_prompt: handoff_prompt)
+          interactive_session_argv(current_ref, handoff_prompt: nil)
         rescue ProcessNotFoundError
           replacement = create_replacement_session_from_rpc(current_ref)
           handoff_intent = replacement.fetch("latest_user_intent", nil) unless present?(handoff_intent)
@@ -745,28 +739,45 @@ module Meringue
             "session_file" => replacement.fetch("session_file"),
             "metadata" => metadata_with(current_ref, "interactive_replacement" => replacement)
           )
-          interactive_argv = interactive_session_argv(current_ref, handoff_prompt: handoff_prompt)
         end
-        detached_ref = quiesce_interactive_rpc(rpc_ref).merge(
+
+        handoff_prompt = if was_streaming
+                           interactive_continuation_prompt(
+                             current_ref,
+                             events: events,
+                             latest_user_intent: handoff_intent,
+                             session_summary: handoff_summary
+                           )
+                         end
+        interactive_argv = interactive_session_argv(current_ref, handoff_prompt: handoff_prompt)
+        # Resolve environment/commit-identity policy before stopping RPC. If that validation fails,
+        # the settled managed process remains available for the kernel's rollback path.
+        interactive_env = process_environment(current_ref.fetch("cwd", Dir.pwd))
+        quiesced_ref = quiesce_interactive_rpc(rpc_ref)
+        detached_ref = quiesced_ref.merge(
           "session_id" => current_ref.fetch("session_id", nil),
           "session_file" => current_ref.fetch("session_file", nil),
           "pid" => nil,
           "is_streaming" => false,
           "metadata" => metadata_with(
-            current_ref,
-            "interactive_handoff_ready" => true,
-            "interactive_handoff_prompt" => handoff_prompt,
-            "interactive_handoff_event_count" => events.length,
-            "killed" => nil,
-            "kill_note" => nil
-          ).compact
+            quiesced_ref,
+            (current_ref.fetch("metadata", {}) || {}).merge(
+              "interactive_handoff_ready" => true,
+              "interactive_handoff_prompt" => handoff_prompt,
+              "interactive_handoff_event_count" => events.length,
+              "interactive_turn_interrupted" => was_streaming,
+              "interactive_interruption_method" => was_streaming ? "process_termination" : nil,
+              "killed" => nil,
+              "kill_note" => nil
+            ).compact
+          )
         )
         {
           "session_ref" => detached_ref,
           "interactive_argv" => interactive_argv,
-          "interactive_env" => process_environment(detached_ref.fetch("cwd", Dir.pwd)),
+          "interactive_env" => interactive_env,
           "handoff" => interactive_handoff_metadata(
-            was_streaming: false,
+            was_streaming: was_streaming,
             events: events,
             prompt: handoff_prompt,
             latest_user_intent: handoff_intent,
@@ -857,7 +868,25 @@ module Meringue
       attr_reader :transport_ownership, :takeover_settle_timeout
 
       def quiesce_interactive_rpc(session_ref)
-        process = process_for_session(session_ref)
+        process = process_for_session(session_ref, required: false)
+        unless process
+          if unmanaged_process_alive?(session_ref)
+            raise SessionTransportUnavailableError,
+                  "Refusing native interactive focus while another live Pi process still owns this session"
+          end
+
+          release_transport(session_ref, pid: session_ref.fetch("pid", nil))
+          return session_ref.merge(
+            "pid" => nil,
+            "is_streaming" => false,
+            "metadata" => metadata_with(
+              session_ref,
+              "interactive_rpc_quiesced" => true,
+              "interactive_rpc_already_stopped" => true
+            )
+          )
+        end
+
         process.terminate(timeout: INTERACTIVE_RPC_SHUTDOWN_TIMEOUT)
         unregister_process(process)
         release_transport(session_ref, pid: process.pid)
@@ -1420,6 +1449,35 @@ module Meringue
         end.join("\n").strip
       end
 
+      def interactive_continuation_prompt(session_ref, events:, latest_user_intent:, session_summary:)
+        context = session_ref.dig("metadata", "interactive_handoff", "context")
+        context = {} unless context.is_a?(Hash)
+        progress = PiSessionView.progress_items(events).last(10).filter_map do |item|
+          text = item.is_a?(Hash) ? item["text"] : nil
+          bounded_handoff_text(text, 2_000) if present?(text)
+        end
+
+        sections = [
+          "Meringue interrupted the dashboard-managed turn because the user requested native interactive focus. " \
+          "Continue the same task in this existing workspace and session. Inspect the transcript and current files " \
+          "before repeating tool calls; work completed before the interruption may already be present."
+        ]
+        issue_line = [context["issue_id"], context["issue_title"]].compact.map(&:to_s).reject(&:empty?).join(" — ")
+        sections << "Current issue: #{bounded_handoff_text(issue_line, 1_000)}" unless issue_line.empty?
+        sections << "Issue description:\n#{bounded_handoff_text(context["issue_description"], 4_000)}" if present?(context["issue_description"])
+        sections << "Original worker assignment:\n#{bounded_handoff_text(context["assignment"], 6_000)}" if present?(context["assignment"])
+        sections << "Latest user intent in the saved transcript:\n#{bounded_handoff_text(latest_user_intent, 3_000)}" if present?(latest_user_intent)
+        sections << "Last durable assistant text before interruption:\n#{bounded_handoff_text(session_summary["last_assistant_text"], 3_000)}" if present?(session_summary["last_assistant_text"])
+        sections << "Recent in-memory assistant progress before interruption:\n#{progress.join("\n")}" unless progress.empty?
+        workspace = [context["workspace_path"], context["workspace_branch"]].compact.map(&:to_s).reject(&:empty?).join(" on branch ")
+        sections << "Workspace continuity: #{bounded_handoff_text(workspace, 2_000)}" unless workspace.empty?
+        sections.join("\n\n")
+      end
+
+      def bounded_handoff_text(value, bytes)
+        value.to_s.byteslice(0, bytes).to_s.scrub.strip
+      end
+
       def interactive_session_argv(session_ref, handoff_prompt: nil)
         session = resume_session_argument(session_ref)
         argv = Array(command).map(&:to_s)
@@ -1436,9 +1494,10 @@ module Meringue
         progress = PiSessionView.progress_items(events)
         {
           "mode" => "native_interactive",
-          "transfer" => "settled_session",
-          "exact_stream_transfer" => true,
+          "transfer" => was_streaming ? "interrupted_turn" : "settled_session",
+          "exact_stream_transfer" => !was_streaming,
           "was_streaming" => !!was_streaming,
+          "interruption_method" => was_streaming ? "process_termination" : nil,
           "prompt" => prompt,
           "latest_user_intent" => latest_user_intent,
           "session_file_summary" => session_summary,
