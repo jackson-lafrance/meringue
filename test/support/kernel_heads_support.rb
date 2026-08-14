@@ -243,13 +243,13 @@ class KernelHeadsTestCase < Minitest::Test
     )
   end
 
-  def head_result(commands: [], questions: [], title: "Route the request", summary: "Routing summary.")
+  def head_result(commands: [], questions: [], title: "Route the request", summary: "Routing summary.", response: nil)
     {
       "title" => title,
       "summary" => summary,
       "commands" => commands,
       "questions" => questions
-    }
+    }.tap { |result| result["response"] = response unless response.nil? }
   end
 
   def create_issue_command(project_id:, title:, description: nil, command_id: nil)

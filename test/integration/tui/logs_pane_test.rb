@@ -113,6 +113,26 @@ class TuiLogsPaneTest < Minitest::Test
     assert_includes styles_in(kernel_body), Style::ERROR
   end
 
+  def test_plain_head_response_renders_as_conversational_markdown
+    logs = [
+      log_record(
+        "L1",
+        "source_type" => "head",
+        "source_id" => "H7",
+        "message" => "## Why they wait\n\n- the workers depend on W1",
+        "details" => { "kind" => "head_response" }
+      )
+    ]
+    state = composed_state(empty_state.merge("logs" => logs, "agents" => [agent_record("H7", "type" => "head")]))
+    lines = @pane.log_lines(state, width: 70)
+    rendered = plain_lines(lines).join("\n")
+
+    assert_includes rendered, "Why they wait"
+    assert_includes rendered, "• the workers depend on W1"
+    refute_includes rendered, "- the workers depend on W1"
+    assert(lines.any? { |line| styles_in(line).include?(Style.agent_body_style("H7")) })
+  end
+
   def test_head_and_worker_headers_use_distinct_kind_styles
     lines = @pane.log_lines(mixed_state, width: 70)
     head_line = lines.find { |line| plain_line(line).include?("◆ H1") }

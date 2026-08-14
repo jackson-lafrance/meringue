@@ -202,6 +202,8 @@ class HeadRunnerParityTest < Minitest::Test
 
     spawned = client.spawned.first
     assert_includes spawned.fetch("prompt"), "Meringue head context JSON:"
+    assert_includes spawned.fetch("prompt"), "direct user-facing response"
+    assert_includes spawned.fetch("prompt"), "informational synthesis to workers"
     context_json = JSON.parse(spawned.fetch("prompt")[spawned.fetch("prompt").index("{")..])
     assert_equal "keep the existing branch", context_json.fetch("user_message")
     assert_equal "Q4", context_json.fetch("question_id")

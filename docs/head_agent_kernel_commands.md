@@ -2,11 +2,11 @@
 
 This file is appended to every newly spawned head agent context. It is the compact command contract a head uses to propose orchestration work back to the Meringue kernel.
 
-Heads must return structured JSON only. They must not edit files, mutate Meringue state directly, invoke harness sessions themselves, or deliver substantive task answers directly to the user. They propose commands; the Ruby kernel validates commands, applies accepted commands, and emits logs.
+Heads must return structured JSON only. They must not edit files, mutate Meringue state directly, or invoke harness sessions themselves. They may return plain user-visible text in `HeadResult.response` when no command, clarification, or substantive investigation is needed. Otherwise they propose commands; the Ruby kernel validates commands, applies accepted commands, and emits logs.
 
-Heads may inspect local project metadata only to choose the right project, issue, and worker routing. For investigation, implementation, and informational work, create/reuse an issue and spawn or prompt a worker/agent. Use the HeadResult summary to explain orchestration decisions, not to answer the underlying task.
+Heads may inspect local project metadata only to choose the right project, issue, and worker routing. They must not perform substantive investigation. For implementation, investigation, or informational work that requires inspecting or synthesizing records, logs, prompts, dependencies, project files, or external facts beyond supplied routing context, create/reuse an issue and spawn or prompt a worker. Use `summary` to explain the routing decision and `response` for an actual direct answer; a nonblank response is handled without `NoOp`.
 
-Meringue housekeeping is the exception to "route it to a worker": every user slash command that maps to a kernel command is also proposable by a head. When the user asks for maintenance the kernel already owns, propose that command instead of creating an issue or spawning a worker.
+Meringue housekeeping is the other exception to "route it to a worker": every user slash command that maps to a kernel command is also proposable by a head. When the user asks for maintenance the kernel already owns, propose that command instead of creating an issue or spawning a worker.
 
 ## User commands a head may run
 
@@ -20,7 +20,7 @@ Natural-language mapping:
 | "renumber the tree", "recount the ids", "compact the ids after cleanup" | `Recount` with an empty payload |
 | "kill that goal and its worker" | `Kill` with the `G<n>` id |
 | "kill P1-I9-W3", "stop that worker", "kill issue P1-I9" | `Kill` with `target_id` |
-| "what is P1-I12", "details on P1-I2-W1", "status of Q3" | `GetInfo` with `target_id` |
+| "what is P1-I12", "details on P1-I2-W1", "show the status fields for Q3" | `GetInfo` with `target_id` |
 | "show me the tree", "list everything" | `ListAll` |
 | "show the raw state" | `GetState` |
 | "list the questions" | `ListQuestions` |
@@ -43,8 +43,18 @@ Natural-language mapping:
 | "use high thinking for future Pi agents" | `SetDefaultSessionThinkingLevel` |
 | "show P1-I9-W3's model/thinking settings" | `GetInfo` with `target_id` (the agent record carries `session_settings`; there is no per-session settings command) |
 | "resync/reconcile the sessions" | `ReconcileSessions` |
-| "this is already done", "no change is needed", "the existing issue already covers it" | `NoOp` with a concise `reason` |
+| "this is already done", "no change is needed", "the existing issue already covers it" | Usually a plain `response` explaining why no action is needed; `NoOp` remains available for explicit command-level no-op bookkeeping |
 | "clear the state", "reset meringue", "wipe everything" | `ClearState`, but only under the confirmation rules below |
+
+### Direct answers versus informational work
+
+Classify an informational message by what it takes to answer, not by whether it contains an id or the word “status”:
+
+- **Direct record detail:** if the user asks to retrieve one record's fields or raw status, propose `GetInfo`. Examples: “What is P6-I22-W1?”, “Show P6-I22-W1's status”, and “Which model is P6-I22-W1 using?”
+- **Direct answer:** if the answer is already established by supplied context or stable Meringue behavior and needs no command or substantive inspection, put the actual answer in `response`. This includes conversational replies and simple explanations of documented UI terminology. Do not add `NoOp` merely to make the result look routed.
+- **Investigated explanation or synthesis:** if a truthful answer requires examining several records, dependency origins, logs, worker prompts/results, project files, or external facts, create/reuse the best matching issue and spawn or prompt an informational worker. Tell that worker to return findings without a PR unless the user requested repository changes.
+
+The H177 regression is the boundary case: **“Why are several workers waiting on P6-I22-W1?” is not a direct `GetInfo` request.** `GetInfo` can print each status and `after_agent_id`, but it cannot establish the causal reason those dependencies were created. Route an informational worker to inspect the relevant dependency origins and synthesize the explanation. In contrast, “What is P6-I22-W1?” is exactly a `GetInfo` request. Never treat raw status/dependency lines as the answer to a why/how/what-caused question.
 
 `/jump`, `/prs`, `/keybind`, `/open-session`, and `/quit` are local TUI commands with no kernel command, and the focused-workspace commands (`/terminal`, `/filter`, `/session`, `/editor`, `/pr`, `/cwd`, `/cancel`) are local to a worker workspace pane. A head cannot run those; explain that in the summary or ask the user to run them directly.
 
@@ -102,16 +112,20 @@ Every head result must match this shape:
 ```json
 {
   "title": "Short display title",
-  "summary": "Short user-visible summary",
+  "summary": "Short description of the head's decision",
+  "response": "Optional plain user-visible answer",
   "commands": [],
   "questions": []
 }
 ```
 
 - `title`: short label for the head while it appears in the AgentTree.
-- `summary`: concise explanation of what the head decided.
+- `summary`: concise explanation of what the head decided; this is routing metadata, not the substantive answer.
+- `response`: optional plain user-visible text. Use it when the head can answer without a command or substantive investigation. A nonblank response is logged/rendered as head output and counts as handled even when both arrays are empty.
 - `commands`: array of kernel command envelopes.
 - `questions`: array of clarifying question objects when ambiguity would likely cause bad work.
+
+`title`, `summary`, `commands`, and `questions` remain required. `response` is optional for compatibility with command-only results. An omitted or blank response with no commands and no questions is still an empty, unrouted result and produces recovery guidance.
 
 Express each clarification exactly once. Put it in `questions`, or send one `AskQuestion` command for it, but do not restate the same clarification in both places. The `questions` array is the preferred form and is recorded first. If a head does restate one clarification twice, the kernel records it once: a repeated or reworded restatement from the same head resolves to the already stored question instead of creating a second question and a second chat log line. Genuinely different clarifications are still stored separately, so list every distinct question you need.
 
@@ -159,7 +173,7 @@ Issue and worker selection rules for the MVP:
 - Never prompt a worker from a different issue. If multiple issues or workers are plausible, ask a clarifying question instead of guessing.
 - Do not create nested/subissues for ordinary follow-up prompts. Set `parent_issue_id` to `null` unless the user explicitly asks for a child issue hierarchy.
 - Give each `SpawnWorker` a short action-oriented `title`; this is what appears under the issue in the AgentTree.
-- Do not answer implementation, investigation, or informational prompts directly in the head summary. Route that work to a worker instead. If current state shows the request is already satisfied and no worker needs to run, propose one `NoOp` command with a specific `reason`; do not return an empty command list unless you are asking a question.
+- Never put a substantive answer in `summary`. Put a direct answer in `response` only when supplied context or stable Meringue behavior already supports it without investigation. Route implementation, investigation, and informational synthesis to a worker. If no command or question is needed, a nonblank `response` is the complete handled result; do not add `NoOp` just to avoid an empty command list.
 
 When proposing a worker flow for an already registered project:
 
@@ -456,7 +470,7 @@ Example:
 
 ### NoOp
 
-Marks a deliberate no-work result. Use this when current state already satisfies the user's request and no issue, worker, prompt, maintenance command, or question is needed. This is different from returning an empty command list: an empty list with no questions is treated as suspicious/unrouted and produces a warning.
+Marks deliberate command-level no-op bookkeeping. Heads no longer need this merely to make a no-work response look routed: when current context already answers the user and no action is needed, return the explanation in `response`. A result with no commands or questions is handled when `response` is nonblank; only a result with all three empty is suspicious/unrouted.
 
 Payload:
 
@@ -528,7 +542,7 @@ The project naming contract above applies here: propose `"Meringue"`, never `"Me
 
 ### GetInfo
 
-Returns detailed information for a project, issue, agent, question, or goal, plus that record's recent log lines. Use it for read-only "what is P1-I12", "status of Q3", or "what is G1" questions instead of spawning a worker. An issue also returns the goal loops attached to it. The kernel writes the loaded record summary to the visible log.
+Returns detailed information for a project, issue, agent, question, or goal, plus that record's recent log lines. Use it for direct record-detail requests such as "what is P1-I12", "show Q3's status fields", or "what is G1" instead of spawning a worker. Do **not** use it as the sole answer to causal or synthesized questions such as "why are several workers waiting on P6-I22-W1?"; route an informational worker when the supplied context does not already establish the explanation. An issue also returns the goal loops attached to it. The kernel writes the loaded record summary to the visible log.
 
 Payload:
 
@@ -616,7 +630,7 @@ Validates and applies the structured result from a completed head. Head agents s
 
 The kernel applies each head command batch exactly once. It journals every command with its result and holds a refreshed apply lease on the head while it works, so a reconciliation pass or a second Meringue process sharing the same state file resumes only the commands that never completed instead of re-running the batch. Do not resend a batch to force progress, and do not repeat a command that was already accepted.
 
-If a head intentionally finds no work to route because the request is already satisfied, include one `NoOp` command with a concrete `reason`. An empty `commands` array with no questions is treated as suspicious/unrouted and produces a warning; `NoOp` makes deliberate no-work accepted and logged at info level.
+If no work needs routing because the request is already satisfied, put the explanation in `response`; do not add `NoOp` solely to satisfy the command journal. A nonblank response with empty commands and questions is accepted, logged as `head_response`, rendered as conversational head output, and considered handled. Only a result with no commands, no questions, and no nonblank response is suspicious/unrouted.
 
 Payload:
 
@@ -625,7 +639,8 @@ Payload:
   "head_id": "H1",
   "head_result": {
     "title": "Short display title",
-    "summary": "Short summary",
+    "summary": "Short decision summary",
+    "response": "Optional direct answer",
     "commands": [],
     "questions": []
   }

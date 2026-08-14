@@ -188,8 +188,8 @@ More than one Meringue instance can share one state file, so kernel state sectio
 ## Heads
 We will be following a similar pattern to the node.js event loop
 Where users should never be blocked from sending a prompt.
-Heads should be stateless, spawning a new one for each user message and killing them after each completion
-They should not modify files themselves, investigate substantive tasks, or return substantive answers directly to the user. They may do limited read-only project/routing discovery and must return structured KERNEL commands that create/reuse issues, spawn/prompt workers for investigation, implementation, and informational work, or ask clarifying questions.
+Heads should be stateless, spawning a new one for each user message and killing them after each completion.
+They should not modify files themselves or investigate substantive tasks. They may answer directly in the structured `HeadResult.response` field when no command, clarification, or substantive investigation is needed and supplied context or stable Meringue behavior already supports the answer. Otherwise they use structured KERNEL commands to create/reuse issues, spawn/prompt workers for investigation, implementation, and informational synthesis, run direct kernel maintenance/lookups, or ask clarifying questions.
 
 If a head is unsure of a users request, they can ask a question to them, but they will still be killed.  
 Instead this question and its prior prompt/thought process will be stored in json for a future head agent whenever the user so chooses to answer that question.
@@ -239,7 +239,7 @@ Do not introduce a parallel conversation-history model merely to route follow-up
 ### Head project discovery
 Project discovery is a head responsibility, not a kernel responsibility.
 
-Heads may inspect the local machine with read-only tools before returning their JSON result. This is how they should understand local projects, git repositories, remotes, and working directories well enough to choose an existing project or propose `AddProject`; it is not permission to perform the user's requested investigation or deliver the answer directly.
+Heads may inspect the local machine with read-only tools before returning their JSON result. This is how they should understand local projects, git repositories, remotes, and working directories well enough to choose an existing project or propose `AddProject`; it is not permission to perform the user's requested substantive investigation. Direct `response` answers must rely on supplied context or stable Meringue behavior, not on expanding routing discovery into task work.
 
 Allowed head discovery examples:
 - `pwd`
@@ -267,7 +267,7 @@ The kernel spawns that session as part of `SpawnHead`, records the generic sessi
 
 The kernel is the only layer that opens or closes head sessions. It tears the session down and marks it `released` when the head result is applied, when the head errors, when the head is killed, and when the head record leaves active state. Reconciliation therefore treats a live head session like any other tracked harness session, and never treats a released head session as live work.
 
-This does not change head semantics: heads still route one user message, still return only the `HeadResult` JSON contract, and are still killed after their result is applied.
+This does not change head lifecycle semantics: heads still handle one user message, still return only the `HeadResult` JSON contract, and are still killed after their result is applied. Handling may be a direct `response` when orchestration is unnecessary.
 
 ### Head result format
 Heads should return structured JSON only.
@@ -277,20 +277,21 @@ Shape:
 ```json
 {
   "title": "Short display title",
-  "summary": "Short user-visible summary",
+  "summary": "Short description of the head's decision",
+  "response": "Optional plain user-visible answer",
   "commands": [],
   "questions": []
 }
 ```
 
-The Ruby kernel validates this output before applying it.
+The Ruby kernel validates this output before applying it. `response` is optional; a nonblank response is logged/rendered as head output and counts as handled without a command or `NoOp`. `summary` describes the decision and is not the substantive answer.
 The `commands` array should contain structured kernel commands, not prose instructions.
 The `questions` array should contain clarifying questions only when ambiguity would likely cause bad work.
 
 ### Head-proposed user commands
 Every user-facing slash command that maps to a kernel command is also proposable by a head, with the same validation, exactly-once journaling, logging, and user-visible output as the typed path. "prune the merged issues" should become `Prune`, "renumber the tree" `Recount`, "kill P1-I9-W3" `Kill`, "what is P1-I12" `GetInfo`. Only kernel/parser internals (`ApplyHeadResult`, `InvalidSlashCommand`) and local TUI commands (`/jump`, `/keybind`, `/quit`) are not proposable.
 
-The kernel's own command output is what the user reads, so a head summary should explain the decision instead of restating kernel output.
+The kernel's own command output is what the user reads, so a head summary should explain the decision instead of restating kernel output. For non-command answers, the user reads `response`, not `summary`.
 
 Destructive commands are guarded by the kernel, not by prompt guidance alone:
 - Ordinary housekeeping (`Prune`, `Recount`, `DismissQuestion`, `ModifyIssue`, `Kill` on a worker or issue) needs only a clear user request.
@@ -433,7 +434,7 @@ Slash command    -> command parser    -> KernelCommand[]
                                       -> TUI rerenders
 ```
 
-Heads should not directly edit Meringue JSON state or project files. They propose commands. Workers may edit assigned project files through their harness sessions.
+Heads should not directly edit Meringue JSON state or project files. They propose commands or return a direct `HeadResult.response` when no orchestration or investigation is needed. Workers may edit assigned project files through their harness sessions.
 
 ## Goal loops
 Some user goals are not "do this task" but "keep working until this measurable criterion is met".
@@ -637,7 +638,7 @@ Registers a project root with Meringue.
 The kernel should validate that `Path` exists and is a directory. The returned project should have an id like `P1`.
 
 ### `GetInfo(TargetID) -> Project | Issue | Agent | Question`
-Returns detailed information about a project, issue, agent, or question.
+Returns detailed information about a project, issue, agent, or question. Use it for direct record-detail requests, not as raw output standing in for a causal or synthesized explanation. A question such as "why are several workers waiting on P6-I22-W1?" requires either a direct `response` when supplied context establishes the reason or an informational worker when substantive inspection/synthesis is needed.
 
 For agents, include harness metadata, recent logs, status, session file, and recent assistant/user messages when available.
 
@@ -655,7 +656,8 @@ Validates and applies commands proposed by a head.
 
 The head result should include:
 - `title`: short display title for the head in the AgentTree
-- `summary`: short user-visible summary
+- `summary`: short description of the head's decision
+- `response`: optional plain user-visible answer when no substantive investigation is needed
 - `commands`: structured kernel commands
 - `questions`: optional clarifying questions
 
