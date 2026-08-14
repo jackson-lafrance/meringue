@@ -260,7 +260,7 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_equal attached.fetch("pid"), ownership.record_for("pi-sess-1").fetch("pid")
   end
 
-  def test_prepare_interactive_session_preempts_an_active_turn_and_preserves_continuation_context
+  def test_prepare_interactive_session_aborts_and_settles_a_pending_tool_turn_before_handoff
     progress = {
       "type" => "message_end",
       "message" => {
@@ -276,40 +276,104 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
         "startup_events" => [progress]
       }
     )
-    session_file = pi_session_file(tmpdir, session_id: "sess-1")
+    session_file = pi_session_file(tmpdir, session_id: "sess-1", completed: false)
     ref = pi_session_ref(session_file: session_file, cwd: tmpdir)
     ref.fetch("metadata")["interactive_handoff"] = {
       "context" => {
         "issue_id" => "P6-I24",
-        "issue_title" => "Allow interactive focus to preempt a turn",
-        "assignment" => "Implement preemptive native focus without losing progress.",
+        "issue_title" => "Coordinate native focus handoff",
+        "assignment" => "Preserve active work while changing focus ownership.",
         "workspace_path" => tmpdir,
-        "workspace_branch" => "focus-preemption"
+        "workspace_branch" => "focus-handoff"
       }
     }
     managed = client.attach_session(ref)
     @harness_sessions << [client, managed]
 
-    started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     prepared = client.prepare_interactive_session(managed)
-    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
 
-    assert_operator elapsed, :<, 0.75
-    assert_empty stub_commands_of_type(stub, "abort"), "focus must not wait for an abort/settle round trip"
-    refute process_alive?(managed.fetch("pid")), "the interrupted RPC writer must exit before native Pi launches"
+    assert_equal 1, stub_commands_of_type(stub, "abort").length
+    refute process_alive?(managed.fetch("pid")), "the settled RPC writer must exit before native focus launches"
     assert_equal false, prepared.fetch("session_ref").fetch("is_streaming")
     assert_nil prepared.fetch("session_ref").fetch("pid")
     assert_equal true, prepared.dig("handoff", "was_streaming")
+    assert_equal true, prepared.dig("handoff", "continuation_required")
     assert_equal false, prepared.dig("handoff", "exact_stream_transfer")
-    assert_equal "interrupted_turn", prepared.dig("handoff", "transfer")
-    assert_equal "process_termination", prepared.dig("handoff", "interruption_method")
+    assert_equal "coordinated_turn_abort", prepared.dig("handoff", "transfer")
+    assert_equal "rpc_abort", prepared.dig("handoff", "interruption_method")
+    assert_equal "incomplete", prepared.dig("handoff", "turn_checkpoint", "state")
+    assert_equal "toolUse", prepared.dig("handoff", "turn_checkpoint", "stop_reason")
     continuation = prepared.dig("handoff", "prompt")
-    assert_includes continuation, "P6-I24 — Allow interactive focus to preempt a turn"
-    assert_includes continuation, "Implement preemptive native focus without losing progress."
+    assert_includes continuation, "P6-I24 — Coordinate native focus handoff"
+    assert_includes continuation, "Preserve active work while changing focus ownership."
     assert_includes continuation, "Found the race in the ownership transfer."
     assert_includes continuation, tmpdir
     assert_equal continuation, prepared.fetch("interactive_argv").last
     assert_includes prepared.fetch("interactive_argv").each_cons(2).to_a, ["--session", session_file]
+  end
+
+  def test_failed_active_turn_abort_leaves_the_managed_writer_and_ownership_untouched
+    client, stub = build_pi_client(
+      tmpdir,
+      stub_config: {
+        "session_id" => "sess-1",
+        "is_streaming" => true,
+        "fail_commands" => { "abort" => "tool cancellation refused" }
+      }
+    )
+    session_file = pi_session_file(tmpdir, session_id: "sess-1", completed: false)
+    managed = client.attach_session(pi_session_ref(session_file: session_file, cwd: tmpdir))
+    @harness_sessions << [client, managed]
+
+    error = assert_raises(PiClient::RpcError) { client.prepare_interactive_session(managed) }
+
+    assert_includes error.message, "tool cancellation refused"
+    assert process_alive?(managed.fetch("pid")), "failed coordination must not terminate the active writer"
+    assert_equal 1, stub_commands_of_type(stub, "abort").length
+  end
+
+  def test_dashboard_return_automatically_continues_when_native_focus_has_no_new_final_result
+    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-1", "is_streaming" => true })
+    session_file = pi_session_file(tmpdir, session_id: "sess-1", completed: false)
+    managed = client.attach_session(pi_session_ref(session_file: session_file, cwd: tmpdir))
+    @harness_sessions << [client, managed]
+    prepared = client.prepare_interactive_session(managed)
+
+    resumed = client.resume_dashboard_session(prepared.fetch("session_ref"), handoff: prepared.fetch("handoff"))
+    @harness_sessions << [client, resumed]
+
+    prompts = stub_commands_of_type(stub, "prompt") + stub_commands_of_type(stub, "follow_up")
+    assert_equal [prepared.dig("handoff", "prompt")], prompts.map { |command| command.fetch("message") }
+    assert_equal true, resumed.fetch("is_streaming")
+    assert_equal "started", resumed.dig("metadata", "interactive_dashboard_continuation")
+  end
+
+  def test_dashboard_return_does_not_repeat_a_continuation_that_finished_in_native_focus
+    client, stub = build_pi_client(tmpdir, stub_config: { "session_id" => "sess-1", "is_streaming" => true })
+    session_file = pi_session_file(tmpdir, session_id: "sess-1", completed: false)
+    managed = client.attach_session(pi_session_ref(session_file: session_file, cwd: tmpdir))
+    @harness_sessions << [client, managed]
+    prepared = client.prepare_interactive_session(managed)
+    File.open(session_file, "a") do |file|
+      file.puts(JSON.generate(
+        "type" => "message",
+        "id" => "native-final",
+        "parentId" => "m2",
+        "timestamp" => "2026-01-01T00:00:03Z",
+        "message" => {
+          "role" => "assistant",
+          "content" => [{ "type" => "text", "text" => "Finished safely in native focus." }],
+          "stopReason" => "endTurn"
+        }
+      ))
+    end
+
+    resumed = client.resume_dashboard_session(prepared.fetch("session_ref"), handoff: prepared.fetch("handoff"))
+    @harness_sessions << [client, resumed]
+
+    assert_empty stub_commands_of_type(stub, "prompt")
+    assert_empty stub_commands_of_type(stub, "follow_up")
+    refute_equal "started", resumed.dig("metadata", "interactive_dashboard_continuation")
   end
 
   def test_prepare_interactive_session_opens_a_settled_resumable_session_with_no_rpc_process
