@@ -409,6 +409,36 @@ class HeadContextTest < Minitest::Test
     assert_includes prompt, File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md")).lines.first.strip
   end
 
+  # H177 asked for a causal explanation across several dependency records. The old contract's
+  # broad "status -> GetInfo" example caused the head to dump raw fields instead of answering.
+  def test_informational_routing_distinguishes_direct_lookup_response_and_investigation
+    context = build_head_context
+    prompt = context.system_prompt
+    rules = context.to_prompt_h.dig("routing_context", "decision_rules")
+    reference = File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md"))
+
+    lookup_rule = rules.find { |rule| rule.include?("First distinguish direct record retrieval") }
+    response_rule = rules.find { |rule| rule.include?("HeadResult response field") }
+    incident_rule = rules.find { |rule| rule.include?("Why are several workers waiting on P6-I22-W1?") }
+
+    refute_nil lookup_rule
+    assert_includes lookup_rule, "Use GetInfo only"
+    assert_includes lookup_rule, "why/how/what-caused"
+    refute_nil response_rule
+    assert_includes response_rule, "with no NoOp required"
+    assert_includes response_rule, "informational worker"
+    refute_nil incident_rule
+    assert_includes incident_rule, "Spawn or prompt an informational worker"
+    assert_includes incident_rule, "do not propose GetInfo alone"
+    assert_includes incident_rule, "What is P6-I22-W1?"
+
+    assert_includes prompt, "HeadResult \"response\" field"
+    assert_includes prompt, "A nonblank response is a handled result and needs no NoOp"
+    assert_includes reference, "Direct answers versus informational work"
+    assert_includes reference, "Why are several workers waiting on P6-I22-W1?"
+    assert_includes reference, "Never treat raw status/dependency lines as the answer"
+  end
+
   # Number-based labels hide which GitHub work an issue represents. The exact-title rule belongs
   # in the durable reference that every harness-backed head receives, for both issue and PR routes.
   def test_github_backed_issue_naming_uses_the_exact_relevant_github_title

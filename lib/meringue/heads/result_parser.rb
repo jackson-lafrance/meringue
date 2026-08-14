@@ -22,6 +22,7 @@ module Meringue
         "properties" => {
           "title" => { "type" => "string" },
           "summary" => { "type" => "string" },
+          "response" => { "type" => "string" },
           "commands" => {
             "type" => "array",
             "items" => {
@@ -127,6 +128,7 @@ module Meringue
         if result.is_a?(Hash)
           errors << "title must be a string" unless result["title"].is_a?(String)
           errors << "summary must be a string" unless result["summary"].is_a?(String)
+          errors << "response must be a string" if result.key?("response") && !result["response"].is_a?(String)
           validate_commands(result["commands"], errors)
           validate_questions(result["questions"], errors)
         end

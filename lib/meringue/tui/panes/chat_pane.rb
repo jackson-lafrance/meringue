@@ -1165,7 +1165,7 @@ module Meringue
           return true if entry.fetch("presentation", nil) == "result"
 
           details = entry.fetch("details", {}) || {}
-          details.is_a?(Hash) && details.fetch("kind", nil).to_s == "head_summary"
+          details.is_a?(Hash) && %w[head_summary head_response].include?(details.fetch("kind", nil).to_s)
         end
 
         def body_text_style(entry)

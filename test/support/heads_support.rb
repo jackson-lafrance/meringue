@@ -326,6 +326,7 @@ module HeadsSupport
 
   def head_result(title: "Routed the request",
                   summary: "Reused the existing issue and prompted its worker.",
+                  response: nil,
                   commands: [],
                   questions: [])
     {
@@ -333,7 +334,7 @@ module HeadsSupport
       "summary" => summary,
       "commands" => commands,
       "questions" => questions
-    }
+    }.tap { |result| result["response"] = response unless response.nil? }
   end
 
   def kernel_command(type, payload = {})

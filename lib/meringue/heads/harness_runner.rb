@@ -112,9 +112,9 @@ module Meringue
           Return only a JSON object matching the Meringue HeadResult contract.
 
           The kernel command reference has already been appended to your system prompt.
-          Use the context JSON below to decide which kernel command to propose.
+          Use the context JSON below to decide whether to return a direct user-facing response, ask a question, or propose kernel commands.
           When the project is unclear, use your read-only tools to inspect local repositories before returning the final JSON.
-          Do not investigate the substantive task or answer the user directly; route investigation, implementation, and informational work to workers through kernel commands.
+          Answer directly in HeadResult.response only when no substantive investigation or orchestration is needed. Route investigation, implementation, and informational synthesis to workers through kernel commands.
 
           Meringue head context JSON:
           #{JSON.pretty_generate(context.to_prompt_h)}

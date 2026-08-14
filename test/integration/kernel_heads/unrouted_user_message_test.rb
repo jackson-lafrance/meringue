@@ -98,6 +98,27 @@ class KernelHeadsUnroutedUserMessageTest < KernelHeadsTestCase
     assert_equal "please colour the working rows too", entry.fetch("details").fetch("user_message")
   end
 
+  def test_a_plain_head_response_is_handled_without_a_command_no_op_or_unrouted_warning
+    head_id = spawn_head!("Thanks, that answers it")
+
+    result = apply_head_result(
+      head_id,
+      head_result(
+        summary: "Acknowledged the user directly.",
+        response: "You're welcome — no further action is needed.",
+        commands: [],
+        questions: []
+      ),
+      cleanup_head: false
+    )
+
+    assert_empty command_results(result)
+    assert_nil unrouted_log, "a nonblank response handles the message without a NoOp"
+    assert_equal "completed", find_agent_record(head_id).fetch("status")
+    assert_includes log_messages, "You're welcome — no further action is needed."
+    refute log_messages.any? { |message| message.include?("intentionally routed no work") }
+  end
+
   def test_a_long_user_message_is_excerpted_in_the_log_line_but_kept_whole_in_details
     long_message = "colour the rows " * 40
     head_id = spawn_head!(long_message)
