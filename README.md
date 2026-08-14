@@ -39,7 +39,7 @@ Meringue provides a single control plane for multi-agent development:
 - **A kernel-owned state model.** The kernel validates commands, mutates JSON state, allocates worker workspaces, and records logs.
 - **An AgentTree view.** Projects, issues, heads, workers, questions, and PR markers are shown in a filesystem-like hierarchy. Every agent row carries its own identity color and its harness logo, in every status, and the same color follows that agent into the logs pane and the chat composer.
 - **Structured logs.** Important lifecycle events are captured without flooding the UI with every streamed token.
-- **Safe parallelism.** For git-backed projects, workers should run in dedicated worktrees and branches so multiple agents can edit safely at once. Sequential steps of one goal are the exception: a worker that continues a settled predecessor's work carries on in that worktree and branch, so one goal delivers one branch and one PR.
+- **Safe parallelism.** For git-backed projects—even when the registered root is a bare common repository—workers run in dedicated editable worktrees and branches. Candidate ownership is reserved across processes and revalidated before launch; collisions are reallocated rather than shared. Sequential steps of one goal are the exception: a worker that continues a settled predecessor's work carries on in that worktree and branch, so one goal delivers one branch and one PR.
 
 ## How Meringue coordinates work
 

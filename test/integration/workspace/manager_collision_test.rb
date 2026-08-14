@@ -8,6 +8,20 @@ require "support/workspace_support"
 class WorkspaceManagerCollisionTest < Minitest::Test
   include WorkspaceSupport
 
+  # Forces independent workers onto the same preferred candidate so ownership—not the normal
+  # agent-id hash in the name—is what must prevent adoption. This reproduces legacy plans and any
+  # future naming collision without weakening production branch naming.
+  class SameCandidateManager < Meringue::Workspace::Manager
+    def plan_worker_workspace(**arguments)
+      plan = super
+      project = File.basename(File.expand_path(arguments.fetch(:project_root)))
+      plan.merge(
+        "workspace_path" => File.join(root_path, project, "forced-candidate"),
+        "workspace_branch" => "meringue/forced-candidate"
+      )
+    end
+  end
+
   def test_reallocation_adopts_the_existing_worktree_and_keeps_uncommitted_work
     with_workspace_tmpdir do |tmp|
       project = create_git_project(tmp)
@@ -23,6 +37,59 @@ class WorkspaceManagerCollisionTest < Minitest::Test
       assert_equal first.fetch("workspace_path"), second.fetch("workspace_path")
       assert_equal first.fetch("workspace_branch"), second.fetch("workspace_branch")
       assert_equal "half-finished work\n", File.read(in_progress)
+    end
+  end
+
+  def test_foreign_owner_is_never_adopted_and_allocation_uniquifies
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = SameCandidateManager.new(root_path: File.join(tmp, "workspaces"))
+      first = allocate_workspace(manager, project, task_title: "One", issue_id: "P1-I1", agent_id: "P1-I1-W1")
+      foreign_file = File.join(first.fetch("workspace_path"), "owner-one.txt")
+      File.write(foreign_file, "do not share\n")
+
+      second = allocate_workspace(manager, project, task_title: "Two", issue_id: "P1-I2", agent_id: "P1-I2-W1")
+
+      assert second.fetch("created"), second.inspect
+      assert_equal "#{first.fetch("workspace_path")}-2", second.fetch("workspace_path")
+      assert_equal "#{first.fetch("workspace_branch")}-2", second.fetch("workspace_branch")
+      assert_equal "do not share\n", File.read(foreign_file)
+      assert manager.validate_worker_workspace(first, agent_id: "P1-I1-W1").fetch("usable")
+      assert manager.validate_worker_workspace(second, agent_id: "P1-I2-W1").fetch("usable")
+      refute manager.validate_worker_workspace(first, agent_id: "P1-I2-W1").fetch("usable")
+    end
+  end
+
+  def test_concurrent_foreign_claims_cannot_receive_the_same_candidate
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = SameCandidateManager.new(root_path: File.join(tmp, "workspaces"))
+      ready = Queue.new
+      start = Queue.new
+      ids = %w[P1-I1-W1 P1-I2-W1]
+      threads = ids.map do |agent_id|
+        Thread.new do
+          ready << true
+          start.pop
+          allocate_workspace(
+            manager,
+            project,
+            task_title: "Concurrent collision",
+            issue_id: agent_id.sub(/-W\d+\z/, ""),
+            agent_id: agent_id
+          )
+        end
+      end
+      ids.length.times { ready.pop }
+      ids.length.times { start << true }
+      allocated = threads.map(&:value)
+
+      assert allocated.all? { |workspace| workspace.fetch("created") }, allocated.inspect
+      assert_equal 2, allocated.map { |workspace| workspace.fetch("workspace_path") }.uniq.length
+      assert_equal 2, allocated.map { |workspace| workspace.fetch("workspace_branch") }.uniq.length
+      allocated.zip(ids).each do |workspace, agent_id|
+        assert manager.validate_worker_workspace(workspace, agent_id: agent_id).fetch("usable")
+      end
     end
   end
 
