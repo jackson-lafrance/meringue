@@ -354,13 +354,16 @@ module Meringue
           segments = label.empty? ? [] : [["harness: ", Style::DIM], [label, Style::ACCENT_BOLD]]
           unless defaults.empty?
             model = defaults.fetch("model", nil) || "mixed"
-            thinking = defaults.fetch("thinking_level", nil) || "mixed"
+            head_thinking = defaults.dig("roles", "head", "thinking_level") || defaults["thinking_level"] || "mixed"
+            worker_thinking = defaults.dig("roles", "worker", "thinking_level") || defaults["thinking_level"] || "mixed"
             segments << [" · ", Style::DIM] unless segments.empty?
             segments.concat([
               ["Pi defaults: ", Style::DIM],
               [model.to_s, Style::MUTED],
-              [" · ", Style::DIM],
-              [thinking.to_s, Style::MUTED]
+              [" · head ", Style::DIM],
+              [head_thinking.to_s, Style::MUTED],
+              [" · worker ", Style::DIM],
+              [worker_thinking.to_s, Style::MUTED]
             ])
           end
           segments

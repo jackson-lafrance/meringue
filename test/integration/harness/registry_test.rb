@@ -205,6 +205,42 @@ class HarnessRegistryTest < HarnessIntegrationTest
     end
   end
 
+  def test_role_specific_thinking_defaults_override_the_legacy_shared_value
+    subject = registry(
+      "harness" => {
+        "pi" => {
+          "thinking_level" => "medium",
+          "head_thinking_level" => "low",
+          "worker_thinking_level" => "xhigh"
+        }
+      }
+    )
+
+    defaults = subject.session_defaults(provider: "pi")
+
+    assert_nil defaults.fetch("thinking_level")
+    assert_equal "low", defaults.dig("roles", "head", "thinking_level")
+    assert_equal "xhigh", defaults.dig("roles", "worker", "thinking_level")
+    assert_equal "low", subject.client_for(provider: "pi", kind: "head").extra_args.last
+    assert_equal "xhigh", subject.client_for(provider: "pi", kind: "worker").extra_args.last
+  end
+
+  def test_updating_one_role_reconfigures_future_sessions_without_changing_the_other_role
+    subject = registry
+    head = subject.client_for(provider: "pi", kind: "head")
+    worker = subject.client_for(provider: "pi", kind: "worker")
+
+    defaults = subject.update_session_defaults!(provider: "pi", thinking_level: "low", thinking_role: "head")
+
+    assert_equal "low", defaults.dig("roles", "head", "thinking_level")
+    assert_equal Registry::DEFAULT_PI_THINKING_LEVEL, defaults.dig("roles", "worker", "thinking_level")
+    assert_equal "low", head.extra_args.last
+    assert_includes worker.extra_args.each_cons(2).to_a, ["--thinking", Registry::DEFAULT_PI_THINKING_LEVEL]
+    saved = Meringue::Config.load(path: subject.config.path)
+    assert_equal "low", saved.value("harness", "pi", "head_thinking_level")
+    assert_nil saved.value("harness", "pi", "worker_thinking_level")
+  end
+
   def test_updating_pi_session_defaults_persists_and_reconfigures_cached_clients_in_place
     subject = registry
     head = subject.client_for(provider: "pi", kind: "head")

@@ -21,7 +21,7 @@ module Meringue
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
         ["/model <provider>/<model-id>", "Persist the model for all future Pi sessions; existing sessions are unchanged. The model id may itself contain / and :."],
-        ["/thinking <level>", "Persist off, minimal, low, medium, high, xhigh, or max for all future Pi sessions; existing sessions are unchanged."],
+        ["/thinking [head|worker] <level>", "Persist a Pi thinking default. Omit the role to update both future heads and workers; existing sessions are unchanged."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
         ["/goal create [issue_id] \"<prompt>\" --metric \"<command>\" --target <number> [flags]", "Start a goal loop: name an issue, or give only a prompt and Meringue creates the issue for it. It iterates until the metric hits its target or a budget guard trips."],
         ["/goal create [issue_id] \"<prompt>\" --reviewer [--max-iterations <n>]", "Start a reviewer-judged goal loop for work with no number: it iterates until a reviewer approves the work or the iteration budget runs out."],
@@ -56,6 +56,8 @@ module Meringue
         { "prefix" => "/retry", "source" => "retry_heads", "append_space" => false },
         { "prefix" => "/open-session", "source" => "agents", "append_space" => false },
         { "prefix" => "/model", "source" => "session_models", "append_space" => false },
+        { "prefix" => "/thinking head", "source" => "thinking_levels", "append_space" => false, "thinking_role" => "head" },
+        { "prefix" => "/thinking worker", "source" => "thinking_levels", "append_space" => false, "thinking_role" => "worker" },
         { "prefix" => "/thinking", "source" => "thinking_levels", "append_space" => false },
         { "prefix" => "/kill", "source" => "targets", "append_space" => false },
         { "prefix" => "/theme", "source" => "themes", "append_space" => false },
@@ -457,7 +459,7 @@ module Meringue
       def self.thinking_level_suggestion_records(context, state, catalog, harness)
         reference = thinking_level_model_reference(state, harness)
         supported = normalized_thinking_levels(catalog.thinking_levels_for(reference))
-        current = current_default_thinking_level(state, harness)
+        current = current_default_thinking_level(state, harness, context["thinking_role"])
         query = context.fetch("query", "").to_s.strip.downcase
         matching_thinking_levels(query, current).map.with_index do |level, index|
           {
@@ -480,7 +482,7 @@ module Meringue
       end
 
       def self.thinking_usage_message
-        "Usage: /thinking <#{thinking_levels.join("|")}>"
+        "Usage: /thinking [head|worker] <#{thinking_levels.join("|")}>"
       end
 
       # With nothing typed the saved default leads the list: only three suggestion
@@ -503,9 +505,15 @@ module Meringue
         [current] + (levels - [current])
       end
 
-      def self.current_default_thinking_level(state, harness)
-        level = state.dig("metadata", "pi_session_defaults", "thinking_level").to_s.strip.downcase
-        level = Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL if level.empty? && harness == "pi"
+      def self.current_default_thinking_level(state, harness, role = nil)
+        defaults = state.dig("metadata", "pi_session_defaults") || {}
+        level = if %w[head worker].include?(role.to_s)
+                  defaults.dig("roles", role.to_s, "thinking_level")
+                else
+                  defaults["thinking_level"]
+                end
+        level = level.to_s.strip.downcase
+        level = Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL if level.empty? && harness == "pi" && role.nil?
         level
       end
 
@@ -773,9 +781,18 @@ module Meringue
 
       def parse_thinking(arguments)
         tokens = split_arguments(arguments)
-        return invalid(self.class.thinking_usage_message) unless tokens.length == 1
+        if tokens.length == 1
+          return kernel_command("SetDefaultSessionThinkingLevel", "level" => tokens[0])
+        end
+        unless tokens.length == 2 && %w[head worker].include?(tokens[0].to_s.downcase)
+          return invalid(self.class.thinking_usage_message)
+        end
 
-        kernel_command("SetDefaultSessionThinkingLevel", "level" => tokens[0])
+        kernel_command(
+          "SetDefaultSessionThinkingLevel",
+          "role" => tokens[0].downcase,
+          "level" => tokens[1]
+        )
       end
 
       def parse_setup(arguments)

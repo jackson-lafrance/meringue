@@ -329,7 +329,7 @@ Do the same thing as coding harnesses for these aswell we want it to be familiar
 /prompt <agent_id> "<message>"
 /models [harness] [refresh]   (opens the model picker; `refresh` re-fetches the catalog instead)
 /model <provider>/<model-id>
-/thinking <level>
+/thinking [head|worker] <level>
 /kill <agent_or_issue_id>
 /tree
 /state
@@ -513,7 +513,7 @@ Model catalogs are asked of the harness, never hand-maintained in Meringue. `ava
 
 A model reference is `<provider>/<model-id>` split on the **first** slash, exactly as the harness resolves it, so a model id may itself contain `/` and `:` (`fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`). That grammar lives in one place (`Meringue::Harness::ModelReference`) and is a shape check only: the catalog labels an unlisted id as unverified and never makes it unsettable, and every rejection names its reason in the user-visible line.
 
-Future Pi defaults and existing Pi session settings are separate scopes. `/model` and `/thinking` persist app-wide Pi spawn defaults for all future heads and workers without mutating existing sessions. Existing sessions have no settings command: their effective values are recorded on the agent record as `session_settings` when the kernel spawns, prompts, or reconciles a session, and are surfaced by the focused workspace line, raw state, and `GetInfo`. A focused workspace advertises `/open-session` for opening its selected harness UI, with the old argumentless `/session` spelling also retained only as an alias. Default persistence belongs in Meringue config and runtime spawn reconfiguration belongs behind the harness registry/client boundary.
+Future Pi defaults and existing Pi session settings are separate scopes. `/model` persists an app-wide Pi spawn default. `/thinking <level>` keeps the shared default for all future roles, while `/thinking head <level>` and `/thinking worker <level>` persist role-specific defaults; none mutate existing sessions. Existing sessions have no settings command: their effective values are recorded on the agent record as `session_settings` when the kernel spawns, prompts, or reconciles a session, and are surfaced by the focused workspace line, raw state, and `GetInfo`. A focused workspace advertises `/open-session` for opening its selected harness UI, with the old argumentless `/session` spelling also retained only as an alias. Default persistence belongs in Meringue config and runtime spawn reconfiguration belongs behind the harness registry/client boundary.
 
 The generic session reference should track:
 - `harness`, such as `pi`
