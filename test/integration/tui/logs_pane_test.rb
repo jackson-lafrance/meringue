@@ -204,6 +204,36 @@ class TuiLogsPaneTest < Minitest::Test
     refute_includes progress_header, "· warn"
   end
 
+  def test_replaceable_progress_refreshes_a_same_size_visible_log_window
+    worker = agent_record("P1-I1-W1", "harness_metadata" => { "title" => "Worker title" })
+    independent = log_record("L1", "message" => "Independent event")
+    first_progress = log_record(
+      "L2",
+      "source_id" => "P1-I1-W1",
+      "message" => "Provisioning for 60s (20%).",
+      "details" => { "kind" => "workspace_provisioning_progress", "percent" => 20 },
+      "replacement_key" => "worker_workspace_provisioning:opaque"
+    )
+    first_state = composed_state(empty_state.merge("logs" => [independent, first_progress], "agents" => [worker]))
+    first_render = plain_lines(@pane.log_lines(first_state, width: 70)).join("\n")
+    assert_includes first_render, "Provisioning for 60s (20%)."
+
+    latest_progress = log_record(
+      "L3",
+      "source_id" => "P1-I1-W1",
+      "message" => "Provisioning for 120s (70%).",
+      "details" => { "kind" => "workspace_provisioning_progress", "percent" => 70 },
+      "replacement_key" => "worker_workspace_provisioning:opaque"
+    )
+    latest_state = composed_state(empty_state.merge("logs" => [independent, latest_progress], "agents" => [worker]))
+    latest_render = plain_lines(@pane.log_lines(latest_state, width: 70)).join("\n")
+
+    assert_includes latest_render, "Independent event"
+    assert_includes latest_render, "Provisioning for 120s (70%)."
+    refute_includes latest_render, "Provisioning for 60s (20%).",
+                    "the cached logs pane must invalidate when replacement keeps the same row count"
+  end
+
   def test_long_worker_progress_reports_are_wrapped_without_cutting_their_content
     report = "The worker found the shared cursor bug and is preserving the complete report. " * 8
     logs = [
