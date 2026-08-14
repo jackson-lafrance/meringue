@@ -179,10 +179,10 @@ module Meringue
         raise NotImplementedError, "harness clients must implement #attach_session"
       end
 
-      # Native interactive mode is an optional harness capability. A capable client must safely
-      # interrupt/checkpoint an active managed turn when necessary, quiesce its managed transport,
-      # and only then return argv that opens the persisted session in a real interactive UI. It must
-      # never leave two processes writing one session file.
+      # Native interactive mode is an optional harness capability. A capable client must settle an
+      # active managed turn through its supported cancellation boundary, preserve a continuation
+      # obligation when that turn has no final result, quiesce its managed transport, and only then
+      # return argv for the persisted session. It must never leave two session writers alive.
       def interactive_session_supported?
         false
       end
@@ -197,7 +197,8 @@ module Meringue
         raise NotImplementedError, "harness clients must implement #reclaim_interactive_session"
       end
 
-      def resume_dashboard_session(session_ref)
+      def resume_dashboard_session(session_ref, handoff: nil)
+        _ = handoff
         attach_session(session_ref)
       end
 

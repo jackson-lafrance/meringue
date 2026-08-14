@@ -158,10 +158,17 @@ module Meringue
 
       def close_workspace(agent:)
         entry = interactive_entry(agent)
-        return { "status" => "closed", "message" => "No native Pi focus was running." } unless entry
+        agent_id = agent.is_a?(Hash) ? agent.fetch("id") : agent.to_s
+        unless entry
+          # The PTY is removed before dashboard reattachment. If that reattachment failed, a later
+          # close/return action must still be able to retry the durable `resume_failed` handoff.
+          resume = focus_session_service&.end_agent_interactive_focus(agent_id)
+          return resume unless resume.nil? || resume.fetch("status", nil) == "accepted"
+
+          return { "status" => "closed", "message" => resume ? "Resumed the dashboard session." : "No native Pi focus was running." }
+        end
 
         result = close_interactive(agent)
-        agent_id = agent.is_a?(Hash) ? agent.fetch("id") : agent.to_s
         resume = focus_session_service&.end_agent_interactive_focus(agent_id)
         return result unless resume
         return resume unless resume.fetch("status", nil) == "accepted"

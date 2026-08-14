@@ -186,6 +186,14 @@ A classified failure settles the worker as `errored` with the reason on the reco
 (`Worker <id> errored without finishing: …`), and in the AgentTree and focused pane. No
 `completed_at` is written, so the issue and project cannot roll up to `completed` behind it.
 
+Native focused-mode ownership changes do not weaken this classifier. The kernel persists an
+`interactive_handoff` before Pi process I/O, reconciliation skips the worker while that marker has
+a live owner, and entry uses Pi's abort/settle boundary before replacing the RPC writer. On return,
+the dashboard either observes a newer final result or automatically starts the handoff's saved
+continuation before clearing the marker. A `toolUse` outcome outside that coordinated lifecycle is
+still incomplete and still errors; the handoff prevents an intentional focus transition from being
+mistaken for an abandoned tool call.
+
 These records deliberately keep `reconcile_state: healthy` and are **not** marked
 `terminal_error`: reconciliation did its job, and the worker is still recoverable. That means
 they stay poll candidates, so the two log-once rules that matter here are its own:
