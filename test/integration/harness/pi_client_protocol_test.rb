@@ -19,6 +19,45 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     track_session(client, ref)
   end
 
+  def test_shared_read_only_session_replaces_configured_tools_with_strict_allowlist
+    client, stub = build_pi_client(
+      tmpdir,
+      extra_args: ["--tools", "read,bash,edit,write", "--extension", "unsafe.ts", "--model", "anthropic/default"]
+    )
+
+    ref = client.spawn_session(
+      kind: "worker",
+      cwd: tmpdir,
+      prompt: "",
+      system_prompt: "read only",
+      session_name: "Investigate only",
+      workspace_mode: "shared_read_only"
+    )
+    track_session(client, ref)
+    argv = stub_argv(stub)
+
+    assert client.read_only_workspace_supported?
+    assert_equal 1, argv.count("--tools")
+    assert_equal "read,grep,find,ls", argv[argv.index("--tools") + 1]
+    refute_includes argv, "read,bash,edit,write"
+    refute_includes argv, "unsafe.ts"
+    assert_includes argv, "--no-extensions"
+    assert_equal "shared_read_only", ref.dig("metadata", "workspace_mode")
+
+    resumed_argv = client.send(
+      :build_argv,
+      session_name: "Investigate only",
+      system_prompt: nil,
+      session: "sess-42",
+      workspace_mode: ref.dig("metadata", "workspace_mode")
+    )
+    assert_equal "read,grep,find,ls", resumed_argv[resumed_argv.index("--tools") + 1]
+
+    interactive_argv = client.send(:interactive_session_argv, ref)
+    assert_equal "read,grep,find,ls", interactive_argv[interactive_argv.index("--tools") + 1]
+    assert_includes interactive_argv, "--no-extensions"
+  end
+
   def test_spawn_session_overrides_default_model_and_thinking_arguments_for_one_session
     client, stub = build_pi_client(
       tmpdir,

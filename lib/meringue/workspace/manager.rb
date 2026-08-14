@@ -283,6 +283,67 @@ module Meringue
         }
       end
 
+      # Resolve an already-existing main/master checkout that investigation-only workers may
+      # share. This method is intentionally discovery-only: it never creates a branch, directory,
+      # or worktree. A registered bare repository (World's common shape) is a valid source for
+      # isolated allocation, but only one of its existing non-bare linked worktrees can satisfy
+      # this contract.
+      def shared_read_only_checkout(project_root:)
+        project_path = canonical_path(project_root)
+        repository = repository_context(project_path)
+        return reuse_outcome(false, "project_is_not_a_git_repository") unless repository
+
+        git_root = repository.fetch("git_root")
+        relative_project_path = repository.fetch("bare") ? "." : relative_path(project_path, git_root)
+        listed = run_command("git", "-C", git_root, "worktree", "list", "--porcelain")
+        unless listed.fetch("status").success?
+          return reuse_outcome(
+            false,
+            "worktree_list_failed",
+            error: present_output(listed.fetch("stderr")) || present_output(listed.fetch("stdout"))
+          )
+        end
+
+        candidates = parse_worktree_records(listed.fetch("stdout")).filter_map do |record|
+          next if record.key?("bare") || record.key?("locked") || record.key?("prunable")
+
+          branch = record.fetch("branch", nil)
+          next unless %w[refs/heads/main refs/heads/master].include?(branch)
+
+          checkout_root = present_output(record.fetch("worktree", nil))
+          next unless checkout_root
+
+          checkout_root = canonical_path(checkout_root)
+          workspace_path = relative_project_path == "." ? checkout_root : File.join(checkout_root, relative_project_path)
+          next unless Dir.exist?(workspace_path) && File.readable?(workspace_path)
+          next if bare_repository?(checkout_root)
+
+          {
+            "strategy" => "shared_checkout",
+            "workspace_strategy" => "shared_checkout",
+            "project_root" => project_path,
+            "workspace_path" => canonical_path(workspace_path),
+            "workspace_root_path" => checkout_root,
+            "worktree_root_path" => checkout_root,
+            "workspace_branch" => branch.sub(%r{\Arefs/heads/}, ""),
+            "git_root" => git_root,
+            "project_relative_path" => relative_project_path,
+            "created" => false,
+            "read_only" => true,
+            "errors" => []
+          }
+        end
+        preferred = candidates.find { |candidate| same_path?(candidate.fetch("workspace_root_path"), git_root) } || candidates.first
+        return preferred if preferred
+
+        reason = repository.fetch("bare") ? "bare_repository_has_no_shared_main_checkout" : "no_readable_main_checkout"
+        reuse_outcome(false, reason, git_root: git_root)
+      rescue CommandTimeout => e
+        reuse_outcome(false, "shared_checkout_discovery_timed_out", error: e.message)
+      rescue StandardError => e
+        reuse_outcome(false, "shared_checkout_discovery_error", error: e.message)
+      end
+
       # `progress` is an optional callable invoked (at most every PROGRESS_REPORT_INTERVAL
       # seconds) while a long command is still running, so a caller can tell the user that a
       # checkout is working rather than hung.
@@ -458,10 +519,42 @@ module Meringue
 
         path = present_output(workspace["workspace_path"])
         return reuse_outcome(false, "workspace_missing") unless path && Dir.exist?(path)
-        return reuse_outcome(false, "workspace_not_editable") unless File.writable?(path)
-        return reuse_outcome(false, "workspace_is_bare_repository") if bare_repository?(path)
 
         strategy = workspace["workspace_strategy"] || workspace["strategy"] || workspace.dig("plan", "strategy")
+        if strategy == "shared_checkout"
+          return reuse_outcome(false, "workspace_not_readable") unless File.readable?(path)
+          return reuse_outcome(false, "workspace_is_bare_repository") if bare_repository?(path)
+
+          expected_root = workspace["workspace_root_path"] || workspace["worktree_root_path"] || path
+          expected_branch = workspace["workspace_branch"]
+          git_root = workspace["git_root"] || workspace["project_root"]
+          return reuse_outcome(false, "shared_checkout_metadata_missing") unless expected_branch && git_root
+
+          listed = run_command("git", "-C", canonical_path(git_root), "worktree", "list", "--porcelain")
+          return reuse_outcome(false, "worktree_list_failed") unless listed.fetch("status").success?
+
+          record = parse_worktree_records(listed.fetch("stdout")).find do |candidate|
+            same_path?(candidate.fetch("worktree", ""), expected_root)
+          end
+          return reuse_outcome(false, "worktree_not_registered") unless record
+          return reuse_outcome(false, "workspace_is_bare_repository") if record.key?("bare")
+          return reuse_outcome(false, "worktree_locked") if record.key?("locked")
+          return reuse_outcome(false, "worktree_prunable") if record.key?("prunable")
+          unless record.fetch("branch", nil) == "refs/heads/#{expected_branch}" && %w[main master].include?(expected_branch)
+            return reuse_outcome(false, "shared_checkout_not_on_main_branch")
+          end
+
+          return reuse_outcome(
+            true,
+            "shared_checkout_ready",
+            workspace_path: canonical_path(path),
+            worktree_root_path: canonical_path(expected_root),
+            workspace_branch: expected_branch
+          )
+        end
+
+        return reuse_outcome(false, "workspace_not_editable") unless File.writable?(path)
+        return reuse_outcome(false, "workspace_is_bare_repository") if bare_repository?(path)
         return reuse_outcome(true, "workspace_ready", workspace_path: canonical_path(path)) unless strategy == "git_worktree"
 
         plan = workspace["plan"].is_a?(Hash) ? workspace.fetch("plan") : workspace

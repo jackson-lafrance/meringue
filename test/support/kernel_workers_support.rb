@@ -82,14 +82,15 @@ module KernelWorkersSupport
       provider
     end
 
-    def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {})
+    def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {}, workspace_mode: "isolated")
       call = {
         "kind" => kind,
         "cwd" => cwd,
         "prompt" => prompt,
         "system_prompt" => system_prompt,
         "session_name" => session_name,
-        "session_settings" => session_settings
+        "session_settings" => session_settings,
+        "workspace_mode" => workspace_mode
       }
       @spawns << call
       @calls << { "call" => "spawn_session", "session_name" => session_name, "cwd" => cwd }
@@ -111,7 +112,8 @@ module KernelWorkersSupport
         "metadata" => {
           "prompt" => prompt,
           "system_prompt" => system_prompt,
-          "session_name" => session_name
+          "session_name" => session_name,
+          "workspace_mode" => workspace_mode
         }
       }
     end

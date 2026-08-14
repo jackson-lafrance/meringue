@@ -7,7 +7,11 @@ module Meringue
         "fake"
       end
 
-      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {})
+      def read_only_workspace_supported?
+        true
+      end
+
+      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {}, workspace_mode: "isolated")
         {
           "harness" => "fake",
           "pid" => nil,
@@ -20,7 +24,8 @@ module Meringue
           "metadata" => {
             "prompt" => prompt,
             "system_prompt" => system_prompt,
-            "session_name" => session_name
+            "session_name" => session_name,
+            "workspace_mode" => workspace_mode
           }
         }
       end

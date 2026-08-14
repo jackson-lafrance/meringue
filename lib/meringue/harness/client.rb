@@ -7,9 +7,15 @@ module Meringue
 
       # session_settings contains optional per-session spawn overrides (currently
       # model and thinking_level). An empty hash means the client must retain its
-      # configured future-session defaults.
-      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {})
+      # configured future-session defaults. workspace_mode is harness-neutral: an
+      # implementation advertising read-only support must enforce shared_read_only
+      # sessions rather than relying only on prompt wording.
+      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {}, workspace_mode: "isolated")
         raise NotImplementedError, "harness clients must implement #spawn_session"
+      end
+
+      def read_only_workspace_supported?
+        false
       end
 
       # Modes are harness neutral: "normal" continues a settled session, "steer" interrupts active

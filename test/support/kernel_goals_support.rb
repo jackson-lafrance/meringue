@@ -44,7 +44,7 @@ module KernelGoalsSupport
       @provider
     end
 
-    def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:)
+    def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, workspace_mode: "isolated")
       @counter += 1
       session_id = "goal-session-#{@counter}"
       @spawns << { "kind" => kind, "cwd" => cwd, "prompt" => prompt, "session_name" => session_name, "session_id" => session_id }

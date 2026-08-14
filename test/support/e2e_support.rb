@@ -58,7 +58,7 @@ module E2eSupport
       HARNESS_NAME
     end
 
-    def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:)
+    def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, workspace_mode: "isolated")
       @mutex.synchronize do
         @counter += 1
         session_id = "e2e-#{kind}-#{@counter}"

@@ -131,7 +131,7 @@ Agents should include the outcome of this review in their final response, especi
 
 ## Terminology
 AgentTree means the UI hierarchy of projects, issues, heads, and workers.
-Workspace means the filesystem directory where a worker harness session runs. To support multiple workers/subagents editing safely at the same time, prefer a dedicated git worktree per worker when the managed project is a git repository, except that a worker continuing a settled predecessor's line of work on the same issue shares that predecessor's worktree and branch. A workspace may fall back to the project root or a dedicated directory only when worktrees are unavailable or explicitly disabled.
+Workspace means the filesystem directory where a worker harness session runs. To support multiple workers/subagents editing safely at the same time, prefer a dedicated git worktree per worker when the managed project is a git repository, except that a worker continuing a settled predecessor's line of work on the same issue shares that predecessor's worktree and branch. An explicitly `shared_read_only` investigation/informational worker may instead use a validated existing non-bare main checkout concurrently with other readers; this is a persisted SpawnWorker contract, never inferred from prompt wording. A workspace may fall back to the project root or a dedicated directory only when worktrees are unavailable or explicitly disabled.
 Harness means the underlying coding agent backend. Pi is the only required harness for the MVP, but the core architecture should not hard-code Pi outside the harness integration layer.
 Do not use WorkTree to mean AgentTree.
 
@@ -306,9 +306,9 @@ Workers do not directly interface with the user, so normal implementation and de
 
 Meringue must never be the author of a git commit. Workers may commit assigned work, but only with the user's configured repository identity (`user.name`/`user.email`); they must never configure or pass a Meringue identity, including `Meringue Worker`, `meringue@example.com`, or `agent@meringue.local`. If no non-Meringue identity is available, workers must leave the work uncommitted and report that identity configuration is a blocker. Meringue's harness layer preserves a valid repository identity for worker child processes and makes an unavailable identity fail closed rather than falling back to Meringue. See `docs/commit-authorship.md` for the implementation, verification, and history audit.
 
+Not every worker issue requires a PR; for investigation-only or informational assigned work that does not require repository changes, workers may return findings or an answer without opening a PR unless the issue explicitly requests one. Heads should set `SpawnWorker.workspace_mode` to `shared_read_only` only when the new worker needs no file, Git, dependency, shell-command, or remote mutation. The harness must enforce a read-only tool set and the worker receives a separate non-mutating system prompt. If the task may implement, test with artifact-writing commands, deliver, or otherwise mutate anything, omit the field so the worker receives the default isolated editable workspace. A read-only session stays read-only on later prompts; spawn an isolated follow-up when work changes to implementation.
 All delivery-facing names and text must describe only the human product task. Branches, worktrees, commit subjects/bodies/trailers, tags, pull request titles/bodies, release notes, and similar artifacts must never contain Meringue branding or a `meringue/` prefix; project/issue/worker/head ids (including variants such as `P5-I2-W3`, `p5_i2_w3`, or `P5/I2/W3`); agent, Pi, harness, or session identities; AI confidence scores; AI-authorship trailers; or statements about which agents worked on the change. Derive names from the product task, sanitize unsafe supplied/generated values, and use only a short opaque suffix when uniqueness is required. Before delivery, inspect commit metadata and the rendered PR title/body and remove prohibited text. See `docs/delivery-artifact-privacy.md`.
 
-Not every worker issue requires a PR; for investigation-only or informational assigned work that does not require repository changes, workers may return findings or an answer without opening a PR unless the issue explicitly requests one.
 They are attached to one specific issue, but multiple agents can be attached to one issue.
 They may follow up, but should not be used many times.
 They should automatically be pruned if they complete over 50% context full.
@@ -481,7 +481,8 @@ sessions, and wall clock are what Meringue can honestly count today. See `docs/g
 Worker isolation is a kernel-owned responsibility.
 
 The kernel should allocate worker workspaces before spawning harness sessions, then pass the resolved workspace path to the harness client as `cwd`. A bare repository is a valid worktree source but is never a valid worker `cwd`; Meringue must create an editable non-bare worktree from it.
-For git-backed projects, the preferred allocation strategy is one git worktree per worker using an allocator-owned, human-facing branch name derived from the sanitized issue/task title, such as `fix-signup-validation-a1b2c3d4`. The opaque suffix provides uniqueness without exposing orchestration. New branch and worktree names must follow the delivery-artifact privacy policy above; lifecycle code may recognize legacy prefixed branches only so upgrades can safely reuse and clean them. Candidate path/branch ownership must be durably reserved under a per-candidate cross-process lock before Git or filesystem mutation. Before harness launch the kernel must revalidate directory editability, non-bare status, Git registration/branch/lock state, durable owner identity, and live-worker occupancy; an unusable or colliding managed candidate is excluded and safely reallocated rather than shared.
+`SpawnWorker.workspace_mode` is explicit and persisted as `isolated` (default) or `shared_read_only`. For `shared_read_only`, the kernel may skip provisioning only after validating an existing readable, registered, unlocked, non-bare checkout on `main` or `master`, and only when the selected harness advertises enforcement. Registered bare roots may select an existing linked main checkout but never the bare root itself. Concurrent shared readers are allowed. The kernel revalidates immediately before launch; when no suitable checkout exists, it safely falls back to ordinary isolated allocation and persists `effective_workspace_mode: isolated` plus a fallback reason. Shared checkouts are never removed during worker cleanup.
+For git-backed projects, the preferred allocation strategy is one git worktree per worker using a Meringue-owned, human-facing branch name derived from the issue/task title, such as `meringue/fix-signup-validation-a1b2c3d4`. Do not expose Meringue agent ids, worker ids, Pi ids, or subagent implementation details in workspace branch names. Candidate path/branch ownership must be durably reserved under a per-candidate cross-process lock before Git or filesystem mutation. Before harness launch the kernel must revalidate directory editability, non-bare status, Git registration/branch/lock state, durable owner identity, and live-worker occupancy; an unusable or colliding managed candidate is excluded and safely reallocated rather than shared.
 Sequential steps of one issue are the exception: a worker that continues a predecessor's line of work (queued behind it, its follow-up, its replacement, or the kernel's restart of an unreplayable session) keeps working in that predecessor's worktree and branch rather than provisioning a second checkout on a suffixed branch. Two live harness sessions must never share one worktree, so the kernel refuses to share and provisions a fresh worktree whenever the predecessor is not settled, the checkout is missing/unregistered/locked/moved to another branch, or its pull request already merged; every refusal is logged with its reason. Uncommitted work is not a refusal reason, because inheriting it is the point.
 Workspace metadata should be persisted on the agent record so sessions can be reconciled, resumed, killed, or cleaned up later.
 When pruning an issue or worker record, the kernel must ask the workspace manager to remove its associated Meringue-managed git worktree first. Cleanup must verify the configured workspace root, repository registration, persisted branch/path ownership, the main checkout, and other worker references. It must never force dirty or locked worktrees: preserve the failed worktree and branch, log the structured failure, and still allow eligible terminal state records to be pruned. Missing/already-removed worktrees are idempotent successes, and cleanup retains the delivery branch.
@@ -494,7 +495,7 @@ Meringue must be designed as harness-independent orchestration software, even th
 All harness-specific behavior belongs behind a harness client/process manager. The TUI and kernel should depend on generic harness operations, not Pi-specific commands.
 
 The harness client should expose operations shaped like:
-- `spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:)`
+- `spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, workspace_mode:)`
 - `prompt_session(session_ref, prompt, mode:)`
 - `abort_session(session_ref)`
 - `kill_session(session_ref)`
@@ -581,8 +582,11 @@ Fields should include:
 - `project_id`
 - `issue_id`
 - `workspace_path`
-- `workspace_strategy`: `git_worktree`, `project_root`, or `dedicated_directory`
-- `workspace_branch`: git branch used by the worktree when relevant
+- `workspace_strategy`: `git_worktree`, `shared_checkout`, `project_root`, or `dedicated_directory`
+- `workspace_branch`: git branch used by the worktree or validated shared checkout when relevant
+- `workspace_mode`: requested `isolated` or `shared_read_only` contract
+- `effective_workspace_mode`: actual launch mode after safe fallback
+- `workspace_mode_fallback_reason`: why a shared request used isolation, when applicable
 - `harness`: `pi` for the MVP
 - `pid`
 - `harness_session_id`: Pi `sessionId` for the MVP
@@ -675,12 +679,12 @@ Updates an existing issue.
 
 This supports title/description edits, reparenting, and status changes such as `working`, `blocked`, `completed`, or `errored`.
 
-### `SpawnWorker(IssueID, Prompt, WorkspacePath?, Model?, ThinkingLevel?) -> Agent`
+### `SpawnWorker(IssueID, Prompt, WorkspacePath?, WorkspaceMode?, Model?, ThinkingLevel?) -> Agent`
 Spawns a real worker harness session for an issue. For the MVP, this is a Pi worker session.
 
 Workers are usually one-to-one with issues.
 If `WorkspacePath` is omitted, the kernel should allocate a worker-specific workspace through the workspace manager.
-Prefer a dedicated git worktree for git-backed projects so concurrent workers/subagents can edit safely.
+Prefer a dedicated git worktree for git-backed projects so concurrent workers/subagents can edit safely. `WorkspaceMode` defaults to `isolated`; heads may explicitly use `shared_read_only` only for non-mutating investigation/informational workers. `WorkspacePath` and `shared_read_only` are mutually exclusive.
 The harness should receive the allocated workspace as its `cwd`; harness clients should not create or mutate worktrees directly.
 `Model` and `ThinkingLevel` are optional per-worker overrides. When omitted, the configured future-session defaults apply; when supplied, they affect only this worker and must be persisted through queued/follow-up activation so the worker record exposes the effective session settings.
 The returned agent should include a Meringue id like `P1-I1-W1`, workspace metadata, pid, harness session id,

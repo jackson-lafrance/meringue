@@ -23,6 +23,7 @@ module Meringue
       ].freeze
       AGENT_WORKSPACE_VIEWS = %w[agent terminal].freeze
       AGENT_WORKSPACE_FILTERS = %w[all output final reasoning tools].freeze
+      WORKER_WORKSPACE_MODES = %w[isolated shared_read_only].freeze
       # A head is stateless per user message, so "retrying" one means re-running the request it
       # never finished routing. Three statuses leave a request unrouted:
       #   errored  its turn or session died before it returned a result
@@ -103,6 +104,7 @@ module Meringue
         state["conversation"]["messages"] ||= []
         state["conversation"]["next_message_id"] ||= max_log_message_id(state)
         state["ui"] = {} unless state["ui"].is_a?(Hash)
+        normalize_worker_workspace_modes!(state)
         normalize_agent_workspace_state!(state)
         state["counters"] ||= {}
         state["counters"]["projects"] ||= max_numeric_suffix(state.fetch("projects"), /^P(\d+)$/)
@@ -124,6 +126,27 @@ module Meringue
         migrate_pull_requests_to_issues!(state)
         repair_project_names!(state)
         state
+      end
+
+      # Older worker records predate the explicit safety contract. Their historical workspaces
+      # were writable/isolated, so migration must never infer read-only sharing from prompts or
+      # project-root paths.
+      def normalize_worker_workspace_modes!(state)
+        Array(state["agents"]).each do |agent|
+          next unless agent.is_a?(Hash) && agent["type"].to_s == "worker"
+
+          requested = agent["workspace_mode"].to_s
+          requested = "isolated" unless WORKER_WORKSPACE_MODES.include?(requested)
+          effective = agent["effective_workspace_mode"].to_s
+          effective = "isolated" unless WORKER_WORKSPACE_MODES.include?(effective)
+          agent["workspace_mode"] = requested
+          agent["effective_workspace_mode"] = effective
+          metadata = agent["harness_metadata"]
+          if metadata.is_a?(Hash)
+            metadata["workspace_mode"] ||= requested
+            metadata["effective_workspace_mode"] ||= effective
+          end
+        end
       end
 
       # Agent-workspace presentation state is durable but is not orchestration state. It is

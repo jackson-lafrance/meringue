@@ -161,17 +161,32 @@ module Meringue
         extra_args
       end
 
-      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {})
+      def read_only_workspace_supported?
+        true
+      end
+
+      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {}, workspace_mode: "isolated")
         expanded_cwd = validate_cwd!(cwd)
-        argv = build_argv(session_name: session_name, system_prompt: system_prompt, session_settings: session_settings)
+        argv = build_argv(
+          session_name: session_name,
+          system_prompt: system_prompt,
+          session_settings: session_settings,
+          workspace_mode: workspace_mode
+        )
         process = start_rpc_process(argv: argv, cwd: expanded_cwd)
         register_process(process)
 
         state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
         set_session_name(process, session_name) if present?(session_name)
         state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
-        session_ref = build_session_ref(process, state, kind: kind, cwd: expanded_cwd,
-                                                        session_name: session_name)
+        session_ref = build_session_ref(
+          process,
+          state,
+          kind: kind,
+          cwd: expanded_cwd,
+          session_name: session_name,
+          workspace_mode: workspace_mode
+        )
         claim_transport(session_ref, note: "spawned")
 
         return session_ref unless present?(prompt)
@@ -391,7 +406,8 @@ module Meringue
               state,
               kind: metadata_value(session_ref, "kind"),
               cwd: session_ref.fetch("cwd", process.cwd),
-              session_name: metadata_value(session_ref, "session_name") || state["sessionName"]
+              session_name: metadata_value(session_ref, "session_name") || state["sessionName"],
+              workspace_mode: metadata_value(session_ref, "workspace_mode") || "isolated"
             )
           rescue ProcessExitedError
             # The wait thread and an RPC-state read can cross by a few instructions. Once request
@@ -681,15 +697,22 @@ module Meringue
         expanded_cwd = validate_cwd!(session_ref["cwd"] || session_ref[:cwd])
         session = resume_session_argument(session_ref)
         session_name = metadata_value(session_ref, "session_name")
-        argv = build_argv(session_name: session_name, system_prompt: nil, session: session)
+        workspace_mode = metadata_value(session_ref, "workspace_mode") || "isolated"
+        argv = build_argv(session_name: session_name, system_prompt: nil, session: session, workspace_mode: workspace_mode)
         process = start_rpc_process(argv: argv, cwd: expanded_cwd)
         register_process(process)
 
         state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
         set_session_name(process, session_name) if present?(session_name)
         state = rpc_data(process.request({ "type" => "get_state" }, timeout: command_timeout))
-        resumed_ref = build_session_ref(process, state, kind: metadata_value(session_ref, "kind"), cwd: expanded_cwd,
-                                                        session_name: session_name)
+        resumed_ref = build_session_ref(
+          process,
+          state,
+          kind: metadata_value(session_ref, "kind"),
+          cwd: expanded_cwd,
+          session_name: session_name,
+          workspace_mode: workspace_mode
+        )
         attached_ref = preserve_session_identity(resumed_ref, session_ref).merge(
           "metadata" => metadata_with(
             session_ref,
@@ -1485,7 +1508,9 @@ module Meringue
         argv += ["--session", session]
         session_name = metadata_value(session_ref, "session_name")
         argv += ["--name", session_name.to_s] if present?(session_name)
-        argv += without_options(extra_args, "--model", "--thinking")
+        session_arguments = without_options(extra_args, "--model", "--thinking")
+        session_arguments = enforce_read_only_tools(session_arguments) if metadata_value(session_ref, "workspace_mode") == "shared_read_only"
+        argv += session_arguments
         argv << handoff_prompt.to_s if present?(handoff_prompt)
         argv
       end
@@ -1514,7 +1539,7 @@ module Meringue
         }.compact
       end
 
-      def build_argv(session_name:, system_prompt:, session: nil, session_settings: {})
+      def build_argv(session_name:, system_prompt:, session: nil, session_settings: {}, workspace_mode: "isolated")
         argv = Array(command).map(&:to_s) + ["--mode", "rpc"]
         argv += ["--session-dir", File.expand_path(session_dir)] if present?(session_dir)
         argv += ["--session", session.to_s] if present?(session)
@@ -1537,7 +1562,18 @@ module Meringue
             session_arguments += ["--thinking", thinking.to_s]
           end
         end
+        session_arguments = enforce_read_only_tools(session_arguments) if workspace_mode.to_s == "shared_read_only"
         argv + session_arguments
+      end
+
+      def enforce_read_only_tools(arguments)
+        # Tool allowlisting blocks write/edit/bash, while disabling extensions closes the startup
+        # side door: Pi extensions execute with full user permissions before a tool call and can
+        # replace a built-in tool by name. Explicit -e/--extension arguments are removed too,
+        # because Pi intentionally lets explicit extensions override --no-extensions.
+        safe = without_options(arguments, "--tools", "-t", "--extension", "-e")
+        safe << "--no-extensions" unless safe.include?("--no-extensions")
+        safe + ["--tools", "read,grep,find,ls"]
       end
 
       def without_options(arguments, *options)
@@ -1582,7 +1618,7 @@ module Meringue
         )
       end
 
-      def build_session_ref(process, pi_state, kind:, cwd:, session_name:)
+      def build_session_ref(process, pi_state, kind:, cwd:, session_name:, workspace_mode: "isolated")
         {
           "harness" => "pi",
           "pid" => process.pid,
@@ -1595,6 +1631,7 @@ module Meringue
           "metadata" => {
             "kind" => kind.to_s,
             "session_name" => session_name,
+            "workspace_mode" => workspace_mode.to_s,
             "started_at" => process.started_at,
             "command" => process.argv,
             "pi_state" => pi_state,
