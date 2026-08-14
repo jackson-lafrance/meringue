@@ -593,7 +593,7 @@ module Meringue
       attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path,
                   :config, :state_lock, :instance_pid, :instance_id, :prune_forge_lookup_budget,
                   :prune_workspace_cleanup_budget, :metric_probe, :goal_advance_budget,
-                  :delivery_pull_request_refresh_budget
+                  :delivery_pull_request_refresh_budget, :worker_provisioning_concurrency
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
                      head_runner: Heads::FakeRunner.new,
@@ -607,6 +607,8 @@ module Meringue
                      workspace_manager: Workspace::Manager.new,
                      cwd: Dir.pwd,
                      async_heads: false,
+                     async_worker_provisioning: false,
+                     worker_provisioning_concurrency: nil,
                      forge_client: Forge::GitHubClient.new,
                      metric_probe: Goals::MetricProbe.new,
                      config_path: Config::DEFAULT_PATH,
@@ -635,6 +637,12 @@ module Meringue
         @config_path = File.expand_path(config_path.to_s)
         @config = config || Config.load(path: @config_path)
         @deferred_worker_default_failure_policy = @config.conflict_predecessor_failure
+        # The dashboard enables this explicitly. Small synchronous embedders retain their existing
+        # apply-and-observe contract unless they opt into the background executor.
+        @async_worker_provisioning = !!async_worker_provisioning
+        configured_provisioning_concurrency = worker_provisioning_concurrency || @config.worker_provisioning_concurrency
+        @worker_provisioning_concurrency = [[Integer(configured_provisioning_concurrency), 1].max,
+                                             Config::MAX_WORKER_PROVISIONING_CONCURRENCY].min
         @prune_forge_lookup_budget = Float(prune_forge_lookup_budget)
         @prune_workspace_cleanup_budget = Float(prune_workspace_cleanup_budget)
         @delivery_pull_request_refresh_budget = Float(delivery_pull_request_refresh_budget)
@@ -655,6 +663,27 @@ module Meringue
         @session_reconcile_mutex = Mutex.new
         @model_catalog_mutex = Mutex.new
         @goal_mutex = Mutex.new
+        @worker_provisioning_queue = Queue.new
+        @worker_provisioning_jobs = {}
+        @worker_provisioning_jobs_mutex = Mutex.new
+        @worker_provisioning_jobs_condition = ConditionVariable.new
+        @worker_provisioning_threads = []
+      end
+
+      # Waits only for work already submitted to this engine. The dashboard never calls this in its
+      # input path; it is useful to orderly embedders and deterministic tests that need to observe a
+      # completed asynchronous provision without polling state.
+      def wait_for_worker_provisioning(timeout: 5)
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout.to_f
+        @worker_provisioning_jobs_mutex.synchronize do
+          until @worker_provisioning_jobs.empty?
+            remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            return false unless remaining.positive?
+
+            @worker_provisioning_jobs_condition.wait(@worker_provisioning_jobs_mutex, remaining)
+          end
+        end
+        true
       end
 
       def list_all
@@ -1664,6 +1693,147 @@ module Meringue
         }.compact
       end
 
+      # Adds a durable reservation to this process's bounded executor. The in-memory set is only a
+      # duplicate-work guard; state remains authoritative, so a process crash loses no work and a
+      # later reconciliation pass can enqueue the same reservation under a new live owner.
+      def schedule_worker_provisioning(agent_id)
+        return false unless @async_worker_provisioning
+
+        submitted = @worker_provisioning_jobs_mutex.synchronize do
+          next false if @worker_provisioning_jobs.key?(agent_id.to_s)
+
+          @worker_provisioning_jobs[agent_id.to_s] = true
+          start_worker_provisioning_threads_locked
+          @worker_provisioning_queue << agent_id.to_s
+          true
+        end
+        submitted
+      end
+
+      def start_worker_provisioning_threads_locked
+        while @worker_provisioning_threads.length < worker_provisioning_concurrency
+          index = @worker_provisioning_threads.length + 1
+          @worker_provisioning_threads << Thread.new do
+            Thread.current.name = "meringue-worker-provisioner-#{index}" if Thread.current.respond_to?(:name=)
+            loop do
+              agent_id = @worker_provisioning_queue.pop
+              begin
+                provision_reserved_worker(agent_id)
+              rescue StandardError => e
+                record_worker_provisioning_executor_error(agent_id, e)
+              ensure
+                @worker_provisioning_jobs_mutex.synchronize do
+                  @worker_provisioning_jobs.delete(agent_id)
+                  @worker_provisioning_jobs_condition.broadcast
+                end
+              end
+            end
+          end
+        end
+      end
+
+      def provision_reserved_worker(agent_id)
+        command = synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          next nil unless agent && agent.fetch("type", nil) == "worker"
+          next nil unless agent.fetch("status", nil) == "queued"
+          next nil if agent_has_session_reference?(agent) || waiting_deferred_worker?(agent)
+          next nil if owned_by_other_live_instance?(agent)
+
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          next nil unless present_string(metadata.fetch("spawn_prompt", nil))
+          # The configured limit is host-wide, not merely per Engine object. The state lock makes
+          # this check-and-claim atomic across dashboards sharing the state file. A dead owner's
+          # stale marker consumes no slot and will itself be recovered by reconciliation.
+          active_provisioners = state.fetch("agents").count do |other|
+            next false if Ids.same?(other.fetch("id", nil), agent_id)
+            next false unless worker_provisioning_slot_occupied?(other)
+
+            ownership = other.fetch("harness_metadata", {}) || {}
+            ownership.fetch("owner_instance_id", nil).to_s == instance_id ||
+              !other_live_instance_pid(
+                ownership.fetch("owner_instance_id", nil),
+                ownership.fetch("owner_instance_pid", nil),
+                ownership.fetch("owner_instance_started_at", nil)
+              ).nil?
+          end
+          next nil if active_provisioners >= worker_provisioning_concurrency
+
+          now = timestamp
+          agent["updated_at"] = now
+          agent["harness_metadata"] = metadata.merge(
+            "provisioning_state" => "allocating_workspace",
+            "provisioning_attempt_started_at" => now,
+            "provisioning_next_step" => nil,
+            **instance_ownership_metadata
+          ).compact
+          touch_state!(state, now)
+          store.save(state)
+          worker_reservation_command(agent, provision_reserved: true)
+        end
+        return unless command
+
+        # Do not call apply: its worker-spawn mutex intentionally serializes public reservation
+        # commands. Provisioners operate on distinct, durably claimed records and may run together.
+        spawn_worker(command.fetch("command_id", nil), "SpawnWorker", command.fetch("payload"))
+      end
+
+      def worker_provisioning_slot_occupied?(agent)
+        return false unless agent.is_a?(Hash) && agent.fetch("type", nil) == "worker"
+        return false if agent_has_session_reference?(agent)
+
+        %w[allocating_workspace starting_harness].include?(
+          (agent.fetch("harness_metadata", {}) || {}).fetch("provisioning_state", nil).to_s
+        )
+      end
+
+      def worker_reservation_command(agent, provision_reserved: false)
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        {
+          "command_id" => present_string(metadata.fetch("spawn_command_id", nil)),
+          "type" => "SpawnWorker",
+          "payload" => {
+            "issue_id" => agent.fetch("issue_id"),
+            # The record itself, so recovery resumes this reservation instead of depending on a
+            # spawn command id the original request may never have had.
+            "_reservation_agent_id" => agent.fetch("id"),
+            "_provision_reserved" => provision_reserved,
+            "title" => metadata.fetch("title", nil),
+            "prompt" => metadata.fetch("spawn_prompt", nil),
+            "workspace_path" => metadata.fetch("requested_workspace_path", nil),
+            "follow_up_of_agent_id" => metadata.fetch("follow_up_of_agent_id", nil),
+            "replace_agent_id" => metadata.fetch("replace_agent_id", nil),
+            "model" => metadata.dig("spawn_session_settings", "model"),
+            "thinking_level" => metadata.dig("spawn_session_settings", "thinking_level"),
+            "workspace_mode" => agent.fetch("workspace_mode", metadata.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED)),
+            # An activation interrupted between its durable state flip and launch must not be
+            # evaluated as a fresh deferral request.
+            "after_agent_id" => present_string(agent.fetch("after_agent_id", nil)),
+            "_activate_deferred" => deferred_spawn_metadata(agent).fetch("state", nil) == DEFERRED_STATE_ACTIVATING
+          }.compact
+        }
+      end
+
+      def record_worker_provisioning_executor_error(agent_id, error)
+        reservation = synchronized_state do
+          agent = find_agent(normalized_state, agent_id)
+          next nil unless agent && !agent_has_session_reference?(agent)
+
+          { "agent_id" => agent_id, "workspace" => workspace_from_reserved_agent(agent) }
+        end
+        return unless reservation
+
+        fail_worker_reservation(
+          reservation,
+          command_id: nil,
+          command_type: "SpawnWorker",
+          message: "Worker #{agent_id} failed during background provisioning: #{error.message}",
+          errors: [error.class.name, error.message],
+          workspace: reservation.fetch("workspace")
+        )
+      end
+
       def recover_worker_reservations
         reservations = synchronized_state do
           normalized_state.fetch("agents").filter_map do |agent|
@@ -1673,37 +1843,27 @@ module Meringue
             # A worker queued behind another agent is not an interrupted provisioning attempt. It is
             # waiting on purpose, and only resolve_deferred_workers may start it.
             next if waiting_deferred_worker?(agent)
+            next unless present_string((agent.fetch("harness_metadata", {}) || {}).fetch("spawn_prompt", nil))
 
-            metadata = agent.fetch("harness_metadata", {}) || {}
-            command_id = present_string(metadata.fetch("spawn_command_id", nil))
-            prompt = present_string(metadata.fetch("spawn_prompt", nil))
-            next unless prompt
-
-            {
-              "command_id" => command_id,
-              "type" => "SpawnWorker",
-              "payload" => {
-                "issue_id" => agent.fetch("issue_id"),
-                # The record itself, so recovery resumes this reservation instead of depending on
-                # a spawn command id the original request may never have had.
-                "_reservation_agent_id" => agent.fetch("id"),
-                "title" => metadata.fetch("title", nil),
-                "prompt" => prompt,
-                "workspace_path" => metadata.fetch("requested_workspace_path", nil),
-                "follow_up_of_agent_id" => metadata.fetch("follow_up_of_agent_id", nil),
-                "replace_agent_id" => metadata.fetch("replace_agent_id", nil),
-                "model" => metadata.dig("spawn_session_settings", "model"),
-                "thinking_level" => metadata.dig("spawn_session_settings", "thinking_level"),
-                "workspace_mode" => agent.fetch("workspace_mode", metadata.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED)),
-                # An activation that was interrupted between the flip and the harness spawn resumes
-                # here; it must not be re-evaluated as a fresh deferral request.
-                "after_agent_id" => present_string(agent.fetch("after_agent_id", nil)),
-                "_activate_deferred" => deferred_spawn_metadata(agent).fetch("state", nil) == DEFERRED_STATE_ACTIVATING
-              }
-            }
+            deep_copy(agent)
           end
         end
-        reservations.map { |command| apply(command) }
+        if @async_worker_provisioning
+          reservations.filter_map do |agent|
+            next unless schedule_worker_provisioning(agent.fetch("id"))
+
+            accepted_result(
+              nil,
+              "RecoverWorkerReservation",
+              agent.fetch("id"),
+              "Queued worker #{agent.fetch("id")} for background provisioning.",
+              agent,
+              []
+            )
+          end
+        else
+          reservations.map { |agent| apply(worker_reservation_command(agent)) }
+        end
       end
 
       def recover_unapplied_head_results
@@ -6483,6 +6643,31 @@ module Meringue
             []
           )
         end
+        # A later command in the same head batch can target a worker immediately after SpawnWorker.
+        # Its harness does not exist yet now that provisioning is asynchronous, so durably fold the
+        # instruction into the first turn instead of rejecting it or racing session startup.
+        if worker_provisioning_in_progress?(agent) && !agent_has_session_reference?(agent)
+          now = timestamp
+          initial_prompt = metadata.fetch("spawn_prompt", "").to_s
+          combined_prompt = [initial_prompt, "--- Additional instruction before launch ---", prompt.to_s].reject(&:empty?).join("\n\n")
+          agent["updated_at"] = now
+          agent["harness_metadata"] = metadata.merge(
+            "spawn_prompt" => combined_prompt,
+            "prompt_command_ids" => (delivered_prompt_ids + [present_string(command_id)]).compact.last(PROMPT_COMMAND_ID_HISTORY_LIMIT)
+          )
+          message = "Added the prompt to worker #{agent.fetch("id")}'s pending launch."
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: agent.fetch("id"),
+            level: "info",
+            message: message,
+            details: { "agent_id" => agent.fetch("id"), "mode" => mode, "delivery" => "initial_turn" }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          return accepted_result(command_id, command_type, agent.fetch("id"), message, deep_copy(agent), log_ids)
+        end
         # A worker whose workspace provisioning failed has no session to prompt, but it is not
         # dead either: prompting it is how the user retries provisioning with a fresh instruction,
         # instead of losing the reservation and having to recreate the worker by hand.
@@ -8573,6 +8758,9 @@ module Meringue
         # Naming the record directly is what lets a worker be recovered or retried even when its
         # original spawn carried no command id, instead of silently spawning a second worker.
         reservation_agent_id = present_string(value_at(payload, "_reservation_agent_id", "reservation_agent_id"))
+        # Executor-only marker. Public SpawnWorker calls stop after the durable reservation; a
+        # bounded provisioning thread re-enters with this marker to perform external I/O.
+        provisioning_reserved = !!value_at(payload, "_provision_reserved", "provision_reserved")
         requested_workspace_path = value_at(payload, "workspace_path", "WorkspacePath", "workspacePath")
         requested_workspace_mode = value_at(payload, "workspace_mode", "workspaceMode", "WorkspaceMode")
         # Set by the kernel when it corrected a head's predicted issue id; kept on the worker and
@@ -8664,6 +8852,19 @@ module Meringue
           # A reservation being provisioned by another live instance must not be
           # provisioned again here: that races on the same worktree branch and
           # leaves two harness sessions in one workspace.
+          if @async_worker_provisioning && existing && worker_provisioning_in_progress?(existing) &&
+             !provisioning_reserved && !activating_deferred
+            # The reservation is the exactly-once effect of SpawnWorker. Replays acknowledge it
+            # whether this engine or another live engine currently owns the expensive phase.
+            return accepted_result(
+              command_id,
+              command_type,
+              existing.fetch("id"),
+              "Worker #{existing.fetch("id")} was already reserved and is being provisioned.",
+              deep_copy(existing),
+              []
+            )
+          end
           if existing && worker_provisioning_in_progress?(existing) && owned_by_other_live_instance?(existing)
             return rejected_result(
               command_id,
@@ -8918,6 +9119,17 @@ module Meringue
             # by fail_worker_reservation as an error log, so nothing goes unreported.
             # harness_metadata.provisioning_state remains the structured telemetry for this phase.
           end
+          if @async_worker_provisioning && !provisioning_reserved
+            queued_agent = find_agent(state, agent_id)
+            queued_metadata = queued_agent.fetch("harness_metadata", {}) || {}
+            queued_agent["status"] = "queued"
+            queued_agent["updated_at"] = now
+            queued_agent["harness_metadata"] = queued_metadata.merge(
+              "provisioning_state" => "provisioning_queued",
+              "provisioning_queued_at" => now,
+              "provisioning_next_step" => "Waiting for an available worker-provisioning slot."
+            )
+          end
           touch_state!(state, now)
           store.save(state)
 
@@ -8940,6 +9152,20 @@ module Meringue
           }
         end
         prompt = reservation.fetch("prompt", prompt)
+
+        if @async_worker_provisioning && !provisioning_reserved
+          schedule_worker_provisioning(reservation.fetch("agent_id"))
+          reserved_agent = agent_record_snapshot(reservation.fetch("agent_id"))
+          message = "Reserved worker #{reservation.fetch("agent_id")}; workspace and harness provisioning will continue in the background."
+          return accepted_result(
+            command_id,
+            command_type,
+            reservation.fetch("agent_id"),
+            message,
+            reserved_agent,
+            []
+          )
+        end
 
         # A claimed workspace is already provisioned by definition: it is the predecessor's existing
         # worktree, so it is adopted as-is and never re-created, re-branched, or cleaned up. The git
@@ -8980,7 +9206,6 @@ module Meringue
           )
         end
         reservation["workspace_reuse"] = workspace_reuse
-        prompt = shared_workspace_prompt_note(prompt, workspace_reuse)
         if workspace.fetch("errors", []).any?
           return fail_worker_reservation(
             reservation,
@@ -8994,6 +9219,12 @@ module Meringue
         end
         reservation["workspace"] = workspace
         checkpoint_worker_workspace!(reservation, workspace, reuse: workspace_reuse)
+        # PromptAgent may have added an instruction while allocation was running. Read the durable
+        # first-turn prompt after the workspace checkpoint so same-batch routing is not lost merely
+        # because the harness startup moved to a background executor.
+        latest_reservation = agent_record_snapshot(reservation.fetch("agent_id"))
+        prompt = latest_reservation.dig("harness_metadata", "spawn_prompt") if latest_reservation
+        prompt = shared_workspace_prompt_note(prompt, workspace_reuse)
 
         session_ref = nil
         begin
@@ -9166,7 +9397,7 @@ module Meringue
 
       def worker_provisioning_in_progress?(agent)
         state = (agent.fetch("harness_metadata", {}) || {}).fetch("provisioning_state", nil)
-        %w[allocating_workspace starting_harness].include?(state.to_s)
+        %w[provisioning_queued allocating_workspace starting_harness].include?(state.to_s)
       end
 
       # What GetInfo says about a worker that is being provisioned, is waiting for a retry, or
@@ -9194,6 +9425,7 @@ module Meringue
       def provisioning_next_step(state, metadata, agent, resumable)
         recorded = present_string(metadata.fetch("provisioning_next_step", nil))
         case state
+        when "provisioning_queued" then recorded || "Waiting for an available worker-provisioning slot."
         when "allocating_workspace" then recorded || "Provisioning this worker's workspace; it starts once the checkout finishes."
         when "retry_pending" then recorded || "Meringue is retrying provisioning automatically."
         else

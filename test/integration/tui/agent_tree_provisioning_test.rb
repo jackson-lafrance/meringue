@@ -15,6 +15,15 @@ class TuiAgentTreeProvisioningTest < Minitest::Test
     @pane = Pane.new
   end
 
+  def test_a_reserved_worker_waiting_for_executor_capacity_says_so
+    rendered = render_worker(
+      "status" => "queued",
+      "harness_metadata" => { "title" => "Force the right index", "provisioning_state" => "provisioning_queued" }
+    )
+
+    assert_includes rendered, "waiting for provisioning slot"
+  end
+
   def test_a_worker_being_provisioned_says_so
     rendered = render_worker(
       "status" => "queued",
