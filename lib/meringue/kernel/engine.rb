@@ -23,9 +23,11 @@ module Meringue
 
         Meringue must never be the author of a git commit. If you create a commit, use the repository's configured user.name and user.email identity; never set or use a Meringue, Meringue Worker, agent@meringue.local, or meringue@example.com identity, and never pass a Meringue identity through --author. If no non-Meringue repository identity is available, do not invent one or commit as Meringue; report the identity configuration as a blocker. The worker environment preserves a non-Meringue repository identity while refusing a Meringue fallback, so committing as the user remains supported.
 
-        The Meringue kernel allocates your workspace before you start. Stay in the assigned workspace and current branch unless the assigned workspace is unusable or the user explicitly asks for a different branch/worktree; report that as a blocker instead of silently creating nested worktrees.
+        The Meringue kernel allocates and validates your workspace before you start. Stay in the assigned workspace and current branch; never create a nested or replacement worktree yourself. Before editing, verify that the checkout is editable, on the recorded task branch, and free of unrelated active changes. If those checks fail, stop writing and report the exact ownership or checkout mismatch so the kernel can safely reallocate it.
 
         Before editing, inspect the repository status and active instructions. Avoid overwriting unrelated active work. Treat the assigned workspace as your task branch/worktree for git-backed projects, commit only the assigned issue's changes, and open a pull request when requested and the environment allows.
+
+        Recover from ordinary environment problems before abandoning implementation or delivery. Read the repository's setup and test guidance, use its documented bootstrap or dependency-repair commands, inspect available environment variables and existing tool installations, and retry transient commands with a bounded attempt. If full verification remains unavailable, run every safe narrower check you can and continue to commit/push/open the requested pull request unless repository guidance explicitly forbids delivery. Report the exact failed commands and remaining limitation; do not turn a recoverable setup problem into an immediate blocker.
 
         Not every worker issue requires a pull request. If the assigned issue is investigation-only or informational and does not require repository changes, return the requested findings or answer without opening a PR unless the issue explicitly asks for one.
 
@@ -8827,6 +8829,14 @@ module Meringue
           create: true,
           progress_agent_id: reservation.fetch("agent_id")
         )
+        unless workspace_reuse.is_a?(Hash) && workspace_reuse.fetch("state", nil) == WORKSPACE_REUSE_STATE_REUSED
+          workspace = ensure_launchable_worker_workspace(
+            workspace,
+            reservation: reservation,
+            requested_workspace_path: requested_workspace_path,
+            task_title: worker_display_title(worker_title, reservation.fetch("issue"))
+          )
+        end
         reservation["workspace_reuse"] = workspace_reuse
         prompt = shared_workspace_prompt_note(prompt, workspace_reuse)
         if workspace.fetch("errors", []).any?
@@ -11964,8 +11974,86 @@ module Meringue
         ).compact
       end
 
+      # Allocation is not the final authority: another process can change Git registration or a
+      # stale state record can reveal a second live owner after checkout. Revalidate immediately
+      # before harness launch and, for kernel-managed workspaces, exclude the unusable candidate and
+      # provision a fresh one. Explicit caller paths are never silently overridden.
+      def ensure_launchable_worker_workspace(workspace, reservation:, requested_workspace_path:, task_title:)
+        return workspace if workspace.fetch("errors", []).any?
+
+        unavailable = []
+        failures = []
+        3.times do
+          validation = validate_worker_workspace_for_launch(workspace, reservation.fetch("agent_id"))
+          occupants = launch_workspace_occupants(reservation.fetch("agent_id"), workspace)
+          if validation.fetch("usable", false) && occupants.empty?
+            if failures.any?
+              reallocation = {
+                "reallocated" => true,
+                "reallocation_reasons" => failures,
+                "unavailable_workspace_paths" => unavailable.dup
+              }
+              plan = workspace.fetch("plan", nil)
+              workspace = workspace.merge(reallocation)
+              workspace["plan"] = plan.merge(reallocation) if plan.is_a?(Hash)
+            end
+            return workspace
+          end
+
+          reason = occupants.empty? ? validation.fetch("reason", "workspace_unusable") : "workspace_owned_by_another_worker"
+          details = occupants.empty? ? validation : { "occupant_agent_ids" => occupants }
+          failures << reason
+          root = workspace_worktree_root_path(workspace) || workspace.fetch("workspace_path", nil)
+          unavailable << root if present_string(root)
+          break if present_string(requested_workspace_path)
+
+          workspace = resolve_worker_workspace(
+            project: reservation.fetch("project"),
+            issue: reservation.fetch("issue"),
+            requested_workspace_path: nil,
+            preview_agent_id: reservation.fetch("agent_id"),
+            task_title: task_title,
+            create: true,
+            progress_agent_id: reservation.fetch("agent_id"),
+            unavailable_paths: unavailable
+          )
+          return workspace if workspace.fetch("errors", []).any?
+          workspace["last_workspace_validation"] = details
+        end
+
+        workspace.merge(
+          "created" => false,
+          "errors" => ["worker workspace is not safe to launch: #{failures.uniq.join(", ")}"],
+          "failure_kind" => "workspace_validation_failed",
+          "recovery" => Meringue::Workspace::Manager::RECOVERY_RETRY,
+          "reallocation_reasons" => failures,
+          "unavailable_workspace_paths" => unavailable
+        )
+      end
+
+      def validate_worker_workspace_for_launch(workspace, agent_id)
+        return { "usable" => Dir.exist?(workspace.fetch("workspace_path", "")), "reason" => "basic_directory_check" } unless
+          workspace_manager.respond_to?(:validate_worker_workspace)
+
+        workspace_manager.validate_worker_workspace(workspace, agent_id: agent_id)
+      rescue StandardError => e
+        { "usable" => false, "reason" => "workspace_validation_error", "error" => sanitized_error_message(e) }
+      end
+
+      def launch_workspace_occupants(agent_id, workspace)
+        return [] unless workspace.fetch("workspace_strategy", workspace.fetch("strategy", nil)) == "git_worktree"
+
+        root = workspace_worktree_root_path(workspace)
+        return [] unless present_string(root)
+
+        synchronized_state do
+          state = normalized_state
+          workspace_occupant_agent_ids(state, root, excluding: [agent_id])
+        end
+      end
+
       def resolve_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:, task_title:, create: false,
-                                   progress_agent_id: nil)
+                                   progress_agent_id: nil, unavailable_paths: [])
         if present_string(requested_workspace_path)
           expanded_path = File.expand_path(requested_workspace_path.to_s)
           errors = Dir.exist?(expanded_path) ? [] : ["workspace_path must be an existing directory"]
@@ -11988,7 +12076,8 @@ module Meringue
                    issue_id: issue.fetch("id"),
                    agent_id: preview_agent_id,
                    task_title: task_title,
-                   progress_agent_id: progress_agent_id
+                   progress_agent_id: progress_agent_id,
+                   unavailable_paths: unavailable_paths
                  )
                else
                  workspace_manager.plan_worker_workspace(
@@ -12056,7 +12145,8 @@ module Meringue
       # and holds no state lock, but a user watching a queued worker still deserves to know the
       # difference between "checking out 478k files" and "wedged", so a long allocation reports
       # progress into the worker record and the log instead of going silent.
-      def allocate_worker_workspace_with_progress(project_root:, project_id:, issue_id:, agent_id:, task_title:, progress_agent_id:)
+      def allocate_worker_workspace_with_progress(project_root:, project_id:, issue_id:, agent_id:, task_title:, progress_agent_id:,
+                                                  unavailable_paths: [])
         arguments = {
           project_root: project_root,
           project_id: project_id,
@@ -12064,6 +12154,9 @@ module Meringue
           agent_id: agent_id,
           task_title: task_title
         }
+        if workspace_manager.method(:allocate_worker_workspace).parameters.any? { |(_kind, name)| name == :unavailable_paths }
+          arguments[:unavailable_paths] = unavailable_paths
+        end
         return workspace_manager.allocate_worker_workspace(**arguments) unless progress_agent_id
         unless workspace_manager.method(:allocate_worker_workspace).parameters.any? { |(_kind, name)| name == :progress }
           # A workspace manager double (or an older implementation) may not accept `progress`.

@@ -2,6 +2,7 @@
 
 require "digest"
 require "fileutils"
+require "json"
 require "open3"
 require "pathname"
 
@@ -48,6 +49,8 @@ module Meringue
       # another actor provisioned the same worker concurrently. Reuse it when it is usable, and
       # otherwise fall back to a uniquified branch/path instead of failing the spawn.
       ALLOCATION_ATTEMPT_LIMIT = 3
+      OWNERSHIP_SCHEMA_VERSION = 1
+      OWNERSHIP_DIRECTORY = ".ownership"
       COLLISION_ERROR_PATTERN = /already exists|already used by worktree|is already checked out/i
       # How a failed allocation can be recovered. The manager knows git, so it classifies; the
       # kernel owns what to do with a worker in each case.
@@ -273,6 +276,7 @@ module Meringue
           "project_root" => File.expand_path(project_root),
           "workspace_path" => workspace_path,
           "workspace_branch" => branch,
+          "workspace_owner_id" => agent_id.to_s,
           "created" => false
         }
       end
@@ -280,7 +284,8 @@ module Meringue
       # `progress` is an optional callable invoked (at most every PROGRESS_REPORT_INTERVAL
       # seconds) while a long command is still running, so a caller can tell the user that a
       # checkout is working rather than hung.
-      def allocate_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil, progress: nil)
+      def allocate_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil, progress: nil,
+                                    unavailable_paths: [])
         plan = nil
         set_allocation_deadline!(self.class.monotonic_now + allocation_budget)
         plan = plan_worker_workspace(
@@ -292,11 +297,12 @@ module Meringue
         )
         project_path = canonical_path(project_root)
         plan["project_root"] = project_path
-        git_root = git_root_for(project_path)
-        return project_root_workspace(project_path, plan, "project root is not inside a git repository") unless git_root
+        repository = repository_context(project_path)
+        return project_root_workspace(project_path, plan, "project root is not inside a git repository") unless repository
 
+        git_root = repository.fetch("git_root")
         worktree_root = File.expand_path(plan.fetch("workspace_path"))
-        relative_project_path = relative_path(project_path, git_root)
+        relative_project_path = repository.fetch("bare") ? "." : relative_path(project_path, git_root)
         base_ref = preferred_base_ref(git_root)
         return failed_workspace(plan, ["could not find a git base ref for worker workspace"], git_root: git_root, worktree_root: worktree_root) unless base_ref
 
@@ -309,6 +315,15 @@ module Meringue
           candidate = candidate_allocation(plan, attempt)
           worktree_root = candidate.fetch("worktree_root")
           candidate_branch = candidate.fetch("branch")
+          if Array(unavailable_paths).any? { |path| paths_overlap?(worktree_root, path) }
+            errors << "worker worktree candidate is unavailable: #{worktree_root}"
+            last_failure = {
+              "failure_kind" => "workspace_collision",
+              "recovery" => RECOVERY_RETRY,
+              "retry" => true
+            }
+            next
+          end
           candidate_created_branch = false
           candidate_owned_attempt = false
           attempt_started = lambda do |details|
@@ -322,6 +337,7 @@ module Meringue
             relative_project_path: relative_project_path,
             branch: candidate_branch,
             worktree_root: worktree_root,
+            owner: workspace_owner(plan, git_root: git_root, branch: candidate_branch, worktree_root: worktree_root),
             progress: progress,
             attempt_started: attempt_started
           )
@@ -431,6 +447,61 @@ module Meringue
         clear_allocation_deadline!
       end
 
+      # Final launch gate. Allocation and harness startup are separated by state checkpointing, so
+      # validate the checkout again immediately before the kernel gives it to a worker. Managed
+      # worktrees must still be registered, editable, on the reserved branch, and owned by this
+      # worker. A bare repository is a valid *source* for `git worktree add`, never a valid cwd.
+      def validate_worker_workspace(workspace, agent_id: nil)
+        return reuse_outcome(false, "invalid_workspace_record") unless workspace.is_a?(Hash)
+
+        path = present_output(workspace["workspace_path"])
+        return reuse_outcome(false, "workspace_missing") unless path && Dir.exist?(path)
+        return reuse_outcome(false, "workspace_not_editable") unless File.writable?(path)
+        return reuse_outcome(false, "workspace_is_bare_repository") if bare_repository?(path)
+
+        strategy = workspace["workspace_strategy"] || workspace["strategy"] || workspace.dig("plan", "strategy")
+        return reuse_outcome(true, "workspace_ready", workspace_path: canonical_path(path)) unless strategy == "git_worktree"
+
+        plan = workspace["plan"].is_a?(Hash) ? workspace.fetch("plan") : workspace
+        root = workspace["worktree_root_path"] || workspace["workspace_root_path"] ||
+               plan["worktree_root_path"] || plan["workspace_root_path"] || path
+        branch = workspace["workspace_branch"] || plan["workspace_branch"]
+        git_root = workspace["git_root"] || plan["git_root"] || workspace["project_root"] || plan["project_root"]
+        inspection = inspect_shared_worktree(worktree_root: root, branch: branch, git_root: git_root)
+        return inspection unless inspection.fetch("usable", false)
+
+        expected_owner = present_output(agent_id) || present_output(workspace["workspace_owner_id"]) ||
+                         present_output(plan["workspace_owner_id"])
+        return reuse_outcome(false, "workspace_owner_unknown") unless expected_owner
+
+        owner = read_workspace_owner(root)
+        return reuse_outcome(false, "workspace_owner_missing") unless owner
+        unless owner.fetch("agent_id", nil) == expected_owner &&
+               same_path?(owner.fetch("worktree_root", ""), root) &&
+               owner.fetch("branch", nil) == branch &&
+               same_path?(owner.fetch("git_root", ""), git_root)
+          return reuse_outcome(
+            false,
+            "workspace_owner_mismatch",
+            expected_owner_agent_id: expected_owner,
+            owner_agent_id: owner.fetch("agent_id", nil)
+          )
+        end
+
+        reuse_outcome(
+          true,
+          "workspace_ready",
+          workspace_path: canonical_path(path),
+          worktree_root_path: canonical_path(root),
+          workspace_branch: branch,
+          owner_agent_id: expected_owner
+        )
+      rescue CommandTimeout => e
+        reuse_outcome(false, "workspace_validation_timed_out", error: e.message)
+      rescue StandardError => e
+        reuse_outcome(false, "workspace_validation_error", error: e.message)
+      end
+
       def release_worker_workspace(workspace, delete_branch: false)
         return false unless workspace.is_a?(Hash)
         return false unless workspace.fetch("created", false)
@@ -439,6 +510,9 @@ module Meringue
         git_root = workspace["git_root"] || workspace.dig("plan", "git_root") || workspace["project_root"]
         worktree_root = workspace["worktree_root_path"] || workspace["workspace_root_path"] || workspace.dig("plan", "worktree_root_path") || workspace["workspace_path"]
         return false unless git_root && worktree_root && Dir.exist?(worktree_root.to_s)
+        owner_id = workspace["workspace_owner_id"] || workspace.dig("plan", "workspace_owner_id")
+        return false unless workspace_owned_by?(worktree_root, agent_id: owner_id, git_root: git_root,
+                                                branch: workspace["workspace_branch"] || workspace.dig("plan", "workspace_branch"))
 
         result = run_command("git", "-C", git_root.to_s, "worktree", "remove", "--force", worktree_root.to_s,
                              timeout: cleanup_timeout, deadline: false)
@@ -446,8 +520,13 @@ module Meringue
 
         branch = workspace["workspace_branch"] || workspace.dig("plan", "workspace_branch")
         # Even an explicit delete keeps a branch that carries commits: releasing a workspace must
-        # never be the reason a delivered commit stops being reachable.
-        release_owned_branch(canonical_path(git_root.to_s), branch.to_s) if delete_branch && branch
+        # never be the reason a delivered commit stops being reachable. Keep its ownership record
+        # with it; a later retry by the same worker may safely check that branch back out, while a
+        # different worker must allocate elsewhere.
+        branch_result = release_owned_branch(canonical_path(git_root.to_s), branch.to_s) if delete_branch && branch
+        if branch_result == "deleted" || !branch_exists?(canonical_path(git_root.to_s), branch.to_s)
+          release_workspace_owner(worktree_root, agent_id: owner_id, git_root: git_root, branch: branch)
+        end
         true
       rescue StandardError
         false
@@ -575,6 +654,8 @@ module Meringue
             return cleanup_outcome("failed", "worktree_not_registered", success: false, **base)
           end
 
+          owner_id = workspace["workspace_owner_id"] || plan["workspace_owner_id"]
+          release_workspace_owner(worktree_root, agent_id: owner_id, git_root: git_root, branch: branch) if owner_id
           return cleanup_outcome("already_removed", "worktree_already_removed", success: true, **base)
         end
         unless record.fetch("branch", nil) == "refs/heads/#{branch}"
@@ -607,6 +688,8 @@ module Meringue
           return cleanup_outcome("failed", reason, success: false, attempted: true, error: output, **base)
         end
 
+        owner_id = workspace["workspace_owner_id"] || plan["workspace_owner_id"]
+        release_workspace_owner(worktree_root, agent_id: owner_id, git_root: git_root, branch: branch) if owner_id
         cleanup_outcome("removed", "worktree_removed", success: true, attempted: true, **base)
       rescue CommandTimeout => e
         cleanup_outcome(
@@ -633,17 +716,38 @@ module Meringue
 
       private
 
-      def git_root_for(project_path)
+      # A registered project may be either a normal checkout or a bare common repository. World
+      # uses the latter: `--show-toplevel` correctly fails there, but the bare repository is still
+      # exactly the Git directory from which isolated editable worktrees must be created.
+      def repository_context(project_path)
         return nil unless Dir.exist?(project_path)
 
-        result = run_command("git", "-C", project_path, "rev-parse", "--show-toplevel")
-        return nil unless result.fetch("status").success?
+        bare = run_command("git", "-C", project_path, "rev-parse", "--is-bare-repository")
+        return nil unless bare.fetch("status").success?
+        if bare.fetch("stdout").to_s.strip == "true"
+          git_dir = run_command("git", "-C", project_path, "rev-parse", "--absolute-git-dir")
+          return nil unless git_dir.fetch("status").success?
 
-        canonical_path(result.fetch("stdout").strip)
+          return { "git_root" => canonical_path(git_dir.fetch("stdout").strip), "bare" => true }
+        end
+
+        top = run_command("git", "-C", project_path, "rev-parse", "--show-toplevel")
+        return nil unless top.fetch("status").success?
+
+        { "git_root" => canonical_path(top.fetch("stdout").strip), "bare" => false }
       rescue CommandTimeout
         raise
       rescue StandardError
         nil
+      end
+
+      def bare_repository?(path)
+        result = run_command("git", "-C", path, "rev-parse", "--is-bare-repository")
+        result.fetch("status").success? && result.fetch("stdout").to_s.strip == "true"
+      rescue CommandTimeout
+        raise
+      rescue StandardError
+        false
       end
 
       def preferred_base_ref(git_root)
@@ -751,8 +855,31 @@ module Meringue
         { "branch" => "#{branch}#{suffix}", "worktree_root" => "#{worktree_root}#{suffix}" }
       end
 
+      # Candidate ownership is reserved before any path/ref mutation and held under a per-candidate
+      # advisory lock until checkout finishes. Distinct workers still provision in parallel because
+      # their locks differ; contenders for one path can only observe or reallocate, never both
+      # decide that an existing worktree is theirs.
       def allocate_candidate_worktree(plan:, git_root:, base_ref:, relative_project_path:, branch:, worktree_root:,
-                                      progress: nil, attempt_started: nil)
+                                      owner:, progress: nil, attempt_started: nil)
+        reservation = reserve_workspace_candidate(owner)
+        return reservation.fetch("outcome") unless reservation.fetch("acquired", false)
+
+        allocate_reserved_candidate_worktree(
+          plan: plan,
+          git_root: git_root,
+          base_ref: base_ref,
+          relative_project_path: relative_project_path,
+          branch: branch,
+          worktree_root: worktree_root,
+          progress: progress,
+          attempt_started: attempt_started
+        )
+      ensure
+        release_candidate_lock(reservation && reservation["lock"])
+      end
+
+      def allocate_reserved_candidate_worktree(plan:, git_root:, base_ref:, relative_project_path:, branch:, worktree_root:,
+                                               progress: nil, attempt_started: nil)
         candidate_plan = plan.merge("workspace_branch" => branch, "workspace_path" => worktree_root)
         workspace_path = relative_project_path == "." ? worktree_root : File.join(worktree_root, relative_project_path)
 
@@ -780,7 +907,12 @@ module Meringue
         FileUtils.mkdir_p(File.dirname(worktree_root))
         created_branch = !branch_exists?(git_root, branch)
         argv = if created_branch
-                 ["git", "-C", git_root, "worktree", "add", "-b", branch, worktree_root, base_ref]
+                 # `origin/main` normally makes Git auto-write branch tracking config. Two otherwise
+                 # independent concurrent adds then race on `.git/config.lock`. Workers push their
+                 # explicit task branch and do not need an implicit upstream at checkout time, so
+                 # suppress that shared config mutation and keep distinct candidate checkouts truly
+                 # parallel.
+                 ["git", "-C", git_root, "worktree", "add", "--no-track", "-b", branch, worktree_root, base_ref]
                else
                  if branch_checked_out?(git_root, branch)
                    return {
@@ -882,6 +1014,163 @@ module Meringue
         }
       end
 
+      def workspace_owner(plan, git_root:, branch:, worktree_root:)
+        {
+          "schema_version" => OWNERSHIP_SCHEMA_VERSION,
+          "agent_id" => plan.fetch("workspace_owner_id").to_s,
+          "project_root" => canonical_path(plan.fetch("project_root")),
+          "git_root" => canonical_path(git_root),
+          "branch" => branch.to_s,
+          "worktree_root" => canonical_path(worktree_root)
+        }
+      end
+
+      def reserve_workspace_candidate(owner)
+        FileUtils.mkdir_p(ownership_directory)
+        lock = File.open(workspace_owner_lock_path(owner.fetch("worktree_root")), File::RDWR | File::CREAT, 0o600)
+        unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+          current = read_workspace_owner(owner.fetch("worktree_root"))
+          same_owner = current && ownership_matches?(current, owner)
+          lock.close
+          return {
+            "acquired" => false,
+            "outcome" => {
+              # A different owner gets a fresh candidate immediately. A duplicate attempt for the
+              # same worker waits for kernel reconciliation instead of provisioning a second tree.
+              "retry" => !same_owner,
+              "errors" => ["worker workspace reservation is already in progress: #{owner.fetch("worktree_root")}"],
+              "failure_kind" => same_owner ? "allocation_in_progress" : "ownership_collision",
+              "recovery" => same_owner ? RECOVERY_RETRY : RECOVERY_NONE
+            }
+          }
+        end
+
+        current = read_workspace_owner(owner.fetch("worktree_root"))
+        if current && !ownership_matches?(current, owner)
+          return {
+            "acquired" => false,
+            "outcome" => ownership_collision_outcome(owner, current),
+            "lock" => lock
+          }
+        end
+
+        unless current
+          foreign_path = Dir.exist?(owner.fetch("worktree_root")) &&
+                         (Dir.children(owner.fetch("worktree_root")) - [".DS_Store"]).any?
+          foreign_registration = worktree_registered?(owner.fetch("git_root"), owner.fetch("worktree_root"))
+          foreign_branch = branch_exists?(owner.fetch("git_root"), owner.fetch("branch"))
+          if foreign_path || foreign_registration || foreign_branch
+            return {
+              "acquired" => false,
+              "outcome" => ownership_collision_outcome(owner, nil),
+              "lock" => lock
+            }
+          end
+          write_workspace_owner(owner)
+        end
+
+        { "acquired" => true, "lock" => lock }
+      rescue StandardError => e
+        release_candidate_lock(lock)
+        {
+          "acquired" => false,
+          "outcome" => {
+            "retry" => false,
+            "errors" => ["worker workspace reservation failed: #{e.message}"],
+            "failure_kind" => "ownership_reservation_error",
+            "recovery" => RECOVERY_RETRY
+          }
+        }
+      end
+
+      def ownership_collision_outcome(owner, current)
+        owner_id = current && current["agent_id"]
+        suffix = owner_id ? " (owned by #{owner_id})" : " (ownership could not be verified)"
+        {
+          "retry" => true,
+          "errors" => ["worker workspace is already reserved: #{owner.fetch("worktree_root")}#{suffix}"],
+          "failure_kind" => "ownership_collision",
+          "recovery" => RECOVERY_NONE
+        }
+      end
+
+      def ownership_directory
+        File.join(root_path, OWNERSHIP_DIRECTORY)
+      end
+
+      def workspace_owner_key(worktree_root)
+        Digest::SHA256.hexdigest(canonical_path(worktree_root))[0, 32]
+      end
+
+      def workspace_owner_path(worktree_root)
+        File.join(ownership_directory, "#{workspace_owner_key(worktree_root)}.json")
+      end
+
+      def workspace_owner_lock_path(worktree_root)
+        File.join(ownership_directory, "#{workspace_owner_key(worktree_root)}.lock")
+      end
+
+      def read_workspace_owner(worktree_root)
+        path = workspace_owner_path(worktree_root)
+        return nil unless File.file?(path)
+
+        parsed = JSON.parse(File.read(path))
+        parsed.is_a?(Hash) ? parsed : nil
+      rescue JSON::ParserError, Errno::ENOENT
+        nil
+      end
+
+      def write_workspace_owner(owner)
+        path = workspace_owner_path(owner.fetch("worktree_root"))
+        temporary = "#{path}.tmp-#{Process.pid}-#{Thread.current.object_id}"
+        File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+          file.write(JSON.generate(owner))
+          file.flush
+          file.fsync
+        end
+        File.rename(temporary, path)
+      ensure
+        FileUtils.rm_f(temporary) if defined?(temporary) && temporary
+      end
+
+      def workspace_owned_by?(worktree_root, agent_id:, git_root:, branch:)
+        return false if [agent_id, git_root, branch].any? { |value| value.to_s.strip.empty? }
+
+        owner = read_workspace_owner(worktree_root)
+        owner && ownership_matches?(
+          owner,
+          "agent_id" => agent_id.to_s,
+          "git_root" => canonical_path(git_root),
+          "branch" => branch.to_s,
+          "worktree_root" => canonical_path(worktree_root)
+        )
+      end
+
+      def ownership_matches?(left, right)
+        left.fetch("agent_id", nil) == right.fetch("agent_id", nil) &&
+          left.fetch("branch", nil) == right.fetch("branch", nil) &&
+          same_path?(left.fetch("git_root", ""), right.fetch("git_root", "")) &&
+          same_path?(left.fetch("worktree_root", ""), right.fetch("worktree_root", ""))
+      end
+
+      def release_workspace_owner(worktree_root, agent_id:, git_root:, branch:)
+        return false unless workspace_owned_by?(worktree_root, agent_id: agent_id, git_root: git_root, branch: branch)
+
+        FileUtils.rm_f(workspace_owner_path(worktree_root))
+        true
+      rescue StandardError
+        false
+      end
+
+      def release_candidate_lock(lock)
+        return unless lock
+
+        lock.flock(File::LOCK_UN)
+        lock.close
+      rescue IOError, SystemCallError
+        nil
+      end
+
       def collision_output?(output)
         output.to_s.match?(COLLISION_ERROR_PATTERN)
       end
@@ -935,6 +1224,7 @@ module Meringue
         record = records.find { |candidate| canonical_path(candidate.fetch("worktree", "")) == canonical_path(worktree_root) }
         return nil unless record
         return nil unless record.fetch("branch", nil) == "refs/heads/#{plan.fetch("workspace_branch")}"
+        return nil if record.key?("locked")
         return nil unless Dir.exist?(workspace_path)
 
         plan.merge(

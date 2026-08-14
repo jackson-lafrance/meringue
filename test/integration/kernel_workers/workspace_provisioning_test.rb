@@ -2,12 +2,34 @@
 
 require "test_helper"
 require "support/kernel_workers_support"
+require "support/workspace_support"
 
 # Workspace provisioning outcomes: git worktree collisions, non-git fallback, and
 # harness spawn failures must surface as failed commands with clear logs and an
 # honest (never half-written) agent record.
 class KernelWorkersWorkspaceProvisioningTest < Minitest::Test
+  include WorkspaceSupport
   include KernelWorkersSupport
+
+  class TamperingWorkspaceManager < Meringue::Workspace::Manager
+    attr_reader :allocations
+
+    def initialize(**options)
+      super
+      @allocations = []
+    end
+
+    def allocate_worker_workspace(**arguments)
+      workspace = super
+      @allocations << workspace
+      if @allocations.length == 1 && workspace.fetch("created", false)
+        owner_path = send(:workspace_owner_path, workspace.fetch("worktree_root_path"))
+        owner = JSON.parse(File.read(owner_path)).merge("agent_id" => "P1-I99-W1")
+        File.write(owner_path, JSON.generate(owner))
+      end
+      workspace
+    end
+  end
 
   def test_workspace_allocation_failure_fails_the_command_and_marks_the_worker_errored
     manager = FailingWorkspaceManager.new(
@@ -102,11 +124,45 @@ class KernelWorkersWorkspaceProvisioningTest < Minitest::Test
 
     assert_equal "failed", result.fetch("status")
     assert_includes result.fetch("message"), "Worker workspace provisioning failed"
-    assert_includes result.fetch("errors").join(" "), "already exists"
+    assert_includes result.fetch("errors").join(" "), "already reserved"
     assert_empty @harness_client.spawns
     assert_equal "errored", worker.fetch("status")
     assert_equal "failed", worker.fetch("harness_metadata").fetch("provisioning_state")
-    refute_empty logs_matching(engine, /Worker workspace provisioning failed.*already exists/)
+    refute_empty logs_matching(engine, /Worker workspace provisioning failed.*already reserved/)
+  end
+
+  def test_bare_project_root_launches_the_worker_in_an_isolated_editable_checkout
+    project = create_git_project(tmp_path("bare-source"))
+    engine = build_engine
+    project_id = add_project(engine, project.fetch("origin_path"), name: "Bare World")
+    issue_id = create_issue(engine, project_id, title: "Fix World pricing")
+
+    result = spawn_worker(engine, issue_id)
+    worker = agent(engine, result.fetch("target_id"))
+
+    assert_equal "accepted", result.fetch("status")
+    assert_equal "git_worktree", worker.fetch("workspace_strategy")
+    refute_equal File.realpath(project.fetch("origin_path")), File.realpath(worker.fetch("workspace_path"))
+    assert_equal "false", run_git(worker.fetch("workspace_path"), "rev-parse", "--is-bare-repository").strip
+    assert_equal "true", run_git(worker.fetch("workspace_path"), "rev-parse", "--is-inside-work-tree").strip
+    assert_equal worker.fetch("workspace_path"), @harness_client.spawns.last.fetch("cwd")
+  end
+
+  def test_ownership_mismatch_before_launch_reallocates_instead_of_starting_in_the_colliding_checkout
+    manager = TamperingWorkspaceManager.new(root_path: workspace_root)
+    engine = build_engine(workspace_manager: manager)
+    context = project_with_issue(engine)
+
+    result = spawn_worker(engine, context.fetch("issue_id"))
+    worker = agent(engine, result.fetch("target_id"))
+
+    assert_equal "accepted", result.fetch("status"), result.inspect
+    assert_equal 2, manager.allocations.length
+    refute_equal manager.allocations.first.fetch("workspace_path"), worker.fetch("workspace_path")
+    assert_equal "#{manager.allocations.first.fetch("worktree_root_path")}-2", worker.fetch("workspace_path")
+    assert_equal true, worker.dig("harness_metadata", "workspace_plan", "reallocated")
+    assert_includes worker.dig("harness_metadata", "workspace_plan", "reallocation_reasons"), "workspace_owner_mismatch"
+    assert_equal worker.fetch("workspace_path"), @harness_client.spawns.last.fetch("cwd")
   end
 
   def test_non_git_project_root_falls_back_to_the_project_root_cwd
