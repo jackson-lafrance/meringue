@@ -29,12 +29,14 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
       @spawn_defaults["thinking_level"] = thinking_level if thinking_level
     end
 
-    def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:)
+    def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {})
       @session_counter += 1
+      model = session_settings.fetch("model", spawn_defaults.fetch("model"))
+      thinking = session_settings.fetch("thinking_level", spawn_defaults.fetch("thinking_level"))
       super.merge(
         "harness" => "pi",
         "session_id" => "pi-settings-#{@session_counter}",
-        "session_settings" => settings(spawn_defaults.fetch("model"), spawn_defaults.fetch("thinking_level"))
+        "session_settings" => settings(model, thinking)
       )
     end
 
@@ -150,6 +152,27 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal "openai/gpt-5.6-sol", second.dig("session_settings", "model", "reference")
     assert_equal "xhigh", second.dig("session_settings", "thinking_level")
     assert_includes log_messages.last(4).join("\n"), "Existing Pi sessions were not changed"
+  end
+
+  def test_spawn_worker_partial_override_uses_other_default_and_does_not_change_future_defaults
+    add_project!(name: "per-worker")
+    create_issue!("P1", title: "Exercise per-worker settings")
+    workspace = make_project_dir("worker-override")
+
+    result = apply_command(
+      "SpawnWorker",
+      "issue_id" => "P1-I1",
+      "prompt" => "Do the work",
+      "workspace_path" => workspace,
+      "model" => "openai/gpt-5.6-sol"
+    )
+    assert_accepted(result)
+    worker = persisted_agents.fetch(0)
+
+    assert_equal "openai/gpt-5.6-sol", worker.dig("session_settings", "model", "reference")
+    assert_equal "max", worker.dig("session_settings", "thinking_level")
+    assert_equal "anthropic/claude-opus-5", @coordinator.defaults("pi").fetch("model")
+    assert_empty @coordinator.calls
   end
 
   def test_targeted_commands_change_one_existing_session_without_changing_defaults

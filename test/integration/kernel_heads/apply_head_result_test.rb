@@ -80,6 +80,35 @@ class KernelHeadsApplyResultTest < KernelHeadsTestCase
     assert_equal ["P1-I1-W1"], agents(type: "worker").map { |agent| agent.fetch("id") }
   end
 
+  def test_head_proposed_worker_session_overrides_are_applied_and_invalid_values_are_rejected
+    project_id = add_project!
+    issue_id = engine.apply(
+      "type" => "CreateIssue",
+      "payload" => { "project_id" => project_id, "title" => "Configured worker" }
+    ).fetch("target_id")
+    head_id = spawn_head!("Use openai/gpt-5.6-sol at medium thinking")
+
+    result = apply_head_result(
+      head_id,
+      head_result(commands: [
+        spawn_worker_command(
+          issue_id: issue_id,
+          extra: { "model" => "openai/gpt-5.6-sol", "thinking_level" => "medium" }
+        ),
+        spawn_worker_command(issue_id: issue_id, extra: { "thinking_level" => "ultra" })
+      ]),
+      cleanup_head: false
+    )
+
+    accepted, rejected = command_results(result)
+    assert_equal "accepted", accepted.fetch("status")
+    assert_equal "openai/gpt-5.6-sol", accepted.dig("result", "session_settings", "model", "reference")
+    assert_equal "medium", accepted.dig("result", "session_settings", "thinking_level")
+    assert_equal "rejected", rejected.fetch("status")
+    assert_includes rejected.fetch("errors").join(" "), "thinking_level must be one of"
+    assert_equal 1, agents(type: "worker").length
+  end
+
   def test_created_issue_records_the_originating_head
     project_id = add_project!
     head_id = spawn_head!("File an issue")

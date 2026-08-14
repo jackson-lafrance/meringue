@@ -39,7 +39,12 @@ module Meringue
         @processes_mutex = Mutex.new
       end
 
-      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:)
+      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {})
+        unless session_settings.empty?
+          raise UnsupportedSessionSettingsError,
+                "#{harness_name} does not support per-session model or thinking overrides"
+        end
+
         expanded_cwd = validate_cwd!(cwd)
         session_id = new_session_id
         argv = build_spawn_argv(

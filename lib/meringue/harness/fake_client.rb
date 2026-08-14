@@ -7,7 +7,7 @@ module Meringue
         "fake"
       end
 
-      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:)
+      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {})
         {
           "harness" => "fake",
           "pid" => nil,
@@ -16,6 +16,7 @@ module Meringue
           "session_file" => nil,
           "is_streaming" => false,
           "last_event_at" => nil,
+          "session_settings" => fake_session_settings(session_settings),
           "metadata" => {
             "prompt" => prompt,
             "system_prompt" => system_prompt,
@@ -23,6 +24,21 @@ module Meringue
           }
         }
       end
+
+      def fake_session_settings(session_settings)
+        return nil if session_settings.empty?
+
+        model = session_settings["model"] || session_settings[:model]
+        thinking = session_settings["thinking_level"] || session_settings[:thinking_level]
+        {
+          "model" => model && ModelReference.parse(model),
+          "thinking_level" => thinking,
+          "availability" => "available",
+          "source" => "spawn_override"
+        }.compact
+      end
+
+      private :fake_session_settings
 
       def prompt_session(session_ref, prompt, mode: "normal", delivery_id: nil)
         session_ref.merge(
