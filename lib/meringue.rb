@@ -11,6 +11,7 @@ end
 require_relative "meringue/version"
 require_relative "meringue/subprocess_environment"
 require_relative "meringue/project_naming"
+require_relative "meringue/delivery_artifact_policy"
 require_relative "meringue/ids"
 require_relative "meringue/config"
 require_relative "meringue/goals/review_verdict"
