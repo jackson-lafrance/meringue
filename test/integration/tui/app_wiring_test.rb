@@ -340,7 +340,10 @@ class TuiAppWiringTest < Minitest::Test
     config = Meringue::Config.new(
       {
         "tui" => { "colorscheme" => "gruvbox" },
-        "harness" => { "provider" => "claude", "pi" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "high" } },
+        "harness" => { "provider" => "claude", "pi" => {
+          "model" => "openai/gpt-5.6-sol", "thinking_level" => "high",
+          "head_thinking_level" => "low", "worker_thinking_level" => "xhigh"
+        } },
         "conflicts" => { "predecessor_failure" => "run" },
         "workspace" => { "editor_command" => ["code", "--reuse-window"] }
       },
@@ -360,6 +363,8 @@ class TuiAppWiringTest < Minitest::Test
     assert_includes overview, "file: /tmp/meringue-test-config.toml (loaded)"
     assert_includes overview, "harness: claude"
     assert_includes overview, "Pi default model: openai/gpt-5.6-sol"
+    assert_includes overview, "Pi head thinking: low"
+    assert_includes overview, "Pi worker thinking: xhigh"
     assert_includes overview, "conflict policy (predecessor failure): run"
     assert_includes overview, "Submit / open selected item [submit]: ctrl-x"
     assert_includes overview, "Keybindings (action: configured keys"

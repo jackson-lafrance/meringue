@@ -239,6 +239,24 @@ class InputConfigTest < Minitest::Test
     end
   end
 
+  def test_saving_role_specific_thinking_defaults_preserves_shared_compatibility_and_shared_save_resets_overrides
+    Dir.mktmpdir("meringue-config-test") do |dir|
+      path = File.join(dir, "config.toml")
+      Meringue::Config.save_pi_session_defaults!(thinking_level: "medium", path: path)
+      Meringue::Config.save_pi_session_defaults!(thinking_level: "low", thinking_role: "head", path: path)
+      split = Meringue::Config.save_pi_session_defaults!(thinking_level: "xhigh", thinking_role: "worker", path: path)
+
+      assert_equal "medium", split.value("harness", "pi", "thinking_level")
+      assert_equal "low", split.value("harness", "pi", "head_thinking_level")
+      assert_equal "xhigh", split.value("harness", "pi", "worker_thinking_level")
+
+      shared = Meringue::Config.save_pi_session_defaults!(thinking_level: "high", path: path)
+      assert_equal "high", shared.value("harness", "pi", "thinking_level")
+      assert_nil shared.value("harness", "pi", "head_thinking_level")
+      assert_nil shared.value("harness", "pi", "worker_thinking_level")
+    end
+  end
+
   def test_conflict_predecessor_failure_accepts_supported_values_and_defaults_safely
     assert_equal "cancel", Meringue::Config.new({}, path: "/tmp/config.toml").conflict_predecessor_failure
     assert_equal "run", Meringue::Config.new(

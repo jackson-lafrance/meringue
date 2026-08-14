@@ -40,7 +40,7 @@ Natural-language mapping:
 | "show the defaults", "which model will future agents use" | `GetSessionDefaults` (no slash command; this is its only user-facing route) |
 | "what models can I use", "list the available models", "refresh the model list" | `GetModelCatalog` (a status report; the browsable list is the TUI model picker behind `/models`) |
 | "use provider/model-id for future Pi agents" | `SetDefaultSessionModel` |
-| "use high thinking for future Pi agents" | `SetDefaultSessionThinkingLevel` |
+| "use high thinking for future Pi agents" / "use low thinking for heads" | `SetDefaultSessionThinkingLevel` (optional `role`) |
 | "show P1-I9-W3's model/thinking settings" | `GetInfo` with `target_id` (the agent record carries `session_settings`; there is no per-session settings command) |
 | "resync/reconcile the sessions" | `ReconcileSessions` |
 | "this is already done", "no change is needed", "the existing issue already covers it" | Usually a plain `response` explaining why no action is needed; `NoOp` remains available for explicit command-level no-op bookkeeping |
@@ -1602,9 +1602,9 @@ Most of these back a dashboard slash command, and all of them are proposable by 
 same validation as the typed path; `GetSessionDefaults` is head-only. They use normal
 kernel/harness validation: a non-Pi or non-resumable target is rejected rather than guessed.
 
-- `GetSessionDefaults` reports the future-session model/thinking pair and takes `{}`. It has no
-  slash command: the dashboard status line already shows `Pi defaults: <model> · <thinking>` and
-  `/config` prints the same pair, so the typed `/defaults` was removed. Propose it when the user
+- `GetSessionDefaults` reports the future-session model plus head and worker thinking levels and takes `{}`. It has no
+  slash command: the dashboard status line already shows `Pi defaults: <model> · head <level> · worker <level>` and
+  `/config` prints the same values, so the typed `/defaults` was removed. Propose it when the user
   asks about the defaults in natural language.
 - `GetModelCatalog` backs `/models refresh [harness]` with `{ "harness": "pi", "refresh": true }` (the `harness` key stays optional). It is read-only: it asks the harness which models exist, reuses the cached snapshot unless `refresh` is set, and reports an explicit unavailable/unsupported state instead of guessing when the harness cannot answer. Its output is a status (harness, availability, model count, timestamps, note) plus a few example references, not a listing: browsing the catalog is the TUI model picker that bare `/models` opens, which reads the same persisted snapshot. A head proposing this command for "what models can I use" therefore gets a short, scannable answer instead of a hundred log lines.
 - `SetDefaultSessionModel` backs `/model <provider>/<model-id>` with `{ "model": "provider/model-id" }`. A
@@ -1614,7 +1614,10 @@ kernel/harness validation: a non-Pi or non-resumable target is rejected rather t
   no slash at all, an empty provider or model id, a leading `-`, or a `.`/`..` provider. Validation
   never consults the model catalog: an id the catalog does not list is still saved, and the accepted
   message labels it unverified. Every rejection names its reason in the visible message.
-- `SetDefaultSessionThinkingLevel` backs `/thinking <level>` with `{ "level": "high" }`.
+- `SetDefaultSessionThinkingLevel` backs the backward-compatible shared `/thinking <level>` with
+  `{ "level": "high" }`. It also backs `/thinking head <level>` and `/thinking worker <level>` with
+  `{ "role": "head", "level": "low" }` or the corresponding worker payload. Omitting `role` updates
+  both future roles and clears role-specific overrides; a role payload updates only that role.
 
 There is no command for reading one existing session's effective settings. `/session-settings` and its
 `GetSessionSettings` kernel command were removed; propose `GetInfo` with the agent id instead, whose
