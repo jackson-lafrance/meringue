@@ -40,6 +40,22 @@ module Meringue
 
         Report true blockers instead of asking for routine approval: missing credentials, authentication or authorization failures, missing or invalid remotes, branch/worktree collisions, unrelated uncommitted work that would be overwritten, or unsafe/destructive operations.
       PROMPT
+      READ_ONLY_WORKER_SYSTEM_PROMPT = <<~PROMPT.freeze
+        You are a Meringue read-only worker agent. Work only on the assigned investigation or informational task and shared checkout.
+        Follow the user's prompt and the repository instructions in your working directory only where they do not conflict with this read-only contract.
+
+        This is a shared project checkout that may be used by the user and other read-only workers concurrently. You must not mutate it or any repository state. Do not create, edit, overwrite, move, or delete files; do not install dependencies, run generators or formatters, change permissions, or write caches/build artifacts. Do not run git operations that mutate refs, the index, worktrees, remotes, or the working tree, including add, commit, checkout, switch, branch, reset, restore, stash, clean, fetch, pull, push, merge, rebase, tag, or worktree commands. Do not open, update, or merge pull requests or mutate other remote services.
+
+        Your harness intentionally exposes only read, grep, find, and ls tools. Do not try to bypass that restriction through extensions, subprocesses, another checkout, or a nested worktree. If the task turns out to require any repository or external mutation, stop and report that an isolated implementation worker is required.
+
+        Inspect and synthesize with read-only tools, then return findings or an answer. Treat pre-existing uncommitted files as user-owned state: you may read them when relevant but must not alter them. Never claim to have changed, committed, pushed, or delivered anything.
+
+        During longer work, keep progress visible by briefly reporting meaningful findings and decisions. Do not narrate routine tool use or invent progress when there is no substantive update.
+      PROMPT
+      WORKSPACE_MODE_ISOLATED = "isolated"
+      WORKSPACE_MODE_SHARED_READ_ONLY = "shared_read_only"
+      WORKSPACE_MODES = [WORKSPACE_MODE_ISOLATED, WORKSPACE_MODE_SHARED_READ_ONLY].freeze
+
       WORKER_RESUME_PROMPT = <<~PROMPT.freeze
         Continue this Meringue worker session from the existing session history and workspace state.
         First inspect the current repository state, then continue the assigned issue from the last incomplete step.
@@ -1671,6 +1687,7 @@ module Meringue
                 "replace_agent_id" => metadata.fetch("replace_agent_id", nil),
                 "model" => metadata.dig("spawn_session_settings", "model"),
                 "thinking_level" => metadata.dig("spawn_session_settings", "thinking_level"),
+                "workspace_mode" => agent.fetch("workspace_mode", metadata.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED)),
                 # An activation that was interrupted between the flip and the harness spawn resumes
                 # here; it must not be re-evaluated as a fresh deferral request.
                 "after_agent_id" => present_string(agent.fetch("after_agent_id", nil)),
@@ -5348,11 +5365,14 @@ module Meringue
       end
 
       def persisted_worker_delivery_branch(agent)
+        return nil if agent.fetch("effective_workspace_mode", WORKSPACE_MODE_ISOLATED) == WORKSPACE_MODE_SHARED_READ_ONLY
+
         metadata = agent.fetch("harness_metadata", {}) || {}
         present_string(metadata.fetch("delivery_branch", nil)) || present_string(agent.fetch("workspace_branch", nil))
       end
 
       def current_workspace_branch_for_delivery(agent)
+        return nil if agent.fetch("effective_workspace_mode", WORKSPACE_MODE_ISOLATED) == WORKSPACE_MODE_SHARED_READ_ONLY
         return nil if agent.fetch("workspace_strategy", nil) == "project_root"
 
         current_workspace_branch(agent)
@@ -8547,6 +8567,7 @@ module Meringue
         # original spawn carried no command id, instead of silently spawning a second worker.
         reservation_agent_id = present_string(value_at(payload, "_reservation_agent_id", "reservation_agent_id"))
         requested_workspace_path = value_at(payload, "workspace_path", "WorkspacePath", "workspacePath")
+        requested_workspace_mode = value_at(payload, "workspace_mode", "workspaceMode", "WorkspaceMode")
         # Set by the kernel when it corrected a head's predicted issue id; kept on the worker and
         # in its spawn log so a corrected route is visible instead of silent.
         rerouted_from_issue_id = present_string(value_at(payload, "_rerouted_from_issue_id", "rerouted_from_issue_id"))
@@ -8559,6 +8580,7 @@ module Meringue
         # should continue in, or turn the continuation default off for a step that must be isolated.
         reuse_workspace_agent_id = present_string(value_at(payload, *WORKSPACE_REUSE_AGENT_KEYS))
         errors = []
+        workspace_mode = normalized_workspace_mode(requested_workspace_mode, errors: errors)
         if requested_model
           reason = Meringue::Harness::ModelReference.rejection_reason(requested_model)
           if reason
@@ -8580,6 +8602,16 @@ module Meringue
 
         errors << "issue_id is required" if blank?(issue_id)
         errors << "prompt is required" if blank?(prompt)
+        if workspace_mode == WORKSPACE_MODE_SHARED_READ_ONLY && present_string(requested_workspace_path)
+          errors << "workspace_path cannot be combined with shared_read_only workspace_mode"
+        end
+        if workspace_mode == WORKSPACE_MODE_SHARED_READ_ONLY && (share_workspace == true || reuse_workspace_agent_id)
+          errors << "shared_read_only workspace_mode cannot reuse a worker-owned workspace"
+        end
+        if workspace_mode == WORKSPACE_MODE_SHARED_READ_ONLY &&
+           (command_gate || completion_continuation_gate(completion_continuation))
+          errors << "shared_read_only workspace_mode cannot be combined with an after_command gate"
+        end
         if share_workspace == false && reuse_workspace_agent_id
           errors << "share_workspace_conflicts_with_reuse_workspace_of_agent_id"
         end
@@ -8722,13 +8754,14 @@ module Meringue
                   include_predecessor_result: include_predecessor_result,
                   completion_continuation: completion_continuation,
                   session_settings_override: session_settings_override,
+                  workspace_mode: workspace_mode,
                   command_gate: command_gate,
                   rerouted_from_issue_id: rerouted_from_issue_id,
                   # The workspace decision is deliberately not made here: a queued worker is
                   # provisioned when it activates, and whether its predecessor's worktree is free
                   # can only be answered then. The *intent* is persisted so activation, a
                   # provisioning retry, and a restart all resolve it the same way.
-                  workspace_reuse_request: workspace_reuse_request(
+                  workspace_reuse_request: workspace_mode == WORKSPACE_MODE_SHARED_READ_ONLY ? nil : workspace_reuse_request(
                     share_workspace: share_workspace,
                     reuse_agent_id: reuse_workspace_agent_id,
                     inherit_agent_id: nil,
@@ -8767,7 +8800,8 @@ module Meringue
             # A queued worker's workspace is decided when it activates, and a retry re-decides it,
             # because "is the predecessor's worktree free" is only answerable now. The persisted
             # request is what makes activation, a retry, and a restart resolve it the same way.
-            reuse_request = persisted_workspace_reuse_request(
+            workspace_mode = persisted_worker_workspace_mode(existing, fallback: workspace_mode)
+            reuse_request = workspace_mode == WORKSPACE_MODE_SHARED_READ_ONLY ? nil : persisted_workspace_reuse_request(
               existing,
               share_workspace: share_workspace,
               reuse_agent_id: reuse_workspace_agent_id,
@@ -8795,7 +8829,7 @@ module Meringue
             end
           else
             agent_id = next_worker_id!(state, issue.fetch("id"))
-            reuse_request = workspace_reuse_request(
+            reuse_request = workspace_mode == WORKSPACE_MODE_SHARED_READ_ONLY ? nil : workspace_reuse_request(
               share_workspace: share_workspace,
               reuse_agent_id: reuse_workspace_agent_id,
               inherit_agent_id: inherit_workspace_agent_id,
@@ -8830,7 +8864,9 @@ module Meringue
               requested_workspace_path: requested_workspace_path,
               preview_agent_id: agent_id,
               task_title: worker_display_title(worker_title, issue),
-              create: false
+              create: false,
+              workspace_mode: workspace_mode,
+              harness_provider: active_provider
             )
             return rejected_result(command_id, command_type, "Worker workspace is invalid.", workspace.fetch("errors")) unless workspace.fetch("errors").empty?
 
@@ -8850,6 +8886,7 @@ module Meringue
               completion_continuation: completion_continuation,
               session_settings_override: session_settings_override,
               workspace_reuse_request: reuse_request,
+              workspace_mode: workspace_mode,
               now: now,
               harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
             )
@@ -8891,6 +8928,7 @@ module Meringue
             "workspace_reuse" => workspace_reuse,
             "session_restart_of_agent_id" => session_restart_of_agent_id,
             "session_settings_override" => session_settings_override,
+            "workspace_mode" => workspace_mode,
             "prompt" => prompt.to_s
           }
         end
@@ -8920,14 +8958,18 @@ module Meringue
           preview_agent_id: reservation.fetch("agent_id"),
           task_title: worker_display_title(worker_title, reservation.fetch("issue")),
           create: true,
-          progress_agent_id: reservation.fetch("agent_id")
+          progress_agent_id: reservation.fetch("agent_id"),
+          workspace_mode: reservation.fetch("workspace_mode", workspace_mode),
+          harness_provider: reservation.fetch("harness")
         )
         unless workspace_reuse.is_a?(Hash) && workspace_reuse.fetch("state", nil) == WORKSPACE_REUSE_STATE_REUSED
           workspace = ensure_launchable_worker_workspace(
             workspace,
             reservation: reservation,
             requested_workspace_path: requested_workspace_path,
-            task_title: worker_display_title(worker_title, reservation.fetch("issue"))
+            task_title: worker_display_title(worker_title, reservation.fetch("issue")),
+            workspace_mode: reservation.fetch("workspace_mode", workspace_mode),
+            harness_provider: reservation.fetch("harness")
           )
         end
         reservation["workspace_reuse"] = workspace_reuse
@@ -8952,8 +8994,12 @@ module Meringue
             kind: "worker",
             cwd: workspace.fetch("workspace_path"),
             prompt: prompt.to_s,
-            system_prompt: worker_system_prompt(reservation.fetch("issue")),
-            session_name: worker_session_name(reservation.fetch("issue"), worker_title: worker_title)
+            system_prompt: worker_system_prompt(
+              reservation.fetch("issue"),
+              workspace_mode: workspace.fetch("effective_workspace_mode", WORKSPACE_MODE_ISOLATED)
+            ),
+            session_name: worker_session_name(reservation.fetch("issue"), worker_title: worker_title),
+            workspace_mode: workspace.fetch("effective_workspace_mode", WORKSPACE_MODE_ISOLATED)
           }
           override = reservation.fetch("session_settings_override", {})
           spawn_options[:session_settings] = override unless override.empty?
@@ -9077,6 +9123,9 @@ module Meringue
               "workspace_path" => agent.fetch("workspace_path"),
               "workspace_strategy" => agent.fetch("workspace_strategy"),
               "workspace_branch" => agent.fetch("workspace_branch"),
+              "workspace_mode" => agent.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED),
+              "effective_workspace_mode" => agent.fetch("effective_workspace_mode", WORKSPACE_MODE_ISOLATED),
+              "workspace_mode_fallback_reason" => agent.fetch("workspace_mode_fallback_reason", nil),
               "title" => agent.fetch("harness_metadata", {}).fetch("title", nil),
               "rerouted_from_issue_id" => rerouted_from_issue_id,
               "workspace_reuse" => workspace_reuse,
@@ -10093,7 +10142,7 @@ module Meringue
                                 requested_workspace_path:, follow_up_of_agent_id:, predecessor:,
                                 chain_depth:, failure_policy:, include_predecessor_result:, completion_continuation:,
                                 rerouted_from_issue_id:, command_gate: nil, workspace_reuse_request: nil,
-                                session_settings_override: {})
+                                session_settings_override: {}, workspace_mode: WORKSPACE_MODE_ISOLATED)
         now = timestamp
         agent_id = next_worker_id!(state, issue.fetch("id"))
         workspace = resolve_worker_workspace(
@@ -10102,7 +10151,9 @@ module Meringue
           requested_workspace_path: requested_workspace_path,
           preview_agent_id: agent_id,
           task_title: worker_display_title(title, issue),
-          create: false
+          create: false,
+          workspace_mode: workspace_mode,
+          harness_provider: active_harness_provider(state)
         )
         return rejected_result(command_id, command_type, "Worker workspace is invalid.", workspace.fetch("errors")) unless workspace.fetch("errors").empty?
 
@@ -10126,6 +10177,7 @@ module Meringue
           completion_continuation: completion_continuation,
           session_settings_override: session_settings_override,
           workspace_reuse_request: workspace_reuse_request,
+          workspace_mode: workspace_mode,
           now: now,
           harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
         )
@@ -10178,7 +10230,9 @@ module Meringue
             "after_command" => gate_record && gate_record.fetch("command", nil),
             "after_command_label" => gate_record && gate_record.fetch("label", nil),
             "if_gate_expires" => gate_record && gate_record.fetch("if_gate_expires", nil),
-            "title" => agent.fetch("harness_metadata", {}).fetch("title", nil)
+            "title" => agent.fetch("harness_metadata", {}).fetch("title", nil),
+            "workspace_mode" => agent.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED),
+            "effective_workspace_mode" => agent.fetch("effective_workspace_mode", nil)
           }.compact
         )
         touch_state!(state, now)
@@ -10943,6 +10997,7 @@ module Meringue
             "after_agent_id" => predecessor && predecessor.fetch("id"),
             "model" => metadata.dig("spawn_session_settings", "model"),
             "thinking_level" => metadata.dig("spawn_session_settings", "thinking_level"),
+            "workspace_mode" => agent.fetch("workspace_mode", metadata.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED)),
             "_activate_deferred" => true,
             "_deferred_agent_id" => agent_id
           }
@@ -11274,7 +11329,7 @@ module Meringue
       def build_worker_reservation(agent_id:, issue:, project:, workspace:, provider:, command_id:, prompt:, title:,
                                    requested_workspace_path:, follow_up_of_agent_id:, replace_agent_id:, now:, harness_generation:,
                                    after_agent_id: nil, completion_continuation: nil, workspace_reuse_request: nil,
-                                   session_settings_override: {})
+                                   session_settings_override: {}, workspace_mode: WORKSPACE_MODE_ISOLATED)
         plan = workspace.fetch("plan", nil) || workspace
         {
           "id" => agent_id,
@@ -11286,6 +11341,9 @@ module Meringue
           "workspace_path" => plan.fetch("workspace_path", workspace.fetch("workspace_path", nil)),
           "workspace_strategy" => plan.fetch("strategy", workspace.fetch("workspace_strategy", nil)),
           "workspace_branch" => plan.fetch("workspace_branch", workspace.fetch("workspace_branch", nil)),
+          "workspace_mode" => workspace_mode,
+          "effective_workspace_mode" => workspace.fetch("effective_workspace_mode", nil),
+          "workspace_mode_fallback_reason" => workspace.fetch("workspace_mode_fallback_reason", nil),
           "harness" => provider,
           "pid" => nil,
           "harness_session_id" => nil,
@@ -11300,6 +11358,7 @@ module Meringue
             "spawn_prompt" => prompt.to_s,
             "spawn_session_settings" => session_settings_override.empty? ? nil : deep_copy(session_settings_override),
             "requested_workspace_path" => present_string(requested_workspace_path),
+            "workspace_mode" => workspace_mode,
             "follow_up_of_agent_id" => present_string(follow_up_of_agent_id),
             "replace_agent_id" => present_string(replace_agent_id),
             "completion_continuation" => completion_continuation_record(completion_continuation, now: now, spawn_command_id: command_id),
@@ -11722,6 +11781,9 @@ module Meringue
           "workspace_path" => agent.fetch("workspace_path", plan.fetch("workspace_path", nil)),
           "workspace_strategy" => agent.fetch("workspace_strategy", plan.fetch("strategy", nil)),
           "workspace_branch" => agent.fetch("workspace_branch", plan.fetch("workspace_branch", nil)),
+          "workspace_mode" => agent.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED),
+          "effective_workspace_mode" => agent.fetch("effective_workspace_mode", plan.fetch("effective_workspace_mode", nil)),
+          "workspace_mode_fallback_reason" => agent.fetch("workspace_mode_fallback_reason", plan.fetch("workspace_mode_fallback_reason", nil)),
           "plan" => plan,
           "created" => plan.fetch("created", false),
           "errors" => []
@@ -11738,11 +11800,17 @@ module Meringue
           agent["workspace_path"] = workspace.fetch("workspace_path")
           agent["workspace_strategy"] = workspace.fetch("workspace_strategy")
           agent["workspace_branch"] = workspace.fetch("workspace_branch", nil)
+          agent["workspace_mode"] = workspace.fetch("workspace_mode", agent.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED))
+          agent["effective_workspace_mode"] = workspace.fetch("effective_workspace_mode", WORKSPACE_MODE_ISOLATED)
+          agent["workspace_mode_fallback_reason"] = workspace.fetch("workspace_mode_fallback_reason", nil)
           agent["status"] = "queued"
           agent["updated_at"] = now
           agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
             "cwd" => workspace.fetch("workspace_path"),
             "workspace_plan" => workspace.fetch("plan", nil),
+            "workspace_mode" => workspace.fetch("workspace_mode", agent.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED)),
+            "effective_workspace_mode" => workspace.fetch("effective_workspace_mode", WORKSPACE_MODE_ISOLATED),
+            "workspace_mode_fallback_reason" => workspace.fetch("workspace_mode_fallback_reason", nil),
             # Durable so a restart, a reconciliation pass, and GetInfo all know this worker shares a
             # workspace rather than owning one.
             "workspace_reuse" => reuse.is_a?(Hash) ? reuse.reject { |key, _value| key == "workspace" }.merge("decided_at" => now) : nil,
@@ -11955,6 +12023,9 @@ module Meringue
           "workspace_path" => workspace.fetch("workspace_path"),
           "workspace_strategy" => workspace.fetch("workspace_strategy"),
           "workspace_branch" => workspace.fetch("workspace_branch"),
+          "workspace_mode" => workspace.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED),
+          "effective_workspace_mode" => workspace.fetch("effective_workspace_mode", WORKSPACE_MODE_ISOLATED),
+          "workspace_mode_fallback_reason" => workspace.fetch("workspace_mode_fallback_reason", nil),
           "harness" => session_ref.fetch("harness", nil),
           "pid" => session_ref.fetch("pid", nil),
           "harness_session_id" => session_ref.fetch("session_id", nil),
@@ -11968,7 +12039,10 @@ module Meringue
             "harness_generation" => harness_generation,
             "workspace_note" => workspace.fetch("note", nil),
             "workspace_plan" => workspace.fetch("plan", nil),
-            "delivery_branch" => workspace.fetch("workspace_branch", nil),
+            "delivery_branch" => workspace.fetch("effective_workspace_mode", WORKSPACE_MODE_ISOLATED) == WORKSPACE_MODE_ISOLATED ? workspace.fetch("workspace_branch", nil) : nil,
+            "workspace_mode" => workspace.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED),
+            "effective_workspace_mode" => workspace.fetch("effective_workspace_mode", WORKSPACE_MODE_ISOLATED),
+            "workspace_mode_fallback_reason" => workspace.fetch("workspace_mode_fallback_reason", nil),
             "routing_action" => spawn_routing_action(follow_up_of_agent_id, replaces_agent_id)
           ).compact,
           "created_at" => now,
@@ -12086,7 +12160,8 @@ module Meringue
       # stale state record can reveal a second live owner after checkout. Revalidate immediately
       # before harness launch and, for kernel-managed workspaces, exclude the unusable candidate and
       # provision a fresh one. Explicit caller paths are never silently overridden.
-      def ensure_launchable_worker_workspace(workspace, reservation:, requested_workspace_path:, task_title:)
+      def ensure_launchable_worker_workspace(workspace, reservation:, requested_workspace_path:, task_title:,
+                                             workspace_mode: WORKSPACE_MODE_ISOLATED, harness_provider: nil)
         return workspace if workspace.fetch("errors", []).any?
 
         unavailable = []
@@ -12111,6 +12186,28 @@ module Meringue
           reason = occupants.empty? ? validation.fetch("reason", "workspace_unusable") : "workspace_owned_by_another_worker"
           details = occupants.empty? ? validation : { "occupant_agent_ids" => occupants }
           failures << reason
+          if workspace.fetch("effective_workspace_mode", nil) == WORKSPACE_MODE_SHARED_READ_ONLY
+            # A checkout can disappear or move branches between discovery and launch. Never try a
+            # different shared checkout implicitly: fall back to the ordinary isolated allocator.
+            workspace = resolve_worker_workspace(
+              project: reservation.fetch("project"),
+              issue: reservation.fetch("issue"),
+              requested_workspace_path: nil,
+              preview_agent_id: reservation.fetch("agent_id"),
+              task_title: task_title,
+              create: true,
+              progress_agent_id: reservation.fetch("agent_id"),
+              workspace_mode: WORKSPACE_MODE_ISOLATED,
+              harness_provider: harness_provider
+            ).merge(
+              "workspace_mode" => workspace_mode,
+              "effective_workspace_mode" => WORKSPACE_MODE_ISOLATED,
+              "workspace_mode_fallback_reason" => reason,
+              "note" => "Shared read-only checkout became unavailable (#{reason}); allocated an isolated workspace."
+            )
+            return workspace if workspace.fetch("errors", []).any?
+            next
+          end
           root = workspace_worktree_root_path(workspace) || workspace.fetch("workspace_path", nil)
           unavailable << root if present_string(root)
           break if present_string(requested_workspace_path)
@@ -12123,7 +12220,9 @@ module Meringue
             task_title: task_title,
             create: true,
             progress_agent_id: reservation.fetch("agent_id"),
-            unavailable_paths: unavailable
+            unavailable_paths: unavailable,
+            workspace_mode: WORKSPACE_MODE_ISOLATED,
+            harness_provider: harness_provider
           )
           return workspace if workspace.fetch("errors", []).any?
           workspace["last_workspace_validation"] = details
@@ -12161,7 +12260,54 @@ module Meringue
       end
 
       def resolve_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:, task_title:, create: false,
-                                   progress_agent_id: nil, unavailable_paths: [])
+                                   progress_agent_id: nil, unavailable_paths: [], workspace_mode: WORKSPACE_MODE_ISOLATED,
+                                   harness_provider: nil)
+        requested_mode = WORKSPACE_MODES.include?(workspace_mode.to_s) ? workspace_mode.to_s : WORKSPACE_MODE_ISOLATED
+        fallback_reason = nil
+        if requested_mode == WORKSPACE_MODE_SHARED_READ_ONLY
+          provider = harness_provider || active_harness_provider(normalized_state)
+          client = active_harness_client(provider: provider)
+          if client.respond_to?(:read_only_workspace_supported?) && client.read_only_workspace_supported?
+            shared = if workspace_manager.respond_to?(:shared_read_only_checkout)
+                       workspace_manager.shared_read_only_checkout(project_root: project.fetch("root_path"))
+                     else
+                       { "usable" => false, "reason" => "workspace_manager_does_not_support_shared_checkouts" }
+                     end
+            if shared.is_a?(Hash) && shared.fetch("strategy", nil) == "shared_checkout" && shared.fetch("errors", []).empty?
+              return shared.merge(
+                "workspace_strategy" => "shared_checkout",
+                "workspace_mode" => requested_mode,
+                "effective_workspace_mode" => WORKSPACE_MODE_SHARED_READ_ONLY,
+                "plan" => shared,
+                "note" => "Validated shared main checkout; harness tools are restricted to read-only access."
+              )
+            end
+            fallback_reason = shared.is_a?(Hash) ? shared.fetch("reason", "shared_checkout_unavailable") : "shared_checkout_unavailable"
+          else
+            fallback_reason = "harness_does_not_enforce_read_only_workspaces"
+          end
+        end
+
+        isolated = resolve_isolated_worker_workspace(
+          project: project,
+          issue: issue,
+          requested_workspace_path: requested_workspace_path,
+          preview_agent_id: preview_agent_id,
+          task_title: task_title,
+          create: create,
+          progress_agent_id: progress_agent_id,
+          unavailable_paths: unavailable_paths
+        )
+        isolated.merge(
+          "workspace_mode" => requested_mode,
+          "effective_workspace_mode" => WORKSPACE_MODE_ISOLATED,
+          "workspace_mode_fallback_reason" => fallback_reason,
+          "note" => fallback_reason ? "Shared read-only checkout unavailable (#{fallback_reason}); allocated an isolated workspace." : isolated.fetch("note", nil)
+        )
+      end
+
+      def resolve_isolated_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:, task_title:, create: false,
+                                             progress_agent_id: nil, unavailable_paths: [])
         if present_string(requested_workspace_path)
           expanded_path = File.expand_path(requested_workspace_path.to_s)
           errors = Dir.exist?(expanded_path) ? [] : ["workspace_path must be an existing directory"]
@@ -12360,9 +12506,28 @@ module Meringue
         false
       end
 
-      def worker_system_prompt(issue)
+      def normalized_workspace_mode(value, errors:)
+        raw = present_string(value)
+        return WORKSPACE_MODE_ISOLATED unless raw
+
+        mode = raw.downcase
+        unless WORKSPACE_MODES.include?(mode)
+          errors << "workspace_mode must be one of: #{WORKSPACE_MODES.join(", ")}"
+          return WORKSPACE_MODE_ISOLATED
+        end
+        mode
+      end
+
+      def persisted_worker_workspace_mode(agent, fallback: WORKSPACE_MODE_ISOLATED)
+        mode = present_string(agent.fetch("workspace_mode", nil)) ||
+               present_string((agent.fetch("harness_metadata", {}) || {}).fetch("workspace_mode", nil)) || fallback
+        WORKSPACE_MODES.include?(mode) ? mode : WORKSPACE_MODE_ISOLATED
+      end
+
+      def worker_system_prompt(issue, workspace_mode: WORKSPACE_MODE_ISOLATED)
+        base_prompt = workspace_mode == WORKSPACE_MODE_SHARED_READ_ONLY ? READ_ONLY_WORKER_SYSTEM_PROMPT : WORKER_SYSTEM_PROMPT
         <<~PROMPT
-          #{WORKER_SYSTEM_PROMPT}
+          #{base_prompt}
 
           Product task title for delivery artifacts:
           #{DeliveryArtifactPolicy.human_title(issue.fetch("title"))}
@@ -12450,6 +12615,14 @@ module Meringue
                else
                  "Spawned worker #{agent.fetch("id")} for #{issue.fetch("id")}."
                end
+        if agent.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED) == WORKSPACE_MODE_SHARED_READ_ONLY
+          fallback = present_string(agent.fetch("workspace_mode_fallback_reason", nil))
+          base = if agent.fetch("effective_workspace_mode", WORKSPACE_MODE_ISOLATED) == WORKSPACE_MODE_SHARED_READ_ONLY
+                   "#{base} Using a validated shared read-only checkout."
+                 else
+                   "#{base} Shared read-only checkout unavailable#{fallback ? " (#{fallback})" : ""}; using an isolated workspace."
+                 end
+        end
         rerouted_from = present_string((agent.fetch("harness_metadata", {}) || {}).fetch("rerouted_from_issue_id", nil))
         return base unless rerouted_from
 

@@ -39,7 +39,10 @@ module Meringue
         @processes_mutex = Mutex.new
       end
 
-      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {})
+      def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {}, workspace_mode: "isolated")
+        if workspace_mode.to_s == "shared_read_only"
+          raise Error, "#{harness_name} does not enforce read-only worker tools"
+        end
         unless session_settings.empty?
           raise UnsupportedSessionSettingsError,
                 "#{harness_name} does not support per-session model or thinking overrides"

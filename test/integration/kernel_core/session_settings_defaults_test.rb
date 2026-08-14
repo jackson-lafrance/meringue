@@ -29,7 +29,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
       @spawn_defaults["thinking_level"] = thinking_level if thinking_level
     end
 
-    def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {})
+    def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {}, workspace_mode: "isolated")
       @session_counter += 1
       model = session_settings.fetch("model", spawn_defaults.fetch("model"))
       thinking = session_settings.fetch("thinking_level", spawn_defaults.fetch("thinking_level"))
