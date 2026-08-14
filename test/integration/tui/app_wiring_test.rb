@@ -31,6 +31,16 @@ class TuiAppWiringTest < Minitest::Test
     end
   end
 
+  class MouseFailureApp < App
+    private
+
+    def handle_mouse_key(key, *)
+      raise "agent tree click failed" if key.is_a?(Hash) && key["type"] == "mouse"
+
+      super
+    end
+  end
+
   class BlockingLogStore
     attr_reader :write_started, :write_finished
 
@@ -89,6 +99,28 @@ class TuiAppWiringTest < Minitest::Test
   def test_run_without_a_state_falls_back_to_an_empty_state
     assert_equal 0, @app.run
     assert_includes @out.string, "No AgentTree data yet."
+  end
+
+  def test_mouse_input_failure_keeps_the_interactive_app_running_and_reports_the_error
+    output = StringIO.new
+    terminal = TUISupport::FakeTerminal.new(
+      interactive: true,
+      output:,
+      keys: [
+        "keep this draft",
+        { "type" => "mouse", "kind" => "button", "pressed" => true, "button" => 0, "x" => 4, "y" => 4 },
+        nil,
+        "\u0004"
+      ]
+    )
+    app = MouseFailureApp.new(layout: Meringue::TUI::Layout.new, out: output, terminal:)
+
+    assert_equal 0, app.run(state: demo_state)
+    assert_operator terminal.frames.length, :>=, 2
+    rendered_output = TUISupport.strip_ansi(output.string).gsub(/\s+/, " ")
+    assert_includes rendered_output, "Could not handle mouse input: RuntimeError: agent tree"
+    assert_includes rendered_output, "click failed"
+    assert_includes rendered_output, "keep this draft"
   end
 
   def test_compose_state_only_adds_presentation_keys

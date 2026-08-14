@@ -308,7 +308,7 @@ module Meringue
               key = terminal.read_key(timeout: frame_refresh_interval(current_state))
               break if quit_key?(key, input_buffer)
 
-              input_buffer, input_cursor, slash_suggestion_index = handle_key(
+              input_buffer, input_cursor, slash_suggestion_index = handle_key_safely(
                 key,
                 input_buffer,
                 input_cursor,
@@ -331,6 +331,26 @@ module Meringue
       private
 
       attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :workspace_controller, :agent_session_service, :log_store, :keybindings, :config
+
+      def handle_key_safely(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        handle_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+      rescue StandardError => e
+        reset_failed_input_gesture
+        append_jump_response("Could not handle #{input_event_name(key)}: #{e.class}: #{e.message}")
+        [input_buffer, input_cursor, slash_suggestion_index]
+      end
+
+      def input_event_name(key)
+        mouse_event?(key) ? "mouse input" : "input"
+      end
+
+      def reset_failed_input_gesture
+        @selection_dragging = false
+        @logs_worker_click_candidate = nil
+        @last_worker_click = nil
+        @last_text_click = nil
+        @last_open_pull_requests_summary_click = nil
+      end
 
       def shutdown_workspace_resources
         # Quitting mid-flow (Ctrl-C, /quit, an interrupt) must not leave the theme
