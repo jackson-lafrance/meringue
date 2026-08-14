@@ -3,9 +3,9 @@
 require "test_helper"
 require "support/state_support"
 
-# Persisted log retention (docs/log-retention.md): append-only inside the retained
-# window, oldest-first eviction at the documented limit, monotonic log identifiers
-# across eviction, independence from record pruning, and no streamed-token noise.
+# Persisted log retention (docs/log-retention.md): independent events append inside the
+# retained window, explicitly keyed evolving statuses replace only their predecessor,
+# eviction stays oldest-first, identifiers stay monotonic, and streamed tokens stay out.
 #
 # This file also carries the correctness assertions that used to live in
 # scripts/benchmark_log_retention.rb, with bounded workloads and generous limits.
@@ -127,6 +127,74 @@ class StateLogRetentionTest < Minitest::Test
       assert_equal "L#{log_count + 1}", reloaded.fetch("logs").last.fetch("id"), "an append must not reuse a pruned ID"
       assert_equal log_count + 1, reloaded.dig("counters", "logs"), "the counter stays monotonic across reloads"
       assert_equal ["L#{log_count + 1}"], result.fetch("log_entry_ids")
+    end
+  end
+
+  def test_replaceable_logs_survive_restart_without_consuming_an_extra_retention_slot
+    with_store do |store, _path, dir|
+      state = Models.empty_state
+      state["logs"] = build_logs(1...(LIMIT))
+      state.fetch("counters")["logs"] = LIMIT - 1
+      engine = build_engine(store: store, dir: dir)
+
+      first_ids = engine.send(
+        :append_log,
+        state,
+        source_type: "kernel",
+        source_id: "P1-I1-W1",
+        level: "info",
+        message: "Provisioning at 20%.",
+        details: { "percent" => 20 },
+        replacement_key: "worker_workspace_provisioning:P1-I1-W1"
+      )
+      store.save(state, preserve_log_buffer: false)
+      assert_equal ["L#{LIMIT}"], first_ids
+      assert_equal LIMIT, store.load.fetch("logs").length
+
+      # A fresh store and engine model a restarted Meringue process. An independent event fills the
+      # retained window first; replacing the persisted progress line must not evict another event.
+      restarted_store = Store.new(path: store.path)
+      restarted_engine = build_engine(store: restarted_store, dir: dir)
+      restarted_state = restarted_store.load
+      restarted_engine.send(
+        :append_log,
+        restarted_state,
+        source_type: "kernel",
+        source_id: "P1-I1",
+        level: "info",
+        message: "Independent lifecycle event.",
+        details: { "issue_id" => "P1-I1" }
+      )
+      restarted_store.save(restarted_state, preserve_log_buffer: false)
+      assert_equal "L2", restarted_store.load.fetch("logs").first.fetch("id"),
+                   "the independent append evicts exactly the oldest retained event"
+
+      restarted_state = restarted_store.load
+      replacement_ids = restarted_engine.send(
+        :append_log,
+        restarted_state,
+        source_type: "kernel",
+        source_id: "P1-I1-W1",
+        level: "info",
+        message: "Provisioning at 80%.",
+        details: { "percent" => 80 },
+        replacement_key: "worker_workspace_provisioning:P1-I1-W1"
+      )
+      restarted_store.save(restarted_state, preserve_log_buffer: false)
+
+      retained = restarted_store.load
+      replacement_logs = retained.fetch("logs").select do |entry|
+        entry.fetch("replacement_key", nil) == "worker_workspace_provisioning:P1-I1-W1"
+      end
+      assert_equal LIMIT, retained.fetch("logs").length
+      assert_equal "L2", retained.fetch("logs").first.fetch("id"),
+                   "replacement removes its predecessor before retention is enforced"
+      assert_equal ["L#{LIMIT + 2}"], replacement_ids
+      assert_equal ["Provisioning at 80%."], replacement_logs.map { |entry| entry.fetch("message") }
+      assert_equal [80], replacement_logs.map { |entry| entry.dig("details", "percent") }
+      assert_includes log_ids(retained), "L#{LIMIT + 1}", "the independent event remains ordered before the replacement"
+      assert_equal "L#{LIMIT + 2}", retained.fetch("logs").last.fetch("id")
+      assert_equal LIMIT + 2, retained.dig("counters", "logs"), "replacement ids remain monotonic"
     end
   end
 

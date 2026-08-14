@@ -93,6 +93,7 @@ module Meringue
       # often than this so a checkout does not look frozen between log entries.
       PROVISIONING_PROGRESS_INTERVAL_SECONDS = 60
       PROVISIONING_PROGRESS_UPDATE_INTERVAL_SECONDS = 15
+      PROVISIONING_PROGRESS_LOG_REPLACEMENT_KIND = "worker_workspace_provisioning".freeze
       PRUNE_SETTLED_PULL_REQUEST_STATES = %w[merged closed].freeze
       # A merged pull request is terminal on the forge: it can never go back to open. Once Meringue
       # has verified and persisted a merged status for a URL, prune trusts that record instead of
@@ -12453,7 +12454,11 @@ module Meringue
           next unless agent
 
           now = timestamp
-          agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          replacement_key = present_string(metadata.fetch("provisioning_progress_log_replacement_key", nil)) ||
+                            "#{PROVISIONING_PROGRESS_LOG_REPLACEMENT_KIND}:#{SecureRandom.uuid}"
+          agent["harness_metadata"] = metadata.merge(
+            "provisioning_progress_log_replacement_key" => replacement_key,
             "provisioning_progress" => {
               "command" => command,
               "phase" => phase,
@@ -12474,12 +12479,14 @@ module Meringue
               message: "Still provisioning worker #{agent_id}: #{command} has been running for " \
                        "#{elapsed.round}s#{detail ? " (#{detail})" : ""}.",
               details: {
+                "kind" => "workspace_provisioning_progress",
                 "agent_id" => agent_id,
                 "phase" => phase,
                 "percent" => percent,
                 "elapsed_seconds" => progress.fetch("elapsed", nil),
                 "detail" => detail
-              }.compact
+              }.compact,
+              replacement_key: replacement_key
             )
           end
           touch_state!(state, now)
@@ -14830,7 +14837,12 @@ module Meringue
         end
       end
 
-      def append_log(state, source_type:, source_id:, level:, message:, details: {})
+      # Appends an independent event by default. A caller may instead provide a stable, namespaced
+      # replacement key for an evolving status whose newest observation makes its predecessor
+      # obsolete. Removal and append happen in the caller's state transaction: the replacement gets
+      # a fresh monotonic id/timestamp at the end of the log, while unrelated entries keep their
+      # relative order. Persisting the key on the entry makes replacement survive process restarts.
+      def append_log(state, source_type:, source_id:, level:, message:, details: {}, replacement_key: nil)
         raise ArgumentError, "invalid log source_type: #{source_type}" unless State::Models::LOG_SOURCE_TYPES.include?(source_type)
         raise ArgumentError, "invalid log level: #{level}" unless State::Models::LOG_LEVELS.include?(level)
 
@@ -14840,10 +14852,15 @@ module Meringue
         # separate provenance, present only while a head journal command is executing.
         log_details.merge!(author) if source_type == "kernel" && author
 
+        replacement_key = present_string(replacement_key)
+        state.fetch("logs").delete_if do |entry|
+          replacement_key && entry.is_a?(Hash) && entry.fetch("replacement_key", nil) == replacement_key
+        end
+
         now = timestamp
         state.fetch("counters")["logs"] = state.fetch("counters").fetch("logs", 0).to_i + 1
         log_id = "L#{state.fetch("counters").fetch("logs")}"
-        state.fetch("logs") << {
+        entry = {
           "id" => log_id,
           "timestamp" => now,
           "source_type" => source_type,
@@ -14852,6 +14869,8 @@ module Meringue
           "message" => message,
           "details" => log_details
         }
+        entry["replacement_key"] = replacement_key if replacement_key
+        state.fetch("logs") << entry
         [log_id]
       end
 
