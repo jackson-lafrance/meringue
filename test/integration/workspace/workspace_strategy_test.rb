@@ -58,7 +58,7 @@ class WorkspaceStrategySelectionTest < Minitest::Test
       refute resolved.fetch("created")
       assert_equal "Workspace manager planned a git worktree for this worker.", resolved.fetch("note")
       assert_equal "git_worktree", resolved.dig("plan", "strategy")
-      assert_match(%r{\Ameringue/}, resolved.dig("plan", "workspace_branch"))
+      assert_match(/\A[a-z0-9-]+-[0-9a-f]{8}\z/, resolved.dig("plan", "workspace_branch"))
       refute Dir.exist?(resolved.dig("plan", "workspace_path"))
     end
   end
@@ -75,7 +75,7 @@ class WorkspaceStrategySelectionTest < Minitest::Test
       assert_nil resolved.fetch("note")
       assert Dir.exist?(resolved.fetch("workspace_path"))
       assert_equal resolved.dig("plan", "workspace_path"), resolved.fetch("workspace_path")
-      assert_match(%r{\Ameringue/}, resolved.fetch("workspace_branch"))
+      assert_match(/\A[a-z0-9-]+-[0-9a-f]{8}\z/, resolved.fetch("workspace_branch"))
     end
   end
 

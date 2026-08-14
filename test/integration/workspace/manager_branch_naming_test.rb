@@ -20,9 +20,9 @@ class WorkspaceManagerBranchNamingTest < Minitest::Test
 
       assert_equal "git_worktree", plan.fetch("strategy")
       refute plan.fetch("created")
-      assert_match(%r{\Ameringue/question-answering-does-nothing-[0-9a-f]{8}\z}, plan.fetch("workspace_branch"))
+      assert_match(/\Aquestion-answering-does-nothing-[0-9a-f]{8}\z/, plan.fetch("workspace_branch"))
       assert_equal(
-        File.join(tmp, "workspaces", "meringue", plan.fetch("workspace_branch").delete_prefix("meringue/")),
+        File.join(tmp, "workspaces", "meringue", plan.fetch("workspace_branch")),
         plan.fetch("workspace_path")
       )
     end
@@ -39,7 +39,7 @@ class WorkspaceManagerBranchNamingTest < Minitest::Test
       )
 
       branch = plan.fetch("workspace_branch")
-      assert_equal "meringue/answer-questions-properly", branch.sub(/-[0-9a-f]{8}\z/, "")
+      assert_equal "answer-questions-properly", branch.sub(/-[0-9a-f]{8}\z/, "")
       refute_match(/p1/i, branch)
       refute_match(/-i9/i, branch)
       refute_match(/w2/i, branch)
@@ -65,7 +65,7 @@ class WorkspaceManagerBranchNamingTest < Minitest::Test
       assert_equal first.fetch("workspace_branch"), repeat.fetch("workspace_branch")
       assert_equal first.fetch("workspace_path"), repeat.fetch("workspace_path")
       refute_equal first.fetch("workspace_branch"), other.fetch("workspace_branch")
-      assert_equal "shared-task-title", first.fetch("workspace_branch")[%r{\Ameringue/(.+)-[0-9a-f]{8}\z}, 1]
+      assert_equal "shared-task-title", first.fetch("workspace_branch")[/\A(.+)-[0-9a-f]{8}\z/, 1]
     end
   end
 
@@ -79,7 +79,7 @@ class WorkspaceManagerBranchNamingTest < Minitest::Test
         task_title: "P1-I1 ***"
       )
 
-      assert_match(%r{\Ameringue/task-[0-9a-f]{8}\z}, plan.fetch("workspace_branch"))
+      assert_match(/\Achange-[0-9a-f]{8}\z/, plan.fetch("workspace_branch"))
     end
   end
 
@@ -93,7 +93,7 @@ class WorkspaceManagerBranchNamingTest < Minitest::Test
         task_title: "Integration tests for workspace and worktree management across the whole kernel"
       )
 
-      slug = plan.fetch("workspace_branch")[%r{\Ameringue/(.+)-[0-9a-f]{8}\z}, 1]
+      slug = plan.fetch("workspace_branch")[/\A(.+)-[0-9a-f]{8}\z/, 1]
       assert_operator slug.length, :<=, 48
       refute slug.end_with?("-")
       assert_equal File.join(tmp, "workspaces", "meringue"), File.dirname(plan.fetch("workspace_path"))

@@ -101,7 +101,7 @@ Before changing files:
 Before finishing:
 - Commit only the task's intended changes from that task's worktree.
 - Push the task branch and open a pull request.
-- Include a `How to test this change` section in the PR description with exact reviewer commands for manually testing the change, including the task worktree path, a `cd <worktree>` command, and the command to run or open the changed slice.
+- Include a `How to test this change` section in the PR description with exact reviewer commands for manually testing the change from a normal checkout. Never include a managed workspace path, orchestration id, agent/session identity, or other internal context in the PR body.
 - Do not rely on a generated PR body that may be truncated. Prefer writing the complete PR description to a markdown file or heredoc and creating/updating the PR with `gh pr create --body-file <file>` or `gh pr edit --body-file <file>`.
 - After opening or updating the PR, inspect the rendered PR body or `gh pr view --json body` output enough to confirm the testing section is present and not cut off.
 - Include the PR link in the final response.
@@ -307,6 +307,8 @@ Workers do not directly interface with the user, so normal implementation and de
 Meringue must never be the author of a git commit. Workers may commit assigned work, but only with the user's configured repository identity (`user.name`/`user.email`); they must never configure or pass a Meringue identity, including `Meringue Worker`, `meringue@example.com`, or `agent@meringue.local`. If no non-Meringue identity is available, workers must leave the work uncommitted and report that identity configuration is a blocker. Meringue's harness layer preserves a valid repository identity for worker child processes and makes an unavailable identity fail closed rather than falling back to Meringue. See `docs/commit-authorship.md` for the implementation, verification, and history audit.
 
 Not every worker issue requires a PR; for investigation-only or informational assigned work that does not require repository changes, workers may return findings or an answer without opening a PR unless the issue explicitly requests one. Heads should set `SpawnWorker.workspace_mode` to `shared_read_only` only when the new worker needs no file, Git, dependency, shell-command, or remote mutation. The harness must enforce a read-only tool set and the worker receives a separate non-mutating system prompt. If the task may implement, test with artifact-writing commands, deliver, or otherwise mutate anything, omit the field so the worker receives the default isolated editable workspace. A read-only session stays read-only on later prompts; spawn an isolated follow-up when work changes to implementation.
+All delivery-facing names and text must describe only the human product task. Branches, worktrees, commit subjects/bodies/trailers, tags, pull request titles/bodies, release notes, and similar artifacts must never contain Meringue branding or a `meringue/` prefix; project/issue/worker/head ids (including variants such as `P5-I2-W3`, `p5_i2_w3`, or `P5/I2/W3`); agent, Pi, harness, or session identities; AI confidence scores; AI-authorship trailers; or statements about which agents worked on the change. Derive names from the product task, sanitize unsafe supplied/generated values, and use only a short opaque suffix when uniqueness is required. Before delivery, inspect commit metadata and the rendered PR title/body and remove prohibited text. See `docs/delivery-artifact-privacy.md`.
+
 They are attached to one specific issue, but multiple agents can be attached to one issue.
 They may follow up, but should not be used many times.
 They should automatically be pruned if they complete over 50% context full.
@@ -535,7 +537,7 @@ The Ruby Pi harness client should communicate with Pi over JSONL stdin/stdout.
 Parse stdout as newline-delimited JSON and never rely on human-formatted text when structured events are available.
 
 After spawning a Pi process, call `get_state` and store Pi's `sessionId` and `sessionFile` in the generic harness session fields.
-Use `set_session_name` to label Pi worker sessions with a concise human-facing task title, such as `Fix signup validation`; avoid embedding Meringue agent ids, worker ids, Pi ids, or subagent implementation details in worker session names.
+Use `set_session_name` to label Pi worker sessions with a sanitized, concise human-facing product task title, such as `Fix signup validation`; apply the same delivery-artifact policy as branches and PR metadata, including its branding, identity, confidence, and attribution exclusions.
 
 When prompting an active worker, use Pi RPC `steer`, `follow_up`, or `prompt` with `streamingBehavior` instead of sending a normal prompt blindly.
 

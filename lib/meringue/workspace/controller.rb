@@ -39,7 +39,9 @@ module Meringue
 
         command = transition.dig("result", "interactive_argv")
         unless command.is_a?(Array) && command.any?
-          focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          rollback = focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          return rollback if rollback && rollback.fetch("status", nil) != "accepted"
+
           return failed("The Pi interactive handoff did not return a launch command.")
         end
 
@@ -53,12 +55,16 @@ module Meringue
         result = session.start(workspace_path: path, rows: rows, columns: columns, on_started: start_callback)
         unless result.fetch("status", nil).to_s == "active"
           session.close
-          focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          rollback = focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          return rollback if rollback && rollback.fetch("status", nil) != "accepted"
+
           return result
         end
         if started && started.fetch("status", nil) != "accepted"
           session.close
-          focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          rollback = focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          return rollback if rollback && rollback.fetch("status", nil) != "accepted"
+
           return started
         end
 
@@ -70,12 +76,21 @@ module Meringue
         started ||= focus_session_service.mark_agent_interactive_focus_started(agent.fetch("id"), pid: result.fetch("pid", nil))
         unless started.fetch("status", nil) == "accepted"
           close_interactive(agent)
-          focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          rollback = focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          return rollback if rollback && rollback.fetch("status", nil) != "accepted"
+
           return started
         end
         result.merge("interactive" => true, "message" => "Opened native Pi focus for #{agent.fetch("id", "worker")} in #{path}.")
       rescue StandardError => e
-        focus_session_service&.end_agent_interactive_focus(agent.fetch("id")) if defined?(agent) && agent
+        begin
+          session.close if defined?(session) && session
+        rescue StandardError
+          nil
+        end
+        rollback = focus_session_service&.end_agent_interactive_focus(agent.fetch("id")) if defined?(agent) && agent
+        return rollback if rollback && rollback.fetch("status", nil) != "accepted"
+
         failed("Could not open native Pi focus: #{e.message}")
       end
 
