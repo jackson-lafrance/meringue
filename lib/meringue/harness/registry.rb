@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "json"
 require "shellwords"
 
 module Meringue
@@ -50,6 +51,8 @@ module Meringue
         "agy" => "antigravity"
       }.freeze
       DEFAULT_PI_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
+      COMMAND_BLACKLIST_ENV = "MERINGUE_WORKER_COMMAND_BLACKLIST"
+      COMMAND_BLACKLIST_EXTENSION = Meringue.root_path("lib", "meringue", "harness", "extensions", "command_blacklist.js")
       # Canonical "provider/model" reference so Pi never has to disambiguate the
       # bare model id across providers that all expose Claude Opus 5.
       DEFAULT_PI_MODEL = "anthropic/claude-opus-5"
@@ -107,6 +110,7 @@ module Meringue
 
       def initialize(config: Config.load)
         @config = config
+        @command_blacklist = CommandBlacklist.from_config(config)
         @clients = {}
       end
 
@@ -330,8 +334,18 @@ module Meringue
         provider = normalize_provider!(provider)
         provider_config = provider_config(provider)
         extra_args = extra_args_for(provider, provider_config, kind)
-        env = env_for(provider_config)
+        # This variable is owned by Meringue. Do not let provider env settings
+        # inject a policy into heads or replace the validated worker patterns.
+        env = env_for(provider_config).reject { |key, _value| key.to_s == COMMAND_BLACKLIST_ENV }
         command = command_argv(provider_config.fetch("command"))
+
+        if kind == "worker" && !@command_blacklist.empty?
+          unless provider == "pi"
+            raise ArgumentError,
+                  "commands.worker_blacklist cannot be enforced by #{self.class.provider_label(provider)}; use Pi or remove the blacklist"
+          end
+          env = env.merge(COMMAND_BLACKLIST_ENV => JSON.generate(@command_blacklist.patterns))
+        end
 
         case provider
         when "pi"
@@ -370,6 +384,9 @@ module Meringue
         thinking_level = provider_config["thinking_level"].to_s.strip if thinking_level.empty?
         args.concat(["--model", model]) unless model.empty?
         args.concat(["--thinking", thinking_level]) unless thinking_level.empty?
+        if kind == "worker" && !@command_blacklist.empty?
+          args.concat(["--extension", COMMAND_BLACKLIST_EXTENSION])
+        end
         args
       end
 

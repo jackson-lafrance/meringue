@@ -345,6 +345,7 @@ class TuiAppWiringTest < Minitest::Test
           "head_thinking_level" => "low", "worker_thinking_level" => "xhigh"
         } },
         "conflicts" => { "predecessor_failure" => "run" },
+        "commands" => { "worker_blacklist" => ["*gh pr comment *"] },
         "workspace" => { "editor_command" => ["code", "--reuse-window"] }
       },
       path: "/tmp/meringue-test-config.toml",
@@ -366,6 +367,7 @@ class TuiAppWiringTest < Minitest::Test
     assert_includes overview, "Pi head thinking: low"
     assert_includes overview, "Pi worker thinking: xhigh"
     assert_includes overview, "conflict policy (predecessor failure): run"
+    assert_includes overview, "worker command blacklist: *gh pr comment *"
     assert_includes overview, "Submit / open selected item [submit]: ctrl-x"
     assert_includes overview, "Keybindings (action: configured keys"
   end
