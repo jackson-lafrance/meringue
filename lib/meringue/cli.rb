@@ -182,8 +182,13 @@ module Meringue
         head_runner_provider: ->(provider) { registry.head_runner_for(provider: provider, cwd: Dir.pwd) },
         default_harness_provider: registry.worker_provider,
         session_defaults_provider: ->(provider) { registry.session_defaults(provider: provider) },
-        session_defaults_updater: lambda do |provider, model: nil, thinking_level: nil|
-          registry.update_session_defaults!(provider: provider, model: model, thinking_level: thinking_level)
+        session_defaults_updater: lambda do |provider, model: nil, thinking_level: nil, thinking_role: nil|
+          registry.update_session_defaults!(
+            provider: provider,
+            model: model,
+            thinking_level: thinking_level,
+            thinking_role: thinking_role
+          )
         end,
         model_catalog_provider: ->(provider) { registry.model_catalog(provider: provider, cwd: Dir.pwd) },
         # Timeouts for worker provisioning are configurable under `[workspace]`, because how long
@@ -191,6 +196,7 @@ module Meringue
         workspace_manager: config ? Workspace::Manager.from_config(config) : Workspace::Manager.new,
         cwd: Dir.pwd,
         async_heads: true,
+        async_worker_provisioning: true,
         config_path: config_path,
         config: config
       )

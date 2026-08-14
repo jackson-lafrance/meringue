@@ -53,6 +53,8 @@ module Meringue
       ALLOCATION_ATTEMPT_LIMIT = 3
       OWNERSHIP_SCHEMA_VERSION = 1
       OWNERSHIP_DIRECTORY = ".ownership"
+      SHARED_READ_ONLY_DIRECTORY = ".shared-read-only"
+      SHARED_READ_ONLY_OWNER_KIND = "managed_shared_read_only_checkout"
       COLLISION_ERROR_PATTERN = /already exists|already used by worktree|is already checked out/i
       # How a failed allocation can be recovered. The manager knows git, so it classifies; the
       # kernel owns what to do with a worker in each case.
@@ -283,61 +285,22 @@ module Meringue
         }
       end
 
-      # Resolve an already-existing main/master checkout that investigation-only workers may
-      # share. This method is intentionally discovery-only: it never creates a branch, directory,
-      # or worktree. A registered bare repository (World's common shape) is a valid source for
-      # isolated allocation, but only one of its existing non-bare linked worktrees can satisfy
-      # this contract.
+      # Resolve a clean main/master checkout that investigation-only workers may share. A normal
+      # registered checkout is discovery-only. A bare registered repository has no executable
+      # working tree of its own, so when no suitable linked checkout exists Meringue creates one
+      # deterministic, manager-owned cache under +root_path+. The cache is protected by a
+      # cross-process lock while it is created or recovered and is retained across worker pruning
+      # so later concurrent readers pay the checkout cost only once.
       def shared_read_only_checkout(project_root:)
         project_path = canonical_path(project_root)
         repository = repository_context(project_path)
         return reuse_outcome(false, "project_is_not_a_git_repository") unless repository
 
-        git_root = repository.fetch("git_root")
-        relative_project_path = repository.fetch("bare") ? "." : relative_path(project_path, git_root)
-        listed = run_command("git", "-C", git_root, "worktree", "list", "--porcelain")
-        unless listed.fetch("status").success?
-          return reuse_outcome(
-            false,
-            "worktree_list_failed",
-            error: present_output(listed.fetch("stderr")) || present_output(listed.fetch("stdout"))
-          )
-        end
+        existing = discover_shared_read_only_checkout(project_path, repository)
+        return existing if existing.fetch("strategy", nil) == "shared_checkout"
+        return existing unless repository.fetch("bare")
 
-        candidates = parse_worktree_records(listed.fetch("stdout")).filter_map do |record|
-          next if record.key?("bare") || record.key?("locked") || record.key?("prunable")
-
-          branch = record.fetch("branch", nil)
-          next unless %w[refs/heads/main refs/heads/master].include?(branch)
-
-          checkout_root = present_output(record.fetch("worktree", nil))
-          next unless checkout_root
-
-          checkout_root = canonical_path(checkout_root)
-          workspace_path = relative_project_path == "." ? checkout_root : File.join(checkout_root, relative_project_path)
-          next unless Dir.exist?(workspace_path) && File.readable?(workspace_path)
-          next if bare_repository?(checkout_root)
-
-          {
-            "strategy" => "shared_checkout",
-            "workspace_strategy" => "shared_checkout",
-            "project_root" => project_path,
-            "workspace_path" => canonical_path(workspace_path),
-            "workspace_root_path" => checkout_root,
-            "worktree_root_path" => checkout_root,
-            "workspace_branch" => branch.sub(%r{\Arefs/heads/}, ""),
-            "git_root" => git_root,
-            "project_relative_path" => relative_project_path,
-            "created" => false,
-            "read_only" => true,
-            "errors" => []
-          }
-        end
-        preferred = candidates.find { |candidate| same_path?(candidate.fetch("workspace_root_path"), git_root) } || candidates.first
-        return preferred if preferred
-
-        reason = repository.fetch("bare") ? "bare_repository_has_no_shared_main_checkout" : "no_readable_main_checkout"
-        reuse_outcome(false, reason, git_root: git_root)
+        provision_managed_shared_read_only_checkout(project_path, repository)
       rescue CommandTimeout => e
         reuse_outcome(false, "shared_checkout_discovery_timed_out", error: e.message)
       rescue StandardError => e
@@ -542,6 +505,20 @@ module Meringue
           return reuse_outcome(false, "worktree_prunable") if record.key?("prunable")
           unless record.fetch("branch", nil) == "refs/heads/#{expected_branch}" && %w[main master].include?(expected_branch)
             return reuse_outcome(false, "shared_checkout_not_on_main_branch")
+          end
+          clean = shared_checkout_clean?(expected_root)
+          return clean unless clean.fetch("usable", false)
+          if workspace.fetch("managed_shared_checkout", false)
+            owner = read_workspace_owner(expected_root)
+            unless managed_shared_checkout_owner_matches?(
+              owner,
+              project_root: workspace.fetch("project_root", git_root),
+              git_root: git_root,
+              branch: expected_branch,
+              worktree_root: expected_root
+            )
+              return reuse_outcome(false, "managed_shared_checkout_owner_mismatch")
+            end
           end
 
           return reuse_outcome(
@@ -810,6 +787,263 @@ module Meringue
       end
 
       private
+
+      def discover_shared_read_only_checkout(project_path, repository)
+        git_root = repository.fetch("git_root")
+        relative_project_path = repository.fetch("bare") ? "." : relative_path(project_path, git_root)
+        listed = run_command("git", "-C", git_root, "worktree", "list", "--porcelain")
+        unless listed.fetch("status").success?
+          return reuse_outcome(
+            false,
+            "worktree_list_failed",
+            error: present_output(listed.fetch("stderr")) || present_output(listed.fetch("stdout"))
+          )
+        end
+
+        rejected_dirty = false
+        candidates = parse_worktree_records(listed.fetch("stdout")).filter_map do |record|
+          next if record.key?("bare") || record.key?("locked") || record.key?("prunable")
+
+          branch_ref = record.fetch("branch", nil)
+          next unless %w[refs/heads/main refs/heads/master].include?(branch_ref)
+
+          checkout_root = present_output(record.fetch("worktree", nil))
+          next unless checkout_root
+
+          checkout_root = canonical_path(checkout_root)
+          workspace_path = relative_project_path == "." ? checkout_root : File.join(checkout_root, relative_project_path)
+          next unless Dir.exist?(workspace_path) && File.readable?(workspace_path)
+          next if bare_repository?(checkout_root)
+
+          clean = shared_checkout_clean?(checkout_root)
+          unless clean.fetch("usable", false)
+            rejected_dirty ||= clean.fetch("reason", nil) == "shared_checkout_dirty"
+            next
+          end
+
+          branch = branch_ref.sub(%r{\Arefs/heads/}, "")
+          managed = managed_shared_checkout_owner_matches?(
+            read_workspace_owner(checkout_root),
+            project_root: project_path,
+            git_root: git_root,
+            branch: branch,
+            worktree_root: checkout_root
+          )
+          shared_checkout_record(
+            project_path: project_path,
+            git_root: git_root,
+            relative_project_path: relative_project_path,
+            checkout_root: checkout_root,
+            branch: branch,
+            managed: managed,
+            created: false
+          )
+        end
+        preferred = candidates.find { |candidate| candidate.fetch("managed_shared_checkout", false) } ||
+                    candidates.find { |candidate| same_path?(candidate.fetch("workspace_root_path"), git_root) } ||
+                    candidates.first
+        return preferred if preferred
+
+        reason = if rejected_dirty
+                   "shared_checkout_dirty"
+                 elsif repository.fetch("bare")
+                   "bare_repository_has_no_shared_main_checkout"
+                 else
+                   "no_readable_main_checkout"
+                 end
+        reuse_outcome(false, reason, git_root: git_root)
+      end
+
+      def provision_managed_shared_read_only_checkout(project_path, repository)
+        git_root = repository.fetch("git_root")
+        branch = preferred_shared_read_only_branch(git_root)
+        return reuse_outcome(false, "shared_checkout_main_branch_missing", git_root: git_root) unless branch
+
+        checkout_root = managed_shared_checkout_path(project_path, git_root)
+        owner = managed_shared_checkout_owner(
+          project_root: project_path,
+          git_root: git_root,
+          branch: branch,
+          worktree_root: checkout_root
+        )
+        FileUtils.mkdir_p(ownership_directory)
+        lock = File.open(workspace_owner_lock_path(checkout_root), File::RDWR | File::CREAT, 0o600)
+        lock.flock(File::LOCK_EX)
+
+        # Another process may have completed provisioning while this caller waited for the lock.
+        existing = discover_shared_read_only_checkout(project_path, repository)
+        return existing if existing.fetch("strategy", nil) == "shared_checkout"
+
+        current_owner = read_workspace_owner(checkout_root)
+        if current_owner && !managed_shared_checkout_owner_matches?(
+          current_owner,
+          project_root: project_path,
+          git_root: git_root,
+          branch: branch,
+          worktree_root: checkout_root
+        )
+          return reuse_outcome(false, "managed_shared_checkout_owner_mismatch", worktree_root_path: checkout_root)
+        end
+
+        if current_owner
+          recovered = recover_incomplete_managed_shared_checkout(
+            git_root: git_root,
+            worktree_root: checkout_root,
+            branch: branch
+          )
+          return recovered unless recovered.fetch("usable", false)
+        elsif Dir.exist?(checkout_root) && (Dir.children(checkout_root) - [".DS_Store"]).any?
+          return reuse_outcome(false, "managed_shared_checkout_path_occupied", worktree_root_path: checkout_root)
+        end
+
+        FileUtils.rm_rf(checkout_root) if Dir.exist?(checkout_root) && Dir.children(checkout_root).empty?
+        FileUtils.mkdir_p(File.dirname(checkout_root))
+        write_workspace_owner(owner)
+        added = run_command(
+          "git", "-C", git_root, "worktree", "add", checkout_root, branch,
+          timeout: checkout_timeout,
+          stall_timeout: checkout_stall_timeout,
+          output_limit: DIAGNOSTIC_OUTPUT_LIMIT_BYTES,
+          deadline: false
+        )
+        unless added.fetch("status").success?
+          cleanup_incomplete_allocation(
+            git_root: git_root,
+            worktree_root: checkout_root,
+            branch: branch,
+            created_branch: false,
+            preserve_branch: true
+          )
+          FileUtils.rm_f(workspace_owner_path(checkout_root))
+          error = present_output(added.fetch("stderr")) || present_output(added.fetch("stdout"))
+          return reuse_outcome(false, "managed_shared_checkout_create_failed", error: error, git_root: git_root)
+        end
+
+        record = shared_checkout_record(
+          project_path: project_path,
+          git_root: git_root,
+          relative_project_path: ".",
+          checkout_root: checkout_root,
+          branch: branch,
+          managed: true,
+          created: true
+        )
+        validation = validate_worker_workspace(record)
+        return record if validation.fetch("usable", false)
+
+        reuse_outcome(false, validation.fetch("reason", "managed_shared_checkout_validation_failed"), git_root: git_root)
+      rescue CommandTimeout => e
+        cleanup_incomplete_allocation(
+          git_root: git_root,
+          worktree_root: checkout_root,
+          branch: branch,
+          created_branch: false,
+          preserve_branch: true
+        ) if defined?(git_root) && defined?(checkout_root) && defined?(branch)
+        FileUtils.rm_f(workspace_owner_path(checkout_root)) if defined?(checkout_root)
+        reuse_outcome(false, "managed_shared_checkout_create_timed_out", error: e.message)
+      ensure
+        release_candidate_lock(lock)
+      end
+
+      def recover_incomplete_managed_shared_checkout(git_root:, worktree_root:, branch:)
+        listed = run_command("git", "-C", git_root, "worktree", "list", "--porcelain")
+        return reuse_outcome(false, "worktree_list_failed") unless listed.fetch("status").success?
+
+        record = parse_worktree_records(listed.fetch("stdout")).find do |candidate|
+          same_path?(candidate.fetch("worktree", ""), worktree_root)
+        end
+        if record && Dir.exist?(worktree_root) && !record.key?("locked") && !record.key?("prunable")
+          # A registered completed cache is never cleanup debris. If it became dirty, moved branch,
+          # or otherwise failed validation, preserve it for diagnosis rather than deleting files
+          # merely because the owner marker says Meringue originally created the checkout.
+          return reuse_outcome(false, "managed_shared_checkout_branch_moved") unless record.fetch("branch", nil) == "refs/heads/#{branch}"
+
+          clean = shared_checkout_clean?(worktree_root)
+          return reuse_outcome(false, "managed_shared_checkout_already_complete") if clean.fetch("usable", false)
+
+          return reuse_outcome(false, "managed_shared_checkout_dirty") if clean.fetch("reason", nil) == "shared_checkout_dirty"
+          return clean
+        end
+        return reuse_outcome(true, "managed_shared_checkout_recovery_not_needed") unless record || Dir.exist?(worktree_root)
+
+        # Ownership plus an absent, locked, or prunable registration proves this path never reached
+        # launch validation. Remove only that interrupted cache; main/master itself is preserved.
+        cleanup = cleanup_incomplete_allocation(
+          git_root: git_root,
+          worktree_root: worktree_root,
+          branch: nil,
+          created_branch: false,
+          preserve_branch: true
+        )
+        return reuse_outcome(false, "managed_shared_checkout_recovery_failed") unless cleanup.fetch("worktree_removed", false)
+
+        reuse_outcome(true, "managed_shared_checkout_recovered")
+      end
+
+      def preferred_shared_read_only_branch(git_root)
+        %w[main master].find { |branch| branch_exists?(git_root, branch) }
+      end
+
+      def managed_shared_checkout_path(project_path, git_root)
+        slug = project_slug(File.basename(project_path)) || "project"
+        suffix = Digest::SHA256.hexdigest(canonical_path(git_root))[0, 12]
+        File.join(root_path, SHARED_READ_ONLY_DIRECTORY, "#{slug}-#{suffix}")
+      end
+
+      def managed_shared_checkout_owner(project_root:, git_root:, branch:, worktree_root:)
+        {
+          "schema_version" => OWNERSHIP_SCHEMA_VERSION,
+          "owner_kind" => SHARED_READ_ONLY_OWNER_KIND,
+          "project_root" => canonical_path(project_root),
+          "git_root" => canonical_path(git_root),
+          "branch" => branch.to_s,
+          "worktree_root" => canonical_path(worktree_root)
+        }
+      end
+
+      def managed_shared_checkout_owner_matches?(owner, project_root:, git_root:, branch:, worktree_root:)
+        return false unless owner.is_a?(Hash) && owner.fetch("owner_kind", nil) == SHARED_READ_ONLY_OWNER_KIND
+
+        owner.fetch("schema_version", nil) == OWNERSHIP_SCHEMA_VERSION &&
+          same_path?(owner.fetch("project_root", ""), project_root) &&
+          same_path?(owner.fetch("git_root", ""), git_root) &&
+          owner.fetch("branch", nil) == branch.to_s &&
+          same_path?(owner.fetch("worktree_root", ""), worktree_root)
+      end
+
+      def shared_checkout_record(project_path:, git_root:, relative_project_path:, checkout_root:, branch:, managed:, created:)
+        workspace_path = relative_project_path == "." ? checkout_root : File.join(checkout_root, relative_project_path)
+        {
+          "strategy" => "shared_checkout",
+          "workspace_strategy" => "shared_checkout",
+          "project_root" => project_path,
+          "workspace_path" => canonical_path(workspace_path),
+          "workspace_root_path" => checkout_root,
+          "worktree_root_path" => checkout_root,
+          "workspace_branch" => branch,
+          "git_root" => git_root,
+          "project_relative_path" => relative_project_path,
+          "created" => created,
+          "managed_shared_checkout" => managed,
+          "read_only" => true,
+          "errors" => []
+        }
+      end
+
+      def shared_checkout_clean?(checkout_root)
+        status = run_command("git", "-C", checkout_root, "status", "--porcelain", "--untracked-files=all")
+        unless status.fetch("status").success?
+          return reuse_outcome(
+            false,
+            "shared_checkout_status_failed",
+            error: present_output(status.fetch("stderr")) || present_output(status.fetch("stdout"))
+          )
+        end
+        return reuse_outcome(false, "shared_checkout_dirty") unless status.fetch("stdout").to_s.empty?
+
+        reuse_outcome(true, "shared_checkout_clean")
+      end
 
       # A registered project may be either a normal checkout or a bare common repository. World
       # uses the latter: `--show-toplevel` correctly fails there, but the bare repository is still
@@ -1154,7 +1388,17 @@ module Meringue
                          (Dir.children(owner.fetch("worktree_root")) - [".DS_Store"]).any?
           foreign_registration = worktree_registered?(owner.fetch("git_root"), owner.fetch("worktree_root"))
           foreign_branch = branch_exists?(owner.fetch("git_root"), owner.fetch("branch"))
-          if foreign_path || foreign_registration || foreign_branch
+          # A previous attempt for this same worker may have left an intact, registered,
+          # unlocked worktree on the exact planned branch at the planned path while its
+          # ownership record is gone (a crashed instance, a migrated workspace root, or a
+          # checkout created before ownership files existed). That is this worker's own
+          # resumable checkout, not a foreign collision: claiming it avoids a redundant
+          # multi-minute `git worktree add` for a branch that is already checked out locally.
+          # The forced-collision case (a different worker on the same candidate) keeps its
+          # ownership record, so it is still refused here; the kernel's launch gate still
+          # re-checks for live occupants before any session starts in the adopted tree.
+          if (foreign_path || foreign_registration || foreign_branch) &&
+             !reusable_existing_checkout?(owner.fetch("git_root"), owner.fetch("worktree_root"), owner.fetch("branch"))
             return {
               "acquired" => false,
               "outcome" => ownership_collision_outcome(owner, nil),
@@ -1484,6 +1728,27 @@ module Meringue
 
       def worktree_registered?(git_root, worktree_root)
         worktree_records(git_root).any? { |record| same_path?(record.fetch("worktree", ""), worktree_root) }
+      end
+
+      # Whether the worktree at the planned path is this worker's own resumable checkout of
+      # its exact planned branch, and therefore safe to reclaim when no ownership record says
+      # otherwise. The branch name is the worker's deterministic delivery branch, the worktree
+      # must live inside the Meringue-managed root, be registered, on that one branch, unlocked,
+      # and not bare or prunable. Anything else (a foreign squatter directory, a worktree that
+      # moved to another branch, a half-finished locked checkout, a bare repository) stays a
+      # collision so the allocator falls back to a uniquified candidate as before.
+      def reusable_existing_checkout?(git_root, worktree_root, branch)
+        return false unless owned_workspace_path?(worktree_root)
+        return false unless DeliveryArtifactPolicy.managed_branch?(branch)
+
+        record = worktree_records(git_root).find do |candidate|
+          same_path?(candidate.fetch("worktree", ""), worktree_root)
+        end
+        return false unless record
+        return false if record.key?("bare") || record.key?("locked") || record.key?("prunable")
+        return false unless record.fetch("branch", nil) == "refs/heads/#{branch}"
+
+        Dir.exist?(worktree_root)
       end
 
       # Cleanup runs after the allocation budget is already spent, so it uses its own budget and

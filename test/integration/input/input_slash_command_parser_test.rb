@@ -28,6 +28,8 @@ class InputSlashCommandParserTest < Minitest::Test
       "/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast" =>
         ["SetDefaultSessionModel", { "model" => "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast" }],
       "/thinking xhigh" => ["SetDefaultSessionThinkingLevel", { "level" => "xhigh" }],
+      "/thinking head low" => ["SetDefaultSessionThinkingLevel", { "role" => "head", "level" => "low" }],
+      "/thinking worker max" => ["SetDefaultSessionThinkingLevel", { "role" => "worker", "level" => "max" }],
       "/project add /tmp" => ["AddProject", { "path" => "/tmp", "name" => "" }],
       "/project rename P1 \"Renamed app\"" => ["ModifyProject", { "project_id" => "P1", "name" => "Renamed app" }],
       "/issue rename P1-I1 \"Renamed issue\"" => ["ModifyIssue", { "issue_id" => "P1-I1", "title" => "Renamed issue" }],
@@ -177,7 +179,7 @@ class InputSlashCommandParserTest < Minitest::Test
 
   def test_missing_arguments_for_strict_commands_return_invalid_slash_command
     ["/theme", "/theme a b", "/harness", "/model", "/model a b",
-     "/thinking", "/thinking high extra",
+     "/thinking", "/thinking high extra", "/thinking reviewer high", "/thinking head high extra",
      "/model P1 extra", "/thinking P1 extra", "/project", "/project list /tmp", "/issue", "/issue delete P1",
      "/worker", "/worker kill P1-I1", "/retry", "/retry H7 again", "/dismiss", "/dismiss Q1 Q2", "/recount now", "/prune bogus",
      "/prune resolved errored", "/project rename P1", "/issue rename P1-I1"].each do |input|
@@ -387,6 +389,26 @@ class InputSlashCommandParserTest < Minitest::Test
     thinking = Meringue::Input::SlashCommandParser.command_suggestion_records("/thinking x", limit: 5, state: state)
     assert_includes thinking.map { |record| record.fetch("usage") }, "xhigh"
     assert_includes thinking.map { |record| record.fetch("completion") }, "/thinking xhigh"
+  end
+
+  def test_role_specific_thinking_suggestions_lead_with_that_roles_default
+    state = sample_state
+    state["metadata"] = {
+      "active_harness" => "pi",
+      "pi_session_defaults" => {
+        "model" => "openai/gpt-5.6-sol",
+        "roles" => {
+          "head" => { "thinking_level" => "low" },
+          "worker" => { "thinking_level" => "xhigh" }
+        }
+      }
+    }
+
+    heads = suggestion_records("/thinking head ", state)
+    workers = suggestion_records("/thinking worker ", state)
+
+    assert_equal "/thinking head low", heads.first.fetch("completion")
+    assert_equal "/thinking worker xhigh", workers.first.fetch("completion")
   end
 
   # The selector must offer every model the harness reports, not only the values

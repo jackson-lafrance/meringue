@@ -8,7 +8,7 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
 
   class InteractiveHarnessClient < RecordingHarnessClient
     attr_reader :prepared, :resumed, :reclaimed
-    attr_accessor :replacement_session, :prepare_error, :resume_error, :resume_streaming
+    attr_accessor :replacement_session, :prepare_error, :resume_error, :resume_streaming, :native_completed
 
     def initialize
       super(provider: "pi")
@@ -26,6 +26,10 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
       raise @prepare_error if @prepare_error
 
       was_streaming = session_ref.fetch("is_streaming", false)
+      if was_streaming
+        abort_session(session_ref)
+        self.streaming = false
+      end
       ref = session_ref.merge("pid" => nil, "is_streaming" => false)
       ref = ref.merge(@replacement_session) if @replacement_session
       {
@@ -33,10 +37,13 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
         "interactive_argv" => ["pi", "--session", ref.fetch("session_file"), "continue the interrupted assignment"],
         "handoff" => {
           "mode" => "native_interactive",
-          "transfer" => was_streaming ? "interrupted_turn" : "settled_session",
+          "transfer" => was_streaming ? "coordinated_turn_abort" : "settled_session",
           "was_streaming" => was_streaming,
+          "continuation_required" => was_streaming,
           "exact_stream_transfer" => !was_streaming,
+          "interruption_method" => was_streaming ? "rpc_abort" : nil,
           "prompt" => was_streaming ? "continue the interrupted assignment" : nil,
+          "turn_checkpoint" => was_streaming ? { "state" => "incomplete", "stop_reason" => "toolUse" } : nil,
           "captured_event_count" => 3
         }.compact
       }
@@ -47,15 +54,25 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
       true
     end
 
-    def resume_dashboard_session(session_ref)
-      @resumed << session_ref.dup
+    def resume_dashboard_session(session_ref, handoff: nil)
+      @resumed << session_ref.merge("handoff" => handoff)
       raise @resume_error if @resume_error
 
-      session_ref.merge("pid" => 49_999, "is_streaming" => !!@resume_streaming)
+      resumed = session_ref.merge("pid" => 49_999, "is_streaming" => !!@resume_streaming)
+      details = handoff.is_a?(Hash) ? handoff.fetch("handoff", {}) : {}
+      return resumed unless details.fetch("continuation_required", false) && !native_completed
+
+      self.streaming = false
+      continued = prompt_session(resumed, details.fetch("prompt"), mode: "normal")
+      self.streaming = true
+      continued.merge(
+        "is_streaming" => true,
+        "metadata" => continued.fetch("metadata", {}).merge("interactive_dashboard_continuation" => "started")
+      )
     end
   end
 
-  def test_focus_preempts_a_streaming_turn_once_and_reconciliation_stands_down
+  def test_focus_safely_hands_off_a_pending_tool_turn_and_dashboard_continues_without_error
     client = InteractiveHarnessClient.new
     client.streaming = true
     engine = build_engine(harness_client: client)
@@ -70,9 +87,11 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_equal "accepted", prepared.fetch("status")
     assert_equal ["pi", "--session", agent(engine, worker_id).fetch("harness_session_file"), "continue the interrupted assignment"], prepared.dig("result", "interactive_argv")
     assert_equal "interactive_pending", agent(engine, worker_id).dig("harness_metadata", "interactive_handoff", "state")
-    assert_equal "interrupted_turn", prepared.dig("result", "handoff", "transfer")
+    assert_equal "coordinated_turn_abort", prepared.dig("result", "handoff", "transfer")
+    assert_equal "rpc_abort", prepared.dig("result", "handoff", "interruption_method")
+    assert_equal true, prepared.dig("result", "handoff", "continuation_required")
     assert_equal 1, client.prepared.length
-    assert_empty client.aborts
+    assert_equal 1, client.aborts.length, "the managed turn must settle before its RPC writer is stopped"
     context_handoff = client.prepared.first.dig("metadata", "interactive_handoff", "context")
     assert_equal worker_id, context_handoff.fetch("agent_id")
     assert_equal context.fetch("issue_id"), context_handoff.fetch("issue_id")
@@ -86,7 +105,7 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_equal "rejected", repeated.fetch("status")
     assert_equal "interactive_focus_active", repeated.fetch("errors").first
     assert_equal 1, client.prepared.length
-    assert_empty client.aborts, "focus should terminate the writer directly without an abort/settle round trip"
+    assert_equal 1, client.aborts.length, "a repeated focus request must not abort the turn twice"
 
     # A background tick cannot read or settle the same JSONL while the native PTY owns it.
     before = agent(engine, worker_id).fetch("updated_at")
@@ -99,7 +118,7 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     repeated_while_active = engine.begin_agent_interactive_focus(worker_id)
     assert_equal "rejected", repeated_while_active.fetch("status")
     assert_equal 1, client.prepared.length
-    assert_empty client.aborts
+    assert_equal 1, client.aborts.length
 
     blocked = engine.apply(
       "type" => "PromptAgent",
@@ -112,9 +131,14 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_equal "accepted", resumed.fetch("status"), resumed.inspect
     assert_equal 1, client.resumed.length
     refute agent(engine, worker_id).fetch("harness_metadata").key?("interactive_handoff")
-    assert_equal "interactive_closed", agent(engine, worker_id).dig("harness_metadata", "last_interactive_handoff", "outcome")
-    assert_equal "idle", agent(engine, worker_id).fetch("status")
+    assert_equal "dashboard_continuation_started", agent(engine, worker_id).dig("harness_metadata", "last_interactive_handoff", "outcome")
+    assert_equal "working", agent(engine, worker_id).fetch("status")
     assert_equal 49_999, agent(engine, worker_id).fetch("pid")
+    assert_equal ["continue the interrupted assignment"], client.prompts.map { |entry| entry.fetch("prompt") }
+
+    engine.reconcile_sessions
+    assert_equal "working", agent(engine, worker_id).fetch("status")
+    refute agent(engine, worker_id).fetch("harness_metadata").key?("settle_failure")
 
     already_resumed = engine.end_agent_interactive_focus(worker_id)
     assert_equal "accepted", already_resumed.fetch("status")
@@ -132,6 +156,24 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_equal "accepted", recovered.fetch("status")
   end
 
+  def test_dashboard_return_does_not_continue_again_after_native_focus_finished
+    client = InteractiveHarnessClient.new
+    client.streaming = true
+    engine = build_engine(harness_client: client)
+    context = project_with_issue(engine)
+    worker_id = spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
+    engine.begin_agent_interactive_focus(worker_id)
+    engine.mark_agent_interactive_focus_started(worker_id, pid: 52_424)
+    client.native_completed = true
+
+    resumed = engine.end_agent_interactive_focus(worker_id)
+
+    assert_equal "accepted", resumed.fetch("status")
+    assert_empty client.prompts
+    assert_equal "interactive_closed", agent(engine, worker_id).dig("harness_metadata", "last_interactive_handoff", "outcome")
+    assert_equal "idle", agent(engine, worker_id).fetch("status")
+  end
+
   def test_a_second_engine_cannot_claim_or_prepare_the_same_workspace_handoff
     client = InteractiveHarnessClient.new
     client.streaming = true
@@ -147,7 +189,7 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_equal "rejected", second.fetch("status")
     assert_equal "interactive_focus_active", second.fetch("errors").first
     assert_equal 1, client.prepared.length
-    assert_empty client.aborts
+    assert_equal 1, client.aborts.length
   end
 
   def test_completed_non_streaming_worker_without_a_process_can_open_native_focus
@@ -168,6 +210,7 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_nil client.prepared.first.fetch("pid")
     assert_equal false, client.prepared.first.fetch("is_streaming")
     assert_equal "settled_session", prepared.dig("result", "handoff", "transfer")
+    assert_empty client.aborts
     assert_equal "interactive_pending", agent(engine, worker_id).dig("harness_metadata", "interactive_handoff", "state")
     assert_equal "completed", agent(engine, worker_id).fetch("status")
   end

@@ -18,6 +18,19 @@ require "tmpdir"
 class TuiStateReloadCostTest < Minitest::Test
   include TUISupport
 
+  class RecordingWorkspaceStore
+    attr_reader :writes
+
+    def initialize
+      @writes = []
+    end
+
+    def save_agent_workspace(workspace)
+      @writes << JSON.parse(JSON.generate(workspace))
+      workspace
+    end
+  end
+
   WIDTH = 140
   HEIGHT = 45
   FRAMES = 30
@@ -106,6 +119,35 @@ class TuiStateReloadCostTest < Minitest::Test
     assert_includes stderr.fetch("head"), "checkout failed at beginning"
     assert_includes stderr.fetch("tail"), "lock remains at end"
     assert_operator stderr.fetch("omitted_bytes"), :>, 100_000
+  end
+
+  def test_filtering_by_worker_does_not_synchronously_rewrite_the_large_state
+    workspace_store = RecordingWorkspaceStore.new
+    app = Meringue::TUI::App.new(
+      layout: Meringue::TUI::Layout.new,
+      out: StringIO.new,
+      terminal: TUISupport::FakeTerminal.new(width: WIDTH, height: HEIGHT),
+      log_store: workspace_store
+    )
+    state = @store.load
+
+    assert app.send(:select_agent_tree_item, state, "P1-I1-W1")
+    composed = compose_app_state(app, state)
+
+    assert_equal "P1-I1-W1", Meringue::TUI::LogScope.id(composed)
+    assert_empty workspace_store.writes,
+                 "a log-filter click must not synchronously lock and rewrite the state store"
+
+    # The focused-workspace preference is still durable; the existing bounded
+    # presentation-state flush writes it after the selection frame is available.
+    app.instance_variable_set(
+      :@workspace_persisted_at,
+      Process.clock_gettime(Process::CLOCK_MONOTONIC) - Meringue::TUI::App::WORKSPACE_PERSIST_INTERVAL
+    )
+    app.send(:flush_deferred_agent_workspace_persistence)
+
+    assert_equal 1, workspace_store.writes.length
+    assert_equal "P1-I1-W1", workspace_store.writes.first.fetch("selected_agent_id")
   end
 
   def test_a_pruned_selection_is_cleared_when_the_base_state_refreshes
