@@ -56,10 +56,10 @@ module Meringue
           lines
         end
 
-        # Durable logs are append-only inside a sliding retention window. A new worker update used
-        # to invalidate the whole-pane cache and re-run Markdown layout for all 500 retained logs.
-        # Keep each entry's wrapped rows independently so an append lays out only the new record;
-        # assembling the complete scrollback remains cheap and preserves selection coordinates.
+        # Durable log changes add a fresh record id; retention or explicit replacement may also
+        # remove an older one. A new worker update used to invalidate the whole-pane cache and re-run
+        # Markdown layout for all 500 retained logs. Keep each entry's wrapped rows independently so
+        # only fresh records need layout; assembling scrollback stays cheap and preserves coordinates.
         def cached_log_entry_fragment(entry, width:, selected_agent_id:)
           @log_entry_fragment_cache ||= {}
           key = log_entry_fragment_cache_key(entry, width, selected_agent_id)
@@ -710,9 +710,9 @@ module Meringue
           ]
         end
 
-        # Durable logs are append-only, and retention only removes entries from
-        # the front. Their boundary ids therefore identify the retained window
-        # without reading the Markdown-heavy details of every entry.
+        # Independent durable logs append, retention removes from the front, and a replaceable
+        # status removes its predecessor before appending a fresh last id. The boundaries and count
+        # therefore identify every visible window change without deep-reading Markdown-heavy details.
         def log_records_cache_key(logs)
           records = Array(logs)
           [records.length, log_record_id(records.first), log_record_id(records.last)]
