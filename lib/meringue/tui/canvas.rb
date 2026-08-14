@@ -14,23 +14,7 @@ module Meringue
       end
 
       def write(x, y, text, max_width: nil, style: nil)
-        row = y.to_i
-        return if row.negative? || row >= height
-
-        column = x.to_i
-        limit = max_width ? max_width.to_i : width
-        return if limit <= 0
-
-        text_chars = sanitize(text).chars
-        visible_start = [0, -column].max
-        visible_width = [limit - visible_start, width - [column, 0].max].min
-        return if visible_width <= 0
-
-        start_column = [column, 0].max
-        text_chars.drop(visible_start).take(visible_width).each_with_index do |char, offset|
-          @chars[row][start_column + offset] = char
-          @styles[row][start_column + offset] = style
-        end
+        write_characters(x, y, sanitize(text).chars, max_width: max_width, style: style)
       end
 
       def write_segments(x, y, segments, max_width:, default_style: nil)
@@ -43,10 +27,7 @@ module Meringue
           chars = sanitize(text).chars
           next if chars.empty?
 
-          visible_text = chars.take(remaining).join
-          write(cursor, y, visible_text, max_width: remaining, style: style)
-
-          written = visible_text.length
+          written = write_characters(cursor, y, chars, max_width: remaining, style: style)
           cursor += written
           remaining -= written
           break if remaining <= 0
@@ -102,8 +83,35 @@ module Meringue
 
       private
 
+      CONTROL_CHARACTER = /[[:cntrl:]]/.freeze
+
       def sanitize(text)
-        text.to_s.tr("\t", " ").gsub(/[[:cntrl:]]/, " ")
+        value = text.to_s
+        value.match?(CONTROL_CHARACTER) ? value.gsub(CONTROL_CHARACTER, " ") : value
+      end
+
+      # Canvas writes are rectangular array replacement, not a Ruby callback per
+      # terminal cell. Segment callers already sanitized and split their text, so
+      # accepting characters directly also prevents the old sanitize -> chars ->
+      # join -> sanitize -> chars round trip on every styled segment.
+      def write_characters(x, y, characters, max_width:, style:)
+        limit = max_width ? max_width.to_i : width
+        return 0 if limit <= 0
+
+        consumed_width = [characters.length, limit].min
+        row = y.to_i
+        return consumed_width if row.negative? || row >= height
+
+        column = x.to_i
+        visible_start = [0, -column].max
+        visible_width = [limit - visible_start, width - [column, 0].max, characters.length - visible_start].min
+        return consumed_width if visible_width <= 0
+
+        start_column = [column, 0].max
+        visible = characters[visible_start, visible_width]
+        @chars[row][start_column, visible_width] = visible
+        @styles[row][start_column, visible_width] = Array.new(visible_width, style)
+        consumed_width
       end
 
       def segment_text_and_style(segment, default_style)
@@ -130,18 +138,35 @@ module Meringue
       def render_row(row, styles, color:)
         return row.join unless color
 
-        current_style = nil
-        row.each_with_index.each_with_object(String.new) do |(char, index), rendered|
+        # Styles normally change only at segment boundaries (borders, labels, and
+        # pane content). Appending one character at a time made the normal ANSI
+        # path scan and grow a Ruby String for every terminal cell on every
+        # keystroke; the scalability benchmark did not see it because it forced
+        # NO_COLOR. Emit complete same-style runs instead, keeping work tied to
+        # rendered segments rather than viewport area.
+        rendered = String.new
+        plain = row.join
+        run_start = 0
+        current_style = styles.first
+        index = 1
+        while index < row.length
           next_style = styles[index]
           if next_style != current_style
+            append_styled_run(rendered, plain, run_start, index, current_style)
             rendered << Style::RESET if current_style
-            rendered << next_style if next_style
+            run_start = index
             current_style = next_style
           end
-          rendered << char
-        end.tap do |rendered|
-          rendered << Style::RESET if current_style
+          index += 1
         end
+        append_styled_run(rendered, plain, run_start, row.length, current_style)
+        rendered << Style::RESET if current_style
+        rendered
+      end
+
+      def append_styled_run(rendered, plain_row, start_index, end_index, style)
+        rendered << style if style
+        rendered << plain_row[start_index...end_index]
       end
     end
   end
