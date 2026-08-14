@@ -72,6 +72,7 @@ lib/meringue/goals/                # goal-loop record, decisions, judge, and met
 docs/config.md                     # config and harness provider reference
 docs/video-recording.md             # macOS proof-video workflow
 docs/commit-authorship.md          # worker commit identity policy and history audit
+docs/delivery-artifact-privacy.md  # branch, commit, and PR metadata privacy policy
 docs/head_agent_kernel_commands.md # compact head-agent command contract
 docs/keybindings.md                # TUI keyboard and jump-mode controls
 docs/onboarding.md                 # first-run setup flow, keys, and completion marker
@@ -270,7 +271,7 @@ Default paths:
 ~/.meringue/state.json    # persisted Meringue state
 ```
 
-The config supports TUI colorschemes, TUI keybinding overrides, default harness selection, role-specific head/worker harnesses, provider command overrides, and the first-run setup marker. See `docs/config.md` for the full reference. Workers may commit assigned work only under the user's repository identity; see [`docs/commit-authorship.md`](docs/commit-authorship.md) for the enforcement path and history audit.
+The config supports TUI colorschemes, TUI keybinding overrides, default harness selection, role-specific head/worker harnesses, provider command overrides, and the first-run setup marker. See `docs/config.md` for the full reference. Workers may commit assigned work only under the user's repository identity; see [`docs/commit-authorship.md`](docs/commit-authorship.md) for the enforcement path and history audit. Branches, commits, and pull request metadata must describe only the product task; see [`docs/delivery-artifact-privacy.md`](docs/delivery-artifact-privacy.md).
 
 The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state. Durable logs retain the newest 500 entries so lifecycle history cannot grow without bound; see [`docs/log-retention.md`](docs/log-retention.md) for the measured rationale and [`docs/scalability.md`](docs/scalability.md) for the hermetic process-level responsiveness sweep.
 

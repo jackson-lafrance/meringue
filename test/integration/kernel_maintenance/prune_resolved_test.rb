@@ -346,9 +346,9 @@ class KernelMaintenancePruneResolvedTest < Minitest::Test
     assert_equal ["P1-I1"], result.dig("result", "removed_issue_ids")
     assert_equal ["P1-I1-W1"], result.dig("result", "removed_agent_ids")
     assert_equal ["P1-I1-W1"], result.dig("result", "workspace_cleanup_blocked_agent_ids")
-    assert_equal "branch_not_meringue_managed", result.dig("result", "workspace_cleanup_outcomes", 0, "reason")
+    assert_equal "branch_not_delivery_managed", result.dig("result", "workspace_cleanup_outcomes", 0, "reason")
     assert_equal "Pruned 1 issue, 1 agent, 0 worktrees, and 0 projects. Preserved 1 managed worktree " \
-                 "because cleanup was not safe: P1-I1-W1 (branch_not_meringue_managed).", result.fetch("message")
+                 "because cleanup was not safe: P1-I1-W1 (branch_not_delivery_managed).", result.fetch("message")
     assert Dir.exist?(workspace), "prune must not guess that an unverified directory is safe to delete"
     assert_equal "worker output\n", File.read(File.join(workspace, "NOTES.md"))
     assert_empty read_state.fetch("agents")
