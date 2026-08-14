@@ -552,6 +552,21 @@ class HeadContextTest < Minitest::Test
     assert_includes reviewer_rule, "Never invent a fake metric"
   end
 
+  def test_ordinary_delivery_stops_at_the_open_pull_request_without_an_automatic_continuation
+    context = build_head_context
+    prompt = context.system_prompt
+    rules = context.to_prompt_h.dig("routing_context", "decision_rules")
+    delivery_rule = rules.find { |rule| rule.include?("ordinary request to implement and deliver a change") }
+
+    refute_nil delivery_rule, "expected an explicit delivery stopping rule"
+    assert_includes delivery_rule, "verified it as reasonably possible, pushed it, and opened or updated the pull request"
+    assert_includes delivery_rule, "do not automatically add a completion_head, CI/review continuation, checker worker, or after_command gate"
+    assert_includes delivery_rule, "The user will explicitly retrigger or request follow-up work"
+    assert_includes prompt, "do not create a completion head, CI/review continuation, checker worker, or external-condition gate"
+    assert_includes prompt, "Only when the user specifically requests CI remediation"
+    assert_includes prompt, "does not watch CI, review bots, pull-request checks, or reviews"
+  end
+
   # A head that asked to both follow up and replace one worker had its SpawnWorker rejected, so the
   # user's retry did nothing. The kernel contract has to be stated in the routing rules.
   # Heads are prompted from docs/head_agent_kernel_commands.md plus these rules; if neither
@@ -561,7 +576,7 @@ class HeadContextTest < Minitest::Test
     rules = context.to_prompt_h.dig("routing_context", "decision_rules")
     reference = context.system_prompt
 
-    assert(rules.any? { |rule| rule.include?("Use after_command when the next step must wait for something outside Meringue") })
+    assert(rules.any? { |rule| rule.include?("Use after_command only when the user explicitly requests a post-delivery action") })
     assert(rules.any? { |rule| rule.include?("after_command composes with after_agent_id as AND") })
     assert(rules.any? { |rule| rule.include?("Use completion_head.after_command") })
     assert(rules.any? { |rule| rule.include?("instead of launching a short-lived worker just to check the state") })
