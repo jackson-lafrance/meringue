@@ -25,6 +25,22 @@ class FoundationDocsPolicyTest < Minitest::Test
     assert_includes agents, "git worktree add -b <branch>"
   end
 
+  def test_delivery_artifact_policy_covers_guidance_and_external_metadata
+    agents = File.read(FoundationSupport.repo_path("AGENTS.md"))
+    contract = File.read(FoundationSupport.repo_path("docs", "head_agent_kernel_commands.md"))
+    policy = File.read(FoundationSupport.repo_path("docs", "delivery-artifact-privacy.md"))
+
+    [agents, contract, policy].each do |text|
+      assert_includes text, "AI confidence"
+      assert_match(/which agents worked|descriptions of which agents worked|agents involved/i, text)
+      assert_match(/P5-I2-W3|p5_i2_w3/, text)
+      assert_match(/commit.*pull request|commits.*PR titles/m, text)
+    end
+    assert_includes agents, "Never include a managed workspace path"
+    assert_includes contract, "Unsafe supplied/generated values must be sanitized"
+    assert_includes policy, "fix-signup-validation-a1b2c3d4"
+  end
+
   def test_agents_md_keeps_one_durable_goal_on_one_issue
     agents = File.read(FoundationSupport.repo_path("AGENTS.md"))
 

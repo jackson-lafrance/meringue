@@ -121,7 +121,7 @@ therefore acknowledges an already-delivered prompt instead of sending it again.
   commands are reported as applied, and reconciliation logs a warning instead of
   failing the whole pass.
 - **A workspace name collides.** Worker workspace allocation adopts a matching
-  existing worktree, checks out an existing `meringue/<slug>` branch left behind by
+  existing worktree, checks out an existing `<task-slug>-<opaque-suffix>` branch left behind by
   a released worktree, cleans up its own half-provisioned attempts, and otherwise
   retries with a uniquified branch and path (`…-2`) instead of failing the spawn.
   See `Meringue::Workspace::Manager`.

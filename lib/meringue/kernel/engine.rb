@@ -10,6 +10,7 @@ require "time"
 require "zlib"
 
 require_relative "../config"
+require_relative "../delivery_artifact_policy"
 require_relative "../ids"
 
 module Meringue
@@ -33,7 +34,9 @@ module Meringue
 
         During longer work, keep progress visible by briefly reporting meaningful findings, decisions, and implementation milestones when they occur. Do not narrate routine tool use or invent progress when there is no substantive update.
 
-        Use human-facing delivery names. Branch names, pull request titles, and pull request metadata should be derived from the assigned issue title or requested change, not from Meringue agent ids, worker ids, Pi ids, or subagent implementation details. If a unique suffix is needed, use a short opaque suffix rather than an orchestration id.
+        Delivery artifacts must describe only the human product task. Never put Meringue branding or a `meringue/` prefix; project, issue, worker, head, agent, Pi, or session identifiers; AI confidence scores; or statements about which agents worked on the change into branch/worktree names, commit subjects or bodies, tags, pull request titles or bodies, release notes, or other externally visible delivery text. This includes formatting variants such as `P5-I2-W3`, `p5_i2_w3`, and `P5/I2/W3`, AI-authorship trailers, and "worked on by" disclosures. Do not derive names from the assigned issue id, your identity, session metadata, or orchestration context.
+
+        Derive delivery names and prose only from the product task title and requested change. The current branch was already allocated under this policy; do not rename it unless it is unusable. If you must supply another name, sanitize unsafe supplied/generated values and use a short opaque suffix for uniqueness. Before delivery, inspect commit metadata and the rendered pull request title/body and remove prohibited text; update an existing compliant pull request rather than opening an agent-specific one.
 
         Report true blockers instead of asking for routine approval: missing credentials, authentication or authorization failures, missing or invalid remotes, branch/worktree collisions, unrelated uncommitted work that would be overwritten, or unsafe/destructive operations.
       PROMPT
@@ -11569,7 +11572,8 @@ module Meringue
         "delivery_branch_already_merged" => "that branch has already been merged",
         "worktree_missing" => "that worktree is no longer on disk",
         "outside_managed_workspace_root" => "that worktree is outside the Meringue workspace root",
-        "branch_not_meringue_managed" => "that branch is not Meringue-managed",
+        "branch_not_delivery_managed" => "that branch is not allocator-managed",
+        "branch_not_meringue_managed" => "that legacy branch is not allocator-managed",
         "git_root_missing" => "the repository that worktree belongs to is gone",
         "worktree_list_failed" => "git could not list the repository's worktrees",
         "worktree_not_registered" => "git no longer registers that directory as a worktree",
@@ -12302,10 +12306,13 @@ module Meringue
         <<~PROMPT
           #{WORKER_SYSTEM_PROMPT}
 
-          Assigned issue:
-          #{issue.fetch("id")} - #{issue.fetch("title")}
+          Product task title for delivery artifacts:
+          #{DeliveryArtifactPolicy.human_title(issue.fetch("title"))}
 
-          Issue description:
+          Assigned task:
+          #{issue.fetch("title")}
+
+          Task description:
           #{issue.fetch("description")}
         PROMPT
       end
@@ -12317,10 +12324,7 @@ module Meringue
       end
 
       def human_delivery_title(value)
-        value.to_s.gsub(/\bP\d+(?:-I\d+)?(?:-W\d+)?\b/i, " ")
-             .gsub(/\b[HQ]\d+\b/i, " ")
-             .strip
-             .gsub(/\s+/, " ")
+        DeliveryArtifactPolicy.human_title(value)
       end
 
       def worker_display_title(worker_title, issue)

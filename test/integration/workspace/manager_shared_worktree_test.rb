@@ -148,7 +148,7 @@ class WorkspaceManagerSharedWorktreeTest < Minitest::Test
       outcome = inspect_workspace(manager, workspace, branch: "main")
 
       refute outcome.fetch("usable")
-      assert_equal "branch_not_meringue_managed", outcome.fetch("reason")
+      assert_equal "branch_not_delivery_managed", outcome.fetch("reason")
     end
   end
 
