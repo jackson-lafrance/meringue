@@ -215,7 +215,7 @@ class WorkspaceManagerFailedAllocationCleanupTest < Minitest::Test
     assert_includes cleanup.fetch("warnings").join(" "), "partial worktree could not be fully removed"
   end
 
-  def test_disk_exhaustion_on_a_preexisting_worker_branch_keeps_it_for_the_retry
+  def test_disk_exhaustion_preserves_an_unowned_preexisting_branch_and_retries_on_a_reserved_candidate
     with_workspace_tmpdir do |tmp|
       project = create_git_project(tmp)
       manager = DiskExhaustedManager.new(
@@ -233,14 +233,36 @@ class WorkspaceManagerFailedAllocationCleanupTest < Minitest::Test
       failed = allocate_workspace(manager, project, task_title: "Retry existing branch")
 
       assert_equal "disk_exhausted", failed.fetch("failure_kind")
-      assert_equal "kept_for_retry", failed.dig("cleanup", "branch_result")
-      assert branch_exists?(project, plan.fetch("workspace_branch"))
+      assert_equal "deleted", failed.dig("cleanup", "branch_result")
+      assert branch_exists?(project, plan.fetch("workspace_branch")),
+             "the legacy branch has no ownership record and must never be adopted or deleted"
       refute Dir.exist?(plan.fetch("workspace_path"))
 
       retried = allocate_workspace(manager, project, task_title: "Retry existing branch")
       assert retried.fetch("created"), retried.inspect
-      assert_equal plan.fetch("workspace_branch"), retried.fetch("workspace_branch")
-      assert_equal plan.fetch("workspace_path"), retried.fetch("workspace_path")
+      assert_equal "#{plan.fetch("workspace_branch")}-2", retried.fetch("workspace_branch")
+      assert_equal "#{plan.fetch("workspace_path")}-2", retried.fetch("workspace_path")
+    end
+  end
+
+  def test_prune_cleanup_releases_a_failed_allocations_stale_owner_for_a_later_worker
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = TimingOutManager.new(root_path: File.join(tmp, "workspaces"))
+      failed = allocate_workspace(manager, project, task_title: "Interrupted owner")
+      owner_path = manager.send(:workspace_owner_path, failed.fetch("worktree_root_path"))
+      assert_path_exists owner_path
+
+      cleanup = manager.cleanup_pruned_worker_workspace(failed)
+
+      assert cleanup.fetch("success"), cleanup.inspect
+      assert_equal "already_removed", cleanup.fetch("status")
+      refute_path_exists owner_path
+
+      recovered_manager = workspace_manager(tmp)
+      next_worker = allocate_workspace(recovered_manager, project, task_title: "Interrupted owner")
+      assert next_worker.fetch("created"), next_worker.inspect
+      assert_equal failed.fetch("workspace_path"), next_worker.fetch("workspace_path")
     end
   end
 

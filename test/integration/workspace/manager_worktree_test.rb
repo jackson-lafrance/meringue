@@ -54,6 +54,29 @@ class WorkspaceManagerWorktreeTest < Minitest::Test
     end
   end
 
+  def test_bare_repository_root_is_used_as_a_source_for_an_editable_worktree
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = workspace_manager(tmp)
+
+      workspace = allocate_workspace(
+        manager,
+        project,
+        task_title: "World bare repository",
+        project_root: project.fetch("origin_path")
+      )
+
+      assert workspace.fetch("created"), workspace.inspect
+      assert_equal "git_worktree", workspace.fetch("strategy")
+      refute_equal real_path(project.fetch("origin_path")), real_path(workspace.fetch("workspace_path"))
+      assert_equal real_path(project.fetch("origin_path")), workspace.fetch("git_root")
+      assert_equal ".", workspace.fetch("project_relative_path")
+      assert_equal "false", git_output(project, workspace.fetch("workspace_path"), "rev-parse", "--is-bare-repository").strip
+      assert_equal "true", git_output(project, workspace.fetch("workspace_path"), "rev-parse", "--is-inside-work-tree").strip
+      assert_equal true, manager.validate_worker_workspace(workspace, agent_id: "P1-I1-W1").fetch("usable")
+    end
+  end
+
   def test_project_root_inside_git_root_gets_subdirectory_workspace_path
     with_workspace_tmpdir do |tmp|
       project = create_git_project(tmp)
@@ -71,6 +94,40 @@ class WorkspaceManagerWorktreeTest < Minitest::Test
       assert_equal File.join(workspace.fetch("worktree_root_path"), "app"), workspace.fetch("workspace_path")
       assert Dir.exist?(workspace.fetch("workspace_path"))
       assert_path_exists File.join(workspace.fetch("workspace_path"), "main.rb")
+    end
+  end
+
+  def test_concurrent_workers_from_one_bare_repository_get_distinct_owned_worktrees
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = workspace_manager(tmp)
+      ready = Queue.new
+      start = Queue.new
+      workers = %w[P1-I1-W1 P1-I2-W1].map do |agent_id|
+        Thread.new do
+          ready << true
+          start.pop
+          allocate_workspace(
+            manager,
+            project,
+            task_title: "Parallel World work",
+            issue_id: agent_id.sub(/-W\d+\z/, ""),
+            agent_id: agent_id,
+            project_root: project.fetch("origin_path")
+          )
+        end
+      end
+      workers.length.times { ready.pop }
+      workers.length.times { start << true }
+      allocated = workers.map(&:value)
+
+      assert allocated.all? { |workspace| workspace.fetch("created") }, allocated.inspect
+      assert_equal 2, allocated.map { |workspace| workspace.fetch("workspace_path") }.uniq.length
+      assert_equal 2, allocated.map { |workspace| workspace.fetch("workspace_branch") }.uniq.length
+      allocated.zip(%w[P1-I1-W1 P1-I2-W1]).each do |workspace, agent_id|
+        validation = manager.validate_worker_workspace(workspace, agent_id: agent_id)
+        assert validation.fetch("usable"), validation.inspect
+      end
     end
   end
 
