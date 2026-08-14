@@ -1154,7 +1154,17 @@ module Meringue
                          (Dir.children(owner.fetch("worktree_root")) - [".DS_Store"]).any?
           foreign_registration = worktree_registered?(owner.fetch("git_root"), owner.fetch("worktree_root"))
           foreign_branch = branch_exists?(owner.fetch("git_root"), owner.fetch("branch"))
-          if foreign_path || foreign_registration || foreign_branch
+          # A previous attempt for this same worker may have left an intact, registered,
+          # unlocked worktree on the exact planned branch at the planned path while its
+          # ownership record is gone (a crashed instance, a migrated workspace root, or a
+          # checkout created before ownership files existed). That is this worker's own
+          # resumable checkout, not a foreign collision: claiming it avoids a redundant
+          # multi-minute `git worktree add` for a branch that is already checked out locally.
+          # The forced-collision case (a different worker on the same candidate) keeps its
+          # ownership record, so it is still refused here; the kernel's launch gate still
+          # re-checks for live occupants before any session starts in the adopted tree.
+          if (foreign_path || foreign_registration || foreign_branch) &&
+             !reusable_existing_checkout?(owner.fetch("git_root"), owner.fetch("worktree_root"), owner.fetch("branch"))
             return {
               "acquired" => false,
               "outcome" => ownership_collision_outcome(owner, nil),
@@ -1484,6 +1494,27 @@ module Meringue
 
       def worktree_registered?(git_root, worktree_root)
         worktree_records(git_root).any? { |record| same_path?(record.fetch("worktree", ""), worktree_root) }
+      end
+
+      # Whether the worktree at the planned path is this worker's own resumable checkout of
+      # its exact planned branch, and therefore safe to reclaim when no ownership record says
+      # otherwise. The branch name is the worker's deterministic delivery branch, the worktree
+      # must live inside the Meringue-managed root, be registered, on that one branch, unlocked,
+      # and not bare or prunable. Anything else (a foreign squatter directory, a worktree that
+      # moved to another branch, a half-finished locked checkout, a bare repository) stays a
+      # collision so the allocator falls back to a uniquified candidate as before.
+      def reusable_existing_checkout?(git_root, worktree_root, branch)
+        return false unless owned_workspace_path?(worktree_root)
+        return false unless DeliveryArtifactPolicy.managed_branch?(branch)
+
+        record = worktree_records(git_root).find do |candidate|
+          same_path?(candidate.fetch("worktree", ""), worktree_root)
+        end
+        return false unless record
+        return false if record.key?("bare") || record.key?("locked") || record.key?("prunable")
+        return false unless record.fetch("branch", nil) == "refs/heads/#{branch}"
+
+        Dir.exist?(worktree_root)
       end
 
       # Cleanup runs after the allocation budget is already spent, so it uses its own budget and

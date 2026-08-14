@@ -138,6 +138,81 @@ class WorkspaceManagerCollisionTest < Minitest::Test
     end
   end
 
+  # A previous attempt for this worker may leave an intact, registered, unlocked worktree on
+  # the exact planned branch at the planned path while its ownership record is gone (a crashed
+  # instance, a migrated workspace root, or a checkout created before ownership files existed).
+  # That is this worker's own resumable checkout of a branch already checked out locally, not a
+  # foreign collision: re-provisioning must adopt it instead of spending minutes on a redundant
+  # `git worktree add` for a suffixed branch.
+  def test_reuses_an_existing_checkout_of_the_same_branch_when_ownership_is_absent
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = workspace_manager(tmp)
+      first = allocate_workspace(manager, project, task_title: "Resume me")
+      in_progress = File.join(first.fetch("workspace_path"), "in-progress.txt")
+      File.write(in_progress, "half-finished work\n")
+
+      # Simulate the ownership record being lost while the worktree stays intact and registered.
+      FileUtils.rm_rf(manager.send(:ownership_directory))
+
+      second = allocate_workspace(manager, project, task_title: "Resume me")
+
+      assert second.fetch("created"), second.inspect
+      assert second.fetch("adopted"), "must adopt the existing local checkout instead of provisioning a new worktree"
+      assert_equal first.fetch("workspace_path"), second.fetch("workspace_path")
+      assert_equal first.fetch("workspace_branch"), second.fetch("workspace_branch")
+      assert_equal "half-finished work\n", File.read(in_progress)
+      assert manager.validate_worker_workspace(second, agent_id: "P1-I1-W1").fetch("usable")
+    end
+  end
+
+  # The ownership-absent reuse must not adopt a worktree that has moved to another branch, nor
+  # one that a different worker owns. Both stay collisions so the allocator falls back to a
+  # uniquified candidate, and the existing checkout is left untouched.
+  def test_an_existing_checkout_on_a_different_branch_is_not_adopted_when_ownership_is_absent
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = workspace_manager(tmp)
+      first = allocate_workspace(manager, project, task_title: "Moved branch")
+      foreign_file = File.join(first.fetch("workspace_path"), "do-not-share.txt")
+      File.write(foreign_file, "someone moved branches\n")
+      # Move the existing worktree onto a different managed branch so it no longer matches the
+      # planned branch, then drop the ownership record so reuse is considered.
+      git_output(project, first.fetch("workspace_path"), "checkout", "-b", "meringue/someone-else")
+      FileUtils.rm_rf(manager.send(:ownership_directory))
+
+      second = allocate_workspace(manager, project, task_title: "Moved branch")
+
+      assert second.fetch("created"), second.inspect
+      refute second.fetch("adopted", false)
+      assert_equal "#{first.fetch("workspace_path")}-2", second.fetch("workspace_path")
+      assert_equal "#{first.fetch("workspace_branch")}-2", second.fetch("workspace_branch")
+      assert_equal "someone moved branches\n", File.read(foreign_file)
+    end
+  end
+
+  # A locked (half-finished) checkout is never adopted even when ownership is absent: reusing it
+  # would hand a worker a worktree git still considers mid-checkout. It stays a collision.
+  def test_a_locked_existing_checkout_is_not_adopted_when_ownership_is_absent
+    with_workspace_tmpdir do |tmp|
+      project = create_git_project(tmp)
+      manager = workspace_manager(tmp)
+      first = allocate_workspace(manager, project, task_title: "Locked checkout")
+      lock_path = File.join(project.fetch("project_root"), ".git", "worktrees",
+                             File.basename(first.fetch("worktree_root_path")), "locked")
+      File.write(lock_path, "initializing\n") if Dir.exist?(File.dirname(lock_path))
+      FileUtils.rm_rf(manager.send(:ownership_directory))
+
+      second = allocate_workspace(manager, project, task_title: "Locked checkout")
+
+      assert second.fetch("created"), second.inspect
+      refute second.fetch("adopted", false)
+      assert_equal "#{first.fetch("workspace_path")}-2", second.fetch("workspace_path")
+      assert_equal "#{first.fetch("workspace_branch")}-2", second.fetch("workspace_branch")
+      assert Dir.exist?(first.fetch("workspace_path")), "the locked worktree must not be removed"
+    end
+  end
+
   def test_branch_checked_out_elsewhere_forces_a_suffixed_branch
     with_workspace_tmpdir do |tmp|
       project = create_git_project(tmp)
