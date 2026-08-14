@@ -713,6 +713,8 @@ module Meringue
       def begin_agent_interactive_focus(agent_id)
         reclaim_pid = nil
         reclaim_started_at = nil
+        reclaim_completed = false
+        client = nil
         agent = synchronized_state do
           state = normalized_state
           candidate = find_agent(state, agent_id.to_s)
@@ -746,14 +748,13 @@ module Meringue
 
           now = timestamp
           candidate["harness_metadata"] = metadata.merge(
-            "interactive_handoff" => {
+            "interactive_handoff" => instance_ownership_metadata.merge(
               "state" => "preparing",
-              "owner_instance_id" => instance_id,
-              "owner_instance_pid" => instance_pid,
               "started_at" => now,
+              "context" => interactive_focus_context(state, candidate),
               "reclaim_interactive_pid" => reclaim_pid,
               "reclaim_interactive_started_at" => reclaim_started_at
-            }.compact
+            ).compact
           )
           candidate["updated_at"] = now
           touch_state!(state, now)
@@ -765,6 +766,7 @@ module Meringue
         client = harness_client_for_agent(agent)
         if reclaim_pid
           client.reclaim_interactive_session(agent_session_ref(agent), pid: reclaim_pid)
+          reclaim_completed = true
         end
         prepared = client.prepare_interactive_session(agent_session_ref(agent))
         synchronized_state do
@@ -792,7 +794,11 @@ module Meringue
             source_type: "kernel",
             source_id: current.fetch("id"),
             level: handoff.fetch("exact_stream_transfer", true) ? "info" : "warning",
-            message: "Prepared worker #{current.fetch("id")} for native interactive Pi focus; the managed RPC session is quiesced.",
+            message: if handoff.fetch("was_streaming", false)
+                       "Interrupted worker #{current.fetch("id")}'s active managed turn and transferred sole session ownership to native interactive Pi focus."
+                     else
+                       "Prepared worker #{current.fetch("id")} for native interactive Pi focus; the managed RPC session is quiesced."
+                     end,
             details: handoff.merge("agent_id" => current.fetch("id"), "routing_action" => "interactive_focus")
           )
           touch_state!(state, now)
@@ -812,26 +818,61 @@ module Meringue
           )
         end
       rescue StandardError => e
+        recovered_ref = nil
+        recovery_error = nil
+        # Preparation may already have quiesced the RPC writer. If no orphaned native
+        # process is still being reclaimed, restore dashboard ownership before clearing the marker.
+        # This makes launch/preparation failure a settled, resumable worker rather than a stale
+        # `working` record with no supervisor.
+        unless reclaim_pid && !reclaim_completed
+          begin
+            client ||= harness_client_for_agent(agent) if agent.is_a?(Hash)
+            recovered_ref = client.resume_dashboard_session(agent_session_ref(agent)) if client && agent.is_a?(Hash)
+          rescue StandardError => recovery_exception
+            recovery_error = recovery_exception
+          end
+        end
+
         synchronized_state do
           state = normalized_state
           current = find_agent(state, agent_id.to_s)
           if current
             metadata = current.fetch("harness_metadata", {}) || {}
             marker = metadata.fetch("interactive_handoff", {}) || {}
-            if reclaim_pid && marker.is_a?(Hash)
+            if reclaim_pid && !reclaim_completed && marker.is_a?(Hash)
               current["harness_metadata"] = metadata.merge(
                 "interactive_handoff" => marker.merge("state" => "reclaim_failed", "reclaim_error" => e.message)
               )
             else
+              merge_session_ref_into_agent!(current, recovered_ref) if recovered_ref.is_a?(Hash)
+              metadata = current.fetch("harness_metadata", {}) || {}
               metadata.delete("interactive_handoff")
-              current["harness_metadata"] = metadata
+              current["harness_metadata"] = metadata.merge(
+                "last_interactive_handoff" => marker.merge(
+                  "state" => "failed",
+                  "outcome" => "prepare_failed",
+                  "failed_at" => timestamp,
+                  "error" => e.message,
+                  "recovery_error" => recovery_error&.message
+                ).compact
+              )
+              unless TERMINAL_AGENT_STATUSES.include?(current.fetch("status", nil))
+                current["status"] = if recovered_ref.is_a?(Hash)
+                                      recovered_ref.fetch("is_streaming", false) ? "working" : "idle"
+                                    else
+                                      "blocked"
+                                    end
+                refresh_worker_parent_statuses!(state, current, timestamp)
+              end
             end
             current["updated_at"] = timestamp
             touch_state!(state)
             store.save(state)
           end
           error = error_payload(e)
-          failed_result(nil, "BeginInteractiveFocus", "Could not prepare worker #{agent_id} for interactive focus: #{error.fetch("message")}", [error.fetch("class"), error.fetch("message")])
+          errors = [error.fetch("class"), error.fetch("message")]
+          errors << "dashboard_recovery_failed: #{recovery_error.message}" if recovery_error
+          failed_result(nil, "BeginInteractiveFocus", "Could not prepare worker #{agent_id} for interactive focus: #{error.fetch("message")}", errors)
         end
       end
 
@@ -853,7 +894,11 @@ module Meringue
             "interactive_started_at" => process&.fetch("started_at", nil)&.iso8601 || now
           )
           marker.delete("reclaim_interactive_pid")
-          agent["harness_metadata"] = metadata.merge("interactive_handoff" => marker)
+          agent["harness_metadata"] = metadata.merge(
+            "is_streaming" => true,
+            "interactive_handoff" => marker
+          )
+          agent["status"] = "working" unless TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil))
           agent["updated_at"] = now
           touch_state!(state, now)
           store.save(state)
@@ -864,6 +909,7 @@ module Meringue
       # Called only after the interactive PTY has exited. Reattaching before that point would create
       # two Pi writers against one JSONL session and is explicitly rejected by the lifecycle seam.
       def end_agent_interactive_focus(agent_id)
+        handoff_marker = nil
         agent = synchronized_state do
           state = normalized_state
           candidate = find_agent(state, agent_id.to_s)
@@ -874,6 +920,7 @@ module Meringue
             return accepted_result(nil, "EndInteractiveFocus", candidate.fetch("id"), "Worker #{candidate.fetch("id")} has no active interactive focus.", candidate, [])
           end
 
+          handoff_marker = deep_copy(marker)
           now = timestamp
           candidate["harness_metadata"] = (candidate.fetch("harness_metadata", {}) || {}).merge(
             "interactive_handoff" => marker.merge("state" => "resuming", "resume_started_at" => now)
@@ -896,8 +943,19 @@ module Meringue
           merge_session_ref_into_agent!(current, resumed)
           metadata = current.fetch("harness_metadata", {}) || {}
           metadata.delete("interactive_handoff")
-          current["harness_metadata"] = metadata.merge("is_streaming" => resumed.fetch("is_streaming", false)).compact
-          current["status"] = "working" unless TERMINAL_AGENT_STATUSES.include?(current.fetch("status", nil))
+          handoff_outcome = handoff_marker.fetch("state", nil).to_s == "interactive_pending" ? "launch_not_started" : "interactive_closed"
+          current["harness_metadata"] = metadata.merge(
+            "is_streaming" => resumed.fetch("is_streaming", false),
+            "last_interactive_handoff" => handoff_marker.merge(
+              "state" => "ended",
+              "outcome" => handoff_outcome,
+              "ended_at" => now
+            )
+          ).compact
+          unless TERMINAL_AGENT_STATUSES.include?(current.fetch("status", nil))
+            current["status"] = resumed.fetch("is_streaming", false) ? "working" : "idle"
+            refresh_worker_parent_statuses!(state, current, now)
+          end
           current["updated_at"] = now
           log_ids = append_log(
             state,
@@ -14820,6 +14878,23 @@ module Meringue
       def canonical_command_type(command_type)
         text = command_type.to_s
         COMMAND_ALIASES.fetch(text, text)
+      end
+
+      def interactive_focus_context(state, agent)
+        issue = find_issue(state, agent.fetch("issue_id", nil))
+        {
+          "agent_id" => agent.fetch("id", nil),
+          "issue_id" => agent.fetch("issue_id", nil),
+          "issue_title" => issue&.fetch("title", nil),
+          "issue_description" => issue&.fetch("description", nil),
+          "assignment" => agent.dig("harness_metadata", "spawn_prompt"),
+          "workspace_path" => agent.fetch("workspace_path", nil),
+          "workspace_branch" => agent.fetch("workspace_branch", nil),
+          "session_id" => agent.fetch("harness_session_id", nil),
+          "session_file" => agent.fetch("harness_session_file", nil)
+        }.compact.transform_values do |value|
+          value.is_a?(String) ? value.byteslice(0, 8_000).to_s.scrub : value
+        end
       end
 
       def agent_session_ref(agent)
