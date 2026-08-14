@@ -13,7 +13,7 @@ class TuiTypingThroughputTest < Minitest::Test
 
   WIDTH = 140
   HEIGHT = 45
-  LOG_COUNT = 150
+  LOG_COUNT = Meringue::State::Models::LOG_RETENTION_LIMIT
   WARM_FRAMES = 20
   # A typing frame that takes longer than this is broken, not merely slow.
   MAX_WARM_FRAME_SECONDS = 1.0
@@ -42,6 +42,16 @@ class TuiTypingThroughputTest < Minitest::Test
     assert_operator warm_average, :<, MAX_WARM_AVERAGE_SECONDS, timing_message(cold_seconds, warm_seconds)
     assert_operator warm_seconds.sum, :<, MAX_WARM_TOTAL_SECONDS, timing_message(cold_seconds, warm_seconds)
     assert_operator warm_average, :<, cold_seconds * MAX_WARM_TO_COLD_RATIO, timing_message(cold_seconds, warm_seconds)
+  end
+
+  def test_scrolling_frames_stay_cheap_with_a_full_retained_log_window
+    cold_seconds = measure { scrolling_frame(1) }
+    warm_seconds = WARM_FRAMES.times.map { |index| measure { scrolling_frame(index.even? ? 0 : 3) } }
+    warm_average = warm_seconds.sum / warm_seconds.length
+
+    assert_operator warm_seconds.max, :<, MAX_WARM_FRAME_SECONDS, timing_message(cold_seconds, warm_seconds)
+    assert_operator warm_average, :<, MAX_WARM_AVERAGE_SECONDS, timing_message(cold_seconds, warm_seconds)
+    assert_operator warm_seconds.sum, :<, MAX_WARM_TOTAL_SECONDS, timing_message(cold_seconds, warm_seconds)
   end
 
   def test_caching_never_hides_a_durable_state_update
@@ -106,6 +116,11 @@ class TuiTypingThroughputTest < Minitest::Test
 
   def typing_frame(text)
     typing_frame_from(@provider, text)
+  end
+
+  def scrolling_frame(offset)
+    @app.instance_variable_get(:@scroll_offsets)["logs"] = offset
+    typing_frame("scroll probe")
   end
 
   def typing_frame_from(provider, text)
