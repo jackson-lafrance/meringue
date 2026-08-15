@@ -727,6 +727,26 @@ module Meringue
         reuse_outcome(false, "worktree_inspection_error", error: e.message)
       end
 
+      # `git worktree prune` removes administrative files for worktrees whose directories are
+      # already gone. It never touches a live worktree directory, so it is safe to run after a
+      # prune pass to clear any dangling registrations the per-worktree cleanup could not
+      # deregister (for example a worktree directory that was removed out of band while its
+      # registration lingered). This is a courtesy, not a force-removal: dirty, locked, or
+      # actively-referenced worktrees are untouched.
+      def prune_dangling_worktrees(git_root)
+        return { "success" => false, "reason" => "git_root_missing" } if git_root.to_s.strip.empty? || !Dir.exist?(git_root.to_s)
+        result = run_command("git", "-C", git_root.to_s, "worktree", "prune")
+        {
+          "success" => result.fetch("status").success?,
+          "stdout" => present_output(result.fetch("stdout")),
+          "stderr" => present_output(result.fetch("stderr"))
+        }.compact
+      rescue CommandTimeout => e
+        { "success" => false, "reason" => "prune_timed_out", "error" => e.message }
+      rescue StandardError => e
+        { "success" => false, "reason" => "prune_error", "error" => e.message }
+      end
+
       # Pruning uses a deliberately stricter cleanup path than failed provisioning. It removes
       # only a registered, clean, unlocked Meringue worktree whose path and branch still match the
       # persisted ownership record. Branches are retained so delivered commits remain reachable.
@@ -747,7 +767,13 @@ module Meringue
         worktree_root = canonical_path(worktree_root)
         base = {
           "worktree_root_path" => worktree_root,
-          "workspace_branch" => workspace["workspace_branch"] || plan["workspace_branch"]
+          "workspace_branch" => workspace["workspace_branch"] || plan["workspace_branch"],
+          "workspace_owner_id" => workspace["workspace_owner_id"] || plan["workspace_owner_id"],
+          "requested_worktree_provider" => workspace["requested_worktree_provider"] || plan["requested_worktree_provider"],
+          "worktree_provider" => workspace["worktree_provider"] || plan["worktree_provider"],
+          "worktree_provider_identifier" => workspace["worktree_provider_identifier"] || plan["worktree_provider_identifier"],
+          "worktree_provider_cwd" => workspace["worktree_provider_cwd"] || plan["worktree_provider_cwd"],
+          "project_root" => workspace["project_root"] || plan["project_root"]
         }.compact
         if Array(protected_paths).compact.any? { |path| paths_overlap?(worktree_root, canonical_path(path)) }
           return cleanup_outcome("failed", "workspace_owned_by_another_worker", success: false, **base)

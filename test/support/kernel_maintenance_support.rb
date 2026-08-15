@@ -245,6 +245,7 @@ module KernelMaintenanceSupport
                    workspace_manager: Meringue::Workspace::Manager.new(root_path: tmp_path("workspaces")),
                    prune_forge_lookup_budget: Meringue::Kernel::Engine::PRUNE_FORGE_LOOKUP_BUDGET_SECONDS,
                    prune_workspace_cleanup_budget: Meringue::Kernel::Engine::PRUNE_WORKSPACE_CLEANUP_BUDGET_SECONDS,
+                   post_prune_cleanup_budget: Meringue::Kernel::Engine::POST_PRUNE_CLEANUP_BUDGET_SECONDS,
                    delivery_pull_request_refresh_budget: Meringue::Kernel::Engine::DELIVERY_PULL_REQUEST_REFRESH_BUDGET_SECONDS,
                    store: Meringue::State::Store.new(path: state_path))
     Meringue::Kernel::Engine.new(
@@ -257,6 +258,7 @@ module KernelMaintenanceSupport
       forge_client: forge_client,
       prune_forge_lookup_budget: prune_forge_lookup_budget,
       prune_workspace_cleanup_budget: prune_workspace_cleanup_budget,
+      post_prune_cleanup_budget: post_prune_cleanup_budget,
       delivery_pull_request_refresh_budget: delivery_pull_request_refresh_budget,
       config_path: tmp_path("config.toml")
     )
