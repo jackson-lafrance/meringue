@@ -501,6 +501,19 @@ Workspace metadata should be persisted on the agent record so sessions can be re
 When pruning an issue or worker record, the kernel must ask the workspace manager to remove its associated Meringue-managed git worktree first. Cleanup must verify the configured workspace root, repository registration, persisted branch/path ownership, the main checkout, and other worker references. It must never force dirty or locked worktrees: preserve the failed worktree and branch, log the structured failure, and still allow eligible terminal state records to be pruned. Missing/already-removed worktrees are idempotent successes, and cleanup retains the delivery branch.
 When pruning an issue or worker record, the kernel must ask the workspace manager to remove its associated Meringue-managed git worktree first. Cleanup must verify the configured workspace root, repository registration, persisted branch/path ownership, the main checkout, and other worker references. A shared worktree is removed only once no retained worker still needs it; the record of a settled sharer is pruned immediately, and the directory goes with the last sharer. It must never force dirty or locked worktrees: retain the state bundle, log the structured failure, and allow a later prune to retry. Missing/already-removed worktrees are idempotent successes, and cleanup retains the delivery branch.
 The TUI, heads, and harness clients should not directly create, prune, or mutate worktrees.
+A project may declare a generic, project-native sparse provisioning profile at
+`.meringue/workspace-profile.toml` so the workspace manager checks out only a repository-approved
+working set instead of the full tree: `git worktree add --no-checkout`, per-worktree
+`core.sparseCheckout`/`core.sparseCheckoutCone` (via `extensions.worktreeConfig` so sparse settings
+stay per-worktree and never leak into the shared repository config), then `read-tree -mu HEAD` only
+after the sparse settings are active. The profile is project-configured (sparse patterns, an
+optional path template for the project's native checkout layout, and an optional post-provision
+validation command), never hard-coded for a specific project or inferred from prompt text. The
+selected profile, path template, sparse record, and validation result are persisted on the
+workspace plan. A project without a declared profile keeps the current full-checkout behavior
+unchanged; a shared read-only worker never uses a sparse profile. Allocator ownership,
+exactly-once safety, collision handling, bare-repository protections, and shared-read-only
+fallback behavior are preserved.
 
 ## Harness integration
 Meringue must be designed as harness-independent orchestration software, even though the MVP only needs Pi.
