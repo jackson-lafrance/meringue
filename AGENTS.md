@@ -343,6 +343,7 @@ Do the same thing as coding harnesses for these aswell we want it to be familiar
 /model [head|worker] <provider>/<model-id>
 /thinking [head|worker] <level>
 /kill <agent_or_issue_id>
+/move <agent_id> <issue_id>   (reparent an existing worker onto a different issue without restarting its harness session)
 /tree
 /state
 /questions
@@ -725,6 +726,9 @@ Titles should be short. Descriptions should be detailed and include relevant use
 Updates an existing issue.
 
 This supports title/description edits, reparenting, and status changes such as `working`, `blocked`, `completed`, or `errored`.
+
+### `MoveWorker(AgentID, TargetIssueID) -> Agent`
+Reparents an existing worker onto a different issue in the same project without killing, restarting, or re-provisioning its harness session, worktree, or branch. The kernel renumbers the worker id to the composite key of its new issue and re-points every reference that named the moved worker (deferred-chain `after_agent_id`, `follow_up`/`replace` lineage, issue `agent_ids`, `deferred_spawn` handover context, shared-workspace relationships, and ids quoted in prose) in the same pass. The harness session id, session file, pid, workspace, branch, and external workspace-owner identity are left intact, so an in-flight (streaming) worker can be reparented mid-turn without interrupting the turn. Cross-project moves are rejected because retaining the original repository would route later prompts into the wrong workspace; spawn a worker on the destination issue instead. A worker is also not movable while background workspace provisioning owns its current id. The target issue and source project must exist, and a worker already on the target issue is rejected as a no-op. Heads may not be reparented.
 
 ### `SpawnWorker(IssueID, Prompt, WorkspacePath?, WorkspaceMode?, Model?, ThinkingLevel?) -> Agent`
 Spawns a real worker harness session for an issue. For the MVP, this is a Pi worker session.

@@ -113,6 +113,33 @@ class KernelHeadsUserKernelCommandsTest < KernelHeadsTestCase
     assert log_messages.any? { |message| message.start_with?("Command output: GetInfo: accepted") }
   end
 
+  def test_a_head_proposed_move_worker_reparents_a_worker_through_the_normal_dispatch_path
+    project_id = add_project!
+    first_issue = apply_command("CreateIssue", { "project_id" => project_id, "title" => "First issue" }).fetch("target_id")
+    second_issue = apply_command("CreateIssue", { "project_id" => project_id, "title" => "Second issue" }).fetch("target_id")
+    worker_id = apply_command(
+      "SpawnWorker",
+      { "issue_id" => first_issue, "title" => "Movable worker", "prompt" => "Do work." }
+    ).fetch("target_id")
+    session_id = state.fetch("agents").find { |record| record.fetch("id") == worker_id }.fetch("harness_session_id")
+
+    head_id = spawn_head!("move #{worker_id} onto #{second_issue}")
+    applied = apply_head_result(
+      head_id,
+      head_result(commands: [command("MoveWorker", "agent_id" => worker_id, "target_issue_id" => second_issue)])
+    )
+    result = command_results(applied).first
+
+    assert_equal "MoveWorker", result.fetch("command_type")
+    assert_equal "accepted", result.fetch("status")
+    new_id = result.fetch("target_id")
+    assert_equal second_issue, state.fetch("agents").find { |record| record.fetch("id") == new_id }.fetch("issue_id")
+    # The head-proposed move keeps the harness session intact, exactly like the slash-command path.
+    assert_equal session_id, state.fetch("agents").find { |record| record.fetch("id") == new_id }.fetch("harness_session_id")
+    assert log_messages.any? { |message| message.start_with?("Moved worker P1-I1-W1 to P1-I2-W1 on issue P1-I2") },
+           "expected a move log line, got: #{log_messages.inspect}"
+  end
+
   def test_clear_state_requires_explicit_recorded_user_intent_and_confirmation
     add_project!
     vague_head = spawn_head!("clean things up")

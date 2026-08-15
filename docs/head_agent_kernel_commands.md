@@ -377,7 +377,7 @@ Every rejected or skipped `ModifyIssue`, `SpawnWorker`, and `PromptAgent` also s
 
 A corrected route is never silent. The kernel appends `Rerouted from predicted issue <id>.` to the worker's spawn log line, adds `rerouted_from_issue_id` to that log's details and to the worker's `harness_metadata`, and emits a separate warning log naming both issues.
 
-A worker's issue is immutable once it is spawned: no kernel command, reconciliation pass, or repair path moves an existing agent between issues. If a worker did land on the wrong issue, the only correction is to `SpawnWorker` on the right issue and `Kill` the misplaced worker.
+A worker's issue is mutable after spawn through `MoveWorker` (`/move <agent_id> <issue_id>` or `/reparent`) when both issues belong to the same project. Reparenting does not re-provision: the worker keeps its harness session, worktree, branch, and external workspace-owner identity. The kernel renumbers the worker id to the composite key of its new issue (P1-I1-W1 -> P1-I7-W2) and re-points every reference that named the moved worker (after_agent_id, follow_up/replace lineage, issue agent_ids, deferred_spawn handover context, and ids quoted in prose) in the same pass, so `/recount` and dependent activation stay coherent. An in-flight (streaming) worker can be reparented mid-turn without interruption. Cross-project moves are rejected because the preserved session would remain in the source repository; spawn a worker on the destination issue instead. A worker whose workspace is still provisioning is also not movable until its session starts.
 
 ## Answering open questions
 
@@ -728,6 +728,33 @@ Example:
     "issue_id": "P1-I1",
     "status": "blocked",
     "description": "Blocked pending the user's answer about expected behavior."
+  }
+}
+```
+
+### MoveWorker
+
+Reparents an existing worker onto a different issue in the same project without killing, restarting, or re-provisioning its harness session, worktree, or branch. The worker id is renumbered to the composite key of its new issue and every reference that named it is re-pointed in the same pass. Use this to correct a misfiled worker instead of `SpawnWorker` + `Kill`, which loses the in-progress session.
+
+The target issue and source project must exist. Cross-project moves are rejected because a preserved session would still be operating in the source repository; spawn a worker on the destination issue to receive the correct workspace. A worker whose background workspace provisioning is still using its current id must finish starting first. A worker already on the target issue is rejected as a no-op, and heads may not be reparented.
+
+Payload:
+
+```json
+{
+  "agent_id": "P1-I1-W1",
+  "target_issue_id": "P1-I7"
+}
+```
+
+Example:
+
+```json
+{
+  "type": "MoveWorker",
+  "payload": {
+    "agent_id": "P1-I1-W1",
+    "target_issue_id": "P1-I7"
   }
 }
 ```

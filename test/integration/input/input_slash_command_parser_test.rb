@@ -345,6 +345,25 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_equal "Unknown slash command: //weird", parsed.fetch("payload").fetch("message")
   end
 
+  def test_move_command_reparents_a_worker_onto_another_issue
+    parsed = parse_slash("/move P1-I1-W1 P1-I5")
+
+    assert_equal "MoveWorker", parsed.fetch("type")
+    assert_equal({ "agent_id" => "P1-I1-W1", "target_issue_id" => "P1-I5" }, parsed.fetch("payload"))
+
+    # `/reparent` is the same command under another name.
+    reparent = parse_slash("/reparent P2-I3-W4 P2-I9")
+    assert_equal "MoveWorker", reparent.fetch("type")
+    assert_equal "P2-I9", reparent.fetch("payload").fetch("target_issue_id")
+  end
+
+  def test_move_command_requires_both_arguments
+    parsed = parse_slash("/move P1-I1-W1")
+
+    assert_equal "InvalidSlashCommand", parsed.fetch("type")
+    assert_equal "Usage: /move <agent_id> <issue_id>", parsed.fetch("payload").fetch("message")
+  end
+
   # Documented gap: the parser rescues Shellwords::ParseError, which does not
   # exist on the Ruby used here, so an unbalanced quote raises instead of
   # returning InvalidSlashCommand. This test accepts either outcome so it stays
