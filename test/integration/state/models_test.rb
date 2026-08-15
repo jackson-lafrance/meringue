@@ -9,7 +9,7 @@ class StateModelsShapeTest < Minitest::Test
   include StateSupport
 
   def test_allowed_status_and_level_vocabularies
-    assert_equal %w[queued working idle blocked completed errored killed], Models::LIFECYCLE_STATUSES
+    assert_equal %w[queued working idle blocked completed errored killed supervision_lost], Models::LIFECYCLE_STATUSES
     assert_equal %w[open answered dismissed], Models::QUESTION_STATUSES
     assert_equal %w[info warning error], Models::LOG_LEVELS
     assert_equal %w[user kernel head worker harness system], Models::LOG_SOURCE_TYPES

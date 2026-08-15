@@ -43,7 +43,8 @@ module Meringue
           "blocked" => "!",
           "completed" => "✓",
           "errored" => "×",
-          "killed" => "∅"
+          "killed" => "∅",
+          "supervision_lost" => "⏸"
         }.freeze
 
         STATUS_STYLES = {
@@ -53,7 +54,8 @@ module Meringue
           "blocked" => Style::WARNING,
           "completed" => Style::SUCCESS,
           "errored" => Style::ERROR,
-          "killed" => Style::DIM
+          "killed" => Style::DIM,
+          "supervision_lost" => Style::WARNING
         }.freeze
 
         def render(state, width: nil)

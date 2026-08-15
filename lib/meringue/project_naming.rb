@@ -11,7 +11,7 @@ module Meringue
     # doing to a project. They are never part of what the project is called, so
     # "Meringue working" is always the name "Meringue" plus a rendered status
     # that leaked into the name.
-    STATUS_SUFFIXES = %w[queued working idle blocked completed errored killed].freeze
+    STATUS_SUFFIXES = %w[queued working idle blocked completed errored killed supervision_lost].freeze
     # These words describe a task, lifecycle state, or repository facet rather
     # than the product itself. They must not become part of a derived project
     # label.
