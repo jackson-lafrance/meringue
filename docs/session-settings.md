@@ -44,6 +44,8 @@ A trailing `refresh` word keeps `/models` on the kernel path instead of opening 
 
 ```text
 /model <provider>/<model-id>
+/model head <provider>/<model-id>
+/model worker <provider>/<model-id>
 /thinking <off|minimal|low|medium|high|xhigh|max>
 /thinking head <off|minimal|low|medium|high|xhigh|max>
 /thinking worker <off|minimal|low|medium|high|xhigh|max>
@@ -54,14 +56,16 @@ Examples:
 ```text
 /model openai/gpt-5.6-sol
 /model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast
+/model head openai/gpt-5.6-sol       # only future heads
+/model worker anthropic/claude-opus-5 # only future workers
 /thinking xhigh          # both roles (backward-compatible shared form)
 /thinking head low       # only future heads
 /thinking worker max     # only future workers
 ```
 
-There is no command that only prints the defaults. The dashboard status line shows `Pi defaults: <model> · head <level> · worker <level>`, and `/config` prints both role values next to the config file they came from. A head can still answer "which model and thinking levels will future agents use" by proposing `GetSessionDefaults`.
+There is no command that only prints the defaults. The dashboard status line shows `Pi defaults: <model> · head <level> · worker <level>` (and splits the model by role when they differ), and `/config` prints each role's model and thinking level next to the config file they came from. A head can still answer "which model and thinking levels will future agents use" by proposing `GetSessionDefaults`.
 
-`/model` and `/thinking` save values under `[harness.pi]` in Meringue's configured TOML file (normally `~/.meringue/config.toml`). The one-argument `/thinking <level>` form keeps its historical behavior: it updates both roles and clears role-specific overrides. The `head` and `worker` forms update only that role, including sessions spawned later in the currently running Meringue process.
+`/model` and `/thinking` save values under `[harness.pi]` in Meringue's configured TOML file (normally `~/.meringue/config.toml`). The one-argument `/model <provider>/<model-id>` and `/thinking <level>` forms keep their historical behavior: they update both roles and clear role-specific overrides. The `head` and `worker` forms update only that role, including sessions spawned later in the currently running Meringue process.
 
 A default change does **not** mutate, reconnect, restart, or terminate an existing Pi session. It also strips spawn-only model/thinking defaults when later resuming an existing session, so a resumable session keeps its persisted effective pair. The result and durable kernel log explicitly list existing Pi agent ids left unchanged.
 
@@ -148,15 +152,17 @@ The dedicated default fields are:
 
 ```toml
 [harness.pi]
-model = "openai/gpt-5.6-sol"
+model = "openai/gpt-5.6-sol"        # compatibility fallback for either omitted role
+head_model = "openai/gpt-5.6-sol"
+worker_model = "anthropic/claude-opus-5"
 thinking_level = "high"        # compatibility fallback for either omitted role
 head_thinking_level = "low"
 worker_thinking_level = "xhigh"
 ```
 
-For each role, its dedicated key wins over `thinking_level`; the shared key then wins over a `--thinking` value in that role's extra-argument array. This preserves old configs that use only `thinking_level` or only role argument arrays. `/thinking <level>` writes the shared key and removes both role keys, while `/thinking head <level>` and `/thinking worker <level>` write only the selected role key. The model remains shared.
+For each role, its dedicated key wins over the shared `model`/`thinking_level` fallback; the shared key then wins over a `--model`/`--thinking` value in that role's extra-argument array. This preserves old configs that use only the shared keys or only role argument arrays. `/model <provider>/<model-id>` and `/thinking <level>` write the shared key and remove both role keys, while the `head` and `worker` forms write only the selected role key.
 
-The dashboard status line shows `Pi defaults: <model> · head <level> · worker <level>` separately from the active harness. A focused worker workspace labels the effective per-session line as `session settings · model … · thinking …`, so a user can distinguish what a future worker will get from what the selected worker is actually using.
+The dashboard status line shows `Pi defaults: <model> · head <level> · worker <level>` when both roles share a model, and splits the model by role (`Pi defaults: head <model> · <level> · worker <model> · <level>`) when they differ, separately from the active harness. A focused worker workspace labels the effective per-session line as `session settings · model … · thinking …`, so a user can distinguish what a future worker will get from what the selected worker is actually using.
 
 ## Authoritative existing-session discovery
 

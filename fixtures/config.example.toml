@@ -36,15 +36,18 @@ provider = "pi"
 [harness.pi]
 command = "pi"
 session_dir = "~/.meringue/pi-sessions"
-# Shared defaults for every future Pi head and worker. `/thinking <level>` keeps
-# this backward-compatible behavior; role-specific commands write the optional
-# overrides below instead.
+# Shared defaults for every future Pi head and worker. `/model` and `/thinking`
+# keep this backward-compatible behavior; role-specific commands write the
+# optional overrides below instead.
 model = "anthropic/claude-opus-5"
 thinking_level = "max"
+# head_model = "openai/gpt-5.6-sol"
+# worker_model = "anthropic/claude-opus-5"
 # head_thinking_level = "low"
 # worker_thinking_level = "max"
-# Role arrays still own tools and other Pi flags; role thinking overrides, then
-# the shared scalar fallback, are appended last if arrays contain --thinking.
+# Role arrays still own tools and other Pi flags; role model/thinking overrides,
+# then the shared scalar fallback, are appended last if arrays contain
+# --model/--thinking.
 head_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 worker_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls,edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 

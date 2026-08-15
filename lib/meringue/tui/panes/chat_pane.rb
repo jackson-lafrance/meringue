@@ -353,18 +353,33 @@ module Meringue
 
           segments = label.empty? ? [] : [["harness: ", Style::DIM], [label, Style::ACCENT_BOLD]]
           unless defaults.empty?
-            model = defaults.fetch("model", nil) || "mixed"
+            head_model = defaults.dig("roles", "head", "model") || defaults["model"] || "mixed"
+            worker_model = defaults.dig("roles", "worker", "model") || defaults["model"] || "mixed"
             head_thinking = defaults.dig("roles", "head", "thinking_level") || defaults["thinking_level"] || "mixed"
             worker_thinking = defaults.dig("roles", "worker", "thinking_level") || defaults["thinking_level"] || "mixed"
             segments << [" · ", Style::DIM] unless segments.empty?
-            segments.concat([
-              ["Pi defaults: ", Style::DIM],
-              [model.to_s, Style::MUTED],
-              [" · head ", Style::DIM],
-              [head_thinking.to_s, Style::MUTED],
-              [" · worker ", Style::DIM],
-              [worker_thinking.to_s, Style::MUTED]
-            ])
+            if head_model == worker_model
+              segments.concat([
+                ["Pi defaults: ", Style::DIM],
+                [head_model.to_s, Style::MUTED],
+                [" · head ", Style::DIM],
+                [head_thinking.to_s, Style::MUTED],
+                [" · worker ", Style::DIM],
+                [worker_thinking.to_s, Style::MUTED]
+              ])
+            else
+              segments.concat([
+                ["Pi defaults: ", Style::DIM],
+                ["head ", Style::DIM],
+                [head_model.to_s, Style::MUTED],
+                [" · ", Style::DIM],
+                [head_thinking.to_s, Style::MUTED],
+                [" · worker ", Style::DIM],
+                [worker_model.to_s, Style::MUTED],
+                [" · ", Style::DIM],
+                [worker_thinking.to_s, Style::MUTED]
+              ])
+            end
           end
           segments
         end

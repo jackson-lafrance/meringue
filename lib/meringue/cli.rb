@@ -182,10 +182,11 @@ module Meringue
         head_runner_provider: ->(provider) { registry.head_runner_for(provider: provider, cwd: Dir.pwd) },
         default_harness_provider: registry.worker_provider,
         session_defaults_provider: ->(provider) { registry.session_defaults(provider: provider) },
-        session_defaults_updater: lambda do |provider, model: nil, thinking_level: nil, thinking_role: nil|
+        session_defaults_updater: lambda do |provider, model: nil, model_role: nil, thinking_level: nil, thinking_role: nil|
           registry.update_session_defaults!(
             provider: provider,
             model: model,
+            model_role: model_role,
             thinking_level: thinking_level,
             thinking_role: thinking_role
           )

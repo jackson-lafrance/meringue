@@ -83,11 +83,15 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
       @client = client
       @config_path = config_path
       @calls = []
-      @role_thinking = { "head" => "max", "worker" => "max" }
+      default_model = client.spawn_defaults.fetch("model")
+      default_thinking = client.spawn_defaults.fetch("thinking_level")
+      @role_model = { "head" => default_model, "worker" => default_model }
+      @role_thinking = { "head" => default_thinking, "worker" => default_thinking }
     end
 
     def defaults(_provider)
-      model = @client.spawn_defaults.fetch("model")
+      model_values = @role_model.values.uniq
+      model = model_values.one? ? model_values.first : nil
       thinking_values = @role_thinking.values.uniq
       thinking = thinking_values.one? ? thinking_values.first : nil
       {
@@ -96,23 +100,32 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
         "thinking_level" => thinking,
         "consistency" => "consistent",
         "roles" => {
-          "head" => { "model" => model, "thinking_level" => @role_thinking.fetch("head") },
-          "worker" => { "model" => model, "thinking_level" => @role_thinking.fetch("worker") }
+          "head" => { "model" => @role_model.fetch("head"), "thinking_level" => @role_thinking.fetch("head") },
+          "worker" => { "model" => @role_model.fetch("worker"), "thinking_level" => @role_thinking.fetch("worker") }
         },
         "scope" => "future_pi_sessions"
       }
     end
 
-    def update(provider, model: nil, thinking_level: nil, thinking_role: nil)
+    def update(provider, model: nil, model_role: nil, thinking_level: nil, thinking_role: nil)
       call = { "provider" => provider, "model" => model, "thinking_level" => thinking_level }
+      call["model_role"] = model_role if model_role
       call["thinking_role"] = thinking_role if thinking_role
       @calls << call
       Meringue::Config.save_pi_session_defaults!(
         model: model,
+        model_role: model_role,
         thinking_level: thinking_level,
         thinking_role: thinking_role,
         path: @config_path
       )
+      if model
+        if model_role
+          @role_model[model_role] = model
+        else
+          @role_model.transform_values! { model }
+        end
+      end
       if thinking_level
         if thinking_role
           @role_thinking[thinking_role] = thinking_level
@@ -120,7 +133,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
           @role_thinking.transform_values! { thinking_level }
         end
       end
-      @client.configure_defaults(model: model, thinking_level: thinking_level) if thinking_role.nil? || thinking_role == "worker"
+      @client.configure_defaults(model: model, thinking_level: thinking_level) if (model || thinking_level) && (model_role.nil? || model_role == "worker") && (thinking_role.nil? || thinking_role == "worker")
       defaults(provider)
     end
   end
@@ -135,8 +148,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
       harness_client_resolver: ->(_agent) { @settings_client },
       default_harness_provider: "pi",
       session_defaults_provider: ->(provider) { @coordinator.defaults(provider) },
-      session_defaults_updater: lambda do |provider, model: nil, thinking_level: nil, thinking_role: nil|
-        @coordinator.update(provider, model: model, thinking_level: thinking_level, thinking_role: thinking_role)
+      session_defaults_updater: lambda do |provider, model: nil, model_role: nil, thinking_level: nil, thinking_role: nil|
+        @coordinator.update(provider, model: model, model_role: model_role, thinking_level: thinking_level, thinking_role: thinking_role)
       end
     )
   end
@@ -195,6 +208,55 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
     assert_nil config.value("harness", "pi", "head_thinking_level")
     assert_nil config.value("harness", "pi", "worker_thinking_level")
+  end
+
+  def test_role_specific_model_commands_persist_independent_defaults_and_scope_their_results
+    head_result = apply_command("SetDefaultSessionModel", "role" => "head", "model" => "openai/gpt-5.6-sol")
+    worker_result = apply_command("SetDefaultSessionModel", "role" => "worker", "model" => "anthropic/claude-opus-5")
+
+    assert_accepted(head_result)
+    assert_accepted(worker_result)
+    assert_equal "future_pi_head_sessions", head_result.dig("result", "scope")
+    assert_equal "future_pi_worker_sessions", worker_result.dig("result", "scope")
+    assert_equal "openai/gpt-5.6-sol", worker_result.dig("result", "roles", "head", "model")
+    assert_equal "anthropic/claude-opus-5", worker_result.dig("result", "roles", "worker", "model")
+    assert_match(/for future Pi heads\./, head_result.fetch("message"))
+    assert_match(/for future Pi workers\./, worker_result.fetch("message"))
+
+    config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
+    assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "head_model")
+    assert_equal "anthropic/claude-opus-5", config.value("harness", "pi", "worker_model")
+  end
+
+  def test_shared_model_command_resets_role_specific_overrides
+    apply_command("SetDefaultSessionModel", "role" => "head", "model" => "openai/gpt-5.6-sol")
+    apply_command("SetDefaultSessionModel", "role" => "worker", "model" => "anthropic/claude-opus-5")
+
+    result = apply_command("SetDefaultSessionModel", "model" => "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast")
+
+    assert_accepted(result)
+    assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", result.dig("result", "model")
+    assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", result.dig("result", "roles", "head", "model")
+    assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", result.dig("result", "roles", "worker", "model")
+    assert_match(/for all future Pi heads and workers\./, result.fetch("message"))
+    config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
+    assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", config.value("harness", "pi", "model")
+    assert_nil config.value("harness", "pi", "head_model")
+    assert_nil config.value("harness", "pi", "worker_model")
+  end
+
+  def test_role_specific_model_command_rejects_an_invalid_role
+    result = apply_command("SetDefaultSessionModel", "role" => "reviewer", "model" => "openai/gpt-5.6-sol")
+
+    assert_equal "rejected", result.fetch("status")
+    assert_match(/role must be head or worker/, result.fetch("message"))
+  end
+
+  def test_role_specific_model_command_rejects_an_invalid_model_reference
+    result = apply_command("SetDefaultSessionModel", "role" => "head", "model" => "not-a-model")
+
+    assert_equal "rejected", result.fetch("status")
+    assert_match(/Default Pi model was not changed/, result.fetch("message"))
   end
 
   def test_spawn_worker_partial_override_uses_other_default_and_does_not_change_future_defaults

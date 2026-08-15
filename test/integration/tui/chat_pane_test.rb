@@ -213,6 +213,25 @@ class TuiChatPaneTest < Minitest::Test
     assert_equal "harness: Pi · Pi defaults: anthropic/claude-opus-5 · head low · worker max", text
   end
 
+  def test_bottom_right_status_shows_distinct_role_model_defaults
+    state = composed_state(
+      empty_state.merge(
+        "metadata" => {
+          "active_harness" => "pi",
+          "pi_session_defaults" => {
+            "roles" => {
+              "head" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "low" },
+              "worker" => { "model" => "anthropic/claude-opus-5", "thinking_level" => "max" }
+            }
+          }
+        }
+      )
+    )
+
+    text = plain_line(@pane.bottom_right_status_line(state))
+    assert_equal "harness: Pi · Pi defaults: head openai/gpt-5.6-sol · low · worker anthropic/claude-opus-5 · max", text
+  end
+
   def test_slash_suggestions_only_activate_for_slash_prompts
     assert @pane.slash_prompt?("  /help")
     refute @pane.slash_prompt?("help")

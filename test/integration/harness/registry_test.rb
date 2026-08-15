@@ -241,6 +241,44 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_nil saved.value("harness", "pi", "worker_thinking_level")
   end
 
+  def test_role_specific_model_defaults_override_the_legacy_shared_value
+    subject = registry(
+      "harness" => {
+        "pi" => {
+          "model" => "anthropic/claude-opus-5",
+          "head_model" => "openai/gpt-5.6-sol",
+          "worker_model" => "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"
+        }
+      }
+    )
+
+    defaults = subject.session_defaults(provider: "pi")
+
+    assert_nil defaults.fetch("model")
+    assert_equal "openai/gpt-5.6-sol", defaults.dig("roles", "head", "model")
+    assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", defaults.dig("roles", "worker", "model")
+    head_model = subject.client_for(provider: "pi", kind: "head").extra_args.each_cons(2).select { |flag, _v| flag == "--model" }.last
+    worker_model = subject.client_for(provider: "pi", kind: "worker").extra_args.each_cons(2).select { |flag, _v| flag == "--model" }.last
+    assert_equal "openai/gpt-5.6-sol", head_model[1]
+    assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", worker_model[1]
+  end
+
+  def test_updating_one_model_role_reconfigures_future_sessions_without_changing_the_other_role
+    subject = registry
+    head = subject.client_for(provider: "pi", kind: "head")
+    worker = subject.client_for(provider: "pi", kind: "worker")
+
+    defaults = subject.update_session_defaults!(provider: "pi", model: "openai/gpt-5.6-sol", model_role: "head")
+
+    assert_equal "openai/gpt-5.6-sol", defaults.dig("roles", "head", "model")
+    assert_equal Registry::DEFAULT_PI_MODEL, defaults.dig("roles", "worker", "model")
+    assert_equal "openai/gpt-5.6-sol", head.extra_args.each_cons(2).select { |flag, _v| flag == "--model" }.last[1]
+    assert_equal Registry::DEFAULT_PI_MODEL, worker.extra_args.each_cons(2).select { |flag, _v| flag == "--model" }.last[1]
+    saved = Meringue::Config.load(path: subject.config.path)
+    assert_equal "openai/gpt-5.6-sol", saved.value("harness", "pi", "head_model")
+    assert_nil saved.value("harness", "pi", "worker_model")
+  end
+
   def test_updating_pi_session_defaults_persists_and_reconfigures_cached_clients_in_place
     subject = registry
     head = subject.client_for(provider: "pi", kind: "head")
