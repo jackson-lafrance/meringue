@@ -2395,7 +2395,8 @@ module Meringue
       # keeps the overview useful and avoids accidentally echoing secrets.
       def configuration_help_text
         pi_defaults = Harness::Registry.new(config: config).session_defaults(provider: "pi")
-        pi_model = pi_defaults.fetch("model", nil) || "mixed by role"
+        pi_head_model = pi_defaults.dig("roles", "head", "model") || "mixed by role"
+        pi_worker_model = pi_defaults.dig("roles", "worker", "model") || "mixed by role"
         pi_head_thinking = pi_defaults.dig("roles", "head", "thinking_level")
         pi_worker_thinking = pi_defaults.dig("roles", "worker", "thinking_level")
         provider = ENV["MERINGUE_HARNESS"] || config.value("harness", "provider") || Harness::Registry::DEFAULT_PROVIDER
@@ -2414,7 +2415,8 @@ module Meringue
           "  head harness: #{head_provider}",
           "  worker harness: #{worker_provider}",
           "  TUI colorscheme: #{colorscheme}",
-          "  Pi default model: #{pi_model}",
+          "  Pi head model: #{pi_head_model}",
+          "  Pi worker model: #{pi_worker_model}",
           "  Pi head thinking: #{pi_head_thinking}",
           "  Pi worker thinking: #{pi_worker_thinking}",
           "  conflict policy (predecessor failure): #{config.conflict_predecessor_failure}",

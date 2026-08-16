@@ -8,7 +8,7 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
-The interactive TUI updates this file with `/theme <name>`, `/model <provider>/<model-id>`, `/thinking <level>`, `/thinking head <level>`, `/thinking worker <level>`, and the first-run setup flow (`/setup`).
+The interactive TUI updates this file with `/theme <name>`, `/model [head|worker] <provider>/<model-id>`, `/thinking [head|worker] <level>`, and the first-run setup flow (`/setup`).
 
 ## First-run setup marker
 
@@ -114,8 +114,10 @@ The config file is intentionally small and only the settings described here are 
 
 ```toml
 [harness.pi]
-model = "anthropic/claude-opus-5"
-thinking_level = "max"        # legacy/shared fallback
+model = "anthropic/claude-opus-5"        # shared fallback for either omitted role
+# head_model = "openai/gpt-5.6-sol"     # optional role override
+# worker_model = "anthropic/claude-opus-5"
+thinking_level = "max"        # shared fallback for either omitted role
 # head_thinking_level = "low"  # optional role override
 # worker_thinking_level = "max"
 
@@ -333,10 +335,12 @@ Each provider can set its executable command and role-specific extra args.
 [harness.pi]
 command = "pi"
 session_dir = "~/.meringue/pi-sessions"
-# Shared model and backward-compatible thinking fallback:
+# Shared model and thinking fallbacks (backward-compatible):
 model = "anthropic/claude-opus-5"
 thinking_level = "max"
-# Optional role-specific thinking overrides:
+# Optional role-specific overrides:
+# head_model = "openai/gpt-5.6-sol"
+# worker_model = "anthropic/claude-opus-5"
 # head_thinking_level = "low"
 # worker_thinking_level = "max"
 head_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls"]
@@ -354,11 +358,11 @@ head_extra_args = []
 worker_extra_args = []
 ```
 
-Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/thinking head <level>` and `/thinking worker <level>`, or set `head_thinking_level` and `worker_thinking_level`, for distinct role defaults. The existing `/thinking <level>` command and `thinking_level` key remain the shared form; the command also clears role overrides. A role key wins over the shared key, and either scalar wins over a thinking flag in that role's argument array. A configured role array still replaces that role's default array entirely, so include every other flag you need.
+Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/model head <provider>/<model-id>` and `/model worker <provider>/<model-id>`, or set `head_model` and `worker_model`, for distinct role model defaults; use `/thinking head <level>` and `/thinking worker <level>`, or set `head_thinking_level` and `worker_thinking_level`, for distinct role thinking defaults. The existing `/model <provider>/<model-id>` command and `model` key, and `/thinking <level>` command and `thinking_level` key, remain the shared form; those commands also clear role overrides. A role key wins over the shared key, and either scalar wins over a `--model`/`--thinking` flag in that role's argument array. A configured role array still replaces that role's default array entirely, so include every other flag you need.
 
 A model reference is `<provider>/<model-id>`, split on the first slash, so the model id may itself contain `/` and `:` (`model = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"` is valid). See [`session-settings.md`](session-settings.md#the-accepted-model-reference-grammar) for the exact grammar and for what is still rejected.
 
-`/config` and the dashboard status line show the shared model plus both future Pi thinking levels. `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. An existing session's own effective pair has no slash command either: it is recorded on the agent record and shown in the focused worker workspace and raw `/state`. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
+`/config` and the dashboard status line show each future Pi role's model and thinking level (the shared model when both roles agree, split by role when they differ). `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. An existing session's own effective pair has no slash command either: it is recorded on the agent record and shown in the focused worker workspace and raw `/state`. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
 
 ### Model catalogs and provider resource flags
 

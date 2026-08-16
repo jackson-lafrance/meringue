@@ -262,6 +262,24 @@ class InputConfigTest < Minitest::Test
     end
   end
 
+  def test_saving_role_specific_model_defaults_preserves_shared_compatibility_and_shared_save_resets_overrides
+    Dir.mktmpdir("meringue-config-test") do |dir|
+      path = File.join(dir, "config.toml")
+      Meringue::Config.save_pi_session_defaults!(model: "anthropic/claude-opus-5", path: path)
+      Meringue::Config.save_pi_session_defaults!(model: "openai/gpt-5.6-sol", model_role: "head", path: path)
+      split = Meringue::Config.save_pi_session_defaults!(model: "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", model_role: "worker", path: path)
+
+      assert_equal "anthropic/claude-opus-5", split.value("harness", "pi", "model")
+      assert_equal "openai/gpt-5.6-sol", split.value("harness", "pi", "head_model")
+      assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", split.value("harness", "pi", "worker_model")
+
+      shared = Meringue::Config.save_pi_session_defaults!(model: "openai/gpt-5.6-sol", path: path)
+      assert_equal "openai/gpt-5.6-sol", shared.value("harness", "pi", "model")
+      assert_nil shared.value("harness", "pi", "head_model")
+      assert_nil shared.value("harness", "pi", "worker_model")
+    end
+  end
+
   def test_conflict_predecessor_failure_accepts_supported_values_and_defaults_safely
     assert_equal "cancel", Meringue::Config.new({}, path: "/tmp/config.toml").conflict_predecessor_failure
     assert_equal "run", Meringue::Config.new(

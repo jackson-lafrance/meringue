@@ -20,7 +20,7 @@ module Meringue
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
         ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
-        ["/model <provider>/<model-id>", "Persist the model for all future Pi sessions; existing sessions are unchanged. The model id may itself contain / and :."],
+        ["/model [head|worker] <provider>/<model-id>", "Persist the model for all future Pi sessions; omit the role to update both future heads and workers. Existing sessions are unchanged. The model id may itself contain / and :."],
         ["/thinking [head|worker] <level>", "Persist a Pi thinking default. Omit the role to update both future heads and workers; existing sessions are unchanged."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
         ["/goal create [issue_id] \"<prompt>\" --metric \"<command>\" --target <number> [flags]", "Start a goal loop: name an issue, or give only a prompt and Meringue creates the issue for it. It iterates until the metric hits its target or a budget guard trips."],
@@ -55,6 +55,8 @@ module Meringue
         { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
         { "prefix" => "/retry", "source" => "retry_heads", "append_space" => false },
         { "prefix" => "/open-session", "source" => "agents", "append_space" => false },
+        { "prefix" => "/model head", "source" => "session_models", "append_space" => false, "model_role" => "head" },
+        { "prefix" => "/model worker", "source" => "session_models", "append_space" => false, "model_role" => "worker" },
         { "prefix" => "/model", "source" => "session_models", "append_space" => false },
         { "prefix" => "/thinking head", "source" => "thinking_levels", "append_space" => false, "thinking_role" => "head" },
         { "prefix" => "/thinking worker", "source" => "thinking_levels", "append_space" => false, "thinking_role" => "worker" },
@@ -320,7 +322,7 @@ module Meringue
       end
 
       def self.model_suggestion_records(context, state, catalog, harness)
-        configured_default = state.dig("metadata", "pi_session_defaults", "model")
+        configured_default = current_default_model(state, harness, context["model_role"])
         observed = Array(state["agents"]).filter_map { |candidate| candidate.dig("session_settings", "model", "reference") }
         preferred = ([configured_default] + observed).compact.map(&:to_s).reject(&:empty?).uniq
         query = context.fetch("query", "").to_s.downcase
@@ -457,7 +459,7 @@ module Meringue
       # therefore made `/thinking max` succeed while `max` was missing from
       # `/thinking`'s own list, so the saved default was invisible in its picker.
       def self.thinking_level_suggestion_records(context, state, catalog, harness)
-        reference = thinking_level_model_reference(state, harness)
+        reference = thinking_level_model_reference(state, harness, context["thinking_role"])
         supported = normalized_thinking_levels(catalog.thinking_levels_for(reference))
         current = current_default_thinking_level(state, harness, context["thinking_role"])
         query = context.fetch("query", "").to_s.strip.downcase
@@ -483,6 +485,11 @@ module Meringue
 
       def self.thinking_usage_message
         "Usage: /thinking [head|worker] <#{thinking_levels.join("|")}>"
+      end
+
+      def self.model_usage_message
+        "Usage: /model [head|worker] <provider>/<model-id> (one token; the model id may itself contain / and :, " \
+          "as in #{Meringue::Harness::ModelReference::MULTI_SEGMENT_EXAMPLE})"
       end
 
       # With nothing typed the saved default leads the list: only three suggestion
@@ -517,14 +524,35 @@ module Meringue
         level
       end
 
+      # Mirrors `current_default_thinking_level`: a role payload reads that
+      # role's effective model (falling back to the shared summary), while the
+      # bare form reads the shared summary that is nil when roles differ.
+      def self.current_default_model(state, harness, role = nil)
+        defaults = state.dig("metadata", "pi_session_defaults") || {}
+        model = if %w[head worker].include?(role.to_s)
+                  defaults.dig("roles", role.to_s, "model") || defaults["model"]
+                else
+                  defaults["model"]
+                end
+        model = model.to_s.strip
+        model = Meringue::Harness::Registry::DEFAULT_PI_MODEL if model.empty? && harness == "pi" && role.nil?
+        model
+      end
+
       def self.normalized_thinking_levels(levels)
         Array(levels).map { |level| level.to_s.strip.downcase }.reject(&:empty?)
       end
 
-      def self.thinking_level_model_reference(state, harness)
-        reference = state.dig("metadata", "pi_session_defaults", "model")
-        reference = Meringue::Harness::Registry::DEFAULT_PI_MODEL if reference.to_s.strip.empty? && harness == "pi"
-        reference.to_s
+      def self.thinking_level_model_reference(state, harness, role = nil)
+        defaults = state.dig("metadata", "pi_session_defaults") || {}
+        reference = if %w[head worker].include?(role.to_s)
+                      defaults.dig("roles", role.to_s, "model") || defaults["model"]
+                    else
+                      defaults["model"]
+                    end
+        reference = reference.to_s.strip
+        reference = Meringue::Harness::Registry::DEFAULT_PI_MODEL if reference.empty? && harness == "pi"
+        reference
       end
 
       def self.thinking_level_description(level, reference, supported, current)
@@ -767,13 +795,17 @@ module Meringue
       # real reference such as
       # `fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast` passes
       # through unchanged; `Meringue::Harness::ModelReference` owns the grammar.
+      # A leading `head` or `worker` token scopes the default to that role, so
+      # `/model head <provider>/<model-id>` updates only future heads. A shared
+      # `/model <provider>/<model-id>` updates both roles and clears role
+      # overrides, mirroring `/thinking`.
       def parse_model(arguments)
         tokens = split_arguments(arguments)
+        if tokens.length == 2 && %w[head worker].include?(tokens[0].to_s.downcase)
+          return kernel_command("SetDefaultSessionModel", "role" => tokens[0].downcase, "model" => tokens[1])
+        end
         unless tokens.length == 1
-          return invalid(
-            "Usage: /model <provider>/<model-id> (one token; the model id may itself contain / and :, " \
-            "as in #{Meringue::Harness::ModelReference::MULTI_SEGMENT_EXAMPLE})"
-          )
+          return invalid(self.class.model_usage_message)
         end
 
         kernel_command("SetDefaultSessionModel", "model" => tokens[0])
