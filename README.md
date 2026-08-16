@@ -70,7 +70,7 @@ lib/meringue/tui/                  # terminal rendering, panes, navigation, styl
 lib/meringue/state/                # JSON persistence models and store
 lib/meringue/goals/                # goal-loop record, decisions, judge, and metric probe
 docs/config.md                     # config and harness provider reference
-docs/settings.md                   # full-screen settings, persistence, experiments, and setup handoff
+docs/settings.md                   # full-screen settings, persistence, experiments, and shared setup UI
 docs/video-recording.md             # macOS proof-video workflow
 docs/commit-authorship.md          # worker commit identity policy and history audit
 docs/delivery-artifact-privacy.md  # branch, commit, and PR metadata privacy policy
@@ -132,7 +132,7 @@ bundle exec meringue
 bundle exec meringue tui
 ```
 
-The first launch on a machine opens a short setup flow that takes over the whole terminal: theme first, then harness, model, and thinking level, each already on a sensible default, so holding `Enter` accepts them all in about a second. You can click visible option rows or use the keyboard; empty-space clicks cannot advance or dismiss it. `Esc` is the one way out (keeping whatever was already applied), `←` goes back a step, and `/setup` reopens it later. It applies every choice through the normal `/theme`, `/harness`, `/model`, and `/thinking` commands, and records one `[onboarding]` marker in the config so it does not open again. Motion degrades on its own on small or non-interactive terminals and can be turned off with `MERINGUE_NO_ANIMATION=1`. See [`docs/onboarding.md`](docs/onboarding.md).
+The first interactive launch opens Setup as the same polished full-screen overlay used by `/config`. Review separate head and worker harness/model/thinking defaults, preview a theme, and opt into experiments such as GitHub support, then confirm the complete draft on one Review screen. Back never loses edits and nothing is written until Finish atomically saves the settings and `[onboarding]` marker together. Automatic first-run `Esc` confirms a safe skip; `Esc` on a manual `/setup` rerun cancels without changing the marker. The overlay remains recoverable through resize, validation, and persistence failures. See [`docs/onboarding.md`](docs/onboarding.md).
 
 Open a safe demo state without spawning real agents:
 
@@ -174,7 +174,7 @@ Useful slash commands inside the TUI include:
 - `/prompt <agent_id> "<message>"` — follow up with an existing worker, or retry a head (`H<n>`) that failed, or was left blocked, without routing your request.
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
 - `/prs` — with **Settings → Experiments → GitHub support** enabled, open the picker for every tracked pull request that is still open. Use `↑`/`↓` to move, `Enter` to open, and `Esc` to close.
-- `/setup` — reopen first-run setup for the theme, harness, model, and thinking level.
+- `/setup` — reopen the shared full-screen Setup overlay for theme, separate head/worker defaults, and experiment checkboxes. Manual cancel writes nothing.
 - `/questions` — list questions and their statuses.
 - `/answer <question_id> "<answer>"` — answer an open question; the kernel records the answer and routes the work it unblocks.
 - `/dismiss <question_id>` — close an open question without answering it.

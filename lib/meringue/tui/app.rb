@@ -13,12 +13,6 @@ module Meringue
       DEFAULT_HEIGHT = 32
       REFRESH_INTERVAL = 0.2
       TERMINAL_REFRESH_INTERVAL = 0.025
-      # First-run setup animates, so it needs frames the dashboard does not. It
-      # only asks for the fast cadence while a step is actually moving, then drops
-      # to a slow idle tick for the breathing selection caret and transient
-      # notices, so an idle setup screen costs a handful of frames a second.
-      ONBOARDING_ANIMATION_INTERVAL = Onboarding::Motion::FRAME_INTERVAL
-      ONBOARDING_IDLE_INTERVAL = Onboarding::Motion::IDLE_INTERVAL
       # Scroll steps defer the workspace state write; this is how often a
       # deferred write is actually flushed to the state file.
       WORKSPACE_PERSIST_INTERVAL = 1.0
@@ -164,28 +158,12 @@ module Meringue
         @settings_discard_confirm = false
         @settings_saving = false
         @settings_mode = "settings"
-        # First-run setup. Off unless the launcher says a kernel is behind the UI
-        # (`meringue demo` has none), and transient like the pickers: the only
-        # thing it persists is the completion marker, and only through the kernel.
+        @settings_setup_auto = false
+        @settings_setup_outcome = nil
+        # First-run setup is a curated mode of the same transactional Settings
+        # draft and full-screen pane. It is disabled for `meringue demo`, where no
+        # kernel exists to save the draft or completion marker.
         @onboarding_enabled = onboarding_enabled ? true : false
-        @onboarding_active = false
-        @onboarding_step_index = 0
-        @onboarding_index = 0
-        @onboarding_query = +""
-        @onboarding_harness = nil
-        @onboarding_saved_theme = nil
-        @onboarding_applied = {}
-        # Animation clock. Every animated value is a pure function of it, so
-        # nothing is buffered and a dropped frame cannot desynchronize anything.
-        @onboarding_step_entered_at = nil
-        @onboarding_progress_from = 0.0
-        @onboarding_notice = nil
-        @onboarding_notice_at = nil
-        @onboarding_refresh_at = nil
-        @onboarding_refresh_signature = nil
-        # Capability answers are per process, not per frame.
-        @onboarding_reduced_motion = nil
-        @onboarding_ascii = nil
         @workspace_draft = ""
         @workspace_agent_scroll_offset = 0
         @workspace_terminal_scroll_offset = 0
@@ -368,10 +346,9 @@ module Meringue
       end
 
       def shutdown_workspace_resources
-        # Quitting mid-flow (Ctrl-C, /quit, an interrupt) must not leave the theme
-        # a step was previewing on screen. Nothing else about setup is persisted.
+        # Quitting with Settings/setup open discards the in-memory draft and
+        # restores any theme preview. No setup marker is written on process exit.
         close_settings(discard: true) if @settings_active
-        close_onboarding if @onboarding_active
         persist_agent_workspace if @agent_workspace_active
         if @agent_workspace_active
           close_agent_workspace
@@ -450,14 +427,6 @@ module Meringue
         # keys regardless of configured dashboard bindings.
         if @settings_active
           return handle_settings_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
-        end
-
-        # First-run setup is the only modal that opens by itself, so it takes keys
-        # ahead of both pickers and the slash list. It still passes unowned keys
-        # through, so Ctrl-C and Ctrl-D behave normally while it is up.
-        if @onboarding_active
-          onboarding_result = handle_onboarding_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
-          return onboarding_result if onboarding_result
         end
 
         if @model_picker_active
@@ -2693,7 +2662,6 @@ module Meringue
         # survive into the focused workspace and reappear on return.
         close_delivery_pr_picker
         close_model_picker
-        close_onboarding if @onboarding_active
         @agent_workspace_active = true
         @agent_workspace_interactive = false
         @force_full_redraw = true
@@ -2880,10 +2848,12 @@ module Meringue
         "Enable GitHub support in Settings → Experiments to use pull request commands."
       end
 
-      def open_settings(_state, mode: "settings")
+      def open_settings(_state, mode: "settings", setup_origin: "manual")
         @settings_draft = Settings::Draft.new(config)
         @settings_active = true
-        @settings_mode = mode.to_s
+        @settings_mode = mode.to_s == "setup" ? "setup" : "settings"
+        @settings_setup_auto = @settings_mode == "setup" && setup_origin.to_s == "auto"
+        @settings_setup_outcome = nil
         @settings_category_index = 0
         @settings_row_index = 0
         @settings_show_advanced = false
@@ -2892,11 +2862,10 @@ module Meringue
         @settings_saving = false
         close_delivery_pr_picker
         close_model_picker
-        close_onboarding if @onboarding_active
         @force_full_redraw = true
         true
       rescue StandardError => e
-        append_jump_response("Could not open Settings: #{e.message}")
+        append_jump_response("Could not open #{@settings_mode == "setup" ? "Setup" : "Settings"}: #{e.message}")
         false
       end
 
@@ -2909,37 +2878,104 @@ module Meringue
         @settings_editor = nil
         @settings_discard_confirm = false
         @settings_saving = false
+        @settings_setup_auto = false
+        @settings_setup_outcome = nil
+        @settings_mode = "settings"
         @force_full_redraw = true
         true
       end
 
+      def setup_mode?
+        @settings_mode == "setup"
+      end
+
+      def settings_categories
+        return [] unless @settings_draft
+
+        setup_mode? ? Settings::SetupFlow.steps : @settings_draft.categories
+      end
+
       def settings_category
-        categories = @settings_draft&.categories || []
+        categories = settings_categories
         categories[@settings_category_index.to_i.clamp(0, [categories.length - 1, 0].max)].to_s
       end
 
       def settings_rows
         return [] unless @settings_draft
+        return setup_rows if setup_mode?
 
         definitions = @settings_draft.definitions_for(settings_category, include_advanced: @settings_show_advanced)
         rows = definitions.map { |definition| @settings_draft.row(definition) }
         hidden = @settings_draft.definitions_for(settings_category, include_advanced: true).count(&:advanced)
         if !@settings_show_advanced && hidden.positive?
-          rows << {
-            "id" => "_show_advanced",
-            "label" => "Show advanced settings",
-            "description" => "Reveal #{hidden} advanced setting#{hidden == 1 ? "" : "s"} in this and every category.",
-            "type" => "action",
-            "editor" => "action",
-            "display_value" => "#{hidden} hidden",
-            "default_value" => "collapsed",
-            "source" => "UI",
-            "dirty" => false,
-            "read_only" => false,
-            "apply_mode" => "none"
-          }
+          rows << synthetic_settings_row(
+            "_show_advanced",
+            "Show advanced settings",
+            "Reveal #{hidden} advanced setting#{hidden == 1 ? "" : "s"} in this and every category.",
+            "#{hidden} hidden"
+          )
         end
         rows
+      end
+
+      def setup_rows
+        case settings_category
+        when "Welcome"
+          [synthetic_settings_row(
+            "_setup_begin",
+            "Review setup",
+            "Choose a theme, then review separate head and worker defaults and opt-in experiments. Nothing is written until Finish succeeds.",
+            "Enter to begin"
+          )]
+        when "Review"
+          setup_review_rows
+        else
+          Settings::SetupFlow.setting_ids(settings_category).filter_map do |id|
+            definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
+            @settings_draft.row(definition) if definition
+          end
+        end
+      end
+
+      def setup_review_rows
+        ids = Settings::SetupFlow.steps.flat_map { |step| Settings::SetupFlow.setting_ids(step) }
+        rows = ids.filter_map do |id|
+          definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
+          next unless definition
+
+          source = @settings_draft.row(definition)
+          synthetic_settings_row(
+            "_setup_review:#{id}",
+            source.fetch("label"),
+            "Return to #{Settings::SetupFlow.step_for_setting(id)} to edit this value.",
+            source.fetch("display_value"),
+            dirty: source.fetch("dirty", false),
+            source: source.fetch("source", "default")
+          )
+        end
+        rows << synthetic_settings_row(
+          "_setup_finish",
+          "Finish setup",
+          "Validate and save this complete draft with the setup marker in one atomic transaction.",
+          @settings_draft.dirty? ? "Save changes" : "Confirm defaults"
+        )
+        rows
+      end
+
+      def synthetic_settings_row(id, label, description, display_value, dirty: false, source: "setup")
+        {
+          "id" => id,
+          "label" => label,
+          "description" => description,
+          "type" => "action",
+          "editor" => "action",
+          "display_value" => display_value,
+          "default_value" => display_value,
+          "source" => source,
+          "dirty" => dirty,
+          "read_only" => false,
+          "apply_mode" => "none"
+        }
       end
 
       def settings_snapshot
@@ -2956,7 +2992,7 @@ module Meringue
         {
           "active" => true,
           "mode" => @settings_mode,
-          "categories" => @settings_draft.categories,
+          "categories" => settings_categories,
           "category" => settings_category,
           "category_index" => @settings_category_index,
           "rows" => rows,
@@ -2965,7 +3001,11 @@ module Meringue
           "saving" => @settings_saving,
           "advanced" => @settings_show_advanced,
           "editor" => editor,
-          "discard_confirm" => @settings_discard_confirm,
+          "discard_confirm" => @settings_discard_confirm.is_a?(String),
+          "confirmation" => (@settings_discard_confirm if @settings_discard_confirm.is_a?(String)),
+          "setup_auto" => @settings_setup_auto,
+          "setup_step" => setup_mode? ? @settings_category_index + 1 : nil,
+          "setup_step_count" => setup_mode? ? settings_categories.length : nil,
           "error_count" => @settings_draft.errors.length,
           "global_error" => @settings_draft.global_error,
           "width" => render_width,
@@ -2981,9 +3021,14 @@ module Meringue
         end
         return handle_settings_mouse(key, unchanged, on_submit, state) if mouse_event?(key)
 
-        if @settings_discard_confirm
+        if @settings_discard_confirm.is_a?(String)
           if ENTER_KEYS.include?(key)
-            close_settings(discard: true)
+            if @settings_discard_confirm == "skip"
+              @settings_discard_confirm = false
+              save_settings(on_submit, state, onboarding_outcome: "skipped")
+            else
+              close_settings(discard: true)
+            end
           elsif hard_escape_key?(key)
             @settings_discard_confirm = false
           end
@@ -2996,7 +3041,7 @@ module Meringue
 
         rows = settings_rows
         if hard_save_key?(key)
-          save_settings(on_submit, state)
+          setup_mode? ? setup_next_or_finish(on_submit, state, jump_to_review: true) : save_settings(on_submit, state)
         elsif hard_escape_key?(key)
           request_settings_cancel
         elsif TAB_KEYS.include?(key) || FOCUS_FORWARD_KEYS.include?(key)
@@ -3020,10 +3065,10 @@ module Meringue
         elsif RIGHT_KEYS.include?(key)
           cycle_or_move_settings(1, state)
         elsif key == " "
-          activate_settings_row(state, toggle_only: true)
+          activate_settings_row(state, toggle_only: true, on_submit: on_submit)
         elsif ENTER_KEYS.include?(key)
-          activate_settings_row(state)
-        elsif key.to_s.downcase == "a"
+          activate_settings_row(state, on_submit: on_submit)
+        elsif key.to_s.downcase == "a" && !setup_mode?
           @settings_show_advanced = !@settings_show_advanced
           @settings_row_index = 0
         end
@@ -3042,7 +3087,7 @@ module Meringue
         if hard_save_key?(key)
           if apply_settings_editor
             @settings_editor = nil
-            save_settings(on_submit, state)
+            setup_mode? ? setup_next_or_finish(on_submit, state, jump_to_review: true) : save_settings(on_submit, state)
           end
           return unchanged
         end
@@ -3107,17 +3152,17 @@ module Meringue
         hit = layout.settings_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
         case hit
         when :save
-          save_settings(on_submit, state)
+          setup_mode? ? setup_next_or_finish(on_submit, state) : save_settings(on_submit, state)
         when :cancel
           request_settings_cancel
         when Array
           kind, index = hit
           if kind == :category
-            @settings_category_index = index.to_i.clamp(0, [@settings_draft.categories.length - 1, 0].max)
+            @settings_category_index = index.to_i.clamp(0, [settings_categories.length - 1, 0].max)
             @settings_row_index = 0
           elsif %i[row toggle].include?(kind)
             @settings_row_index = index.to_i.clamp(0, [settings_rows.length - 1, 0].max)
-            activate_settings_row(state, toggle_only: kind == :toggle)
+            activate_settings_row(state, toggle_only: kind == :toggle, on_submit: on_submit)
           end
         end
         unchanged
@@ -3132,10 +3177,14 @@ module Meringue
       end
 
       def move_settings_category(delta)
-        count = @settings_draft.categories.length
+        count = settings_categories.length
         return if count.zero?
 
-        @settings_category_index = (@settings_category_index.to_i + delta.to_i) % count
+        @settings_category_index = if setup_mode?
+                                     (@settings_category_index.to_i + delta.to_i).clamp(0, count - 1)
+                                   else
+                                     (@settings_category_index.to_i + delta.to_i) % count
+                                   end
         @settings_row_index = 0
       end
 
@@ -3179,7 +3228,7 @@ module Meringue
         @settings_draft.set(row.fetch("id"), options[(index + delta.to_i) % options.length])
       end
 
-      def activate_settings_row(state, toggle_only: false)
+      def activate_settings_row(state, toggle_only: false, on_submit: nil)
         row = selected_settings_row
         return false unless row
 
@@ -3192,6 +3241,16 @@ module Meringue
         if id == "setup.run_again"
           close_settings(discard: true)
           return handle_local_setup_command(state)
+        end
+        if id == "_setup_begin"
+          move_settings_category(1)
+          return true
+        end
+        if id == "_setup_finish"
+          return save_settings(on_submit, state, onboarding_outcome: "completed")
+        end
+        if id.start_with?("_setup_review:")
+          return focus_setup_setting(id.delete_prefix("_setup_review:"))
         end
         return false if row.fetch("read_only", false)
 
@@ -3212,6 +3271,15 @@ module Meringue
         true
       end
 
+      def focus_setup_setting(id)
+        step = Settings::SetupFlow.step_for_setting(id)
+        return false unless step
+
+        @settings_category_index = settings_categories.index(step) || 0
+        @settings_row_index = settings_rows.index { |row| row.fetch("id", nil) == id.to_s } || 0
+        true
+      end
+
       def open_settings_editor(row)
         id = row.fetch("id")
         text = @settings_draft.editor_text(id)
@@ -3224,133 +3292,84 @@ module Meringue
       end
 
       def request_settings_cancel
+        if setup_mode?
+          if @settings_setup_auto
+            @settings_discard_confirm = "skip"
+          elsif @settings_draft&.dirty?
+            @settings_discard_confirm = "discard"
+          else
+            close_settings(discard: true)
+          end
+          return true
+        end
+
         return close_settings(discard: true) unless @settings_draft&.dirty?
 
-        @settings_discard_confirm = true
+        @settings_discard_confirm = "discard"
+        true
       end
 
-      def save_settings(on_submit, state)
+      def setup_next_or_finish(on_submit, state, jump_to_review: false)
+        if settings_category == "Review"
+          save_settings(on_submit, state, onboarding_outcome: "completed")
+        elsif jump_to_review
+          @settings_category_index = settings_categories.index("Review")
+          @settings_row_index = [settings_rows.length - 1, 0].max
+          true
+        else
+          move_settings_category(1)
+          true
+        end
+      end
+
+      def save_settings(on_submit, state, onboarding_outcome: nil)
         return false if @settings_saving
         unless @settings_draft.validate
           first_id = @settings_draft.errors.keys.first
           focus_settings_id(first_id) if first_id
           return false
         end
-        if @settings_draft.changes.empty?
+
+        changes = @settings_draft.changes
+        unless onboarding_outcome.to_s.empty?
+          explicit_experiments = Settings::SetupFlow.experiment_defaults(@settings_draft, explicit_only: true)
+          changes = onboarding_outcome == "skipped" ? explicit_experiments : changes.merge(explicit_experiments)
+        end
+        if changes.empty? && onboarding_outcome.to_s.empty?
           close_settings(discard: false)
           return true
         end
 
         payload = {
           "base_fingerprint" => @settings_draft.baseline_fingerprint,
-          "changes" => @settings_draft.changes
+          "changes" => changes
         }
+        payload["onboarding_outcome"] = onboarding_outcome unless onboarding_outcome.to_s.empty?
         encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
         @settings_saving = true
+        @settings_setup_outcome = onboarding_outcome
         @settings_draft.clear_save_failure
         submit_prompt("/config save #{encoded}", on_submit, state)
         true
       end
 
       def focus_settings_id(id)
+        return focus_setup_setting(id) if setup_mode?
+
         definition = @settings_draft.definitions.find { |candidate| candidate.id == id.to_s }
         return unless definition
 
         @settings_show_advanced = true if definition.advanced
-        @settings_category_index = @settings_draft.categories.index(definition.category) || 0
+        @settings_category_index = settings_categories.index(definition.category) || 0
         @settings_row_index = settings_rows.index { |row| row.fetch("id", nil) == definition.id } || 0
       end
 
       # --- first-run setup --------------------------------------------------
 
-      # Everything the full-screen setup screen renders from, including the clock
-      # its animation is a function of. Elapsed seconds are handed to the view
-      # rather than a frame counter, so a slow terminal skips values instead of
-      # falling behind, and a resize or a forced redraw recomputes the same picture
-      # for the same instant.
-      def onboarding_snapshot
-        return nil unless @onboarding_active
-
-        now = monotonic_time
-        {
-          "active" => true,
-          "step" => onboarding_step,
-          "plan" => onboarding_plan,
-          "index" => @onboarding_index,
-          "query" => @onboarding_query.to_s,
-          "harness" => @onboarding_harness,
-          "theme" => @onboarding_saved_theme,
-          "applied" => @onboarding_applied.dup,
-          "animated" => onboarding_animated?,
-          "ascii" => onboarding_ascii?,
-          "elapsed" => now - (@onboarding_step_entered_at || now),
-          "progress_from" => @onboarding_progress_from.to_f,
-          "notice" => onboarding_notice_text,
-          "refresh" => onboarding_refresh_snapshot(now)
-        }.compact
-      end
-
-      # Animation is chrome, and it is only ever asked for where it can be drawn
-      # honestly: a real interactive terminal, big enough that no content row is
-      # spent on motion, and with motion not turned off. Everywhere else the same
-      # view renders its settled frame immediately.
-      def onboarding_animated?
-        return false unless terminal.interactive?
-        return false unless Onboarding.animation_allowed?(width: render_width, height: render_height)
-
-        !onboarding_reduced_motion?
-      end
-
-      def onboarding_reduced_motion?
-        return @onboarding_reduced_motion unless @onboarding_reduced_motion.nil?
-
-        @onboarding_reduced_motion = Onboarding.reduced_motion?(config: config)
-      end
-
-      def onboarding_ascii?
-        return @onboarding_ascii unless @onboarding_ascii.nil?
-
-        @onboarding_ascii = Onboarding.ascii_only?
-      end
-
-      def onboarding_notice_text
-        return nil unless @onboarding_notice && @onboarding_notice_at
-        return nil if monotonic_time - @onboarding_notice_at > Onboarding::NOTICE_SECONDS
-
-        @onboarding_notice
-      end
-
-      def set_onboarding_notice(message)
-        @onboarding_notice = message.to_s
-        @onboarding_notice_at = monotonic_time
-      end
-
-      def onboarding_refresh_snapshot(now)
-        return nil unless @onboarding_refresh_at
-
-        { "elapsed" => now - @onboarding_refresh_at, "signature" => @onboarding_refresh_signature.to_s }
-      end
-
-      # How long to wait for the next key. Setup asks for animation frames only
-      # while a step is still moving; a settled screen falls back to a slow tick
-      # for the caret and notices, which is cheaper than the dashboard's own.
-      def frame_refresh_interval(state)
+      def frame_refresh_interval(_state)
         return TERMINAL_REFRESH_INTERVAL if @agent_workspace_active && @agent_workspace_view == "terminal"
-        return REFRESH_INTERVAL unless @onboarding_active
-        return REFRESH_INTERVAL unless onboarding_animated?
 
-        layout.onboarding_animating?(state) ? ONBOARDING_ANIMATION_INTERVAL : ONBOARDING_IDLE_INTERVAL
-      rescue StandardError
         REFRESH_INTERVAL
-      end
-
-      def onboarding_plan
-        Onboarding.plan(@onboarding_harness)
-      end
-
-      def onboarding_step
-        steps = onboarding_plan
-        steps[@onboarding_step_index.to_i.clamp(0, steps.length - 1)]
       end
 
       # Auto-open decision, made once per launch. It never opens when the config
@@ -3360,7 +3379,7 @@ module Meringue
         return false unless onboarding_autostart?
 
         state = state_provider.call || State::Models.empty_state
-        open_onboarding(state)
+        open_settings(state, mode: "setup", setup_origin: "auto")
       end
 
       def onboarding_autostart?
@@ -3371,332 +3390,19 @@ module Meringue
         Onboarding.fits?(width: width, height: height)
       end
 
-      # Setup reads persisted state and the theme only, so opening it starts no
-      # harness process and writes nothing. Every choice is applied later as the
-      # ordinary slash command for it.
+      # Compatibility seam for tests/extensions that opened the old controller
+      # directly. Setup now opens the curated transactional Settings mode.
       def open_onboarding(state)
-        @onboarding_active = true
-        @onboarding_step_index = 0
-        @onboarding_query = +""
-        @onboarding_harness = nil
-        @onboarding_applied = {}
-        @onboarding_saved_theme = Style.current_colorscheme.to_s
-        @onboarding_index = onboarding_default_index(state)
-        @onboarding_step_entered_at = monotonic_time
-        @onboarding_progress_from = 0.0
-        @onboarding_notice = nil
-        @onboarding_notice_at = nil
-        @onboarding_refresh_at = nil
-        @onboarding_refresh_signature = nil
-        close_delivery_pr_picker
-        close_model_picker
-        # Taking over the screen changes every row, so the next frame is written as
-        # one repaint instead of a cloud of row patches.
-        @force_full_redraw = true
-        true
-      end
-
-      def close_onboarding
-        restore_onboarding_theme
-        @onboarding_active = false
-        @onboarding_step_index = 0
-        @onboarding_index = 0
-        @onboarding_query = +""
-        @onboarding_harness = nil
-        @onboarding_applied = {}
-        @onboarding_saved_theme = nil
-        @onboarding_step_entered_at = nil
-        @onboarding_progress_from = 0.0
-        @onboarding_notice = nil
-        @onboarding_notice_at = nil
-        @onboarding_refresh_at = nil
-        @onboarding_refresh_signature = nil
-        # Handing the screen back to the dashboard is the same kind of transition.
-        @force_full_redraw = true
-      end
-
-      # The theme step previews live by reconfiguring the running Style, so leaving
-      # without pressing Enter has to put the saved theme back.
-      def restore_onboarding_theme
-        theme = @onboarding_saved_theme
-        return if theme.to_s.empty?
-        return if Style.current_colorscheme.to_s == theme.to_s
-
-        Style.configure!(theme)
-      rescue StandardError
-        nil
-      end
-
-      def onboarding_rows(state)
-        Onboarding.rows(
-          state,
-          step: onboarding_step,
-          harness: @onboarding_harness,
-          query: @onboarding_query,
-          saved_theme: @onboarding_saved_theme
-        )
-      end
-
-      def onboarding_default_index(state)
-        Onboarding.default_index(
-          state,
-          step: onboarding_step,
-          harness: @onboarding_harness,
-          query: @onboarding_query,
-          saved_theme: @onboarding_saved_theme
-        )
-      end
-
-      # A modal step flow that owns the keys and setup-specific clicks it needs
-      # and passes everything else through, so Ctrl-C still quits and setup is
-      # never a trap. Only visible option rows are clickable: empty-space clicks,
-      # drags, releases, and right-clicks cannot apply a choice or dismiss setup.
-      def handle_onboarding_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
-        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
-        return unchanged if close_collapsed_onboarding(state)
-        return handle_onboarding_mouse(key, unchanged, on_submit, state) if mouse_event?(key)
-
-        rows = onboarding_rows(state)
-        step = onboarding_step
-
-        # A paste belongs to the filter on the model step and to nothing at all
-        # elsewhere; it must never land in the composer hidden behind setup.
-        if paste_key?(key)
-          set_onboarding_query("#{@onboarding_query}#{paste_text(key)}", state) if step == Onboarding::MODEL
-          return unchanged
-        end
-
-        if keybinding?("suggestion_previous", key)
-          move_onboarding(-1, rows.length, state)
-          return unchanged
-        end
-        if keybinding?("suggestion_next", key)
-          move_onboarding(1, rows.length, state)
-          return unchanged
-        end
-        if keybinding?("submit", key)
-          advance_onboarding(rows, on_submit, state)
-          return unchanged
-        end
-        if keybinding?("cancel_navigation", key)
-          skip_onboarding(on_submit, state)
-          return unchanged
-        end
-        if keybinding?("cursor_left", key)
-          back_onboarding(state)
-          return unchanged
-        end
-        if step == Onboarding::MODEL
-          if keybinding?("refresh_model_catalog", key)
-            refresh_onboarding_catalog(on_submit, state)
-            return unchanged
-          end
-          if keybinding?("delete_word_backward", key)
-            set_onboarding_query(+"", state)
-            return unchanged
-          end
-          if keybinding?("delete_backward", key)
-            set_onboarding_query(@onboarding_query.to_s.chars[0...-1].join, state)
-            return unchanged
-          end
-          if printable_key?(key)
-            set_onboarding_query("#{@onboarding_query}#{key}", state)
-            return unchanged
-          end
-        elsif printable_key?(key)
-          # Steps without a filter are pure choices: typing must not leak into the
-          # composer behind the modal.
-          return unchanged
-        end
-
-        nil
-      rescue StandardError => e
-        # A modal that raised while it owned the keys would be the one real trap in
-        # this flow, so a failure closes it (restoring the previewed theme) and
-        # says so instead of eating every key.
-        close_onboarding
-        append_jump_response("Setup closed after an error: #{e.message}. Run /setup to try again.")
-        [input_buffer, input_cursor, slash_suggestion_index]
-      end
-
-      # Setup has its own hit testing because the dashboard is not drawn behind
-      # it. A left-click on an option row applies that same row as Enter would;
-      # every other mouse event is swallowed so it cannot leak to dashboard mouse
-      # handling or become a click-away skip.
-      def handle_onboarding_mouse(key, unchanged, on_submit, state)
-        return unchanged unless mouse_button_press?(key)
-        return missed_onboarding_click(unchanged) unless key.fetch("button", 0).to_i.zero?
-
-        hit = layout.onboarding_hit(
-          state,
-          width: render_width,
-          height: render_height,
-          x: mouse_x(key),
-          y: mouse_y(key)
-        )
-        return missed_onboarding_click(unchanged) unless hit.is_a?(Integer)
-
-        rows = onboarding_rows(state)
-        return missed_onboarding_click(unchanged) unless hit >= 0 && hit < rows.length
-
-        @onboarding_index = hit
-        preview_onboarding_theme(state)
-        advance_onboarding(rows, on_submit, state)
-        unchanged
-      end
-
-      def missed_onboarding_click(unchanged)
-        set_onboarding_notice(Onboarding::NOTICE_MOUSE)
-        unchanged
-      end
-
-      def move_onboarding(step, count, state)
-        return if count <= 0
-
-        @onboarding_index = (@onboarding_index.to_i + step) % count
-        preview_onboarding_theme(state)
-      end
-
-      def set_onboarding_query(query, state)
-        @onboarding_query = +query.to_s
-        @onboarding_index = onboarding_default_index(state)
-      end
-
-      # Moving the highlight on the theme step repaints the whole dashboard in that
-      # theme. Nothing is persisted until Enter, and leaving restores the saved one.
-      def preview_onboarding_theme(state)
-        return unless onboarding_step == Onboarding::THEME
-
-        row = onboarding_rows(state)[@onboarding_index.to_i]
-        return unless row
-
-        Style.configure!(row.fetch("value"))
-      rescue StandardError
-        nil
-      end
-
-      # Enter applies the highlighted row and moves on. Re-applying a value that is
-      # already in effect is accepted by the kernel, so holding Enter through the
-      # flow accepts every current default and changes nothing.
-      def advance_onboarding(rows, on_submit, state)
-        leaving = Onboarding.step_fraction(onboarding_step, onboarding_plan)
-        apply_onboarding_row(rows[@onboarding_index.to_i], on_submit, state)
-        steps = onboarding_plan
-        if @onboarding_step_index >= steps.length - 1
-          finish_onboarding(on_submit, state)
-          return true
-        end
-
-        @onboarding_step_index += 1
-        enter_onboarding_step(state, from: leaving)
-        true
-      end
-
-      # The progress bar eases from where the step being left had it, so advancing
-      # and going back both read as movement instead of a jump. Everything else
-      # tied to the step being left (a pending refresh, an answer to a refused
-      # click) is dropped with it rather than following the user onto the next one.
-      def restart_onboarding_step_clock(from: nil)
-        @onboarding_progress_from = (from || Onboarding.step_fraction(onboarding_step, onboarding_plan)).to_f
-        @onboarding_step_entered_at = monotonic_time
-        @onboarding_refresh_at = nil
-        @onboarding_refresh_signature = nil
-        @onboarding_notice = nil
-        @onboarding_notice_at = nil
-      end
-
-      # Back is deliberately non-destructive: it returns to the step without
-      # un-applying anything (there are no inverse kernel commands), and the finish
-      # card reports what is actually in effect.
-      def back_onboarding(state)
-        return false if @onboarding_step_index.to_i <= 0
-
-        leaving = Onboarding.step_fraction(onboarding_step, onboarding_plan)
-        @onboarding_step_index -= 1
-        enter_onboarding_step(state, from: leaving)
-        true
-      end
-
-      # Arriving at a step also ends the previous step's theme preview, so walking
-      # back off the theme list puts the saved theme back on screen.
-      def enter_onboarding_step(state, from: nil)
-        restart_onboarding_step_clock(from: from)
-        @onboarding_query = +""
-        restore_onboarding_theme
-        @onboarding_index = onboarding_default_index(state)
-        preview_onboarding_theme(state)
-      end
-
-      def apply_onboarding_row(row, on_submit, state)
-        return false unless row
-
-        command = row.fetch("command", nil)
-        return false if command.to_s.empty?
-
-        kind = row.fetch("kind", nil)
-        @onboarding_harness = row.fetch("value") if kind == Onboarding::HARNESS
-        @onboarding_saved_theme = row.fetch("value") if kind == Onboarding::THEME
-        @onboarding_applied[kind] = row.fetch("value")
-        submit_prompt(command, on_submit, state)
-        true
-      end
-
-      # Ctrl-R is the one step that waits on something outside the flow, so it is
-      # the one place with a spinner. The catalog snapshot that is on screen right
-      # now is remembered, and the spinner stops as soon as the kernel has written
-      # a different one (or the bounded wait runs out).
-      def refresh_onboarding_catalog(on_submit, state)
-        harness = Onboarding.harness_for(state, @onboarding_harness)
-        @onboarding_refresh_at = monotonic_time
-        @onboarding_refresh_signature = Onboarding.catalog_signature(state, harness: harness)
-        submit_prompt("/models #{harness} refresh", on_submit, state)
-        true
-      end
-
-      def finish_onboarding(on_submit, state)
-        record_onboarding_outcome("complete", on_submit, state)
-      end
-
-      # Esc is an exit, not a cancel: everything already applied stays, and the
-      # marker is still written so setup never opens by itself again.
-      def skip_onboarding(on_submit, state)
-        record_onboarding_outcome("skip", on_submit, state)
-      end
-
-      # The card is written after the flow closes, so it reports the theme that is
-      # really in effect rather than a preview the exit just rolled back.
-      def record_onboarding_outcome(outcome, on_submit, state)
-        applied = @onboarding_applied.dup
-        harness = @onboarding_harness
-        close_onboarding
-        settings = Onboarding.settings(state, applied: applied, harness: harness)
-        card = outcome == "skip" ? Onboarding.skip_card(settings) : Onboarding.completion_card(settings)
-        append_jump_response(card)
-        submit_prompt("/setup #{outcome}", on_submit, state)
-        true
-      end
-
-      # A screen too small to draw the card and its exit hint would be an
-      # invisible modal eating keys, which is the one real trap in this flow. This
-      # is checked on the next key rather than during render, so a resize below the
-      # minimum closes setup instead of leaving it up in an unusable size.
-      def close_collapsed_onboarding(_state)
-        return false if onboarding_fits?
-
-        close_onboarding
-        append_jump_response(Onboarding.collapsed_message)
-        true
-      rescue StandardError
-        false
+        open_settings(state, mode: "setup", setup_origin: "manual")
       end
 
       def setup_command?(text)
         text.to_s.strip.downcase == "/setup"
       end
 
-      # Bare `/setup` is local UI, exactly like `/jump` and `/models`; the kernel
-      # spellings `/setup complete` and `/setup skip` stay kernel commands so the
-      # marker is validated, journaled, and logged.
+      # Bare `/setup` is local UI. `/setup complete|skip` remain compatibility
+      # kernel commands for scripts, while the interactive flow saves its marker
+      # together with the reviewed draft in one SaveConfiguration transaction.
       def handle_local_setup_command(state)
         unless @onboarding_enabled
           append_jump_response(Onboarding.unavailable_message)
@@ -3708,7 +3414,7 @@ module Meringue
           return true
         end
 
-        open_onboarding(state)
+        open_settings(state, mode: "setup", setup_origin: "manual")
         true
       end
 
@@ -4297,7 +4003,10 @@ module Meringue
               update_message(assistant_message_id, text: final_text, status: nil, visible: visible, persist: visible)
             end
           rescue StandardError => e
-            if assistant_message_id
+            if slash_command && text.start_with?("/config save ") && @settings_active && @settings_draft
+              @settings_saving = false
+              @settings_draft.apply_save_failure("Configuration save failed: #{e.class}: #{e.message}")
+            elsif assistant_message_id
               update_message(assistant_message_id, text: "Head loop failed: #{e.class}: #{e.message}", status: "errored", visible: true)
             end
           ensure
@@ -4420,10 +4129,14 @@ module Meringue
         return unless result
 
         if result.fetch("status", nil) == "accepted"
+          outcome = result.dig("result", "onboarding_outcome") || @settings_setup_outcome
+          setup_was_active = @settings_active && setup_mode?
           @config = config.reload_file
           @keybindings = Keybindings.from_config(@config.section("tui", "keybindings"))
-          @onboarding_reduced_motion = nil
-          close_settings(discard: false) if @settings_active
+          close_settings(discard: outcome == "skipped") if @settings_active
+          if setup_was_active && outcome
+            append_jump_response(outcome == "skipped" ? Onboarding.skip_card : Onboarding.completion_card(@config))
+          end
         elsif @settings_active && @settings_draft
           @settings_saving = false
           details = result.fetch("result", {}) || {}
@@ -4611,9 +4324,6 @@ module Meringue
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
           Settings::STATE_KEY => settings_snapshot,
           "_capabilities" => { "github_support" => github_support_enabled?(state) },
-          # First-run setup renders full screen, so it is a top-level view like the
-          # focused workspace rather than a slot inside the chat pane.
-          Panes::OnboardingPane::STATE_KEY => onboarding_snapshot,
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
           LogScope::STATE_KEY => LogScope.snapshot(state, @log_scope_id),
           "_agent_workspace" => agent_workspace_snapshot(state, input_buffer, input_cursor, slash_suggestion_index),

@@ -2,7 +2,7 @@
 
 Meringue exposes future Pi defaults for how every new head and worker is started. Existing sessions retain their effective settings.
 
-First-run setup (`/setup`, and automatically on a first launch) walks a new user through the same two defaults plus the harness and theme, and applies each choice as the ordinary slash command for it. It reads the cached catalog snapshot only and never blocks on a fetch; see [`onboarding.md`](onboarding.md).
+First-run Setup (`/setup`, and automatically on a first interactive launch) uses the shared Settings overlay to review separate head and worker harness/model/thinking defaults, theme, and experiments. All choices remain in one draft until Finish atomically saves them with the onboarding marker. It reads the cached catalog only and never blocks on a fetch; see [`onboarding.md`](onboarding.md).
 
 ## Commands
 
@@ -244,7 +244,7 @@ The kernel owns catalog state. Snapshots live in `metadata.harness_model_catalog
 - Refresh is silent: an expected "not fetched yet" state produces no durable log entries.
 - `/models refresh` forces an immediate re-fetch and reports `availability`, the model count, the confirmed timestamp, and the last failed attempt when there is one. `/models` alone opens the picker over the cached snapshot without starting a harness process; `Ctrl-R` in the picker submits the same refresh command.
 - The picker never renders an empty box. An unavailable catalog, an unsupported harness, a snapshot Meringue has never fetched, and a filter that matched nothing are four different sentences, each naming what to do next (`Ctrl-R`, or an exact `provider/model` id with `/model`).
-- First-run setup reuses those same four sentences on its model step, and adds a permanent `keep the default` row so a catalog that has not arrived yet can never dead-end the flow. Rows appear on their own once a background refresh lands, because state is re-read every frame.
+- Setup exposes each exact model value through the shared editor. `←` / `→` cycles the cached Pi catalog when one exists; a missing catalog never blocks setup because the current exact reference remains editable and validatable.
 
 ### What completion shows
 

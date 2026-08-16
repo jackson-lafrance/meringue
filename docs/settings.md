@@ -71,7 +71,7 @@ Role serialization preserves old readers:
 
 ## Experiments registry
 
-`Meringue::Experiments::Registry` is the only experiment list. Definitions carry an ID, config path, label, description/risk note, default, dependencies/conflicts, and live/restart mode. Settings and future guided setup derive checkboxes from it.
+`Meringue::Experiments::Registry` is the only experiment list. Definitions carry an ID, config path, label, description/risk note, default, dependencies/conflicts, and live/restart mode. Both `/config` and first-run Setup derive their checkboxes from it.
 
 The capability audit found only one capability that currently warrants an experiment:
 
@@ -108,19 +108,10 @@ The config carries `[settings].schema_version`. Migration runs before `State::St
 - Historical PR metadata and unknown config are not deleted.
 - Onboarding version 1 remains valid and is not replayed.
 
-## Setup-flow successor handoff
+## Setup uses the same overlay
 
-The schema, `Settings::Draft`, editor parsing, full-screen pane shell, responsive geometry, hit testing, `SaveConfiguration`, experiment registry, and role serialization are intentionally reusable by the guided setup successor.
+First-run Setup is a curated `Settings::Draft` mode, not a second wizard. It presents Welcome → Theme → Head defaults → Worker defaults → Experiments → Review and reuses this pane's responsive geometry, editors, validation, theme preview, hit testing, and persistence result handling.
 
-The remaining successor slice is controller-only:
+Finish sends the changed settings, explicit absent experiment defaults, and the completed onboarding outcome through one `SaveConfiguration` transaction. Automatic first-run skip saves only the skipped marker and explicit experiment defaults; manual `/setup` cancel writes nothing and preserves the existing marker. `/setup complete|skip` remain compatibility commands, and onboarding version 1 remains valid for existing users.
 
-1. replace `TUI::App`'s current `@onboarding_*` immediate-command controller with a curated `Settings::Draft` mode;
-2. derive experiment checkboxes from `Experiments::Registry` (do not create a setup-only list);
-3. present Welcome → Theme → Head defaults → Worker defaults → Experiments → Review/Finish using the existing settings pane/editor primitives;
-4. keep all choices draft-only; Finish adds the onboarding marker to the same single save transaction;
-5. auto-open `Esc` confirms skip and saves only the skipped marker plus explicit new-install experiment defaults;
-6. manual `/setup` `Esc` discards without changing the existing marker;
-7. preserve `/setup complete|skip` as compatibility commands;
-8. keep onboarding version 1 accepted so existing users are not forced through setup again.
-
-Do not reuse the old `apply_onboarding_row` command-per-step behavior: Back/cancel cannot be transactional while that method remains the writer path.
+See [`onboarding.md`](onboarding.md) for keys, review/back behavior, first-run versus rerun cancellation, resize handling, and persistence failures.

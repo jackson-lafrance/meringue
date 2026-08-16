@@ -265,31 +265,25 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 
 ## First-run setup
 
-The first launch on a machine opens a short setup flow that **takes over the whole
-terminal** while it runs, and `/setup` reopens it any time. It adds no new
-keybindings.
+The first interactive launch opens Setup as a curated mode of the full-screen
+Settings overlay, and `/setup` reopens it any time.
 
-- `Enter` or a left-click on a visible row: apply that row and continue; the last step finishes the flow.
-- `↑` / `↓`: move the highlight; it wraps. A list longer than the card scrolls with the highlight.
-- `←`: go back one step. This is the `cursor_left` action, so rebinding `cursor_left` changes it.
-- `Esc`: exit setup, keeping everything already applied. It does not open by itself again. This is the only skip affordance.
-- On the model step only: printable characters filter, `Backspace` / `Ctrl-W` clear the filter, and `Ctrl-R` re-fetches the catalog.
-- Every step starts on the value already in effect, so holding `Enter` accepts every default and changes nothing.
-- Keys the flow does not own still work, so `Ctrl-C` and `Ctrl-D` behave normally while it is up.
+- `↑` / `↓`: move through rows.
+- `←` / `→`: change a selector/cached model; on rows without choices, change steps.
+- `Space`: toggle a checkbox.
+- `Enter`: edit/change a value, begin from Welcome, return from Review to a value, or Finish.
+- `Tab` / `Shift-Tab`: next/back through Welcome, Theme, Head defaults, Worker defaults, Experiments, and Review.
+- `Ctrl-S`: jump to Review; on Review, Finish.
+- First-run `Esc`: open a skip confirmation. Confirming discards the draft and saves only the skipped marker plus explicit experiment defaults.
+- Manual `/setup` `Esc`: cancel a clean draft, or open the ordinary discard confirmation for a dirty draft. It never changes the existing marker.
 
-**Setup owns the mouse.** While it is up, a left-click on a visible option row
-applies that row just like `Enter`. Other mouse reports — right click, middle
-click, release, drag, both wheel directions, and left-clicks on chrome or empty
-space — are inert: they do not move the highlight, advance a step, dismiss the
-flow, or reach the dashboard underneath. Clicking away used to skip the whole
-flow, so one stray click during a first launch silently skipped setup. A missed
-click now draws a short line at the bottom of the screen (`Click an option row,
-press Enter to continue, or Esc to skip setup.`) so it is never mistaken for a
-frozen screen; it clears itself after a few seconds and when the step changes.
+Setup owns the whole screen and the mouse. Left-click selects a visible step or
+row, toggles a checkbox, or presses Next/Finish/Cancel on wide terminals. The
+wheel moves the visible list. Empty space, chrome, right-click, release, and drag
+reports are inert and never reach the dashboard underneath.
 
-See [`onboarding.md`](onboarding.md) for the steps, the screen layout, the
-animation, the completion marker, and what happens when the model catalog is
-unavailable.
+See [`onboarding.md`](onboarding.md) for transactional persistence, resize and
+failure recovery, first-run versus rerun behavior, and the completion marker.
 
 ## Model picker
 

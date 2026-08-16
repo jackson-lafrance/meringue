@@ -8,7 +8,7 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
-Run `/config` for the full-screen schema-driven editor covering every supported setting. `/config --text` retains the read-only diagnostic listing. Existing `/theme`, `/model [head|worker] <provider>/<model-id>`, `/thinking [head|worker] <level>`, `/harness [head|worker] <provider>`, and setup compatibility commands use the same validated atomic persistence layer. See [`settings.md`](settings.md) for interaction, responsive layouts, transactional save/cancel behavior, provenance, and the setup-flow successor handoff.
+Run `/config` for the full-screen schema-driven editor covering every supported setting. `/config --text` retains the read-only diagnostic listing. Existing `/theme`, `/model [head|worker] <provider>/<model-id>`, `/thinking [head|worker] <level>`, `/harness [head|worker] <provider>`, and setup compatibility commands use the same validated atomic persistence layer. First-run Setup is a curated mode of this same overlay. See [`settings.md`](settings.md) for interaction, responsive layouts, transactional save/cancel behavior, and provenance.
 
 ## Settings schema and experiments
 
@@ -26,8 +26,9 @@ New installations default GitHub support off. Existing installations with a pre-
 
 ## First-run setup marker
 
-The first launch on a machine opens a short setup flow for the harness, model,
-thinking level, and theme. Finishing or skipping it records one marker here:
+The first interactive launch opens the shared Settings overlay for a theme,
+separate head/worker defaults, and experiment checkboxes. Finishing or confirming
+a first-run skip records one marker here:
 
 ```toml
 [onboarding]
@@ -38,10 +39,12 @@ outcome = "completed"   # or "skipped"
 
 The marker lives in the config file rather than in `state.json` so that
 `meringue reset-state` and `/clear` do not replay setup. Delete the `[onboarding]`
-section to see the flow again on the next launch, or run `/setup` any time. It is
-written by the `CompleteOnboarding` kernel command, so it honors `--config PATH`
-like every other config write. See [`onboarding.md`](onboarding.md) for the steps,
-keys, and degraded behavior.
+section to see the flow again on the next launch, or run `/setup` any time.
+Interactive Finish writes the reviewed settings and marker in one
+`SaveConfiguration` transaction; `/setup complete|skip` remain compatible
+`CompleteOnboarding` commands. Both honor `--config PATH`. See
+[`onboarding.md`](onboarding.md) for first-run, rerun, cancel, resize, and failure
+behavior.
 
 ## Selecting a TUI colorscheme
 
@@ -72,9 +75,7 @@ AgentTree rows also show which harness backs each session: `π` Pi, `✳` Claude
 animations = false
 ```
 
-Animation is opt-out and today it only affects the [first-run setup screen](onboarding.md#animation): the sweep, the eased progress bar, the staggered row reveal, and the breathing selection marker. With `animations = false` (or `MERINGUE_NO_ANIMATION=1`, which wins over the file) setup draws its settled frame immediately and stops asking for animation frames, so nothing about the flow changes except the motion. Any other value, or an absent key, keeps motion on.
-
-Motion also turns itself off without being asked: on a non-interactive stdin, and on any terminal smaller than 60×16, where every row is needed for content.
+Animation is an appearance preference for TUI surfaces that support motion. `MERINGUE_NO_ANIMATION=1` overrides the file for the current process. Setup exposes the checkbox because it is a useful first-run preference, but the shared Settings/Setup overlay itself uses immediate redraws and does not depend on animation for navigation or recovery.
 
 ## Customizing TUI keybindings
 

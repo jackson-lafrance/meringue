@@ -6,6 +6,8 @@ module Meringue
       class SettingsPane
         STATE_KEY = Settings::STATE_KEY
         SAVE_LABEL = "[ Save ]"
+        NEXT_LABEL = "[ Next ]"
+        FINISH_LABEL = "[ Finish ]"
         CANCEL_LABEL = "[ Cancel ]"
 
         def active?(state)
@@ -64,8 +66,12 @@ module Meringue
 
         def header_segments(state, width:)
           snap = snapshot(state)
-          mode = snap.fetch("mode", "settings") == "setup" ? "setup" : "settings"
-          segments = [["meringue · #{mode}", Style::TITLE]]
+          setup = snap.fetch("mode", "settings") == "setup"
+          title = setup ? "meringue · setup" : "meringue · settings"
+          if setup && width.to_i >= Settings::COMPACT_WIDTH
+            title = "#{title}  #{snap.fetch("setup_step", 1)}/#{snap.fetch("setup_step_count", 1)}"
+          end
+          segments = [[title, Style::TITLE]]
           segments << ["  • unsaved", Style::WARNING] if snap.fetch("dirty", false)
           segments << ["  • saving…", Style::ACCENT] if snap.fetch("saving", false)
           segments
@@ -75,8 +81,15 @@ module Meringue
           snap = snapshot(state)
           categories = Array(snap.fetch("categories", []))
           selected = snap.fetch("category_index", 0).to_i.clamp(0, [categories.length - 1, 0].max)
+          setup = snap.fetch("mode", "settings") == "setup"
           categories.first([height.to_i, 0].max).map.with_index do |category, index|
-            marker = index == selected ? "› " : "  "
+            marker = if index == selected
+                       "› "
+                     elsif setup && index < selected
+                       "✓ "
+                     else
+                       "  "
+                     end
             style = index == selected ? Style::ACCENT_BOLD : Style::MUTED
             [["#{marker}#{category}", style]]
           end
@@ -124,6 +137,9 @@ module Meringue
             return [["Esc cancel", Style::WARNING]]
           end
           if snap.fetch("discard_confirm", false)
+            if snap.fetch("confirmation", "discard") == "skip"
+              return [["Enter skip setup", Style::WARNING], [" · Esc keep setting up", Style::MUTED]]
+            end
             return [["Enter discard", Style::ERROR], [" · Esc keep editing", Style::MUTED]]
           end
           if snap.fetch("editor", nil).is_a?(Hash)
@@ -131,10 +147,20 @@ module Meringue
           end
 
           error_count = snap.fetch("error_count", 0).to_i
-          hint = if compact?(width)
+          setup = snap.fetch("mode", "settings") == "setup"
+          cancel = snap.fetch("setup_auto", false) ? "skip" : "cancel"
+          hint = if setup && width.to_i < Settings::WIDE_WIDTH
+                   "Esc #{cancel} · Tab next · Shift-Tab back · ↑↓ · ←→ change · Enter edit"
+                 elsif setup && width.to_i < 100
+                   "Esc #{cancel} · Tab/S-Tab steps · ↑↓ · ←→ · Enter edit"
+                 elsif setup
+                   "↑↓ · ←→ change · Tab next · S-Tab back · Space · Enter edit · Esc #{cancel}"
+                 elsif compact?(width)
                    "Esc cancel · Ctrl-S save · ↑↓ · Enter edit"
+                 elsif width.to_i < 100
+                   "Esc cancel · Ctrl-S save · Tab category · ↑↓ · Enter edit"
                  else
-                   "↑↓ rows · Tab categories · Space toggle · Enter edit · Ctrl-S save · Esc cancel"
+                   "↑↓ · Tab category · Space toggle · Enter edit · Ctrl-S save · Esc cancel"
                  end
           segments = [[hint, Style::DIM]]
           segments << [" · #{error_count} error#{error_count == 1 ? "" : "s"}", Style::ERROR] if error_count.positive?
@@ -144,7 +170,7 @@ module Meringue
         def action_segments(state)
           snap = snapshot(state)
           save_style = snap.fetch("saving", false) ? Style::DIM : Style::ACCENT_BOLD
-          [[SAVE_LABEL, save_style], [" ", Style::DIM], [CANCEL_LABEL, Style::MUTED]]
+          [[primary_label(snap), save_style], [" ", Style::DIM], [CANCEL_LABEL, Style::MUTED]]
         end
 
         # A visible category, row, or footer button. Everything else is inert.
@@ -155,10 +181,11 @@ module Meringue
 
           snap = snapshot(state)
           if y.to_i == geometry.fetch(:footer_y)
-            action_width = SAVE_LABEL.length + 1 + CANCEL_LABEL.length
+            primary = primary_label(snap)
+            action_width = primary.length + 1 + CANCEL_LABEL.length
             start = width.to_i - action_width - 1
-            return :save if x.to_i >= start && x.to_i < start + SAVE_LABEL.length
-            return :cancel if x.to_i >= start + SAVE_LABEL.length + 1 && x.to_i < start + action_width
+            return :save if x.to_i >= start && x.to_i < start + primary.length
+            return :cancel if x.to_i >= start + primary.length + 1 && x.to_i < start + action_width
             return :inert
           end
           return :inert if snap.fetch("discard_confirm", false) || snap.fetch("editor", nil).is_a?(Hash)
@@ -183,6 +210,12 @@ module Meringue
         end
 
         private
+
+        def primary_label(snap)
+          return SAVE_LABEL unless snap.fetch("mode", "settings") == "setup"
+
+          snap.fetch("category", "") == "Review" ? FINISH_LABEL : NEXT_LABEL
+        end
 
         def row_line(row, selected:, width:)
           marker = selected ? "›" : " "
@@ -222,7 +255,18 @@ module Meringue
           { lines: lines.first([height.to_i, 1].max), window_start: 0, visible_count: 0, counter: "text editor", selected_row: row }
         end
 
-        def confirmation_detail(_snap, width:, height:)
+        def confirmation_detail(snap, width:, height:)
+          if snap.fetch("confirmation", "discard") == "skip"
+            lines = [
+              [["Skip first-run setup?", Style::WARNING]],
+              [["Your draft will be discarded. Only the skipped marker and explicit experiment defaults will be saved.", Style::MUTED]],
+              [["", Style::DIM]],
+              [["Enter", Style::ACCENT_BOLD], [" skip setup", Style::TEXT]],
+              [["Esc", Style::ACCENT_BOLD], [" keep setting up", Style::TEXT]]
+            ]
+            return { lines: lines.first([height.to_i, 1].max), window_start: 0, visible_count: 0, counter: "confirmation", selected_row: nil }
+          end
+
           lines = [
             [["Discard unsaved changes?", Style::ERROR]],
             [["Nothing has been written. The original theme will be restored.", Style::MUTED]],
@@ -241,8 +285,19 @@ module Meringue
         end
 
         def wrap(text, width)
-          text.to_s.lines(chomp: true).flat_map do |line|
-            line.empty? ? [""] : line.scan(/.{1,#{[width.to_i, 1].max}}/)
+          limit = [width.to_i, 1].max
+          text.to_s.lines(chomp: true).flat_map do |source|
+            next [""] if source.empty?
+
+            source.split(/\s+/).each_with_object([+""]) do |word, lines|
+              if lines.last.empty?
+                lines[-1] = +word
+              elsif lines.last.length + word.length + 1 <= limit
+                lines.last << " " << word
+              else
+                lines << +word
+              end
+            end.flat_map { |line| line.length <= limit ? [line] : line.scan(/.{1,#{limit}}/) }
           end
         end
 

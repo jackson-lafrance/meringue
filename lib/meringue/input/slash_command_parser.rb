@@ -34,7 +34,7 @@ module Meringue
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/prs", "Open the picker for every tracked pull request that is still open."],
-        ["/setup", "Reopen first-run setup: theme, harness, model, and thinking level."],
+        ["/setup", "Reopen Setup for theme, separate head/worker defaults, and experiments."],
         ["/keybind", "Show all TUI keybindings."],
         ["/config", "Open full-screen Settings; /config --text prints read-only diagnostics."],
         ["/tree", "Show the current AgentTree state."],
@@ -767,11 +767,17 @@ module Meringue
           return invalid("Configuration save payload is invalid.")
         end
 
-        kernel_command(
-          "SaveConfiguration",
+        command_payload = {
           "base_fingerprint" => payload.fetch("base_fingerprint"),
           "changes" => payload.fetch("changes")
-        )
+        }
+        if payload.key?("onboarding_outcome")
+          outcome = payload.fetch("onboarding_outcome").to_s
+          return invalid("Configuration save payload has an invalid setup outcome.") unless Config::ONBOARDING_OUTCOMES.include?(outcome)
+
+          command_payload["onboarding_outcome"] = outcome
+        end
+        kernel_command("SaveConfiguration", command_payload)
       rescue ArgumentError, JSON::ParserError
         invalid("Configuration save payload is invalid.")
       end
@@ -861,7 +867,7 @@ module Meringue
         tokens = split_arguments(arguments)
         if tokens.empty?
           return invalid(
-            "/setup is a local TUI command. Run it in the interactive TUI to choose your theme, harness, model, and thinking level.",
+            "/setup is a local TUI command. Run it in the interactive TUI to review theme, separate head/worker defaults, and experiments.",
             usage: "/setup"
           )
         end

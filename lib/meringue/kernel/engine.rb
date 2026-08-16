@@ -241,7 +241,7 @@ module Meringue
         ["/jump [agent_id]", "TUI local: open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/prs", "TUI local: open the picker for every tracked pull request that is still open."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
-        ["/setup", "TUI local: reopen first-run setup for the theme, harness, model, and thinking level."],
+        ["/setup", "TUI local: reopen Setup for theme, separate head/worker defaults, and experiments."],
         ["/keybind", "TUI local: show all keybindings."],
         ["/config", "TUI local: open full-screen Settings; /config --text prints diagnostics."],
         ["/tree", "Show the current AgentTree state."],
@@ -2851,6 +2851,7 @@ module Meringue
       def save_configuration(command_id, command_type, payload)
         baseline = value_at(payload, "base_fingerprint", "BaseFingerprint")
         changes = value_at(payload, "changes", "Changes")
+        onboarding_outcome = value_at(payload, "onboarding_outcome", "OnboardingOutcome")
         unless baseline.is_a?(String) && changes.is_a?(Hash)
           return rejected_result(
             command_id,
@@ -2860,9 +2861,19 @@ module Meringue
           )
         end
 
+        unless onboarding_outcome.nil? || Config::ONBOARDING_OUTCOMES.include?(onboarding_outcome.to_s)
+          return configuration_rejected_result(
+            command_id,
+            command_type,
+            "Configuration was not saved because the setup outcome is invalid.",
+            { "setup.outcome" => "must be one of: #{Config::ONBOARDING_OUTCOMES.join(", ")}" }
+          )
+        end
+
         transaction = Config::Store.new(path: config_path).save(
           base_fingerprint: baseline,
-          changes: changes
+          changes: changes,
+          onboarding_outcome: onboarding_outcome
         )
         saved_file_config = transaction.fetch("config")
         @config = config_with_runtime_overrides(saved_file_config)
@@ -2892,18 +2903,24 @@ module Meringue
           metadata["config_fingerprint"] = transaction.fetch("fingerprint")
 
           changed_ids = transaction.fetch("changed_ids")
+          outcome = transaction["onboarding_outcome"]
+          log_message = "Saved #{changed_ids.length} configuration setting#{changed_ids.length == 1 ? "" : "s"}"
+          log_message = "#{log_message}: #{changed_ids.join(", ")}" unless changed_ids.empty?
+          log_message = "#{log_message}; setup #{outcome}" if outcome
           log_ids = append_log(
             current,
             source_type: "kernel",
             source_id: nil,
             level: "info",
-            message: "Saved #{changed_ids.length} configuration setting#{changed_ids.length == 1 ? "" : "s"}: #{changed_ids.join(", ")}.",
+            message: "#{log_message}.",
             # IDs only: provider environment values must never enter logs.
             details: {
               "changed_setting_ids" => changed_ids,
               "restart_required" => transaction.fetch("restart_required"),
-              "config_path" => config_path
-            }
+              "config_path" => config_path,
+              "onboarding_outcome" => outcome,
+              "onboarding_version" => transaction["onboarding_version"]
+            }.compact
           )
           touch_state!(current)
           store.save(current)
@@ -2923,15 +2940,17 @@ module Meringue
             "fingerprint" => transaction.fetch("fingerprint"),
             "theme" => theme,
             "github_support" => github_support_enabled?(state.first),
-            "saved_but_overridden" => overridden_settings
-          },
+            "saved_but_overridden" => overridden_settings,
+            "onboarding_outcome" => transaction["onboarding_outcome"],
+            "onboarding_version" => transaction["onboarding_version"]
+          }.compact,
           state.last
         )
       rescue Config::StaleRevisionError => e
         configuration_rejected_result(command_id, command_type, e.message, { "_stale" => e.message })
       rescue Config::ValidationError => e
         configuration_rejected_result(command_id, command_type, "Configuration has #{e.field_errors.length} invalid setting#{e.field_errors.length == 1 ? "" : "s"}.", e.field_errors)
-      rescue Config::ParseError, Config::LockError => e
+      rescue Config::ParseError, Config::LockError, Config::PersistenceError => e
         configuration_rejected_result(command_id, command_type, "Configuration was not saved: #{e.message}", { "_configuration" => e.message })
       end
 
@@ -2945,6 +2964,9 @@ module Meringue
         count = transaction.fetch("changed_ids").length
         restart = transaction.fetch("restart_required")
         message = "Saved #{count} configuration setting#{count == 1 ? "" : "s"} atomically to #{config_path}."
+        if transaction["onboarding_outcome"]
+          message = "#{message} Setup #{transaction.fetch("onboarding_outcome")}."
+        end
         message = "#{message} Restart Meringue to apply: #{restart.join(", ")}." unless restart.empty?
         unless overridden_settings.empty?
           badges = overridden_settings.map { |id, source| "#{id} by #{source}" }.join(", ")
