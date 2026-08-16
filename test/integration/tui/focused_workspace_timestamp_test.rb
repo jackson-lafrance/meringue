@@ -8,6 +8,7 @@ class TuiFocusedWorkspaceTimestampTest < Minitest::Test
 
   WorkspacePane = Meringue::TUI::Panes::AgentWorkspacePane
   LogsPane = Meringue::TUI::Panes::ChatPane
+  Timestamps = Meringue::TUI::Timestamps
 
   def test_utc_focused_timestamp_matches_the_local_logs_clock
     with_env("TZ" => "Etc/GMT+6") do
@@ -16,8 +17,9 @@ class TuiFocusedWorkspaceTimestampTest < Minitest::Test
       logs_state = composed_state(empty_state.merge("logs" => [log_record("L1", "timestamp" => timestamp)]))
       logs_header = plain_lines(LogsPane.new.log_lines(logs_state, width: 70)).first
 
-      assert_includes focused_header, "· 12:30:00"
-      assert_includes logs_header, "[12:30]"
+      expected = Timestamps.display(timestamp)
+      assert_includes focused_header, "· #{expected}"
+      assert_includes logs_header, expected
     end
   end
 
@@ -26,7 +28,8 @@ class TuiFocusedWorkspaceTimestampTest < Minitest::Test
       same_instant = Time.utc(2026, 1, 15, 18, 30).to_f * 1000
       headers = focused_headers("2026-01-15T21:30:00+03:00", same_instant)
 
-      assert_equal ["● you · 12:30:00", "● you · 12:30:00"], headers
+      expected = Timestamps.display("2026-01-15T21:30:00+03:00")
+      assert_equal ["● you · #{expected}", "● you · #{expected}"], headers
     end
   end
 

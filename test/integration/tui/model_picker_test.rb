@@ -232,6 +232,22 @@ class TuiModelPickerTest < Minitest::Test
     assert_includes plain_line(@pane.popup_footer_line(picker)), "last confirmed"
   end
 
+  def test_stale_catalog_state_label_uses_the_shared_recency_timestamp
+    previous = Meringue::Harness::ModelCatalog.available(
+      harness: "pi",
+      models: [{ "provider" => "openai", "id" => "gpt-5" }],
+      fetched_at: "2026-08-12T18:28:00Z"
+    )
+    stale = Meringue::Harness::ModelCatalog.retained(
+      previous: previous,
+      failure: Meringue::Harness::ModelCatalog.unavailable(harness: "pi", note: "refresh failed")
+    )
+    state = state_with_catalog(catalogs: { "pi" => stale.to_h })
+    now = Time.new(2026, 8, 16, 14, 30, 0, "-04:00")
+
+    assert_equal "last confirmed [wed 14:28]", ModelPicker.state_label(state, now: now)
+  end
+
   def test_clicking_a_row_applies_it_and_clicking_away_dismisses_the_picker
     picker = open_picker
     send_key(press_event(screen_position_for_row(picker, 2)))
