@@ -8,11 +8,20 @@
 # completed_at = "2026-08-06T14:02:11Z"
 # outcome = "completed"   # or "skipped"
 
+[settings]
+schema_version = 1
+
+[experiments]
+# New installations are local-first. Enable this for built-in gh title/status
+# lookups, delivery PR verification, markers, pickers, and opening actions.
+github_support = false
+
 [tui]
 # Default yellow/white Meringue palette. Other options:
 # rose-pine, tokyonight, gruvbox, catppuccin, kanagawa
-# You can also run /theme <name> in the TUI to save this setting.
+# You can also run /theme <name>, or preview and save it from /config.
 colorscheme = "meringue"
+# animations = true
 
 [tui.keybindings]
 # Omitted actions keep defaults. Use /keybind in the TUI to see active bindings.

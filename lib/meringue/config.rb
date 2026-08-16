@@ -22,13 +22,14 @@ module Meringue
 
     class ParseError < StandardError; end
 
-    attr_reader :path, :data, :loaded
+    attr_reader :path, :data, :loaded, :file_data, :overrides, :override_sources
 
     def self.load(path: DEFAULT_PATH)
       expanded_path = File.expand_path(path.to_s)
-      return new({}, path: expanded_path, loaded: false) unless File.file?(expanded_path)
+      return new({}, path: expanded_path, loaded: false, file_data: {}) unless File.file?(expanded_path)
 
-      new(parse(File.read(expanded_path), path: expanded_path), path: expanded_path, loaded: true)
+      parsed = parse(File.read(expanded_path), path: expanded_path)
+      new(parsed, path: expanded_path, loaded: true, file_data: parsed)
     end
 
     def self.parse(source, path: nil)
@@ -38,55 +39,33 @@ module Meringue
 
     def self.save_tui_theme!(theme, path: DEFAULT_PATH)
       expanded_path = File.expand_path(path.to_s)
-      config = load(path: expanded_path)
-      data = config.to_h
-      data["tui"] = {} unless data["tui"].is_a?(Hash)
-      data.fetch("tui").delete("color_scheme")
-      data.fetch("tui")["colorscheme"] = theme.to_s
-      write_toml(expanded_path, data)
-      new(data, path: expanded_path, loaded: true)
+      store = Store.new(path: expanded_path)
+      store.save(
+        base_fingerprint: store.fingerprint,
+        changes: { "appearance.theme" => theme.to_s }
+      ).fetch("config")
     end
 
-    # Persists Pi spawn defaults without rewriting role-specific tool flags.
-    # A role-specific model or thinking level overrides the legacy shared value
-    # for that role. Saving the shared value clears role overrides so `/model`
-    # and `/thinking <level>` retain their historical meaning of changing every
-    # future Pi session.
+    # Persists Pi spawn defaults through the same schema transaction used by
+    # Settings. Shared commands patch both role rows; role serialization then
+    # writes one compatibility fallback plus only differing overrides.
     def self.save_pi_session_defaults!(model: nil, model_role: nil, thinking_level: nil, thinking_role: nil, path: DEFAULT_PATH)
-      expanded_path = File.expand_path(path.to_s)
-      config = load(path: expanded_path)
-      data = config.to_h
-      data["harness"] = {} unless data["harness"].is_a?(Hash)
-      data.fetch("harness")["pi"] = {} unless data.fetch("harness")["pi"].is_a?(Hash)
-      pi = data.fetch("harness").fetch("pi")
+      changes = {}
       unless model.nil?
-        model_role = model_role.to_s.strip.downcase
-        unless model_role.empty? || %w[head worker].include?(model_role)
-          raise ArgumentError, "model_role must be head or worker"
-        end
-        if !model_role.empty?
-          pi["#{model_role}_model"] = model.to_s
-        else
-          pi["model"] = model.to_s
-          pi.delete("head_model")
-          pi.delete("worker_model")
-        end
+        role = model_role.to_s.strip.downcase
+        raise ArgumentError, "model_role must be head or worker" unless role.empty? || %w[head worker].include?(role)
+        targets = role.empty? ? %w[head worker] : [role]
+        targets.each { |target| changes["agent.#{target}_model"] = model.to_s }
       end
       unless thinking_level.nil?
-        thinking_role = thinking_role.to_s.strip.downcase
-        unless thinking_role.empty? || %w[head worker].include?(thinking_role)
-          raise ArgumentError, "thinking_role must be head or worker"
-        end
-        if !thinking_role.empty?
-          pi["#{thinking_role}_thinking_level"] = thinking_level.to_s
-        else
-          pi["thinking_level"] = thinking_level.to_s
-          pi.delete("head_thinking_level")
-          pi.delete("worker_thinking_level")
-        end
+        role = thinking_role.to_s.strip.downcase
+        raise ArgumentError, "thinking_role must be head or worker" unless role.empty? || %w[head worker].include?(role)
+        targets = role.empty? ? %w[head worker] : [role]
+        targets.each { |target| changes["agent.#{target}_thinking"] = thinking_level.to_s }
       end
-      write_toml(expanded_path, data)
-      new(data, path: expanded_path, loaded: true)
+      expanded_path = File.expand_path(path.to_s)
+      store = Store.new(path: expanded_path)
+      store.save(base_fingerprint: store.fingerprint, changes: changes).fetch("config")
     end
 
     # Records that the user has been through (or dismissed) first-run setup, so
@@ -94,15 +73,64 @@ module Meringue
     # CompleteOnboarding command, never by the TUI.
     def self.save_onboarding!(outcome:, version: ONBOARDING_VERSION, completed_at: nil, path: DEFAULT_PATH)
       expanded_path = File.expand_path(path.to_s)
+      store = Store.new(path: expanded_path)
+      store.patch_paths(
+        patches: {
+          "onboarding.completed_version" => version.to_i,
+          "onboarding.completed_at" => (completed_at || Time.now.utc.iso8601).to_s,
+          "onboarding.outcome" => outcome.to_s
+        }
+      )
+    end
+
+    def self.save_harness_defaults!(head_provider:, worker_provider:, path: DEFAULT_PATH)
+      expanded_path = File.expand_path(path.to_s)
+      store = Store.new(path: expanded_path)
+      store.save(
+        base_fingerprint: store.fingerprint,
+        changes: {
+          "agent.head_harness" => head_provider,
+          "agent.worker_harness" => worker_provider
+        }
+      ).fetch("config")
+    end
+
+    # Runs before State::Store can create a new empty state file. An explicit
+    # experiment value always wins. Existing installations retain GitHub support;
+    # genuinely new installations record the opt-in default (off).
+    def self.migrate_settings!(path: DEFAULT_PATH, state_path: nil)
+      expanded_path = File.expand_path(path.to_s)
       config = load(path: expanded_path)
-      data = config.to_h
-      data[ONBOARDING_SECTION] = {} unless data[ONBOARDING_SECTION].is_a?(Hash)
-      section = data.fetch(ONBOARDING_SECTION)
-      section["completed_version"] = version.to_i
-      section["completed_at"] = (completed_at || Time.now.utc.iso8601).to_s
-      section["outcome"] = outcome.to_s
-      write_toml(expanded_path, data)
-      new(data, path: expanded_path, loaded: true)
+      return config if config.value("settings", "schema_version").to_i >= Schema::VERSION
+
+      explicit_github = config.value("experiments", "github_support")
+      legacy_install = config.onboarding_version.positive? || preexisting_state?(state_path)
+      github_support = explicit_github == true || (explicit_github.nil? && legacy_install)
+      store = Store.new(path: expanded_path)
+      store.patch_paths(
+        base_fingerprint: store.fingerprint,
+        patches: {
+          "settings.schema_version" => Schema::VERSION,
+          "experiments.github_support" => github_support
+        }
+      )
+    end
+
+    def self.preexisting_state?(state_path)
+      return false if state_path.nil? || state_path.to_s.strip.empty?
+      return false unless File.file?(File.expand_path(state_path.to_s))
+
+      state = JSON.parse(File.read(File.expand_path(state_path.to_s)))
+      return true if Array(state["issues"]).any? do |issue|
+        issue.is_a?(Hash) && %w[delivery_pull_request delivery_pull_requests reported_pr_urls candidate_pr_urls].any? do |key|
+          value = issue[key]
+          value.is_a?(Array) ? !value.empty? : !value.nil?
+        end
+      end
+
+      true
+    rescue JSON::ParserError, SystemCallError
+      true
     end
 
     def self.write_toml(path, data)
@@ -114,8 +142,11 @@ module Meringue
       File.delete(temp_path) if temp_path && File.exist?(temp_path)
     end
 
-    def initialize(data, path:, loaded: false)
+    def initialize(data, path:, loaded: false, file_data: nil, overrides: nil, override_sources: nil)
       @data = deep_stringify(data || {})
+      @file_data = deep_stringify(file_data.nil? ? data || {} : file_data)
+      @overrides = deep_stringify(overrides || {})
+      @override_sources = deep_stringify(override_sources || {})
       @path = File.expand_path(path.to_s)
       @loaded = loaded
     end
@@ -140,8 +171,65 @@ module Meringue
       end
     end
 
-    def with_overrides(overrides)
-      self.class.new(deep_merge(data, deep_stringify(overrides || {})), path: path, loaded: loaded?)
+    def path_present?(*keys)
+      sentinel = Object.new
+      value = keys.reduce(data) do |current, key|
+        return false unless current.is_a?(Hash) && current.key?(key.to_s)
+
+        current.fetch(key.to_s, sentinel)
+      end
+      !value.equal?(sentinel)
+    end
+
+    def override_source_for(*keys)
+      override_sources[keys.map(&:to_s).join(".")]
+    end
+
+    def with_overrides(new_overrides = nil, source: "runtime", **keyword_overrides)
+      supplied = new_overrides.nil? ? keyword_overrides : new_overrides
+      normalized = deep_stringify(supplied || {})
+      sources = override_sources.dup
+      each_leaf_path(normalized) { |parts, _value| sources[parts.join(".")] = source.to_s }
+      merged_overrides = deep_merge(overrides, normalized)
+      self.class.new(
+        deep_merge(file_data, merged_overrides),
+        path: path,
+        loaded: loaded?,
+        file_data: file_data,
+        overrides: merged_overrides,
+        override_sources: sources
+      )
+    end
+
+    def reload_file
+      loaded_config = self.class.load(path: path)
+      return loaded_config if overrides.empty?
+
+      self.class.new(
+        deep_merge(loaded_config.to_file_h, overrides),
+        path: path,
+        loaded: loaded_config.loaded?,
+        file_data: loaded_config.to_file_h,
+        overrides: overrides,
+        override_sources: override_sources
+      )
+    end
+
+    def setting(id, env: ENV)
+      Schema.fetch(id).effective_value(self, env: env)
+    end
+
+    def setting_source(id, env: ENV)
+      Schema.fetch(id).source(self, env: env)
+    end
+
+    def experiment_enabled?(id, legacy: nil)
+      definition = Meringue::Experiments::Registry.fetch(id)
+      explicit = value(*definition.config_path)
+      return explicit if explicit == true || explicit == false
+      return legacy unless legacy.nil?
+
+      definition.default
     end
 
     # A dependent worker normally cancels when its predecessor fails. `run` is
@@ -177,6 +265,25 @@ module Meringue
 
     def to_h
       deep_copy(data)
+    end
+
+    def to_file_h
+      deep_copy(file_data)
+    end
+
+    def fingerprint
+      Store.fingerprint(path)
+    end
+
+    def each_leaf_path(value = data, prefix = [], &block)
+      value.each do |key, child|
+        path_parts = prefix + [key.to_s]
+        if child.is_a?(Hash)
+          each_leaf_path(child, path_parts, &block)
+        else
+          yield(path_parts, child)
+        end
+      end
     end
 
     def self.deep_stringify(value)
@@ -470,3 +577,6 @@ module Meringue
     end
   end
 end
+
+require_relative "config/schema"
+require_relative "config/store"

@@ -1604,7 +1604,7 @@ kernel/harness validation: a non-Pi or non-resumable target is rejected rather t
 
 - `GetSessionDefaults` reports the future-session head and worker model and thinking levels and takes `{}`. It has no
   slash command: the dashboard status line already shows `harness: Pi` plus a compact model/thinking summary, and
-  `/config` prints each role's model and thinking level, so the typed `/defaults` was removed. Propose it when the
+  `/config` displays each role in the full-screen Agent defaults category (`/config --text` prints diagnostics), so the typed `/defaults` was removed. Propose it when the
   user asks about the defaults in natural language.
 - `GetModelCatalog` backs `/models refresh [harness]` with `{ "harness": "pi", "refresh": true }` (the `harness` key stays optional). It is read-only: it asks the harness which models exist, reuses the cached snapshot unless `refresh` is set, and reports an explicit unavailable/unsupported state instead of guessing when the harness cannot answer. Its output is a status (harness, availability, model count, timestamps, note) plus a few example references, not a listing: browsing the catalog is the TUI model picker that bare `/models` opens, which reads the same persisted snapshot. A head proposing this command for "what models can I use" therefore gets a short, scannable answer instead of a hundred log lines.
 - `SetDefaultSessionModel` backs the backward-compatible shared `/model <provider>/<model-id>` with

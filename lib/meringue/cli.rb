@@ -181,6 +181,8 @@ module Meringue
         harness_client_provider: ->(provider) { registry.worker_client_for(provider: provider) },
         head_runner_provider: ->(provider) { registry.head_runner_for(provider: provider, cwd: Dir.pwd) },
         default_harness_provider: registry.worker_provider,
+        default_head_harness_provider: registry.head_provider,
+        default_worker_harness_provider: registry.worker_provider,
         session_defaults_provider: ->(provider) { registry.session_defaults(provider: provider) },
         session_defaults_updater: lambda do |provider, model: nil, model_role: nil, thinking_level: nil, thinking_role: nil|
           registry.update_session_defaults!(
@@ -192,6 +194,7 @@ module Meringue
           )
         end,
         model_catalog_provider: ->(provider) { registry.model_catalog(provider: provider, cwd: Dir.pwd) },
+        runtime_config_updater: ->(updated_config, changed_ids: []) { registry.reload_config!(updated_config, changed_ids: changed_ids) },
         # Timeouts for worker provisioning are configurable under `[workspace]`, because how long
         # a `git worktree add` may take is a property of the repository and the disk.
         workspace_manager: config ? Workspace::Manager.from_config(config) : Workspace::Manager.new,
@@ -204,7 +207,10 @@ module Meringue
     end
 
     def runtime_config(options)
-      Config.load(path: options.fetch(:config_path)).with_overrides(config_overrides(options))
+      Config.migrate_settings!(
+        path: options.fetch(:config_path),
+        state_path: options.fetch(:state_path)
+      ).with_overrides(config_overrides(options), source: "cli")
     rescue Config::ParseError => e
       err.puts e.message
       nil
@@ -268,10 +274,10 @@ module Meringue
           /help                     # list command syntax
           /quit                     # quit the TUI
           /theme <name>             # set and persist the TUI theme
-          /harness <pi|claude|antigravity> # select the harness backend for future agents
+          /harness [head|worker] <pi|claude|antigravity> # select role-aware harness defaults
           /models [harness]         # open the searchable model picker; Enter sets the default model, Ctrl-R refreshes
           /keybind                  # show all TUI keybindings
-          /config                   # show active config, supported defaults, conflict policy, and keybindings
+          /config                   # open full-screen Settings (/config --text prints diagnostics)
           /jump [agent_id]          # open a focused workspace; omit id to navigate the AgentTree
           /recount                  # compact AgentTree numbering after records are removed
           Ctrl-B                    # open the selected issue's verified delivery PR; with nothing selected, pick from the open PRs

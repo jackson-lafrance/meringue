@@ -19,14 +19,22 @@ module Meringue
       def initialize(agent_tree_pane: Panes::AgentTreePane.new,
                      chat_pane: Panes::ChatPane.new,
                      agent_workspace_pane: Panes::AgentWorkspacePane.new,
-                     onboarding_pane: Panes::OnboardingPane.new)
+                     onboarding_pane: Panes::OnboardingPane.new,
+                     settings_pane: Panes::SettingsPane.new)
         @agent_tree_pane = agent_tree_pane
         @chat_pane = chat_pane
         @agent_workspace_pane = agent_workspace_pane
         @onboarding_pane = onboarding_pane
+        @settings_pane = settings_pane
       end
 
       def render(state, width:, height:, color: false)
+        raw_width = [width.to_i, 1].max
+        raw_height = [height.to_i, 1].max
+        if settings_active?(state)
+          canvas = Canvas.new(width: raw_width, height: raw_height)
+          return render_settings(canvas, state, raw_width, raw_height, color: color)
+        end
         width = bounded_width(width)
         height = bounded_height(height)
         canvas = Canvas.new(width: width, height: height)
@@ -122,6 +130,7 @@ module Meringue
       end
 
       def pane_at(state, width:, height:, x:, y:)
+        return "settings" if settings_active?(state)
         # Setup owns the screen, so clicks resolve only inside setup and never to
         # dashboard panes while it is up.
         return "onboarding" if onboarding_active?(state)
@@ -139,7 +148,8 @@ module Meringue
       # retain their existing mouse behavior. A scoped issue shows its own PR
       # instead, and zero/untracked PRs have no picker to open.
       def open_pull_requests_summary_hit?(state, width:, height:, x:, y:)
-        return false if onboarding_active?(state) || agent_workspace_active?(state)
+        return false if settings_active?(state) || onboarding_active?(state) || agent_workspace_active?(state)
+        return false unless Settings.github_enabled?(state)
         return false unless DeliveryPullRequest.scoped_id(state).empty?
         return false unless OpenPullRequests.count(state).positive?
 
@@ -310,7 +320,19 @@ module Meringue
         index < OpenPullRequests.entries(state).length ? index : :chrome
       end
 
+      def settings_active?(state)
+        settings_pane.active?(state)
+      end
+
+      def settings_hit(state, width:, height:, x:, y:)
+        return :inert unless settings_active?(state)
+
+        settings_pane.hit(state, width: width, height: height, x: x, y: y)
+      end
+
       def onboarding_active?(state)
+        return false if settings_active?(state)
+
         onboarding_pane.active?(state)
       end
 
@@ -568,13 +590,79 @@ module Meringue
 
       private
 
-      attr_reader :agent_tree_pane, :chat_pane, :agent_workspace_pane, :onboarding_pane
+      attr_reader :agent_tree_pane, :chat_pane, :agent_workspace_pane, :onboarding_pane, :settings_pane
 
       def agent_workspace_active?(state)
-        return false if onboarding_active?(state)
+        return false if settings_active?(state) || onboarding_active?(state)
 
         workspace = state.fetch("_agent_workspace", {}) || {}
         !!workspace.fetch("active", false)
+      end
+
+      def render_settings(canvas, state, width, height, color:)
+        geometry = settings_pane.geometry(state, width: width, height: height)
+        if geometry.fetch(:too_small)
+          message = "Terminal too small for Settings (need #{Settings::MIN_WIDTH}×#{Settings::MIN_HEIGHT})"
+          cancel = "Esc cancel"
+          canvas.write_segments(
+            [(width - message.length) / 2, 0].max,
+            [height / 2, 0].max,
+            [[message, Style::WARNING]],
+            max_width: width
+          )
+          canvas.write_segments(1, [height - 1, 0].max, [[cancel, Style::ACCENT_BOLD]], max_width: [width - 2, 1].max)
+          return canvas.render(color: color)
+        end
+
+        header = settings_pane.header_segments(state, width: width)
+        canvas.write_segments(
+          [(width - segment_text_width(header)) / 2, 0].max,
+          geometry.fetch(:header_y),
+          header,
+          max_width: width,
+          default_style: Style::TITLE
+        )
+        detail_bounds = geometry.fetch(:detail)
+        detail = settings_pane.detail(
+          state,
+          width: [detail_bounds.fetch(:width) - 4, 8].max,
+          height: [detail_bounds.fetch(:height) - 2, 1].max
+        )
+        if geometry.fetch(:wide)
+          rail = geometry.fetch(:rail)
+          draw_pane(
+            canvas,
+            rail.fetch(:x), rail.fetch(:y), rail.fetch(:width), rail.fetch(:height),
+            "categories",
+            settings_pane.category_lines(state, height: rail.fetch(:height) - 2),
+            active: true
+          )
+        end
+        selected_category = Settings.snapshot(state).fetch("category", "settings")
+        title = geometry.fetch(:wide) ? selected_category : "#{selected_category}  ·  Tab/Shift-Tab categories"
+        draw_pane(
+          canvas,
+          detail_bounds.fetch(:x), detail_bounds.fetch(:y), detail_bounds.fetch(:width), detail_bounds.fetch(:height),
+          title,
+          detail.fetch(:lines),
+          active: true
+        )
+        footer_y = geometry.fetch(:footer_y)
+        footer = settings_pane.footer_segments(state, width: width)
+        actions = width >= Settings::COMPACT_WIDTH ? settings_pane.action_segments(state) : []
+        action_width = segment_text_width(actions)
+        canvas.write_segments(1, footer_y, footer, max_width: [width - action_width - 3, 1].max, default_style: Style::DIM)
+        canvas.write_segments([width - action_width - 1, 0].max, footer_y, actions, max_width: action_width)
+        counter = detail.fetch(:counter, "").to_s
+        unless counter.empty? || footer_y <= geometry.fetch(:body_y)
+          canvas.write_segments(
+            [detail_bounds.fetch(:x) + detail_bounds.fetch(:width) - counter.length - 2, detail_bounds.fetch(:x) + 2].max,
+            [footer_y - 1, geometry.fetch(:body_y)].max,
+            [[counter, Style::DIM]],
+            max_width: [detail_bounds.fetch(:width) - 4, 1].max
+          )
+        end
+        canvas.render(color: color)
       end
 
       # The setup screen: centered card, animated chrome above it, one caption

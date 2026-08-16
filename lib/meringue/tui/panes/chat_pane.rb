@@ -347,11 +347,10 @@ module Meringue
         end
 
         def bottom_right_status_line(state)
-          label = active_harness_label(state)
+          segments = compact_harness_status_segments(state)
           defaults = (state.fetch("metadata", {}) || {}).fetch("pi_session_defaults", {}) || {}
-          return [] if label.empty? && defaults.empty?
+          return [] if segments.empty? && defaults.empty?
 
-          segments = label.empty? ? [] : [["harness: ", Style::DIM], [label, Style::ACCENT_BOLD]]
           unless defaults.empty?
             head_model = defaults.dig("roles", "head", "model") || defaults["model"] || "mixed"
             worker_model = defaults.dig("roles", "worker", "model") || defaults["model"] || "mixed"
@@ -560,7 +559,7 @@ module Meringue
         end
 
         def delivery_pr_picker?(state)
-          delivery_pr_picker_state(state).fetch("active", false) == true
+          Settings.github_enabled?(state) && delivery_pr_picker_state(state).fetch("active", false) == true
         end
 
         # Highlighted row, clamped to the list that exists this frame so a PR that
@@ -709,6 +708,8 @@ module Meringue
         # and `/keybind` documents it, but repeating it on every frame cost the
         # width this line needs for everything else.
         def delivery_pr_hint_segments(state)
+          return [] unless Settings.github_enabled?(state)
+
           scoped_id = DeliveryPullRequest.scoped_id(state)
           return open_pull_requests_hint_segments(state) if scoped_id.empty?
 
@@ -1436,6 +1437,24 @@ module Meringue
           return "" if provider.empty?
 
           Meringue::Harness::Registry.provider_label(provider)
+        end
+
+        def compact_harness_status_segments(state)
+          metadata = state.fetch("metadata", {}) || {}
+          head = metadata.fetch("active_head_harness_label", "").to_s.strip
+          worker = metadata.fetch("active_worker_harness_label", "").to_s.strip
+          head = Meringue::Harness::Registry.provider_label(metadata["active_head_harness"]) if head.empty? && metadata["active_head_harness"]
+          worker = Meringue::Harness::Registry.provider_label(metadata["active_worker_harness"]) if worker.empty? && metadata["active_worker_harness"]
+          shared = active_harness_label(state)
+          head = shared if head.empty?
+          worker = shared if worker.empty?
+          return [] if head.empty? && worker.empty?
+          return [["harness: ", Style::DIM], [head, Style::ACCENT_BOLD]] if head == worker
+
+          [
+            ["head: ", Style::DIM], [head, Style::ACCENT_BOLD],
+            [" · worker: ", Style::DIM], [worker, Style::ACCENT_BOLD]
+          ]
         end
 
         def compact_status_segments(state, pending_count)

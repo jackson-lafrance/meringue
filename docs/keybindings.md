@@ -1,6 +1,6 @@
 # TUI Keybindings
 
-Use `/keybind` inside the interactive TUI to show the active keybinding list in the logs pane. Defaults can be customized in `~/.meringue/config.toml` under `[tui.keybindings]`; see `docs/config.md` for the full schema.
+Use `/keybind` inside the interactive TUI to show the active keybinding list in the logs pane, or `/config` to edit every action in the full-screen Keybindings category. Defaults can also be customized in `~/.meringue/config.toml` under `[tui.keybindings]`; see `docs/config.md` for the full schema.
 
 ## Customizing
 

@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "base64"
+require "json"
 require "shellwords"
 
 require_relative "../tui/style"
@@ -19,7 +21,7 @@ module Meringue
         ["/prompt <agent_id> \"<message>\"", "Prompt a worker session."],
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
-        ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
+        ["/harness [head|worker] <pi|claude|antigravity>", "Select role-aware harness defaults for future agents; omit the role to update both."],
         ["/model [head|worker] <provider>/<model-id>", "Persist the model for all future Pi sessions; omit the role to update both future heads and workers. Existing sessions are unchanged. The model id may itself contain / and :."],
         ["/thinking [head|worker] <level>", "Persist a Pi thinking default. Omit the role to update both future heads and workers; existing sessions are unchanged."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
@@ -34,7 +36,7 @@ module Meringue
         ["/prs", "Open the picker for every tracked pull request that is still open."],
         ["/setup", "Reopen first-run setup: theme, harness, model, and thinking level."],
         ["/keybind", "Show all TUI keybindings."],
-        ["/config", "Show the active config, supported defaults, conflict policy, and keybindings."],
+        ["/config", "Open full-screen Settings; /config --text prints read-only diagnostics."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
@@ -46,6 +48,8 @@ module Meringue
       ].freeze
 
       ARGUMENT_SUGGESTION_CONTEXTS = [
+        { "prefix" => "/harness head", "source" => "harness_providers", "append_space" => false },
+        { "prefix" => "/harness worker", "source" => "harness_providers", "append_space" => false },
         { "prefix" => "/harness", "source" => "harness_providers", "append_space" => false },
         { "prefix" => "/models", "source" => "harness_providers", "append_space" => false },
         { "prefix" => "/issue create", "source" => "projects", "append_space" => true },
@@ -723,7 +727,7 @@ module Meringue
         when "keybind"
           invalid("/keybind is a local TUI command. Run it in the interactive TUI to show keybindings.", usage: "/keybind")
         when "config"
-          invalid("/config is a local TUI command. Run it in the interactive TUI to show the active configuration.", usage: "/config")
+          parse_config(arguments)
         when "tree"
           kernel_command("ListAll", "view" => "tree")
         when "state"
@@ -749,6 +753,29 @@ module Meringue
 
       private
 
+      def parse_config(arguments)
+        tokens = split_arguments(arguments)
+        if tokens.empty? || tokens == ["--text"]
+          return invalid("/config is a local TUI command. Run it in the interactive TUI to edit the active configuration.", usage: "/config")
+        end
+        return invalid("Usage: /config") unless tokens.length == 2 && tokens.first == "save"
+        return invalid("Configuration save payload is too large.") if tokens.last.bytesize > 1_000_000
+
+        decoded = Base64.urlsafe_decode64(tokens.last)
+        payload = JSON.parse(decoded)
+        unless payload.is_a?(Hash) && payload["changes"].is_a?(Hash) && payload["base_fingerprint"].is_a?(String)
+          return invalid("Configuration save payload is invalid.")
+        end
+
+        kernel_command(
+          "SaveConfiguration",
+          "base_fingerprint" => payload.fetch("base_fingerprint"),
+          "changes" => payload.fetch("changes")
+        )
+      rescue ArgumentError, JSON::ParserError
+        invalid("Configuration save payload is invalid.")
+      end
+
       def parse_theme(arguments)
         tokens = split_arguments(arguments)
         return invalid("Usage: /theme <name>") unless tokens.length == 1
@@ -758,9 +785,12 @@ module Meringue
 
       def parse_harness(arguments)
         tokens = split_arguments(arguments)
-        return invalid("Usage: /harness <pi|claude|antigravity>") unless tokens.length == 1
+        return kernel_command("SetHarness", "provider" => tokens[0]) if tokens.length == 1
+        if tokens.length == 2 && %w[head worker].include?(tokens[0].to_s.downcase)
+          return kernel_command("SetHarness", "role" => tokens[0].downcase, "provider" => tokens[1])
+        end
 
-        kernel_command("SetHarness", "provider" => tokens[0])
+        invalid("Usage: /harness [head|worker] <pi|claude|antigravity>")
       end
 
       # `/models` opens the local TUI model picker: a searchable list of the
