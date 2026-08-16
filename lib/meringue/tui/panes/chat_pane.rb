@@ -1404,7 +1404,7 @@ module Meringue
             return [["⧉ logs select", Style::ACCENT], ["  arrows move · Shift+arrows extend · Ctrl-C copies · Esc exits", Style::MUTED]]
           end
           return [["⧉ selection", Style::ACCENT], ["  Ctrl-C copies", Style::MUTED]] if selection.fetch("active", false)
-          return [["double-click a word · triple-click a paragraph · Alt-V or Shift+arrows select logs", Style::MUTED]] if logs_pane_focused?(state)
+          return [["use the mouse or shift+arrows to select text.", Style::MUTED]] if logs_pane_focused?(state)
 
           []
         end
