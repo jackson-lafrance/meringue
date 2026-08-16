@@ -332,7 +332,100 @@ class TuiChatPaneTest < Minitest::Test
     assert_operator @pane.composer_row_spans(state, width: 96).length, :>, 1
   end
 
+  def test_selected_worker_title_reports_effective_settings_context_and_turns
+    worker = agent_record(
+      "P1-I1-W1",
+      "status" => "working",
+      "session_settings" => {
+        "model" => { "reference" => "anthropic/claude-opus-5" },
+        "thinking_level" => "high",
+        "availability" => "available"
+      },
+      "session_stats" => {
+        "user_messages" => 3,
+        "context_usage" => { "tokens" => 12_500, "capacity" => 50_000, "approximate" => true }
+      }
+    )
+    state = scoped_worker_state(worker)
+
+    title = @pane.log_pane_title(state)
+
+    assert_includes title, "working"
+    assert_includes title, "model anthropic/claude-opus-5"
+    assert_includes title, "thinking high"
+    assert_includes title, "context ~12.5K/50K (25%)"
+    assert_includes title, "turns 3"
+  end
+
+  def test_selected_worker_title_computes_percentage_from_used_and_capacity
+    worker = agent_record(
+      "P1-I1-W1",
+      "session_stats" => { "context_usage" => { "tokens" => 1, "capacity" => 3 } }
+    )
+
+    title = @pane.log_pane_title(scoped_worker_state(worker))
+
+    assert_includes title, "context 1/3 (33.3%)"
+  end
+
+  def test_selected_worker_title_labels_missing_telemetry_instead_of_guessing
+    worker = agent_record("P1-I1-W1", "status" => "idle")
+
+    title = @pane.log_pane_title(scoped_worker_state(worker))
+
+    assert_includes title, "idle"
+    assert_includes title, "model unavailable"
+    assert_includes title, "thinking unavailable"
+    assert_includes title, "context unavailable"
+    refute_includes title, "0%"
+  end
+
+  def test_selected_worker_title_keeps_high_signal_fields_when_resized_narrow
+    worker = agent_record(
+      "P1-I1-W1",
+      "session_settings" => {
+        "model" => { "reference" => "anthropic/claude-opus-5" },
+        "thinking_level" => "max"
+      },
+      "session_stats" => { "context_usage" => { "tokens" => 80_000, "capacity" => 100_000 } }
+    )
+
+    title = @pane.log_pane_title(scoped_worker_state(worker), width: 52)
+
+    assert_operator title.length, :<=, 52
+    assert_includes title, "P1-I1-W1"
+    assert_includes title, "working"
+    assert_includes title, "t max"
+    assert_includes title, "ctx"
+  end
+
+  def test_selected_worker_title_refreshes_when_session_state_changes
+    worker = agent_record(
+      "P1-I1-W1",
+      "session_stats" => { "context_usage" => { "tokens" => 10, "capacity" => 100 } }
+    )
+    state = scoped_worker_state(worker)
+    first = @pane.log_pane_title(state)
+
+    worker["status"] = "errored"
+    worker["session_stats"]["context_usage"]["tokens"] = 90
+    second = @pane.log_pane_title(state)
+
+    assert_includes first, "working"
+    assert_includes first, "context 10/100 (10%)"
+    assert_includes second, "errored"
+    assert_includes second, "context 90/100 (90%)"
+  end
+
   private
+
+  def scoped_worker_state(worker)
+    state = empty_state.merge(
+      "issues" => [issue_record("P1-I1")],
+      "agents" => [worker]
+    )
+    state.merge(Meringue::TUI::LogScope::STATE_KEY => Meringue::TUI::LogScope.snapshot(state, worker.fetch("id")))
+  end
 
   def chat_state(buffer, cursor: nil, selection: nil)
     chat = { "input_buffer" => buffer, "input_cursor" => cursor.nil? ? buffer.length : cursor }

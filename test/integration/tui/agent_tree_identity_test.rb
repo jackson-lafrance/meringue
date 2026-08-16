@@ -113,7 +113,10 @@ class TuiAgentTreeIdentityTest < Minitest::Test
     )
     expected = Style.agent_chrome_style("P1-I1-W1", bold: true)
 
-    assert_equal "logs — P1-I1-W1", chat.log_pane_title(scoped)
+    title = chat.log_pane_title(scoped)
+    assert_includes title, "logs — P1-I1-W1"
+    assert_includes title, "completed"
+    assert_includes title, "model unavailable"
     assert_equal expected, chat.log_pane_title_style(scoped)
     assert_equal expected, chat.composer_title_style(scoped)
     # An issue filter uses the issue's color; an unfiltered or project-filtered
