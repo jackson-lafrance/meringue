@@ -190,7 +190,8 @@ class TuiChatPaneTest < Minitest::Test
     )
 
     text = plain_line(@pane.bottom_right_status_line(state))
-    assert_equal "harness: Pi · Pi defaults: openai/gpt-5.6-sol · head xhigh · worker xhigh", text
+    assert_equal "harness: Pi · model: openai/gpt-5.6-sol · thinking: xhigh", text
+    refute_includes text, "Pi defaults"
   end
 
   def test_bottom_right_status_shows_distinct_role_thinking_defaults
@@ -210,7 +211,45 @@ class TuiChatPaneTest < Minitest::Test
     )
 
     text = plain_line(@pane.bottom_right_status_line(state))
-    assert_equal "harness: Pi · Pi defaults: anthropic/claude-opus-5 · head low · worker max", text
+    assert_equal "harness: Pi · model: anthropic/claude-opus-5 · head thinking: low · worker thinking: max", text
+  end
+
+  def test_bottom_right_status_shows_distinct_role_model_defaults
+    state = composed_state(
+      empty_state.merge(
+        "metadata" => {
+          "active_harness" => "pi",
+          "pi_session_defaults" => {
+            "roles" => {
+              "head" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "high" },
+              "worker" => { "model" => "anthropic/claude-opus-5", "thinking_level" => "high" }
+            }
+          }
+        }
+      )
+    )
+
+    text = plain_line(@pane.bottom_right_status_line(state))
+    assert_equal "harness: Pi · head model: openai/gpt-5.6-sol · worker model: anthropic/claude-opus-5 · thinking: high", text
+  end
+
+  def test_bottom_right_status_shows_both_role_model_and_thinking_differences
+    state = composed_state(
+      empty_state.merge(
+        "metadata" => {
+          "active_harness" => "pi",
+          "pi_session_defaults" => {
+            "roles" => {
+              "head" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "low" },
+              "worker" => { "model" => "anthropic/claude-opus-5", "thinking_level" => "max" }
+            }
+          }
+        }
+      )
+    )
+
+    text = plain_line(@pane.bottom_right_status_line(state))
+    assert_equal "harness: Pi · head model: openai/gpt-5.6-sol (thinking: low) · worker model: anthropic/claude-opus-5 (thinking: max)", text
   end
 
   def test_slash_suggestions_only_activate_for_slash_prompts

@@ -275,8 +275,8 @@ module Meringue
       end
 
       # Effective defaults used when the registry next starts a Pi head or
-      # worker. Role details stay visible when dedicated thinking defaults or
-      # older explicit argv values differ.
+      # worker. Role details stay visible when dedicated model/thinking defaults
+      # or older explicit argv values differ.
       def session_defaults(provider: "pi")
         provider = normalize_provider!(provider)
         raise ArgumentError, "Session defaults are currently Pi-only." unless provider == "pi"
@@ -301,15 +301,58 @@ module Meringue
         }
       end
 
+      # Applies only runtime-safe provider defaults after an atomic Settings
+      # transaction. Provider commands/environment/arguments and blacklist policy
+      # remain restart-required, and cached clients stay attached to existing
+      # sessions. Pi clients receive only replacement spawn defaults.
+      def reload_config!(updated_config, changed_ids: [])
+        live_role_ids = %w[
+          agent.head_harness agent.worker_harness
+          agent.head_model agent.worker_model
+          agent.head_thinking agent.worker_thinking
+        ]
+        ids = Array(changed_ids).map(&:to_s)
+        return self if (ids & live_role_ids).empty?
+
+        data = config.to_h
+        data["harness"] = {} unless data["harness"].is_a?(Hash)
+        updated_harness = updated_config.section("harness")
+        %w[provider head_provider worker_provider].each do |key|
+          if updated_harness.key?(key)
+            data.fetch("harness")[key] = Config.deep_copy(updated_harness[key])
+          else
+            data.fetch("harness").delete(key)
+          end
+        end
+        data.fetch("harness")["pi"] = {} unless data.fetch("harness")["pi"].is_a?(Hash)
+        updated_pi = updated_config.section("harness", "pi")
+        %w[model head_model worker_model thinking_level head_thinking_level worker_thinking_level].each do |key|
+          if updated_pi.key?(key)
+            data.fetch("harness").fetch("pi")[key] = Config.deep_copy(updated_pi[key])
+          else
+            data.fetch("harness").fetch("pi").delete(key)
+          end
+        end
+        @config = Config.new(data, path: updated_config.path, loaded: updated_config.loaded?, file_data: updated_config.to_file_h)
+        provider_settings = provider_config("pi")
+        @clients.each do |(provider, kind), client|
+          next unless provider == "pi" && client.respond_to?(:configure_spawn_arguments)
+
+          client.configure_spawn_arguments(extra_args_for("pi", provider_settings, kind))
+        end
+        self
+      end
+
       # Saves the selected values and reconfigures cached Pi clients in place.
       # Existing RPC processes keep their current effective settings; only a
       # later new-session spawn applies the replacement model/thinking argv.
-      def update_session_defaults!(provider: "pi", model: nil, thinking_level: nil, thinking_role: nil)
+      def update_session_defaults!(provider: "pi", model: nil, model_role: nil, thinking_level: nil, thinking_role: nil)
         provider = normalize_provider!(provider)
         raise ArgumentError, "Session defaults are currently Pi-only." unless provider == "pi"
 
         saved = Config.save_pi_session_defaults!(
           model: model,
+          model_role: model_role,
           thinking_level: thinking_level,
           thinking_role: thinking_role,
           path: config.path
@@ -379,7 +422,8 @@ module Meringue
         return args unless provider == "pi"
 
         args = args.dup
-        model = provider_config["model"].to_s.strip
+        model = provider_config["#{kind}_model"].to_s.strip
+        model = provider_config["model"].to_s.strip if model.empty?
         thinking_level = provider_config["#{kind}_thinking_level"].to_s.strip
         thinking_level = provider_config["thinking_level"].to_s.strip if thinking_level.empty?
         args.concat(["--model", model]) unless model.empty?

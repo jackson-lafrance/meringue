@@ -13,27 +13,26 @@ module Meringue
       BOTTOM_HINT_HEIGHT = 1
       MAX_COMPOSER_HEIGHT = 12
       MIN_CHAT_HEIGHT = 5
-      # First-run setup is a centered card on an otherwise empty screen, so it
-      # cannot be narrower than a readable choice row.
-      ONBOARDING_MIN_CARD_WIDTH = 20
       def initialize(agent_tree_pane: Panes::AgentTreePane.new,
                      chat_pane: Panes::ChatPane.new,
                      agent_workspace_pane: Panes::AgentWorkspacePane.new,
-                     onboarding_pane: Panes::OnboardingPane.new)
+                     settings_pane: Panes::SettingsPane.new)
         @agent_tree_pane = agent_tree_pane
         @chat_pane = chat_pane
         @agent_workspace_pane = agent_workspace_pane
-        @onboarding_pane = onboarding_pane
+        @settings_pane = settings_pane
       end
 
       def render(state, width:, height:, color: false)
+        raw_width = [width.to_i, 1].max
+        raw_height = [height.to_i, 1].max
+        if settings_active?(state)
+          canvas = Canvas.new(width: raw_width, height: raw_height)
+          return render_settings(canvas, state, raw_width, raw_height, color: color)
+        end
         width = bounded_width(width)
         height = bounded_height(height)
         canvas = Canvas.new(width: width, height: height)
-        # First-run setup takes over the whole terminal: it is the one modal that
-        # opens by itself, and rendering the dashboard behind it is what made a
-        # stray click meaningful. It wins over every other view.
-        return render_onboarding(canvas, state, width, height, color: color) if onboarding_active?(state)
         return render_agent_workspace(canvas, state, width, height, color: color) if agent_workspace_active?(state)
 
         metrics = layout_metrics(width, height, state)
@@ -122,9 +121,7 @@ module Meringue
       end
 
       def pane_at(state, width:, height:, x:, y:)
-        # Setup owns the screen, so clicks resolve only inside setup and never to
-        # dashboard panes while it is up.
-        return "onboarding" if onboarding_active?(state)
+        return "settings" if settings_active?(state)
         return "agent_workspace" if agent_workspace_active?(state)
 
         metrics = layout_metrics([width.to_i, MIN_WIDTH].max, [height.to_i, MIN_HEIGHT].max, state)
@@ -139,7 +136,8 @@ module Meringue
       # retain their existing mouse behavior. A scoped issue shows its own PR
       # instead, and zero/untracked PRs have no picker to open.
       def open_pull_requests_summary_hit?(state, width:, height:, x:, y:)
-        return false if onboarding_active?(state) || agent_workspace_active?(state)
+        return false if settings_active?(state) || agent_workspace_active?(state)
+        return false unless Settings.github_enabled?(state)
         return false unless DeliveryPullRequest.scoped_id(state).empty?
         return false unless OpenPullRequests.count(state).positive?
 
@@ -310,120 +308,14 @@ module Meringue
         index < OpenPullRequests.entries(state).length ? index : :chrome
       end
 
-      def onboarding_active?(state)
-        onboarding_pane.active?(state)
+      def settings_active?(state)
+        settings_pane.active?(state)
       end
 
-      # Whether this frame still has motion left in it, so the app can ask for
-      # animation frames only while something is actually moving.
-      def onboarding_animating?(state)
-        onboarding_pane.animating?(state)
-      end
+      def settings_hit(state, width:, height:, x:, y:)
+        return :inert unless settings_active?(state)
 
-      # Geometry of the full-screen setup screen. Everything is derived from the
-      # terminal's real viewport every frame, so a resize is just a recompute:
-      # chrome (title, sweep rule, step rail, progress bar, caption) drops off in
-      # a fixed order as rows run out, and the card and its exit hint are the last
-      # things standing.
-      def onboarding_geometry(state, width:, height:)
-        width = bounded_width(width)
-        height = bounded_height(height)
-        card_width = [[width - (OUTER_MARGIN * 2), Onboarding::MAX_CARD_WIDTH].min, ONBOARDING_MIN_CARD_WIDTH].max
-        card_width = [card_width, width].min
-        content_width = [card_width - 4, 8].max
-        hint_y = [height - BOTTOM_HINT_HEIGHT, 0].max
-        available = [hint_y, 1].max
-
-        # The drop ladder, decorative first: as rows run out the flow gives up the
-        # rule, then the title, then the step rail, then the progress bar, then the
-        # caption. The card and the bottom hint (which names Esc) always survive.
-        # The rail and rule also need columns, not just rows, so a narrow terminal
-        # drops them without waiting to be short.
-        rule = available >= 14 && card_width >= 32
-        header = available >= 12
-        rail = available >= 11 && card_width >= 52
-        progress = available >= 9
-        caption = available >= 7
-        chrome_height = [header, rule, rail, progress].count(true)
-        gaps = 0
-        gaps += 1 if (header || rule) && (rail || progress)
-        gaps += 1 if chrome_height.positive?
-
-        capacity = available - chrome_height - gaps - (caption ? 1 : 0) - 2
-        card = onboarding_pane.card(state, width: content_width, height: [capacity, 1].max)
-        card_height = [card.fetch(:lines).length + 2, [available, 3].max].min
-        total = chrome_height + gaps + card_height + (caption ? 1 : 0)
-        cursor = [(available - total) / 2, 0].max
-
-        geometry = {
-          card: card,
-          card_x: [(width - card_width) / 2, 0].max,
-          card_width: card_width,
-          content_width: content_width,
-          hint_y: hint_y,
-          hint_width: [width - (OUTER_MARGIN * 2) - 1, 1].max,
-          hint_x: OUTER_MARGIN + 1
-        }
-        if header
-          geometry[:header_y] = cursor
-          cursor += 1
-        end
-        if rule
-          geometry[:rule_y] = cursor
-          cursor += 1
-        end
-        cursor += 1 if (header || rule) && (rail || progress)
-        if rail
-          geometry[:rail_y] = cursor
-          cursor += 1
-        end
-        if progress
-          geometry[:progress_y] = cursor
-          cursor += 1
-        end
-        cursor += 1 if chrome_height.positive?
-        geometry[:card_y] = cursor
-        geometry[:card_height] = card_height
-        cursor += card_height
-        geometry[:caption_y] = cursor if caption
-        geometry
-      end
-
-      # Where a click landed relative to the full-screen setup card: a row index
-      # for an option, `:chrome` for card chrome/prose/borders, and `:outside` for
-      # anything off the card. The row index is absolute in Onboarding.rows, so a
-      # windowed model list can apply the exact visible row that was clicked.
-      def onboarding_hit(state, width:, height:, x:, y:)
-        return :outside unless onboarding_active?(state)
-
-        geometry = onboarding_geometry(state, width: width, height: height)
-        bounds = {
-          x: geometry.fetch(:card_x),
-          y: geometry.fetch(:card_y),
-          width: geometry.fetch(:card_width),
-          height: geometry.fetch(:card_height)
-        }
-        return :outside unless point_in_bounds?(x.to_i, y.to_i, bounds)
-
-        content_x = geometry.fetch(:card_x) + 2
-        content_y = geometry.fetch(:card_y) + 1
-        content_width = [geometry.fetch(:card_width) - 4, 0].max
-        content_height = [geometry.fetch(:card_height) - 2, 0].max
-        return :chrome if content_width.zero? || content_height.zero?
-        return :chrome unless x.to_i >= content_x && x.to_i < content_x + content_width
-        return :chrome unless y.to_i >= content_y && y.to_i < content_y + content_height
-
-        card = geometry.fetch(:card)
-        window = card.fetch(:window, {})
-        row_start = card.fetch(:row_start, nil)
-        return :chrome unless row_start
-
-        row = y.to_i - content_y
-        visible_count = window.fetch("finish", 0).to_i - window.fetch("start", 0).to_i
-        return :chrome unless row >= row_start && row < row_start + visible_count
-
-        index = window.fetch("start", 0).to_i + (row - row_start)
-        index < window.fetch("count", 0).to_i ? index : :chrome
+        settings_pane.hit(state, width: width, height: height, x: x, y: y)
       end
 
       # Same three answers for the model picker: a row index, `:chrome` for its
@@ -446,7 +338,7 @@ module Meringue
       end
 
       def agent_tree_item_at(state, width:, height:, x:, y:)
-        return nil if onboarding_active?(state) || agent_workspace_active?(state)
+        return nil if settings_active?(state) || agent_workspace_active?(state)
 
         metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
         return nil unless point_in_bounds?(x.to_i, y.to_i, pane_bounds(metrics, :sidebar_x, :top_y, :sidebar_width, :top_height))
@@ -552,7 +444,7 @@ module Meringue
       end
 
       def scroll_limits(state, width:, height:)
-        return { "agent_tree" => 0, "logs" => 0, "chat" => 0 } if onboarding_active?(state) || agent_workspace_active?(state)
+        return { "agent_tree" => 0, "logs" => 0, "chat" => 0 } if settings_active?(state) || agent_workspace_active?(state)
 
         width = [width.to_i, MIN_WIDTH].max
         height = [height.to_i, MIN_HEIGHT].max
@@ -568,106 +460,87 @@ module Meringue
 
       private
 
-      attr_reader :agent_tree_pane, :chat_pane, :agent_workspace_pane, :onboarding_pane
+      attr_reader :agent_tree_pane, :chat_pane, :agent_workspace_pane, :settings_pane
 
       def agent_workspace_active?(state)
-        return false if onboarding_active?(state)
+        return false if settings_active?(state)
 
         workspace = state.fetch("_agent_workspace", {}) || {}
         !!workspace.fetch("active", false)
       end
 
-      # The setup screen: centered card, animated chrome above it, one caption
-      # under it, and the bottom hint line that says option rows can be clicked
-      # but empty space cannot skip setup. Drawn with the same Canvas/draw_pane
-      # primitives as every pane, so there is no second renderer to keep in sync.
-      def render_onboarding(canvas, state, width, height, color:)
-        geometry = onboarding_geometry(state, width: width, height: height)
-        card_x = geometry.fetch(:card_x)
-        card_width = geometry.fetch(:card_width)
-        content_width = geometry.fetch(:content_width)
-
-        if geometry[:header_y]
-          header = onboarding_pane.header_segments(state)
+      def render_settings(canvas, state, width, height, color:)
+        geometry = settings_pane.geometry(state, width: width, height: height)
+        if geometry.fetch(:too_small)
+          mode = Settings.snapshot(state).fetch("mode", "settings") == "setup" ? "Setup" : "Settings"
+          message = "Terminal too small for #{mode} (need #{Settings::MIN_WIDTH}×#{Settings::MIN_HEIGHT})"
+          cancel = "Esc cancel"
           canvas.write_segments(
-            card_x + centering_offset(card_width, segment_text_width(header)),
-            geometry.fetch(:header_y),
-            header,
-            max_width: card_width,
-            default_style: Style::TITLE
+            [(width - message.length) / 2, 0].max,
+            [height / 2, 0].max,
+            [[message, Style::WARNING]],
+            max_width: width
           )
-        end
-        if geometry[:rule_y]
-          canvas.write_segments(
-            card_x + 2,
-            geometry.fetch(:rule_y),
-            onboarding_pane.rule_segments(state, width: content_width),
-            max_width: content_width,
-            default_style: Style::BORDER
-          )
-        end
-        if geometry[:rail_y]
-          canvas.write_segments(
-            card_x + 2,
-            geometry.fetch(:rail_y),
-            onboarding_pane.rail_segments(state, width: content_width),
-            max_width: content_width,
-            default_style: Style::DIM
-          )
-        end
-        if geometry[:progress_y]
-          canvas.write_segments(
-            card_x + 2,
-            geometry.fetch(:progress_y),
-            onboarding_pane.progress_segments(state, width: content_width),
-            max_width: content_width,
-            default_style: Style::DIM
-          )
+          canvas.write_segments(1, [height - 1, 0].max, [[cancel, Style::ACCENT_BOLD]], max_width: [width - 2, 1].max)
+          return canvas.render(color: color)
         end
 
-        card = geometry.fetch(:card)
+        header = settings_pane.header_segments(state, width: width)
+        canvas.write_segments(
+          [(width - segment_text_width(header)) / 2, 0].max,
+          geometry.fetch(:header_y),
+          header,
+          max_width: width,
+          default_style: Style::TITLE
+        )
+        detail_bounds = geometry.fetch(:detail)
+        detail = settings_pane.detail(
+          state,
+          width: [detail_bounds.fetch(:width) - 4, 8].max,
+          height: [detail_bounds.fetch(:height) - 2, 1].max
+        )
+        if geometry.fetch(:wide)
+          rail = geometry.fetch(:rail)
+          draw_pane(
+            canvas,
+            rail.fetch(:x), rail.fetch(:y), rail.fetch(:width), rail.fetch(:height),
+            Settings.snapshot(state).fetch("mode", "settings") == "setup" ? "setup steps" : "categories",
+            settings_pane.category_lines(state, height: rail.fetch(:height) - 2),
+            active: true
+          )
+        end
+        snap = Settings.snapshot(state)
+        selected_category = snap.fetch("category", "settings")
+        title = if geometry.fetch(:wide)
+                  selected_category
+                elsif snap.fetch("mode", "settings") == "setup"
+                  "#{snap.fetch("setup_step", 1)}/#{snap.fetch("setup_step_count", 1)} · #{selected_category}  ·  Tab steps"
+                else
+                  "#{selected_category}  ·  Tab/Shift-Tab categories"
+                end
         draw_pane(
           canvas,
-          card_x,
-          geometry.fetch(:card_y),
-          card_width,
-          geometry.fetch(:card_height),
-          onboarding_pane.title(state),
-          card.fetch(:lines),
-          active: true,
-          title_style: Style::PANEL_TITLE
+          detail_bounds.fetch(:x), detail_bounds.fetch(:y), detail_bounds.fetch(:width), detail_bounds.fetch(:height),
+          title,
+          detail.fetch(:lines),
+          active: true
         )
-        if geometry[:caption_y]
-          caption_width = [card_width - 2, 1].max
+        footer_y = geometry.fetch(:footer_y)
+        footer = settings_pane.footer_segments(state, width: width)
+        actions = width >= Settings::WIDE_WIDTH ? settings_pane.action_segments(state) : []
+        action_width = segment_text_width(actions)
+        canvas.write_segments(1, footer_y, footer, max_width: [width - action_width - 3, 1].max, default_style: Style::DIM)
+        canvas.write_segments([width - action_width - 1, 0].max, footer_y, actions, max_width: action_width)
+        counter = detail.fetch(:counter, "").to_s
+        unless counter.empty? || footer_y <= geometry.fetch(:body_y)
           canvas.write_segments(
-            card_x + 2,
-            geometry.fetch(:caption_y),
-            onboarding_pane.caption_segments(state, window: card.fetch(:window), width: caption_width),
-            max_width: caption_width,
-            default_style: Style::DIM
+            [detail_bounds.fetch(:x) + detail_bounds.fetch(:width) - counter.length - 2, detail_bounds.fetch(:x) + 2].max,
+            [footer_y - 1, geometry.fetch(:body_y)].max,
+            [[counter, Style::DIM]],
+            max_width: [detail_bounds.fetch(:width) - 4, 1].max
           )
         end
-
-        # The hint half is sized first and may use the whole line: it carries the
-        # answer to a refused click, which matters more than the standing status on
-        # the right. The status is dropped rather than clipped if what is left over
-        # is too narrow for it.
-        hint_width = geometry.fetch(:hint_width)
-        hint = onboarding_pane.hint_segments(state, width: hint_width)
-        remaining = hint_width - segment_text_width(hint) - 2
-        draw_hint_line(
-          canvas,
-          geometry.fetch(:hint_x),
-          geometry.fetch(:hint_y),
-          hint_width,
-          hint,
-          onboarding_pane.right_hint_segments(state, width: remaining)
-        )
         canvas.render(color: color)
-      end
-
-      def centering_offset(outer_width, inner_width)
-        [(outer_width.to_i - inner_width.to_i) / 2, 0].max
       end
 
       def render_agent_workspace(canvas, state, width, height, color:)
@@ -788,7 +661,7 @@ module Meringue
       # Shared AgentTree geometry so hit-testing, scrolling, reveal, and the
       # overflow indicator all wrap the same content at the same width.
       def agent_tree_content_dimensions(state, width:, height:)
-        return nil if onboarding_active?(state) || agent_workspace_active?(state)
+        return nil if settings_active?(state) || agent_workspace_active?(state)
 
         metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
         content_width = metrics.fetch(:sidebar_width) - 4

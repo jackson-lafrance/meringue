@@ -198,6 +198,7 @@ module Meringue
         "complete_onboarding" => "CompleteOnboarding",
         "theme" => "SetTheme",
         "set_theme" => "SetTheme",
+        "save_configuration" => "SaveConfiguration",
         "get_state" => "GetState",
         "get_session_defaults" => "GetSessionDefaults",
         "get_model_catalog" => "GetModelCatalog",
@@ -226,7 +227,7 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/prompt <agent_id> \"<message>\"", "Prompt an existing worker agent session."],
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
-        ["/harness <pi|claude|antigravity>", "Select the active harness backend for future heads and workers."],
+        ["/harness [head|worker] <pi|claude|antigravity>", "Select role-aware harness defaults for future agents; omit the role to update both."],
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
         ["/model <provider>/<model-id>", "Persist the model used for all future Pi heads and workers; existing sessions are unchanged. The model id may itself contain / and :."],
         ["/thinking <level>", "Persist the thinking level used for all future Pi heads and workers: off, minimal, low, medium, high, xhigh, or max."],
@@ -240,9 +241,9 @@ module Meringue
         ["/jump [agent_id]", "TUI local: open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/prs", "TUI local: open the picker for every tracked pull request that is still open."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
-        ["/setup", "TUI local: reopen first-run setup for the theme, harness, model, and thinking level."],
+        ["/setup", "TUI local: reopen Setup for theme, separate head/worker defaults, and experiments."],
         ["/keybind", "TUI local: show all keybindings."],
-        ["/config", "TUI local: show the active config, supported defaults, conflict policy, and keybindings."],
+        ["/config", "TUI local: open full-screen Settings; /config --text prints diagnostics."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
@@ -265,7 +266,7 @@ module Meringue
         AskQuestion AnswerQuestion DismissQuestion
         Kill Prune Recount ClearState SetTheme SetHarness ReconcileSessions
       ].freeze
-      HEAD_BLOCKED_COMMANDS = %w[ApplyHeadResult InvalidSlashCommand RetryHead].freeze
+      HEAD_BLOCKED_COMMANDS = %w[ApplyHeadResult InvalidSlashCommand RetryHead SaveConfiguration].freeze
       HEAD_UNPROPOSABLE_COMMAND_REASON = "command_not_proposable_by_head"
       # Destructive commands a head may only propose when the user's own message is an
       # unambiguous instruction and the head marks the command user-confirmed. Everything else
@@ -605,9 +606,12 @@ module Meringue
                      harness_client_provider: nil,
                      head_runner_provider: nil,
                      default_harness_provider: nil,
+                     default_head_harness_provider: nil,
+                     default_worker_harness_provider: nil,
                      session_defaults_provider: nil,
                      session_defaults_updater: nil,
                      model_catalog_provider: nil,
+                     runtime_config_updater: nil,
                      workspace_manager: Workspace::Manager.new,
                      cwd: Dir.pwd,
                      async_heads: false,
@@ -630,9 +634,12 @@ module Meringue
         @harness_client_provider = harness_client_provider
         @head_runner_provider = head_runner_provider
         @default_harness_provider = normalize_initial_harness_provider(default_harness_provider || inferred_default_harness_provider)
+        @default_head_harness_provider = normalize_initial_harness_provider(default_head_harness_provider || @default_harness_provider)
+        @default_worker_harness_provider = normalize_initial_harness_provider(default_worker_harness_provider || @default_harness_provider)
         @session_defaults_provider = session_defaults_provider
         @session_defaults_updater = session_defaults_updater
         @model_catalog_provider = model_catalog_provider
+        @runtime_config_updater = runtime_config_updater
         @workspace_manager = workspace_manager
         @cwd = File.expand_path(cwd)
         @async_heads = async_heads
@@ -1071,6 +1078,12 @@ module Meringue
           reconcile_sessions(command_id: command_id, command_type: command_type)
         elsif command_type == "Prune"
           @prune_mutex.synchronize { prune(command_id, command_type, payload) }
+        elsif command_type == "SaveConfiguration"
+          # The config lock must be acquired before the state lock. Validation and
+          # atomic publication happen first; runtime/state mirrors follow.
+          save_configuration(command_id, command_type, payload)
+        elsif command_type == "SetHarness"
+          set_harness(command_id, command_type, payload)
         elsif command_type == "GetModelCatalog"
           # Reading a catalog may start a short-lived harness process, so it must
           # not hold the state lock while it waits on that process.
@@ -1120,6 +1133,8 @@ module Meringue
           invalid_slash_command(command_id, command_type, payload)
         when "CompleteOnboarding"
           complete_onboarding(command_id, command_type, payload)
+        when "SaveConfiguration"
+          save_configuration(command_id, command_type, payload)
         when "SetTheme"
           set_theme(command_id, command_type, payload)
         when "SetHarness"
@@ -1309,10 +1324,13 @@ module Meringue
           update_issue_status_from_workers!(state, issue, now) if issue
           update_project_status_from_issues!(state, project, now) if project
 
-          candidate_pr_urls = worker_pr_urls(last_assistant_text: last_assistant_text, harness_events: harness_events)
-          State::Models.scrub_worker_pull_request_keys!(agent["harness_metadata"])
-          delivery_pull_request = verified_worker_pull_request(agent: agent, project: project, candidate_urls: candidate_pr_urls)
-          attach_issue_pull_requests!(issue, delivery_pull_request, candidate_pr_urls) if issue
+          github_enabled = github_support_enabled?(state)
+          candidate_pr_urls = github_enabled ? worker_pr_urls(last_assistant_text: last_assistant_text, harness_events: harness_events) : []
+          if github_enabled
+            State::Models.scrub_worker_pull_request_keys!(agent["harness_metadata"])
+            delivery_pull_request = verified_worker_pull_request(agent: agent, project: project, candidate_urls: candidate_pr_urls)
+            attach_issue_pull_requests!(issue, delivery_pull_request, candidate_pr_urls) if issue
+          end
 
           completion_details = {
             "issue_id" => agent.fetch("issue_id", nil),
@@ -1540,7 +1558,11 @@ module Meringue
         pending_prompt_results = reconcile_step("deliver_pending_prompts", []) { deliver_pending_agent_prompts }
         recovered_results = reconcile_step("recover_head_results", []) { recover_unapplied_head_results }
         prune_result = reconcile_step("prune_killed_records", { "changed" => false, "log_entry_ids" => [] }) { prune_killed_records }
-        delivery_pr_refreshes = reconcile_step("refresh_delivery_pull_requests", []) { refresh_stale_delivery_pull_requests }
+        delivery_pr_refreshes = if github_support_enabled?
+                                  reconcile_step("refresh_delivery_pull_requests", []) { refresh_stale_delivery_pull_requests }
+                                else
+                                  []
+                                end
         model_catalog_refresh = reconcile_step("refresh_model_catalog", { "changed" => false }) { refresh_active_model_catalog }
         agents = synchronized_state do
           normalized_state.fetch("agents").select { |agent| reconcile_candidate?(agent) }.map { |agent| deep_copy(agent) }
@@ -2152,8 +2174,8 @@ module Meringue
 
       # Reports the model/thinking pair future Pi heads and workers will use.
       # There is no slash command for it any more: the dashboard status line
-      # already shows `Pi defaults: <model> · <thinking>` and `/config` prints
-      # the same pair, so the typed `/defaults` was redundant surface. The
+      # already shows the compact model/thinking summary and `/config` prints
+      # the same values, so the typed `/defaults` was redundant surface. The
       # command stays because a head still proposes it for "show the defaults"
       # or "which model will future agents use", where the answer has to reach
       # the log with the clamp caveat attached.
@@ -2352,6 +2374,17 @@ module Meringue
       # empty, unavailable, or simply behind a provider extension that added the
       # model), it is just labelled unverified in the accepted message.
       def set_default_session_model(command_id, command_type, payload)
+        role_value = value_at(payload, "role", "Role")
+        role = role_value.to_s.strip.downcase
+        if !role.empty? && !%w[head worker].include?(role)
+          return rejected_result(
+            command_id,
+            command_type,
+            "Default Pi model was not changed: role must be head or worker.",
+            ["role must be one of: head, worker"]
+          )
+        end
+        role = nil if role.empty?
         model_reference = value_at(payload, "model", "model_reference", "Model", "ModelReference")
         reason = Meringue::Harness::ModelReference.rejection_reason(model_reference)
         if reason
@@ -2367,6 +2400,7 @@ module Meringue
           command_id,
           command_type,
           model: Meringue::Harness::ModelReference.normalize(model_reference),
+          model_role: role,
           changed_field: "model"
         )
       end
@@ -2403,15 +2437,17 @@ module Meringue
         )
       end
 
-      def update_pi_session_defaults(command_id, command_type, model: nil, thinking_level: nil, thinking_role: nil, changed_field:)
+      def update_pi_session_defaults(command_id, command_type, model: nil, model_role: nil, thinking_level: nil, thinking_role: nil, changed_field:)
         previous = configured_pi_session_defaults
         defaults = if @session_defaults_updater
                      keywords = { model: model, thinking_level: thinking_level }
+                     keywords[:model_role] = model_role unless model_role.nil?
                      keywords[:thinking_role] = thinking_role unless thinking_role.nil?
                      @session_defaults_updater.call("pi", **keywords)
                    else
                      saved = Config.save_pi_session_defaults!(
                        model: model,
+                       model_role: model_role,
                        thinking_level: thinking_level,
                        thinking_role: thinking_role,
                        path: config_path
@@ -2422,18 +2458,23 @@ module Meringue
         state = normalized_state
         state.fetch("metadata")["pi_session_defaults"] = deep_copy(defaults)
         unchanged_ids = existing_pi_session_ids(state)
+        active_role = model_role || thinking_role
         value = if changed_field == "model"
-                  defaults.fetch("model", model)
+                  if model_role
+                    defaults.dig("roles", model_role, "model") || model
+                  else
+                    defaults.fetch("model", model)
+                  end
                 elsif thinking_role
                   defaults.dig("roles", thinking_role, "thinking_level") || thinking_level
                 else
                   defaults.fetch("thinking_level", thinking_level)
                 end
         label = changed_field == "model" ? "model" : "thinking level"
-        audience = thinking_role ? "future Pi #{thinking_role}s" : "all future Pi heads and workers"
-        scope = thinking_role ? "future_pi_#{thinking_role}_sessions" : "future_pi_sessions"
-        clamp_note = clamped_default_thinking_note(defaults, changed_field, role: thinking_role)
-        unverified_note = unverified_default_model_note(defaults, changed_field)
+        audience = active_role ? "future Pi #{active_role}s" : "all future Pi heads and workers"
+        scope = active_role ? "future_pi_#{active_role}_sessions" : "future_pi_sessions"
+        clamp_note = clamped_default_thinking_note(defaults, changed_field, role: active_role)
+        unverified_note = unverified_default_model_note(defaults, changed_field, role: model_role)
         message = "Set the default Pi #{label} to #{value} for #{audience}. " \
                   "Existing Pi sessions were not changed#{unchanged_ids.empty? ? "." : ": #{unchanged_ids.join(", ")}."}" \
                   "#{unverified_note ? " #{unverified_note}" : ""}" \
@@ -2512,7 +2553,12 @@ module Meringue
       def clamped_default_thinking_note(defaults, changed_field, role: nil)
         return nil unless %w[thinking_level model].include?(changed_field)
 
-        reference = defaults.fetch("model", nil).to_s.strip
+        reference = if role
+                      defaults.dig("roles", role, "model")
+                    else
+                      defaults.fetch("model", nil)
+                    end
+        reference = reference.to_s.strip
         level = if role
                   defaults.dig("roles", role, "thinking_level")
                 else
@@ -2546,10 +2592,15 @@ module Meringue
       # provider extension that added the model after the last fetch. Say so,
       # reusing the "unverified" wording the picker and completion already use
       # for a degraded catalog.
-      def unverified_default_model_note(defaults, changed_field)
+      def unverified_default_model_note(defaults, changed_field, role: nil)
         return nil unless changed_field == "model"
 
-        reference = defaults.fetch("model", nil).to_s.strip
+        reference = if role
+                      defaults.dig("roles", role, "model")
+                    else
+                      defaults.fetch("model", nil)
+                    end
+        reference = reference.to_s.strip
         return nil if reference.empty?
 
         snapshot = persisted_model_catalog(Meringue::Harness::Registry.public_provider_name("pi"))
@@ -2594,14 +2645,15 @@ module Meringue
       end
 
       def pi_session_defaults_message(defaults)
-        model = defaults.fetch("model", nil) || "mixed by role"
+        head_model = defaults.dig("roles", "head", "model") || Meringue::Harness::Registry::DEFAULT_PI_MODEL
+        worker_model = defaults.dig("roles", "worker", "model") || Meringue::Harness::Registry::DEFAULT_PI_MODEL
         head_thinking = defaults.dig("roles", "head", "thinking_level") || Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL
         worker_thinking = defaults.dig("roles", "worker", "thinking_level") || Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL
         clamp_note = clamped_default_thinking_note(defaults, "thinking_level")
-        summary = if head_thinking == worker_thinking
-                    "Future Pi heads and workers use #{model} with thinking #{head_thinking}."
+        summary = if head_model == worker_model && head_thinking == worker_thinking
+                    "Future Pi heads and workers use #{head_model} with thinking #{head_thinking}."
                   else
-                    "Future Pi heads use #{model} with thinking #{head_thinking}; workers use #{model} with thinking #{worker_thinking}."
+                    "Future Pi heads use #{head_model} with thinking #{head_thinking}; workers use #{worker_model} with thinking #{worker_thinking}."
                   end
         [
           summary,
@@ -2796,6 +2848,164 @@ module Meringue
         accepted_result(command_id, command_type, head_id, message, { "reason" => reason }.compact, log_ids)
       end
 
+      def save_configuration(command_id, command_type, payload)
+        baseline = value_at(payload, "base_fingerprint", "BaseFingerprint")
+        changes = value_at(payload, "changes", "Changes")
+        onboarding_outcome = value_at(payload, "onboarding_outcome", "OnboardingOutcome")
+        unless baseline.is_a?(String) && changes.is_a?(Hash)
+          return rejected_result(
+            command_id,
+            command_type,
+            "Configuration was not saved because the Settings draft is invalid.",
+            ["base_fingerprint and changes are required"]
+          )
+        end
+
+        unless onboarding_outcome.nil? || Config::ONBOARDING_OUTCOMES.include?(onboarding_outcome.to_s)
+          return configuration_rejected_result(
+            command_id,
+            command_type,
+            "Configuration was not saved because the setup outcome is invalid.",
+            { "setup.outcome" => "must be one of: #{Config::ONBOARDING_OUTCOMES.join(", ")}" }
+          )
+        end
+
+        transaction = Config::Store.new(path: config_path).save(
+          base_fingerprint: baseline,
+          changes: changes,
+          onboarding_outcome: onboarding_outcome
+        )
+        saved_file_config = transaction.fetch("config")
+        @config = config_with_runtime_overrides(saved_file_config)
+        apply_runtime_config_update(@config, transaction.fetch("changed_ids"))
+
+        overridden_settings = transaction.fetch("changed_ids").filter_map do |id|
+          source = @config.setting_source(id)
+          [id, source] unless %w[file default].include?(source)
+        end.to_h
+        theme = @config.setting("appearance.theme")
+        apply_tui_theme(theme) if transaction.fetch("changed_ids").include?("appearance.theme")
+        state = synchronized_state do
+          current = normalized_state
+          metadata = current.fetch("metadata")
+          head_provider = normalized_configured_provider(@config.setting("agent.head_harness"))
+          worker_provider = normalized_configured_provider(@config.setting("agent.worker_harness"))
+          metadata["active_head_harness"] = Meringue::Harness::Registry.public_provider_name(head_provider)
+          metadata["active_worker_harness"] = Meringue::Harness::Registry.public_provider_name(worker_provider)
+          metadata["active_head_harness_label"] = Meringue::Harness::Registry.provider_label(head_provider)
+          metadata["active_worker_harness_label"] = Meringue::Harness::Registry.provider_label(worker_provider)
+          # Keep the old shared key as the worker-side compatibility fallback.
+          metadata["active_harness"] = metadata.fetch("active_worker_harness")
+          metadata["active_harness_label"] = metadata.fetch("active_worker_harness_label")
+          metadata["harness_generation"] = metadata.fetch("harness_generation", 0).to_i + 1
+          metadata["pi_session_defaults"] = configured_pi_session_defaults
+          metadata["settings_schema_version"] = Config::Schema::VERSION
+          metadata["config_fingerprint"] = transaction.fetch("fingerprint")
+
+          changed_ids = transaction.fetch("changed_ids")
+          outcome = transaction["onboarding_outcome"]
+          log_message = "Saved #{changed_ids.length} configuration setting#{changed_ids.length == 1 ? "" : "s"}"
+          log_message = "#{log_message}: #{changed_ids.join(", ")}" unless changed_ids.empty?
+          log_message = "#{log_message}; setup #{outcome}" if outcome
+          log_ids = append_log(
+            current,
+            source_type: "kernel",
+            source_id: nil,
+            level: "info",
+            message: "#{log_message}.",
+            # IDs only: provider environment values must never enter logs.
+            details: {
+              "changed_setting_ids" => changed_ids,
+              "restart_required" => transaction.fetch("restart_required"),
+              "config_path" => config_path,
+              "onboarding_outcome" => outcome,
+              "onboarding_version" => transaction["onboarding_version"]
+            }.compact
+          )
+          touch_state!(current)
+          store.save(current)
+          [current, log_ids]
+        end
+
+        accepted_result(
+          command_id,
+          command_type,
+          config_path,
+          configuration_saved_message(transaction, overridden_settings: overridden_settings),
+          {
+            "changed_setting_ids" => transaction.fetch("changed_ids"),
+            "restart_required" => transaction.fetch("restart_required"),
+            "live_applied" => transaction.fetch("live_applied"),
+            "config_path" => config_path,
+            "fingerprint" => transaction.fetch("fingerprint"),
+            "theme" => theme,
+            "github_support" => github_support_enabled?(state.first),
+            "saved_but_overridden" => overridden_settings,
+            "onboarding_outcome" => transaction["onboarding_outcome"],
+            "onboarding_version" => transaction["onboarding_version"]
+          }.compact,
+          state.last
+        )
+      rescue Config::StaleRevisionError => e
+        configuration_rejected_result(command_id, command_type, e.message, { "_stale" => e.message })
+      rescue Config::ValidationError => e
+        configuration_rejected_result(command_id, command_type, "Configuration has #{e.field_errors.length} invalid setting#{e.field_errors.length == 1 ? "" : "s"}.", e.field_errors)
+      rescue Config::ParseError, Config::LockError, Config::PersistenceError => e
+        configuration_rejected_result(command_id, command_type, "Configuration was not saved: #{e.message}", { "_configuration" => e.message })
+      end
+
+      def configuration_rejected_result(command_id, command_type, message, field_errors)
+        result = rejected_result(command_id, command_type, message, field_errors.map { |id, error| "#{id}: #{error}" })
+        result["result"] = { "field_errors" => field_errors }
+        result
+      end
+
+      def configuration_saved_message(transaction, overridden_settings: {})
+        count = transaction.fetch("changed_ids").length
+        restart = transaction.fetch("restart_required")
+        message = "Saved #{count} configuration setting#{count == 1 ? "" : "s"} atomically to #{config_path}."
+        if transaction["onboarding_outcome"]
+          message = "#{message} Setup #{transaction.fetch("onboarding_outcome")}."
+        end
+        message = "#{message} Restart Meringue to apply: #{restart.join(", ")}." unless restart.empty?
+        unless overridden_settings.empty?
+          badges = overridden_settings.map { |id, source| "#{id} by #{source}" }.join(", ")
+          message = "#{message} Saved but overridden: #{badges}."
+        end
+        message
+      end
+
+      def config_with_runtime_overrides(saved_file_config)
+        return saved_file_config unless config.respond_to?(:overrides) && !config.overrides.empty?
+
+        Config.new(
+          Config.deep_merge(saved_file_config.to_file_h, config.overrides),
+          path: saved_file_config.path,
+          loaded: true,
+          file_data: saved_file_config.to_file_h,
+          overrides: config.overrides,
+          override_sources: config.override_sources
+        )
+      end
+
+      def apply_runtime_config_update(updated_config, changed_ids)
+        return unless @runtime_config_updater
+
+        parameters = @runtime_config_updater.respond_to?(:parameters) ? @runtime_config_updater.parameters : []
+        accepts_keywords = parameters.any? { |kind, name| kind == :keyrest || (%i[key keyreq].include?(kind) && name == :changed_ids) }
+        if accepts_keywords
+          @runtime_config_updater.call(updated_config, changed_ids: changed_ids)
+        else
+          @runtime_config_updater.call(updated_config)
+        end
+      end
+
+      def normalized_configured_provider(provider)
+        Meringue::Harness::Registry.normalize_provider!(provider)
+      rescue ArgumentError
+        Meringue::Harness::Registry::DEFAULT_PROVIDER
+      end
+
       def set_theme(command_id, command_type, payload)
         requested_theme = value_at(payload, "theme", "Theme", "name", "Name")
         return rejected_result(command_id, command_type, "Theme was not changed.", ["theme is required"]) if blank?(requested_theme)
@@ -2810,7 +3020,8 @@ module Meringue
           )
         end
 
-        Config.save_tui_theme!(theme, path: config_path)
+        saved = Config.save_tui_theme!(theme, path: config_path)
+        @config = config_with_runtime_overrides(saved)
         apply_tui_theme(theme)
 
         state = normalized_state
@@ -2892,74 +3103,71 @@ module Meringue
 
       def set_harness(command_id, command_type, payload)
         requested_provider = value_at(payload, "provider", "Provider", "harness", "Harness")
-        return rejected_result(command_id, command_type, "Harness was not changed.", ["provider is required"]) if blank?(requested_provider)
+        return synchronized_state { rejected_result(command_id, command_type, "Harness was not changed.", ["provider is required"]) } if blank?(requested_provider)
 
         provider = normalize_selectable_harness_provider(requested_provider)
         unless provider
           supported = Meringue::Harness::Registry.supported_provider_names.join(", ")
-          return rejected_result(
-            command_id,
-            command_type,
-            "Unsupported harness provider #{requested_provider.inspect}. Choose one of: #{supported}.",
-            ["unsupported_harness_provider"]
-          )
+          return synchronized_state do
+            rejected_result(command_id, command_type, "Unsupported harness provider #{requested_provider.inspect}. Choose one of: #{supported}.", ["unsupported_harness_provider"])
+          end
+        end
+        role = value_at(payload, "role", "Role").to_s.strip.downcase
+        unless role.empty? || %w[head worker].include?(role)
+          return synchronized_state { rejected_result(command_id, command_type, "Harness was not changed.", ["role must be head or worker"]) }
         end
 
-        state = normalized_state
-        # A head may propose `/harness` for itself; it is not its own blocker. The switch only
-        # affects future heads and workers, and this head's session is torn down right after.
         proposing_head_id = present_string(value_at(payload, "_head_id", "head_id", "HeadID", "headId"))
-        active_agents = active_harness_selection_blockers(state) - [proposing_head_id].compact
-        if active_agents.any?
-          return rejected_result(
-            command_id,
-            command_type,
-            "Harness was not changed because #{active_agents.length} agent#{active_agents.length == 1 ? " is" : "s are"} active or working: #{active_agents.join(", ")}.",
-            ["active_agents", *active_agents]
-          )
+        initial = synchronized_state do
+          state = normalized_state
+          blockers = active_harness_selection_blockers(state) - [proposing_head_id].compact
+          {
+            "blockers" => blockers,
+            "head" => active_harness_provider(state, role: "head"),
+            "worker" => active_harness_provider(state, role: "worker")
+          }
+        end
+        if initial.fetch("blockers").any?
+          active_agents = initial.fetch("blockers")
+          return synchronized_state do
+            rejected_result(command_id, command_type, "Harness was not changed because #{active_agents.length} agent#{active_agents.length == 1 ? " is" : "s are"} active or working: #{active_agents.join(", ")}.", ["active_agents", *active_agents])
+          end
         end
 
-        previous_provider = active_harness_provider(state)
-        previous_public_provider = Meringue::Harness::Registry.public_provider_name(previous_provider)
-        public_provider = Meringue::Harness::Registry.public_provider_name(provider)
-        now = timestamp
-        metadata = state.fetch("metadata")
-        changed = previous_provider != provider
-        metadata["active_harness"] = public_provider
-        metadata["active_harness_label"] = Meringue::Harness::Registry.provider_label(provider)
-        metadata["harness_selected_at"] = now
-        metadata["harness_generation"] = metadata.fetch("harness_generation", 0).to_i + (changed ? 1 : 0)
+        head_provider = role == "worker" ? initial.fetch("head") : provider
+        worker_provider = role == "head" ? initial.fetch("worker") : provider
+        saved = Config.save_harness_defaults!(head_provider: head_provider, worker_provider: worker_provider, path: config_path)
+        @config = config_with_runtime_overrides(saved)
+        role_ids = role.empty? ? %w[agent.head_harness agent.worker_harness] : ["agent.#{role}_harness"]
+        apply_runtime_config_update(@config, role_ids)
+        runtime_head_provider = normalized_configured_provider(@config.setting("agent.head_harness"))
+        runtime_worker_provider = normalized_configured_provider(@config.setting("agent.worker_harness"))
 
-        log_ids = append_log(
-          state,
-          source_type: "kernel",
-          source_id: nil,
-          level: "info",
-          message: changed ? "Selected #{metadata.fetch("active_harness_label")} harness for future agents." : "#{metadata.fetch("active_harness_label")} harness is already selected.",
-          details: {
-            "previous_harness" => previous_public_provider,
-            "active_harness" => public_provider,
-            "internal_active_harness" => provider,
-            "harness_generation" => metadata.fetch("harness_generation")
-          }
-        )
-        touch_state!(state, now)
-        store.save(state)
-
-        accepted_result(
-          command_id,
-          command_type,
-          public_provider,
-          changed ? "Selected #{metadata.fetch("active_harness_label")} for future heads and workers." : "#{metadata.fetch("active_harness_label")} is already the active harness.",
-          {
-            "active_harness" => public_provider,
-            "active_harness_label" => metadata.fetch("active_harness_label"),
-            "previous_harness" => previous_public_provider,
-            "internal_active_harness" => provider,
-            "harness_generation" => metadata.fetch("harness_generation")
-          },
-          log_ids
-        )
+        synchronized_state do
+          state = normalized_state
+          previous = role == "head" ? active_harness_provider(state, role: "head") : active_harness_provider(state, role: "worker")
+          now = timestamp
+          metadata = state.fetch("metadata")
+          public_head = Meringue::Harness::Registry.public_provider_name(runtime_head_provider)
+          public_worker = Meringue::Harness::Registry.public_provider_name(runtime_worker_provider)
+          metadata["active_head_harness"] = public_head
+          metadata["active_worker_harness"] = public_worker
+          metadata["active_head_harness_label"] = Meringue::Harness::Registry.provider_label(runtime_head_provider)
+          metadata["active_worker_harness_label"] = Meringue::Harness::Registry.provider_label(runtime_worker_provider)
+          metadata["active_harness"] = public_worker
+          metadata["active_harness_label"] = metadata.fetch("active_worker_harness_label")
+          metadata["harness_selected_at"] = now
+          changed = previous != provider
+          metadata["harness_generation"] = metadata.fetch("harness_generation", 0).to_i + (changed ? 1 : 0)
+          scope = role.empty? ? "future heads and workers" : "future #{role}s"
+          label = Meringue::Harness::Registry.provider_label(provider)
+          log_ids = append_log(state, source_type: "kernel", source_id: nil, level: "info", message: "Selected #{label} harness for #{scope}.", details: { "active_head_harness" => public_head, "active_worker_harness" => public_worker, "config_path" => config_path })
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(command_id, command_type, Meringue::Harness::Registry.public_provider_name(provider), "Selected #{label} for #{scope} and saved it to #{config_path}.", { "active_harness" => metadata.fetch("active_harness"), "active_head_harness" => public_head, "active_worker_harness" => public_worker, "role" => role.empty? ? nil : role, "config_path" => config_path }, log_ids)
+        end
+      rescue Config::ParseError, Config::ValidationError, Config::LockError => e
+        synchronized_state { rejected_result(command_id, command_type, "Harness was not changed: #{e.message}", [e.message]) }
       end
 
       def prompt_agent(command_id, command_type, payload)
@@ -3128,7 +3336,7 @@ module Meringue
             )
           end
 
-          active_provider = active_harness_provider(state)
+          active_provider = active_harness_provider(state, role: "head")
           active_runner = active_head_runner(provider: active_provider)
           now = timestamp
           head_id = next_head_id!(state)
@@ -3178,7 +3386,8 @@ module Meringue
             question_id: present_string(question_id),
             selected_target: selected_target,
             cwd: cwd,
-            state_path: store.path
+            state_path: store.path,
+            github_support: github_support_enabled?(snapshot)
           )
 
           {
@@ -4202,6 +4411,7 @@ module Meringue
       # unverified delivery records. The normal refresh path can enrich their lifecycle state, and
       # the worker-completion path can merge branch/repository verification into the same URL.
       def associate_head_request_pull_requests!(head, command_result)
+        return [] unless github_support_enabled?
         return [] unless head.is_a?(Hash)
         return [] unless command_result.is_a?(Hash) && command_result.fetch("status", nil) == "accepted"
         return [] unless PULL_REQUEST_ASSOCIATING_COMMANDS.include?(command_result.fetch("command_type", nil).to_s)
@@ -4778,6 +4988,11 @@ module Meringue
         snapshot = synchronized_state { deep_copy(normalized_state) }
         context = new_prune_forge_lookup_context
         seed_trusted_prune_pull_request_statuses!(context, snapshot)
+        unless github_support_enabled?(snapshot)
+          context["allow_external"] = false
+          context["github_support_disabled"] = true
+          return context
+        end
         with_prune_forge_lookup_context(context) do
           # These are the only prune phases that can consult the forge, and they share one bounded
           # budget, so they run in the order retention actually depends on:
@@ -5135,6 +5350,9 @@ module Meringue
 
       def prune_forge_lookup_clause(forge_lookup)
         return "" unless forge_lookup.is_a?(Hash)
+        if forge_lookup.fetch("github_support_disabled", false)
+          return " (GitHub support is disabled; re-enable it in Settings → Experiments to refresh pull request status)"
+        end
 
         if forge_lookup.fetch("budget_exhausted", false)
           " (the #{format_seconds(forge_lookup.fetch("budget_seconds", prune_forge_lookup_budget))}s forge lookup " \
@@ -5174,6 +5392,7 @@ module Meringue
           "elapsed_seconds" => (monotonic_time - started_at).round(3),
           "remaining_seconds" => prune_forge_lookup_remaining(context).round(3),
           "budget_exhausted" => context.fetch("budget_exhausted", false),
+          "github_support_disabled" => context.fetch("github_support_disabled", false),
           "status_lookup_count" => context.fetch("external_status_urls", []).length,
           "branch_lookup_count" => context.fetch("external_branch_lookups", []).length,
           "trusted_from_state_urls" => context.fetch("trusted_status_urls", []).uniq,
@@ -5192,6 +5411,7 @@ module Meringue
       # (submitting a prompt, applying a HeadResult, settling a worker) for the length of the
       # whole burst.
       def refresh_stale_delivery_pull_requests
+        return [] unless github_support_enabled?
         # Capped so a long backlog costs several cheap ticks instead of one long stall.
         due_urls = due_delivery_pull_request_urls.first(DELIVERY_PULL_REQUEST_REFRESH_BATCH_LIMIT)
         return [] if due_urls.empty?
@@ -5311,6 +5531,8 @@ module Meringue
       end
 
       def refresh_worker_delivery_pull_requests!(state)
+        return [] unless github_support_enabled?(state)
+
         workers_by_issue = worker_agents_by_issue(state)
         state.fetch("issues").flat_map do |issue|
           workers = workers_by_issue.fetch(issue.fetch("id", nil), [])
@@ -5478,6 +5700,8 @@ module Meringue
       end
 
       def verified_worker_pull_requests(agent:, project:, candidate_urls:)
+        return [] unless github_support_enabled?
+
         branch = worker_delivery_branch(agent)
         return [] if blank?(branch)
 
@@ -5507,6 +5731,7 @@ module Meringue
       end
 
       def discovered_worker_candidate_pr_urls(agent:, project:, issue: nil)
+        return [] unless github_support_enabled?
         # A worker can settle without usable final output, so recover from the durable branch
         # identity rather than treating arbitrary URLs elsewhere in its session as deliveries.
         return [] unless agent.fetch("status", nil) == "completed"
@@ -5622,6 +5847,8 @@ module Meringue
       end
 
       def pull_request_urls_for_branch(repository:, branch:)
+        return [] unless github_support_enabled?
+
         context = prune_forge_lookup_context
         return Array(forge_client.pull_request_urls_for_branch(repository: repository, branch: branch)) unless context
 
@@ -5651,6 +5878,13 @@ module Meringue
 
       def pull_request_status(url)
         context = prune_forge_lookup_context
+        unless github_support_enabled?
+          trusted = context&.dig("status_by_url", url.to_s)
+          return trusted if trusted
+
+          return unavailable_prune_pull_request_status(url, "GitHub support is disabled; enable it in Settings → Experiments")
+        end
+
         return forge_client.pull_request_status(url) unless context
 
         key = url.to_s
@@ -5708,6 +5942,23 @@ module Meringue
       def forge_method_accepts_timeout?(method)
         method.parameters.any? do |kind, name|
           kind == :keyrest || (%i[key keyreq].include?(kind) && name == :timeout)
+        end
+      end
+
+      def github_support_enabled?(state = nil)
+        explicit = config.value("experiments", "github_support")
+        return explicit if explicit == true || explicit == false
+
+        # Callers that bypass CLI migration (older embedders and persisted test
+        # fixtures) retain pre-experiment behavior. Normal launches always record
+        # schema version 1 before an empty state file can be created.
+        return true if config.value("settings", "schema_version").to_i < Config::Schema::VERSION
+
+        source = state
+        return false unless source.is_a?(Hash)
+
+        Array(source.fetch("issues", [])).any? do |issue|
+          State::Models.pull_request_records_from(issue).any?
         end
       end
 
@@ -14802,9 +15053,19 @@ module Meringue
         state["metadata"] ||= {}
         state["metadata"]["created_at"] ||= timestamp
         state["metadata"]["updated_at"] ||= state["metadata"].fetch("created_at")
-        internal_harness = normalize_harness_provider(state["metadata"]["active_harness"] || @default_harness_provider)
-        state["metadata"]["active_harness"] = selectable_harness_provider?(internal_harness) ? Meringue::Harness::Registry.public_provider_name(internal_harness) : internal_harness
-        state["metadata"]["active_harness_label"] = Meringue::Harness::Registry.provider_label(internal_harness) if selectable_harness_provider?(internal_harness)
+        shared_harness = state["metadata"]["active_harness"]
+        head_harness = normalize_harness_provider(state["metadata"]["active_head_harness"] || shared_harness || @default_head_harness_provider)
+        worker_harness = normalize_harness_provider(state["metadata"]["active_worker_harness"] || shared_harness || @default_worker_harness_provider)
+        public_head = selectable_harness_provider?(head_harness) ? Meringue::Harness::Registry.public_provider_name(head_harness) : head_harness
+        public_worker = selectable_harness_provider?(worker_harness) ? Meringue::Harness::Registry.public_provider_name(worker_harness) : worker_harness
+        state["metadata"]["active_head_harness"] = public_head
+        state["metadata"]["active_worker_harness"] = public_worker
+        state["metadata"]["active_head_harness_label"] = Meringue::Harness::Registry.provider_label(head_harness) if selectable_harness_provider?(head_harness)
+        state["metadata"]["active_worker_harness_label"] = Meringue::Harness::Registry.provider_label(worker_harness) if selectable_harness_provider?(worker_harness)
+        # The shared key remains a worker-side compatibility fallback. Older
+        # readers therefore retain their historical future-worker behavior.
+        state["metadata"]["active_harness"] = public_worker
+        state["metadata"]["active_harness_label"] = state["metadata"]["active_worker_harness_label"]
         state["metadata"]["harness_generation"] ||= 0
         state["metadata"]["pi_session_defaults"] = configured_pi_session_defaults
         # Harness model catalogs are fetched in the background, so state only
@@ -16530,7 +16791,8 @@ module Meringue
           question_id: request.fetch("question_id", nil),
           selected_target: request.fetch("selected_target", nil),
           cwd: cwd,
-          state_path: store.path
+          state_path: store.path,
+          github_support: github_support_enabled?(snapshot)
         )
         runner.spawn_head_session(
           user_message: request.fetch("user_message"),
@@ -17378,9 +17640,12 @@ module Meringue
         active_harness_client(provider: agent.fetch("harness", nil))
       end
 
-      def active_harness_provider(state = nil)
+      def active_harness_provider(state = nil, role: "worker")
         source_state = state || normalized_state
-        normalize_harness_provider(source_state.fetch("metadata", {}).fetch("active_harness", @default_harness_provider))
+        metadata = source_state.fetch("metadata", {})
+        role = role.to_s == "head" ? "head" : "worker"
+        fallback = role == "head" ? @default_head_harness_provider : @default_worker_harness_provider
+        normalize_harness_provider(metadata["active_#{role}_harness"] || metadata["active_harness"] || fallback)
       end
 
       def normalize_harness_provider(provider)

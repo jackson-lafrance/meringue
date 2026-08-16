@@ -61,6 +61,7 @@ module Meringue
         end
 
         def lines(state, width: nil)
+          @github_support_enabled = Settings.github_enabled?(state)
           key = presentation_cache_key(state, width)
           return @lines_cache.fetch(:value) if @lines_cache&.fetch(:key, nil) == key
 
@@ -80,6 +81,7 @@ module Meringue
         end
 
         def line_item_ids(state, width: nil)
+          @github_support_enabled = Settings.github_enabled?(state)
           key = presentation_cache_key(state, width)
           return @item_ids_cache.fetch(:value) if @item_ids_cache&.fetch(:key, nil) == key
 
@@ -126,6 +128,7 @@ module Meringue
           JSON.generate([
             width,
             Style.current_colorscheme,
+            Settings.github_enabled?(state),
             AgentTreeNavigation.highlighted_ids_for(state),
             Array(state["projects"]).map { |item| item.values_at("id", "name", "status") },
             Array(state["issues"]).map do |item|
@@ -738,7 +741,7 @@ module Meringue
             # Delivery PRs are issue state. Older snapshots may still have the record on a
             # worker until the state migration runs, so use that only as an issue-row fallback;
             # never copy the marker onto each worker row.
-            [active_pr_marker(issue, workers), :marker]
+            [@github_support_enabled == false ? "" : active_pr_marker(issue, workers), :marker]
           ].reject { |text, _kind| text.to_s.empty? }
         end
 

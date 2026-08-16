@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "base64"
+require "json"
 require "shellwords"
 require "time"
 require_relative "keybindings"
@@ -11,12 +13,6 @@ module Meringue
       DEFAULT_HEIGHT = 32
       REFRESH_INTERVAL = 0.2
       TERMINAL_REFRESH_INTERVAL = 0.025
-      # First-run setup animates, so it needs frames the dashboard does not. It
-      # only asks for the fast cadence while a step is actually moving, then drops
-      # to a slow idle tick for the breathing selection caret and transient
-      # notices, so an idle setup screen costs a handful of frames a second.
-      ONBOARDING_ANIMATION_INTERVAL = Onboarding::Motion::FRAME_INTERVAL
-      ONBOARDING_IDLE_INTERVAL = Onboarding::Motion::IDLE_INTERVAL
       # Scroll steps defer the workspace state write; this is how often a
       # deferred write is actually flushed to the state file.
       WORKSPACE_PERSIST_INTERVAL = 1.0
@@ -69,6 +65,8 @@ module Meringue
       # CSI-u or xterm modifyOtherKeys instead of the raw ETX byte.
       CTRL_C_KEYS = [CTRL_C, "\e[99;5u", "\e[67;5u", "\e[27;5;99~", "\e[27;5;67~"].freeze
       CTRL_D = "\u0004"
+      CTRL_S = "\u0013"
+      CTRL_S_KEYS = [CTRL_S, "\e[115;5u", "\e[83;5u", "\e[27;5;115~", "\e[27;5;83~"].freeze
       CTRL_W = "\u0017"
       BACKSPACE_KEYS = ["\u007f", "\b"].freeze
       DELETE_KEYS = ["\e[3~"].freeze
@@ -149,28 +147,23 @@ module Meringue
         @model_picker_index = 0
         @model_picker_query = +""
         @model_picker_harness = nil
-        # First-run setup. Off unless the launcher says a kernel is behind the UI
-        # (`meringue demo` has none), and transient like the pickers: the only
-        # thing it persists is the completion marker, and only through the kernel.
+        # Full-screen schema-backed Settings. The draft is purely in memory until
+        # one SaveConfiguration command succeeds.
+        @settings_active = false
+        @settings_draft = nil
+        @settings_category_index = 0
+        @settings_row_index = 0
+        @settings_show_advanced = false
+        @settings_editor = nil
+        @settings_discard_confirm = false
+        @settings_saving = false
+        @settings_mode = "settings"
+        @settings_setup_auto = false
+        @settings_setup_outcome = nil
+        # First-run setup is a curated mode of the same transactional Settings
+        # draft and full-screen pane. It is disabled for `meringue demo`, where no
+        # kernel exists to save the draft or completion marker.
         @onboarding_enabled = onboarding_enabled ? true : false
-        @onboarding_active = false
-        @onboarding_step_index = 0
-        @onboarding_index = 0
-        @onboarding_query = +""
-        @onboarding_harness = nil
-        @onboarding_saved_theme = nil
-        @onboarding_applied = {}
-        # Animation clock. Every animated value is a pure function of it, so
-        # nothing is buffered and a dropped frame cannot desynchronize anything.
-        @onboarding_step_entered_at = nil
-        @onboarding_progress_from = 0.0
-        @onboarding_notice = nil
-        @onboarding_notice_at = nil
-        @onboarding_refresh_at = nil
-        @onboarding_refresh_signature = nil
-        # Capability answers are per process, not per frame.
-        @onboarding_reduced_motion = nil
-        @onboarding_ascii = nil
         @workspace_draft = ""
         @workspace_agent_scroll_offset = 0
         @workspace_terminal_scroll_offset = 0
@@ -353,9 +346,9 @@ module Meringue
       end
 
       def shutdown_workspace_resources
-        # Quitting mid-flow (Ctrl-C, /quit, an interrupt) must not leave the theme
-        # a step was previewing on screen. Nothing else about setup is persisted.
-        close_onboarding if @onboarding_active
+        # Quitting with Settings/setup open discards the in-memory draft and
+        # restores any theme preview. No setup marker is written on process exit.
+        close_settings(discard: true) if @settings_active
         persist_agent_workspace if @agent_workspace_active
         if @agent_workspace_active
           close_agent_workspace
@@ -430,12 +423,10 @@ module Meringue
 
         @chat_pastes.sync!(input_buffer)
 
-        # First-run setup is the only modal that opens by itself, so it takes keys
-        # ahead of both pickers and the slash list. It still passes unowned keys
-        # through, so Ctrl-C and Ctrl-D behave normally while it is up.
-        if @onboarding_active
-          onboarding_result = handle_onboarding_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
-          return onboarding_result if onboarding_result
+        # Settings owns the complete screen and keeps Esc/Ctrl-S as hard recovery
+        # keys regardless of configured dashboard bindings.
+        if @settings_active
+          return handle_settings_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
         end
 
         if @model_picker_active
@@ -1867,6 +1858,8 @@ module Meringue
 
       def workspace_action_prefix(key)
         WORKSPACE_COMMAND_ACTIONS.each do |action|
+          next if action == "workspace_open_pull_request" && !github_support_enabled?
+
           remainder = keybindings.consume_prefix(action, key)
           return [action, remainder] if remainder
         end
@@ -1884,6 +1877,11 @@ module Meringue
         when "workspace_open_editor"
           open_agent_workspace_editor(state)
         when "workspace_open_pull_request"
+          unless github_support_enabled?(state)
+            @agent_workspace_notice = nil
+            @agent_workspace_error = github_support_disabled_message
+            return :handled
+          end
           if open_workspace_delivery_pr(state)
             @agent_workspace_notice = "Opened the verified delivery pull request."
             @agent_workspace_error = nil
@@ -1918,7 +1916,7 @@ module Meringue
       end
 
       def handle_workspace_slash_navigation(key, input_buffer, slash_suggestion_index)
-        records = WorkspaceCommands.command_suggestion_records(input_buffer)
+        records = workspace_command_suggestion_records(input_buffer)
         return [input_buffer, NO_SLASH_SELECTION] if records.empty?
 
         if keybinding?("suggestion_previous", key)
@@ -1937,11 +1935,20 @@ module Meringue
       def workspace_slash_completion(input_buffer, slash_suggestion_index)
         return nil unless slash_selection?(slash_suggestion_index)
 
-        records = WorkspaceCommands.command_suggestion_records(input_buffer)
+        records = workspace_command_suggestion_records(input_buffer)
         return nil if records.empty?
 
         completion = slash_completion_for(records.fetch(slash_suggestion_index.clamp(0, records.length - 1)))
         completion == input_buffer.to_s ? nil : completion
+      end
+
+      def workspace_command_suggestion_records(input_buffer)
+        records = WorkspaceCommands.command_suggestion_records(input_buffer)
+        return records if github_support_enabled?
+
+        records.reject do |record|
+          record.fetch("action", nil) == "workspace_open_pull_request" || record.fetch("completion", nil) == "/pr"
+        end
       end
 
       def run_workspace_slash_command(input_buffer, state)
@@ -1957,7 +1964,9 @@ module Meringue
         case action
         when "workspace_help"
           @agent_workspace_error = nil
-          @agent_workspace_notice = "Workspace commands: #{WorkspaceCommands.help_lines.join(" · ")}"
+          help_lines = WorkspaceCommands.help_lines
+          help_lines = help_lines.reject { |line| line.start_with?("/pr ") } unless github_support_enabled?(state)
+          @agent_workspace_notice = "Workspace commands: #{help_lines.join(" · ")}"
         when "workspace_filter"
           arguments.empty? ? cycle_agent_workspace_filter : set_agent_workspace_filter(arguments.first)
         when "workspace_cwd"
@@ -2012,6 +2021,7 @@ module Meringue
       # harness-agnostic so a non-Pi backend reads correctly.
       def workspace_leader_commands
         WORKSPACE_COMMAND_ACTIONS.filter_map do |action|
+          next if action == "workspace_open_pull_request" && !github_support_enabled?
           key = keybindings.display_name_for(action)
           next unless key
 
@@ -2337,7 +2347,7 @@ module Meringue
         return handle_local_open_session_command(text, state) if open_session_command?(text)
         return handle_local_setup_command(state) if setup_command?(text)
         return handle_local_keybind_command if keybind_command?(text)
-        return handle_local_config_command if config_command?(text)
+        return handle_local_config_command(text, state) if config_command?(text)
         return handle_local_quit_command if quit_command?(text)
 
         false
@@ -2358,8 +2368,12 @@ module Meringue
         true
       end
 
-      def handle_local_config_command
-        append_jump_response(configuration_help_text)
+      def handle_local_config_command(text, state)
+        if text.to_s.strip == "/config --text"
+          append_jump_response(configuration_help_text)
+        else
+          open_settings(state)
+        end
         true
       end
 
@@ -2395,7 +2409,8 @@ module Meringue
       # keeps the overview useful and avoids accidentally echoing secrets.
       def configuration_help_text
         pi_defaults = Harness::Registry.new(config: config).session_defaults(provider: "pi")
-        pi_model = pi_defaults.fetch("model", nil) || "mixed by role"
+        pi_head_model = pi_defaults.dig("roles", "head", "model") || "mixed by role"
+        pi_worker_model = pi_defaults.dig("roles", "worker", "model") || "mixed by role"
         pi_head_thinking = pi_defaults.dig("roles", "head", "thinking_level")
         pi_worker_thinking = pi_defaults.dig("roles", "worker", "thinking_level")
         provider = ENV["MERINGUE_HARNESS"] || config.value("harness", "provider") || Harness::Registry::DEFAULT_PROVIDER
@@ -2414,7 +2429,8 @@ module Meringue
           "  head harness: #{head_provider}",
           "  worker harness: #{worker_provider}",
           "  TUI colorscheme: #{colorscheme}",
-          "  Pi default model: #{pi_model}",
+          "  Pi head model: #{pi_head_model}",
+          "  Pi worker model: #{pi_worker_model}",
           "  Pi head thinking: #{pi_head_thinking}",
           "  Pi worker thinking: #{pi_worker_thinking}",
           "  conflict policy (predecessor failure): #{config.conflict_predecessor_failure}",
@@ -2460,6 +2476,11 @@ module Meringue
       end
 
       def handle_local_pull_requests_command(state)
+        unless github_support_enabled?(state)
+          append_jump_response(github_support_disabled_message)
+          return true
+        end
+
         open_delivery_pr_picker(state)
         true
       end
@@ -2534,7 +2555,7 @@ module Meringue
       end
 
       def config_command?(text)
-        text == "/config"
+        ["/config", "/config --text"].include?(text.to_s.strip)
       end
 
       def quit_command?(text)
@@ -2542,7 +2563,7 @@ module Meringue
       end
 
       def local_navigation_command_without_id?(input_buffer)
-        ["/jump", "/prs", "/models", "/setup", "/open-session"].include?(input_buffer.to_s.strip.downcase)
+        ["/jump", "/prs", "/models", "/setup", "/config", "/open-session"].include?(input_buffer.to_s.strip.downcase)
       end
 
       def enter_agent_tree_navigation(state)
@@ -2641,7 +2662,6 @@ module Meringue
         # survive into the focused workspace and reappear on return.
         close_delivery_pr_picker
         close_model_picker
-        close_onboarding if @onboarding_active
         @agent_workspace_active = true
         @agent_workspace_interactive = false
         @force_full_redraw = true
@@ -2768,6 +2788,11 @@ module Meringue
       # delivery PR. Unscoped, there is no single PR to mean, so it opens the picker
       # over every PR that is still open instead of guessing.
       def open_workspace_delivery_pr(state)
+        unless github_support_enabled?(state)
+          set_selection_status(github_support_disabled_message)
+          return false
+        end
+
         return open_delivery_pr_for_id(state, @agent_workspace_agent_id) if @agent_workspace_active
         return open_delivery_pr_for_id(state, normalized_selected_agent_id(state)) if @agent_tree_navigation_active
 
@@ -2778,6 +2803,10 @@ module Meringue
       end
 
       def open_delivery_pr_for_id(state, agent_id)
+        unless github_support_enabled?(state)
+          append_jump_response(github_support_disabled_message)
+          return false
+        end
         if agent_id.to_s.empty?
           append_jump_response("Select a worker before opening its delivery pull request.")
           return false
@@ -2804,96 +2833,543 @@ module Meringue
         { "active" => true, "index" => @delivery_pr_picker_index }
       end
 
-      # --- first-run setup --------------------------------------------------
+      # --- full-screen settings --------------------------------------------
 
-      # Everything the full-screen setup screen renders from, including the clock
-      # its animation is a function of. Elapsed seconds are handed to the view
-      # rather than a frame counter, so a slow terminal skips values instead of
-      # falling behind, and a resize or a forced redraw recomputes the same picture
-      # for the same instant.
-      def onboarding_snapshot
-        return nil unless @onboarding_active
+      def github_support_enabled?(state = nil)
+        explicit = config.value("experiments", "github_support")
+        return explicit if explicit == true || explicit == false
+        return true if config.value("settings", "schema_version").to_i < Config::Schema::VERSION
+        return false unless state.is_a?(Hash)
 
-        now = monotonic_time
+        Array(state.fetch("issues", [])).any? { |issue| State::Models.pull_request_records_from(issue).any? }
+      end
+
+      def github_support_disabled_message
+        "Enable GitHub support in Settings → Experiments to use pull request commands."
+      end
+
+      def open_settings(_state, mode: "settings", setup_origin: "manual")
+        @settings_draft = Settings::Draft.new(config)
+        @settings_active = true
+        @settings_mode = mode.to_s == "setup" ? "setup" : "settings"
+        @settings_setup_auto = @settings_mode == "setup" && setup_origin.to_s == "auto"
+        @settings_setup_outcome = nil
+        @settings_category_index = 0
+        @settings_row_index = 0
+        @settings_show_advanced = false
+        @settings_editor = nil
+        @settings_discard_confirm = false
+        @settings_saving = false
+        close_delivery_pr_picker
+        close_model_picker
+        @force_full_redraw = true
+        true
+      rescue StandardError => e
+        append_jump_response("Could not open #{@settings_mode == "setup" ? "Setup" : "Settings"}: #{e.message}")
+        false
+      end
+
+      def close_settings(discard: false)
+        @settings_draft&.restore_theme if discard
+        @settings_active = false
+        @settings_draft = nil
+        @settings_category_index = 0
+        @settings_row_index = 0
+        @settings_editor = nil
+        @settings_discard_confirm = false
+        @settings_saving = false
+        @settings_setup_auto = false
+        @settings_setup_outcome = nil
+        @settings_mode = "settings"
+        @force_full_redraw = true
+        true
+      end
+
+      def setup_mode?
+        @settings_mode == "setup"
+      end
+
+      def settings_categories
+        return [] unless @settings_draft
+
+        setup_mode? ? Settings::SetupFlow.steps : @settings_draft.categories
+      end
+
+      def settings_category
+        categories = settings_categories
+        categories[@settings_category_index.to_i.clamp(0, [categories.length - 1, 0].max)].to_s
+      end
+
+      def settings_rows
+        return [] unless @settings_draft
+        return setup_rows if setup_mode?
+
+        definitions = @settings_draft.definitions_for(settings_category, include_advanced: @settings_show_advanced)
+        rows = definitions.map { |definition| @settings_draft.row(definition) }
+        hidden = @settings_draft.definitions_for(settings_category, include_advanced: true).count(&:advanced)
+        if !@settings_show_advanced && hidden.positive?
+          rows << synthetic_settings_row(
+            "_show_advanced",
+            "Show advanced settings",
+            "Reveal #{hidden} advanced setting#{hidden == 1 ? "" : "s"} in this and every category.",
+            "#{hidden} hidden"
+          )
+        end
+        rows
+      end
+
+      def setup_rows
+        case settings_category
+        when "Welcome"
+          [synthetic_settings_row(
+            "_setup_begin",
+            "Review setup",
+            "Choose a theme, then review separate head and worker defaults and opt-in experiments. Nothing is written until Finish succeeds.",
+            "Enter to begin"
+          )]
+        when "Review"
+          setup_review_rows
+        else
+          Settings::SetupFlow.setting_ids(settings_category).filter_map do |id|
+            definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
+            @settings_draft.row(definition) if definition
+          end
+        end
+      end
+
+      def setup_review_rows
+        ids = Settings::SetupFlow.steps.flat_map { |step| Settings::SetupFlow.setting_ids(step) }
+        rows = ids.filter_map do |id|
+          definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
+          next unless definition
+
+          source = @settings_draft.row(definition)
+          synthetic_settings_row(
+            "_setup_review:#{id}",
+            source.fetch("label"),
+            "Return to #{Settings::SetupFlow.step_for_setting(id)} to edit this value.",
+            source.fetch("display_value"),
+            dirty: source.fetch("dirty", false),
+            source: source.fetch("source", "default")
+          )
+        end
+        rows << synthetic_settings_row(
+          "_setup_finish",
+          "Finish setup",
+          "Validate and save this complete draft with the setup marker in one atomic transaction.",
+          @settings_draft.dirty? ? "Save changes" : "Confirm defaults"
+        )
+        rows
+      end
+
+      def synthetic_settings_row(id, label, description, display_value, dirty: false, source: "setup")
+        {
+          "id" => id,
+          "label" => label,
+          "description" => description,
+          "type" => "action",
+          "editor" => "action",
+          "display_value" => display_value,
+          "default_value" => display_value,
+          "source" => source,
+          "dirty" => dirty,
+          "read_only" => false,
+          "apply_mode" => "none"
+        }
+      end
+
+      def settings_snapshot
+        return nil unless @settings_active && @settings_draft
+
+        rows = settings_rows
+        @settings_row_index = @settings_row_index.to_i.clamp(0, [rows.length - 1, 0].max)
+        editor = if @settings_editor
+                   row = @settings_editor.fetch("row", {}).merge(
+                     "error" => @settings_draft.errors[@settings_editor.fetch("id")]
+                   ).compact
+                   @settings_editor.merge("row" => row)
+                 end
         {
           "active" => true,
-          "step" => onboarding_step,
-          "plan" => onboarding_plan,
-          "index" => @onboarding_index,
-          "query" => @onboarding_query.to_s,
-          "harness" => @onboarding_harness,
-          "theme" => @onboarding_saved_theme,
-          "applied" => @onboarding_applied.dup,
-          "animated" => onboarding_animated?,
-          "ascii" => onboarding_ascii?,
-          "elapsed" => now - (@onboarding_step_entered_at || now),
-          "progress_from" => @onboarding_progress_from.to_f,
-          "notice" => onboarding_notice_text,
-          "refresh" => onboarding_refresh_snapshot(now)
+          "mode" => @settings_mode,
+          "categories" => settings_categories,
+          "category" => settings_category,
+          "category_index" => @settings_category_index,
+          "rows" => rows,
+          "row_index" => @settings_row_index,
+          "dirty" => @settings_draft.dirty?,
+          "saving" => @settings_saving,
+          "advanced" => @settings_show_advanced,
+          "editor" => editor,
+          "discard_confirm" => @settings_discard_confirm.is_a?(String),
+          "confirmation" => (@settings_discard_confirm if @settings_discard_confirm.is_a?(String)),
+          "setup_auto" => @settings_setup_auto,
+          "setup_step" => setup_mode? ? @settings_category_index + 1 : nil,
+          "setup_step_count" => setup_mode? ? settings_categories.length : nil,
+          "error_count" => @settings_draft.errors.length,
+          "global_error" => @settings_draft.global_error,
+          "width" => render_width,
+          "height" => render_height
         }.compact
       end
 
-      # Animation is chrome, and it is only ever asked for where it can be drawn
-      # honestly: a real interactive terminal, big enough that no content row is
-      # spent on motion, and with motion not turned off. Everywhere else the same
-      # view renders its settled frame immediately.
-      def onboarding_animated?
-        return false unless terminal.interactive?
-        return false unless Onboarding.animation_allowed?(width: render_width, height: render_height)
+      def handle_settings_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
+        if render_width < Settings::MIN_WIDTH || render_height < Settings::MIN_HEIGHT
+          close_settings(discard: true) if hard_escape_key?(key)
+          return unchanged
+        end
+        return handle_settings_mouse(key, unchanged, on_submit, state) if mouse_event?(key)
 
-        !onboarding_reduced_motion?
+        if @settings_discard_confirm.is_a?(String)
+          if ENTER_KEYS.include?(key)
+            if @settings_discard_confirm == "skip"
+              @settings_discard_confirm = false
+              save_settings(on_submit, state, onboarding_outcome: "skipped")
+            else
+              close_settings(discard: true)
+            end
+          elsif hard_escape_key?(key)
+            @settings_discard_confirm = false
+          end
+          return unchanged
+        end
+
+        if @settings_editor
+          return handle_settings_editor_key(key, unchanged, on_submit, state)
+        end
+
+        rows = settings_rows
+        if hard_save_key?(key)
+          setup_mode? ? setup_next_or_finish(on_submit, state, jump_to_review: true) : save_settings(on_submit, state)
+        elsif hard_escape_key?(key)
+          request_settings_cancel
+        elsif TAB_KEYS.include?(key) || FOCUS_FORWARD_KEYS.include?(key)
+          move_settings_category(1)
+        elsif SHIFT_TAB_KEYS.include?(key)
+          move_settings_category(-1)
+        elsif UP_KEYS.include?(key) || keybinding?("suggestion_previous", key)
+          move_settings_row(-1)
+        elsif DOWN_KEYS.include?(key) || keybinding?("suggestion_next", key)
+          move_settings_row(1)
+        elsif PAGE_UP_KEYS.include?(key)
+          move_settings_row(-settings_page_size)
+        elsif PAGE_DOWN_KEYS.include?(key)
+          move_settings_row(settings_page_size)
+        elsif HOME_KEYS.include?(key)
+          @settings_row_index = 0
+        elsif END_KEYS.include?(key)
+          @settings_row_index = [rows.length - 1, 0].max
+        elsif LEFT_KEYS.include?(key)
+          cycle_or_move_settings(-1, state)
+        elsif RIGHT_KEYS.include?(key)
+          cycle_or_move_settings(1, state)
+        elsif key == " "
+          activate_settings_row(state, toggle_only: true, on_submit: on_submit)
+        elsif ENTER_KEYS.include?(key)
+          activate_settings_row(state, on_submit: on_submit)
+        elsif key.to_s.downcase == "a" && !setup_mode?
+          @settings_show_advanced = !@settings_show_advanced
+          @settings_row_index = 0
+        end
+        unchanged
+      rescue StandardError => e
+        @settings_draft&.apply_save_failure("Settings input failed: #{e.message}")
+        unchanged
       end
 
-      def onboarding_reduced_motion?
-        return @onboarding_reduced_motion unless @onboarding_reduced_motion.nil?
-
-        @onboarding_reduced_motion = Onboarding.reduced_motion?(config: config)
+      def handle_settings_editor_key(key, unchanged, on_submit, state)
+        editor = @settings_editor
+        if hard_escape_key?(key)
+          @settings_editor = nil
+          return unchanged
+        end
+        if hard_save_key?(key)
+          if apply_settings_editor
+            @settings_editor = nil
+            setup_mode? ? setup_next_or_finish(on_submit, state, jump_to_review: true) : save_settings(on_submit, state)
+          end
+          return unchanged
+        end
+        if ENTER_KEYS.include?(key)
+          @settings_editor = nil if apply_settings_editor
+          return unchanged
+        end
+        if paste_key?(key)
+          insert_settings_editor_text(paste_text(key))
+          return unchanged
+        end
+        if keybinding?("delete_backward", key)
+          chars = editor.fetch("buffer").chars
+          cursor = editor.fetch("cursor").to_i
+          if cursor.positive?
+            chars.delete_at(cursor - 1)
+            editor["buffer"] = chars.join
+            editor["cursor"] = cursor - 1
+          end
+          return unchanged
+        end
+        if LEFT_KEYS.include?(key)
+          editor["cursor"] = [editor.fetch("cursor").to_i - 1, 0].max
+          return unchanged
+        end
+        if RIGHT_KEYS.include?(key)
+          editor["cursor"] = [editor.fetch("cursor").to_i + 1, editor.fetch("buffer").chars.length].min
+          return unchanged
+        end
+        if printable_key?(key)
+          insert_settings_editor_text(key)
+          return unchanged
+        end
+        unchanged
       end
 
-      def onboarding_ascii?
-        return @onboarding_ascii unless @onboarding_ascii.nil?
-
-        @onboarding_ascii = Onboarding.ascii_only?
+      def insert_settings_editor_text(text)
+        editor = @settings_editor
+        chars = editor.fetch("buffer").chars
+        cursor = editor.fetch("cursor").to_i.clamp(0, chars.length)
+        insertion = text.to_s.chars
+        chars.insert(cursor, *insertion)
+        editor["buffer"] = chars.join
+        editor["cursor"] = cursor + insertion.length
       end
 
-      def onboarding_notice_text
-        return nil unless @onboarding_notice && @onboarding_notice_at
-        return nil if monotonic_time - @onboarding_notice_at > Onboarding::NOTICE_SECONDS
-
-        @onboarding_notice
+      def apply_settings_editor
+        id = @settings_editor.fetch("id")
+        applied = @settings_draft.parse_editor(id, @settings_editor.fetch("buffer"))
+        @settings_draft.preview_theme if id == "appearance.theme" && applied
+        !applied.nil?
       end
 
-      def set_onboarding_notice(message)
-        @onboarding_notice = message.to_s
-        @onboarding_notice_at = monotonic_time
+      def handle_settings_mouse(key, unchanged, on_submit, state)
+        if mouse_wheel_up?(key) || mouse_wheel_down?(key)
+          hit = layout.settings_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+          move_settings_row(mouse_wheel_up?(key) ? -3 : 3) unless hit == :inert
+          return unchanged
+        end
+        return unchanged unless mouse_button_press?(key) && key.fetch("button", 0).to_i.zero?
+
+        hit = layout.settings_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+        case hit
+        when :save
+          setup_mode? ? setup_next_or_finish(on_submit, state) : save_settings(on_submit, state)
+        when :cancel
+          request_settings_cancel
+        when Array
+          kind, index = hit
+          if kind == :category
+            @settings_category_index = index.to_i.clamp(0, [settings_categories.length - 1, 0].max)
+            @settings_row_index = 0
+          elsif %i[row toggle].include?(kind)
+            @settings_row_index = index.to_i.clamp(0, [settings_rows.length - 1, 0].max)
+            activate_settings_row(state, toggle_only: kind == :toggle, on_submit: on_submit)
+          end
+        end
+        unchanged
       end
 
-      def onboarding_refresh_snapshot(now)
-        return nil unless @onboarding_refresh_at
-
-        { "elapsed" => now - @onboarding_refresh_at, "signature" => @onboarding_refresh_signature.to_s }
+      def hard_escape_key?(key)
+        key == "\e" || keybinding?("cancel_navigation", key)
       end
 
-      # How long to wait for the next key. Setup asks for animation frames only
-      # while a step is still moving; a settled screen falls back to a slow tick
-      # for the caret and notices, which is cheaper than the dashboard's own.
-      def frame_refresh_interval(state)
+      def hard_save_key?(key)
+        CTRL_S_KEYS.include?(key)
+      end
+
+      def move_settings_category(delta)
+        count = settings_categories.length
+        return if count.zero?
+
+        @settings_category_index = if setup_mode?
+                                     (@settings_category_index.to_i + delta.to_i).clamp(0, count - 1)
+                                   else
+                                     (@settings_category_index.to_i + delta.to_i) % count
+                                   end
+        @settings_row_index = 0
+      end
+
+      def move_settings_row(delta)
+        count = settings_rows.length
+        return if count.zero?
+
+        @settings_row_index = (@settings_row_index.to_i + delta.to_i) % count
+      end
+
+      def settings_page_size
+        [render_height - 8, 1].max
+      end
+
+      def selected_settings_row
+        rows = settings_rows
+        rows[@settings_row_index.to_i.clamp(0, [rows.length - 1, 0].max)]
+      end
+
+      def cycle_or_move_settings(delta, state)
+        row = selected_settings_row
+        return move_settings_category(delta) unless row
+
+        if %w[selector enum].include?(row.fetch("editor", nil))
+          @settings_draft.cycle(row.fetch("id"), delta)
+          @settings_draft.preview_theme if row.fetch("id") == "appearance.theme"
+        elsif row.fetch("editor", nil) == "model"
+          cycle_settings_model(row, delta, state)
+        else
+          move_settings_category(delta)
+        end
+      end
+
+      def cycle_settings_model(row, delta, state)
+        options = ModelPicker.entries(state, harness: "pi", query: "").map { |entry| entry.fetch("reference") }
+        current = @settings_draft.value(row.fetch("id")).to_s
+        options.unshift(current) unless options.include?(current)
+        return if options.empty?
+
+        index = options.index(current) || 0
+        @settings_draft.set(row.fetch("id"), options[(index + delta.to_i) % options.length])
+      end
+
+      def activate_settings_row(state, toggle_only: false, on_submit: nil)
+        row = selected_settings_row
+        return false unless row
+
+        id = row.fetch("id")
+        if id == "_show_advanced"
+          @settings_show_advanced = true
+          @settings_row_index = 0
+          return true
+        end
+        if id == "setup.run_again"
+          close_settings(discard: true)
+          return handle_local_setup_command(state)
+        end
+        if id == "_setup_begin"
+          move_settings_category(1)
+          return true
+        end
+        if id == "_setup_finish"
+          return save_settings(on_submit, state, onboarding_outcome: "completed")
+        end
+        if id.start_with?("_setup_review:")
+          return focus_setup_setting(id.delete_prefix("_setup_review:"))
+        end
+        return false if row.fetch("read_only", false)
+
+        case row.fetch("editor", nil)
+        when "checkbox"
+          @settings_draft.toggle(id)
+        when "selector"
+          return false if toggle_only
+          @settings_draft.cycle(id, 1)
+          @settings_draft.preview_theme if id == "appearance.theme"
+        when "model"
+          return false if toggle_only
+          open_settings_editor(row)
+        else
+          return false if toggle_only
+          open_settings_editor(row)
+        end
+        true
+      end
+
+      def focus_setup_setting(id)
+        step = Settings::SetupFlow.step_for_setting(id)
+        return false unless step
+
+        @settings_category_index = settings_categories.index(step) || 0
+        @settings_row_index = settings_rows.index { |row| row.fetch("id", nil) == id.to_s } || 0
+        true
+      end
+
+      def open_settings_editor(row)
+        id = row.fetch("id")
+        text = @settings_draft.editor_text(id)
+        @settings_editor = {
+          "id" => id,
+          "row" => row,
+          "buffer" => text,
+          "cursor" => text.chars.length
+        }
+      end
+
+      def request_settings_cancel
+        if setup_mode?
+          if @settings_setup_auto
+            @settings_discard_confirm = "skip"
+          elsif @settings_draft&.dirty?
+            @settings_discard_confirm = "discard"
+          else
+            close_settings(discard: true)
+          end
+          return true
+        end
+
+        return close_settings(discard: true) unless @settings_draft&.dirty?
+
+        @settings_discard_confirm = "discard"
+        true
+      end
+
+      def setup_next_or_finish(on_submit, state, jump_to_review: false)
+        if settings_category == "Review"
+          save_settings(on_submit, state, onboarding_outcome: "completed")
+        elsif jump_to_review
+          @settings_category_index = settings_categories.index("Review")
+          @settings_row_index = [settings_rows.length - 1, 0].max
+          true
+        else
+          move_settings_category(1)
+          true
+        end
+      end
+
+      def save_settings(on_submit, state, onboarding_outcome: nil)
+        return false if @settings_saving
+        unless @settings_draft.validate
+          first_id = @settings_draft.errors.keys.first
+          focus_settings_id(first_id) if first_id
+          return false
+        end
+
+        changes = @settings_draft.changes
+        unless onboarding_outcome.to_s.empty?
+          explicit_experiments = Settings::SetupFlow.experiment_defaults(@settings_draft, explicit_only: true)
+          changes = onboarding_outcome == "skipped" ? explicit_experiments : changes.merge(explicit_experiments)
+        end
+        if changes.empty? && onboarding_outcome.to_s.empty?
+          close_settings(discard: false)
+          return true
+        end
+
+        payload = {
+          "base_fingerprint" => @settings_draft.baseline_fingerprint,
+          "changes" => changes
+        }
+        payload["onboarding_outcome"] = onboarding_outcome unless onboarding_outcome.to_s.empty?
+        encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
+        @settings_saving = true
+        @settings_setup_outcome = onboarding_outcome
+        @settings_draft.clear_save_failure
+        submit_prompt("/config save #{encoded}", on_submit, state)
+        true
+      end
+
+      def focus_settings_id(id)
+        return focus_setup_setting(id) if setup_mode?
+
+        definition = @settings_draft.definitions.find { |candidate| candidate.id == id.to_s }
+        return unless definition
+
+        @settings_show_advanced = true if definition.advanced
+        @settings_category_index = settings_categories.index(definition.category) || 0
+        @settings_row_index = settings_rows.index { |row| row.fetch("id", nil) == definition.id } || 0
+      end
+
+      # --- first-run setup --------------------------------------------------
+
+      def frame_refresh_interval(_state)
         return TERMINAL_REFRESH_INTERVAL if @agent_workspace_active && @agent_workspace_view == "terminal"
-        return REFRESH_INTERVAL unless @onboarding_active
-        return REFRESH_INTERVAL unless onboarding_animated?
 
-        layout.onboarding_animating?(state) ? ONBOARDING_ANIMATION_INTERVAL : ONBOARDING_IDLE_INTERVAL
-      rescue StandardError
         REFRESH_INTERVAL
-      end
-
-      def onboarding_plan
-        Onboarding.plan(@onboarding_harness)
-      end
-
-      def onboarding_step
-        steps = onboarding_plan
-        steps[@onboarding_step_index.to_i.clamp(0, steps.length - 1)]
       end
 
       # Auto-open decision, made once per launch. It never opens when the config
@@ -2903,7 +3379,7 @@ module Meringue
         return false unless onboarding_autostart?
 
         state = state_provider.call || State::Models.empty_state
-        open_onboarding(state)
+        open_settings(state, mode: "setup", setup_origin: "auto")
       end
 
       def onboarding_autostart?
@@ -2914,332 +3390,19 @@ module Meringue
         Onboarding.fits?(width: width, height: height)
       end
 
-      # Setup reads persisted state and the theme only, so opening it starts no
-      # harness process and writes nothing. Every choice is applied later as the
-      # ordinary slash command for it.
+      # Compatibility seam for tests/extensions that opened the old controller
+      # directly. Setup now opens the curated transactional Settings mode.
       def open_onboarding(state)
-        @onboarding_active = true
-        @onboarding_step_index = 0
-        @onboarding_query = +""
-        @onboarding_harness = nil
-        @onboarding_applied = {}
-        @onboarding_saved_theme = Style.current_colorscheme.to_s
-        @onboarding_index = onboarding_default_index(state)
-        @onboarding_step_entered_at = monotonic_time
-        @onboarding_progress_from = 0.0
-        @onboarding_notice = nil
-        @onboarding_notice_at = nil
-        @onboarding_refresh_at = nil
-        @onboarding_refresh_signature = nil
-        close_delivery_pr_picker
-        close_model_picker
-        # Taking over the screen changes every row, so the next frame is written as
-        # one repaint instead of a cloud of row patches.
-        @force_full_redraw = true
-        true
-      end
-
-      def close_onboarding
-        restore_onboarding_theme
-        @onboarding_active = false
-        @onboarding_step_index = 0
-        @onboarding_index = 0
-        @onboarding_query = +""
-        @onboarding_harness = nil
-        @onboarding_applied = {}
-        @onboarding_saved_theme = nil
-        @onboarding_step_entered_at = nil
-        @onboarding_progress_from = 0.0
-        @onboarding_notice = nil
-        @onboarding_notice_at = nil
-        @onboarding_refresh_at = nil
-        @onboarding_refresh_signature = nil
-        # Handing the screen back to the dashboard is the same kind of transition.
-        @force_full_redraw = true
-      end
-
-      # The theme step previews live by reconfiguring the running Style, so leaving
-      # without pressing Enter has to put the saved theme back.
-      def restore_onboarding_theme
-        theme = @onboarding_saved_theme
-        return if theme.to_s.empty?
-        return if Style.current_colorscheme.to_s == theme.to_s
-
-        Style.configure!(theme)
-      rescue StandardError
-        nil
-      end
-
-      def onboarding_rows(state)
-        Onboarding.rows(
-          state,
-          step: onboarding_step,
-          harness: @onboarding_harness,
-          query: @onboarding_query,
-          saved_theme: @onboarding_saved_theme
-        )
-      end
-
-      def onboarding_default_index(state)
-        Onboarding.default_index(
-          state,
-          step: onboarding_step,
-          harness: @onboarding_harness,
-          query: @onboarding_query,
-          saved_theme: @onboarding_saved_theme
-        )
-      end
-
-      # A modal step flow that owns the keys and setup-specific clicks it needs
-      # and passes everything else through, so Ctrl-C still quits and setup is
-      # never a trap. Only visible option rows are clickable: empty-space clicks,
-      # drags, releases, and right-clicks cannot apply a choice or dismiss setup.
-      def handle_onboarding_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
-        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
-        return unchanged if close_collapsed_onboarding(state)
-        return handle_onboarding_mouse(key, unchanged, on_submit, state) if mouse_event?(key)
-
-        rows = onboarding_rows(state)
-        step = onboarding_step
-
-        # A paste belongs to the filter on the model step and to nothing at all
-        # elsewhere; it must never land in the composer hidden behind setup.
-        if paste_key?(key)
-          set_onboarding_query("#{@onboarding_query}#{paste_text(key)}", state) if step == Onboarding::MODEL
-          return unchanged
-        end
-
-        if keybinding?("suggestion_previous", key)
-          move_onboarding(-1, rows.length, state)
-          return unchanged
-        end
-        if keybinding?("suggestion_next", key)
-          move_onboarding(1, rows.length, state)
-          return unchanged
-        end
-        if keybinding?("submit", key)
-          advance_onboarding(rows, on_submit, state)
-          return unchanged
-        end
-        if keybinding?("cancel_navigation", key)
-          skip_onboarding(on_submit, state)
-          return unchanged
-        end
-        if keybinding?("cursor_left", key)
-          back_onboarding(state)
-          return unchanged
-        end
-        if step == Onboarding::MODEL
-          if keybinding?("refresh_model_catalog", key)
-            refresh_onboarding_catalog(on_submit, state)
-            return unchanged
-          end
-          if keybinding?("delete_word_backward", key)
-            set_onboarding_query(+"", state)
-            return unchanged
-          end
-          if keybinding?("delete_backward", key)
-            set_onboarding_query(@onboarding_query.to_s.chars[0...-1].join, state)
-            return unchanged
-          end
-          if printable_key?(key)
-            set_onboarding_query("#{@onboarding_query}#{key}", state)
-            return unchanged
-          end
-        elsif printable_key?(key)
-          # Steps without a filter are pure choices: typing must not leak into the
-          # composer behind the modal.
-          return unchanged
-        end
-
-        nil
-      rescue StandardError => e
-        # A modal that raised while it owned the keys would be the one real trap in
-        # this flow, so a failure closes it (restoring the previewed theme) and
-        # says so instead of eating every key.
-        close_onboarding
-        append_jump_response("Setup closed after an error: #{e.message}. Run /setup to try again.")
-        [input_buffer, input_cursor, slash_suggestion_index]
-      end
-
-      # Setup has its own hit testing because the dashboard is not drawn behind
-      # it. A left-click on an option row applies that same row as Enter would;
-      # every other mouse event is swallowed so it cannot leak to dashboard mouse
-      # handling or become a click-away skip.
-      def handle_onboarding_mouse(key, unchanged, on_submit, state)
-        return unchanged unless mouse_button_press?(key)
-        return missed_onboarding_click(unchanged) unless key.fetch("button", 0).to_i.zero?
-
-        hit = layout.onboarding_hit(
-          state,
-          width: render_width,
-          height: render_height,
-          x: mouse_x(key),
-          y: mouse_y(key)
-        )
-        return missed_onboarding_click(unchanged) unless hit.is_a?(Integer)
-
-        rows = onboarding_rows(state)
-        return missed_onboarding_click(unchanged) unless hit >= 0 && hit < rows.length
-
-        @onboarding_index = hit
-        preview_onboarding_theme(state)
-        advance_onboarding(rows, on_submit, state)
-        unchanged
-      end
-
-      def missed_onboarding_click(unchanged)
-        set_onboarding_notice(Onboarding::NOTICE_MOUSE)
-        unchanged
-      end
-
-      def move_onboarding(step, count, state)
-        return if count <= 0
-
-        @onboarding_index = (@onboarding_index.to_i + step) % count
-        preview_onboarding_theme(state)
-      end
-
-      def set_onboarding_query(query, state)
-        @onboarding_query = +query.to_s
-        @onboarding_index = onboarding_default_index(state)
-      end
-
-      # Moving the highlight on the theme step repaints the whole dashboard in that
-      # theme. Nothing is persisted until Enter, and leaving restores the saved one.
-      def preview_onboarding_theme(state)
-        return unless onboarding_step == Onboarding::THEME
-
-        row = onboarding_rows(state)[@onboarding_index.to_i]
-        return unless row
-
-        Style.configure!(row.fetch("value"))
-      rescue StandardError
-        nil
-      end
-
-      # Enter applies the highlighted row and moves on. Re-applying a value that is
-      # already in effect is accepted by the kernel, so holding Enter through the
-      # flow accepts every current default and changes nothing.
-      def advance_onboarding(rows, on_submit, state)
-        leaving = Onboarding.step_fraction(onboarding_step, onboarding_plan)
-        apply_onboarding_row(rows[@onboarding_index.to_i], on_submit, state)
-        steps = onboarding_plan
-        if @onboarding_step_index >= steps.length - 1
-          finish_onboarding(on_submit, state)
-          return true
-        end
-
-        @onboarding_step_index += 1
-        enter_onboarding_step(state, from: leaving)
-        true
-      end
-
-      # The progress bar eases from where the step being left had it, so advancing
-      # and going back both read as movement instead of a jump. Everything else
-      # tied to the step being left (a pending refresh, an answer to a refused
-      # click) is dropped with it rather than following the user onto the next one.
-      def restart_onboarding_step_clock(from: nil)
-        @onboarding_progress_from = (from || Onboarding.step_fraction(onboarding_step, onboarding_plan)).to_f
-        @onboarding_step_entered_at = monotonic_time
-        @onboarding_refresh_at = nil
-        @onboarding_refresh_signature = nil
-        @onboarding_notice = nil
-        @onboarding_notice_at = nil
-      end
-
-      # Back is deliberately non-destructive: it returns to the step without
-      # un-applying anything (there are no inverse kernel commands), and the finish
-      # card reports what is actually in effect.
-      def back_onboarding(state)
-        return false if @onboarding_step_index.to_i <= 0
-
-        leaving = Onboarding.step_fraction(onboarding_step, onboarding_plan)
-        @onboarding_step_index -= 1
-        enter_onboarding_step(state, from: leaving)
-        true
-      end
-
-      # Arriving at a step also ends the previous step's theme preview, so walking
-      # back off the theme list puts the saved theme back on screen.
-      def enter_onboarding_step(state, from: nil)
-        restart_onboarding_step_clock(from: from)
-        @onboarding_query = +""
-        restore_onboarding_theme
-        @onboarding_index = onboarding_default_index(state)
-        preview_onboarding_theme(state)
-      end
-
-      def apply_onboarding_row(row, on_submit, state)
-        return false unless row
-
-        command = row.fetch("command", nil)
-        return false if command.to_s.empty?
-
-        kind = row.fetch("kind", nil)
-        @onboarding_harness = row.fetch("value") if kind == Onboarding::HARNESS
-        @onboarding_saved_theme = row.fetch("value") if kind == Onboarding::THEME
-        @onboarding_applied[kind] = row.fetch("value")
-        submit_prompt(command, on_submit, state)
-        true
-      end
-
-      # Ctrl-R is the one step that waits on something outside the flow, so it is
-      # the one place with a spinner. The catalog snapshot that is on screen right
-      # now is remembered, and the spinner stops as soon as the kernel has written
-      # a different one (or the bounded wait runs out).
-      def refresh_onboarding_catalog(on_submit, state)
-        harness = Onboarding.harness_for(state, @onboarding_harness)
-        @onboarding_refresh_at = monotonic_time
-        @onboarding_refresh_signature = Onboarding.catalog_signature(state, harness: harness)
-        submit_prompt("/models #{harness} refresh", on_submit, state)
-        true
-      end
-
-      def finish_onboarding(on_submit, state)
-        record_onboarding_outcome("complete", on_submit, state)
-      end
-
-      # Esc is an exit, not a cancel: everything already applied stays, and the
-      # marker is still written so setup never opens by itself again.
-      def skip_onboarding(on_submit, state)
-        record_onboarding_outcome("skip", on_submit, state)
-      end
-
-      # The card is written after the flow closes, so it reports the theme that is
-      # really in effect rather than a preview the exit just rolled back.
-      def record_onboarding_outcome(outcome, on_submit, state)
-        applied = @onboarding_applied.dup
-        harness = @onboarding_harness
-        close_onboarding
-        settings = Onboarding.settings(state, applied: applied, harness: harness)
-        card = outcome == "skip" ? Onboarding.skip_card(settings) : Onboarding.completion_card(settings)
-        append_jump_response(card)
-        submit_prompt("/setup #{outcome}", on_submit, state)
-        true
-      end
-
-      # A screen too small to draw the card and its exit hint would be an
-      # invisible modal eating keys, which is the one real trap in this flow. This
-      # is checked on the next key rather than during render, so a resize below the
-      # minimum closes setup instead of leaving it up in an unusable size.
-      def close_collapsed_onboarding(_state)
-        return false if onboarding_fits?
-
-        close_onboarding
-        append_jump_response(Onboarding.collapsed_message)
-        true
-      rescue StandardError
-        false
+        open_settings(state, mode: "setup", setup_origin: "manual")
       end
 
       def setup_command?(text)
         text.to_s.strip.downcase == "/setup"
       end
 
-      # Bare `/setup` is local UI, exactly like `/jump` and `/models`; the kernel
-      # spellings `/setup complete` and `/setup skip` stay kernel commands so the
-      # marker is validated, journaled, and logged.
+      # Bare `/setup` is local UI. `/setup complete|skip` remain compatibility
+      # kernel commands for scripts, while the interactive flow saves its marker
+      # together with the reviewed draft in one SaveConfiguration transaction.
       def handle_local_setup_command(state)
         unless @onboarding_enabled
           append_jump_response(Onboarding.unavailable_message)
@@ -3251,7 +3414,7 @@ module Meringue
           return true
         end
 
-        open_onboarding(state)
+        open_settings(state, mode: "setup", setup_origin: "manual")
         true
       end
 
@@ -3400,6 +3563,11 @@ module Meringue
       end
 
       def open_delivery_pr_picker(state)
+        unless github_support_enabled?(state)
+          append_jump_response(github_support_disabled_message)
+          return false
+        end
+
         entries = OpenPullRequests.entries(state)
         if entries.empty?
           # Expected unavailability, so it stays a transient hint rather than a
@@ -3484,6 +3652,7 @@ module Meringue
 
       def open_delivery_pr_entry(entry)
         return false unless entry
+        return false unless github_support_enabled?
 
         result = pull_request_opener.open(entry.fetch("url"))
         return true if open_succeeded?(result)
@@ -3496,6 +3665,11 @@ module Meringue
       end
 
       def open_pr_by_agent_id(state, agent_id, silent_fail: false)
+        unless github_support_enabled?(state)
+          append_jump_response(github_support_disabled_message) unless silent_fail
+          return false
+        end
+
         record = pr_record_for_id(state, agent_id)
         unless record
           append_jump_response("Agent tree item #{agent_id} does not exist.") unless silent_fail
@@ -3829,7 +4003,10 @@ module Meringue
               update_message(assistant_message_id, text: final_text, status: nil, visible: visible, persist: visible)
             end
           rescue StandardError => e
-            if assistant_message_id
+            if slash_command && text.start_with?("/config save ") && @settings_active && @settings_draft
+              @settings_saving = false
+              @settings_draft.apply_save_failure("Configuration save failed: #{e.class}: #{e.message}")
+            elsif assistant_message_id
               update_message(assistant_message_id, text: "Head loop failed: #{e.class}: #{e.message}", status: "errored", visible: true)
             end
           ensure
@@ -3944,6 +4121,35 @@ module Meringue
         clear_logs! if clear_state_accepted?(command_results)
         reload_recounted_presentation_state! if recount_accepted?(command_results)
         apply_theme_command_results(command_results)
+        apply_configuration_command_results(command_results)
+      end
+
+      def apply_configuration_command_results(command_results)
+        result = Array(command_results).reverse.find { |candidate| candidate.fetch("command_type", nil) == "SaveConfiguration" }
+        return unless result
+
+        if result.fetch("status", nil) == "accepted"
+          outcome = result.dig("result", "onboarding_outcome") || @settings_setup_outcome
+          setup_was_active = @settings_active && setup_mode?
+          @config = config.reload_file
+          @keybindings = Keybindings.from_config(@config.section("tui", "keybindings"))
+          close_settings(discard: outcome == "skipped") if @settings_active
+          if setup_was_active && outcome
+            append_jump_response(outcome == "skipped" ? Onboarding.skip_card : Onboarding.completion_card(@config))
+          end
+        elsif @settings_active && @settings_draft
+          @settings_saving = false
+          details = result.fetch("result", {}) || {}
+          @settings_draft.apply_save_failure(
+            result.fetch("message", "Configuration was not saved."),
+            details.fetch("field_errors", {})
+          )
+        end
+      rescue StandardError => e
+        if @settings_active && @settings_draft
+          @settings_saving = false
+          @settings_draft.apply_save_failure("Configuration result could not be applied: #{e.message}")
+        end
       end
 
       def clear_state_accepted?(command_results)
@@ -4116,9 +4322,8 @@ module Meringue
         reconcile_log_scope!(state)
         composed_state = state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
-          # First-run setup renders full screen, so it is a top-level view like the
-          # focused workspace rather than a slot inside the chat pane.
-          Panes::OnboardingPane::STATE_KEY => onboarding_snapshot,
+          Settings::STATE_KEY => settings_snapshot,
+          "_capabilities" => { "github_support" => github_support_enabled?(state) },
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
           LogScope::STATE_KEY => LogScope.snapshot(state, @log_scope_id),
           "_agent_workspace" => agent_workspace_snapshot(state, input_buffer, input_cursor, slash_suggestion_index),
@@ -4186,7 +4391,7 @@ module Meringue
             "leader_commands" => workspace_leader_commands,
             "leader_pending" => @workspace_leader_pending,
             "slash_suggestion_index" => slash_suggestion_index.to_i,
-            "slash_suggestions" => WorkspaceCommands.command_suggestion_records(input_buffer),
+            "slash_suggestions" => workspace_command_suggestion_records(input_buffer),
             "scroll_offset" => @agent_workspace_view == "terminal" ? @workspace_terminal_scroll_offset.to_i : @workspace_agent_scroll_offset.to_i,
             "messages" => @agent_workspace_messages[@agent_workspace_agent_id.to_s].map(&:dup),
             "notice" => @agent_workspace_notice,

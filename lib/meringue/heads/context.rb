@@ -31,11 +31,11 @@ module Meringue
       ROUTING_TEXT_LIMIT = 2_000
 
       attr_reader :head_id, :user_message, :snapshot, :question_id, :selected_target,
-                  :kernel_commands_path, :cwd, :state_path
+                  :kernel_commands_path, :cwd, :state_path, :github_support
 
       def initialize(head_id:, user_message:, snapshot:, question_id: nil, selected_target: nil,
                      kernel_commands_path: DEFAULT_KERNEL_COMMANDS_PATH, cwd: Dir.pwd,
-                     state_path: State::Store.default_path)
+                     state_path: State::Store.default_path, github_support: true)
         @head_id = head_id
         @user_message = user_message
         @snapshot = snapshot
@@ -44,6 +44,7 @@ module Meringue
         @kernel_commands_path = kernel_commands_path
         @cwd = File.expand_path(cwd)
         @state_path = File.expand_path(state_path)
+        @github_support = github_support != false
       end
 
       def to_h
@@ -51,7 +52,7 @@ module Meringue
       end
 
       def to_prompt_h
-        {
+        prompt = {
           "head_id" => head_id,
           "user_message" => user_message,
           "question_id" => question_id,
@@ -64,10 +65,11 @@ module Meringue
             "appended_to_system_prompt" => true
           )
         }
+        github_support ? prompt : without_github_guidance(prompt)
       end
 
       def system_prompt
-        <<~PROMPT
+        prompt = <<~PROMPT
           You are a stateless Meringue head agent.
           Read the user message and return a HeadResult JSON object only.
           The prompt includes the Meringue state file path and read-only commands you may run when state details are necessary.
@@ -89,6 +91,7 @@ module Meringue
 
           #{kernel_command_reference}
         PROMPT
+        github_support ? prompt : prompt.lines.reject { |line| github_guidance_line?(line) }.join
       end
 
       def reference_metadata
@@ -102,9 +105,32 @@ module Meringue
       private
 
       def kernel_command_reference
-        @kernel_command_reference ||= File.read(kernel_commands_path)
+        @kernel_command_reference ||= begin
+          reference = File.read(kernel_commands_path)
+          github_support ? reference : reference.lines.reject { |line| github_guidance_line?(line) }.join
+        end
       rescue Errno::ENOENT
         raise ArgumentError, "Head kernel command reference not found: #{kernel_commands_path}"
+      end
+
+      def github_guidance_line?(line)
+        line.to_s.match?(/github|\bgh\s+(?:issue|pr|api)\b/i)
+      end
+
+      def without_github_guidance(value)
+        case value
+        when Hash
+          value.each_with_object({}) do |(key, child), result|
+            filtered = without_github_guidance(child)
+            result[key] = filtered unless filtered.nil?
+          end
+        when Array
+          value.filter_map { |child| without_github_guidance(child) }
+        when String
+          github_guidance_line?(value) ? nil : value
+        else
+          value
+        end
       end
 
       def state_access

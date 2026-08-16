@@ -8,12 +8,27 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
-The interactive TUI updates this file with `/theme <name>`, `/model <provider>/<model-id>`, `/thinking <level>`, `/thinking head <level>`, `/thinking worker <level>`, and the first-run setup flow (`/setup`).
+Run `/config` for the full-screen schema-driven editor covering every supported setting. `/config --text` retains the read-only diagnostic listing. Existing `/theme`, `/model [head|worker] <provider>/<model-id>`, `/thinking [head|worker] <level>`, `/harness [head|worker] <provider>`, and setup compatibility commands use the same validated atomic persistence layer. First-run Setup is a curated mode of this same overlay. See [`settings.md`](settings.md) for interaction, responsive layouts, transactional save/cancel behavior, and provenance.
+
+## Settings schema and experiments
+
+The config carries an internal schema version and the opt-in GitHub integration:
+
+```toml
+[settings]
+schema_version = 1
+
+[experiments]
+github_support = false
+```
+
+New installations default GitHub support off. Existing installations with a pre-upgrade state file or onboarding marker migrate it on so upgrading does not silently remove PR behavior; an explicit value always wins. Disabling it performs no built-in `gh` subprocess/network lookup, hides GitHub-specific TUI commands and status, and preserves historical PR records. See [`settings.md`](settings.md#github-support).
 
 ## First-run setup marker
 
-The first launch on a machine opens a short setup flow for the harness, model,
-thinking level, and theme. Finishing or skipping it records one marker here:
+The first interactive launch opens the shared Settings overlay for a theme,
+separate head/worker defaults, and experiment checkboxes. Finishing or confirming
+a first-run skip records one marker here:
 
 ```toml
 [onboarding]
@@ -24,10 +39,12 @@ outcome = "completed"   # or "skipped"
 
 The marker lives in the config file rather than in `state.json` so that
 `meringue reset-state` and `/clear` do not replay setup. Delete the `[onboarding]`
-section to see the flow again on the next launch, or run `/setup` any time. It is
-written by the `CompleteOnboarding` kernel command, so it honors `--config PATH`
-like every other config write. See [`onboarding.md`](onboarding.md) for the steps,
-keys, and degraded behavior.
+section to see the flow again on the next launch, or run `/setup` any time.
+Interactive Finish writes the reviewed settings and marker in one
+`SaveConfiguration` transaction; `/setup complete|skip` remain compatible
+`CompleteOnboarding` commands. Both honor `--config PATH`. See
+[`onboarding.md`](onboarding.md) for first-run, rerun, cancel, resize, and failure
+behavior.
 
 ## Selecting a TUI colorscheme
 
@@ -58,9 +75,7 @@ AgentTree rows also show which harness backs each session: `π` Pi, `✳` Claude
 animations = false
 ```
 
-Animation is opt-out and today it only affects the [first-run setup screen](onboarding.md#animation): the sweep, the eased progress bar, the staggered row reveal, and the breathing selection marker. With `animations = false` (or `MERINGUE_NO_ANIMATION=1`, which wins over the file) setup draws its settled frame immediately and stops asking for animation frames, so nothing about the flow changes except the motion. Any other value, or an absent key, keeps motion on.
-
-Motion also turns itself off without being asked: on a non-interactive stdin, and on any terminal smaller than 60×16, where every row is needed for content.
+Animation is an appearance preference for TUI surfaces that support motion. `MERINGUE_NO_ANIMATION=1` overrides the file for the current process. Setup exposes the checkbox because it is a useful first-run preference, but the shared Settings/Setup overlay itself uses immediate redraws and does not depend on animation for navigation or recovery.
 
 ## Customizing TUI keybindings
 
@@ -106,7 +121,7 @@ Supported action names:
 
 Common key names include `enter`, `shift-enter`, `tab`, `shift-tab`, `ctrl-tab`, `escape`, arrow keys (`up`, `down`, `left`, `right`), `shift-left`, `shift-right`, `shift-up`, `shift-down`, `shift-home`, `shift-end`, `shift-alt-left`, `shift-alt-right`, `shift-ctrl-left`, `shift-ctrl-right`, `shift-page-up`, `shift-page-down`, `home`, `end`, `page-up`, `page-down`, `backspace`, `delete`, `ctrl-space`, `ctrl-a` through `ctrl-z`, `alt-c`, `alt-v`, `alt-left`, `alt-right`, `ctrl-left`, `ctrl-right`, `alt-backspace`, `ctrl-backspace`, `alt-delete`, `ctrl-delete`, `space`, and single printable characters like `j` or `p`. Advanced users can bind a raw terminal sequence with `raw:<sequence>`; literal `\\e` inside that string is converted to Escape.
 
-Use `/keybind` in the TUI to show the active keybindings after config has been loaded. `/config` shows the same keybindings together with the active supported defaults, workspace commands, and conflict policy.
+Use `/keybind` in the TUI to show the active keybindings after config has been loaded. `/config` opens the editable Keybindings category; `/config --text` prints the diagnostic listing.
 
 ## Supported defaults and conflict policy
 
@@ -114,8 +129,10 @@ The config file is intentionally small and only the settings described here are 
 
 ```toml
 [harness.pi]
-model = "anthropic/claude-opus-5"
-thinking_level = "max"        # legacy/shared fallback
+model = "anthropic/claude-opus-5"        # shared fallback for either omitted role
+# head_model = "openai/gpt-5.6-sol"     # optional role override
+# worker_model = "anthropic/claude-opus-5"
+thinking_level = "max"        # shared fallback for either omitted role
 # head_thinking_level = "low"  # optional role override
 # worker_thinking_level = "max"
 
@@ -125,7 +142,7 @@ thinking_level = "max"        # legacy/shared fallback
 predecessor_failure = "cancel"
 ```
 
-`[conflicts].predecessor_failure` accepts `cancel` or `run`. It applies only when a dependent worker does not provide its own `if_predecessor_fails` value; it does not change the handling of git merge conflicts or overwrite project files. `/config` reports the effective value and `/keybind` reports only keybindings.
+`[conflicts].predecessor_failure` accepts `cancel` or `run`. It applies only when a dependent worker does not provide its own `if_predecessor_fails` value; it does not change the handling of git merge conflicts or overwrite project files. Settings reports the current/default value and provenance; `/keybind` reports only keybindings.
 
 ## Worker command blacklists
 
@@ -333,10 +350,12 @@ Each provider can set its executable command and role-specific extra args.
 [harness.pi]
 command = "pi"
 session_dir = "~/.meringue/pi-sessions"
-# Shared model and backward-compatible thinking fallback:
+# Shared model and thinking fallbacks (backward-compatible):
 model = "anthropic/claude-opus-5"
 thinking_level = "max"
-# Optional role-specific thinking overrides:
+# Optional role-specific overrides:
+# head_model = "openai/gpt-5.6-sol"
+# worker_model = "anthropic/claude-opus-5"
 # head_thinking_level = "low"
 # worker_thinking_level = "max"
 head_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls"]
@@ -354,11 +373,11 @@ head_extra_args = []
 worker_extra_args = []
 ```
 
-Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/thinking head <level>` and `/thinking worker <level>`, or set `head_thinking_level` and `worker_thinking_level`, for distinct role defaults. The existing `/thinking <level>` command and `thinking_level` key remain the shared form; the command also clears role overrides. A role key wins over the shared key, and either scalar wins over a thinking flag in that role's argument array. A configured role array still replaces that role's default array entirely, so include every other flag you need.
+Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/model head <provider>/<model-id>` and `/model worker <provider>/<model-id>`, or set `head_model` and `worker_model`, for distinct role model defaults; use `/thinking head <level>` and `/thinking worker <level>`, or set `head_thinking_level` and `worker_thinking_level`, for distinct role thinking defaults. The existing `/model <provider>/<model-id>` command and `model` key, and `/thinking <level>` command and `thinking_level` key, remain the shared form; those commands also clear role overrides. A role key wins over the shared key, and either scalar wins over a `--model`/`--thinking` flag in that role's argument array. A configured role array still replaces that role's default array entirely, so include every other flag you need.
 
 A model reference is `<provider>/<model-id>`, split on the first slash, so the model id may itself contain `/` and `:` (`model = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"` is valid). See [`session-settings.md`](session-settings.md#the-accepted-model-reference-grammar) for the exact grammar and for what is still rejected.
 
-`/config` and the dashboard status line show the shared model plus both future Pi thinking levels. `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. An existing session's own effective pair has no slash command either: it is recorded on the agent record and shown in the focused worker workspace and raw `/state`. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
+`/config` and the dashboard status line show each future Pi role's model and thinking level (the shared model when both roles agree, split by role when they differ). `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. An existing session's own effective pair has no slash command either: it is recorded on the agent record and shown in the focused worker workspace and raw `/state`. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
 
 ### Model catalogs and provider resource flags
 

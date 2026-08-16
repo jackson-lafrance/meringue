@@ -121,10 +121,54 @@ module Meringue
         state["counters"]["issues_by_project"] ||= {}
         state["counters"]["workers_by_issue"] ||= {}
         state["metadata"] ||= {}
+        migrate_active_harness_defaults!(state)
+        migrate_pi_session_defaults!(state)
         state["metadata"]["created_at"] ||= now
         state["metadata"]["updated_at"] ||= state["metadata"].fetch("created_at")
         migrate_pull_requests_to_issues!(state)
         repair_project_names!(state)
+        state
+      end
+
+      # Older snapshots stored one shared future-agent harness. Materialize it
+      # into role-aware keys while retaining the shared compatibility fallback.
+      def migrate_active_harness_defaults!(state)
+        metadata = state["metadata"]
+        return state unless metadata.is_a?(Hash)
+
+        shared = metadata["active_harness"]
+        return state if shared.to_s.strip.empty?
+
+        metadata["active_head_harness"] ||= shared
+        metadata["active_worker_harness"] ||= shared
+        shared_label = metadata["active_harness_label"]
+        metadata["active_head_harness_label"] ||= shared_label if shared_label
+        metadata["active_worker_harness_label"] ||= shared_label if shared_label
+        state
+      end
+
+      # Older state snapshots stored one shared Pi model alongside role-specific
+      # thinking values. Materialize that shared model into both role records so
+      # renderers and later settings code can consume one stable shape while the
+      # legacy top-level value remains intact for compatibility.
+      def migrate_pi_session_defaults!(state)
+        metadata = state["metadata"]
+        return state unless metadata.is_a?(Hash)
+
+        defaults = metadata["pi_session_defaults"]
+        return state unless defaults.is_a?(Hash)
+
+        shared_model = defaults["model"].to_s.strip
+        roles = defaults["roles"]
+        roles = {} unless roles.is_a?(Hash)
+        defaults["roles"] = %w[head worker].each_with_object(roles) do |role, migrated|
+          role_defaults = migrated[role]
+          role_defaults = {} unless role_defaults.is_a?(Hash)
+          role_model = role_defaults["model"].to_s.strip
+          role_defaults["model"] = role_model unless role_model.empty?
+          role_defaults["model"] = shared_model if role_defaults["model"].to_s.empty? && !shared_model.empty?
+          migrated[role] = role_defaults
+        end
         state
       end
 
