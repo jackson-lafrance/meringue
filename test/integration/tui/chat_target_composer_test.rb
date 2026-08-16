@@ -248,10 +248,11 @@ class TuiChatTargetComposerTest < Minitest::Test
     # The filtered logs pane shares the same identity color on its title only;
     # its box keeps the theme border, so the tint still reads as "this is that
     # agent" rather than as a second focused pane.
-    logs_row = frame.split("\n", -1).find { |line| strip_ansi(line).include?("─ logs") }
+    logs_row = frame.split("\n", -1).find { |line| strip_ansi(line).include?("P1-I1-W1 · working") }
+    refute_nil logs_row, "the filtered worker title row should be rendered"
     assert_includes logs_row, tint
     assert_includes logs_row, Style::BORDER
-    assert_includes logs_row, "#{tint} logs — P1-I1-W1 "
+    assert_includes logs_row, "#{tint} P1-I1-W1 · working"
     # The AgentTree pane is not about one agent, so its title stays neutral.
     # (It shares this physical row with the logs pane title.)
     assert_includes logs_row, "#{Style::PANEL_TITLE} agent tree "

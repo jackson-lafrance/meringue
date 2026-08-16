@@ -65,6 +65,10 @@ module Meringue
         session_ref
       end
 
+      def get_session_stats(session_ref)
+        session_ref.fetch("session_stats", nil)
+      end
+
       def read_events(_session_ref)
         []
       end

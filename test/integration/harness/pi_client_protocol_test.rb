@@ -338,6 +338,31 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     assert_equal "sess-99", state.fetch("metadata").fetch("pi_state").fetch("sessionId")
   end
 
+  def test_session_stats_normalize_current_context_and_leave_unknown_tokens_unknown
+    client, stub = build_pi_client(
+      tmpdir,
+      stub_config: {
+        "session_stats" => {
+          "userMessages" => 3,
+          "assistantMessages" => 2,
+          "tokens" => { "total" => 99_999 },
+          "contextUsage" => { "tokens" => 12_500, "contextWindow" => 50_000, "percent" => 25.0 }
+        }
+      }
+    )
+    ref = spawn(client, prompt: "start")
+
+    stats = client.get_session_stats(ref)
+
+    assert_equal 3, stats.fetch("user_messages")
+    assert_equal 2, stats.fetch("assistant_messages")
+    assert_equal 12_500, stats.dig("context_usage", "tokens")
+    assert_equal 50_000, stats.dig("context_usage", "capacity")
+    assert_equal true, stats.dig("context_usage", "approximate")
+    refute_equal 99_999, stats.dig("context_usage", "tokens")
+    assert_equal 1, stub_commands_of_type(stub, "get_session_stats").length
+  end
+
   def test_parses_responses_split_across_reads_and_ignores_interleaved_non_json_noise
     client, stub = build_pi_client(
       tmpdir,

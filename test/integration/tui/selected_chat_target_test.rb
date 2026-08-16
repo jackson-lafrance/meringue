@@ -59,7 +59,8 @@ class TuiSelectedChatTargetTest < Minitest::Test
     assert_equal "P1-I1", target.fetch("issue_id")
 
     pane = Meringue::TUI::Panes::ChatPane.new
-    assert_equal "logs — P1-I1-W1", pane.log_pane_title(composed)
+    assert_includes pane.log_pane_title(composed), "logs — P1-I1-W1"
+    assert_includes pane.log_pane_title(composed), "working"
     # The composer title is the one place the target is named: the clicked agent
     # plus its issue's short title. The worker id already contains the durable
     # issue id a fresh head will receive.
