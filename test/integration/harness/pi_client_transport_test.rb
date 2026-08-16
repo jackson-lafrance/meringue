@@ -414,6 +414,40 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     assert_empty stub_commands_of_type(stub, "abort")
   end
 
+  def test_prepare_interactive_session_resolves_a_bare_pi_command_from_the_harness_path
+    stub = write_pi_stub(tmpdir, stub_config: { "session_id" => "sess-restricted" })
+    bin_dir = File.join(tmpdir, "restricted-bin")
+    pi_path = write_executable(
+      tmpdir,
+      "restricted-bin/pi",
+      "#!/bin/sh\nexec #{RUBY_BIN} #{stub.fetch("command").fetch(1)} \"$@\"\n"
+    )
+    client = PiClient.new(
+      command: "pi",
+      env: { "PATH" => bin_dir, "PI_STUB_CONFIG" => stub.fetch("env").fetch("PI_STUB_CONFIG") },
+      session_dir: File.join(tmpdir, "pi-sessions"),
+      command_timeout: 10,
+      event_timeout: 10,
+      shutdown_timeout: 1,
+      transport_ownership: build_transport_ownership(tmpdir)
+    )
+    # The app is intentionally launched with no inherited PATH. The only way to
+    # start Pi is the provider's effective environment supplied to the client.
+    with_env("PATH" => "") do
+      session_file = pi_session_file(tmpdir, session_id: "sess-restricted")
+      ref = pi_session_ref(session_file: session_file, cwd: tmpdir)
+      managed = client.attach_session(ref)
+      @harness_sessions << [client, managed]
+
+      prepared = client.prepare_interactive_session(managed)
+
+      assert_equal pi_path, prepared.fetch("interactive_executable")
+      assert_equal bin_dir, prepared.fetch("interactive_env").fetch("PATH")
+      assert_equal "pi", prepared.fetch("interactive_argv").first
+      assert_equal false, prepared.fetch("session_ref").fetch("is_streaming")
+    end
+  end
+
   def test_prepare_interactive_session_rebuilds_a_replacement_jsonl_when_rpc_has_no_session_path
     entry = {
       "type" => "message",

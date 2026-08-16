@@ -100,6 +100,63 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     end
   end
 
+  class BlockingFocusService
+    attr_reader :begun
+
+    def initialize
+      @begun = Queue.new
+      @release = Queue.new
+    end
+
+    def begin_agent_interactive_focus(agent_id)
+      @begun << agent_id
+      @release.pop
+      { "status" => "accepted", "result" => { "interactive_argv" => ["/bin/sh"], "interactive_env" => {} } }
+    end
+
+    def release
+      @release << true
+    end
+
+    def mark_agent_interactive_focus_started(agent_id, pid:)
+      { "status" => "accepted", "agent_id" => agent_id, "pid" => pid }
+    end
+
+    def end_agent_interactive_focus(_agent_id)
+      { "status" => "accepted" }
+    end
+  end
+
+  class ImmediateInteractiveSession
+    def start(workspace_path:, rows:, columns:, on_started:)
+      on_started.call(4242)
+      { "status" => "active", "pid" => 4242, "workspace_path" => workspace_path }
+    end
+
+    def alive? = true
+
+    def status
+      { "state" => "running", "pid" => 4242, "alive" => true }
+    end
+
+    def drain_output(timeout: 0)
+      _ = timeout
+      +""
+    end
+
+    def resize(rows:, columns:)
+      { "status" => "resized", "rows" => rows, "columns" => columns }
+    end
+
+    def write(_bytes)
+      { "status" => "written" }
+    end
+
+    def close
+      { "status" => "closed" }
+    end
+  end
+
   class RecordingService
     attr_reader :views
 
@@ -162,6 +219,60 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     @app.send(:switch_agent_workspace_view, @state)
     assert_equal 1, view.resumed
     assert_equal 0, view.cancelled
+  end
+
+  def test_entering_an_actively_streaming_worker_focus_is_pending_without_blocking_the_tui
+    Dir.mktmpdir("meringue-focused-worker-") do |workspace|
+      focus = BlockingFocusService.new
+      controller = Meringue::Workspace::Controller.new(
+        focus_session_service: focus,
+        interactive_session_factory: ->(command:, env:) { ImmediateInteractiveSession.new }
+      )
+      app = Meringue::TUI::App.new(
+        layout: Meringue::TUI::Layout.new,
+        terminal: TUISupport::FakeTerminal.new,
+        workspace_controller: controller
+      )
+      state = @state.merge(
+        "agents" => [agent_record(
+          "P1-I1-W1",
+          "type" => "worker",
+          "status" => "working",
+          "harness" => "pi",
+          "workspace_path" => workspace,
+          "project_id" => "P1",
+          "issue_id" => "P1-I1"
+        )]
+      )
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      assert app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_operator elapsed, :<, 0.5, "selecting an active worker must not wait for Pi handoff"
+      assert_equal "P1-I1-W1", focus.begun.pop
+      refute app.instance_variable_get(:@agent_workspace_interactive)
+      assert_equal true, app.instance_variable_get(:@agent_workspace_open_pending)
+
+      # Rendering and input remain available while the background handoff waits
+      # for the active turn to settle.
+      snapshot = app.send(:agent_workspace_snapshot, state, "", 0)
+      assert_equal true, snapshot.fetch("active")
+      refute snapshot.fetch("interactive")
+
+      focus.release
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      until app.send(:agent_workspace_snapshot, state, "", 0).fetch("interactive", false)
+        raise "native focus did not complete" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
+      assert_equal false, app.instance_variable_get(:@agent_workspace_open_pending)
+      app.send(:close_agent_workspace)
+      refute controller.agent_interactive?(agent: state.fetch("agents").first)
+    ensure
+      app&.send(:close_agent_workspace)
+      controller&.close
+    end
   end
 
   def test_native_pi_focus_uses_controller_screen_and_forwards_input_without_custom_view

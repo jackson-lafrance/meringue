@@ -179,6 +179,9 @@ module Meringue
         @agent_workspace_agent_id = nil
         @agent_workspace_session = nil
         @agent_workspace_interactive = false
+        @agent_workspace_open_pending = false
+        @agent_workspace_open_generation = 0
+        @agent_workspace_open_result = nil
         @agent_workspace_view = "agent"
         @agent_workspace_filter = "all"
         @agent_workspace_notice = nil
@@ -2672,6 +2675,8 @@ module Meringue
         @workspace_leader_pending = false
         @agent_workspace_notice = nil
         @agent_workspace_error = nil
+        @agent_workspace_open_generation += 1
+        open_generation = @agent_workspace_open_generation
         @chat_mutex.synchronize do
           event_key = agent.fetch("id").to_s
           @agent_workspace_events[event_key] = []
@@ -2687,17 +2692,33 @@ module Meringue
         @focused_pane = "agent_tree"
         if workspace_controller&.respond_to?(:open_workspace)
           workspace_result = begin
-            workspace_controller.open_workspace(
-              agent: agent,
-              state: state,
-              rows: [(@last_render_height || DEFAULT_HEIGHT) - 3, 1].max,
-              columns: [(@last_render_width || DEFAULT_WIDTH) - 6, 1].max
-            )
+            if workspace_controller.respond_to?(:open_workspace_async) && agent.fetch("harness", nil).to_s == "pi"
+              @agent_workspace_open_pending = true
+              @chat_mutex.synchronize { @agent_workspace_open_result = nil }
+              workspace_controller.open_workspace_async(
+                agent: agent,
+                state: state,
+                rows: [(@last_render_height || DEFAULT_HEIGHT) - 3, 1].max,
+                columns: [(@last_render_width || DEFAULT_WIDTH) - 6, 1].max
+              ) do |result|
+                @chat_mutex.synchronize do
+                  @agent_workspace_open_result = [open_generation, agent.fetch("id").to_s, result]
+                end
+              end
+            else
+              workspace_controller.open_workspace(
+                agent: agent,
+                state: state,
+                rows: [(@last_render_height || DEFAULT_HEIGHT) - 3, 1].max,
+                columns: [(@last_render_width || DEFAULT_WIDTH) - 6, 1].max
+              )
+            end
           rescue ArgumentError
             workspace_controller.open_workspace(agent: agent, state: state)
           end
           apply_workspace_controller_result(workspace_result)
           if %w[failed rejected errored].include?(workspace_result.fetch("status", nil).to_s)
+            @agent_workspace_open_pending = false
             # The focused pane is about to disappear, so keep its actionable failure visible on the
             # restored dashboard instead of stranding it in @agent_workspace_error.
             message = workspace_result.fetch("message", "Could not open focused workspace.").to_s
@@ -2706,6 +2727,12 @@ module Meringue
             @force_full_redraw = true
             return false
           end
+          if workspace_result.fetch("status", nil).to_s == "pending"
+            @agent_workspace_notice = workspace_result.fetch("message", "Preparing focused workspace…")
+            persist_agent_workspace
+            return true
+          end
+          @agent_workspace_open_pending = false
           @agent_workspace_interactive = workspace_result.fetch("interactive", false)
         end
         open_agent_workspace_session(agent) unless @agent_workspace_interactive
@@ -2741,6 +2768,12 @@ module Meringue
       end
 
       def close_agent_workspace(preserve_terminal: false)
+        if @agent_workspace_open_pending && workspace_controller&.respond_to?(:cancel_workspace_open)
+          workspace_controller.cancel_workspace_open(agent: @agent_workspace_agent_id)
+        end
+        @agent_workspace_open_pending = false
+        @agent_workspace_open_generation += 1
+        @chat_mutex.synchronize { @agent_workspace_open_result = nil }
         close_agent_workspace_session
         if @agent_workspace_interactive && workspace_controller&.respond_to?(:close_workspace)
           apply_workspace_controller_result(workspace_controller.close_workspace(agent: @agent_workspace_agent_id))
@@ -2748,6 +2781,7 @@ module Meringue
           workspace_controller.close_terminal(agent: @agent_workspace_agent_id)
         end
         @agent_workspace_interactive = false
+        @agent_workspace_open_pending = false
         @agent_workspace_active = false
         @agent_workspace_view = "agent"
         @force_full_redraw = true
@@ -4485,7 +4519,43 @@ module Meringue
         @scroll_offsets["agent_tree"] = offset.to_i unless offset.nil?
       end
 
+      def complete_pending_workspace_open(state)
+        pending = @chat_mutex.synchronize do
+          result = @agent_workspace_open_result
+          @agent_workspace_open_result = nil
+          result
+        end
+        return unless pending
+
+        open_generation, agent_id, result = pending
+        return unless @agent_workspace_open_pending && open_generation == @agent_workspace_open_generation && agent_id == @agent_workspace_agent_id.to_s
+
+        @agent_workspace_open_pending = false
+        apply_workspace_controller_result(result)
+        if %w[failed rejected errored cancelled].include?(result.fetch("status", nil).to_s)
+          @agent_workspace_active = false
+          @agent_workspace_interactive = false
+          persist_agent_workspace
+          return
+        end
+
+        agent = agent_workspace_agent(state)
+        unless agent
+          @agent_workspace_active = false
+          persist_agent_workspace
+          return
+        end
+        @agent_workspace_interactive = result.fetch("interactive", false)
+        open_agent_workspace_session(agent) unless @agent_workspace_interactive
+        if @agent_workspace_view == "terminal"
+          @agent_workspace_session.pause if !@agent_workspace_interactive && @agent_workspace_session&.respond_to?(:pause)
+          prepare_workspace_terminal(state)
+        end
+        persist_agent_workspace
+      end
+
       def agent_workspace_snapshot(state, input_buffer, input_cursor, slash_suggestion_index = NO_SLASH_SELECTION)
+        complete_pending_workspace_open(state)
         snapshot = @chat_mutex.synchronize do
           {
             "active" => @agent_workspace_active,
@@ -4582,11 +4652,16 @@ module Meringue
         end
         return if current && !%w[completed killed].include?(current.fetch("status", nil).to_s)
 
-        if @agent_workspace_interactive && workspace_controller&.respond_to?(:close_workspace)
+        if @agent_workspace_open_pending && workspace_controller&.respond_to?(:cancel_workspace_open)
+          workspace_controller.cancel_workspace_open(agent: @agent_workspace_agent_id)
+        elsif @agent_workspace_interactive && workspace_controller&.respond_to?(:close_workspace)
           workspace_controller.close_workspace(agent: @agent_workspace_agent_id)
         else
           close_agent_workspace_session
         end
+        @chat_mutex.synchronize { @agent_workspace_open_result = nil }
+        @agent_workspace_open_pending = false
+        @agent_workspace_open_generation += 1
         @force_full_redraw = true if @agent_workspace_active
         @agent_workspace_interactive = false
         @agent_workspace_active = false
