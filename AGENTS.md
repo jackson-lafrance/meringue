@@ -146,6 +146,7 @@ Lifecycle statuses apply to projects, issues, and agents:
 - `completed`
 - `errored`
 - `killed`
+- `supervision_lost`
 
 Question statuses are separate because questions are not executable work:
 - `open`
@@ -162,6 +163,8 @@ The TUI should never invent new lifecycle statuses, question statuses, or log le
 `completed` means the work really finished. A harness session that merely stopped streaming is not evidence of completion: a turn also ends when the transport or provider request dies (dropped wifi, DNS/TLS failure, provider 5xx, a session that disappears mid-tool-call). The kernel must classify that settle, not assume it: a turn with a real final assistant message settles as `completed`, and a turn that died mid-flight or a session that vanished without producing a result settles as `errored` with a human-readable reason recorded in `harness_metadata` and shown in the log line and the AgentTree/focused pane. An `errored` worker never rolls its issue or project up to `completed`.
 
 That errored state must stay recoverable. A worker whose turn was cut short keeps its harness session reference, workspace, worktree, and branch, keeps any prompt that was queued for it, and can be prompted to continue; only a worker whose session is genuinely gone is terminal for prompting.
+
+`supervision_lost` is the explicit paused-runtime state, distinct from `working` (a live turn) and from `errored` (a terminal settle). It means the supervisor that owns a session's transport has disappeared: both the recorded transport owner and the harness child are gone, so the session's runtime is paused even though the durable session, workspace, worktree, branch, queued prompts, and deferred-chain references remain valid. It is recoverable rather than terminal: a fresh supervisor re-attaches to the durable session, and when the original turn can remain alive it keeps running instead of being re-prompted or restarted. The supervisor records a downtime metric so paused runtime is visible and measurable rather than silently conflated with active working. See `docs/supervisor-transport-ownership.md`.
 
 ## Persistence
 Store Meringue state in JSON.

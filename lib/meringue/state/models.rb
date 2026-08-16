@@ -10,7 +10,16 @@ module Meringue
     module Models
       SCHEMA_VERSION = 1
 
-      LIFECYCLE_STATUSES = %w[queued working idle blocked completed errored killed].freeze
+      # `supervision_lost` is the explicit paused-runtime state: the supervisor
+      # that owns a session's transport has disappeared (both the recorded owner
+      # and the harness child are gone), so the session's runtime is paused even
+      # though the durable session, workspace, and queued work remain valid. It
+      # is distinct from `working` (a live turn) and from `errored` (a terminal
+      # settle). It is recoverable: a fresh supervisor re-attaches, and when the
+      # original turn is still alive it keeps running instead of being
+      # re-prompted. See `Meringue::Supervisor::Service` and
+      # `docs/supervisor-transport-ownership.md`.
+      LIFECYCLE_STATUSES = %w[queued working idle blocked completed errored killed supervision_lost].freeze
       QUESTION_STATUSES = %w[open answered dismissed].freeze
       LOG_LEVELS = %w[info warning error].freeze
       LOG_SOURCE_TYPES = %w[user kernel head worker harness system].freeze
