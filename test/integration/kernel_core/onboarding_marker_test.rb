@@ -62,6 +62,68 @@ class KernelCoreOnboardingMarkerTest < Minitest::Test
     assert_equal "gruvbox", config.value("tui", "colorscheme"), "the marker must not rewrite other settings"
   end
 
+  def test_settings_finish_saves_role_defaults_experiment_and_marker_atomically
+    baseline = Meringue::Config::Store.new(path: config_path).fingerprint
+    result = apply_command(
+      "SaveConfiguration",
+      "base_fingerprint" => baseline,
+      "changes" => {
+        "agent.head_harness" => "claude",
+        "agent.worker_harness" => "pi",
+        "agent.head_model" => "openai/gpt-5.6-sol",
+        "agent.worker_model" => "anthropic/claude-opus-5",
+        "experiments.github_support" => true
+      },
+      "onboarding_outcome" => "completed"
+    )
+
+    assert_accepted(result)
+    config = saved_config
+    assert_equal "completed", config.onboarding_outcome
+    assert_equal "claude", config.setting("agent.head_harness", env: {})
+    assert_equal "pi", config.setting("agent.worker_harness", env: {})
+    assert_equal "openai/gpt-5.6-sol", config.setting("agent.head_model", env: {})
+    assert_equal "anthropic/claude-opus-5", config.setting("agent.worker_model", env: {})
+    assert_equal true, config.value("experiments", "github_support")
+    assert_equal "completed", result.dig("result", "onboarding_outcome")
+
+    metadata = persisted_state.fetch("metadata")
+    assert_equal "claude", metadata.fetch("active_head_harness")
+    assert_equal "pi", metadata.fetch("active_worker_harness")
+    assert_equal "openai/gpt-5.6-sol", metadata.dig("pi_session_defaults", "roles", "head", "model")
+    assert_equal "anthropic/claude-opus-5", metadata.dig("pi_session_defaults", "roles", "worker", "model")
+  end
+
+  def test_settings_skip_records_explicit_experiment_default_without_role_changes
+    baseline = Meringue::Config::Store.new(path: config_path).fingerprint
+    result = apply_command(
+      "SaveConfiguration",
+      "base_fingerprint" => baseline,
+      "changes" => { "experiments.github_support" => false },
+      "onboarding_outcome" => "skipped"
+    )
+
+    assert_accepted(result)
+    assert_equal "skipped", saved_config.onboarding_outcome
+    assert_equal false, saved_config.value("experiments", "github_support")
+    assert_equal Meringue::Harness::Registry::DEFAULT_PI_MODEL, saved_config.setting("agent.head_model", env: {})
+    assert_equal Meringue::Harness::Registry::DEFAULT_PI_MODEL, saved_config.setting("agent.worker_model", env: {})
+  end
+
+  def test_save_configuration_rejects_an_unknown_setup_outcome_without_writing
+    baseline = Meringue::Config::Store.new(path: config_path).fingerprint
+    result = apply_command(
+      "SaveConfiguration",
+      "base_fingerprint" => baseline,
+      "changes" => { "experiments.github_support" => false },
+      "onboarding_outcome" => "maybe"
+    )
+
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors").join(" "), "setup.outcome"
+    refute File.exist?(config_path)
+  end
+
   def test_an_unknown_outcome_is_rejected_and_writes_nothing
     result = apply_command("CompleteOnboarding", "outcome" => "maybe")
 

@@ -347,26 +347,67 @@ module Meringue
         end
 
         def bottom_right_status_line(state)
-          label = active_harness_label(state)
+          segments = compact_harness_status_segments(state)
           defaults = (state.fetch("metadata", {}) || {}).fetch("pi_session_defaults", {}) || {}
-          return [] if label.empty? && defaults.empty?
+          return [] if segments.empty? && defaults.empty?
 
-          segments = label.empty? ? [] : [["harness: ", Style::DIM], [label, Style::ACCENT_BOLD]]
           unless defaults.empty?
-            model = defaults.fetch("model", nil) || "mixed"
+            head_model = defaults.dig("roles", "head", "model") || defaults["model"] || "mixed"
+            worker_model = defaults.dig("roles", "worker", "model") || defaults["model"] || "mixed"
             head_thinking = defaults.dig("roles", "head", "thinking_level") || defaults["thinking_level"] || "mixed"
             worker_thinking = defaults.dig("roles", "worker", "thinking_level") || defaults["thinking_level"] || "mixed"
             segments << [" · ", Style::DIM] unless segments.empty?
-            segments.concat([
-              ["Pi defaults: ", Style::DIM],
-              [model.to_s, Style::MUTED],
-              [" · head ", Style::DIM],
-              [head_thinking.to_s, Style::MUTED],
-              [" · worker ", Style::DIM],
-              [worker_thinking.to_s, Style::MUTED]
-            ])
+            segments.concat(compact_model_status_segments(
+              head_model: head_model,
+              worker_model: worker_model,
+              head_thinking: head_thinking,
+              worker_thinking: worker_thinking
+            ))
           end
           segments
+        end
+
+        # Keep the footer short when the two roles share values, while making
+        # every role-specific combination explicit enough to scan at a glance.
+        def compact_model_status_segments(head_model:, worker_model:, head_thinking:, worker_thinking:)
+          if head_model == worker_model && head_thinking == worker_thinking
+            [
+              ["model: ", Style::DIM],
+              [head_model.to_s, Style::MUTED],
+              [" · thinking: ", Style::DIM],
+              [head_thinking.to_s, Style::MUTED]
+            ]
+          elsif head_model != worker_model && head_thinking == worker_thinking
+            [
+              ["head model: ", Style::DIM],
+              [head_model.to_s, Style::MUTED],
+              [" · worker model: ", Style::DIM],
+              [worker_model.to_s, Style::MUTED],
+              [" · thinking: ", Style::DIM],
+              [head_thinking.to_s, Style::MUTED]
+            ]
+          elsif head_model == worker_model
+            [
+              ["model: ", Style::DIM],
+              [head_model.to_s, Style::MUTED],
+              [" · head thinking: ", Style::DIM],
+              [head_thinking.to_s, Style::MUTED],
+              [" · worker thinking: ", Style::DIM],
+              [worker_thinking.to_s, Style::MUTED]
+            ]
+          else
+            [
+              ["head model: ", Style::DIM],
+              [head_model.to_s, Style::MUTED],
+              [" (thinking: ", Style::DIM],
+              [head_thinking.to_s, Style::MUTED],
+              [") · worker model: ", Style::DIM],
+              [worker_model.to_s, Style::MUTED],
+              [" (thinking: ", Style::DIM],
+              [worker_thinking.to_s, Style::MUTED],
+              [")", Style::DIM]
+            ]
+          end
         end
 
         def slash_suggestions?(state)
@@ -379,9 +420,8 @@ module Meringue
         # keyboard shape instead of introducing another overlay mechanism. A picker
         # wins while it is up.
         #
-        # First-run setup deliberately does not live here: it takes over the whole
-        # terminal (see Panes::OnboardingPane) rather than sharing a slot with the
-        # dashboard.
+        # First-run setup is a full-screen Settings mode rather than a popup in
+        # this composer slot.
         def popup?(state)
           model_picker?(state) || delivery_pr_picker?(state) || slash_suggestions?(state)
         end
@@ -518,7 +558,7 @@ module Meringue
         end
 
         def delivery_pr_picker?(state)
-          delivery_pr_picker_state(state).fetch("active", false) == true
+          Settings.github_enabled?(state) && delivery_pr_picker_state(state).fetch("active", false) == true
         end
 
         # Highlighted row, clamped to the list that exists this frame so a PR that
@@ -667,6 +707,8 @@ module Meringue
         # and `/keybind` documents it, but repeating it on every frame cost the
         # width this line needs for everything else.
         def delivery_pr_hint_segments(state)
+          return [] unless Settings.github_enabled?(state)
+
           scoped_id = DeliveryPullRequest.scoped_id(state)
           return open_pull_requests_hint_segments(state) if scoped_id.empty?
 
@@ -1394,6 +1436,24 @@ module Meringue
           return "" if provider.empty?
 
           Meringue::Harness::Registry.provider_label(provider)
+        end
+
+        def compact_harness_status_segments(state)
+          metadata = state.fetch("metadata", {}) || {}
+          head = metadata.fetch("active_head_harness_label", "").to_s.strip
+          worker = metadata.fetch("active_worker_harness_label", "").to_s.strip
+          head = Meringue::Harness::Registry.provider_label(metadata["active_head_harness"]) if head.empty? && metadata["active_head_harness"]
+          worker = Meringue::Harness::Registry.provider_label(metadata["active_worker_harness"]) if worker.empty? && metadata["active_worker_harness"]
+          shared = active_harness_label(state)
+          head = shared if head.empty?
+          worker = shared if worker.empty?
+          return [] if head.empty? && worker.empty?
+          return [["harness: ", Style::DIM], [head, Style::ACCENT_BOLD]] if head == worker
+
+          [
+            ["head: ", Style::DIM], [head, Style::ACCENT_BOLD],
+            [" · worker: ", Style::DIM], [worker, Style::ACCENT_BOLD]
+          ]
         end
 
         def compact_status_segments(state, pending_count)

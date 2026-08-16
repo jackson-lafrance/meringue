@@ -1,18 +1,27 @@
 # Copy to ~/.meringue/config.toml and adjust for your machine.
 
-# Written by first-run setup. Uncomment (or delete the section after setup has
-# run) to control whether the setup flow opens on the next launch; /setup always
-# reopens it by hand.
+# Written atomically with the reviewed first-run Setup draft. Delete this section
+# to make Setup auto-open on the next interactive launch; /setup always reopens
+# the shared Settings overlay by hand.
 # [onboarding]
 # completed_version = 1
 # completed_at = "2026-08-06T14:02:11Z"
 # outcome = "completed"   # or "skipped"
 
+[settings]
+schema_version = 1
+
+[experiments]
+# New installations are local-first. Enable this for built-in gh title/status
+# lookups, delivery PR verification, markers, pickers, and opening actions.
+github_support = false
+
 [tui]
 # Default yellow/white Meringue palette. Other options:
 # rose-pine, tokyonight, gruvbox, catppuccin, kanagawa
-# You can also run /theme <name> in the TUI to save this setting.
+# You can also run /theme <name>, or preview and save it from /config.
 colorscheme = "meringue"
+# animations = true
 
 [tui.keybindings]
 # Omitted actions keep defaults. Use /keybind in the TUI to see active bindings.
@@ -36,15 +45,18 @@ provider = "pi"
 [harness.pi]
 command = "pi"
 session_dir = "~/.meringue/pi-sessions"
-# Shared defaults for every future Pi head and worker. `/thinking <level>` keeps
-# this backward-compatible behavior; role-specific commands write the optional
-# overrides below instead.
+# Shared defaults for every future Pi head and worker. `/model` and `/thinking`
+# keep this backward-compatible behavior; role-specific commands write the
+# optional overrides below instead.
 model = "anthropic/claude-opus-5"
 thinking_level = "max"
+# head_model = "openai/gpt-5.6-sol"
+# worker_model = "anthropic/claude-opus-5"
 # head_thinking_level = "low"
 # worker_thinking_level = "max"
-# Role arrays still own tools and other Pi flags; role thinking overrides, then
-# the shared scalar fallback, are appended last if arrays contain --thinking.
+# Role arrays still own tools and other Pi flags; role model/thinking overrides,
+# then the shared scalar fallback, are appended last if arrays contain
+# --model/--thinking.
 head_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 worker_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls,edit,write", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--no-approve"]
 

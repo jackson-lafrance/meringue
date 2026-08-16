@@ -70,6 +70,7 @@ lib/meringue/tui/                  # terminal rendering, panes, navigation, styl
 lib/meringue/state/                # JSON persistence models and store
 lib/meringue/goals/                # goal-loop record, decisions, judge, and metric probe
 docs/config.md                     # config and harness provider reference
+docs/settings.md                   # full-screen settings, persistence, experiments, and shared setup UI
 docs/video-recording.md             # macOS proof-video workflow
 docs/commit-authorship.md          # worker commit identity policy and history audit
 docs/delivery-artifact-privacy.md  # branch, commit, and PR metadata privacy policy
@@ -131,7 +132,7 @@ bundle exec meringue
 bundle exec meringue tui
 ```
 
-The first launch on a machine opens a short setup flow that takes over the whole terminal: theme first, then harness, model, and thinking level, each already on a sensible default, so holding `Enter` accepts them all in about a second. You can click visible option rows or use the keyboard; empty-space clicks cannot advance or dismiss it. `Esc` is the one way out (keeping whatever was already applied), `←` goes back a step, and `/setup` reopens it later. It applies every choice through the normal `/theme`, `/harness`, `/model`, and `/thinking` commands, and records one `[onboarding]` marker in the config so it does not open again. Motion degrades on its own on small or non-interactive terminals and can be turned off with `MERINGUE_NO_ANIMATION=1`. See [`docs/onboarding.md`](docs/onboarding.md).
+The first interactive launch opens Setup as the same polished full-screen overlay used by `/config`. Review separate head and worker harness/model/thinking defaults, preview a theme, and opt into experiments such as GitHub support, then confirm the complete draft on one Review screen. Back never loses edits and nothing is written until Finish atomically saves the settings and `[onboarding]` marker together. Automatic first-run `Esc` confirms a safe skip; `Esc` on a manual `/setup` rerun cancels without changing the marker. The overlay remains recoverable through resize, validation, and persistence failures. See [`docs/onboarding.md`](docs/onboarding.md).
 
 Open a safe demo state without spawning real agents:
 
@@ -172,16 +173,16 @@ Useful slash commands inside the TUI include:
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
 - `/prompt <agent_id> "<message>"` — follow up with an existing worker, or retry a head (`H<n>`) that failed, or was left blocked, without routing your request.
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
-- `/prs` — open the picker for every tracked pull request that is still open, regardless of the current AgentTree selection. Use `↑`/`↓` to move, `Enter` to open the highlighted PR, and `Esc` to close.
-- `/setup` — reopen first-run setup for the theme, harness, model, and thinking level.
+- `/prs` — with **Settings → Experiments → GitHub support** enabled, open the picker for every tracked pull request that is still open. Use `↑`/`↓` to move, `Enter` to open, and `Esc` to close.
+- `/setup` — reopen the shared full-screen Setup overlay for theme, separate head/worker defaults, and experiment checkboxes. Manual cancel writes nothing.
 - `/questions` — list questions and their statuses.
 - `/answer <question_id> "<answer>"` — answer an open question; the kernel records the answer and routes the work it unblocks.
 - `/dismiss <question_id>` — close an open question without answering it.
 - `/theme <name>` — persist a TUI colorscheme.
-- `/config` — show the active config, supported defaults, conflict policy, and keybindings.
-- `/harness <pi|claude|antigravity>` — select the harness for future agents.
+- `/config` — open the full-screen transactional Settings editor for themes, separate head/worker defaults, experiments, harnesses, workspaces, safety, and every keybinding. Use `/config --text` for the old read-only diagnostic listing.
+- `/harness [head|worker] <pi|claude|antigravity>` — select the harness for future agents; omit the role to update both.
 - `/models [harness]` — open the model picker: a searchable list of the models the selected harness reports, with each model's provider/id, name, and supported thinking levels. Type to filter, `↑`/`↓` to move, `Enter` applies the model as the future-session default (exactly like `/model`), `Ctrl-R` re-asks the harness, `Esc` closes. `/models refresh [harness]` skips the picker and just re-fetches the catalog.
-- `/model <provider>/<model-id>` — persist the model for all future Pi sessions; existing sessions are unchanged. The reference is split on the first slash, so the model id may itself contain `/` and `:` (`/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`). An id the model catalog does not list is still set, and reported as unverified. The values in force are always visible in the dashboard status line (`Pi defaults: <model> · head <level> · worker <level>`) and in `/config`.
+- `/model [head|worker] <provider>/<model-id>` — persist the model for all future Pi sessions; omit the role to update both (the backward-compatible form), or name `head`/`worker` to update only that role. Existing sessions are unchanged. The reference is split on the first slash, so the model id may itself contain `/` and `:` (`/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`). An id the model catalog does not list is still set, and reported as unverified. The values in force are always visible in the dashboard status line (`harness: Pi · model: <model> · thinking: <level>` when both roles match, or a compact head/worker form when they differ) and in `/config`.
 - `/thinking [head|worker] <off|minimal|low|medium|high|xhigh|max>` — persist a thinking level for future Pi sessions. Omit the role to update both (the backward-compatible form), or name `head`/`worker` to update only that role; existing sessions are unchanged.
 - `/keybind` — show active TUI keybindings.
 - `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together and removes their clean, unlocked Meringue-managed worktrees. Unsafe cleanup (dirty, locked, ambiguous, or failed) retains the bundle and logs why so it can be retried. A worktree shared by several workers is removed once the last of them is pruned.
@@ -201,7 +202,7 @@ and theme/harness names.
 
 You do not have to type them. Head agents can run the same commands from plain language, so "prune the merged issues", "renumber the tree", "kill P1-I9-W3", or "what is P1-I12" apply the matching kernel command and print the same output as the typed slash command. A head can also answer directly in plain user-visible text when no command or substantive investigation is needed; that response is a complete result and does not need a dummy `NoOp`. Questions that require causal investigation or synthesis are routed to an informational worker instead of being answered with raw record output. Irreversible commands are gated: `/clear` and killing a whole project are only run when your own message unambiguously asks for them, and otherwise the head asks you to confirm. `/jump`, `/prs`, `/setup`, `/keybind`, and `/quit` are local TUI commands and stay typed-only.
 
-There is no command for one existing session's settings: `/model` and `/thinking` only move future-session defaults. The dashboard shows the separate head and worker thinking defaults, while the effective model and thinking level of a running agent are shown on the `session settings` line of its focused workspace (`/jump <agent_id>`). Focused workspaces advertise `/open-session` for opening the harness UI.
+There is no command for one existing session's settings: `/model` and `/thinking` only move future-session defaults. The dashboard shows the separate head and worker model and thinking defaults, while the effective model and thinking level of a running agent are shown on the `session settings` line of its focused workspace (`/jump <agent_id>`). Focused workspaces advertise `/open-session` for opening the harness UI.
 
 `/model` and `/thinking` complete from the selected harness's own model catalog, so the selector lists every available model rather than only the ones Meringue has seen. `/thinking` always offers all seven levels — the saved default first, the rest labelled with what the configured model advertises — because the catalog explains a level rather than deciding whether you may pick it. See `docs/session-settings.md#authoritative-model-catalog-discovery` for discovery, caching, and unavailable-catalog behavior, and `docs/session-settings.md#thinking-levels` for the level ladder, labels, and clamping.
 
@@ -271,7 +272,7 @@ Default paths:
 ~/.meringue/state.json    # persisted Meringue state
 ```
 
-The config supports TUI colorschemes, TUI keybinding overrides, default harness selection, role-specific head/worker harnesses and Pi thinking levels, provider command overrides, enforceable Pi worker command blacklists, and the first-run setup marker. See `docs/config.md` for the full reference. Workers may commit assigned work only under the user's repository identity; see [`docs/commit-authorship.md`](docs/commit-authorship.md) for the enforcement path and history audit. Branches, commits, and pull request metadata must describe only the product task; see [`docs/delivery-artifact-privacy.md`](docs/delivery-artifact-privacy.md).
+The config supports TUI colorschemes, animations, every TUI keybinding, separate head/worker harness/model/thinking defaults, provider commands/environment/arguments, workspace and launcher bounds, safety policy, experiments, and the first-run setup marker. `/config` edits these through one schema-backed atomic transaction. GitHub support is an opt-in experiment for new installations; disabling it removes built-in `gh` lookups and GitHub-specific commands/status/UI without deleting historical PR records. See [`docs/config.md`](docs/config.md) and [`docs/settings.md`](docs/settings.md). Workers may commit assigned work only under the user's repository identity; see [`docs/commit-authorship.md`](docs/commit-authorship.md) for the enforcement path and history audit. Branches, commits, and pull request metadata must describe only the product task; see [`docs/delivery-artifact-privacy.md`](docs/delivery-artifact-privacy.md).
 
 The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state. Durable logs retain the newest 500 entries so lifecycle history cannot grow without bound. Independent events remain chronological, while explicitly identified evolving statuses—currently per-worker workspace-provisioning elapsed time and checkout percentage—replace only their own preceding entry so the dashboard shows one latest value. See [`docs/log-retention.md`](docs/log-retention.md) for replacement/retention semantics and the measured rationale, and [`docs/scalability.md`](docs/scalability.md) for the hermetic process-level responsiveness sweep.
 

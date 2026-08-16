@@ -27,6 +27,9 @@ class InputSlashCommandParserTest < Minitest::Test
       # whole token to the kernel, which splits it on the first slash.
       "/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast" =>
         ["SetDefaultSessionModel", { "model" => "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast" }],
+      "/model head openai/gpt-5.6-sol" => ["SetDefaultSessionModel", { "role" => "head", "model" => "openai/gpt-5.6-sol" }],
+      "/model worker fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast" =>
+        ["SetDefaultSessionModel", { "role" => "worker", "model" => "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast" }],
       "/thinking xhigh" => ["SetDefaultSessionThinkingLevel", { "level" => "xhigh" }],
       "/thinking head low" => ["SetDefaultSessionThinkingLevel", { "role" => "head", "level" => "low" }],
       "/thinking worker max" => ["SetDefaultSessionThinkingLevel", { "role" => "worker", "level" => "max" }],
@@ -44,6 +47,26 @@ class InputSlashCommandParserTest < Minitest::Test
       assert_equal type, parsed.fetch("type"), "type for #{input.inspect}"
       assert_equal payload, parsed.fetch("payload"), "payload for #{input.inspect}"
     end
+  end
+
+  def test_private_config_save_carries_the_transactional_setup_outcome
+    payload = {
+      "base_fingerprint" => "abc123",
+      "changes" => { "experiments.github_support" => false },
+      "onboarding_outcome" => "skipped"
+    }
+    encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
+
+    parsed = parse_slash("/config save #{encoded}")
+
+    assert_equal "SaveConfiguration", parsed.fetch("type")
+    assert_equal payload, parsed.fetch("payload")
+
+    payload["onboarding_outcome"] = "maybe"
+    invalid_encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
+    invalid = parse_slash("/config save #{invalid_encoded}")
+    assert_equal "InvalidSlashCommand", invalid.fetch("type")
+    assert_includes invalid.dig("payload", "message"), "invalid setup outcome"
   end
 
   def test_every_command_spec_entry_parses_to_a_command
@@ -180,6 +203,7 @@ class InputSlashCommandParserTest < Minitest::Test
   def test_missing_arguments_for_strict_commands_return_invalid_slash_command
     ["/theme", "/theme a b", "/harness", "/model", "/model a b",
      "/thinking", "/thinking high extra", "/thinking reviewer high", "/thinking head high extra",
+     "/model head anthropic/x extra", "/model reviewer anthropic/x",
      "/model P1 extra", "/thinking P1 extra", "/project", "/project list /tmp", "/issue", "/issue delete P1",
      "/worker", "/worker kill P1-I1", "/retry", "/retry H7 again", "/dismiss", "/dismiss Q1 Q2", "/recount now", "/prune bogus",
      "/prune resolved errored", "/project rename P1", "/issue rename P1-I1"].each do |input|
@@ -409,6 +433,25 @@ class InputSlashCommandParserTest < Minitest::Test
 
     assert_equal "/thinking head low", heads.first.fetch("completion")
     assert_equal "/thinking worker xhigh", workers.first.fetch("completion")
+  end
+
+  def test_role_specific_model_suggestions_lead_with_that_roles_default
+    state = sample_state_with_model_catalog
+    state["metadata"]["pi_session_defaults"] = {
+      "model" => "anthropic/claude-opus-5",
+      "roles" => {
+        "head" => { "model" => "openai/gpt-5.6-sol" },
+        "worker" => { "model" => "anthropic-flex/claude-opus-5" }
+      }
+    }
+
+    heads = suggestion_records("/model head ", state)
+    workers = suggestion_records("/model worker ", state)
+
+    assert_equal "/model head openai/gpt-5.6-sol", heads.first.fetch("completion")
+    assert_includes heads.first.fetch("description"), "current default"
+    assert_equal "/model worker anthropic-flex/claude-opus-5", workers.first.fetch("completion")
+    assert_includes workers.first.fetch("description"), "current default"
   end
 
   # The selector must offer every model the harness reports, not only the values

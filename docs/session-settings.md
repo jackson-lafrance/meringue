@@ -2,7 +2,7 @@
 
 Meringue exposes future Pi defaults for how every new head and worker is started. Existing sessions retain their effective settings.
 
-First-run setup (`/setup`, and automatically on a first launch) walks a new user through the same two defaults plus the harness and theme, and applies each choice as the ordinary slash command for it. It reads the cached catalog snapshot only and never blocks on a fetch; see [`onboarding.md`](onboarding.md).
+First-run Setup (`/setup`, and automatically on a first interactive launch) uses the shared Settings overlay to review separate head and worker harness/model/thinking defaults, theme, and experiments. All choices remain in one draft until Finish atomically saves them with the onboarding marker. It reads the cached catalog only and never blocks on a fetch; see [`onboarding.md`](onboarding.md).
 
 ## Commands
 
@@ -44,6 +44,8 @@ A trailing `refresh` word keeps `/models` on the kernel path instead of opening 
 
 ```text
 /model <provider>/<model-id>
+/model head <provider>/<model-id>
+/model worker <provider>/<model-id>
 /thinking <off|minimal|low|medium|high|xhigh|max>
 /thinking head <off|minimal|low|medium|high|xhigh|max>
 /thinking worker <off|minimal|low|medium|high|xhigh|max>
@@ -54,14 +56,16 @@ Examples:
 ```text
 /model openai/gpt-5.6-sol
 /model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast
+/model head openai/gpt-5.6-sol       # only future heads
+/model worker anthropic/claude-opus-5 # only future workers
 /thinking xhigh          # both roles (backward-compatible shared form)
 /thinking head low       # only future heads
 /thinking worker max     # only future workers
 ```
 
-There is no command that only prints the defaults. The dashboard status line shows `Pi defaults: <model> · head <level> · worker <level>`, and `/config` prints both role values next to the config file they came from. A head can still answer "which model and thinking levels will future agents use" by proposing `GetSessionDefaults`.
+There is no command that only prints the defaults. The dashboard status line keeps a compact role-aware harness/model/thinking summary, `/config` displays each role in the full-screen Agent defaults category, and `/config --text` prints diagnostics. A head can still answer "which model and thinking levels will future agents use" by proposing `GetSessionDefaults`.
 
-`/model` and `/thinking` save values under `[harness.pi]` in Meringue's configured TOML file (normally `~/.meringue/config.toml`). The one-argument `/thinking <level>` form keeps its historical behavior: it updates both roles and clears role-specific overrides. The `head` and `worker` forms update only that role, including sessions spawned later in the currently running Meringue process.
+`/model` and `/thinking` save values under `[harness.pi]` in Meringue's configured TOML file (normally `~/.meringue/config.toml`). The one-argument `/model <provider>/<model-id>` and `/thinking <level>` forms keep their historical behavior: they update both roles and clear role-specific overrides. The `head` and `worker` forms update only that role, including sessions spawned later in the currently running Meringue process.
 
 A default change does **not** mutate, reconnect, restart, or terminate an existing Pi session. It also strips spawn-only model/thinking defaults when later resuming an existing session, so a resumable session keeps its persisted effective pair. The result and durable kernel log explicitly list existing Pi agent ids left unchanged.
 
@@ -148,15 +152,17 @@ The dedicated default fields are:
 
 ```toml
 [harness.pi]
-model = "openai/gpt-5.6-sol"
+model = "openai/gpt-5.6-sol"        # compatibility fallback for either omitted role
+head_model = "openai/gpt-5.6-sol"
+worker_model = "anthropic/claude-opus-5"
 thinking_level = "high"        # compatibility fallback for either omitted role
 head_thinking_level = "low"
 worker_thinking_level = "xhigh"
 ```
 
-For each role, its dedicated key wins over `thinking_level`; the shared key then wins over a `--thinking` value in that role's extra-argument array. This preserves old configs that use only `thinking_level` or only role argument arrays. `/thinking <level>` writes the shared key and removes both role keys, while `/thinking head <level>` and `/thinking worker <level>` write only the selected role key. The model remains shared.
+For each role, its dedicated key wins over the shared `model`/`thinking_level` fallback; the shared key then wins over a `--model`/`--thinking` value in that role's extra-argument array. This preserves old configs that use only the shared keys or only role argument arrays. `/model <provider>/<model-id>` and `/thinking <level>` write the shared key and remove both role keys, while the `head` and `worker` forms write only the selected role key. When an older `state.json` has only the shared model in `metadata.pi_session_defaults`, state normalization materializes that value into both role entries while retaining the legacy field.
 
-The dashboard status line shows `Pi defaults: <model> · head <level> · worker <level>` separately from the active harness. A focused worker workspace labels the effective per-session line as `session settings · model … · thinking …`, so a user can distinguish what a future worker will get from what the selected worker is actually using.
+The dashboard keeps the active harness separate from a compact role-aware summary. It shows `harness: Pi · model: <model> · thinking: <level>` when both roles match; `head model: … · worker model: … · thinking: …` when only models differ; `model: … · head thinking: … · worker thinking: …` when only thinking differs; and `head model: <model> (thinking: <level>) · worker model: <model> (thinking: <level>)` when both differ. The explicit labels keep model ids containing `/` unambiguous. A focused worker workspace labels the effective per-session line as `session settings · model … · thinking …`, so a user can distinguish what a future worker will get from what the selected worker is actually using.
 
 ## Authoritative existing-session discovery
 
@@ -238,7 +244,7 @@ The kernel owns catalog state. Snapshots live in `metadata.harness_model_catalog
 - Refresh is silent: an expected "not fetched yet" state produces no durable log entries.
 - `/models refresh` forces an immediate re-fetch and reports `availability`, the model count, the confirmed timestamp, and the last failed attempt when there is one. `/models` alone opens the picker over the cached snapshot without starting a harness process; `Ctrl-R` in the picker submits the same refresh command.
 - The picker never renders an empty box. An unavailable catalog, an unsupported harness, a snapshot Meringue has never fetched, and a filter that matched nothing are four different sentences, each naming what to do next (`Ctrl-R`, or an exact `provider/model` id with `/model`).
-- First-run setup reuses those same four sentences on its model step, and adds a permanent `keep the default` row so a catalog that has not arrived yet can never dead-end the flow. Rows appear on their own once a background refresh lands, because state is re-read every frame.
+- Setup exposes each exact model value through the shared editor. `←` / `→` cycles the cached Pi catalog when one exists; a missing catalog never blocks setup because the current exact reference remains editable and validatable.
 
 ### What completion shows
 
