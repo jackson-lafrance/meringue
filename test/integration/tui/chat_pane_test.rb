@@ -123,6 +123,9 @@ class TuiChatPaneTest < Minitest::Test
   end
 
   def test_selection_hints_replace_each_other
+    guidance = @pane.bottom_hint_line(composed_state(empty_state, scroll: { "active_pane" => "logs" }))
+    assert_includes guidance, ["use the mouse or shift+arrows to select text.", Style::MUTED]
+
     active = plain_line(@pane.bottom_hint_line(composed_state(empty_state, selection: { "active" => true })))
     assert_includes active, "⧉ selection"
     assert_includes active, "Ctrl-C copies"
