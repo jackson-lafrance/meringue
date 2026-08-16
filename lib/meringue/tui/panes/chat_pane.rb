@@ -237,12 +237,22 @@ module Meringue
         end
 
         # Pane title, so an active AgentTree selection is always visible as the
-        # reason the logs pane is filtered.
-        def log_pane_title(state)
+        # reason the logs pane is filtered. A worker scope gets its own compact
+        # status strip; issue/project scopes remain plain because they do not
+        # identify one session's telemetry.
+        def log_pane_title(state, width: nil)
           label = LogScope.label(state)
           return "logs" if label.empty?
+          return "logs — #{label}" unless LogScope.kind(state) == "worker"
 
-          "logs — #{label}"
+          worker = agent_by_id(state, label)
+          return "logs — #{label}" unless worker
+
+          base = "logs — #{label}"
+          fragments = selected_worker_status_fragments(worker)
+          return [base, *fragments].join(" · ") if width.nil?
+
+          fit_worker_log_title(base, fragments, width)
         end
 
         # A filtered logs pane takes the identity color of the node it is filtered
@@ -679,6 +689,189 @@ module Meringue
         end
 
         private
+
+        def selected_worker_status_fragments(agent)
+          status, model, thinking, context, turns = selected_worker_status_values(agent)
+          fragments = [
+            status,
+            "model #{model}",
+            "thinking #{thinking}",
+            context
+          ]
+          fragments << "turns #{turns}" unless turns.nil?
+          fragments
+        end
+
+        def selected_worker_status_values(agent)
+          settings = agent.fetch("session_settings", {})
+          settings = {} unless settings.is_a?(Hash)
+          model = effective_model_reference(settings.fetch("model", nil)) || "unavailable"
+          thinking = (settings["thinking_level"] || settings["thinkingLevel"]).to_s.strip
+          thinking = "unavailable" if thinking.empty?
+          stats = agent.fetch("session_stats", nil)
+          stats = agent.fetch("context_usage", nil) unless stats.is_a?(Hash)
+          stats = agent.dig("harness_metadata", "session_stats") unless stats.is_a?(Hash)
+          stats = agent.dig("harness_metadata", "context_usage") unless stats.is_a?(Hash)
+          stats = {} unless stats.is_a?(Hash)
+          context = context_usage_fragment(stats, settings: settings)
+          turns = session_turn_count(stats)
+          status = agent.fetch("status", nil).to_s.strip
+          status = "unavailable" if status.empty?
+          [status, model, thinking, context, turns]
+        end
+
+        def effective_model_reference(model)
+          return nil if model.nil?
+          if model.is_a?(Hash)
+            reference = model.fetch("reference", nil).to_s.strip
+            return reference unless reference.empty?
+
+            provider = model.fetch("provider", nil).to_s.strip
+            id = model.fetch("id", model.fetch("modelId", nil)).to_s.strip
+            return [provider, id].reject(&:empty?).join("/") unless provider.empty? || id.empty?
+            return nil
+          end
+
+          value = model.to_s.strip
+          value.empty? ? nil : value
+        end
+
+        def context_usage_fragment(stats, settings:)
+          usage = stats["context_usage"] || stats["contextUsage"]
+          usage = stats if usage.nil? && (stats.key?("tokens") || stats.key?("used") || stats.key?("capacity"))
+          usage = usage.is_a?(Hash) ? usage : {}
+          model = settings.fetch("model", nil)
+          model = {} unless model.is_a?(Hash)
+          capacity = numeric_telemetry_value(
+            usage["capacity"] || usage["contextWindow"] || usage["context_window"] ||
+              model["context_window"] || model["contextWindow"]
+          )
+          capacity = nil unless capacity&.positive?
+          used = numeric_telemetry_value(usage.key?("tokens") ? usage["tokens"] : usage["used"])
+          approximate = usage["approximate"] == true || usage["estimated"] == true ||
+                        usage["source"].to_s == "pi_session_stats"
+          prefix = approximate && used ? "~" : ""
+          used_text = used.nil? ? "?" : token_count(used)
+          capacity_text = capacity.nil? ? "?" : token_count(capacity)
+          if used && capacity && capacity.positive?
+            percent = (used.to_f / capacity.to_f) * 100.0
+            "context #{prefix}#{used_text}/#{capacity_text} (#{percentage(percent)})"
+          elsif used || capacity
+            "context #{prefix}#{used_text}/#{capacity_text} (unavailable)"
+          else
+            "context unavailable"
+          end
+        end
+
+        def numeric_telemetry_value(value)
+          return nil if value.nil? || value.to_s.strip.empty?
+
+          number = Float(value)
+          number.finite? && number >= 0 ? number : nil
+        rescue ArgumentError, TypeError
+          nil
+        end
+
+        def token_count(value)
+          number = value.to_f
+          return number.round.to_s if number < 1_000
+
+          scaled = if number >= 1_000_000
+                     [number / 1_000_000.0, "M"]
+                   else
+                     [number / 1_000.0, "K"]
+                   end
+          rounded = scaled.fetch(0).round(1)
+          formatted = rounded.to_i == rounded ? rounded.to_i.to_s : rounded.to_s
+          "#{formatted}#{scaled.fetch(1)}"
+        end
+
+        def percentage(value)
+          rounded = value.round(1)
+          rounded.to_i == rounded ? "#{rounded.to_i}%" : "#{rounded}%"
+        end
+
+        def session_turn_count(stats)
+          value = stats["turn_count"]
+          value = stats["user_messages"] if value.nil?
+          value = stats["userMessages"] if value.nil?
+          number = numeric_telemetry_value(value)
+          number&.to_i
+        end
+
+        def fit_worker_log_title(base, fragments, width)
+          limit = [width.to_i, 1].max
+          full = [base, *fragments].join(" · ")
+          return full if full.length <= limit
+
+          status, model, thinking, context, turns = selected_worker_status_values_from_fragments(fragments)
+          compact = [
+            base,
+            status,
+            "m #{clip_title_value(model, 18)}",
+            "t #{clip_title_value(thinking, 8)}",
+            context.sub(/\Acontext/, "ctx")
+          ]
+          compact << "n #{turns}" unless turns.nil?
+          compact_text = compact.join(" · ")
+          return compact_text if compact_text.length <= limit
+
+          compact.delete_if { |part| part.start_with?("n ") }
+          compact_text = compact.join(" · ")
+          return compact_text if compact_text.length <= limit
+
+          # At ordinary dashboard widths, dropping the `logs —` caption and
+          # shortening labels preserves all four requested signals. The model is
+          # visibly elided rather than silently replaced with an id-only guess.
+          tight_base = base.sub(/\Alogs — /, "")
+          tight_context = context.sub(/\Acontext /, "ctx ").sub(/\s+\(([^)]*)\)\z/, " \\1")
+          tight = [
+            tight_base,
+            status,
+            "m #{clip_title_value(model, 12)}",
+            "t #{clip_title_value(thinking, 6)}",
+            tight_context
+          ].join(" · ")
+          return tight if tight.length <= limit
+
+          tight = [
+            tight_base,
+            status,
+            "m #{clip_title_value(model, 4)}",
+            "t #{clip_title_value(thinking, 6)}",
+            tight_context
+          ].join(" · ")
+          return tight if tight.length <= limit
+
+          # Keep the worker id, lifecycle state, thinking level, and context
+          # signal ahead of the optional model spelling when a genuinely narrow
+          # pane cannot fit all fields. An ellipsis means the value was clipped,
+          # never a guessed value.
+          core = [
+            tight_base,
+            status,
+            "t #{clip_title_value(thinking, 6)}",
+            tight_context
+          ].join(" · ")
+          clip_title_value(core, limit)
+        end
+
+        def selected_worker_status_values_from_fragments(fragments)
+          status = fragments.fetch(0, "unavailable")
+          model = fragments.fetch(1, "model unavailable").sub(/\Amodel /, "")
+          thinking = fragments.fetch(2, "thinking unavailable").sub(/\Athinking /, "")
+          context = fragments.fetch(3, "context unavailable")
+          turns = fragments.find { |fragment| fragment.start_with?("turns ") }&.sub(/\Aturns /, "")
+          [status, model, thinking, context, turns]
+        end
+
+        def clip_title_value(value, limit)
+          text = value.to_s
+          return text if text.length <= limit
+          return text[0, limit] if limit <= 1
+
+          "#{text[0, limit - 1]}…"
+        end
 
         # Gestures for the current selection, never its identity: the composer
         # title one row above already names the target, so this only says that a

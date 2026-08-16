@@ -7178,6 +7178,7 @@ module Meringue
         agent["harness_session_id"] = session_ref.fetch("session_id", agent.fetch("harness_session_id", nil))
         agent["harness_session_file"] = session_ref.fetch("session_file", agent.fetch("harness_session_file", nil))
         agent["session_settings"] = deep_copy(session_ref.fetch("session_settings")) if session_ref.fetch("session_settings", nil).is_a?(Hash)
+        agent["session_stats"] = deep_copy(session_ref.fetch("session_stats")) if session_ref.fetch("session_stats", nil).is_a?(Hash)
         agent["harness_metadata"] = previous_metadata.merge(
           session_metadata,
           "prompt_count" => previous_metadata.fetch("prompt_count", 0).to_i + 1,
@@ -12563,6 +12564,7 @@ module Meringue
           "harness_session_id" => session_ref.fetch("session_id", nil),
           "harness_session_file" => session_ref.fetch("session_file", nil),
           "session_settings" => session_ref.fetch("session_settings", nil).is_a?(Hash) ? deep_copy(session_ref.fetch("session_settings")) : nil,
+          "session_stats" => session_ref.fetch("session_stats", nil).is_a?(Hash) ? deep_copy(session_ref.fetch("session_stats")) : nil,
           "harness_metadata" => session_metadata.merge(
             "title" => display_title,
             "cwd" => session_ref.fetch("cwd", workspace.fetch("workspace_path")),
@@ -12593,6 +12595,7 @@ module Meringue
           "is_streaming" => metadata.fetch("is_streaming", false),
           "last_event_at" => metadata.fetch("last_event_at", nil),
           "session_settings" => agent.fetch("session_settings", nil),
+          "session_stats" => agent.fetch("session_stats", nil),
           "metadata" => metadata
         }
       end
@@ -12603,6 +12606,7 @@ module Meringue
         agent["harness_session_id"] = session_ref.fetch("session_id", agent.fetch("harness_session_id", nil))
         agent["harness_session_file"] = session_ref.fetch("session_file", agent.fetch("harness_session_file", nil))
         agent["session_settings"] = deep_copy(session_ref.fetch("session_settings")) if session_ref.fetch("session_settings", nil).is_a?(Hash)
+        agent["session_stats"] = deep_copy(session_ref.fetch("session_stats")) if session_ref.fetch("session_stats", nil).is_a?(Hash)
         agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
           metadata.merge(
             "cwd" => session_ref.fetch("cwd", metadata.fetch("cwd", agent.fetch("workspace_path", nil))),
@@ -15752,6 +15756,16 @@ module Meringue
         client = harness_client_for_agent(agent)
         session_ref = agent_session_ref(agent)
         state_ref = client.get_state(session_ref)
+        if client.respond_to?(:get_session_stats)
+          session_stats = begin
+            client.get_session_stats(state_ref)
+          rescue StandardError
+            nil
+          end
+          state_ref = state_ref.merge(
+            "session_stats" => session_stats.is_a?(Hash) ? session_stats : { "availability" => "unavailable" }
+          )
+        end
         events = client.respond_to?(:read_events) ? client.read_events(state_ref) : []
         settled = completed_session?(state_ref)
         assistant_text = settled ? safe_last_assistant_text(client, state_ref) : nil
@@ -17718,6 +17732,7 @@ module Meringue
         agent["harness_session_file"] = session_ref.fetch("session_file", agent.fetch("harness_session_file", nil))
         agent["workspace_path"] ||= session_ref.fetch("cwd", nil)
         agent["session_settings"] = deep_copy(session_ref.fetch("session_settings")) if session_ref.fetch("session_settings", nil).is_a?(Hash)
+        agent["session_stats"] = deep_copy(session_ref.fetch("session_stats")) if session_ref.fetch("session_stats", nil).is_a?(Hash)
         agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
           metadata,
           "cwd" => session_ref.fetch("cwd", metadata.fetch("cwd", nil)),

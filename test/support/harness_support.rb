@@ -240,6 +240,8 @@ module HarnessSupport
           case type
           when "get_state"
             state.dup
+          when "get_session_stats"
+            config.fetch("session_stats", {})
           when "set_session_name"
             state["sessionName"] = command["name"]
             nil

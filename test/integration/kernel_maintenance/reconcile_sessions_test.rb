@@ -74,6 +74,32 @@ class KernelMaintenanceReconcileSessionsTest < Minitest::Test
     assert_includes client.calls, ["get_state", "sess-1"]
   end
 
+  def test_reconciliation_refreshes_worker_telemetry_without_changing_lifecycle
+    state_with_worker(pid: Process.pid.to_s, session_file: live_session_file)
+    engine, client = stub_engine({ "sess-1" => { "streaming" => true } })
+    telemetry = [
+      { "context_usage" => { "tokens" => 10, "capacity" => 100 }, "user_messages" => 1 },
+      { "context_usage" => { "tokens" => 40, "capacity" => 100 }, "user_messages" => 2 }
+    ]
+    client.define_singleton_method(:get_session_stats) do |session_ref|
+      @calls << ["get_session_stats", session_id_of(session_ref)]
+      telemetry.shift
+    end
+
+    first = apply_command(engine, "ReconcileSessions", {})
+    first_worker = agent_by_id(read_state, "P1-I1-W1")
+    second = apply_command(engine, "ReconcileSessions", {})
+    second_worker = agent_by_id(read_state, "P1-I1-W1")
+
+    assert_equal "working", first_worker.fetch("status")
+    assert_equal 10, first_worker.dig("session_stats", "context_usage", "tokens")
+    assert_equal "working", second_worker.fetch("status")
+    assert_equal 40, second_worker.dig("session_stats", "context_usage", "tokens")
+    assert first.dig("result", "poll_results").first.fetch("changed")
+    assert second.dig("result", "poll_results").first.fetch("changed")
+    assert_equal 2, client.calls.count { |call| call.first == "get_session_stats" }
+  end
+
   def test_repeated_healthy_poll_does_not_rewrite_unchanged_state
     state_with_worker(
       pid: Process.pid.to_s,

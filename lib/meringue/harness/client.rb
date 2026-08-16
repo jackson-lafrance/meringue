@@ -65,6 +65,12 @@ module Meringue
         raise NotImplementedError, "harness clients must implement #get_state"
       end
 
+      # Optional session telemetry. A client that cannot report it returns nil;
+      # callers must never substitute cumulative token totals for current context usage.
+      def get_session_stats(_session_ref)
+        nil
+      end
+
       # Session settings are intentionally harness-neutral. Providers opt in as
       # they gain authoritative read/update APIs; unsupported providers fail
       # explicitly instead of echoing Meringue spawn defaults.
