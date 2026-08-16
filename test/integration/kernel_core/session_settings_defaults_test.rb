@@ -225,7 +225,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
 
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
     assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "head_model")
-    assert_equal "anthropic/claude-opus-5", config.value("harness", "pi", "worker_model")
+    assert_equal "anthropic/claude-opus-5", config.value("harness", "pi", "model")
+    assert_nil config.value("harness", "pi", "worker_model"), "the worker inherits the shared compatibility fallback"
   end
 
   def test_shared_model_command_resets_role_specific_overrides

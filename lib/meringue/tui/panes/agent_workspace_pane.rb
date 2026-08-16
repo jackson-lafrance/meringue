@@ -181,6 +181,7 @@ module Meringue
             workspace.fetch("agent_id", nil).to_s,
             workspace.fetch("interactive", false),
             workspace.fetch("filter", "all").to_s,
+            Settings.github_enabled?(state),
             revision,
             agent&.fetch("updated_at", nil).to_s,
             agent&.fetch("status", nil).to_s
@@ -215,7 +216,7 @@ module Meringue
             session_settings_line(agent),
             issue_line(issue),
             workspace_path_line(agent),
-            pull_request_line(agent, issue),
+            pull_request_line(state, agent, issue),
             [["", Style::DIM]]
           ].compact
           lines.concat(workspace_notices(workspace, width: width))
@@ -283,7 +284,9 @@ module Meringue
           [["cwd    ", Style::DIM], [path, Style::MUTED]]
         end
 
-        def pull_request_line(agent, issue)
+        def pull_request_line(state, agent, issue)
+          return nil unless Settings.github_enabled?(state)
+
           presentation = DeliveryPullRequest.for_id(
             { "agents" => [agent], "issues" => [issue].compact },
             agent.fetch("id", nil)

@@ -63,7 +63,7 @@ Examples:
 /thinking worker max     # only future workers
 ```
 
-There is no command that only prints the defaults. The dashboard status line keeps `harness: Pi` followed by the compact model/thinking summary described below, and `/config` prints each role's model and thinking level next to the config file they came from. A head can still answer "which model and thinking levels will future agents use" by proposing `GetSessionDefaults`.
+There is no command that only prints the defaults. The dashboard status line keeps a compact role-aware harness/model/thinking summary, `/config` displays each role in the full-screen Agent defaults category, and `/config --text` prints diagnostics. A head can still answer "which model and thinking levels will future agents use" by proposing `GetSessionDefaults`.
 
 `/model` and `/thinking` save values under `[harness.pi]` in Meringue's configured TOML file (normally `~/.meringue/config.toml`). The one-argument `/model <provider>/<model-id>` and `/thinking <level>` forms keep their historical behavior: they update both roles and clear role-specific overrides. The `head` and `worker` forms update only that role, including sessions spawned later in the currently running Meringue process.
 

@@ -121,11 +121,29 @@ module Meringue
         state["counters"]["issues_by_project"] ||= {}
         state["counters"]["workers_by_issue"] ||= {}
         state["metadata"] ||= {}
+        migrate_active_harness_defaults!(state)
         migrate_pi_session_defaults!(state)
         state["metadata"]["created_at"] ||= now
         state["metadata"]["updated_at"] ||= state["metadata"].fetch("created_at")
         migrate_pull_requests_to_issues!(state)
         repair_project_names!(state)
+        state
+      end
+
+      # Older snapshots stored one shared future-agent harness. Materialize it
+      # into role-aware keys while retaining the shared compatibility fallback.
+      def migrate_active_harness_defaults!(state)
+        metadata = state["metadata"]
+        return state unless metadata.is_a?(Hash)
+
+        shared = metadata["active_harness"]
+        return state if shared.to_s.strip.empty?
+
+        metadata["active_head_harness"] ||= shared
+        metadata["active_worker_harness"] ||= shared
+        shared_label = metadata["active_harness_label"]
+        metadata["active_head_harness_label"] ||= shared_label if shared_label
+        metadata["active_worker_harness_label"] ||= shared_label if shared_label
         state
       end
 

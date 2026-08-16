@@ -8,7 +8,21 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
-The interactive TUI updates this file with `/theme <name>`, `/model [head|worker] <provider>/<model-id>`, `/thinking [head|worker] <level>`, and the first-run setup flow (`/setup`).
+Run `/config` for the full-screen schema-driven editor covering every supported setting. `/config --text` retains the read-only diagnostic listing. Existing `/theme`, `/model [head|worker] <provider>/<model-id>`, `/thinking [head|worker] <level>`, `/harness [head|worker] <provider>`, and setup compatibility commands use the same validated atomic persistence layer. See [`settings.md`](settings.md) for interaction, responsive layouts, transactional save/cancel behavior, provenance, and the setup-flow successor handoff.
+
+## Settings schema and experiments
+
+The config carries an internal schema version and the opt-in GitHub integration:
+
+```toml
+[settings]
+schema_version = 1
+
+[experiments]
+github_support = false
+```
+
+New installations default GitHub support off. Existing installations with a pre-upgrade state file or onboarding marker migrate it on so upgrading does not silently remove PR behavior; an explicit value always wins. Disabling it performs no built-in `gh` subprocess/network lookup, hides GitHub-specific TUI commands and status, and preserves historical PR records. See [`settings.md`](settings.md#github-support).
 
 ## First-run setup marker
 
@@ -106,7 +120,7 @@ Supported action names:
 
 Common key names include `enter`, `shift-enter`, `tab`, `shift-tab`, `ctrl-tab`, `escape`, arrow keys (`up`, `down`, `left`, `right`), `shift-left`, `shift-right`, `shift-up`, `shift-down`, `shift-home`, `shift-end`, `shift-alt-left`, `shift-alt-right`, `shift-ctrl-left`, `shift-ctrl-right`, `shift-page-up`, `shift-page-down`, `home`, `end`, `page-up`, `page-down`, `backspace`, `delete`, `ctrl-space`, `ctrl-a` through `ctrl-z`, `alt-c`, `alt-v`, `alt-left`, `alt-right`, `ctrl-left`, `ctrl-right`, `alt-backspace`, `ctrl-backspace`, `alt-delete`, `ctrl-delete`, `space`, and single printable characters like `j` or `p`. Advanced users can bind a raw terminal sequence with `raw:<sequence>`; literal `\\e` inside that string is converted to Escape.
 
-Use `/keybind` in the TUI to show the active keybindings after config has been loaded. `/config` shows the same keybindings together with the active supported defaults, workspace commands, and conflict policy.
+Use `/keybind` in the TUI to show the active keybindings after config has been loaded. `/config` opens the editable Keybindings category; `/config --text` prints the diagnostic listing.
 
 ## Supported defaults and conflict policy
 
@@ -127,7 +141,7 @@ thinking_level = "max"        # shared fallback for either omitted role
 predecessor_failure = "cancel"
 ```
 
-`[conflicts].predecessor_failure` accepts `cancel` or `run`. It applies only when a dependent worker does not provide its own `if_predecessor_fails` value; it does not change the handling of git merge conflicts or overwrite project files. `/config` reports the effective value and `/keybind` reports only keybindings.
+`[conflicts].predecessor_failure` accepts `cancel` or `run`. It applies only when a dependent worker does not provide its own `if_predecessor_fails` value; it does not change the handling of git merge conflicts or overwrite project files. Settings reports the current/default value and provenance; `/keybind` reports only keybindings.
 
 ## Worker command blacklists
 

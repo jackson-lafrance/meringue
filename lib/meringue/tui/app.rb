@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "base64"
+require "json"
 require "shellwords"
 require "time"
 require_relative "keybindings"
@@ -69,6 +71,8 @@ module Meringue
       # CSI-u or xterm modifyOtherKeys instead of the raw ETX byte.
       CTRL_C_KEYS = [CTRL_C, "\e[99;5u", "\e[67;5u", "\e[27;5;99~", "\e[27;5;67~"].freeze
       CTRL_D = "\u0004"
+      CTRL_S = "\u0013"
+      CTRL_S_KEYS = [CTRL_S, "\e[115;5u", "\e[83;5u", "\e[27;5;115~", "\e[27;5;83~"].freeze
       CTRL_W = "\u0017"
       BACKSPACE_KEYS = ["\u007f", "\b"].freeze
       DELETE_KEYS = ["\e[3~"].freeze
@@ -149,6 +153,17 @@ module Meringue
         @model_picker_index = 0
         @model_picker_query = +""
         @model_picker_harness = nil
+        # Full-screen schema-backed Settings. The draft is purely in memory until
+        # one SaveConfiguration command succeeds.
+        @settings_active = false
+        @settings_draft = nil
+        @settings_category_index = 0
+        @settings_row_index = 0
+        @settings_show_advanced = false
+        @settings_editor = nil
+        @settings_discard_confirm = false
+        @settings_saving = false
+        @settings_mode = "settings"
         # First-run setup. Off unless the launcher says a kernel is behind the UI
         # (`meringue demo` has none), and transient like the pickers: the only
         # thing it persists is the completion marker, and only through the kernel.
@@ -355,6 +370,7 @@ module Meringue
       def shutdown_workspace_resources
         # Quitting mid-flow (Ctrl-C, /quit, an interrupt) must not leave the theme
         # a step was previewing on screen. Nothing else about setup is persisted.
+        close_settings(discard: true) if @settings_active
         close_onboarding if @onboarding_active
         persist_agent_workspace if @agent_workspace_active
         if @agent_workspace_active
@@ -429,6 +445,12 @@ module Meringue
         end
 
         @chat_pastes.sync!(input_buffer)
+
+        # Settings owns the complete screen and keeps Esc/Ctrl-S as hard recovery
+        # keys regardless of configured dashboard bindings.
+        if @settings_active
+          return handle_settings_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
 
         # First-run setup is the only modal that opens by itself, so it takes keys
         # ahead of both pickers and the slash list. It still passes unowned keys
@@ -1867,6 +1889,8 @@ module Meringue
 
       def workspace_action_prefix(key)
         WORKSPACE_COMMAND_ACTIONS.each do |action|
+          next if action == "workspace_open_pull_request" && !github_support_enabled?
+
           remainder = keybindings.consume_prefix(action, key)
           return [action, remainder] if remainder
         end
@@ -1884,6 +1908,11 @@ module Meringue
         when "workspace_open_editor"
           open_agent_workspace_editor(state)
         when "workspace_open_pull_request"
+          unless github_support_enabled?(state)
+            @agent_workspace_notice = nil
+            @agent_workspace_error = github_support_disabled_message
+            return :handled
+          end
           if open_workspace_delivery_pr(state)
             @agent_workspace_notice = "Opened the verified delivery pull request."
             @agent_workspace_error = nil
@@ -1918,7 +1947,7 @@ module Meringue
       end
 
       def handle_workspace_slash_navigation(key, input_buffer, slash_suggestion_index)
-        records = WorkspaceCommands.command_suggestion_records(input_buffer)
+        records = workspace_command_suggestion_records(input_buffer)
         return [input_buffer, NO_SLASH_SELECTION] if records.empty?
 
         if keybinding?("suggestion_previous", key)
@@ -1937,11 +1966,20 @@ module Meringue
       def workspace_slash_completion(input_buffer, slash_suggestion_index)
         return nil unless slash_selection?(slash_suggestion_index)
 
-        records = WorkspaceCommands.command_suggestion_records(input_buffer)
+        records = workspace_command_suggestion_records(input_buffer)
         return nil if records.empty?
 
         completion = slash_completion_for(records.fetch(slash_suggestion_index.clamp(0, records.length - 1)))
         completion == input_buffer.to_s ? nil : completion
+      end
+
+      def workspace_command_suggestion_records(input_buffer)
+        records = WorkspaceCommands.command_suggestion_records(input_buffer)
+        return records if github_support_enabled?
+
+        records.reject do |record|
+          record.fetch("action", nil) == "workspace_open_pull_request" || record.fetch("completion", nil) == "/pr"
+        end
       end
 
       def run_workspace_slash_command(input_buffer, state)
@@ -1957,7 +1995,9 @@ module Meringue
         case action
         when "workspace_help"
           @agent_workspace_error = nil
-          @agent_workspace_notice = "Workspace commands: #{WorkspaceCommands.help_lines.join(" · ")}"
+          help_lines = WorkspaceCommands.help_lines
+          help_lines = help_lines.reject { |line| line.start_with?("/pr ") } unless github_support_enabled?(state)
+          @agent_workspace_notice = "Workspace commands: #{help_lines.join(" · ")}"
         when "workspace_filter"
           arguments.empty? ? cycle_agent_workspace_filter : set_agent_workspace_filter(arguments.first)
         when "workspace_cwd"
@@ -2012,6 +2052,7 @@ module Meringue
       # harness-agnostic so a non-Pi backend reads correctly.
       def workspace_leader_commands
         WORKSPACE_COMMAND_ACTIONS.filter_map do |action|
+          next if action == "workspace_open_pull_request" && !github_support_enabled?
           key = keybindings.display_name_for(action)
           next unless key
 
@@ -2337,7 +2378,7 @@ module Meringue
         return handle_local_open_session_command(text, state) if open_session_command?(text)
         return handle_local_setup_command(state) if setup_command?(text)
         return handle_local_keybind_command if keybind_command?(text)
-        return handle_local_config_command if config_command?(text)
+        return handle_local_config_command(text, state) if config_command?(text)
         return handle_local_quit_command if quit_command?(text)
 
         false
@@ -2358,8 +2399,12 @@ module Meringue
         true
       end
 
-      def handle_local_config_command
-        append_jump_response(configuration_help_text)
+      def handle_local_config_command(text, state)
+        if text.to_s.strip == "/config --text"
+          append_jump_response(configuration_help_text)
+        else
+          open_settings(state)
+        end
         true
       end
 
@@ -2462,6 +2507,11 @@ module Meringue
       end
 
       def handle_local_pull_requests_command(state)
+        unless github_support_enabled?(state)
+          append_jump_response(github_support_disabled_message)
+          return true
+        end
+
         open_delivery_pr_picker(state)
         true
       end
@@ -2536,7 +2586,7 @@ module Meringue
       end
 
       def config_command?(text)
-        text == "/config"
+        ["/config", "/config --text"].include?(text.to_s.strip)
       end
 
       def quit_command?(text)
@@ -2544,7 +2594,7 @@ module Meringue
       end
 
       def local_navigation_command_without_id?(input_buffer)
-        ["/jump", "/prs", "/models", "/setup", "/open-session"].include?(input_buffer.to_s.strip.downcase)
+        ["/jump", "/prs", "/models", "/setup", "/config", "/open-session"].include?(input_buffer.to_s.strip.downcase)
       end
 
       def enter_agent_tree_navigation(state)
@@ -2770,6 +2820,11 @@ module Meringue
       # delivery PR. Unscoped, there is no single PR to mean, so it opens the picker
       # over every PR that is still open instead of guessing.
       def open_workspace_delivery_pr(state)
+        unless github_support_enabled?(state)
+          set_selection_status(github_support_disabled_message)
+          return false
+        end
+
         return open_delivery_pr_for_id(state, @agent_workspace_agent_id) if @agent_workspace_active
         return open_delivery_pr_for_id(state, normalized_selected_agent_id(state)) if @agent_tree_navigation_active
 
@@ -2780,6 +2835,10 @@ module Meringue
       end
 
       def open_delivery_pr_for_id(state, agent_id)
+        unless github_support_enabled?(state)
+          append_jump_response(github_support_disabled_message)
+          return false
+        end
         if agent_id.to_s.empty?
           append_jump_response("Select a worker before opening its delivery pull request.")
           return false
@@ -2804,6 +2863,402 @@ module Meringue
         return nil unless @delivery_pr_picker_active
 
         { "active" => true, "index" => @delivery_pr_picker_index }
+      end
+
+      # --- full-screen settings --------------------------------------------
+
+      def github_support_enabled?(state = nil)
+        explicit = config.value("experiments", "github_support")
+        return explicit if explicit == true || explicit == false
+        return true if config.value("settings", "schema_version").to_i < Config::Schema::VERSION
+        return false unless state.is_a?(Hash)
+
+        Array(state.fetch("issues", [])).any? { |issue| State::Models.pull_request_records_from(issue).any? }
+      end
+
+      def github_support_disabled_message
+        "Enable GitHub support in Settings → Experiments to use pull request commands."
+      end
+
+      def open_settings(_state, mode: "settings")
+        @settings_draft = Settings::Draft.new(config)
+        @settings_active = true
+        @settings_mode = mode.to_s
+        @settings_category_index = 0
+        @settings_row_index = 0
+        @settings_show_advanced = false
+        @settings_editor = nil
+        @settings_discard_confirm = false
+        @settings_saving = false
+        close_delivery_pr_picker
+        close_model_picker
+        close_onboarding if @onboarding_active
+        @force_full_redraw = true
+        true
+      rescue StandardError => e
+        append_jump_response("Could not open Settings: #{e.message}")
+        false
+      end
+
+      def close_settings(discard: false)
+        @settings_draft&.restore_theme if discard
+        @settings_active = false
+        @settings_draft = nil
+        @settings_category_index = 0
+        @settings_row_index = 0
+        @settings_editor = nil
+        @settings_discard_confirm = false
+        @settings_saving = false
+        @force_full_redraw = true
+        true
+      end
+
+      def settings_category
+        categories = @settings_draft&.categories || []
+        categories[@settings_category_index.to_i.clamp(0, [categories.length - 1, 0].max)].to_s
+      end
+
+      def settings_rows
+        return [] unless @settings_draft
+
+        definitions = @settings_draft.definitions_for(settings_category, include_advanced: @settings_show_advanced)
+        rows = definitions.map { |definition| @settings_draft.row(definition) }
+        hidden = @settings_draft.definitions_for(settings_category, include_advanced: true).count(&:advanced)
+        if !@settings_show_advanced && hidden.positive?
+          rows << {
+            "id" => "_show_advanced",
+            "label" => "Show advanced settings",
+            "description" => "Reveal #{hidden} advanced setting#{hidden == 1 ? "" : "s"} in this and every category.",
+            "type" => "action",
+            "editor" => "action",
+            "display_value" => "#{hidden} hidden",
+            "default_value" => "collapsed",
+            "source" => "UI",
+            "dirty" => false,
+            "read_only" => false,
+            "apply_mode" => "none"
+          }
+        end
+        rows
+      end
+
+      def settings_snapshot
+        return nil unless @settings_active && @settings_draft
+
+        rows = settings_rows
+        @settings_row_index = @settings_row_index.to_i.clamp(0, [rows.length - 1, 0].max)
+        editor = if @settings_editor
+                   row = @settings_editor.fetch("row", {}).merge(
+                     "error" => @settings_draft.errors[@settings_editor.fetch("id")]
+                   ).compact
+                   @settings_editor.merge("row" => row)
+                 end
+        {
+          "active" => true,
+          "mode" => @settings_mode,
+          "categories" => @settings_draft.categories,
+          "category" => settings_category,
+          "category_index" => @settings_category_index,
+          "rows" => rows,
+          "row_index" => @settings_row_index,
+          "dirty" => @settings_draft.dirty?,
+          "saving" => @settings_saving,
+          "advanced" => @settings_show_advanced,
+          "editor" => editor,
+          "discard_confirm" => @settings_discard_confirm,
+          "error_count" => @settings_draft.errors.length,
+          "global_error" => @settings_draft.global_error,
+          "width" => render_width,
+          "height" => render_height
+        }.compact
+      end
+
+      def handle_settings_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
+        if render_width < Settings::MIN_WIDTH || render_height < Settings::MIN_HEIGHT
+          close_settings(discard: true) if hard_escape_key?(key)
+          return unchanged
+        end
+        return handle_settings_mouse(key, unchanged, on_submit, state) if mouse_event?(key)
+
+        if @settings_discard_confirm
+          if ENTER_KEYS.include?(key)
+            close_settings(discard: true)
+          elsif hard_escape_key?(key)
+            @settings_discard_confirm = false
+          end
+          return unchanged
+        end
+
+        if @settings_editor
+          return handle_settings_editor_key(key, unchanged, on_submit, state)
+        end
+
+        rows = settings_rows
+        if hard_save_key?(key)
+          save_settings(on_submit, state)
+        elsif hard_escape_key?(key)
+          request_settings_cancel
+        elsif TAB_KEYS.include?(key) || FOCUS_FORWARD_KEYS.include?(key)
+          move_settings_category(1)
+        elsif SHIFT_TAB_KEYS.include?(key)
+          move_settings_category(-1)
+        elsif UP_KEYS.include?(key) || keybinding?("suggestion_previous", key)
+          move_settings_row(-1)
+        elsif DOWN_KEYS.include?(key) || keybinding?("suggestion_next", key)
+          move_settings_row(1)
+        elsif PAGE_UP_KEYS.include?(key)
+          move_settings_row(-settings_page_size)
+        elsif PAGE_DOWN_KEYS.include?(key)
+          move_settings_row(settings_page_size)
+        elsif HOME_KEYS.include?(key)
+          @settings_row_index = 0
+        elsif END_KEYS.include?(key)
+          @settings_row_index = [rows.length - 1, 0].max
+        elsif LEFT_KEYS.include?(key)
+          cycle_or_move_settings(-1, state)
+        elsif RIGHT_KEYS.include?(key)
+          cycle_or_move_settings(1, state)
+        elsif key == " "
+          activate_settings_row(state, toggle_only: true)
+        elsif ENTER_KEYS.include?(key)
+          activate_settings_row(state)
+        elsif key.to_s.downcase == "a"
+          @settings_show_advanced = !@settings_show_advanced
+          @settings_row_index = 0
+        end
+        unchanged
+      rescue StandardError => e
+        @settings_draft&.apply_save_failure("Settings input failed: #{e.message}")
+        unchanged
+      end
+
+      def handle_settings_editor_key(key, unchanged, on_submit, state)
+        editor = @settings_editor
+        if hard_escape_key?(key)
+          @settings_editor = nil
+          return unchanged
+        end
+        if hard_save_key?(key)
+          if apply_settings_editor
+            @settings_editor = nil
+            save_settings(on_submit, state)
+          end
+          return unchanged
+        end
+        if ENTER_KEYS.include?(key)
+          @settings_editor = nil if apply_settings_editor
+          return unchanged
+        end
+        if paste_key?(key)
+          insert_settings_editor_text(paste_text(key))
+          return unchanged
+        end
+        if keybinding?("delete_backward", key)
+          chars = editor.fetch("buffer").chars
+          cursor = editor.fetch("cursor").to_i
+          if cursor.positive?
+            chars.delete_at(cursor - 1)
+            editor["buffer"] = chars.join
+            editor["cursor"] = cursor - 1
+          end
+          return unchanged
+        end
+        if LEFT_KEYS.include?(key)
+          editor["cursor"] = [editor.fetch("cursor").to_i - 1, 0].max
+          return unchanged
+        end
+        if RIGHT_KEYS.include?(key)
+          editor["cursor"] = [editor.fetch("cursor").to_i + 1, editor.fetch("buffer").chars.length].min
+          return unchanged
+        end
+        if printable_key?(key)
+          insert_settings_editor_text(key)
+          return unchanged
+        end
+        unchanged
+      end
+
+      def insert_settings_editor_text(text)
+        editor = @settings_editor
+        chars = editor.fetch("buffer").chars
+        cursor = editor.fetch("cursor").to_i.clamp(0, chars.length)
+        insertion = text.to_s.chars
+        chars.insert(cursor, *insertion)
+        editor["buffer"] = chars.join
+        editor["cursor"] = cursor + insertion.length
+      end
+
+      def apply_settings_editor
+        id = @settings_editor.fetch("id")
+        applied = @settings_draft.parse_editor(id, @settings_editor.fetch("buffer"))
+        @settings_draft.preview_theme if id == "appearance.theme" && applied
+        !applied.nil?
+      end
+
+      def handle_settings_mouse(key, unchanged, on_submit, state)
+        if mouse_wheel_up?(key) || mouse_wheel_down?(key)
+          hit = layout.settings_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+          move_settings_row(mouse_wheel_up?(key) ? -3 : 3) unless hit == :inert
+          return unchanged
+        end
+        return unchanged unless mouse_button_press?(key) && key.fetch("button", 0).to_i.zero?
+
+        hit = layout.settings_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+        case hit
+        when :save
+          save_settings(on_submit, state)
+        when :cancel
+          request_settings_cancel
+        when Array
+          kind, index = hit
+          if kind == :category
+            @settings_category_index = index.to_i.clamp(0, [@settings_draft.categories.length - 1, 0].max)
+            @settings_row_index = 0
+          elsif %i[row toggle].include?(kind)
+            @settings_row_index = index.to_i.clamp(0, [settings_rows.length - 1, 0].max)
+            activate_settings_row(state, toggle_only: kind == :toggle)
+          end
+        end
+        unchanged
+      end
+
+      def hard_escape_key?(key)
+        key == "\e" || keybinding?("cancel_navigation", key)
+      end
+
+      def hard_save_key?(key)
+        CTRL_S_KEYS.include?(key)
+      end
+
+      def move_settings_category(delta)
+        count = @settings_draft.categories.length
+        return if count.zero?
+
+        @settings_category_index = (@settings_category_index.to_i + delta.to_i) % count
+        @settings_row_index = 0
+      end
+
+      def move_settings_row(delta)
+        count = settings_rows.length
+        return if count.zero?
+
+        @settings_row_index = (@settings_row_index.to_i + delta.to_i) % count
+      end
+
+      def settings_page_size
+        [render_height - 8, 1].max
+      end
+
+      def selected_settings_row
+        rows = settings_rows
+        rows[@settings_row_index.to_i.clamp(0, [rows.length - 1, 0].max)]
+      end
+
+      def cycle_or_move_settings(delta, state)
+        row = selected_settings_row
+        return move_settings_category(delta) unless row
+
+        if %w[selector enum].include?(row.fetch("editor", nil))
+          @settings_draft.cycle(row.fetch("id"), delta)
+          @settings_draft.preview_theme if row.fetch("id") == "appearance.theme"
+        elsif row.fetch("editor", nil) == "model"
+          cycle_settings_model(row, delta, state)
+        else
+          move_settings_category(delta)
+        end
+      end
+
+      def cycle_settings_model(row, delta, state)
+        options = ModelPicker.entries(state, harness: "pi", query: "").map { |entry| entry.fetch("reference") }
+        current = @settings_draft.value(row.fetch("id")).to_s
+        options.unshift(current) unless options.include?(current)
+        return if options.empty?
+
+        index = options.index(current) || 0
+        @settings_draft.set(row.fetch("id"), options[(index + delta.to_i) % options.length])
+      end
+
+      def activate_settings_row(state, toggle_only: false)
+        row = selected_settings_row
+        return false unless row
+
+        id = row.fetch("id")
+        if id == "_show_advanced"
+          @settings_show_advanced = true
+          @settings_row_index = 0
+          return true
+        end
+        if id == "setup.run_again"
+          close_settings(discard: true)
+          return handle_local_setup_command(state)
+        end
+        return false if row.fetch("read_only", false)
+
+        case row.fetch("editor", nil)
+        when "checkbox"
+          @settings_draft.toggle(id)
+        when "selector"
+          return false if toggle_only
+          @settings_draft.cycle(id, 1)
+          @settings_draft.preview_theme if id == "appearance.theme"
+        when "model"
+          return false if toggle_only
+          open_settings_editor(row)
+        else
+          return false if toggle_only
+          open_settings_editor(row)
+        end
+        true
+      end
+
+      def open_settings_editor(row)
+        id = row.fetch("id")
+        text = @settings_draft.editor_text(id)
+        @settings_editor = {
+          "id" => id,
+          "row" => row,
+          "buffer" => text,
+          "cursor" => text.chars.length
+        }
+      end
+
+      def request_settings_cancel
+        return close_settings(discard: true) unless @settings_draft&.dirty?
+
+        @settings_discard_confirm = true
+      end
+
+      def save_settings(on_submit, state)
+        return false if @settings_saving
+        unless @settings_draft.validate
+          first_id = @settings_draft.errors.keys.first
+          focus_settings_id(first_id) if first_id
+          return false
+        end
+        if @settings_draft.changes.empty?
+          close_settings(discard: false)
+          return true
+        end
+
+        payload = {
+          "base_fingerprint" => @settings_draft.baseline_fingerprint,
+          "changes" => @settings_draft.changes
+        }
+        encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
+        @settings_saving = true
+        @settings_draft.clear_save_failure
+        submit_prompt("/config save #{encoded}", on_submit, state)
+        true
+      end
+
+      def focus_settings_id(id)
+        definition = @settings_draft.definitions.find { |candidate| candidate.id == id.to_s }
+        return unless definition
+
+        @settings_show_advanced = true if definition.advanced
+        @settings_category_index = @settings_draft.categories.index(definition.category) || 0
+        @settings_row_index = settings_rows.index { |row| row.fetch("id", nil) == definition.id } || 0
       end
 
       # --- first-run setup --------------------------------------------------
@@ -3402,6 +3857,11 @@ module Meringue
       end
 
       def open_delivery_pr_picker(state)
+        unless github_support_enabled?(state)
+          append_jump_response(github_support_disabled_message)
+          return false
+        end
+
         entries = OpenPullRequests.entries(state)
         if entries.empty?
           # Expected unavailability, so it stays a transient hint rather than a
@@ -3486,6 +3946,7 @@ module Meringue
 
       def open_delivery_pr_entry(entry)
         return false unless entry
+        return false unless github_support_enabled?
 
         result = pull_request_opener.open(entry.fetch("url"))
         return true if open_succeeded?(result)
@@ -3498,6 +3959,11 @@ module Meringue
       end
 
       def open_pr_by_agent_id(state, agent_id, silent_fail: false)
+        unless github_support_enabled?(state)
+          append_jump_response(github_support_disabled_message) unless silent_fail
+          return false
+        end
+
         record = pr_record_for_id(state, agent_id)
         unless record
           append_jump_response("Agent tree item #{agent_id} does not exist.") unless silent_fail
@@ -3946,6 +4412,31 @@ module Meringue
         clear_logs! if clear_state_accepted?(command_results)
         reload_recounted_presentation_state! if recount_accepted?(command_results)
         apply_theme_command_results(command_results)
+        apply_configuration_command_results(command_results)
+      end
+
+      def apply_configuration_command_results(command_results)
+        result = Array(command_results).reverse.find { |candidate| candidate.fetch("command_type", nil) == "SaveConfiguration" }
+        return unless result
+
+        if result.fetch("status", nil) == "accepted"
+          @config = config.reload_file
+          @keybindings = Keybindings.from_config(@config.section("tui", "keybindings"))
+          @onboarding_reduced_motion = nil
+          close_settings(discard: false) if @settings_active
+        elsif @settings_active && @settings_draft
+          @settings_saving = false
+          details = result.fetch("result", {}) || {}
+          @settings_draft.apply_save_failure(
+            result.fetch("message", "Configuration was not saved."),
+            details.fetch("field_errors", {})
+          )
+        end
+      rescue StandardError => e
+        if @settings_active && @settings_draft
+          @settings_saving = false
+          @settings_draft.apply_save_failure("Configuration result could not be applied: #{e.message}")
+        end
       end
 
       def clear_state_accepted?(command_results)
@@ -4118,6 +4609,8 @@ module Meringue
         reconcile_log_scope!(state)
         composed_state = state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
+          Settings::STATE_KEY => settings_snapshot,
+          "_capabilities" => { "github_support" => github_support_enabled?(state) },
           # First-run setup renders full screen, so it is a top-level view like the
           # focused workspace rather than a slot inside the chat pane.
           Panes::OnboardingPane::STATE_KEY => onboarding_snapshot,
@@ -4188,7 +4681,7 @@ module Meringue
             "leader_commands" => workspace_leader_commands,
             "leader_pending" => @workspace_leader_pending,
             "slash_suggestion_index" => slash_suggestion_index.to_i,
-            "slash_suggestions" => WorkspaceCommands.command_suggestion_records(input_buffer),
+            "slash_suggestions" => workspace_command_suggestion_records(input_buffer),
             "scroll_offset" => @agent_workspace_view == "terminal" ? @workspace_terminal_scroll_offset.to_i : @workspace_agent_scroll_offset.to_i,
             "messages" => @agent_workspace_messages[@agent_workspace_agent_id.to_s].map(&:dup),
             "notice" => @agent_workspace_notice,
