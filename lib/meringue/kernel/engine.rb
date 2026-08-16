@@ -83,8 +83,11 @@ module Meringue
       # are eligible together, so an errored record is terminal rather than a retention blocker.
       PRUNE_ELIGIBLE_STATUSES = %w[completed killed errored].freeze
       # Only work that could still move on its own retains a record. An errored worker is
-      # settled; a queued, working, or blocked worker is not.
-      PRUNE_BLOCKING_WORKER_STATUSES = %w[queued working blocked].freeze
+      # settled; a queued, working, or blocked worker is not. A `supervision_lost` worker is
+      # paused runtime, not settled: its transport owner disappeared but its durable session,
+      # workspace, and queued work remain valid and recoverable, so it retains its record like
+      # other live work rather than being pruned.
+      PRUNE_BLOCKING_WORKER_STATUSES = %w[queued working blocked supervision_lost].freeze
       # How many times workspace provisioning is attempted for one worker before it stops being
       # retried automatically and starts waiting for a human. Two, not more: a retry of a stuck
       # `git worktree add` is cheap and usually works, but each attempt can legitimately take
