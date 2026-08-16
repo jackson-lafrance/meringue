@@ -186,6 +186,10 @@ For a live Pi RPC process, Meringue reads `model` and `thinkingLevel` from Pi's 
 
 That object is refreshed by the normal session paths rather than by a user command: spawning, prompting, and each reconcile poll merge the harness's reported settings back onto the agent record. It is visible in the focused worker workspace (`session settings · model … · thinking …`), in the raw `/state` output, and in the `GetInfo` record for an agent.
 
+### Selected-worker log telemetry
+
+When logs are filtered to one worker, the logs border adds that worker's lifecycle status, effective model, thinking level, and context telemetry. Context is shown as `used/capacity (percent)`, with the percentage computed from the displayed token values. Pi's context value is an estimate because it combines provider-reported usage with estimated trailing messages, so it is prefixed with `~`. A missing value is shown as `?` or `unavailable`; cumulative billed tokens are never used as current context usage. A small turn count is included only when the title has room.
+
 For a resumable process whose RPC transport is unavailable, Pi's persisted JSONL session is authoritative. Meringue walks the current branch and reads `model_change` and `thinking_level_change` entries. An assistant message's provider/model is only a fallback for older session files. If Pi persisted no thinking level, Meringue reports `unknown` rather than guessing.
 
 Codex, Claude Code, and other harnesses can implement the same generic client operations later. They currently return an explicit unsupported result; Meringue does not infer their session settings from command-line arguments.

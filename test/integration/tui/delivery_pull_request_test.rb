@@ -38,8 +38,24 @@ class TuiDeliveryPullRequestTest < Minitest::Test
     presentation = Delivery.for_id(state_with_pull_request("state" => "open", "last_checked_at" => "2026-07-11T00:00:00Z"), "P1-I1", now: NOW)
 
     assert presentation.fetch("stale")
-    assert_equal "open · stale", Delivery.status_label(presentation)
+    assert_equal "open · check stale", Delivery.status_label(presentation)
+    assert_includes presentation.fetch("message"), "forge status check is stale"
     assert Delivery.openable?(presentation)
+  end
+
+  def test_merged_lifecycle_is_separate_from_stale_check_freshness
+    presentation = Delivery.for_id(
+      state_with_pull_request("state" => "merged", "last_checked_at" => "2026-07-11T00:00:00Z"),
+      "P1-I1",
+      now: NOW
+    )
+
+    assert_equal "merged", presentation.fetch("state")
+    assert presentation.fetch("stale")
+    assert_equal "merged · check stale", Delivery.status_label(presentation)
+    refute_equal "merged · stale", Delivery.status_label(presentation)
+    assert_includes presentation.fetch("message"), "merged"
+    assert_includes presentation.fetch("message"), "forge status check is stale"
   end
 
   def test_unavailable_refresh_keeps_the_link_actionable

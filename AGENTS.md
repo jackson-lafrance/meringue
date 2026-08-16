@@ -508,6 +508,7 @@ The harness client should expose operations shaped like:
 - `abort_session(session_ref)`
 - `kill_session(session_ref)`
 - `get_state(session_ref)`
+- `get_session_stats(session_ref)` (optional current context usage and turn telemetry)
 - `get_session_settings(session_ref)`
 - `set_session_model(session_ref, model_reference)`
 - `set_session_thinking_level(session_ref, level)`

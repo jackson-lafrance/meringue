@@ -24,6 +24,7 @@ module Meringue
 
         state_name = record_state(record)
         refresh_unavailable = record["availability"].to_s == "unavailable"
+        stale = refresh_unavailable || stale_record?(record, now: now)
         {
           "agent_id" => id.to_s,
           "record" => record,
@@ -32,8 +33,8 @@ module Meringue
           "state" => state_name,
           "available" => true,
           "metadata_available" => !refresh_unavailable,
-          "stale" => refresh_unavailable || stale_record?(record, now: now),
-          "message" => presentation_message(state_name, refresh_unavailable: refresh_unavailable)
+          "stale" => stale,
+          "message" => presentation_message(state_name, refresh_unavailable: refresh_unavailable, stale: stale)
         }
       end
 
@@ -146,7 +147,9 @@ module Meringue
         return "status unavailable" unless presentation.fetch("metadata_available", true)
 
         label = presentation.fetch("state", "unknown").to_s
-        presentation["stale"] ? "#{label} · stale" : label
+        # `stale` is freshness of the last forge check, not a PR lifecycle
+        # state. Name that dimension so `merged` can never read as contradictory.
+        presentation["stale"] ? "#{label} · check stale" : label
       end
 
       def stale_record?(record, now: Time.now.utc)
@@ -182,9 +185,10 @@ module Meringue
         }
       end
 
-      def presentation_message(state_name, refresh_unavailable:)
+      def presentation_message(state_name, refresh_unavailable:, stale: false)
         return "Pull request status is temporarily unavailable; the last verified link is still openable." if refresh_unavailable
         return "Pull request status has not been verified recently; the tracked link is still openable." if state_name == "unknown"
+        return "Tracked delivery pull request is #{state_name}; its forge status check is stale." if stale
 
         "Tracked delivery pull request is #{state_name}."
       end

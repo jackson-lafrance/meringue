@@ -439,6 +439,18 @@ module Meringue
         build_session_ref_from_file(session_ref)
       end
 
+      # Pi's session statistics include current context usage and message counts.
+      # Failures are intentionally represented as unavailable telemetry rather than
+      # allowing a stats probe to make an otherwise healthy session look errored.
+      def get_session_stats(session_ref)
+        process = process_for_session(session_ref, required: false)
+        return session_ref.fetch("session_stats", nil) unless process
+
+        normalize_session_stats(rpc_data(process.request({ "type" => "get_session_stats" }, timeout: command_timeout)))
+      rescue StandardError
+        nil
+      end
+
       def session_settings_supported?
         true
       end
@@ -1694,7 +1706,7 @@ module Meringue
         )
       end
 
-      def build_session_ref(process, pi_state, kind:, cwd:, session_name:, workspace_mode: "isolated")
+      def build_session_ref(process, pi_state, kind:, cwd:, session_name:, workspace_mode: "isolated", session_stats: nil)
         {
           "harness" => "pi",
           "pid" => process.pid,
@@ -1704,6 +1716,7 @@ module Meringue
           "is_streaming" => !!pi_state["isStreaming"],
           "last_event_at" => process.last_event_at,
           "session_settings" => session_settings_from_pi_state(pi_state),
+          "session_stats" => session_stats,
           "metadata" => {
             "kind" => kind.to_s,
             "session_name" => session_name,
@@ -1758,6 +1771,7 @@ module Meringue
           "is_streaming" => !summary.fetch("completed", false),
           "last_event_at" => summary.fetch("last_event_at", nil),
           "session_settings" => summary.fetch("session_settings"),
+          "session_stats" => summary.fetch("session_stats", nil),
           "metadata" => metadata_with(
             session_ref,
             "session_name" => summary.fetch("session_name", nil) || metadata_value(session_ref, "session_name"),
@@ -1824,6 +1838,35 @@ module Meringue
         summary["completed"] = !turn_pending && assistant_message_completed?(last_assistant)
         summary["session_settings"] = session_settings_from_session_records(records)
         summary
+      end
+
+      def normalize_session_stats(stats)
+        return nil unless stats.is_a?(Hash)
+
+        context = stats["contextUsage"] || stats["context_usage"]
+        context = normalize_context_usage(context)
+        {
+          "user_messages" => stats["userMessages"] || stats["user_messages"],
+          "assistant_messages" => stats["assistantMessages"] || stats["assistant_messages"],
+          "tool_calls" => stats["toolCalls"] || stats["tool_calls"],
+          "tool_results" => stats["toolResults"] || stats["tool_results"],
+          "total_messages" => stats["totalMessages"] || stats["total_messages"],
+          "context_usage" => context
+        }.compact
+      end
+
+      def normalize_context_usage(context)
+        return nil unless context.is_a?(Hash)
+
+        {
+          "tokens" => context.key?("tokens") ? context["tokens"] : context["used"],
+          "capacity" => context["contextWindow"] || context["context_window"] || context["capacity"],
+          "percent" => context["percent"],
+          # Pi documents this value as an estimate: it combines provider usage
+          # with estimated tokens for messages after the latest response.
+          "approximate" => true,
+          "source" => "pi_session_stats"
+        }
       end
 
       def session_file_path(session_ref)

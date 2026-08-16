@@ -28,7 +28,7 @@ class TuiClickableWorkerLogsTest < Minitest::Test
 
       assert_equal "P1-I1-W1", Meringue::TUI::LogScope.id(composed), part
       frame = @layout.render(composed, width: WIDTH, height: HEIGHT, color: true)
-      assert_includes frame, "logs — P1-I1-W1"
+      assert_includes frame, "P1-I1-W1 · working"
       assert_includes frame, Meringue::TUI::Style::AGENT_TREE_SELECTED, "the worker row stays highlighted"
     end
   end
