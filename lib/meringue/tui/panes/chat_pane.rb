@@ -181,7 +181,8 @@ module Meringue
             agent.is_a?(Hash) ? agent.fetch("status", nil) : nil,
             metadata.fetch("title", nil),
             selected_agent_id,
-            Style.current_colorscheme
+            Style.current_colorscheme,
+            Timestamps.context_key
           ]
         end
 
@@ -709,7 +710,8 @@ module Meringue
             AgentTreeNavigation.selected_agent_id(state),
             log_scope_cache_key(state),
             state.dig("metadata", "last_recount", "recounted_at"),
-            Style.current_colorscheme
+            Style.current_colorscheme,
+            Timestamps.context_key
           ]
         end
 
@@ -961,7 +963,7 @@ module Meringue
         def role_line(entry, selected_agent_id: nil)
           style = entry_style(entry)
           segments = [
-            ["[#{timestamp(entry)}] ", Style::DIM],
+            ["#{timestamp(entry)} ", Style::DIM],
             [entry_icon(entry), style]
           ]
           segments.concat(participant_segments(entry, style))
@@ -1180,7 +1182,7 @@ module Meringue
         end
 
         def timestamp(entry)
-          Timestamps.format(entry.fetch("timestamp", nil), "%H:%M") || "--:--"
+          Timestamps.display(entry.fetch("timestamp", nil)) || "[--:--]"
         end
 
         def status_line(status, gutter = [PLAIN_GUTTER, Style::DIM])
