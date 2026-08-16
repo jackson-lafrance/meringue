@@ -275,8 +275,8 @@ module Meringue
       end
 
       # Effective defaults used when the registry next starts a Pi head or
-      # worker. Role details stay visible when dedicated thinking defaults or
-      # older explicit argv values differ.
+      # worker. Role details stay visible when dedicated model/thinking defaults
+      # or older explicit argv values differ.
       def session_defaults(provider: "pi")
         provider = normalize_provider!(provider)
         raise ArgumentError, "Session defaults are currently Pi-only." unless provider == "pi"
@@ -304,12 +304,13 @@ module Meringue
       # Saves the selected values and reconfigures cached Pi clients in place.
       # Existing RPC processes keep their current effective settings; only a
       # later new-session spawn applies the replacement model/thinking argv.
-      def update_session_defaults!(provider: "pi", model: nil, thinking_level: nil, thinking_role: nil)
+      def update_session_defaults!(provider: "pi", model: nil, model_role: nil, thinking_level: nil, thinking_role: nil)
         provider = normalize_provider!(provider)
         raise ArgumentError, "Session defaults are currently Pi-only." unless provider == "pi"
 
         saved = Config.save_pi_session_defaults!(
           model: model,
+          model_role: model_role,
           thinking_level: thinking_level,
           thinking_role: thinking_role,
           path: config.path
@@ -379,7 +380,8 @@ module Meringue
         return args unless provider == "pi"
 
         args = args.dup
-        model = provider_config["model"].to_s.strip
+        model = provider_config["#{kind}_model"].to_s.strip
+        model = provider_config["model"].to_s.strip if model.empty?
         thinking_level = provider_config["#{kind}_thinking_level"].to_s.strip
         thinking_level = provider_config["thinking_level"].to_s.strip if thinking_level.empty?
         args.concat(["--model", model]) unless model.empty?

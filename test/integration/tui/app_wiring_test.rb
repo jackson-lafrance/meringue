@@ -363,7 +363,8 @@ class TuiAppWiringTest < Minitest::Test
 
     assert_includes overview, "file: /tmp/meringue-test-config.toml (loaded)"
     assert_includes overview, "harness: claude"
-    assert_includes overview, "Pi default model: openai/gpt-5.6-sol"
+    assert_includes overview, "Pi head model: openai/gpt-5.6-sol"
+    assert_includes overview, "Pi worker model: openai/gpt-5.6-sol"
     assert_includes overview, "Pi head thinking: low"
     assert_includes overview, "Pi worker thinking: xhigh"
     assert_includes overview, "conflict policy (predecessor failure): run"

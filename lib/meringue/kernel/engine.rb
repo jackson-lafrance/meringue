@@ -2152,8 +2152,8 @@ module Meringue
 
       # Reports the model/thinking pair future Pi heads and workers will use.
       # There is no slash command for it any more: the dashboard status line
-      # already shows `Pi defaults: <model> · <thinking>` and `/config` prints
-      # the same pair, so the typed `/defaults` was redundant surface. The
+      # already shows the compact model/thinking summary and `/config` prints
+      # the same values, so the typed `/defaults` was redundant surface. The
       # command stays because a head still proposes it for "show the defaults"
       # or "which model will future agents use", where the answer has to reach
       # the log with the clamp caveat attached.
@@ -2352,6 +2352,17 @@ module Meringue
       # empty, unavailable, or simply behind a provider extension that added the
       # model), it is just labelled unverified in the accepted message.
       def set_default_session_model(command_id, command_type, payload)
+        role_value = value_at(payload, "role", "Role")
+        role = role_value.to_s.strip.downcase
+        if !role.empty? && !%w[head worker].include?(role)
+          return rejected_result(
+            command_id,
+            command_type,
+            "Default Pi model was not changed: role must be head or worker.",
+            ["role must be one of: head, worker"]
+          )
+        end
+        role = nil if role.empty?
         model_reference = value_at(payload, "model", "model_reference", "Model", "ModelReference")
         reason = Meringue::Harness::ModelReference.rejection_reason(model_reference)
         if reason
@@ -2367,6 +2378,7 @@ module Meringue
           command_id,
           command_type,
           model: Meringue::Harness::ModelReference.normalize(model_reference),
+          model_role: role,
           changed_field: "model"
         )
       end
@@ -2403,15 +2415,17 @@ module Meringue
         )
       end
 
-      def update_pi_session_defaults(command_id, command_type, model: nil, thinking_level: nil, thinking_role: nil, changed_field:)
+      def update_pi_session_defaults(command_id, command_type, model: nil, model_role: nil, thinking_level: nil, thinking_role: nil, changed_field:)
         previous = configured_pi_session_defaults
         defaults = if @session_defaults_updater
                      keywords = { model: model, thinking_level: thinking_level }
+                     keywords[:model_role] = model_role unless model_role.nil?
                      keywords[:thinking_role] = thinking_role unless thinking_role.nil?
                      @session_defaults_updater.call("pi", **keywords)
                    else
                      saved = Config.save_pi_session_defaults!(
                        model: model,
+                       model_role: model_role,
                        thinking_level: thinking_level,
                        thinking_role: thinking_role,
                        path: config_path
@@ -2422,18 +2436,23 @@ module Meringue
         state = normalized_state
         state.fetch("metadata")["pi_session_defaults"] = deep_copy(defaults)
         unchanged_ids = existing_pi_session_ids(state)
+        active_role = model_role || thinking_role
         value = if changed_field == "model"
-                  defaults.fetch("model", model)
+                  if model_role
+                    defaults.dig("roles", model_role, "model") || model
+                  else
+                    defaults.fetch("model", model)
+                  end
                 elsif thinking_role
                   defaults.dig("roles", thinking_role, "thinking_level") || thinking_level
                 else
                   defaults.fetch("thinking_level", thinking_level)
                 end
         label = changed_field == "model" ? "model" : "thinking level"
-        audience = thinking_role ? "future Pi #{thinking_role}s" : "all future Pi heads and workers"
-        scope = thinking_role ? "future_pi_#{thinking_role}_sessions" : "future_pi_sessions"
-        clamp_note = clamped_default_thinking_note(defaults, changed_field, role: thinking_role)
-        unverified_note = unverified_default_model_note(defaults, changed_field)
+        audience = active_role ? "future Pi #{active_role}s" : "all future Pi heads and workers"
+        scope = active_role ? "future_pi_#{active_role}_sessions" : "future_pi_sessions"
+        clamp_note = clamped_default_thinking_note(defaults, changed_field, role: active_role)
+        unverified_note = unverified_default_model_note(defaults, changed_field, role: model_role)
         message = "Set the default Pi #{label} to #{value} for #{audience}. " \
                   "Existing Pi sessions were not changed#{unchanged_ids.empty? ? "." : ": #{unchanged_ids.join(", ")}."}" \
                   "#{unverified_note ? " #{unverified_note}" : ""}" \
@@ -2512,7 +2531,12 @@ module Meringue
       def clamped_default_thinking_note(defaults, changed_field, role: nil)
         return nil unless %w[thinking_level model].include?(changed_field)
 
-        reference = defaults.fetch("model", nil).to_s.strip
+        reference = if role
+                      defaults.dig("roles", role, "model")
+                    else
+                      defaults.fetch("model", nil)
+                    end
+        reference = reference.to_s.strip
         level = if role
                   defaults.dig("roles", role, "thinking_level")
                 else
@@ -2546,10 +2570,15 @@ module Meringue
       # provider extension that added the model after the last fetch. Say so,
       # reusing the "unverified" wording the picker and completion already use
       # for a degraded catalog.
-      def unverified_default_model_note(defaults, changed_field)
+      def unverified_default_model_note(defaults, changed_field, role: nil)
         return nil unless changed_field == "model"
 
-        reference = defaults.fetch("model", nil).to_s.strip
+        reference = if role
+                      defaults.dig("roles", role, "model")
+                    else
+                      defaults.fetch("model", nil)
+                    end
+        reference = reference.to_s.strip
         return nil if reference.empty?
 
         snapshot = persisted_model_catalog(Meringue::Harness::Registry.public_provider_name("pi"))
@@ -2594,14 +2623,15 @@ module Meringue
       end
 
       def pi_session_defaults_message(defaults)
-        model = defaults.fetch("model", nil) || "mixed by role"
+        head_model = defaults.dig("roles", "head", "model") || Meringue::Harness::Registry::DEFAULT_PI_MODEL
+        worker_model = defaults.dig("roles", "worker", "model") || Meringue::Harness::Registry::DEFAULT_PI_MODEL
         head_thinking = defaults.dig("roles", "head", "thinking_level") || Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL
         worker_thinking = defaults.dig("roles", "worker", "thinking_level") || Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL
         clamp_note = clamped_default_thinking_note(defaults, "thinking_level")
-        summary = if head_thinking == worker_thinking
-                    "Future Pi heads and workers use #{model} with thinking #{head_thinking}."
+        summary = if head_model == worker_model && head_thinking == worker_thinking
+                    "Future Pi heads and workers use #{head_model} with thinking #{head_thinking}."
                   else
-                    "Future Pi heads use #{model} with thinking #{head_thinking}; workers use #{model} with thinking #{worker_thinking}."
+                    "Future Pi heads use #{head_model} with thinking #{head_thinking}; workers use #{worker_model} with thinking #{worker_thinking}."
                   end
         [
           summary,
