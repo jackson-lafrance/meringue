@@ -2476,7 +2476,7 @@ module Meringue
         clamp_note = clamped_default_thinking_note(defaults, changed_field, role: active_role)
         unverified_note = unverified_default_model_note(defaults, changed_field, role: model_role)
         message = "Set the default Pi #{label} to #{value} for #{audience}. " \
-                  "Existing Pi sessions were not changed#{unchanged_ids.empty? ? "." : ": #{unchanged_ids.join(", ")}."}" \
+                  "Existing sessions were not changed." \
                   "#{unverified_note ? " #{unverified_note}" : ""}" \
                   "#{clamp_note ? " #{clamp_note}" : ""}"
         log_ids = append_log(
