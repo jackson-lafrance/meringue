@@ -91,23 +91,23 @@ Chat routing uses the same selection without turning the dashboard into a direct
 
 - Selecting `P1-I9` sends its id with the next natural-language `SpawnHead`; the kernel resolves and supplies `P1-I9` as `routing_context.selected_target.issue_id`.
 - Selecting `P1-I9-W3` sends the worker id. The kernel resolves it to owning issue `P1-I9`, includes the selected worker as a context hint, and rejects a stale selection instead of silently routing elsewhere.
-- Selecting a failed head (`H13`) and typing retries that head: the kernel re-runs the request it never routed, with whatever you just typed added as a new instruction. If its own agent session is still open the same session finishes the interrupted turn; otherwise a fresh head carries the original message forward, and the log reads `Retrying head H13 as head H14: <reason>.` Selecting a head that is still working routes the message as a new request instead, and says so in the log. See [Retrying a failed head](head_agent_kernel_commands.md#retrying-a-failed-head).
+- Selecting a head filters its logs only. A stopped head is retried explicitly with `/retry H13` (or by double-clicking its `retry me` row), which starts a fresh head carrying the unrouted request and applied-command journal forward. Typing a new message while a head row is selected remains unscoped. See [Retrying a failed head](head_agent_kernel_commands.md#retrying-a-failed-head).
 - The fresh head still chooses `PromptAgent` mode (`normal`, `steer`, or `follow_up`), a healthy worker on that issue, a follow-up/replacement, or a clarification. Selection never emits `PromptAgent` directly.
 - Slash commands bypass the head as usual and do not inherit selection: `/prune`, `/help`, `/kill`, and the local navigation commands submit identically whether or not a row is selected, and they leave the selection in place. The focused worker workspace also retains its explicit direct-prompt behavior; this section applies to dashboard natural-language chat.
-- Selecting a project, or a head that is still routing, filters logs only. Chat keeps its unscoped routing rather than sending a half-populated target, and clearing the selection restores unscoped routing.
+- Selecting a project or head filters logs only. Chat keeps its unscoped routing rather than sending a half-populated target, and clearing the selection restores unscoped routing.
 
 ### The composer shows its target by color
 
 The chat box itself changes to match the row it will prompt, so a stale selection cannot be missed while typing.
 
-The destination is named in exactly one place: the composer's pane title, on the border row directly above the chat bar. The hint line below the chat bar never repeats it and carries gestures only, so the same id is not printed twice one row apart and the delivery-PR indicator and interaction hints keep that width on a narrow terminal.
+The destination is named in exactly one place: the composer's pane title, on the border row directly above the chat bar. The hint line below the chat bar never repeats it. It gives a selected target only the useful `Esc clears` action, leaving changing status and delivery information room on narrow terminals.
 
 | state | composer title (above the chat bar) | border / title / `›` | hint line (below the chat bar) |
 | --- | --- | --- | --- |
-| worker or head with an issue (`P1-I9-W3`) | `chat → P1-I9-W3 · <issue title>` | tinted with that agent's own log color | `head routes · Esc clears` |
-| issue (`P1-I9`) | `chat → P1-I9 · <issue title>` | tinted with that issue id's color | `head routes · Esc clears` |
-| failed head (`H13`) | `chat → retry H13 · errored` (or `· blocked`) | tinted with that head's own log color | `retries this head · Esc clears` |
-| project or still-routing head (log-only) | `chat · head routes · P1 logs only` | theme default, never tinted | `head routes · Esc clears` |
+| worker (`P1-I9-W3`) | `chat → P1-I9-W3 · <issue title>` | tinted with that agent's own log color | `Esc clears` |
+| issue (`P1-I9`) | `chat → P1-I9 · <issue title>` | tinted with that issue id's color | `Esc clears` |
+| failed head (`H13`) | `chat · H13 logs only` | theme default, never tinted | `Esc clears` |
+| project or still-routing head (log-only) | `chat · P1 logs only` | theme default, never tinted | `Esc clears` |
 | nothing selected | `chat` | theme default, never tinted | nothing — no target to explain, nothing to clear |
 | buffer starts with `/` | `chat · slash command · P1-I9-W3 not targeted` | theme default, never tinted | `slash ignores target · Esc clears` |
 
@@ -117,7 +117,7 @@ The destination is named in exactly one place: the composer's pane title, on the
 - The tint is the *same* per-id color the logs pane and the AgentTree already give that agent (the active colorscheme's identity palette, `AGENT_PALETTE` in `lib/meringue/tui/style.rb`; see [AgentTree agent colors and harness logos](#agenttree-agent-colors-and-harness-logos)), so a tinted composer visibly belongs to the tree row, the log rows, and the `▌` gutter of the node it prompts. Issue ids hash through the same function, so an issue selection gets a stable color too, and an issue and a worker under it are never the same color.
 - Only the composer chrome is tinted: the border, the pane title, and the `›` prompt marker. Typed text, the placeholder, and text selection keep their normal semantic styles, so input contrast does not depend on which palette slot the target hashed into. This holds in all shipped colorschemes (`catppuccin`, `gruvbox`, `kanagawa`, `meringue`, `rose-pine`, `tokyonight`).
 - A focused composer stays distinguishable from an unfocused one by using the bold weight of the same hue instead of switching back to the focus border color.
-- Color is never the only cue. The title always names the destination, the hint line always says who routes the message and how to clear the selection, and an empty targeted composer's placeholder reads `message P1-I9-W3`. With `NO_COLOR=1`, a 16-color terminal, or a screenshot, the text still says exactly where the prompt is going.
+- Color is never the only cue. The title always names the destination, the hint line only explains how to clear a selection, and an empty targeted composer's placeholder reads `message P1-I9-W3`. With `NO_COLOR=1`, a 16-color terminal, or a screenshot, the text still says exactly where the prompt is going.
 - Typing a slash command removes the tint immediately, because slash commands never inherit the selection. The selection itself is untouched: delete the `/` and the tint (and the routing target) come back.
 - A selection the kernel or reconciliation drops (pruned, killed, renumbered) also drops the tint, so a colored composer always refers to a node that still exists.
 
@@ -125,7 +125,7 @@ The destination is named in exactly one place: the composer's pane title, on the
 
 The single row under the chat bar is shared, left to right, and truncated at the terminal width, so every group has to earn its columns. In order:
 
-1. **Routing gestures** for the current selection (`head routes · Esc clears`, or `slash ignores target · Esc clears`). Never the target id, which the composer title above already names.
+1. **Selection actions**: `Esc clears` for a selected target, or `slash ignores target · Esc clears` while a slash command bypasses the selection. Never the target id, which the composer title above already names.
 2. **Text-selection state** when a selection or the logs cursor is active (`⧉ selection  Ctrl-C copies`, `⧉ copied 3 lines`, or the `Alt-V` hint while the logs pane is focused).
 3. **Work in flight**: `● 2W 1H` (working workers and heads) or `2 prompts running`. There is no `active` label; the lit dot and the counts say it.
 4. **Open questions**: `? 2`.
@@ -140,7 +140,7 @@ The single row under the chat bar is shared, left to right, and truncated at the
 | nothing is selected and every tracked PR is merged/closed | `no open PRs` | says nothing is open |
 | nothing is selected and no PR has ever been tracked | *(silent)* | says nothing is tracked yet |
 
-6. **Interaction hints**: `Enter send · Ctrl-C clear/quit · Tab focus · / commands · /keybind keys`.
+6. **Idle discovery**: `Ctrl-C clear/quit · Tab focus · / commands`, shown only when no selection, text-selection state, activity, questions, PR summary, or slash popup needs the row.
 
 Delivery PR records are owned by issues, so an issue selection shows the newest PR that is still live, falling back to the newest settled one so a finished issue still says what it delivered. A worker selection resolves to that owning issue for the same action and never gets a second worker-owned marker or record. Every one of these facts comes from state the kernel already persisted (`delivery_pull_requests` on the issue); rendering never runs `gh`.
 
@@ -337,10 +337,10 @@ The composer is titled `chat`, and the helper line under it is exactly this lead
 Ctrl-Space  T terminal/agent · F filter: all · A agent session · B editor · P PR · Q quit
 ```
 
-The dashboard's bottom bar uses the same styling — accented keys, muted labels, dim dividers — so both bars read as one product:
+The dashboard's bottom bar uses the same styling — accented keys, muted labels, dim dividers — so both bars read as one product. It stays quiet while changing state or a transient selection needs attention; in an otherwise idle dashboard it offers only:
 
 ```txt
-Enter send · Ctrl-C clear/quit · Tab focus · / commands · /keybind keys
+Ctrl-C clear/quit · Tab focus · / commands
 ```
 
 Key letters and labels come from the active bindings, so custom bindings render accurately. The `F` entry always shows the active transcript filter, which resets scroll to the newest matching entry, persists across restart for the selected worker, and resets to `all` when another worker is selected.

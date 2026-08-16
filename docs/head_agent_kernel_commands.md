@@ -869,7 +869,7 @@ Use `completion_head` when the next routing decision depends on the worker's fin
 }
 ```
 
-When the worker completes, the kernel records the final report, claims the continuation exactly once, spawns a fresh stateless head, and includes a bounded worker-result block in that head's prompt. If Meringue was down when the worker was marked completed, the next `ReconcileSessions` pass triggers the same continuation. The spawned head routes normal kernel commands (`SpawnWorker`, `PromptAgent`, questions, etc.) through the usual validation and journaling path.
+When the worker completes, the kernel records the final report, claims the continuation exactly once, spawns a fresh stateless head, and includes a bounded worker-result block in that head's prompt. If Meringue was down when the worker was marked completed, the next `ReconcileSessions` pass triggers the same continuation. The spawned head proposes normal kernel commands (`SpawnWorker`, `PromptAgent`, questions, etc.) through the usual validation and journaling path.
 
 When that routing decision must not happen until an external condition changes, put the ordinary `after_command` fields **inside** the `completion_head` object:
 

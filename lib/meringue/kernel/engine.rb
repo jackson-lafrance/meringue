@@ -5057,7 +5057,7 @@ module Meringue
         end
       end
 
-      # Pull request links in a user's request are routing metadata: when the head routes that
+      # Pull request links in a user's request are routing metadata: when the head assigns that
       # request to an issue, the issue should expose the linked PR immediately rather than waiting
       # for a worker to finish and mention it again. We intentionally store the links as
       # unverified delivery records. The normal refresh path can enrich their lifecycle state, and
