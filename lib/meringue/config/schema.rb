@@ -16,6 +16,7 @@ module Meringue
 
     class StaleRevisionError < StandardError; end
     class LockError < StandardError; end
+    class PersistenceError < StandardError; end
 
     class SettingDefinition
       ATTRIBUTES = %i[

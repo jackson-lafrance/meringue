@@ -128,12 +128,10 @@ class TuiAppWiringTest < Minitest::Test
     composed = compose_app_state(@app, provider.to_proc, "typed")
 
     assert_equal(
-      %w[_agent_tree_navigation _agent_workspace _capabilities _chat _log_scope _onboarding _scroll _selection _settings],
+      %w[_agent_tree_navigation _agent_workspace _capabilities _chat _log_scope _scroll _selection _settings],
       (composed.keys - demo_state.keys).sort
     )
-    # First-run setup renders full screen, so it is a top-level view key like the
-    # focused workspace, and it is nil unless setup is actually up.
-    assert_nil composed.fetch("_onboarding")
+    # Settings is nil unless /config or the shared first-run Setup mode is active.
     assert_nil composed.fetch("_settings")
     assert composed.fetch("_capabilities").key?("github_support")
     demo_state.each_key { |key| assert composed.key?(key), "kernel key #{key} must survive composition" }

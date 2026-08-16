@@ -420,9 +420,8 @@ module Meringue
         # keyboard shape instead of introducing another overlay mechanism. A picker
         # wins while it is up.
         #
-        # First-run setup deliberately does not live here: it takes over the whole
-        # terminal (see Panes::OnboardingPane) rather than sharing a slot with the
-        # dashboard.
+        # First-run setup is a full-screen Settings mode rather than a popup in
+        # this composer slot.
         def popup?(state)
           model_picker?(state) || delivery_pr_picker?(state) || slash_suggestions?(state)
         end

@@ -49,6 +49,26 @@ class InputSlashCommandParserTest < Minitest::Test
     end
   end
 
+  def test_private_config_save_carries_the_transactional_setup_outcome
+    payload = {
+      "base_fingerprint" => "abc123",
+      "changes" => { "experiments.github_support" => false },
+      "onboarding_outcome" => "skipped"
+    }
+    encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
+
+    parsed = parse_slash("/config save #{encoded}")
+
+    assert_equal "SaveConfiguration", parsed.fetch("type")
+    assert_equal payload, parsed.fetch("payload")
+
+    payload["onboarding_outcome"] = "maybe"
+    invalid_encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
+    invalid = parse_slash("/config save #{invalid_encoded}")
+    assert_equal "InvalidSlashCommand", invalid.fetch("type")
+    assert_includes invalid.dig("payload", "message"), "invalid setup outcome"
+  end
+
   def test_every_command_spec_entry_parses_to_a_command
     Meringue::Input::SlashCommandParser::COMMAND_SPECS.each do |usage, description|
       refute_empty description

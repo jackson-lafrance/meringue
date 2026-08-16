@@ -78,7 +78,7 @@ class TuiSettingsOverlayTest < Minitest::Test
   def test_wide_medium_compact_and_too_small_layouts_are_recoverable
     @app.send(:open_settings, @state)
     {
-      [100, 30] => ["categories", "Head harness"],
+      [100, 30] => ["categories", "Head harness", "Esc cancel"],
       [79, 24] => ["Tab/Shift-Tab categories", "Head harness"],
       [46, 18] => ["Agent defaults", "Head harness"],
       [32, 10] => ["settings", "Esc cancel"],

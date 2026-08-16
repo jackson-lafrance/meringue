@@ -1,8 +1,8 @@
 # Copy to ~/.meringue/config.toml and adjust for your machine.
 
-# Written by first-run setup. Uncomment (or delete the section after setup has
-# run) to control whether the setup flow opens on the next launch; /setup always
-# reopens it by hand.
+# Written atomically with the reviewed first-run Setup draft. Delete this section
+# to make Setup auto-open on the next interactive launch; /setup always reopens
+# the shared Settings overlay by hand.
 # [onboarding]
 # completed_version = 1
 # completed_at = "2026-08-06T14:02:11Z"

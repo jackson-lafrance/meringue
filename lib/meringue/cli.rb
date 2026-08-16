@@ -76,8 +76,8 @@ module Meringue
           log_store: store,
           keybindings: keybindings,
           config: config,
-          # First-run setup applies every choice through a kernel command, so it
-          # is only offered when there is a kernel behind the UI. `meringue demo`
+          # First-run setup saves its Settings draft through the kernel, so it is
+          # only offered when there is a kernel behind the UI. `meringue demo`
           # has none and must never open it.
           onboarding_enabled: enable_agents
         ),

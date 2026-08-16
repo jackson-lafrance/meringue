@@ -154,11 +154,54 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       before = File.binread(config_path)
       store = FailingPublishStore.new(path: config_path)
 
-      assert_raises(Errno::ENOSPC) do
+      error = assert_raises(Meringue::Config::PersistenceError) do
         store.save(base_fingerprint: store.fingerprint, changes: { "appearance.theme" => "gruvbox" })
       end
+      assert_includes error.message, "No space left on device"
       assert_equal before, File.binread(config_path)
       assert_empty Dir.glob(File.join(File.dirname(config_path), ".config.toml.tmp-*"))
+    end
+  end
+
+  def test_setup_marker_and_reviewed_settings_publish_in_one_transaction
+    with_paths do |config_path, _state_path|
+      store = Meringue::Config::Store.new(path: config_path)
+      transaction = store.save(
+        base_fingerprint: store.fingerprint,
+        changes: {
+          "agent.head_model" => "openai/gpt-5.6-sol",
+          "agent.worker_model" => "anthropic/claude-opus-5",
+          "experiments.github_support" => true
+        },
+        onboarding_outcome: "completed",
+        completed_at: "2026-08-16T12:00:00Z"
+      )
+
+      config = Meringue::Config.load(path: config_path)
+      assert_equal "completed", transaction.fetch("onboarding_outcome")
+      assert_equal Meringue::Config::ONBOARDING_VERSION, config.onboarding_version
+      assert_equal "2026-08-16T12:00:00Z", config.value("onboarding", "completed_at")
+      assert_equal "openai/gpt-5.6-sol", config.setting("agent.head_model", env: {})
+      assert_equal "anthropic/claude-opus-5", config.setting("agent.worker_model", env: {})
+      assert_equal true, config.value("experiments", "github_support")
+    end
+  end
+
+  def test_failed_setup_publish_writes_neither_marker_nor_draft
+    with_paths do |config_path, _state_path|
+      File.write(config_path, "[tui]\ncolorscheme = \"meringue\"\n")
+      before = File.binread(config_path)
+      store = FailingPublishStore.new(path: config_path)
+
+      assert_raises(Meringue::Config::PersistenceError) do
+        store.save(
+          base_fingerprint: store.fingerprint,
+          changes: { "appearance.theme" => "gruvbox" },
+          onboarding_outcome: "completed"
+        )
+      end
+      assert_equal before, File.binread(config_path)
+      assert_equal 0, Meringue::Config.load(path: config_path).onboarding_version
     end
   end
 

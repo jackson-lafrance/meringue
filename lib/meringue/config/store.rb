@@ -4,11 +4,13 @@ require "digest"
 require "fileutils"
 require "securerandom"
 require "tempfile"
+require "time"
 
 module Meringue
   class Config
-    # Single-writer, optimistic config transaction. It patches only schema-owned
-    # paths into the latest parsed document, preserving unknown tables and keys.
+    # Single-writer, optimistic config transaction. It patches schema-owned
+    # settings and optional onboarding lifecycle metadata into the latest parsed
+    # document, preserving unknown tables and keys.
     class Store
       LOCK_SUFFIX = ".lock"
 
@@ -29,7 +31,12 @@ module Meringue
         Digest::SHA256.hexdigest("file\0#{File.binread(expanded)}")
       end
 
-      def save(base_fingerprint:, changes:)
+      def save(base_fingerprint:, changes:, onboarding_outcome: nil, completed_at: nil)
+        outcome = onboarding_outcome.nil? ? nil : onboarding_outcome.to_s
+        if outcome && !Config::ONBOARDING_OUTCOMES.include?(outcome)
+          raise ValidationError, "setup.outcome" => "must be one of: #{Config::ONBOARDING_OUTCOMES.join(", ")}"
+        end
+
         with_lock do
           current = Config.load(path: path)
           current_fingerprint = fingerprint
@@ -47,6 +54,11 @@ module Meringue
           end
           canonicalize_role_defaults!(data, normalized.keys)
           validate_cross_fields!(data, changed_ids: normalized.keys)
+          if outcome
+            set_path!(data, %w[onboarding completed_version], Config::ONBOARDING_VERSION)
+            set_path!(data, %w[onboarding completed_at], (completed_at || Time.now.utc.iso8601).to_s)
+            set_path!(data, %w[onboarding outcome], outcome)
+          end
           publish!(data)
 
           saved = Config.new(data, path: path, loaded: true, file_data: data)
@@ -55,9 +67,15 @@ module Meringue
             "changed_ids" => normalized.keys.sort,
             "restart_required" => Schema.restart_required_ids(normalized.keys).sort,
             "live_applied" => Schema.live_ids(normalized.keys).sort,
-            "fingerprint" => fingerprint
-          }
+            "fingerprint" => fingerprint,
+            "onboarding_outcome" => outcome,
+            "onboarding_version" => (Config::ONBOARDING_VERSION if outcome)
+          }.compact
         end
+      rescue StaleRevisionError, ValidationError, LockError
+        raise
+      rescue SystemCallError, IOError => e
+        raise PersistenceError, "Could not publish configuration #{path}: #{e.message}"
       end
 
       # Compatibility writers and startup migration use schema-owned paths but

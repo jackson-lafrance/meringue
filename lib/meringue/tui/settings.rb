@@ -12,6 +12,44 @@ module Meringue
       WIDE_WIDTH = 80
       COMPACT_WIDTH = 46
 
+      # Curated first-run mode over the same Draft, schema definitions, editors,
+      # and pane used by /config. Experiment ids are always derived from the
+      # registry so setup cannot drift from the complete Settings surface.
+      module SetupFlow
+        STEPS = ["Welcome", "Theme", "Head defaults", "Worker defaults", "Experiments", "Review"].freeze
+        FIXED_SETTING_IDS = {
+          "Theme" => %w[appearance.theme appearance.animations].freeze,
+          "Head defaults" => %w[agent.head_harness agent.head_model agent.head_thinking].freeze,
+          "Worker defaults" => %w[agent.worker_harness agent.worker_model agent.worker_thinking].freeze
+        }.freeze
+
+        module_function
+
+        def steps
+          STEPS
+        end
+
+        def setting_ids(step)
+          return Experiments::Registry.ids.map { |id| "experiments.#{id}" } if step.to_s == "Experiments"
+
+          FIXED_SETTING_IDS.fetch(step.to_s, [])
+        end
+
+        def step_for_setting(id)
+          candidate = id.to_s
+          steps.find { |step| setting_ids(step).include?(candidate) }
+        end
+
+        def experiment_defaults(draft, explicit_only: false)
+          Experiments::Registry.all.each_with_object({}) do |experiment, values|
+            definition = Config::Schema.fetch("experiments.#{experiment.id}")
+            next if explicit_only && draft.config.path_present?(*definition.path)
+
+            values[definition.id] = draft.value(definition.id)
+          end
+        end
+      end
+
       # Transactional, schema-backed UI draft. It owns no persistence; Save emits
       # one patch payload for the kernel's SaveConfiguration command.
       class Draft
