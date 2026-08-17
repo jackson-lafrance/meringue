@@ -64,6 +64,16 @@ module Meringue
           url = DeliveryPullRequest.pull_request_url(record)
           next unless DeliveryPullRequest.valid_url?(url)
 
+          # A PR URL the user mentioned in a request is stored on the routed
+          # issue as a `matched_by: "user_request"` delivery record so the link
+          # is visible immediately, but it has NOT been verified against a
+          # worker's delivery branch by the kernel. Surfacing every user-reported
+          # PR as a delivery PR of whatever issue the head routed to made
+          # unrelated open PRs render as triplicate delivery PRs under one issue.
+          # The `/prs` panel lists kernel-verified delivery PRs only; user-reported
+          # links remain on the issue record and in `reported_pr_urls`.
+          next if user_reported?(record)
+
           status = DeliveryPullRequest.record_state(record)
           next if DeliveryPullRequest::SETTLED_STATES.include?(status)
 
@@ -71,14 +81,18 @@ module Meringue
             "url" => url,
             "number" => url[DeliveryPullRequest::GITHUB_PULL_REQUEST_URL, 1].to_s,
             "issue_id" => issue.fetch("id", "").to_s,
-            # Delivery PR records carry no PR title of their own (the kernel asks
-            # the forge only for status fields), so the issue title is the name
-            # Meringue actually knows for this work. Meringue-created PRs are
-            # titled from the issue anyway.
+            # Delivery PR records carry no PR title of their own until the kernel
+            # refreshes them from the forge, so the issue title is the name
+            # Meringue falls back to. Once refreshed the record carries its own
+            # PR title and that wins.
             "title" => title_for(issue, record),
             "status" => status == "open" ? "open" : "unverified"
           }
         end
+      end
+
+      def user_reported?(record)
+        record.is_a?(Hash) && record["matched_by"].to_s == "user_request"
       end
 
       def title_for(issue, record)

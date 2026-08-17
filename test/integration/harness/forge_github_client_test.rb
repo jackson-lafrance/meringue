@@ -107,8 +107,20 @@ class HarnessForgeGitHubClientTest < HarnessIntegrationTest
 
     argv = invocations.fetch(0)
     assert_equal %w[pr view https://github.com/acme/app/pull/7 --json], argv.first(4)
-    assert_equal "state,mergedAt,url,isDraft,headRefName,headRepository,headRepositoryOwner,isCrossRepository",
+    assert_equal "state,mergedAt,url,isDraft,headRefName,headRepository,headRepositoryOwner,isCrossRepository,title",
                  argv.last
+  end
+
+  def test_pull_request_status_includes_the_pull_request_title
+    script_gh(stdout: JSON.generate(
+      "state" => "OPEN",
+      "url" => "https://github.com/acme/app/pull/7",
+      "title" => "Fix the signup validation edge case"
+    ))
+
+    status = @client.pull_request_status("https://github.com/acme/app/pull/7")
+
+    assert_equal "Fix the signup validation edge case", status.fetch("title")
   end
 
   def test_pull_request_status_normalizes_every_state

@@ -53,7 +53,7 @@ module Meringue
           "view",
           url.to_s,
           "--json",
-          "state,mergedAt,url,isDraft,headRefName,headRepository,headRepositoryOwner,isCrossRepository",
+          "state,mergedAt,url,isDraft,headRefName,headRepository,headRepositoryOwner,isCrossRepository,title",
           timeout: timeout
         )
         return unknown_status(url, stderr, status.exitstatus) unless status.success?
@@ -71,7 +71,8 @@ module Meringue
           "head_repository" => data.dig("headRepository", "nameWithOwner"),
           "head_repository_owner" => data.dig("headRepositoryOwner", "login"),
           "is_cross_repository" => data["isCrossRepository"],
-          "base_repository" => github_repository_from_url(data["url"] || url.to_s)
+          "base_repository" => github_repository_from_url(data["url"] || url.to_s),
+          "title" => data["title"]
         }.compact
       rescue Errno::ENOENT => e
         unknown_status(url, e.message, nil)
