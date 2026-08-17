@@ -18,6 +18,8 @@ module Meringue
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
+        ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."],
+        ["/worker resume <agent_id>", "Resume a paused worker session."],
         ["/prompt <agent_id> \"<message>\"", "Prompt a worker session."],
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
@@ -56,6 +58,8 @@ module Meringue
         { "prefix" => "/project rename", "source" => "projects", "append_space" => true },
         { "prefix" => "/issue rename", "source" => "issues", "append_space" => true },
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
+        { "prefix" => "/worker pause", "source" => "workers", "append_space" => false },
+        { "prefix" => "/worker resume", "source" => "workers", "append_space" => false },
         { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
         { "prefix" => "/retry", "source" => "retry_heads", "append_space" => false },
         { "prefix" => "/open-session", "source" => "agents", "append_space" => false },
@@ -918,13 +922,20 @@ module Meringue
 
       def parse_worker(arguments)
         tokens = split_arguments(arguments)
-        return invalid("Usage: /worker spawn <issue_id> \"<prompt>\"") unless tokens.first == "spawn"
+        case tokens.first.to_s.downcase
+        when "spawn"
+          kernel_command(
+            "SpawnWorker",
+            "issue_id" => tokens[1],
+            "prompt" => tokens[2..]&.join(" ")
+          )
+        when "pause", "resume"
+          return invalid("Usage: /worker #{tokens.first.downcase} <agent_id>") unless tokens.length == 2
 
-        kernel_command(
-          "SpawnWorker",
-          "issue_id" => tokens[1],
-          "prompt" => tokens[2..]&.join(" ")
-        )
+          kernel_command(tokens.first.to_s.downcase == "pause" ? "PauseWorker" : "ResumeWorker", "agent_id" => tokens[1])
+        else
+          invalid("Usage: /worker spawn <issue_id> \"<prompt>\" | /worker pause <agent_id> | /worker resume <agent_id>")
+        end
       end
 
       def parse_prompt(arguments)

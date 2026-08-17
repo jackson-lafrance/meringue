@@ -564,6 +564,7 @@ module Meringue
             "working" => Style::WORKING,
             "streaming" => Style::WORKING,
             "completed" => Style::SUCCESS,
+            "paused" => Style::WARNING,
             "blocked" => Style::WARNING,
             "errored" => Style::ERROR,
             "sending" => Style::ACCENT
