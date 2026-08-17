@@ -3647,8 +3647,14 @@ module Meringue
 
         result = deep_copy(target)
         removal = remove_killed_target_records!(state, target_id.to_s, killed_agent_ids, now)
+        result = result.merge(
+          "removed_worktree_agent_ids" => removal.fetch("removed_worktree_agent_ids", []),
+          "workspace_cleanup_outcomes" => removal.fetch("workspace_cleanup_outcomes", []),
+          "workspace_cleanup_blocked_agent_ids" => removal.fetch("workspace_cleanup_blocked_agent_ids", [])
+        )
 
         log_ids = cancelled_dependents.fetch("log_entry_ids").dup
+        log_ids.concat(removal.fetch("workspace_cleanup_log_entry_ids", []))
         log_ids.concat(append_log(
           state,
           source_type: "kernel",
@@ -3661,9 +3667,27 @@ module Meringue
             "cancelled_deferred_agent_ids" => cancelled_dependents.fetch("agent_ids"),
             "removed_issue_ids" => removal.fetch("removed_issue_ids", []),
             "removed_agent_ids" => removal.fetch("removed_agent_ids", []),
-            "removed_project_ids" => removal.fetch("removed_project_ids", [])
+            "removed_project_ids" => removal.fetch("removed_project_ids", []),
+            "removed_worktree_agent_ids" => removal.fetch("removed_worktree_agent_ids", []),
+            "workspace_cleanup_outcomes" => removal.fetch("workspace_cleanup_outcomes", []),
+            "workspace_cleanup_blocked_agent_ids" => removal.fetch("workspace_cleanup_blocked_agent_ids", [])
           }.compact
         ))
+        worktree_summary = kill_worktree_summary(removal)
+        if present_string(worktree_summary)
+          log_ids.concat(append_log(
+            state,
+            source_type: "kernel",
+            source_id: target_id.to_s,
+            level: kill_worktree_summary_level(removal),
+            message: worktree_summary,
+            details: {
+              "target_id" => target_id.to_s,
+              "removed_worktree_agent_ids" => removal.fetch("removed_worktree_agent_ids", []),
+              "workspace_cleanup_outcomes" => removal.fetch("workspace_cleanup_outcomes", [])
+            }.compact
+          ))
+        end
         touch_state!(state, now)
         store.save(state)
 
@@ -3672,6 +3696,10 @@ module Meringue
 
       # Kill is an immediate stop-and-remove operation: lifecycle state is marked first so
       # attached sessions are stopped consistently, then the target bundle leaves active state.
+      # A killed worker's managed git worktree is removed in the same pass, reusing the prune
+      # cleanup path so every safety invariant (shared worktree, handed-over successor, dirty or
+      # locked checkout, main-checkout protection, branch retention) is preserved. A worktree
+      # another live or queued agent still needs is left in place and reported as retained.
       def remove_killed_target_records!(state, target_id, killed_agent_ids, now)
         issue_ids = []
         project_ids = []
@@ -3690,8 +3718,55 @@ module Meringue
           extra_agent_ids: killed_agent_ids,
           reason: "killed",
           now: now,
-          remove_empty_projects: false
+          remove_empty_projects: false,
+          cleanup_worker_workspaces: true
         )
+      end
+
+      # One visible line for the worktree side effect of a kill, mirroring the prune summary.
+      # Removed worktrees, worktrees retained because another agent still uses them, and worktrees
+      # preserved because cleanup was unsafe each get their own clause; a kill with no managed
+      # worktrees writes nothing so the "Killed <id>." line stands alone.
+      def kill_worktree_summary(removal)
+        outcomes = Array(removal.fetch("workspace_cleanup_outcomes", []))
+        return "" if outcomes.empty?
+
+        removed = outcomes.select { |outcome| outcome.fetch("status", nil) == "removed" }
+        retained = outcomes.select do |outcome|
+          outcome.fetch("reason", nil) == "workspace_shared_with_retained_worker" ||
+            outcome.fetch("reason", nil) == "workspace_handed_over_to_successor"
+        end
+        blocked = outcomes.reject { |outcome| outcome.fetch("success", false) }
+
+        clauses = []
+        if removed.any?
+          clauses << "Removed #{count_phrase(removed.length, "managed worktree")}: " \
+                     "#{id_list_phrase(removed.map { |outcome| outcome.fetch("agent_id", nil) }.compact)}."
+        end
+        if retained.any?
+          descriptions = retained.first(PRUNE_RETENTION_REPORT_LIMIT).map do |outcome|
+            sharing = Array(outcome.fetch("sharing_agent_ids", [])) + Array(outcome.fetch("successor_agent_id", nil))
+            "#{outcome.fetch("agent_id", "worker")} (still in use by #{sharing.compact.join(", ")})"
+          end
+          remainder = retained.length - descriptions.length
+          descriptions << "and #{remainder} more" if remainder.positive?
+          clauses << "Retained #{count_phrase(retained.length, "managed worktree")} because another agent is still " \
+                     "using it: #{descriptions.join(", ")}."
+        end
+        if blocked.any?
+          listed = blocked.first(PRUNE_RETENTION_REPORT_LIMIT).map do |outcome|
+            "#{outcome.fetch("agent_id", "worker")} (#{outcome.fetch("reason", "unknown_error")})"
+          end
+          remainder = blocked.length - listed.length
+          listed << "and #{remainder} more" if remainder.positive?
+          clauses << "Preserved #{count_phrase(blocked.length, "managed worktree")} because cleanup was not safe: " \
+                     "#{listed.join(", ")}."
+        end
+        clauses.empty? ? "" : clauses.join(" ")
+      end
+
+      def kill_worktree_summary_level(removal)
+        Array(removal.fetch("workspace_cleanup_outcomes", [])).any? { |outcome| !outcome.fetch("success", false) } ? "warning" : "info"
       end
 
       def unapplied_head_ids_for_issue_visibility(state)
