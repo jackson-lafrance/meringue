@@ -7,8 +7,25 @@ module Meringue
         STATE_KEY = Settings::STATE_KEY
         SAVE_LABEL = "[ Save ]"
         NEXT_LABEL = "[ Next ]"
+        BEGIN_LABEL = "[ Begin ]"
         FINISH_LABEL = "[ Finish ]"
         CANCEL_LABEL = "[ Cancel ]"
+        SETUP_HEADINGS = {
+          "Welcome" => "Welcome to Meringue",
+          "Theme" => "Make the workspace yours",
+          "Head defaults" => "Choose how heads think",
+          "Worker defaults" => "Choose how workers work",
+          "Experiments" => "Opt into what is useful",
+          "Review" => "Review before saving"
+        }.freeze
+        SETUP_INTROS = {
+          "Welcome" => "A few calm choices now make every future session feel like yours.",
+          "Theme" => "Pick a comfortable look. Your preview stays local until you finish.",
+          "Head defaults" => "Heads route your requests. These defaults apply only to future heads.",
+          "Worker defaults" => "Workers do the work. Keep their future defaults independent from heads.",
+          "Experiments" => "Optional capabilities start off until you choose them.",
+          "Review" => "Nothing is written yet. Select a value to revisit it, then finish when ready."
+        }.freeze
 
         def active?(state)
           Settings.enabled?(state)
@@ -34,6 +51,7 @@ module Meringue
           width = [width.to_i, 1].max
           height = [height.to_i, 1].max
           return { too_small: true, width: width, height: height } if too_small?(width: width, height: height)
+          return setup_geometry(width: width, height: height) if snapshot(state).fetch("mode", "settings") == "setup"
 
           footer_y = height - 1
           header_y = 0
@@ -75,6 +93,107 @@ module Meringue
           segments << ["  • unsaved", Style::WARNING] if snap.fetch("dirty", false)
           segments << ["  • saving…", Style::ACCENT] if snap.fetch("saving", false)
           segments
+        end
+
+        def setup_geometry(width:, height:)
+          available_width = [width.to_i - 2, 1].max
+          available_height = [height.to_i - 1, 1].max
+          card_width = [[width.to_i - 8, 56].max, 76].min
+          card_width = [card_width, available_width].min
+          card_height = [[available_height, 10].max, 26].min
+          card_height = [card_height, available_height].min
+          card = {
+            x: [(width.to_i - card_width) / 2, 0].max,
+            y: [(available_height - card_height) / 2, 0].max,
+            width: card_width,
+            height: card_height
+          }
+          {
+            too_small: false,
+            setup: true,
+            wide: width.to_i >= Settings::WIDE_WIDTH,
+            header_y: 0,
+            footer_y: height.to_i - 1,
+            body_y: card.fetch(:y),
+            body_height: card.fetch(:height),
+            card: card,
+            detail: card
+          }
+        end
+
+        def setup_view(state, width:, height:)
+          snap = snapshot(state)
+          geometry = setup_geometry(width: width, height: height)
+          card = geometry.fetch(:card)
+          content_width = [card.fetch(:width) - 4, 1].max
+          card_content_height = [card.fetch(:height) - 2, 1].max
+          detail = if snap.fetch("discard_confirm", false) || snap.fetch("editor", nil).is_a?(Hash)
+                     detail(state, width: content_width, height: card_content_height)
+                   end
+          return setup_modal_view(snap, detail, geometry) if detail
+
+          rows = Array(snap.fetch("rows", []))
+          selected = snap.fetch("row_index", 0).to_i.clamp(0, [rows.length - 1, 0].max)
+          preamble = setup_preamble(snap, rows[selected], width: content_width)
+          content_y = card.fetch(:y) + 6
+          footer_y = card.fetch(:y) + card.fetch(:height) - 1
+          row_y = content_y + preamble.length
+          capacity = [footer_y - row_y, 1].max
+          start = window_start(rows.length, selected, capacity)
+          visible = rows.drop(start).first(capacity)
+          lines = preamble + visible.map.with_index do |row, offset|
+            setup_row_line(row, selected: start + offset == selected, width: content_width)
+          end
+          row_error = rows[selected]&.fetch("error", nil).to_s
+          lines << [["! #{row_error}", Style::ERROR]] unless row_error.empty?
+          global_error = snap.fetch("global_error", nil).to_s
+          lines << [["! #{global_error}", Style::ERROR]] unless global_error.empty?
+          {
+            geometry: geometry,
+            card_title: setup_card_title(snap),
+            heading: setup_heading(snap),
+            progress: setup_progress(snap, width: content_width),
+            content_x: card.fetch(:x) + 2,
+            content_y: content_y,
+            content_width: content_width,
+            lines: lines.first(card_content_height),
+            row_y: row_y,
+            window_start: start,
+            visible_count: visible.length,
+            selected_row: rows[selected],
+            counter: setup_counter(rows.length, start, visible.length, snap),
+            modal: false
+          }
+        end
+
+        def setup_animation_marker(state)
+          snap = snapshot(state)
+          ascii = ascii_glyphs?
+          return (ascii ? "*" : "✦") unless snap.fetch("setup_animations", true)
+
+          frames = ascii ? %w[* + . +] : %w[✦ ✧ · ✧]
+          frames.fetch(snap.fetch("setup_animation_phase", 0).to_i % frames.length)
+        end
+
+        def setup_footer_segments(state, width:)
+          snap = snapshot(state)
+          return footer_segments(state, width: width) unless snap.fetch("mode", "settings") == "setup"
+          return footer_segments(state, width: width) if snap.fetch("discard_confirm", false) || snap.fetch("editor", nil).is_a?(Hash)
+
+          category = snap.fetch("category", "Welcome")
+          if category == "Welcome"
+            return [["Enter begin", Style::ACCENT_BOLD], [" · Esc skip for now", Style::MUTED]]
+          end
+          if category == "Review"
+            return [["↑↓ choose", Style::ACCENT_BOLD], [" · Enter open/finish", Style::MUTED], [" · Esc cancel", Style::MUTED]]
+          end
+
+          hint = if width.to_i < Settings::COMPACT_WIDTH
+                   "↑↓ move · ←→ change · Space toggle · Enter edit · Esc cancel"
+                 else
+                   "↑↓ move · ←→ change · Space toggle · Enter edit · Tab next step · Esc cancel"
+                 end
+          [[hint, Style::DIM]]
         end
 
         def category_lines(state, height:)
@@ -197,6 +316,7 @@ module Meringue
           return :inert if geometry.fetch(:too_small)
 
           snap = snapshot(state)
+          return setup_hit(state, snap, geometry, width: width, height: height, x: x, y: y) if geometry.fetch(:setup, false)
           return :inert if snap.fetch("keybinding_capture", nil).is_a?(Hash)
 
           if y.to_i == geometry.fetch(:footer_y)
@@ -228,10 +348,140 @@ module Meringue
           [toggle ? :toggle : :row, index]
         end
 
+        def setup_hit(state, snap, geometry, width:, height:, x:, y:)
+          return :inert if snap.fetch("discard_confirm", false) || snap.fetch("editor", nil).is_a?(Hash)
+
+          if y.to_i == geometry.fetch(:footer_y)
+            primary = primary_label(snap)
+            actions = action_segments(state)
+            action_width = actions.sum { |text, _style| text.to_s.length }
+            start = width.to_i - action_width - 1
+            return :save if x.to_i >= start && x.to_i < start + primary.length
+            return :cancel if x.to_i >= start + primary.length + 1 && x.to_i < start + action_width
+            return :inert
+          end
+
+          card = geometry.fetch(:card)
+          return :inert unless x.to_i >= card.fetch(:x) + 1 && x.to_i < card.fetch(:x) + card.fetch(:width) - 1 &&
+                               y.to_i >= card.fetch(:y) + 1 && y.to_i < card.fetch(:y) + card.fetch(:height) - 1
+
+          view = setup_view(state, width: width, height: height)
+          row_y = view.fetch(:row_y)
+          visible_count = view.fetch(:visible_count).to_i
+          if row_y && y.to_i >= row_y && y.to_i < row_y + visible_count
+            index = view.fetch(:window_start) + y.to_i - row_y
+            row = Array(snap.fetch("rows", []))[index]
+            return :inert unless row
+
+            toggle = row.fetch("editor", nil) == "checkbox" && x.to_i <= card.fetch(:x) + 6
+            return [toggle ? :toggle : :row, index]
+          end
+
+          :scroll
+        end
+
         private
+
+        def setup_modal_view(snap, detail, geometry)
+          card = geometry.fetch(:card)
+          content_width = [card.fetch(:width) - 4, 1].max
+          content_height = [card.fetch(:height) - 2, 1].max
+          {
+            geometry: geometry,
+            card_title: setup_card_title(snap),
+            heading: setup_heading(snap),
+            progress: setup_progress(snap, width: content_width),
+            content_x: card.fetch(:x) + 2,
+            content_y: card.fetch(:y) + 4,
+            content_width: content_width,
+            lines: Array(detail.fetch(:lines, [])).first(content_height),
+            row_y: nil,
+            window_start: 0,
+            visible_count: 0,
+            selected_row: detail.fetch(:selected_row, nil),
+            counter: detail.fetch(:counter, ""),
+            modal: true
+          }
+        end
+
+        def setup_card_title(snap)
+          "setup · #{snap.fetch("setup_step", 1)}/#{snap.fetch("setup_step_count", 1)}"
+        end
+
+        def setup_heading(snap)
+          SETUP_HEADINGS.fetch(snap.fetch("category", "Welcome"), "Setup")
+        end
+
+        def setup_preamble(snap, selected_row, width:)
+          category = snap.fetch("category", "Welcome")
+          intro = SETUP_INTROS.fetch(category, "Choose a value, then continue when it feels right.")
+          if category == "Welcome"
+            return [
+              [["A focused home for your coding agents.", Style::TEXT]],
+              [[intro, Style::MUTED]],
+              [["", Style::DIM]],
+              [["Nothing is saved until you choose Finish.", Style::ACCENT_BOLD]],
+              [["", Style::DIM]]
+            ]
+          end
+
+          description = selected_row ? selected_row.fetch("description", "").to_s : ""
+          lines = wrap(intro, [width.to_i, 8].max).first(2).map { |line| [[line, Style::MUTED]] }
+          lines << [["", Style::DIM]]
+          unless description.empty? || category == "Review"
+            lines << [[wrap(description, [width.to_i, 8].max).first.to_s, Style::DIM]]
+            lines << [["", Style::DIM]]
+          end
+          lines
+        end
+
+        def setup_progress(snap, width:)
+          ascii = ascii_glyphs?
+          steps = Array(snap.fetch("categories", []))
+          selected = snap.fetch("category_index", 0).to_i
+          complete = ascii ? "*" : "✓"
+          current = ascii ? ">" : "●"
+          pending = ascii ? "." : "○"
+          bar = steps.each_index.map do |index|
+            marker = index < selected ? complete : index == selected ? current : pending
+            "#{index + 1}#{marker}"
+          end.join(ascii ? " - " : " ─ ")
+          caption = "Step #{snap.fetch("setup_step", selected + 1)} of #{snap.fetch("setup_step_count", steps.length)} · #{snap.fetch("category", "Setup")}"
+          {
+            caption: [[caption, Style::ACCENT_BOLD]],
+            bar: [[bar[0, [bar.length, width.to_i].min], Style::DIM]]
+          }
+        end
+
+        def setup_row_line(row, selected:, width:)
+          ascii = ascii_glyphs?
+          marker = selected ? (ascii ? ">" : "›") : " "
+          dirty = row.fetch("dirty", false) ? (ascii ? "*" : "•") : " "
+          editor = row.fetch("editor", nil)
+          value = row.fetch("display_value", "").to_s
+          value = row.fetch("value", false) == true ? "[x]" : "[ ]" if editor == "checkbox"
+          value = "Enter" if editor == "action"
+          label = row.fetch("label", row.fetch("id", "setting")).to_s
+          available = [width.to_i - marker.length - dirty.length - label.length - 6, 4].max
+          value = value.length > available ? "…#{value[-(available - 1), available - 1]}" : value
+          style = selected ? Style::AGENT_TREE_SELECTED : Style::TEXT
+          secondary = selected ? Style::AGENT_TREE_SELECTED_DIM : Style::MUTED
+          [["#{marker}#{dirty} #{label}", style], ["  #{value}", secondary]]
+        end
+
+        def setup_counter(total, start, visible, snap)
+          return "" if total.zero? || snap.fetch("category", "") == "Welcome"
+
+          "#{start + 1}–#{start + visible} of #{total}"
+        end
+
+        def ascii_glyphs?
+          defined?(Harness::Registry) && Harness::Registry.ascii_glyphs?
+        end
 
         def primary_label(snap)
           return SAVE_LABEL unless snap.fetch("mode", "settings") == "setup"
+          return BEGIN_LABEL if snap.fetch("category", "") == "Welcome"
 
           snap.fetch("category", "") == "Review" ? FINISH_LABEL : NEXT_LABEL
         end
