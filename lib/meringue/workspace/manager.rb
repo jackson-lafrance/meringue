@@ -7,6 +7,7 @@ require "open3"
 require "pathname"
 
 require_relative "../delivery_artifact_policy"
+require_relative "profile"
 
 module Meringue
   module Workspace
@@ -16,10 +17,11 @@ module Meringue
       # worktree list. None of them touch a working tree, so 60s is already generous and a
       # command that spends longer than that reading refs really is stuck.
       DEFAULT_COMMAND_TIMEOUT = 60
-      # `git worktree add` is not plumbing: it checks the whole tree out. shop/world is ~478k
-      # files, which is minutes of honest work on a warm disk and longer on a cold one, so one
-      # flat 60s budget for both `git rev-parse` and a half-million-file checkout is what turned a
-      # slow provisioning into a dead worker. The checkout is therefore bounded by two independent
+      # `git worktree add` is not plumbing: it checks the whole tree out. A large monorepo is
+      # hundreds of thousands of files, which is minutes of honest work on a warm disk and longer
+      # on a cold one, so one flat 60s budget for both `git rev-parse` and a half-million-file
+      # checkout is what turned a slow provisioning into a dead worker. The checkout is therefore
+      # bounded by two independent
       # limits instead of one:
       #
       #   * DEFAULT_CHECKOUT_STALL_TIMEOUT - the real bound. Git reports checkout progress on
@@ -66,7 +68,23 @@ module Meringue
       RECOVERY_RETRY = "retry"
       RECOVERY_RESUME = "resume"
       RECOVERY_NONE = "none"
-      # Some global git configs (Shopify's `dev` config among them) enable core.fsmonitor. Git then
+      # When a project declares no sparse profile, a large bare source still materializes the full
+      # tree per isolated worker. To avoid multi-minute provisioning on such sources, Meringue
+      # synthesizes a generic root-files-only sparse profile (no project-specific paths) once the
+      # packed object count crosses this threshold. The count is read from pack `.idx` footers in
+      # O(number-of-packs), so the gate itself never scans every object. Operators can opt out via
+      # `[workspace] default_bare_checkout_mode = "full"` or raise/lower the threshold.
+      DEFAULT_BARE_SPARSE_OBJECT_THRESHOLD = 1_000_000
+      DEFAULT_BARE_CHECKOUT_MODE = "sparse"
+      BARE_FULL_CHECKOUT_MODE = "full"
+      BARE_DEFAULT_PROFILE_NAME = "bare-default-root"
+      # `/*` matches every entry directly under the root; `!/*/` negates all root
+      # directories. In non-cone mode the result is root-level files only (README,
+      # manifests, etc.) with every subdirectory skipped until the worker expands
+      # its working set. The pair is fully generic: it carries no project-specific
+      # path and makes zero layout assumptions.
+      BARE_DEFAULT_SPARSE_PATTERNS = ["/*", "!/*/"].freeze
+      # Some global git configs (a shared developer config among them) enable core.fsmonitor. Git then
       # starts a `git fsmonitor--daemon` for every new worktree and blocks on that daemon's answer
       # before it can read the new index. `git worktree add` runs `git reset --hard` internally, so
       # a daemon that never answers hangs provisioning until the command timeout kills it and the
@@ -236,18 +254,22 @@ module Meringue
           root_path: section.fetch("root_path", root_path),
           command_timeout: section.fetch("git_command_timeout", DEFAULT_COMMAND_TIMEOUT),
           checkout_stall_timeout: section.fetch("worktree_stall_timeout", DEFAULT_CHECKOUT_STALL_TIMEOUT),
-          checkout_timeout: section.fetch("worktree_checkout_timeout", DEFAULT_CHECKOUT_TIMEOUT)
+          checkout_timeout: section.fetch("worktree_checkout_timeout", DEFAULT_CHECKOUT_TIMEOUT),
+          bare_sparse_object_threshold: section.fetch("bare_sparse_object_threshold", DEFAULT_BARE_SPARSE_OBJECT_THRESHOLD),
+          default_bare_checkout_mode: section.fetch("default_bare_checkout_mode", DEFAULT_BARE_CHECKOUT_MODE)
         )
       end
 
       attr_reader :root_path, :command_timeout, :checkout_stall_timeout, :checkout_timeout, :cleanup_timeout,
-                  :progress_interval
+                  :progress_interval, :bare_sparse_object_threshold, :default_bare_checkout_mode
 
       def initialize(root_path: DEFAULT_ROOT, command_timeout: DEFAULT_COMMAND_TIMEOUT,
                      checkout_stall_timeout: DEFAULT_CHECKOUT_STALL_TIMEOUT,
                      checkout_timeout: DEFAULT_CHECKOUT_TIMEOUT,
                      cleanup_timeout: DEFAULT_CLEANUP_TIMEOUT,
-                     progress_interval: PROGRESS_REPORT_INTERVAL)
+                     progress_interval: PROGRESS_REPORT_INTERVAL,
+                     bare_sparse_object_threshold: DEFAULT_BARE_SPARSE_OBJECT_THRESHOLD,
+                     default_bare_checkout_mode: DEFAULT_BARE_CHECKOUT_MODE)
         @root_path = File.expand_path(root_path)
         @command_timeout = positive_float(command_timeout, DEFAULT_COMMAND_TIMEOUT)
         @checkout_stall_timeout = positive_float(checkout_stall_timeout, DEFAULT_CHECKOUT_STALL_TIMEOUT)
@@ -257,6 +279,11 @@ module Meringue
         @checkout_stall_timeout = @checkout_timeout if @checkout_stall_timeout > @checkout_timeout
         @cleanup_timeout = positive_float(cleanup_timeout, DEFAULT_CLEANUP_TIMEOUT)
         @progress_interval = positive_float(progress_interval, PROGRESS_REPORT_INTERVAL)
+        @bare_sparse_object_threshold = positive_integer(bare_sparse_object_threshold, DEFAULT_BARE_SPARSE_OBJECT_THRESHOLD)
+        @default_bare_checkout_mode = normalize_bare_checkout_mode(default_bare_checkout_mode)
+        # The large-bare determination reads pack idx footers once per bare source and is reused
+        # across plan/allocate calls, so a busy provisioning loop never re-runs count-objects.
+        @large_bare_source_cache = {}
       end
 
       # Hard ceiling on one allocate_worker_workspace call, including every retried candidate and
@@ -265,7 +292,9 @@ module Meringue
         checkout_timeout
       end
 
-      def plan_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil)
+      def plan_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil, profile: nil,
+                                 repository: nil)
+        profile = resolve_provisioning_profile(project_root, profile, repository: repository)
         safe_project_name = project_slug(File.basename(File.expand_path(project_root))) || "project"
         safe_task_name = DeliveryArtifactPolicy.slug(task_title)
         unique_suffix = Digest::SHA256.hexdigest(
@@ -273,9 +302,14 @@ module Meringue
         )[0, 8]
         workspace_name = [safe_task_name, unique_suffix].join("-")
         branch = workspace_name
-        workspace_path = File.join(root_path, safe_project_name, workspace_name)
+        workspace_path = default_workspace_path(root_path, safe_project_name, workspace_name)
+        if profile&.custom_path_template?
+          expanded = profile.expand_path(root: root_path, project_slug: safe_project_name,
+                                         task_slug: safe_task_name, suffix: unique_suffix)
+          workspace_path = expanded || workspace_path
+        end
 
-        {
+        plan = {
           "strategy" => "git_worktree",
           "project_root" => File.expand_path(project_root),
           "workspace_path" => workspace_path,
@@ -283,6 +317,7 @@ module Meringue
           "workspace_owner_id" => agent_id.to_s,
           "created" => false
         }
+        attach_profile_metadata(plan, profile)
       end
 
       # Resolve a clean main/master checkout that investigation-only workers may share. A normal
@@ -311,19 +346,25 @@ module Meringue
       # seconds) while a long command is still running, so a caller can tell the user that a
       # checkout is working rather than hung.
       def allocate_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil, progress: nil,
-                                    unavailable_paths: [])
+                                    unavailable_paths: [], profile: nil)
         plan = nil
         set_allocation_deadline!(self.class.monotonic_now + allocation_budget)
+        project_path = canonical_path(project_root)
+        # Resolve the repository once and reuse it for both profile resolution and
+        # the rest of provisioning, so the allocation budget is not spent on a
+        # second `git rev-parse` pass before `git worktree add` runs.
+        repository = repository_context(project_path)
+        profile = resolve_provisioning_profile(project_root, profile, repository: repository)
         plan = plan_worker_workspace(
           project_root: project_root,
           project_id: project_id,
           issue_id: issue_id,
           agent_id: agent_id,
-          task_title: task_title
+          task_title: task_title,
+          profile: profile,
+          repository: repository
         )
-        project_path = canonical_path(project_root)
         plan["project_root"] = project_path
-        repository = repository_context(project_path)
         return project_root_workspace(project_path, plan, "project root is not inside a git repository") unless repository
 
         git_root = repository.fetch("git_root")
@@ -365,6 +406,7 @@ module Meringue
             worktree_root: worktree_root,
             owner: workspace_owner(plan, git_root: git_root, branch: candidate_branch, worktree_root: worktree_root),
             progress: progress,
+            profile: profile,
             attempt_started: attempt_started
           )
           workspace = outcome.fetch("workspace", nil)
@@ -1189,7 +1231,7 @@ module Meringue
       # their locks differ; contenders for one path can only observe or reallocate, never both
       # decide that an existing worktree is theirs.
       def allocate_candidate_worktree(plan:, git_root:, base_ref:, relative_project_path:, branch:, worktree_root:,
-                                      owner:, progress: nil, attempt_started: nil)
+                                      owner:, progress: nil, attempt_started: nil, profile: nil)
         reservation = reserve_workspace_candidate(owner)
         return reservation.fetch("outcome") unless reservation.fetch("acquired", false)
 
@@ -1201,6 +1243,7 @@ module Meringue
           branch: branch,
           worktree_root: worktree_root,
           progress: progress,
+          profile: profile,
           attempt_started: attempt_started
         )
       ensure
@@ -1208,8 +1251,9 @@ module Meringue
       end
 
       def allocate_reserved_candidate_worktree(plan:, git_root:, base_ref:, relative_project_path:, branch:, worktree_root:,
-                                               progress: nil, attempt_started: nil)
+                                               progress: nil, attempt_started: nil, profile: nil)
         candidate_plan = plan.merge("workspace_branch" => branch, "workspace_path" => worktree_root)
+        attach_profile_metadata(candidate_plan, profile)
         workspace_path = relative_project_path == "." ? worktree_root : File.join(worktree_root, relative_project_path)
 
         if Dir.exist?(worktree_root)
@@ -1235,13 +1279,15 @@ module Meringue
         remove_orphaned_owned_branch(git_root, branch)
         FileUtils.mkdir_p(File.dirname(worktree_root))
         created_branch = !branch_exists?(git_root, branch)
+        sparse = profile&.sparse?
+        no_checkout = sparse ? ["--no-checkout"] : []
         argv = if created_branch
                  # `origin/main` normally makes Git auto-write branch tracking config. Two otherwise
                  # independent concurrent adds then race on `.git/config.lock`. Workers push their
                  # explicit task branch and do not need an implicit upstream at checkout time, so
                  # suppress that shared config mutation and keep distinct candidate checkouts truly
                  # parallel.
-                 ["git", "-C", git_root, "worktree", "add", "--no-track", "-b", branch, worktree_root, base_ref]
+                 ["git", "-C", git_root, "worktree", "add", *no_checkout, "--no-track", "-b", branch, worktree_root, base_ref]
                else
                  if branch_checked_out?(git_root, branch)
                    return {
@@ -1255,7 +1301,7 @@ module Meringue
                  # The branch survived a previous attempt for this worker and carries commits, so
                  # it is checked out instead of being recreated: the previous attempt's work stays
                  # reachable and "a branch named ... already exists" never fails the spawn.
-                 ["git", "-C", git_root, "worktree", "add", worktree_root, branch]
+                 ["git", "-C", git_root, "worktree", "add", *no_checkout, worktree_root, branch]
                end
         # From this point onward the path is either absent/empty and Meringue-owned, and the branch
         # ownership decision is known. Outer exception/timeout handling may therefore clean this
@@ -1327,20 +1373,79 @@ module Meringue
           }
         end
 
-        {
-          "workspace" => candidate_plan.merge(
-            "workspace_path" => workspace_path,
-            "workspace_root_path" => worktree_root,
-            "worktree_root_path" => worktree_root,
-            "git_root" => git_root,
-            "base_ref" => base_ref,
-            "project_relative_path" => relative_project_path,
-            "created" => true,
-            "errors" => [],
-            "stdout" => present_output(stdout),
-            "stderr" => present_output(stderr)
-          ).compact
-        }
+        sparse_result = if sparse
+                          apply_sparse_checkout(
+                            git_root: git_root,
+                            worktree_root: worktree_root,
+                            profile: profile,
+                            progress: progress
+                          )
+                        end
+        if sparse_result && !sparse_result.fetch("success", false)
+          cleanup = cleanup_failed_attempt(
+            git_root: git_root,
+            worktree_root: worktree_root,
+            branch: branch,
+            created_branch: created_branch,
+            collision: false,
+            preserve_branch: false
+          )
+          return {
+            "retry" => false,
+            "errors" => sparse_result.fetch("errors"),
+            "stdout" => sparse_result["stdout"],
+            "stderr" => sparse_result["stderr"],
+            "exit_status" => sparse_result["exit_status"],
+            "failure_kind" => sparse_result.fetch("failure_kind", "sparse_checkout_failed"),
+            "recovery" => RECOVERY_RESUME,
+            "cleanup" => cleanup
+          }
+        end
+
+        validation_result = nil
+        if profile&.validation?
+          validation_result = run_profile_validation(
+            worktree_root: worktree_root,
+            workspace_path: workspace_path,
+            profile: profile
+          )
+          unless validation_result.fetch("success", false)
+            cleanup = cleanup_failed_attempt(
+              git_root: git_root,
+              worktree_root: worktree_root,
+              branch: branch,
+              created_branch: created_branch,
+              collision: false,
+              preserve_branch: false
+            )
+            return {
+              "retry" => false,
+              "errors" => validation_result.fetch("errors"),
+              "stdout" => validation_result["stdout"],
+              "stderr" => validation_result["stderr"],
+              "exit_status" => validation_result["exit_status"],
+              "failure_kind" => "validation_failed",
+              "recovery" => RECOVERY_RESUME,
+              "cleanup" => cleanup
+            }
+          end
+        end
+
+        record = candidate_plan.merge(
+          "workspace_path" => workspace_path,
+          "workspace_root_path" => worktree_root,
+          "worktree_root_path" => worktree_root,
+          "git_root" => git_root,
+          "base_ref" => base_ref,
+          "project_relative_path" => relative_project_path,
+          "created" => true,
+          "errors" => [],
+          "stdout" => present_output(stdout),
+          "stderr" => present_output(stderr)
+        ).compact
+        record["sparse_checkout"] = sparse_result.fetch("record", nil) if sparse_result
+        record["profile_validation"] = validation_result if validation_result
+        { "workspace" => record }
       end
 
       def workspace_owner(plan, git_root:, branch:, worktree_root:)
@@ -1820,7 +1925,8 @@ module Meringue
       #
       # The command is polled rather than wrapped in Timeout.timeout, so the watchdog can look at
       # output activity, report progress, and kill the process group promptly.
-      def run_command(*argv, timeout: command_timeout, stall_timeout: nil, deadline: nil, output_limit: nil, progress: nil)
+      def run_command(*argv, timeout: command_timeout, stall_timeout: nil, deadline: nil, output_limit: nil, progress: nil,
+                     chdir: nil)
         requested_argv = argv.map(&:to_s)
         # Every git command Meringue runs is spawned with the isolation flags, so no call site can
         # forget them. Timeouts still report the caller's argv, which reads better in logs.
@@ -1834,11 +1940,14 @@ module Meringue
         readers = []
         expiry = nil
 
+        spawn_options = { pgroup: true }
+        spawn_options[:chdir] = chdir if chdir
+
         # Provider, Git, and diagnostic commands are independent executables. Do not leak
         # `bundle exec`'s RUBYOPT/BUNDLE_GEMFILE into them: in particular, invoking a system
         # Ruby would otherwise try to load this process's Bundler and exit before producing
         # the output the watchdog is responsible for capturing.
-        Open3.popen3(SubprocessEnvironment.clean, *effective_argv, pgroup: true) do |child_stdin, child_out, child_err, child_wait|
+        Open3.popen3(SubprocessEnvironment.clean, *effective_argv, spawn_options) do |child_stdin, child_out, child_err, child_wait|
           stdin = child_stdin
           out = child_out
           err = child_err
@@ -2015,6 +2124,333 @@ module Meringue
         slug = value.to_s.downcase.gsub(/[^a-z0-9]+/, "-").gsub(/\A-+|-+\z/, "")
         slug = slug[0, DeliveryArtifactPolicy::MAX_SLUG_LENGTH].to_s.gsub(/-+\z/, "")
         slug.empty? ? nil : slug
+      end
+
+      # ---- project-native sparse provisioning profiles ----------------------
+
+      # Profiles are project-declared and loaded from the project root. An
+      # explicit profile (or a cached one) wins; otherwise the project's
+      # `.meringue/workspace-profile.toml` is read. A missing or malformed file
+      # returns nil so the default full-checkout behavior is preserved exactly.
+      def resolve_profile(project_root, profile)
+        return profile if profile.is_a?(Meringue::Workspace::Profile)
+
+        Meringue::Workspace::Profile.load(project_root)
+      end
+
+      # Resolve the profile that should drive provisioning for a worker. A
+      # project-declared profile (or an explicit one) always wins. When no
+      # profile is declared and the source is a large bare repository, a generic
+      # root-only cone sparse profile is synthesized so an isolated writable
+      # worker does not materialize the whole tree. The synthesis carries no
+      # project-specific paths: the non-cone patterns `/*` plus `!/*/`
+      # materialize root-level files only and skip every subdirectory.
+      # Operators opt out with `[workspace] default_bare_checkout_mode = "full"`
+      # to keep the legacy full checkout, and a project that declares any
+      # profile (sparse or full-checkout) always overrides the synthetic default.
+      def resolve_provisioning_profile(project_root, profile, repository: nil)
+        resolved = resolve_profile(project_root, profile)
+        return resolved if resolved
+        return nil if bare_full_checkout_mode?
+
+        repository ||= repository_context(canonical_path(project_root))
+        return nil unless repository && repository.fetch("bare")
+
+        git_root = repository.fetch("git_root")
+        return nil unless large_bare_source?(git_root)
+
+        default_bare_profile
+      rescue CommandTimeout
+        raise
+      rescue StandardError
+        nil
+      end
+
+      # The generic synthetic profile used when a large bare source declares no
+      # profile. Root-files-only (non-cone) keeps it project-agnostic: it
+      # materializes the root-level files (README, manifests) and skips every
+      # subdirectory until the worker expands its working set with
+      # `git sparse-checkout add <path>` or `git checkout HEAD -- <path>`.
+      def default_bare_profile
+        Meringue::Workspace::Profile.new(
+          name: BARE_DEFAULT_PROFILE_NAME,
+          sparse_cone: false,
+          sparse_patterns: BARE_DEFAULT_SPARSE_PATTERNS
+        )
+      end
+
+      def bare_full_checkout_mode?
+        default_bare_checkout_mode.to_s == BARE_FULL_CHECKOUT_MODE
+      end
+
+      # Whether a bare source is large enough that a full per-worker checkout is
+      # worth avoiding. The packed object count is read from `git
+      # count-objects -v`, whose `in-pack:` line is derived from pack `.idx`
+      # footers in O(number-of-packs), never O(objects). The result is memoized
+      # per git_root so repeated plan/allocate calls never re-run the command.
+      def large_bare_source?(git_root)
+        return false if bare_sparse_object_threshold <= 0
+
+        git_root = canonical_path(git_root)
+        return @large_bare_source_cache.fetch(git_root) if @large_bare_source_cache.key?(git_root)
+
+        count = packed_object_count(git_root)
+        large = count && count >= bare_sparse_object_threshold
+        @large_bare_source_cache[git_root] = large
+        large
+      end
+
+      def packed_object_count(git_root)
+        result = run_command("git", "-C", git_root, "count-objects", "-v", timeout: command_timeout)
+        return nil unless result.fetch("status").success?
+
+        loose = 0
+        packed = 0
+        result.fetch("stdout").to_s.each_line do |line|
+          if line =~ /^count:\s*(\d+)/
+            loose = Regexp.last_match(1).to_i
+          elsif line =~ /^in-pack:\s*(\d+)/
+            packed = Regexp.last_match(1).to_i
+          end
+        end
+        loose + packed
+      rescue CommandTimeout
+        raise
+      rescue StandardError
+        nil
+      end
+
+      def normalize_bare_checkout_mode(value)
+        mode = value.to_s.strip.downcase
+        mode == BARE_FULL_CHECKOUT_MODE ? BARE_FULL_CHECKOUT_MODE : DEFAULT_BARE_CHECKOUT_MODE
+      end
+
+      def positive_integer(value, fallback)
+        number = Integer(value)
+        number.positive? ? number : Integer(fallback)
+      rescue ArgumentError, TypeError
+        Integer(fallback)
+      end
+
+      def default_workspace_path(root, project_name, workspace_name)
+        File.join(root, project_name, workspace_name)
+      end
+
+      # Stamps the selected profile onto a plan/workspace record so it is
+      # persisted on the agent's workspace_plan and reused on retry.
+      def attach_profile_metadata(record, profile)
+        return record unless profile.is_a?(Meringue::Workspace::Profile)
+
+        record["workspace_profile"] = profile.to_h.merge("summary" => profile.summary)
+        record
+      end
+
+      # Applies per-worktree sparse-checkout configuration after a
+      # `git worktree add --no-checkout`. Sparse settings are written to the
+      # worktree's own git dir so no shared repository config is mutated; this
+      # keeps bare-repository and shared-checkout protections intact. Only the
+      # declared pattern set is materialized via `read-tree -mu HEAD`.
+      def apply_sparse_checkout(git_root:, worktree_root:, profile:, progress:)
+        patterns = profile.sparse_patterns
+        unless profile.sparse?
+          # Defensive: a profile marked sparse with no patterns would otherwise leave a
+          # `--no-checkout` worktree empty. Materialize the full tree instead.
+          materialize_full_tree(worktree_root, progress: progress)
+          return success_sparse_record(profile, patterns, materialized: count_materialized_files(worktree_root))
+        end
+
+        # Per-worktree sparse config requires the worktreeConfig extension on the
+        # common repository so each worktree reads its own sparse settings. The
+        # flag is non-destructive and idempotent; without it, sparse config would
+        # leak into the shared repository config and apply to every worktree.
+        extension_result = run_command(
+          "git", "-C", git_root, "config", "extensions.worktreeConfig", "true",
+          timeout: command_timeout
+        )
+        unless extension_result.fetch("status").success?
+          return sparse_failure("could not enable per-worktree config extension", extension_result)
+        end
+
+        config_result = run_command(
+          "git", "-C", worktree_root, "config", "--worktree", "core.sparseCheckout", "true",
+          timeout: command_timeout
+        )
+        unless config_result.fetch("status").success?
+          return sparse_failure("git config core.sparseCheckout failed", config_result)
+        end
+        # A `--no-checkout` worktree created from a bare common repository inherits
+        # `core.bare=true`, so `read-tree -mu` refuses to touch the working tree.
+        # Flip it per-worktree (harmless on a non-bare source) before materializing.
+        bare_result = run_command(
+          "git", "-C", worktree_root, "config", "--worktree", "core.bare", "false",
+          timeout: command_timeout
+        )
+        unless bare_result.fetch("status").success?
+          return sparse_failure("git config core.bare failed for bare-sourced worktree", bare_result)
+        end
+        if profile.cone?
+          cone_result = run_command(
+            "git", "-C", worktree_root, "config", "--worktree", "core.sparseCheckoutCone", "true",
+            timeout: command_timeout
+          )
+          unless cone_result.fetch("status").success?
+            return sparse_failure("git config core.sparseCheckoutCone failed", cone_result)
+          end
+        end
+
+        git_dir = resolve_worktree_git_dir(worktree_root)
+        return sparse_failure("could not resolve worktree git dir", nil) unless git_dir
+
+        info_dir = File.join(git_dir, "info")
+        FileUtils.mkdir_p(info_dir)
+        sparse_file = File.join(info_dir, "sparse-checkout")
+        File.write(sparse_file, patterns.join("\n") + "\n")
+
+        read_result = run_command(
+          "git", "-C", worktree_root, "read-tree", "-mu", "HEAD",
+          timeout: checkout_timeout,
+          stall_timeout: checkout_stall_timeout,
+          output_limit: DIAGNOSTIC_OUTPUT_LIMIT_BYTES,
+          progress: progress
+        )
+        unless read_result.fetch("status").success?
+          return sparse_failure("git read-tree failed to materialize sparse checkout", read_result)
+        end
+
+        materialized = count_materialized_files(worktree_root)
+        success_sparse_record(profile, patterns, materialized: materialized)
+      rescue Meringue::Workspace::Manager::CommandTimeout => e
+        {
+          "success" => false,
+          "errors" => [e.describe(command_label(e.argv))],
+          "stdout" => e.stdout,
+          "stderr" => e.stderr,
+          "exit_status" => nil,
+          "failure_kind" => e.stalled? ? "sparse_checkout_stalled" : "sparse_checkout_timed_out"
+        }
+      rescue StandardError => e
+        {
+          "success" => false,
+          "errors" => ["sparse checkout configuration failed: #{e.message}"],
+          "stdout" => nil,
+          "stderr" => nil,
+          "exit_status" => nil,
+          "failure_kind" => "sparse_checkout_error"
+        }
+      end
+
+      def resolve_worktree_git_dir(worktree_root)
+        result = run_command("git", "-C", worktree_root, "rev-parse", "--absolute-git-dir", timeout: command_timeout)
+        return nil unless result.fetch("status").success?
+
+        canonical_path(result.fetch("stdout").to_s.strip)
+      rescue StandardError
+        nil
+      end
+
+      def materialize_full_tree(worktree_root, progress:)
+        read_result = run_command(
+          "git", "-C", worktree_root, "read-tree", "-mu", "HEAD",
+          timeout: checkout_timeout,
+          stall_timeout: checkout_stall_timeout,
+          output_limit: DIAGNOSTIC_OUTPUT_LIMIT_BYTES,
+          progress: progress
+        )
+        read_result.fetch("status").success?
+      rescue StandardError
+        false
+      end
+
+      # A bounded count of materialized files, used to record how much the
+      # sparse profile reduced the working set. It is capped so counting a
+      # sparse checkout never costs the minutes the full checkout would have.
+      def count_materialized_files(worktree_root)
+        count = 0
+        Dir.glob(File.join(worktree_root, "**", "*"), File::FNM_DOTMATCH).each do |entry|
+          next if File.basename(entry) == ".git" || entry.include?("#{File::SEPARATOR}.git#{File::SEPARATOR}")
+          count += 1 if File.file?(entry)
+        end
+        count
+      rescue StandardError
+        nil
+      end
+
+      def success_sparse_record(profile, patterns, materialized:)
+        {
+          "success" => true,
+          "record" => {
+            "profile" => profile.name,
+            "cone" => profile.cone?,
+            "patterns" => patterns,
+            "materialized_files" => materialized
+          }.compact
+        }
+      end
+
+      def sparse_failure(message, result)
+        {
+          "success" => false,
+          "errors" => [message],
+          "stdout" => result && present_output(result.fetch("stdout")),
+          "stderr" => result && present_output(result.fetch("stderr")),
+          "exit_status" => result && result.fetch("status")&.exitstatus,
+          "failure_kind" => "sparse_checkout_failed"
+        }
+      end
+
+      # Runs the project-declared post-provision validation command inside the
+      # checkout so a project can confirm the sparse set is recognized by its
+      # own tooling. A non-zero exit fails provisioning so the worker never
+      # launches in a checkout its project tooling rejects.
+      def run_profile_validation(worktree_root:, workspace_path:, profile:)
+        argv = profile.validation_command
+        started = self.class.monotonic_now
+        result = run_command(
+          *argv,
+          timeout: validation_timeout,
+          stall_timeout: checkout_stall_timeout,
+          output_limit: DIAGNOSTIC_OUTPUT_LIMIT_BYTES,
+          chdir: workspace_path
+        )
+        elapsed = self.class.monotonic_now - started
+        status = result.fetch("status")
+        success = status&.success?
+        {
+          "success" => success,
+          "command" => argv,
+          "exit_status" => status&.exitstatus,
+          "duration_seconds" => round_seconds(elapsed),
+          "stdout" => present_output(result.fetch("stdout")),
+          "stderr" => present_output(result.fetch("stderr")),
+          "errors" => success ? [] : ["profile validation command failed with exit #{status&.exitstatus}"]
+        }
+      rescue Meringue::Workspace::Manager::CommandTimeout => e
+        {
+          "success" => false,
+          "command" => argv,
+          "exit_status" => nil,
+          "duration_seconds" => nil,
+          "stdout" => e.stdout,
+          "stderr" => e.stderr,
+          "errors" => [e.describe("profile validation command")],
+          "failure_kind" => e.stalled? ? "validation_stalled" : "validation_timed_out"
+        }
+      rescue StandardError => e
+        {
+          "success" => false,
+          "command" => argv,
+          "exit_status" => nil,
+          "duration_seconds" => nil,
+          "stdout" => nil,
+          "stderr" => nil,
+          "errors" => ["profile validation command could not run: #{e.message}"]
+        }
+      end
+
+      def validation_timeout
+        # Validation is project tooling over a sparse checkout, so it shares the
+        # checkout budget as its ceiling rather than the short plumbing budget.
+        checkout_timeout
       end
     end
   end

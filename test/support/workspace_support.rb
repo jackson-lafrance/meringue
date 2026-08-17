@@ -108,14 +108,39 @@ module WorkspaceSupport
     Meringue::Workspace::Manager.new(root_path: File.join(tmp, "workspaces"), **options)
   end
 
-  def allocate_workspace(manager, project, task_title:, issue_id: "P1-I1", agent_id: "P1-I1-W1", project_root: nil)
+  def allocate_workspace(manager, project, task_title:, issue_id: "P1-I1", agent_id: "P1-I1-W1", project_root: nil, profile: nil)
     manager.allocate_worker_workspace(
       project_root: project_root || project.fetch("project_root"),
       project_id: "P1",
       issue_id: issue_id,
       agent_id: agent_id,
-      task_title: task_title
+      task_title: task_title,
+      profile: profile
     )
+  end
+
+  # Write a project-declared workspace profile file at the project root.
+  def write_workspace_profile(project, body)
+    dir = File.join(project.fetch("project_root"), ".meringue")
+    FileUtils.mkdir_p(dir)
+    File.write(File.join(dir, "workspace-profile.toml"), body)
+  end
+
+  # Project with several top-level directories so a sparse profile can exclude
+  # some and include others while staying hermetic.
+  def create_git_project_with_dirs(tmp, name: "project", dirs: %w[src docs tests config build])
+    project = create_git_project(tmp, name: name)
+    env = project.fetch("git_env")
+    root = project.fetch("project_root")
+    dirs.each do |dir|
+      FileUtils.mkdir_p(File.join(root, dir))
+      File.write(File.join(root, dir, "file.txt"), "#{dir} content\n")
+    end
+    run_git!(root, "add", ".", env: env)
+    run_git!(root, "commit", "-m", "add top-level directories", env: env)
+    run_git!(root, "push", "origin", "main", env: env)
+    project["origin_sha"] = run_git!(root, "rev-parse", "origin/main", env: env).strip
+    project
   end
 
   # Manager whose `git worktree add` always times out, used to exercise the
