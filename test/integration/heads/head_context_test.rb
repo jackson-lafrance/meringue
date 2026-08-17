@@ -409,6 +409,19 @@ class HeadContextTest < Minitest::Test
     assert_includes prompt, File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md")).lines.first.strip
   end
 
+  # Recorded invalid-HeadResult failures showed heads emitting `"response": null`,
+  # prose without a JSON wrapper, and unescaped literal newlines or embedded code
+  # fences inside string values. The system prompt must give the model concrete
+  # formatting rules so it stops producing those malformed shapes.
+  def test_system_prompt_pins_headresult_json_formatting_rules
+    prompt = build_head_context.system_prompt
+
+    assert_includes prompt, "never use JSON null"
+    assert_includes prompt, "Escape newlines inside every JSON string value"
+    assert_includes prompt, "never embed a ``` code fence inside a string value"
+    assert_includes prompt, "never write prose without the JSON wrapper"
+  end
+
   # H177 asked for a causal explanation across several dependency records. The old contract's
   # broad "status -> GetInfo" example caused the head to dump raw fields instead of answering.
   def test_informational_routing_distinguishes_direct_lookup_response_and_investigation

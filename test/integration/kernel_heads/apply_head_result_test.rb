@@ -376,4 +376,23 @@ class KernelHeadsApplyResultTest < KernelHeadsTestCase
     assert_equal "rejected", result.fetch("status")
     assert_includes result.fetch("errors"), "head_result must be an object"
   end
+
+  # A routing-only head naturally emits `"response": null` (JSON null) to mean
+  # "no direct answer". The apply-time shape validator must treat null like an
+  # absent key instead of rejecting it, matching the parser contract.
+  def test_null_response_is_accepted_by_apply_head_result
+    project_id = add_project!
+    head_id = spawn_head!("Route with a null response")
+    result = apply_head_result(
+      head_id,
+      head_result(
+        commands: [create_issue_command(project_id: project_id, title: "Null response goal")]
+      ).merge("response" => nil),
+      cleanup_head: false
+    )
+
+    assert_equal "accepted", result.fetch("status")
+    assert_includes issues.map { |issue| issue.fetch("title") }, "Null response goal"
+    assert_equal "completed", find_agent_record(head_id).fetch("status")
+  end
 end
