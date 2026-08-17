@@ -4,7 +4,8 @@ require "test_helper"
 require "support/kernel_workers_support"
 
 # Kill: stopping harness sessions, removing records from active state, cascading
-# through issue/project subtrees, and never deleting a worker's workspace.
+# through issue/project subtrees, and removing each killed worker's managed git worktree
+# with the same safe cleanup path Prune uses (the delivery branch is always retained).
 class KernelWorkersKillTest < Minitest::Test
   include KernelWorkersSupport
 
@@ -26,16 +27,19 @@ class KernelWorkersKillTest < Minitest::Test
     assert_equal [worker_id], kill_log.fetch("details").fetch("killed_agent_ids")
   end
 
-  def test_killing_a_worker_never_deletes_its_workspace
+  def test_killing_a_worker_removes_its_clean_managed_worktree_and_retains_the_branch
     engine = build_engine
     context = project_with_issue(engine)
     worker_id = spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
-    workspace_path = agent(engine, worker_id).fetch("workspace_path")
+    worker = agent(engine, worker_id)
+    workspace_path = worker.fetch("workspace_path")
+    branch = worker.fetch("workspace_branch")
 
     apply!(engine, "Kill", { "target_id" => worker_id })
 
-    assert Dir.exist?(workspace_path), "kill must leave the worker workspace on disk"
-    assert File.exist?(File.join(workspace_path, ".git")), "the worktree link should be intact"
+    refute Dir.exist?(workspace_path), "kill removes a clean managed worktree"
+    refute_empty run_git(context.fetch("root"), "branch", "--list", branch),
+                 "the delivery branch must be retained, only the worktree directory is removed"
   end
 
   def test_killing_an_issue_cascades_to_its_workers_and_child_issues
@@ -55,6 +59,7 @@ class KernelWorkersKillTest < Minitest::Test
     child_worker_id = spawn_worker(engine, child_issue_id).fetch("target_id")
     session_ids = [parent_worker_id, child_worker_id].map { |id| agent(engine, id).fetch("harness_session_id") }
     workspaces = [parent_worker_id, child_worker_id].map { |id| agent(engine, id).fetch("workspace_path") }
+    branches = [parent_worker_id, child_worker_id].map { |id| agent(engine, id).fetch("workspace_branch") }
 
     result = apply!(engine, "Kill", { "target_id" => parent_issue_id })
     kill_log = state(engine).fetch("logs").find { |entry| entry.fetch("message") == "Killed #{parent_issue_id}." }
@@ -68,7 +73,8 @@ class KernelWorkersKillTest < Minitest::Test
     assert_equal [parent_issue_id, child_issue_id].sort, kill_log.fetch("details").fetch("removed_issue_ids").sort
     assert_equal [parent_worker_id, child_worker_id].sort, kill_log.fetch("details").fetch("killed_agent_ids").sort
     refute_nil project(engine, context.fetch("project_id")), "killing an issue keeps its project registered"
-    workspaces.each { |path| assert Dir.exist?(path), "workspace #{path} must survive an issue kill" }
+    workspaces.each { |path| refute Dir.exist?(path), "clean managed worktree #{path} is removed by an issue kill" }
+    branches.each { |branch| refute_empty run_git(context.fetch("root"), "branch", "--list", branch), "issue kill retains the delivery branch" }
   end
 
   def test_killing_a_project_cascades_to_every_issue_and_worker
@@ -81,6 +87,7 @@ class KernelWorkersKillTest < Minitest::Test
     ]
     session_ids = worker_ids.map { |id| agent(engine, id).fetch("harness_session_id") }
     workspaces = worker_ids.map { |id| agent(engine, id).fetch("workspace_path") }
+    branches = worker_ids.map { |id| agent(engine, id).fetch("workspace_branch") }
 
     apply!(engine, "Kill", { "target_id" => context.fetch("project_id") })
 
@@ -88,7 +95,8 @@ class KernelWorkersKillTest < Minitest::Test
     assert_empty state(engine).fetch("issues")
     assert_empty state(engine).fetch("agents")
     assert_nil project(engine, context.fetch("project_id"))
-    workspaces.each { |path| assert Dir.exist?(path), "workspace #{path} must survive a project kill" }
+    workspaces.each { |path| refute Dir.exist?(path), "clean managed worktree #{path} is removed by a project kill" }
+    branches.each { |branch| refute_empty run_git(context.fetch("root"), "branch", "--list", branch), "project kill retains the delivery branch" }
   end
 
   def test_killing_one_issue_leaves_sibling_work_untouched

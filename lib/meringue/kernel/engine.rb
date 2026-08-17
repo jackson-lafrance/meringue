@@ -1437,6 +1437,8 @@ module Meringue
           command_type == "PauseWorker" ? pause_worker(command_id, command_type, payload) : resume_worker(command_id, command_type, payload)
         elsif command_type == "Prune"
           @prune_mutex.synchronize { prune(command_id, command_type, payload) }
+        elsif command_type == "Kill"
+          kill(command_id, command_type, payload)
         elsif command_type == "SaveConfiguration"
           # The config lock must be acquired before the state lock. Validation and
           # atomic publication happen first; runtime/state mirrors follow.
@@ -3622,57 +3624,139 @@ module Meringue
         target_id = value_at(payload, "target_id", "TargetID", "targetId", "id")
         return rejected_result(command_id, command_type, "Target was not killed.", ["target_id is required"]) if blank?(target_id)
 
-        state = normalized_state
-        target = find_agent(state, target_id) || find_goal(state, target_id) || find_issue(state, target_id) || find_project(state, target_id)
-        return rejected_result(command_id, command_type, "Target #{target_id} does not exist.", ["target_not_found"]) unless target
+        # Kill is an immediate stop-and-remove, but two of its side effects are unbounded I/O from
+        # the state layer's point of view: stopping harness sessions and removing managed git
+        # worktrees. Neither may run while the shared state lock is held. The command mirrors
+        # Prune's shape: a short under-lock section marks lifecycle state and claims the workspace
+        # cleanup, the slow work runs outside the lock, then a second short under-lock section
+        # removes the records and publishes the result. Workspace cleanup reuses Prune's safe
+        # `cleanup_pruned_worker_workspaces!` path, so every invariant (no force-removal of dirty /
+        # locked / mismatched worktrees, no removal of a worktree a retained sharer or handed-over
+        # successor still needs, never the main checkout or a bare repo, branch retained) is the
+        # same one Prune and reconciliation already enforce.
+        operation_id = present_string(command_id) || "kill-#{instance_id}-#{Thread.current.object_id}-#{(monotonic_time * 1_000_000).to_i}"
 
-        now = timestamp
-        killed_agent_ids = kill_target_in_state!(state, target_id.to_s, now)
-        # A worker queued behind a killed agent can never settle its predecessor, so it is cancelled
-        # in the same command instead of waiting forever on a record that is being removed.
-        cancelled_dependents = cancel_deferred_dependents_in_state!(
-          state,
-          killed_agent_ids,
-          now: now,
-          reason: "predecessor_killed",
-          trigger: "kill"
-        )
-        killed_agent_ids = (killed_agent_ids + cancelled_dependents.fetch("agent_ids")).uniq
-        killed_agent_ids.each do |agent_id|
-          agent = find_agent(state, agent_id)
-          next unless agent
+        preparation = synchronized_state do
+          state = normalized_state
+          target = find_agent(state, target_id) || find_goal(state, target_id) || find_issue(state, target_id) || find_project(state, target_id)
+          next nil unless target
 
-          kill_session_safely(session_ref_from_agent(agent), agent: agent) if present_string(agent.fetch("harness", nil))
-        end
+          now = timestamp
+          killed_agent_ids = kill_target_in_state!(state, target_id.to_s, now)
+          # A worker queued behind a killed agent can never settle its predecessor, so it is cancelled
+          # in the same command instead of waiting forever on a record that is being removed.
+          cancelled_dependents = cancel_deferred_dependents_in_state!(
+            state,
+            killed_agent_ids,
+            now: now,
+            reason: "predecessor_killed",
+            trigger: "kill"
+          )
+          killed_agent_ids = (killed_agent_ids + cancelled_dependents.fetch("agent_ids")).uniq
 
-        result = deep_copy(target)
-        removal = remove_killed_target_records!(state, target_id.to_s, killed_agent_ids, now)
+          session_refs = killed_agent_ids.filter_map do |agent_id|
+            agent = find_agent(state, agent_id)
+            next unless agent && present_string(agent.fetch("harness", nil))
 
-        log_ids = cancelled_dependents.fetch("log_entry_ids").dup
-        log_ids.concat(append_log(
-          state,
-          source_type: "kernel",
-          source_id: target_id.to_s,
-          level: "info",
-          message: "Killed #{target_id}.",
-          details: {
+            { "agent_id" => agent_id, "agent" => deep_copy(agent), "session_ref" => deep_copy(session_ref_from_agent(agent)) }
+          end
+
+          # Claim the workspace cleanup for the killed workers that own a managed worktree so a
+          # concurrent reconcile pass cannot double-remove it while the kill's slow phase runs.
+          cleanup_worker_ids = killed_worker_workspace_cleanup_ids(state, killed_agent_ids)
+          cleanup_worker_ids.each do |worker_id|
+            worker = find_agent(state, worker_id)
+            next unless worker
+
+            metadata = worker.fetch("harness_metadata", {}) || {}
+            worker["harness_metadata"] = metadata.merge("prune_cleanup_claim" => prune_cleanup_claim(operation_id, now))
+          end
+          touch_state!(state, now)
+          store.save(state)
+
+          {
+            "target" => deep_copy(target),
             "target_id" => target_id.to_s,
             "killed_agent_ids" => killed_agent_ids,
-            "cancelled_deferred_agent_ids" => cancelled_dependents.fetch("agent_ids"),
-            "removed_issue_ids" => removal.fetch("removed_issue_ids", []),
-            "removed_agent_ids" => removal.fetch("removed_agent_ids", []),
-            "removed_project_ids" => removal.fetch("removed_project_ids", [])
-          }.compact
-        ))
-        touch_state!(state, now)
-        store.save(state)
+            "cancelled_dependents" => deep_copy(cancelled_dependents),
+            "session_refs" => session_refs,
+            "worker_ids" => cleanup_worker_ids,
+            "state" => deep_copy(state),
+            "claimed_at" => now
+          }
+        end
+        return rejected_result(command_id, command_type, "Target #{target_id} does not exist.", ["target_not_found"]) if preparation.nil?
 
-        accepted_result(command_id, command_type, target_id.to_s, "Killed #{target_id}.", result, log_ids)
+        # Slow phase: stop harness sessions and attempt safe worktree removal outside the lock.
+        preparation.fetch("session_refs").each do |entry|
+          kill_session_safely(entry.fetch("session_ref"), agent: entry.fetch("agent"))
+        end
+        workspace_cleanups = cleanup_prune_workspace_plan(
+          preparation,
+          deadline: monotonic_time + [prune_workspace_cleanup_budget, 0.0].max
+        )
+
+        target_id = preparation.fetch("target_id")
+        killed_agent_ids = preparation.fetch("killed_agent_ids")
+        cancelled_dependents = preparation.fetch("cancelled_dependents")
+        result = synchronized_state do
+          state = normalized_state
+          now = timestamp
+          removal = remove_killed_target_records!(
+            state,
+            target_id,
+            killed_agent_ids,
+            now,
+            prepared_workspace_cleanups: workspace_cleanups
+          )
+          log_ids = cancelled_dependents.fetch("log_entry_ids").dup
+          log_ids.concat(append_log(
+            state,
+            source_type: "kernel",
+            source_id: target_id,
+            level: "info",
+            message: "Killed #{target_id}.",
+            details: {
+              "target_id" => target_id,
+              "killed_agent_ids" => killed_agent_ids,
+              "cancelled_deferred_agent_ids" => cancelled_dependents.fetch("agent_ids"),
+              "removed_issue_ids" => removal.fetch("removed_issue_ids", []),
+              "removed_agent_ids" => removal.fetch("removed_agent_ids", []),
+              "removed_project_ids" => removal.fetch("removed_project_ids", []),
+              "removed_worktree_agent_ids" => removal.fetch("removed_worktree_agent_ids", [])
+            }.compact
+          ))
+          clear_prune_cleanup_claims!(state, operation_id)
+          touch_state!(state, now)
+          store.save(state)
+          { "result" => deep_copy(preparation.fetch("target")), "log_ids" => log_ids.uniq }
+        end
+
+        accepted_result(command_id, command_type, target_id, "Killed #{target_id}.", result.fetch("result"), result.fetch("log_ids"))
+      rescue StandardError
+        release_prune_cleanup_claims(operation_id)
+        raise
+      end
+
+      # The killed agents whose managed worktrees should be cleaned up during the kill's slow
+      # phase. Only workers can own a managed git worktree; the workspace manager's safe cleanup
+      # path skips any record that is not a `git_worktree` strategy, so this is the same set Prune
+      # claims and reconciles against.
+      def killed_worker_workspace_cleanup_ids(state, killed_agent_ids)
+        Array(killed_agent_ids).filter_map do |agent_id|
+          agent = find_agent(state, agent_id)
+          next unless agent && agent.fetch("type", nil) == "worker"
+
+          agent_id
+        end
       end
 
       # Kill is an immediate stop-and-remove operation: lifecycle state is marked first so
       # attached sessions are stopped consistently, then the target bundle leaves active state.
-      def remove_killed_target_records!(state, target_id, killed_agent_ids, now)
+      # `prepared_workspace_cleanups` carries the safe worktree-removal outcomes the kill's slow
+      # phase already ran outside the lock; applying them here reuses Prune's exactly-once path so
+      # a kill never re-runs git I/O under the lock and never double-removes a worktree.
+      def remove_killed_target_records!(state, target_id, killed_agent_ids, now, prepared_workspace_cleanups: nil)
         issue_ids = []
         project_ids = []
         if find_agent(state, target_id).nil?
@@ -3690,7 +3774,8 @@ module Meringue
           extra_agent_ids: killed_agent_ids,
           reason: "killed",
           now: now,
-          remove_empty_projects: false
+          remove_empty_projects: false,
+          prepared_workspace_cleanups: prepared_workspace_cleanups
         )
       end
 

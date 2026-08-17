@@ -757,6 +757,8 @@ Kills an agent, goal, issue, or project subtree.
 
 Killing should cascade downward. Killing an issue should kill or mark killed all child issues and attached workers. Killing a project should do the same for every issue and worker under it. Killing a goal ends its loop and kills the attempt session it owns; killing a goal's issue or project settles that goal too, so a goal can never keep driving a record that no longer exists.
 
+A kill also removes each killed worker's managed git worktree using the same safe cleanup path `/prune` uses: a clean worktree is removed while its delivery branch is retained, and a dirty, locked, branch/path/registration-mismatched, or actively-shared worktree is preserved on disk with a warning while the kill still succeeds. A worktree another live or queued worker still needs is never removed, the main checkout and bare repos are never removed, and the branch is never deleted. The slow session-stop and git worktree removal run outside the shared state lock, so a kill never blocks reconciliation or the TUI on harness or git I/O. A worktree the kill already removed is not removed twice by a later `/prune` or reconciliation.
+
 ### `ReconcileSessions() -> ReconcileResult`
 Runs at startup and periodically while Meringue is active.
 
