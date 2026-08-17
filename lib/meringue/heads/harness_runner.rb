@@ -115,6 +115,7 @@ module Meringue
           Use the context JSON below to decide whether to return a direct user-facing response, ask a question, or propose kernel commands.
           When the project is unclear, use your read-only tools to inspect local repositories before returning the final JSON.
           Answer directly in HeadResult.response only when no substantive investigation or orchestration is needed. Route investigation, implementation, and informational synthesis to workers through kernel commands.
+          Always return exactly one HeadResult JSON object, even for a direct answer: put the answer in the "response" string field and never write prose without the JSON wrapper. The "response" field is optional, so omit it or use an empty string when routing only through commands; never use JSON null. Escape newlines inside every JSON string value as \\n instead of writing literal line breaks, and never embed a ``` code fence inside a string value.
 
           Meringue head context JSON:
           #{JSON.pretty_generate(context.to_prompt_h)}
