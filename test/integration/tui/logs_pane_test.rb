@@ -71,6 +71,57 @@ class TuiLogsPaneTest < Minitest::Test
     assert_equal "#{Timestamps.display("2026-07-11T00:00:00Z")} ▪ meringue", plain_line(generic)
   end
 
+  # A single command result renders as one coherent entry: one header carrying the
+  # proposing-head attribution, with the summary and continuation detail lines as body
+  # rows under that header. It must not split into a separate header per line.
+  def test_one_command_result_renders_as_one_attributed_entry
+    logs = [
+      log_record(
+        "L1",
+        "source_type" => "kernel",
+        "source_id" => "P1-I1",
+        "message" => "Created issue P1-I1: Fix the batch loader.",
+        "details" => {
+          "command_author_type" => "head",
+          "command_author_id" => "H127",
+          "project_id" => "P1"
+        }
+      ),
+      log_record(
+        "L2",
+        "source_type" => "kernel",
+        "source_id" => "H127",
+        "message" => "Command output: SpawnWorker: accepted — Reserved worker P1-I1-W1; " \
+                      "workspace and harness provisioning will continue in the background.\n" \
+                      "  target: P1-I1-W1",
+        "details" => {
+          "head_id" => "H127",
+          "command_type" => "SpawnWorker",
+          "kind" => "kernel_command_output",
+          "presentation" => "cmd",
+          "command_author_type" => "head",
+          "command_author_id" => "H127"
+        }
+      )
+    ]
+    state = composed_state(empty_state.merge("logs" => logs))
+    lines = plain_lines(@pane.log_lines(state, width: 100))
+    joined = lines.join("\n")
+
+    # Both entries carry the same proposing-head attribution.
+    assert_equal 2, lines.count { |line| line.include?("▪ meringue · via H127") },
+                 "every entry from the head batch must carry the via-H attribution"
+
+    # The SpawnWorker command is a single entry: one header, with the summary and the
+    # continuation target line as body rows underneath it.
+    spawn_headers = lines.select do |line|
+      line.start_with?("[") && line.include?("▪ meringue · via H127 · cmd")
+    end
+    assert_equal 1, spawn_headers.length, "one command result must render one header"
+    assert_includes joined, "Command output: SpawnWorker: accepted — Reserved worker P1-I1-W1"
+    assert_includes joined, "    target: P1-I1-W1"
+  end
+
   def test_log_levels_render_status_labels_and_semantic_styles
     lines = @pane.log_lines(mixed_state, width: 70)
 

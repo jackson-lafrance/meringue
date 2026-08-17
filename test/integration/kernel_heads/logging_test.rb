@@ -88,6 +88,35 @@ class KernelHeadsLoggingTest < KernelHeadsTestCase
     )
   end
 
+  # A single command result renders as one coherent log entry: its summary line and any
+  # continuation detail lines share one id, one timestamp, one header, and one attribution
+  # instead of producing a separate log row per line.
+  def test_one_command_result_produces_one_log_entry_with_joined_lines
+    project_id = add_project!
+    head_id = spawn_head!("Report the state in one go")
+    apply_head_result(
+      head_id,
+      head_result(
+        commands: [
+          { "type" => "ListAll", "payload" => {} }
+        ]
+      )
+    )
+
+    output_entries = logs.select { |entry| entry.fetch("message", "").start_with?("Command output: ListAll: accepted") }
+    assert_equal 1, output_entries.length, "one ListAll command must produce one log entry, not one per line"
+    message = output_entries.first.fetch("message")
+    assert_includes message, "Command output: ListAll: accepted"
+    assert_includes message, "\n  projects:"
+    assert_includes message, "\n  issues:"
+    assert_includes message, "\n  agents:"
+    assert_includes message, "\n  questions:"
+
+    details = output_entries.first.fetch("details")
+    assert_equal "head", details.fetch("command_author_type")
+    assert_equal head_id, details.fetch("command_author_id")
+  end
+
   def test_head_authored_kernel_command_logs_retain_the_proposing_head
     project_id = add_project!
     standalone_log = log_with_message("Added project #{project_id}")
