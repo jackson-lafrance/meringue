@@ -228,6 +228,39 @@ module Meringue
 
       # Display form used by hint lines: single letters read as command keys,
       # named keys keep their conventional capitalization.
+      # Convert one terminal key event back to the config spelling used by the
+      # keybinding editor.  This is intentionally a shape conversion rather
+      # than an action lookup: the same key may be bound to several actions.
+      # Unsupported multi-character input (for example a paste) returns nil so
+      # the capture modal can reject it without leaking the input elsewhere.
+      def self.capture_name(key)
+        return nil unless key.is_a?(String) && !key.empty?
+
+        configured_name = KEY_ALIASES.find { |_name, sequences| sequences.include?(key) }&.first
+        return configured_name if configured_name
+
+        byte = key.bytes.length == 1 ? key.getbyte(0) : nil
+        return "ctrl-space" if byte == 0
+        if byte && byte.between?(1, 26)
+          return "ctrl-#{(byte + 96).chr}"
+        end
+
+        return key if key.chars.length == 1 && key.bytes.all? { |value| value >= 32 && value != 127 }
+        return "raw:#{encode_raw_key(key)}" if key.start_with?("\e")
+
+        nil
+      end
+
+      def self.encode_raw_key(key)
+        key.each_byte.map do |byte|
+          case byte
+          when 27 then "\\e"
+          when 32..126 then byte.chr
+          else "\\x#{byte.to_s(16).rjust(2, "0")}"
+          end
+        end.join
+      end
+
       def self.display_name(name)
         text = name.to_s.strip
         return text.upcase if text.length == 1
@@ -320,7 +353,12 @@ module Meringue
       end
 
       def self.canonical_key_name(name)
-        name.to_s.strip.downcase.tr("_ ", "--").gsub(/-+/, "-")
+        text = name.to_s.strip
+        # Raw sequences are case-sensitive terminal bytes. Do not lowercase or
+        # collapse their payload while normalizing the config prefix.
+        return text if text.downcase.start_with?("raw:")
+
+        text.downcase.tr("_ ", "--").gsub(/-+/, "-")
       end
 
       def self.ctrl_key(name)
@@ -329,7 +367,7 @@ module Meringue
       end
 
       def self.decode_raw_sequence(value)
-        value.to_s.gsub("\\e", "\e")
+        value.to_s.gsub("\\e", "\e").gsub(/\\x([0-9a-f]{2})/i) { Regexp.last_match(1).to_i(16).chr }
       end
     end
   end

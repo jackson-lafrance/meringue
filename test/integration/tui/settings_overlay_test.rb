@@ -24,8 +24,11 @@ class TuiSettingsOverlayTest < Minitest::Test
   ESC = "\e"
   DOWN = "\e[B"
   RIGHT = "\e[C"
+  UP = "\e[A"
   TAB = "\t"
+  SHIFT_TAB = "\e[Z"
   CTRL_S = "\u0013"
+  BACKSPACE = "\u007f"
 
   def setup
     @original_theme = Meringue::TUI::Style.current_colorscheme
@@ -73,6 +76,19 @@ class TuiSettingsOverlayTest < Minitest::Test
     refute @app.instance_variable_get(:@settings_active)
     messages = @app.instance_variable_get(:@messages)
     assert messages.any? { |message| message.fetch("text", "").include?("Configuration (read-only)") }
+  end
+
+  def test_settings_header_offers_friendly_agent_help_without_cluttering_setup
+    @app.send(:open_settings, @state)
+    header = @layout.send(:settings_pane).header_segments(compose, width: 100)
+    assert_includes header.map(&:first).join, "Not sure what to change? Ask your agent for help."
+    assert_includes @app.render(compose, width: 100, height: 30, color: false), "Ask your agent for help"
+    compact_header = @layout.send(:settings_pane).header_segments(compose, width: 46)
+    assert_includes compact_header.map(&:first).join, "Need help? Ask your agent."
+
+    @app.send(:open_settings, @state, mode: "setup")
+    setup_header = @layout.send(:settings_pane).header_segments(compose, width: 100)
+    refute_includes setup_header.map(&:first).join, "Ask your agent"
   end
 
   def test_wide_medium_compact_and_too_small_layouts_are_recoverable
@@ -210,6 +226,77 @@ class TuiSettingsOverlayTest < Minitest::Test
     refute_nil @app.instance_variable_get(:@settings_editor)
     frame = @app.render(compose, width: 100, height: 30, color: false)
     assert_includes frame, "must be at most 8"
+  end
+
+  def test_advanced_reveal_is_scoped_to_the_category_and_counts_are_explicit
+    @app.send(:open_settings, @state)
+    3.times { send_key(TAB) }
+    assert_equal "Harnesses", @app.send(:settings_category)
+    hidden = @app.send(:settings_snapshot).fetch("hidden_advanced_count")
+    assert_operator hidden, :>, 0
+    assert_includes @app.send(:selected_settings_row).fetch("label"), "(#{hidden})"
+
+    send_key(ENTER)
+    assert_equal 0, @app.send(:settings_snapshot).fetch("hidden_advanced_count")
+    assert @app.send(:settings_rows).any? { |row| row.fetch("id") == "harnesses.pi.command" }
+
+    send_key(TAB)
+    assert_equal "Workspace", @app.send(:settings_category)
+    workspace_hidden = @app.send(:settings_snapshot).fetch("hidden_advanced_count")
+    assert_operator workspace_hidden, :>, 0
+    assert_equal "_show_advanced", @app.send(:selected_settings_row).fetch("id")
+    assert_includes @app.render(compose, width: 100, height: 30, color: false), "advanced hidden"
+
+    send_key(SHIFT_TAB)
+    assert_equal "Harnesses", @app.send(:settings_category)
+    refute @app.send(:settings_rows).any? { |row| row.fetch("id") == "_show_advanced" }
+  end
+
+  def test_keybinding_enter_uses_isolated_capture_with_cancel_clear_invalid_and_repeat_paths
+    @app.send(:open_settings, @state)
+    6.times { send_key(TAB) }
+    assert_equal "Keybindings", @app.send(:settings_category)
+    send_key("a")
+    row = @app.send(:selected_settings_row)
+    assert_equal "keybindings.quit", row.fetch("id")
+
+    send_key(ENTER)
+    assert @app.instance_variable_get(:@settings_keybinding_capture)
+    assert_includes @app.render(compose, width: 100, height: 30, color: false), "Press the next keyboard key"
+
+    send_key(UP)
+    refute @app.instance_variable_get(:@settings_keybinding_capture), "the navigation key should be captured, not navigate the list"
+    assert_equal ["up"], @app.instance_variable_get(:@settings_draft).value("keybindings.quit")
+    assert_equal 0, @app.send(:settings_snapshot).fetch("row_index")
+
+    send_key(ENTER)
+    send_key("xy")
+    assert @app.instance_variable_get(:@settings_keybinding_capture), "multi-character input is invalid, not a paste"
+    assert_includes @app.render(compose, width: 100, height: 30, color: false), "cannot be used"
+
+    send_mouse("x" => 0, "y" => 0)
+    assert @app.instance_variable_get(:@settings_keybinding_capture), "mouse input must not close capture"
+    assert_includes @app.render(compose, width: 100, height: 30, color: false), "Mouse input cannot"
+
+    original = @app.instance_variable_get(:@settings_draft).value("keybindings.quit")
+    send_key(ESC)
+    refute @app.instance_variable_get(:@settings_keybinding_capture)
+    assert_equal original, @app.instance_variable_get(:@settings_draft).value("keybindings.quit")
+
+    send_key(ENTER)
+    send_key("x")
+    assert_equal ["x"], @app.instance_variable_get(:@settings_draft).value("keybindings.quit")
+    refute @app.instance_variable_get(:@settings_keybinding_capture)
+
+    send_key(ENTER)
+    send_key(ENTER) # Enter is captured, not applied as an editor command.
+    assert_equal ["enter"], @app.instance_variable_get(:@settings_draft).value("keybindings.quit")
+    refute @app.instance_variable_get(:@settings_keybinding_capture)
+
+    send_key(ENTER)
+    send_key(BACKSPACE)
+    assert_equal [], @app.instance_variable_get(:@settings_draft).value("keybindings.quit")
+    refute @app.instance_variable_get(:@settings_keybinding_capture)
   end
 
   private
