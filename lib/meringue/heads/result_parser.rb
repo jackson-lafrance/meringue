@@ -128,7 +128,12 @@ module Meringue
         if result.is_a?(Hash)
           errors << "title must be a string" unless result["title"].is_a?(String)
           errors << "summary must be a string" unless result["summary"].is_a?(String)
-          errors << "response must be a string" if result.key?("response") && !result["response"].is_a?(String)
+          # `response` is optional. A head that only routes commands naturally
+          # emits JSON null ("response": null) to mean "no direct answer"; treat
+          # null the same as an absent key so routing-only results stay valid.
+          if result.key?("response") && !result["response"].nil? && !result["response"].is_a?(String)
+            errors << "response must be a string"
+          end
           validate_commands(result["commands"], errors)
           validate_questions(result["questions"], errors)
         end

@@ -74,6 +74,7 @@ module Meringue
         Your previous response was not valid Meringue HeadResult JSON.
         Return exactly one JSON object with string fields "title" and "summary", an optional string field "response" for plain user-visible text, an array field "commands", and an array field "questions".
         Do not include markdown, prose, code fences, or tool calls outside the JSON object.
+        The "response" field is optional: omit it or use an empty string when routing only through commands, and never use JSON null. Escape newlines inside every JSON string value as \\n instead of writing literal line breaks, and never embed a ``` code fence inside a string value.
       PROMPT
       PULL_REQUEST_URL_PATTERN = /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+(?:[\/?#][^\s<>"'\])}]*)?/.freeze
       PULL_REQUEST_ASSOCIATING_COMMANDS = %w[
@@ -13585,7 +13586,7 @@ module Meringue
 
         errors << "head_result.title must be a string" unless head_result["title"].is_a?(String)
         errors << "head_result.summary must be a string" unless head_result["summary"].is_a?(String)
-        if head_result.key?("response") && !head_result["response"].is_a?(String)
+        if head_result.key?("response") && !head_result["response"].nil? && !head_result["response"].is_a?(String)
           errors << "head_result.response must be a string"
         end
         validate_head_commands(head_result["commands"], errors)

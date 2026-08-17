@@ -216,6 +216,22 @@ class HeadResultParserTest < Minitest::Test
     assert_equal ["response must be a string"], error.validation_errors
   end
 
+  # A routing-only head naturally emits `"response": null` (JSON null) to mean
+  # "no direct answer". The contract treats `response` as optional, so null must
+  # behave like an absent key instead of being rejected as a type violation.
+  # This was the dominant invalid-HeadResult failure shape in recorded state.
+  def test_null_response_is_accepted_as_absent
+    raw = JSON.generate(head_result.merge("response" => nil))
+
+    result = Meringue::Heads::ResultParser.parse(raw)
+
+    assert_equal "Routed the request", result.fetch("title")
+    assert_empty result.fetch("commands")
+    assert_empty result.fetch("questions")
+    # null and absent are equivalent: the parsed value carries no usable response.
+    assert_nil result.fetch("response", nil)
+  end
+
   def test_non_string_title_is_rejected
     error = assert_raises(Meringue::Heads::InvalidHeadResultError) do
       Meringue::Heads::ResultParser.parse(JSON.generate(head_result.merge("title" => 42)))
@@ -291,5 +307,19 @@ class HeadResultParserTest < Minitest::Test
     assert_equal '{"a": 1}', Meringue::Heads::ResultParser.first_json_object('x {"a": 1} y')
     assert_nil Meringue::Heads::ResultParser.first_json_object("no braces here")
     assert_nil Meringue::Heads::ResultParser.first_fenced_json("no fence here")
+  end
+
+  # The repair prompt is the kernel's single retry turn after a head emits invalid
+  # HeadResult JSON. It must restate the concrete formatting rules that prevent the
+  # recorded malformed shapes (null response, prose, raw newlines, embedded fences)
+  # so the repair turn produces a clean object instead of repeating the failure.
+  def test_head_result_repair_prompt_pins_json_formatting_rules
+    prompt = Meringue::Kernel::Engine::HEAD_RESULT_REPAIR_PROMPT
+
+    assert_includes prompt, "optional string field \"response\""
+    assert_includes prompt, "never use JSON null"
+    assert_includes prompt, "Escape newlines inside every JSON string value"
+    assert_includes prompt, "never embed a ``` code fence inside a string value"
+    assert_includes prompt, "Do not include markdown, prose, code fences, or tool calls outside the JSON object."
   end
 end
