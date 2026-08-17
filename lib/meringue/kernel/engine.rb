@@ -3795,7 +3795,7 @@ module Meringue
         true
       end
 
-      def head_takeover_plan(state, head_id)
+      def head_takeover_plan(state, head_id, allow_self_consumption: false, direct_follow_up: false)
         target_id = Ids.canonical(head_id.to_s)
         target = find_agent(state, target_id)
         unless target && target.fetch("type", nil) == "head"
@@ -3809,8 +3809,8 @@ module Meringue
         end
 
         metadata = target.fetch("harness_metadata", {}) || {}
-        if metadata.fetch("head_result_apply_state", nil).to_s == "applying" ||
-           head_result_apply_lease_held_elsewhere?(target)
+        applying = metadata.fetch("head_result_apply_state", nil).to_s == "applying"
+        if (applying && !allow_self_consumption) || head_result_apply_lease_held_elsewhere?(target)
           return {
             "error" => "Head #{target.fetch("id")} is already applying its result, so it cannot be taken over safely.",
             "code" => "head_result_apply_in_progress"
@@ -3828,22 +3828,32 @@ module Meringue
         {
           "target" => target,
           "request" => request,
-          "context" => head_takeover_context(target, request)
+          "context" => head_takeover_context(target, request, direct_follow_up: direct_follow_up)
         }
       end
 
-      def head_takeover_context(head, request)
+      def head_takeover_context(head, request, direct_follow_up: false)
         metadata = head.fetch("harness_metadata", {}) || {}
         metadata = {} unless metadata.is_a?(Hash)
         prior_takeover = request.fetch("takeover_context", nil)
         prior_takeover = nil unless prior_takeover.is_a?(Hash)
+        previous_result = metadata.fetch("head_result", nil)
+        previous_result = previous_result.slice("title", "summary", "response", "commands", "questions") if previous_result.is_a?(Hash)
+        previous_journal = Array(metadata.fetch("head_result_command_journal", [])).filter_map do |entry|
+          next unless entry.is_a?(Hash)
+
+          entry.slice("command_id", "index", "command_type", "status", "target_id", "message", "errors").compact
+        end
         {
           "previous_head_id" => head.fetch("id", nil),
+          "relationship" => direct_follow_up ? "direct_follow_up" : "takeover",
           "original_user_message" => prior_takeover&.fetch("original_user_message", nil) || request.fetch("user_message", nil),
           "original_prompt" => request.fetch("user_message", nil),
           "original_request" => request.slice("user_message", "question_id", "selected_target", "input_submission_id").compact,
           "previous_title" => metadata.fetch("title", nil),
           "previous_summary" => metadata.fetch("summary", nil),
+          "previous_head_result" => previous_result,
+          "previous_command_journal" => previous_journal.empty? ? nil : previous_journal,
           "snapshot" => {
             "issue_ids" => metadata.fetch("snapshot_issue_ids", []),
             "project_ids" => metadata.fetch("snapshot_project_ids", []),
@@ -3851,7 +3861,7 @@ module Meringue
             "counters" => metadata.fetch("snapshot_counters", {})
           },
           "prior_takeover" => prior_takeover,
-          "guidance" => "Continue the previous head's request with the new prompt. Do not duplicate durable commands that already landed; route only the coherent result for this replacement head."
+          "guidance" => "Continue the previous head's request with the new prompt. Treat the previous result and command journal as context. Do not duplicate durable commands that already landed; route only one coherent result for this replacement head."
         }.compact
       end
 
@@ -3859,7 +3869,16 @@ module Meringue
         user_message = value_at(payload, "user_message", "UserMessage", "message")
         question_id = value_at(payload, "question_id", "QuestionID", "questionId")
         requested_selected_target = value_at(payload, "selected_target", "SelectedTarget", "selectedTarget")
+        follow_up_of_head_id = present_string(value_at(payload, "_follow_up_of_head_id", "follow_up_of_head_id", "follow_up_of_head", "follow_up_head_id", "followUpOfHeadID", "followUpOfHeadId", "followUpOfHead"))
         takeover_head_id = present_string(value_at(payload, "_takeover_of_head_id", "takeover_of_head_id", "takeover_head_id", "takeoverHeadId"))
+        if takeover_head_id && follow_up_of_head_id && !Ids.same?(takeover_head_id, follow_up_of_head_id)
+          return synchronized_state do
+            rejected_result(command_id, command_type, "Head was not spawned.", ["takeover_of_head_id and follow_up_of_head_id conflict"])
+          end
+        end
+        takeover_head_id ||= follow_up_of_head_id
+        proposing_head_id = present_string(value_at(payload, "_head_id", "head_id", "HeadID", "headId"))
+        self_follow_up = follow_up_of_head_id && proposing_head_id && Ids.same?(follow_up_of_head_id, proposing_head_id)
         # Internally routed heads (for example the head spawned for an answered question) carry a
         # long structured prompt. The visible chat log should stay short and human-facing.
         log_message = present_string(value_at(payload, "log_message", "LogMessage"))
@@ -3888,7 +3907,12 @@ module Meringue
             )
           end
           if takeover_head_id
-            takeover = head_takeover_plan(state, takeover_head_id)
+            takeover = head_takeover_plan(
+              state,
+              takeover_head_id,
+              allow_self_consumption: !!self_follow_up,
+              direct_follow_up: !!follow_up_of_head_id
+            )
             if takeover.fetch("error", nil)
               return rejected_result(command_id, command_type, "Head takeover was not started: #{takeover.fetch("error")}", [takeover.fetch("code")])
             end
@@ -3937,6 +3961,7 @@ module Meringue
             question_id: present_string(question_id),
             selected_target: selected_target,
             takeover_of_head_id: takeover_target&.fetch("id", nil),
+            follow_up_of_head_id: follow_up_of_head_id,
             takeover_context: takeover_context,
             retry_of: retry_of,
             completion_trigger: completion_trigger,
@@ -3959,7 +3984,10 @@ module Meringue
               "question_id" => present_string(question_id),
               "retry_of_head_id" => retry_of && retry_of.fetch("head_id", nil),
               "takeover_of_head_id" => takeover_target&.fetch("id", nil),
-              "routing_action" => takeover_target ? "head_takeover" : nil,
+              "follow_up_of_head_id" => follow_up_of_head_id,
+              "routing_action" => if takeover_target
+                                    follow_up_of_head_id ? "head_follow_up" : "head_takeover"
+                                  end,
               **selected_target_log_details(selected_target)
             }.compact
           )
@@ -3987,7 +4015,8 @@ module Meringue
             "log_ids" => log_ids,
             "snapshot" => snapshot,
             "head_runner" => active_runner,
-            "takeover_of_head_id" => takeover_target&.fetch("id", nil)
+            "takeover_of_head_id" => takeover_target&.fetch("id", nil),
+            "follow_up_of_head_id" => follow_up_of_head_id
           }
         end
 
@@ -4024,6 +4053,10 @@ module Meringue
           end
         else
           session_log_ids = mark_head_session_unavailable!(head_id, reason: "head_runner_has_no_session").fetch("log_entry_ids", [])
+          if takeover_target
+            takeover_release = complete_head_takeover!(takeover_target.fetch("id"), head_id)
+            session_log_ids.concat(takeover_release.fetch("log_entry_ids", []))
+          end
         end
 
         head_result = if session_ref && runner.respond_to?(:await_head_result)
@@ -5248,8 +5281,9 @@ module Meringue
         }
       end
 
-      # Prompting a head is a user recovery action, not something a head may trigger: a head
-      # spawning or taking over heads is exactly the loop the stateless head contract prevents.
+      # Prompting a head is a user recovery action, not something a head may trigger. A head may
+      # explicitly hand its own still-routing result to one direct follow-up head, however; the
+      # SpawnHead path claims that self predecessor before any replacement session runs.
       def prompt_agent_head_guard(head, payload)
         target_id = present_string(value_at(payload, "agent_id", "AgentID", "agentId"))
         return nil unless target_id
@@ -5265,10 +5299,13 @@ module Meringue
 
       def head_takeover_command_guard(head, payload)
         takeover_id = present_string(value_at(payload, "_takeover_of_head_id", "takeover_of_head_id", "takeover_head_id", "takeoverHeadId"))
-        return nil unless takeover_id
+        follow_up_id = present_string(value_at(payload, "_follow_up_of_head_id", "follow_up_of_head_id", "follow_up_of_head", "follow_up_head_id", "followUpOfHeadID", "followUpOfHeadId", "followUpOfHead"))
+        return nil if follow_up_id && Ids.same?(follow_up_id, head.fetch("id", nil))
+        return nil unless takeover_id || follow_up_id
 
+        target_id = takeover_id || follow_up_id
         {
-          "message" => "Head #{head.fetch("id", nil)} may not take over head #{takeover_id}; only the user can start a head takeover.",
+          "message" => "Head #{head.fetch("id", nil)} may not take over head #{target_id}; only a direct self follow-up may consume its predecessor.",
           "errors" => ["head_cannot_prompt_head"]
         }
       end
@@ -13148,7 +13185,7 @@ module Meringue
       end
 
       def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0, user_message: nil, question_id: nil,
-                           selected_target: nil, takeover_of_head_id: nil, takeover_context: nil,
+                           selected_target: nil, takeover_of_head_id: nil, follow_up_of_head_id: nil, takeover_context: nil,
                            retry_of: nil, completion_trigger: nil, input_submission_id: nil,
                            snapshot_issue_ids: [], snapshot_project_ids: [], snapshot_unapplied_head_ids: [], snapshot_counters: {})
         retry_of = nil unless retry_of.is_a?(Hash)
@@ -13190,6 +13227,7 @@ module Meringue
             "retry_case" => retry_of && retry_of.fetch("case", nil),
             "retry_strategy" => retry_of ? "respawn" : nil,
             "takeover_of_head_id" => takeover_of_head_id,
+            "follow_up_of_head_id" => follow_up_of_head_id,
             "takeover_context" => takeover_context,
             "completion_trigger" => completion_trigger,
             "head_request" => {
@@ -13198,6 +13236,7 @@ module Meringue
               "question_id" => question_id,
               "selected_target" => selected_target,
               "takeover_of_head_id" => takeover_of_head_id,
+              "follow_up_of_head_id" => follow_up_of_head_id,
               "takeover_context" => takeover_context,
               "retry_of_head_id" => retry_of && retry_of.fetch("head_id", nil)
             }.compact
@@ -17678,6 +17717,7 @@ module Meringue
           "question_id" => present_string(request.fetch("question_id", nil)),
           "selected_target" => request.fetch("selected_target", nil),
           "takeover_of_head_id" => present_string(request.fetch("takeover_of_head_id", nil)),
+          "follow_up_of_head_id" => present_string(request.fetch("follow_up_of_head_id", nil)),
           "takeover_context" => request.fetch("takeover_context", nil)
         }.compact
       end

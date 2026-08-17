@@ -569,6 +569,7 @@ Payload:
 {
   "user_message": "The user prompt",
   "question_id": "Optional question id when answering a prior question",
+  "follow_up_of_head_id": "Optional active head id to consume as a direct follow-up",
   "selected_target": {
     "selected_id": "Optional AgentTree issue or agent id selected for dashboard chat"
   }
@@ -580,6 +581,8 @@ Payload:
 Omitted, `null`, and blank (`""`, `{}`, whitespace-only id) values all mean "nothing is selected": the head spawns with no `routing_context.selected_target` instead of the message being rejected. Only a non-blank id that no longer resolves to a record is rejected.
 
 Selecting a head id (`H13`) is not routing context. It filters logs only; ordinary chat starts a new head with no selected target. Retry a stranded head explicitly with `/retry H13` or by double-clicking its `retry me` row in the TUI.
+
+A direct head follow-up may set `follow_up_of_head_id` to an active head. The kernel claims that predecessor before starting the new session, records both `follow_up_of_head_id` and `takeover_of_head_id`, and carries the predecessor's request, result journal, and compact takeover guidance into the successor. A head may use this field only for a follow-up of itself while its own result is applying; any other head-to-head takeover remains a user action through `PromptAgent`. If startup fails, the claim rolls back; once the successor is recorded, the predecessor is released and removed so its result cannot route a second batch.
 
 ### Retrying a failed head
 
@@ -601,7 +604,7 @@ A retry does not re-run journal entries, it re-routes the request. So the fresh 
 
 So retrying a partially applied head is safe: the issue that was created is reused rather than recreated, and only the missing steps are routed. Lineage is recorded on the retry head (`harness_metadata.retry_of_head_id`, `head_retry_count`) and in the log once as `Retrying head H13 as head H14: <reason>. Re-running its original request with a fresh head.` The old head row is removed from active state instead of lingering as `retried as H14`.
 
-The head contract is unchanged by a retry or takeover: the replacement still returns `HeadResult` JSON, still proposes commands instead of doing the work, and is never turned into a worker. These are user routing actions; a head may not propose `RetryHead` or `PromptAgent` on another head. Such commands are rejected with `command_not_proposable_by_head` or `head_cannot_prompt_head`.
+The head contract is unchanged by a retry or takeover: the replacement still returns `HeadResult` JSON, still proposes commands instead of doing the work, and is never turned into a worker. These are user routing actions, except that a head may explicitly spawn one direct follow-up of itself with `follow_up_of_head_id`; it may not propose `RetryHead`, take over another head, or prompt a head. Such commands are rejected with `command_not_proposable_by_head` or `head_cannot_prompt_head`.
 
 Rejection codes, all of which should now be rare:
 

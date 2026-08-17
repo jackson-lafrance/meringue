@@ -264,6 +264,79 @@ class KernelHeadsSpawnHeadTest < KernelHeadsTestCase
     assert_includes session_runner.closed_sessions.map { |ref| ref.fetch("session_id") }, "fake-head-session-1"
   end
 
+  def test_direct_head_follow_up_claims_predecessor_before_starting
+    session_runner = KernelHeadsSupport::SessionHeadRunner.new
+    session_engine = build_engine(head_runner: session_runner, async_heads: true)
+    first_head_id = apply_command(
+      "SpawnHead",
+      { "user_message" => "Start the setup flow" },
+      target_engine: session_engine
+    ).fetch("target_id")
+
+    result = apply_command(
+      "SpawnHead",
+      {
+        "user_message" => "Continue the setup flow with the theme preview.",
+        "follow_up_of_head_id" => first_head_id
+      },
+      target_engine: session_engine
+    )
+
+    assert_equal "accepted", result.fetch("status"), result.inspect
+    successor_id = result.fetch("target_id")
+    state = session_engine.list_all
+    assert_nil state.fetch("agents").find { |agent| agent.fetch("id") == first_head_id }
+    successor = state.fetch("agents").find { |agent| agent.fetch("id") == successor_id }
+    assert_equal first_head_id, successor.dig("harness_metadata", "takeover_of_head_id")
+    assert_equal first_head_id, successor.dig("harness_metadata", "follow_up_of_head_id")
+    assert_equal "direct_follow_up", session_runner.spawned_contexts.fetch(1).to_prompt_h.dig("routing_context", "head_takeover", "relationship")
+    assert_includes session_runner.closed_sessions.map { |ref| ref.fetch("session_id") }, "fake-head-session-1"
+    assert_equal 2, session_runner.spawned_sessions.length
+  end
+
+  def test_head_can_spawn_a_direct_follow_up_that_consumes_its_own_result
+    project_id = add_project!
+    session_runner = KernelHeadsSupport::SessionHeadRunner.new
+    session_engine = build_engine(head_runner: session_runner, async_heads: true)
+    first_head_id = apply_command(
+      "SpawnHead",
+      { "user_message" => "Start the setup flow" },
+      target_engine: session_engine
+    ).fetch("target_id")
+
+    result = apply_head_result(
+      first_head_id,
+      head_result(
+        commands: [
+          create_issue_command(project_id: project_id, title: "Theme setup"),
+          {
+            "type" => "SpawnHead",
+            "payload" => {
+              "user_message" => "Continue with the theme preview.",
+              "follow_up_of_head_id" => first_head_id
+            }
+          }
+        ]
+      ),
+      target_engine: session_engine
+    )
+
+    assert_equal "accepted", result.fetch("status"), result.inspect
+    assert_equal [["CreateIssue", "accepted"], ["SpawnHead", "accepted"]], command_statuses(result)
+    assert_equal ["P1-I1"], issues(current_state: session_engine.list_all).map { |issue| issue.fetch("id") }
+    state = session_engine.list_all
+    assert_nil state.fetch("agents").find { |agent| agent.fetch("id") == first_head_id }
+    successor = state.fetch("agents").find { |agent| agent.fetch("id") == "H2" }
+    refute_nil successor
+    assert_equal first_head_id, successor.dig("harness_metadata", "takeover_of_head_id")
+    context = session_runner.spawned_contexts.fetch(1).to_prompt_h
+    assert_equal "direct_follow_up", context.dig("routing_context", "head_takeover", "relationship")
+    assert_equal first_head_id, context.dig("routing_context", "head_takeover", "previous_head_id")
+    assert_equal "SpawnHead", context.dig("routing_context", "head_takeover", "previous_head_result", "commands", 1, "type")
+    assert_includes context.dig("routing_context", "head_takeover", "guidance"), "Do not duplicate durable commands"
+    assert_equal 2, session_runner.spawned_sessions.length
+  end
+
   def test_predecessor_result_is_deferred_while_takeover_is_starting
     project_id = add_project!
     session_runner = BlockingSuccessorSessionRunner.new
