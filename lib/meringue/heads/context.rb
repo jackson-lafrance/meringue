@@ -31,16 +31,17 @@ module Meringue
       ROUTING_TEXT_LIMIT = 2_000
 
       attr_reader :head_id, :user_message, :snapshot, :question_id, :selected_target,
-                  :kernel_commands_path, :cwd, :state_path, :github_support
+                  :takeover_context, :kernel_commands_path, :cwd, :state_path, :github_support
 
       def initialize(head_id:, user_message:, snapshot:, question_id: nil, selected_target: nil,
-                     kernel_commands_path: DEFAULT_KERNEL_COMMANDS_PATH, cwd: Dir.pwd,
+                     takeover_context: nil, kernel_commands_path: DEFAULT_KERNEL_COMMANDS_PATH, cwd: Dir.pwd,
                      state_path: State::Store.default_path, github_support: true)
         @head_id = head_id
         @user_message = user_message
         @snapshot = snapshot
         @question_id = question_id
         @selected_target = selected_target
+        @takeover_context = takeover_context.is_a?(Hash) ? takeover_context : nil
         @kernel_commands_path = kernel_commands_path
         @cwd = File.expand_path(cwd)
         @state_path = File.expand_path(state_path)
@@ -85,6 +86,7 @@ module Meringue
           When proposing AddProject, use the concise suggested product name from project_discovery when available. Preserve intentional capitalization exactly, and do not use a worktree suffix, repository path slug, or verbose product description as the name.
           Before creating a GitHub-backed Meringue issue, resolve the relevant GitHub issue or pull request's exact current title with the permitted read-only title lookup and use that title unchanged as the Meringue issue title. Never substitute a generic number-based title such as "Fix PR #123", "Rebase PR #123", or "GitHub issue #123". If the relevant GitHub target or its exact title cannot be resolved unambiguously, ask a clarifying question instead of creating the issue.
           Prefer a healthy existing worker session when its Pi or other harness history contains the context needed for the follow-up. Do not duplicate that harness history in Meringue state.
+          When a takeover block is present, a previous head was still routing this request. Preserve its original request and guidance, use the new user prompt as the correction or continuation, and do not re-propose durable work that the previous head already landed. The kernel releases the previous head only after this replacement session is recorded; return one coherent HeadResult for the replacement.
           An issue is the durable goal and a worker is one session step, so one goal that needs research and then implementation is one issue with two workers on it (issue_from_command on both, plus after_from_command and follow_up_of_command on the implementer), not two issues. Create a second issue only for a genuinely independent goal. Never write a worker prompt that polls Meringue state or sleeps waiting for another worker: the kernel owns that wait. An ordinary request to implement and deliver ends when the verified change is pushed and its pull request is opened or updated: do not create a completion head, CI/review continuation, checker worker, or external-condition gate, and do not tell the worker to watch checks or reviews. The user will explicitly retrigger follow-up work. Only when the user specifically requests CI remediation, review response, merge/deploy monitoring, or another post-delivery action may you route that named action; if it must wait for an external condition, queue it with after_command rather than making a worker poll. When explicitly requested completion-head routing itself must wait and the condition is known up front, put after_command inside the completion_head object so the kernel holds the continuation without spawning a checker worker.
           When the user wants an outcome driven to completion rather than attempted once ("keep going until", "don't stop until", "this is critical, it has to actually land") and there is a finish line the kernel can measure by running a command, that is a goal loop: propose CreateGoal instead of a single one-shot worker. CreateGoal mints its own issue from a prompt (send prompt plus project_id, or project_from_command for a project this batch registers), so you never have to create an issue first, and the kernel spawns and judges the attempt workers itself. When the outcome has no number but could be judged by reading the result (prose, onboarding copy, UX polish, "until it looks right"), that is still a goal loop: send judge.mode "reviewer" with the standard as success_criteria and no metric, and a reviewer session judges each iteration. Urgency alone is not a goal loop: if neither a command nor a reviewable standard defines done, route the work normally or ask one question about what done is measured by, rather than inventing a fake metric or using a goal to buy ordinary work extra iterations.
           Do not mutate files, git state, dependencies, databases, remote services, or Meringue state directly.
@@ -173,6 +175,7 @@ module Meringue
           "purpose" => "Stateless routing hints assembled from existing issues, logs, and inspectable harness session metadata. These are not a separate conversation history.",
           "explicit_references" => explicit_references,
           "question_being_answered" => question_being_answered,
+          "head_takeover" => takeover_context,
           "open_questions" => open_question_records,
           "answer_inference" => answer_inference,
           "issue_candidates" => routing_issue_candidates,
@@ -216,6 +219,7 @@ module Meringue
         }
         target = selected_target_context
         context["selected_target"] = target if target
+        context.delete("head_takeover") unless takeover_context
         context
       end
 

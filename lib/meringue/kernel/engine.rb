@@ -234,7 +234,7 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."],
         ["/worker resume <agent_id>", "Resume a paused worker session."],
-        ["/prompt <agent_id> \"<message>\"", "Prompt an existing worker agent session."],
+        ["/prompt <agent_id> \"<message>\"", "Continue a worker session or take over a still-routing head."]
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/harness [head|worker] <pi|claude|antigravity>", "Select role-aware harness defaults for future agents; omit the role to update both."],
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
@@ -2295,6 +2295,7 @@ module Meringue
             next unless head_result.is_a?(Hash)
             next if present_string(metadata.fetch("head_result_applied_at", nil))
             next if owned_by_other_live_instance?(agent)
+            next if head_takeover_claimed_by?(agent)
             next unless metadata.fetch("head_result_apply_state", nil) == "applying" ||
                         (agent.fetch("status", nil) == "completed" && agent_has_session_reference?(agent))
             # Another kernel instance is applying this batch right now; recovering it here would
@@ -3627,6 +3628,9 @@ module Meringue
         return rejected_result(command_id, command_type, "Target #{target_id} does not exist.", ["target_not_found"]) unless target
 
         now = timestamp
+        takeover_previous_head_id = if target.fetch("type", nil) == "head"
+                                      present_string(target.dig("harness_metadata", "takeover_of_head_id"))
+                                    end
         killed_agent_ids = kill_target_in_state!(state, target_id.to_s, now)
         # A worker queued behind a killed agent can never settle its predecessor, so it is cancelled
         # in the same command instead of waiting forever on a record that is being removed.
@@ -3690,6 +3694,9 @@ module Meringue
         end
         touch_state!(state, now)
         store.save(state)
+        if takeover_previous_head_id
+          log_ids.concat(Array(rollback_head_takeover!(takeover_previous_head_id, target_id.to_s, reason: "successor_head_killed")))
+        end
 
         accepted_result(command_id, command_type, target_id.to_s, "Killed #{target_id}.", result, log_ids)
       end
@@ -3776,10 +3783,83 @@ module Meringue
         end.map { |agent| agent.fetch("id", nil) }.compact
       end
 
+      def head_still_routing?(head)
+        return false unless head.is_a?(Hash) && head.fetch("type", nil) == "head"
+        return false unless %w[queued working idle].include?(head.fetch("status", nil).to_s)
+
+        metadata = head.fetch("harness_metadata", {}) || {}
+        return false unless metadata.is_a?(Hash)
+        return false if present_string(metadata.fetch("head_result_applied_at", nil))
+        return false if metadata.fetch("head_takeover_state", nil).to_s == "claimed"
+
+        true
+      end
+
+      def head_takeover_plan(state, head_id)
+        target_id = Ids.canonical(head_id.to_s)
+        target = find_agent(state, target_id)
+        unless target && target.fetch("type", nil) == "head"
+          return { "error" => "Head #{head_id} does not exist.", "code" => "head_not_found" }
+        end
+        unless head_still_routing?(target)
+          return {
+            "error" => "Head #{target.fetch("id")} is no longer still routing; use /retry for a stopped head or send a new prompt.",
+            "code" => "head_not_still_routing"
+          }
+        end
+
+        metadata = target.fetch("harness_metadata", {}) || {}
+        if metadata.fetch("head_result_apply_state", nil).to_s == "applying" ||
+           head_result_apply_lease_held_elsewhere?(target)
+          return {
+            "error" => "Head #{target.fetch("id")} is already applying its result, so it cannot be taken over safely.",
+            "code" => "head_result_apply_in_progress"
+          }
+        end
+
+        request = head_request_in_state(state, target) || {}
+        unless present_string(request.fetch("user_message", nil))
+          return {
+            "error" => "Head #{target.fetch("id")} has no recorded request to take over; send the new message as a fresh prompt.",
+            "code" => "head_request_unavailable"
+          }
+        end
+
+        {
+          "target" => target,
+          "request" => request,
+          "context" => head_takeover_context(target, request)
+        }
+      end
+
+      def head_takeover_context(head, request)
+        metadata = head.fetch("harness_metadata", {}) || {}
+        metadata = {} unless metadata.is_a?(Hash)
+        prior_takeover = request.fetch("takeover_context", nil)
+        prior_takeover = nil unless prior_takeover.is_a?(Hash)
+        {
+          "previous_head_id" => head.fetch("id", nil),
+          "original_user_message" => prior_takeover&.fetch("original_user_message", nil) || request.fetch("user_message", nil),
+          "original_prompt" => request.fetch("user_message", nil),
+          "original_request" => request.slice("user_message", "question_id", "selected_target", "input_submission_id").compact,
+          "previous_title" => metadata.fetch("title", nil),
+          "previous_summary" => metadata.fetch("summary", nil),
+          "snapshot" => {
+            "issue_ids" => metadata.fetch("snapshot_issue_ids", []),
+            "project_ids" => metadata.fetch("snapshot_project_ids", []),
+            "unapplied_head_ids" => metadata.fetch("snapshot_unapplied_head_ids", []),
+            "counters" => metadata.fetch("snapshot_counters", {})
+          },
+          "prior_takeover" => prior_takeover,
+          "guidance" => "Continue the previous head's request with the new prompt. Do not duplicate durable commands that already landed; route only the coherent result for this replacement head."
+        }.compact
+      end
+
       def spawn_head(command_id, command_type, payload)
         user_message = value_at(payload, "user_message", "UserMessage", "message")
         question_id = value_at(payload, "question_id", "QuestionID", "questionId")
         requested_selected_target = value_at(payload, "selected_target", "SelectedTarget", "selectedTarget")
+        takeover_head_id = present_string(value_at(payload, "_takeover_of_head_id", "takeover_of_head_id", "takeover_head_id", "takeoverHeadId"))
         # Internally routed heads (for example the head spawned for an answered question) carry a
         # long structured prompt. The visible chat log should stay short and human-facing.
         log_message = present_string(value_at(payload, "log_message", "LogMessage"))
@@ -3795,6 +3875,8 @@ module Meringue
 
         head_id = nil
         selected_target = nil
+        takeover_context = nil
+        takeover_target = nil
         started = synchronized_state do
           state = normalized_state
           submission_id = present_string(value_at(payload, "_input_submission_id", "input_submission_id"))
@@ -3805,6 +3887,19 @@ module Meringue
               deep_copy(existing), []
             )
           end
+          if takeover_head_id
+            takeover = head_takeover_plan(state, takeover_head_id)
+            if takeover.fetch("error", nil)
+              return rejected_result(command_id, command_type, "Head takeover was not started: #{takeover.fetch("error")}", [takeover.fetch("code")])
+            end
+
+            takeover_target = takeover.fetch("target")
+            takeover_context = takeover.fetch("context").merge("new_prompt" => user_message.to_s)
+            request = takeover.fetch("request")
+            question_id = present_string(question_id) || present_string(request.fetch("question_id", nil))
+            requested_selected_target ||= request.fetch("selected_target", nil)
+          end
+
           if present_string(question_id) && !find_question(state, question_id)
             return rejected_result(command_id, command_type, "Question #{question_id} does not exist.", ["question_not_found"])
           end
@@ -3823,6 +3918,15 @@ module Meringue
           active_runner = active_head_runner(provider: active_provider)
           now = timestamp
           head_id = next_head_id!(state)
+          if takeover_target
+            target_metadata = takeover_target.fetch("harness_metadata", {}) || {}
+            takeover_target["harness_metadata"] = target_metadata.merge(
+              "head_takeover_state" => "claimed",
+              "head_takeover_by_head_id" => head_id,
+              "head_takeover_claimed_at" => now
+            )
+            takeover_target["updated_at"] = now
+          end
           agent = build_head_agent(
             head_id: head_id,
             now: now,
@@ -3832,6 +3936,8 @@ module Meringue
             user_message: user_message.to_s,
             question_id: present_string(question_id),
             selected_target: selected_target,
+            takeover_of_head_id: takeover_target&.fetch("id", nil),
+            takeover_context: takeover_context,
             retry_of: retry_of,
             completion_trigger: completion_trigger,
             input_submission_id: submission_id,
@@ -3852,6 +3958,8 @@ module Meringue
               "head_id" => head_id,
               "question_id" => present_string(question_id),
               "retry_of_head_id" => retry_of && retry_of.fetch("head_id", nil),
+              "takeover_of_head_id" => takeover_target&.fetch("id", nil),
+              "routing_action" => takeover_target ? "head_takeover" : nil,
               **selected_target_log_details(selected_target)
             }.compact
           )
@@ -3868,6 +3976,7 @@ module Meringue
             snapshot: snapshot,
             question_id: present_string(question_id),
             selected_target: selected_target,
+            takeover_context: takeover_context,
             cwd: cwd,
             state_path: store.path,
             github_support: github_support_enabled?(snapshot)
@@ -3877,7 +3986,8 @@ module Meringue
             "context" => context,
             "log_ids" => log_ids,
             "snapshot" => snapshot,
-            "head_runner" => active_runner
+            "head_runner" => active_runner,
+            "takeover_of_head_id" => takeover_target&.fetch("id", nil)
           }
         end
 
@@ -3895,6 +4005,10 @@ module Meringue
           )
           session_record = record_head_session!(head_id, session_ref)
           session_log_ids = session_record.fetch("log_entry_ids", [])
+          if takeover_target
+            takeover_release = complete_head_takeover!(takeover_target.fetch("id"), head_id)
+            session_log_ids.concat(takeover_release.fetch("log_entry_ids", []))
+          end
 
           if async_heads?
             return synchronized_state do
@@ -3928,6 +4042,16 @@ module Meringue
           agent = find_agent(state, head_id)
           raise "Head #{head_id} disappeared before completion could be recorded." unless agent
 
+          if head_takeover_claimed_by?(agent)
+            return defer_head_result_for_takeover(
+              command_id,
+              command_type,
+              state,
+              agent,
+              head_result
+            )
+          end
+
           agent["status"] = "completed"
           agent["updated_at"] = timestamp
           agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
@@ -3945,6 +4069,7 @@ module Meringue
         end
       rescue StandardError => e
         released = mark_head_errored(head_id, e, release_session: true) if defined?(head_id) && head_id
+        rollback_head_takeover!(takeover_target.fetch("id"), head_id, reason: e.message) if takeover_target && head_id
         # If the head record itself is gone the kernel still owns the session it spawned.
         if !released && defined?(session_ref) && session_ref && runner.respond_to?(:close_head_session)
           runner.close_head_session(session_ref)
@@ -4368,6 +4493,10 @@ module Meringue
             return already_applied_head_result(command_id, command_type, head_id.to_s, metadata)
           end
 
+          if head_takeover_claimed_by?(head)
+            return defer_head_result_for_takeover(command_id, command_type, state, head, head_result)
+          end
+
           stored_result = metadata.fetch("head_result", nil)
           fingerprint = head_result_fingerprint(head_result)
           stored_fingerprint = present_string(metadata.fetch("head_result_fingerprint", nil))
@@ -4425,6 +4554,12 @@ module Meringue
           }
         end
         return initialization if kernel_command_result?(initialization)
+
+        takeover_previous_head_id = present_string(initialization.dig("head", "harness_metadata", "takeover_of_head_id"))
+        if takeover_previous_head_id
+          takeover_release = complete_head_takeover!(takeover_previous_head_id, head_id.to_s)
+          log_ids.concat(takeover_release.fetch("log_entry_ids", []))
+        end
 
         command_results = []
         interrupted = false
@@ -5058,6 +5193,7 @@ module Meringue
                 when "ClearState" then clear_state_head_guard(head, payload)
                 when "Kill" then kill_head_guard(head, payload)
                 when "PromptAgent" then prompt_agent_head_guard(head, payload)
+                when "SpawnHead" then head_takeover_command_guard(head, payload)
                 end
         return nil unless guard
 
@@ -5112,9 +5248,8 @@ module Meringue
         }
       end
 
-      # Prompting a head retries it by spawning another head. That is a user recovery action, not
-      # something a head may trigger: a head spawning heads is exactly the loop the stateless head
-      # contract exists to prevent.
+      # Prompting a head is a user recovery action, not something a head may trigger: a head
+      # spawning or taking over heads is exactly the loop the stateless head contract prevents.
       def prompt_agent_head_guard(head, payload)
         target_id = present_string(value_at(payload, "agent_id", "AgentID", "agentId"))
         return nil unless target_id
@@ -5123,7 +5258,17 @@ module Meringue
         return nil unless target && target.fetch("type", nil) == "head"
 
         {
-          "message" => "Head #{head.fetch("id", nil)} may not prompt head #{target.fetch("id")}; only the user can retry a head.",
+          "message" => "Head #{head.fetch("id", nil)} may not prompt head #{target.fetch("id")}; only the user can take over a head.",
+          "errors" => ["head_cannot_prompt_head"]
+        }
+      end
+
+      def head_takeover_command_guard(head, payload)
+        takeover_id = present_string(value_at(payload, "_takeover_of_head_id", "takeover_of_head_id", "takeover_head_id", "takeoverHeadId"))
+        return nil unless takeover_id
+
+        {
+          "message" => "Head #{head.fetch("id", nil)} may not take over head #{takeover_id}; only the user can start a head takeover.",
           "errors" => ["head_cannot_prompt_head"]
         }
       end
@@ -7275,17 +7420,21 @@ module Meringue
         "Issue #{issue_id} no longer exists: it was removed #{issue_removal_phrase(removal)}."
       end
 
-      # `/prompt <id>` prompts worker sessions only. Retrying a head is a separate visible user
-      # action (`/retry H<n>`), so a prompt can never message or resume an old head by accident.
+      # `/prompt <id>` continues a worker session. When the id is an active head, it starts a
+      # replacement head with the original request and compact routing context in hand. A stopped
+      # head remains on the explicit `/retry H<n>` path so retry and takeover cannot be confused.
       def prompt_agent_command(command_id, command_type, payload)
         agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
         agent = present_string(agent_id) ? agent_record_snapshot(agent_id.to_s) : nil
         if agent && agent.fetch("type", nil) == "head"
+          prompt = value_at(payload, "prompt", "Prompt", "message", "Message")
+          return takeover_head_command(command_id, command_type, agent, prompt) if head_still_routing?(agent)
+
           return synchronized_state do
             rejected_result(
               command_id,
               command_type,
-              "Agent #{agent.fetch("id")} is a head. Use /retry #{agent.fetch("id")} to retry it with a fresh head; /prompt only targets worker sessions.",
+              "Agent #{agent.fetch("id")} is a head. Use /retry #{agent.fetch("id")} to retry a stopped head; /prompt only takes over a head that is still routing.",
               ["agent_is_not_worker", "use_retry_head"]
             )
           end
@@ -7305,6 +7454,26 @@ module Meringue
       # `/prompt` (or a head's PromptAgent) aimed at a worker whose session cannot be replayed. The
       # instruction is carried into a fresh session on the same worktree and branch. When the
       # restart was already spent, the reply names the successor that holds the work.
+      def takeover_head_command(command_id, command_type, head, prompt)
+        return synchronized_state do
+          rejected_result(command_id, command_type, "Head #{head.fetch("id")} cannot be taken over without a replacement prompt.", ["prompt is required"])
+        end if blank?(prompt)
+
+        result = spawn_head(
+          command_id,
+          command_type,
+          "user_message" => prompt.to_s,
+          "log_message" => prompt.to_s,
+          "_log_source_type" => "user",
+          "_takeover_of_head_id" => head.fetch("id")
+        )
+        return result unless result.fetch("status", nil) == "accepted"
+
+        result.merge(
+          "message" => "Took over head #{head.fetch("id")} as head #{result.fetch("target_id")}."
+        )
+      end
+
       def continue_unreplayable_worker_session(command_id, command_type, agent, instruction)
         restart = restart_unreplayable_worker_session(agent.fetch("id"), trigger: "prompt", instruction: instruction)
         if restart.fetch("claimed", false) && restart.fetch("restarted", false)
@@ -7365,15 +7534,15 @@ module Meringue
             ["agent_not_found"]
           )
         end
-        # Heads are retried only through RetryHead. Reaching this branch means a caller bypassed
-        # `prompt_agent_command`, so the head contract is restated instead of turning the head into
-        # a worker session.
+        # Head takeovers are handled by `prompt_agent_command`, before this worker-only
+        # implementation is reached. Keep the defensive rejection for callers that bypass the
+        # command router or invoke the private method directly.
         if agent.fetch("type", nil) == "head"
           return rejected_result(
             command_id,
             command_type,
-            "Agent #{agent_id} is a head. Use /retry #{agent.fetch("id")} to retry it with a fresh head; /prompt only targets worker sessions.",
-            ["agent_is_not_worker", "use_retry_head"]
+            "Agent #{agent_id} is a head. Use /prompt #{agent.fetch("id")} to take over an active head or /retry it after it stops.",
+            ["agent_is_not_worker", "head_takeover_requires_command_router"]
           )
         end
         return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
@@ -12979,9 +13148,11 @@ module Meringue
       end
 
       def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0, user_message: nil, question_id: nil,
-                           selected_target: nil, retry_of: nil, completion_trigger: nil, input_submission_id: nil,
+                           selected_target: nil, takeover_of_head_id: nil, takeover_context: nil,
+                           retry_of: nil, completion_trigger: nil, input_submission_id: nil,
                            snapshot_issue_ids: [], snapshot_project_ids: [], snapshot_unapplied_head_ids: [], snapshot_counters: {})
         retry_of = nil unless retry_of.is_a?(Hash)
+        takeover_context = nil unless takeover_context.is_a?(Hash)
         completion_trigger = nil unless completion_trigger.is_a?(Hash)
         {
           "id" => head_id,
@@ -13018,12 +13189,16 @@ module Meringue
             "retry_of_head_id" => retry_of && retry_of.fetch("head_id", nil),
             "retry_case" => retry_of && retry_of.fetch("case", nil),
             "retry_strategy" => retry_of ? "respawn" : nil,
+            "takeover_of_head_id" => takeover_of_head_id,
+            "takeover_context" => takeover_context,
             "completion_trigger" => completion_trigger,
             "head_request" => {
               "user_message" => user_message,
               "input_submission_id" => input_submission_id,
               "question_id" => question_id,
               "selected_target" => selected_target,
+              "takeover_of_head_id" => takeover_of_head_id,
+              "takeover_context" => takeover_context,
               "retry_of_head_id" => retry_of && retry_of.fetch("head_id", nil)
             }.compact
           }.compact,
@@ -15373,6 +15548,155 @@ module Meringue
         end
       end
 
+      def head_takeover_claimed_by?(agent, successor_id: nil)
+        return false unless agent.is_a?(Hash) && agent.fetch("type", nil) == "head"
+
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        return false unless metadata.is_a?(Hash)
+        return false unless metadata.fetch("head_takeover_state", nil).to_s == "claimed"
+
+        successor_id.nil? || metadata.fetch("head_takeover_by_head_id", nil).to_s == successor_id.to_s
+      end
+
+      def complete_head_takeover!(previous_head_id, successor_head_id)
+        synchronized_state do
+          state = normalized_state
+          previous = find_agent(state, previous_head_id)
+          successor = find_agent(state, successor_head_id)
+          unless previous && successor && head_takeover_claimed_by?(previous, successor_id: successor_head_id)
+            return { "changed" => false, "reason" => "takeover_target_missing", "log_entry_ids" => [] }
+          end
+
+          now = timestamp
+          session_release = release_head_session!(previous, reason: "head_taken_over", now: now)
+          remove_agent_from_active_state!(state, previous_head_id)
+          successor_metadata = successor.fetch("harness_metadata", {}) || {}
+          successor["harness_metadata"] = successor_metadata.merge(
+            "takeover_state" => "completed",
+            "takeover_completed_at" => now,
+            "takeover_previous_head_id" => previous_head_id
+          )
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: successor_head_id,
+            level: "info",
+            message: "Head #{successor_head_id} took over the still-routing request from head #{previous_head_id}.",
+            details: {
+              "head_id" => successor_head_id,
+              "takeover_of_head_id" => previous_head_id,
+              "routing_action" => "head_takeover",
+              "previous_head_removed_from_active_tree" => true,
+              "previous_head_session_released" => session_release.fetch("changed", false),
+              "previous_head_session_release_reason" => session_release.fetch("reason", nil)
+            }.compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+          {
+            "changed" => true,
+            "previous_head_id" => previous_head_id,
+            "successor_head_id" => successor_head_id,
+            "session_release" => session_release,
+            "log_entry_ids" => log_ids
+          }
+        end
+      end
+
+      def rollback_head_takeover!(previous_head_id, successor_head_id, reason:)
+        synchronized_state do
+          state = normalized_state
+          previous = find_agent(state, previous_head_id)
+          next unless previous && head_takeover_claimed_by?(previous, successor_id: successor_head_id)
+
+          now = timestamp
+          metadata = previous.fetch("harness_metadata", {}) || {}
+          metadata = metadata.dup
+          metadata.delete("head_takeover_state")
+          metadata.delete("head_takeover_by_head_id")
+          metadata.delete("head_takeover_claimed_at")
+          metadata["head_takeover_rollback_at"] = now
+          metadata["head_takeover_rollback_reason"] = reason.to_s
+          previous["harness_metadata"] = metadata
+          previous["status"] = "completed" if metadata.fetch("head_result", nil).is_a?(Hash)
+          previous["updated_at"] = now
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: successor_head_id,
+            level: "warning",
+            message: "Head takeover by #{successor_head_id} did not start; head #{previous_head_id} remains available.",
+            details: {
+              "head_id" => successor_head_id,
+              "takeover_of_head_id" => previous_head_id,
+              "routing_action" => "head_takeover_rollback",
+              "reason" => reason.to_s
+            }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          log_ids
+        end
+      rescue StandardError
+        nil
+      end
+
+      def defer_head_result_for_takeover(command_id, command_type, state, head, head_result)
+        metadata = head.fetch("harness_metadata", {}) || {}
+        metadata = metadata.dup
+        if metadata.fetch("head_result_apply_state", nil).to_s == "takeover_pending" &&
+           metadata.fetch("head_result", nil).is_a?(Hash)
+          return accepted_result(
+            command_id,
+            command_type,
+            head.fetch("id"),
+            "Head #{head.fetch("id")} was taken over; its result will not be routed separately.",
+            {
+              "head_id" => head.fetch("id"),
+              "skipped" => "head_taken_over",
+              "takeover_head_id" => metadata.fetch("head_takeover_by_head_id")
+            },
+            []
+          )
+        end
+        metadata["title"] = head_result.fetch("title")
+        metadata["summary"] = head_result.fetch("summary")
+        metadata["response"] = present_string(head_result.fetch("response", nil))
+        metadata["head_result"] = deep_copy(head_result)
+        metadata["head_result_fingerprint"] = head_result_fingerprint(head_result)
+        metadata["head_result_apply_state"] = "takeover_pending"
+        metadata["head_result_takeover_deferred_at"] ||= timestamp
+        head["harness_metadata"] = metadata.compact
+        head["status"] = "completed"
+        head["updated_at"] = timestamp
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: head.fetch("id"),
+          level: "info",
+          message: "Deferred the result from head #{head.fetch("id")} because head #{metadata.fetch("head_takeover_by_head_id")} took over its request.",
+          details: {
+            "head_id" => head.fetch("id"),
+            "takeover_head_id" => metadata.fetch("head_takeover_by_head_id"),
+            "routing_action" => "head_takeover_defer_result"
+          }
+        )
+        touch_state!(state)
+        store.save(state)
+        accepted_result(
+          command_id,
+          command_type,
+          head.fetch("id"),
+          "Head #{head.fetch("id")} was taken over; its result will not be routed separately.",
+          {
+            "head_id" => head.fetch("id"),
+            "skipped" => "head_taken_over",
+            "takeover_head_id" => metadata.fetch("head_takeover_by_head_id")
+          },
+          log_ids
+        )
+      end
+
       def mark_head_session_unavailable!(head_id, reason:)
         synchronized_state do
           state = normalized_state
@@ -15421,10 +15745,8 @@ module Meringue
         already_released = metadata.fetch("head_session_state", nil) == HEAD_SESSION_STATE_RELEASED
         killed_session = false
         if !already_released && present_string(agent.fetch("harness", nil))
-          kill_session_safely(session_ref_from_agent(agent), agent: agent)
-          killed_session = !!agent_has_session_reference?(agent)
+          killed_session = close_head_session_safely(agent)
         end
-
         agent["harness_metadata"] = metadata.merge(
           "head_session_state" => HEAD_SESSION_STATE_RELEASED,
           "head_session_released_at" => present_string(metadata.fetch("head_session_released_at", nil)) || now,
@@ -15437,6 +15759,19 @@ module Meringue
           "killed_session" => killed_session,
           "reason" => reason
         }
+      end
+
+      def close_head_session_safely(agent)
+        session_ref = session_ref_from_agent(agent)
+        runner = active_head_runner(provider: agent.fetch("harness", nil))
+        if runner.respond_to?(:close_head_session)
+          return !!runner.close_head_session(session_ref)
+        end
+
+        kill_session_safely(session_ref, agent: agent)
+        !!agent_has_session_reference?(agent)
+      rescue StandardError
+        false
       end
 
       def mark_head_errored(head_id, error, release_session: false)
@@ -16152,6 +16487,7 @@ module Meringue
       def reconcile_candidate?(agent)
         metadata = agent.fetch("harness_metadata", {}) || {}
         return false if agent.fetch("type", nil) == "head" && present_string(metadata.fetch("head_result_applied_at", nil))
+        return false if head_takeover_claimed_by?(agent)
         # A head belongs to the instance that spawned it. Completing another live
         # instance's head would apply its result a second time.
         return false if agent.fetch("type", nil) == "head" && owned_by_other_live_instance?(agent)
@@ -17307,6 +17643,7 @@ module Meringue
           snapshot: snapshot,
           question_id: request.fetch("question_id", nil),
           selected_target: request.fetch("selected_target", nil),
+          takeover_context: request.fetch("takeover_context", nil),
           cwd: cwd,
           state_path: store.path,
           github_support: github_support_enabled?(snapshot)
@@ -17339,7 +17676,9 @@ module Meringue
         {
           "user_message" => user_message,
           "question_id" => present_string(request.fetch("question_id", nil)),
-          "selected_target" => request.fetch("selected_target", nil)
+          "selected_target" => request.fetch("selected_target", nil),
+          "takeover_of_head_id" => present_string(request.fetch("takeover_of_head_id", nil)),
+          "takeover_context" => request.fetch("takeover_context", nil)
         }.compact
       end
 
@@ -17506,12 +17845,14 @@ module Meringue
       end
 
       def mark_agent_errored_from_poll(poll_result)
-        synchronized_state do
+        takeover_previous_head_id = nil
+        result = synchronized_state do
           state = normalized_state
           agent = find_agent(state, poll_result.fetch("agent_id"))
           return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless agent
           return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if %w[completed killed].include?(agent.fetch("status", nil))
 
+          takeover_previous_head_id = present_string(agent.dig("harness_metadata", "takeover_of_head_id")) if agent.fetch("type", nil) == "head"
           now = timestamp
           reconcile = terminal_reconcile_error_model(poll_result, now)
           # Recording the same terminal failure twice is not a state change: it would bump
@@ -17561,6 +17902,10 @@ module Meringue
           store.save(state)
           poll_result.merge("changed" => true, "log_entry_ids" => log_ids)
         end
+        if takeover_previous_head_id
+          rollback_head_takeover!(takeover_previous_head_id, poll_result.fetch("agent_id"), reason: "successor_head_errored")
+        end
+        result
       end
 
       # Same record, same terminal failure: nothing new to persist or tell the user about.

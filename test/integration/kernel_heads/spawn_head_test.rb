@@ -7,6 +7,37 @@ require "support/kernel_heads_support"
 # A head only ever proposes work; nothing it returns changes state until the
 # kernel applies its HeadResult.
 class KernelHeadsSpawnHeadTest < KernelHeadsTestCase
+  class FailingSuccessorSessionRunner < KernelHeadsSupport::SessionHeadRunner
+    def spawn_head_session(**kwargs)
+      raise "successor session refused" unless spawned_sessions.empty?
+
+      super
+    end
+  end
+
+  class BlockingSuccessorSessionRunner < KernelHeadsSupport::SessionHeadRunner
+    def initialize
+      super
+      @entered = Queue.new
+      @release = Queue.new
+    end
+
+    def spawn_head_session(**kwargs)
+      unless spawned_sessions.empty?
+        @entered << true
+        @release.pop
+      end
+      super
+    end
+
+    def wait_for_successor
+      @entered.pop
+    end
+
+    def release_successor
+      @release << true
+    end
+  end
   def test_head_ids_are_assigned_sequentially_by_the_kernel
     first = spawn_head!("First request")
     second = spawn_head!("Second request")
@@ -198,6 +229,124 @@ class KernelHeadsSpawnHeadTest < KernelHeadsTestCase
     assert_equal "unavailable", metadata.fetch("head_session_state")
     assert_equal "head_runner_has_no_session", metadata.fetch("head_session_note")
     assert_nil find_agent_record(head_id).fetch("harness_session_id")
+  end
+
+  def test_prompting_a_still_routing_head_starts_a_successor_with_its_request_context
+    session_runner = KernelHeadsSupport::SessionHeadRunner.new
+    session_engine = build_engine(head_runner: session_runner, async_heads: true)
+    first = apply_command("SpawnHead", { "user_message" => "Build the setup flow" }, target_engine: session_engine)
+    first_head_id = first.fetch("target_id")
+
+    takeover = apply_command(
+      "PromptAgent",
+      { "agent_id" => first_head_id, "prompt" => "Make the theme preview happen before harness selection." },
+      target_engine: session_engine
+    )
+
+    assert_equal "accepted", takeover.fetch("status"), takeover.inspect
+    successor_id = takeover.fetch("target_id")
+    refute_equal first_head_id, successor_id
+    assert_equal "Took over head #{first_head_id} as head #{successor_id}.", takeover.fetch("message")
+
+    state = session_engine.list_all
+    refute state.fetch("agents").any? { |agent| agent.fetch("id") == first_head_id }, "the predecessor must leave active state"
+    successor = state.fetch("agents").find { |agent| agent.fetch("id") == successor_id }
+    assert_equal first_head_id, successor.dig("harness_metadata", "takeover_of_head_id")
+    assert_equal first_head_id, successor.dig("harness_metadata", "takeover_previous_head_id")
+    assert_equal "active", successor.dig("harness_metadata", "head_session_state")
+
+    context = session_runner.spawned_contexts.fetch(1).to_prompt_h
+    takeover_context = context.dig("routing_context", "head_takeover")
+    assert_equal first_head_id, takeover_context.fetch("previous_head_id")
+    assert_equal "Build the setup flow", takeover_context.fetch("original_user_message")
+    assert_equal "Make the theme preview happen before harness selection.", context.fetch("user_message")
+    assert_includes takeover_context.fetch("guidance"), "Do not duplicate durable commands"
+    assert_includes session_runner.closed_sessions.map { |ref| ref.fetch("session_id") }, "fake-head-session-1"
+  end
+
+  def test_predecessor_result_is_deferred_while_takeover_is_starting
+    project_id = add_project!
+    session_runner = BlockingSuccessorSessionRunner.new
+    session_engine = build_engine(head_runner: session_runner, async_heads: true)
+    first_head_id = apply_command(
+      "SpawnHead",
+      { "user_message" => "Build the setup flow" },
+      target_engine: session_engine
+    ).fetch("target_id")
+
+    takeover_thread = Thread.new do
+      session_engine.apply(
+        "type" => "PromptAgent",
+        "payload" => { "agent_id" => first_head_id, "prompt" => "Use the theme-first flow." }
+      )
+    end
+    session_runner.wait_for_successor
+
+    old_result = session_engine.apply(
+      "type" => "ApplyHeadResult",
+      "payload" => {
+        "head_id" => first_head_id,
+        "head_result" => head_result(commands: [create_issue_command(project_id: project_id, title: "Must not duplicate")])
+      }
+    )
+
+    assert_equal "accepted", old_result.fetch("status")
+    assert_equal "head_taken_over", old_result.dig("result", "skipped")
+    assert_empty issues(current_state: session_engine.list_all), "the predecessor result must not create durable work"
+
+    session_runner.release_successor
+    takeover_thread.value
+    assert_empty issues(current_state: session_engine.list_all)
+  end
+
+  def test_failed_successor_start_rolls_back_the_takeover_claim
+    session_runner = FailingSuccessorSessionRunner.new
+    session_engine = build_engine(head_runner: session_runner, async_heads: true)
+    first_head_id = apply_command(
+      "SpawnHead",
+      { "user_message" => "Build the setup flow" },
+      target_engine: session_engine
+    ).fetch("target_id")
+
+    result = apply_command(
+      "PromptAgent",
+      { "agent_id" => first_head_id, "prompt" => "Try a replacement." },
+      target_engine: session_engine
+    )
+
+    assert_equal "failed", result.fetch("status")
+    state = session_engine.list_all
+    predecessor = state.fetch("agents").find { |agent| agent.fetch("id") == first_head_id }
+    refute_nil predecessor
+    assert_equal "working", predecessor.fetch("status")
+    refute predecessor.fetch("harness_metadata").key?("head_takeover_state")
+    heads = state.fetch("agents").select { |agent| agent.fetch("type") == "head" }
+    assert_equal [first_head_id, "H2"], heads.map { |agent| agent.fetch("id") }
+    assert_equal "errored", heads.find { |agent| agent.fetch("id") == "H2" }.fetch("status")
+  end
+
+  def test_only_one_successor_can_claim_a_still_routing_head
+    session_runner = KernelHeadsSupport::SessionHeadRunner.new
+    session_engine = build_engine(head_runner: session_runner, async_heads: true)
+    first_head_id = apply_command(
+      "SpawnHead",
+      { "user_message" => "Build the setup flow" },
+      target_engine: session_engine
+    ).fetch("target_id")
+
+    results = 2.times.map do |index|
+      Thread.new do
+        session_engine.apply(
+          "type" => "PromptAgent",
+          "command_id" => "takeover-#{index}",
+          "payload" => { "agent_id" => first_head_id, "prompt" => "Replacement #{index}." }
+        )
+      end
+    end.map(&:value)
+
+    assert_equal ["accepted", "rejected"], results.map { |result| result.fetch("status") }.sort
+    assert_equal 1, session_engine.list_all.fetch("agents").count { |agent| agent.fetch("type") == "head" }
+    assert_equal 2, session_runner.spawned_sessions.length
   end
 
   def test_async_heads_defer_result_application_to_polling

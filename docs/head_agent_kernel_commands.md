@@ -588,7 +588,7 @@ A head is stateless per user message, so a head that stops without routing the w
 - `/retry H<n>` (`RetryHead` with a head id)
 - double-clicking a retryable `retry me` head row in the AgentTree, which submits the same `/retry H<n>` command
 
-Selecting the failed head and typing is ordinary chat, not retry. `/prompt` is worker-only and rejects head ids with advice to use `/retry`.
+Selecting the failed head and typing is ordinary chat, not retry. `/prompt H<n> "<message>"` takes over a head only while it is still routing; a stopped head remains on `/retry H<n>`.
 
 Three statuses leave a request unrouted, and all three are retryable: `errored` (its turn or session died), `killed` (the user stopped it), and `blocked` (its result was applied, but the kernel rejected or failed part of the batch). A `blocked` head is the common stranded case, because a rejected command means the work behind it never happened.
 
@@ -601,7 +601,7 @@ A retry does not re-run journal entries, it re-routes the request. So the fresh 
 
 So retrying a partially applied head is safe: the issue that was created is reused rather than recreated, and only the missing steps are routed. Lineage is recorded on the retry head (`harness_metadata.retry_of_head_id`, `head_retry_count`) and in the log once as `Retrying head H13 as head H14: <reason>. Re-running its original request with a fresh head.` The old head row is removed from active state instead of lingering as `retried as H14`.
 
-The head contract is unchanged by a retry: the retried head still returns `HeadResult` JSON, still proposes commands instead of doing the work, and is never turned into a worker. Retrying is a user recovery action, so a head may not propose `RetryHead` or `PromptAgent` on another head; those commands are rejected with `command_not_proposable_by_head` or `head_cannot_prompt_head`.
+The head contract is unchanged by a retry or takeover: the replacement still returns `HeadResult` JSON, still proposes commands instead of doing the work, and is never turned into a worker. These are user routing actions; a head may not propose `RetryHead` or `PromptAgent` on another head. Such commands are rejected with `command_not_proposable_by_head` or `head_cannot_prompt_head`.
 
 Rejection codes, all of which should now be rare:
 
@@ -1093,7 +1093,9 @@ Choose the mode deliberately:
 - `steer`: inject an urgent correction into active work before its next model call.
 - `follow_up`: queue a related next step until active work settles.
 
-`agent_id` must name a worker. Head ids (`H<n>`) are rejected here; retry a stranded head with `/retry H<n>`/`RetryHead`, which starts a fresh head instead of prompting the old one. A head-proposed `PromptAgent` on a head is rejected with `head_cannot_prompt_head`, whatever status the target head is in.
+`agent_id` normally names a worker. A user `PromptAgent` targeting a queued, working, or idle head starts a fresh successor head, carrying the predecessor's recorded request and compact routing context, and releases the predecessor only after the successor session is recorded. This is a takeover, not a second application of the predecessor's result. Head ids that are stopped or already applying a result are rejected; use `/retry H<n>` for a stranded head. A head-proposed `PromptAgent` on a head is always rejected with `head_cannot_prompt_head`.
+
+A takeover claims the predecessor while the successor session is being created. The predecessor is not polled or allowed to apply a result during that claim. Once the successor session is recorded, the kernel releases the predecessor session and removes its transient head record. If successor startup fails, the claim is rolled back; if a predecessor result arrives during the handoff, it is retained only as recovery metadata and never applies its commands. The successor persists the compact takeover context so restart recovery does not lose the original request or guidance.
 
 Killed and errored workers are not resumable through this command, with one deliberate exception: a worker that errored because its harness turn was cut short by a transport failure (a dropped wifi connection, a provider request that failed mid-turn, a session that ended before producing a result). Those records carry `harness_metadata.settle_failure`, and the routing context marks them `"stopped_without_finishing": true` with `"resumable": true` and a `status_reason`. Prompting one with `normal` is how its in-progress work is recovered, because its session, worktree, and branch are all still intact. For every other errored or killed worker, spawn a related or replacement worker on the same issue instead.
 

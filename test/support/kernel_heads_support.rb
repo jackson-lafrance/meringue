@@ -33,12 +33,13 @@ module KernelHeadsSupport
   # Head runner that owns a fake head session for the head's lifetime, exercising the
   # spawn_head_session/await_head_result/close_head_session seam without a real harness.
   class SessionHeadRunner < StubHeadRunner
-    attr_reader :spawned_sessions, :closed_sessions
+    attr_reader :spawned_sessions, :closed_sessions, :spawned_contexts
 
     def initialize(head_result: nil)
       super(head_result: head_result)
       @spawned_sessions = []
       @closed_sessions = []
+      @spawned_contexts = []
     end
 
     def spawn_head_session(user_message:, snapshot:, question_id: nil, context: nil)
@@ -52,6 +53,7 @@ module KernelHeadsSupport
         "metadata" => { "user_message" => user_message, "question_id" => question_id }
       }
       @spawned_sessions << session_ref
+      @spawned_contexts << context
       session_ref
     end
 
