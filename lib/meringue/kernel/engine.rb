@@ -1887,18 +1887,18 @@ module Meringue
       end
 
       def record_user_kernel_command_output(input:, command_results: [])
-        lines = kernel_command_output_lines(command_results)
-        return [] if lines.empty?
+        bodies = command_output_bodies(command_results)
+        return [] if bodies.empty?
 
         synchronized_state do
           state = normalized_state
-          log_ids = lines.flat_map do |line|
+          log_ids = bodies.map do |body, _result|
             append_log(
               state,
               source_type: "kernel",
               source_id: nil,
               level: "info",
-              message: "Command output: #{line}",
+              message: "Command output: #{body}",
               details: {
                 "input" => input.to_s,
                 "kind" => "kernel_command_output",
@@ -2347,6 +2347,21 @@ module Meringue
 
       def command_result_already_logged?(result)
         Array(result.fetch("log_entry_ids", [])).any?
+      end
+
+      # One command result renders as one visible log entry: its summary line and any
+      # continuation detail lines are joined with newlines so they share a single header
+      # (and one attribution) instead of producing a separate log row per line. Commands
+      # that already logged their own outcome are skipped, matching `kernel_command_output_lines`.
+      def command_output_bodies(command_results)
+        Array(command_results).filter_map do |result|
+          next nil unless result.is_a?(Hash)
+
+          lines = kernel_command_output_lines([result])
+          next nil if lines.empty?
+
+          [lines.join("\n"), result]
+        end
       end
 
       def kernel_command_output_detail_lines(command_type, result)
@@ -4912,24 +4927,20 @@ module Meringue
       # SpawnWorker, and every rejection) is not repeated, while read-only commands are surfaced
       # here instead of staying buried inside the ApplyHeadResult envelope.
       def append_head_command_output_logs(state, head_id, command_results)
-        Array(command_results).flat_map do |result|
-          next [] unless result.is_a?(Hash)
-
-          kernel_command_output_lines([result]).flat_map do |line|
-            append_log(
-              state,
-              source_type: "kernel",
-              source_id: head_id.to_s,
-              level: result.fetch("status", nil) == "accepted" ? "info" : "warning",
-              message: "Command output: #{line}",
-              details: {
-                "head_id" => head_id.to_s,
-                "command_type" => result.fetch("command_type", nil),
-                "kind" => "kernel_command_output",
-                "presentation" => "cmd"
-              }.merge(head_command_author_details(head_id)).compact
-            )
-          end
+        command_output_bodies(command_results).map do |body, result|
+          append_log(
+            state,
+            source_type: "kernel",
+            source_id: head_id.to_s,
+            level: result.fetch("status", nil) == "accepted" ? "info" : "warning",
+            message: "Command output: #{body}",
+            details: {
+              "head_id" => head_id.to_s,
+              "command_type" => result.fetch("command_type", nil),
+              "kind" => "kernel_command_output",
+              "presentation" => "cmd"
+            }.merge(head_command_author_details(head_id)).compact
+          )
         end
       end
 
