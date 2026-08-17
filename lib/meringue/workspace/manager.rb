@@ -17,10 +17,11 @@ module Meringue
       # worktree list. None of them touch a working tree, so 60s is already generous and a
       # command that spends longer than that reading refs really is stuck.
       DEFAULT_COMMAND_TIMEOUT = 60
-      # `git worktree add` is not plumbing: it checks the whole tree out. shop/world is ~478k
-      # files, which is minutes of honest work on a warm disk and longer on a cold one, so one
-      # flat 60s budget for both `git rev-parse` and a half-million-file checkout is what turned a
-      # slow provisioning into a dead worker. The checkout is therefore bounded by two independent
+      # `git worktree add` is not plumbing: it checks the whole tree out. A large monorepo is
+      # hundreds of thousands of files, which is minutes of honest work on a warm disk and longer
+      # on a cold one, so one flat 60s budget for both `git rev-parse` and a half-million-file
+      # checkout is what turned a slow provisioning into a dead worker. The checkout is therefore
+      # bounded by two independent
       # limits instead of one:
       #
       #   * DEFAULT_CHECKOUT_STALL_TIMEOUT - the real bound. Git reports checkout progress on
@@ -67,7 +68,23 @@ module Meringue
       RECOVERY_RETRY = "retry"
       RECOVERY_RESUME = "resume"
       RECOVERY_NONE = "none"
-      # Some global git configs (Shopify's `dev` config among them) enable core.fsmonitor. Git then
+      # When a project declares no sparse profile, a large bare source still materializes the full
+      # tree per isolated worker. To avoid multi-minute provisioning on such sources, Meringue
+      # synthesizes a generic root-files-only sparse profile (no project-specific paths) once the
+      # packed object count crosses this threshold. The count is read from pack `.idx` footers in
+      # O(number-of-packs), so the gate itself never scans every object. Operators can opt out via
+      # `[workspace] default_bare_checkout_mode = "full"` or raise/lower the threshold.
+      DEFAULT_BARE_SPARSE_OBJECT_THRESHOLD = 1_000_000
+      DEFAULT_BARE_CHECKOUT_MODE = "sparse"
+      BARE_FULL_CHECKOUT_MODE = "full"
+      BARE_DEFAULT_PROFILE_NAME = "bare-default-root"
+      # `/*` matches every entry directly under the root; `!/*/` negates all root
+      # directories. In non-cone mode the result is root-level files only (README,
+      # manifests, etc.) with every subdirectory skipped until the worker expands
+      # its working set. The pair is fully generic: it carries no project-specific
+      # path and makes zero layout assumptions.
+      BARE_DEFAULT_SPARSE_PATTERNS = ["/*", "!/*/"].freeze
+      # Some global git configs (a shared developer config among them) enable core.fsmonitor. Git then
       # starts a `git fsmonitor--daemon` for every new worktree and blocks on that daemon's answer
       # before it can read the new index. `git worktree add` runs `git reset --hard` internally, so
       # a daemon that never answers hangs provisioning until the command timeout kills it and the
@@ -237,18 +254,22 @@ module Meringue
           root_path: section.fetch("root_path", root_path),
           command_timeout: section.fetch("git_command_timeout", DEFAULT_COMMAND_TIMEOUT),
           checkout_stall_timeout: section.fetch("worktree_stall_timeout", DEFAULT_CHECKOUT_STALL_TIMEOUT),
-          checkout_timeout: section.fetch("worktree_checkout_timeout", DEFAULT_CHECKOUT_TIMEOUT)
+          checkout_timeout: section.fetch("worktree_checkout_timeout", DEFAULT_CHECKOUT_TIMEOUT),
+          bare_sparse_object_threshold: section.fetch("bare_sparse_object_threshold", DEFAULT_BARE_SPARSE_OBJECT_THRESHOLD),
+          default_bare_checkout_mode: section.fetch("default_bare_checkout_mode", DEFAULT_BARE_CHECKOUT_MODE)
         )
       end
 
       attr_reader :root_path, :command_timeout, :checkout_stall_timeout, :checkout_timeout, :cleanup_timeout,
-                  :progress_interval
+                  :progress_interval, :bare_sparse_object_threshold, :default_bare_checkout_mode
 
       def initialize(root_path: DEFAULT_ROOT, command_timeout: DEFAULT_COMMAND_TIMEOUT,
                      checkout_stall_timeout: DEFAULT_CHECKOUT_STALL_TIMEOUT,
                      checkout_timeout: DEFAULT_CHECKOUT_TIMEOUT,
                      cleanup_timeout: DEFAULT_CLEANUP_TIMEOUT,
-                     progress_interval: PROGRESS_REPORT_INTERVAL)
+                     progress_interval: PROGRESS_REPORT_INTERVAL,
+                     bare_sparse_object_threshold: DEFAULT_BARE_SPARSE_OBJECT_THRESHOLD,
+                     default_bare_checkout_mode: DEFAULT_BARE_CHECKOUT_MODE)
         @root_path = File.expand_path(root_path)
         @command_timeout = positive_float(command_timeout, DEFAULT_COMMAND_TIMEOUT)
         @checkout_stall_timeout = positive_float(checkout_stall_timeout, DEFAULT_CHECKOUT_STALL_TIMEOUT)
@@ -258,6 +279,11 @@ module Meringue
         @checkout_stall_timeout = @checkout_timeout if @checkout_stall_timeout > @checkout_timeout
         @cleanup_timeout = positive_float(cleanup_timeout, DEFAULT_CLEANUP_TIMEOUT)
         @progress_interval = positive_float(progress_interval, PROGRESS_REPORT_INTERVAL)
+        @bare_sparse_object_threshold = positive_integer(bare_sparse_object_threshold, DEFAULT_BARE_SPARSE_OBJECT_THRESHOLD)
+        @default_bare_checkout_mode = normalize_bare_checkout_mode(default_bare_checkout_mode)
+        # The large-bare determination reads pack idx footers once per bare source and is reused
+        # across plan/allocate calls, so a busy provisioning loop never re-runs count-objects.
+        @large_bare_source_cache = {}
       end
 
       # Hard ceiling on one allocate_worker_workspace call, including every retried candidate and
@@ -266,8 +292,9 @@ module Meringue
         checkout_timeout
       end
 
-      def plan_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil, profile: nil)
-        profile = resolve_profile(project_root, profile)
+      def plan_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil, profile: nil,
+                                 repository: nil)
+        profile = resolve_provisioning_profile(project_root, profile, repository: repository)
         safe_project_name = project_slug(File.basename(File.expand_path(project_root))) || "project"
         safe_task_name = DeliveryArtifactPolicy.slug(task_title)
         unique_suffix = Digest::SHA256.hexdigest(
@@ -322,18 +349,22 @@ module Meringue
                                     unavailable_paths: [], profile: nil)
         plan = nil
         set_allocation_deadline!(self.class.monotonic_now + allocation_budget)
-        profile = resolve_profile(project_root, profile)
+        project_path = canonical_path(project_root)
+        # Resolve the repository once and reuse it for both profile resolution and
+        # the rest of provisioning, so the allocation budget is not spent on a
+        # second `git rev-parse` pass before `git worktree add` runs.
+        repository = repository_context(project_path)
+        profile = resolve_provisioning_profile(project_root, profile, repository: repository)
         plan = plan_worker_workspace(
           project_root: project_root,
           project_id: project_id,
           issue_id: issue_id,
           agent_id: agent_id,
           task_title: task_title,
-          profile: profile
+          profile: profile,
+          repository: repository
         )
-        project_path = canonical_path(project_root)
         plan["project_root"] = project_path
-        repository = repository_context(project_path)
         return project_root_workspace(project_path, plan, "project root is not inside a git repository") unless repository
 
         git_root = repository.fetch("git_root")
@@ -2105,6 +2136,100 @@ module Meringue
         return profile if profile.is_a?(Meringue::Workspace::Profile)
 
         Meringue::Workspace::Profile.load(project_root)
+      end
+
+      # Resolve the profile that should drive provisioning for a worker. A
+      # project-declared profile (or an explicit one) always wins. When no
+      # profile is declared and the source is a large bare repository, a generic
+      # root-only cone sparse profile is synthesized so an isolated writable
+      # worker does not materialize the whole tree. The synthesis carries no
+      # project-specific paths: the non-cone patterns `/*` plus `!/*/`
+      # materialize root-level files only and skip every subdirectory.
+      # Operators opt out with `[workspace] default_bare_checkout_mode = "full"`
+      # to keep the legacy full checkout, and a project that declares any
+      # profile (sparse or full-checkout) always overrides the synthetic default.
+      def resolve_provisioning_profile(project_root, profile, repository: nil)
+        resolved = resolve_profile(project_root, profile)
+        return resolved if resolved
+        return nil if bare_full_checkout_mode?
+
+        repository ||= repository_context(canonical_path(project_root))
+        return nil unless repository && repository.fetch("bare")
+
+        git_root = repository.fetch("git_root")
+        return nil unless large_bare_source?(git_root)
+
+        default_bare_profile
+      rescue CommandTimeout
+        raise
+      rescue StandardError
+        nil
+      end
+
+      # The generic synthetic profile used when a large bare source declares no
+      # profile. Root-files-only (non-cone) keeps it project-agnostic: it
+      # materializes the root-level files (README, manifests) and skips every
+      # subdirectory until the worker expands its working set with
+      # `git sparse-checkout add <path>` or `git checkout HEAD -- <path>`.
+      def default_bare_profile
+        Meringue::Workspace::Profile.new(
+          name: BARE_DEFAULT_PROFILE_NAME,
+          sparse_cone: false,
+          sparse_patterns: BARE_DEFAULT_SPARSE_PATTERNS
+        )
+      end
+
+      def bare_full_checkout_mode?
+        default_bare_checkout_mode.to_s == BARE_FULL_CHECKOUT_MODE
+      end
+
+      # Whether a bare source is large enough that a full per-worker checkout is
+      # worth avoiding. The packed object count is read from `git
+      # count-objects -v`, whose `in-pack:` line is derived from pack `.idx`
+      # footers in O(number-of-packs), never O(objects). The result is memoized
+      # per git_root so repeated plan/allocate calls never re-run the command.
+      def large_bare_source?(git_root)
+        return false if bare_sparse_object_threshold <= 0
+
+        git_root = canonical_path(git_root)
+        return @large_bare_source_cache.fetch(git_root) if @large_bare_source_cache.key?(git_root)
+
+        count = packed_object_count(git_root)
+        large = count && count >= bare_sparse_object_threshold
+        @large_bare_source_cache[git_root] = large
+        large
+      end
+
+      def packed_object_count(git_root)
+        result = run_command("git", "-C", git_root, "count-objects", "-v", timeout: command_timeout)
+        return nil unless result.fetch("status").success?
+
+        loose = 0
+        packed = 0
+        result.fetch("stdout").to_s.each_line do |line|
+          if line =~ /^count:\s*(\d+)/
+            loose = Regexp.last_match(1).to_i
+          elsif line =~ /^in-pack:\s*(\d+)/
+            packed = Regexp.last_match(1).to_i
+          end
+        end
+        loose + packed
+      rescue CommandTimeout
+        raise
+      rescue StandardError
+        nil
+      end
+
+      def normalize_bare_checkout_mode(value)
+        mode = value.to_s.strip.downcase
+        mode == BARE_FULL_CHECKOUT_MODE ? BARE_FULL_CHECKOUT_MODE : DEFAULT_BARE_CHECKOUT_MODE
+      end
+
+      def positive_integer(value, fallback)
+        number = Integer(value)
+        number.positive? ? number : Integer(fallback)
+      rescue ArgumentError, TypeError
+        Integer(fallback)
       end
 
       def default_workspace_path(root, project_name, workspace_name)

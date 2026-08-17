@@ -515,6 +515,14 @@ unchanged; a shared read-only worker never uses a sparse profile. Allocator owne
 exactly-once safety, collision handling, bare-repository protections, and shared-read-only
 fallback behavior are preserved.
 
+When no profile is declared and the source is a large bare repository (packed object count above a
+configurable `[workspace] bare_sparse_object_threshold`, default 1,000,000), the manager
+synthesizes a generic root-files-only sparse profile (non-cone `/*` plus `!/*/`, no
+project-specific paths) so an isolated writable worker does not materialize the whole tree. The
+object count is read from `git count-objects -v` pack idx footers in O(number-of-packs). An
+operator opts out with `[workspace] default_bare_checkout_mode = "full"`, and any project-declared
+profile (sparse or full-checkout) always overrides the synthetic default.
+
 ## Harness integration
 Meringue must be designed as harness-independent orchestration software, even though the MVP only needs Pi.
 

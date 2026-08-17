@@ -336,6 +336,33 @@ handling, bare-repository protections, and shared-read-only fallback behavior ar
 shared read-only worker never uses a sparse profile, and a malformed or missing profile file falls
 back to the default full checkout.
 
+### Synthetic large-bare default
+
+A project that declares no profile still gets the full checkout on a normal (non-bare) source or
+on a small bare source. To stop a large bare repository from materializing the whole tree for every
+isolated writable worker, Meringue synthesizes a generic **root-files-only** sparse profile
+automatically when the source is bare and its packed object count crosses a threshold. The
+synthetic profile carries no project-specific paths: it uses the non-cone patterns `/*` (every
+root entry) and `!/*/` (negate all root directories), so only root-level files such as README and
+manifests are materialized and every subdirectory is skipped until the worker expands its working
+set with `git sparse-checkout add <path>` or `git checkout HEAD -- <path>`. The packed object count
+is read from `git count-objects -v` pack `.idx` footers, which is O(number-of-packs) and never
+scans every object, so the gate itself stays cheap.
+
+Two `[workspace]` knobs tune the behavior:
+
+- `bare_sparse_object_threshold` (default `1000000`) — the packed object count at which a bare
+  source with no declared profile switches to the synthetic sparse default. Raise it to narrow the
+  behavior to only the largest sources, or lower it to apply it sooner.
+- `default_bare_checkout_mode` (default `sparse`, or `full`) — set to `full` to opt out entirely
+  and keep the legacy full checkout on every bare source, regardless of size.
+
+A project that declares any profile (sparse or full-checkout) always overrides the synthetic
+default, so a project that wants the full checkout on a large bare repo can declare a full-checkout
+profile (no `sparse_patterns`) or an operator can set `default_bare_checkout_mode = "full"`.
+Allocator ownership, exactly-once safety, collision handling, and bare-repository protections are
+preserved: the synthetic profile flows through the same provisioning path as a declared one.
+
 Commands may be either an argv array (recommended) or a shell-quoted string such as `editor_command = "code --reuse-window"`. Strings are split into arguments, but are **never executed by a shell**: redirects, substitutions, pipes, semicolons, and worktree paths cannot become shell code. `editor_args` is a string or array of strings and defaults to `["."]`.
 
 Defaults, in precedence order:
