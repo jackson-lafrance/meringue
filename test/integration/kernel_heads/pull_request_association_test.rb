@@ -34,7 +34,10 @@ class KernelHeadsPullRequestAssociationTest < KernelHeadsTestCase
     presentation = Meringue::TUI::DeliveryPullRequest.for_id(state, issue.fetch("id"))
     assert Meringue::TUI::DeliveryPullRequest.openable?(presentation)
     assert_equal PULL_REQUEST_URL, presentation.fetch("url")
-    assert_equal "unverified", Meringue::TUI::OpenPullRequests.entries(state).fetch(0).fetch("status")
+    # A user-reported link is stored on the issue but is not a kernel-verified
+    # delivery PR, so the `/prs` picker does not list it until branch
+    # verification promotes it (`matched_by` becomes `workspace_branch`).
+    assert_empty Meringue::TUI::OpenPullRequests.entries(state)
   end
 
   def test_a_linked_pull_request_is_attached_when_continuing_an_existing_issue

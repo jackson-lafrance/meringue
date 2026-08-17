@@ -138,6 +138,63 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
     assert_equal %w[P1-I2 P1-I1], entries.map { |entry| entry.fetch("issue_id") }
   end
 
+  # Regression: a PR URL the user mentioned in a request is stored on the routed
+  # issue as a `matched_by: "user_request"` delivery record, but it has not been
+  # verified against a worker's delivery branch. Surfacing every user-reported
+  # PR as a delivery PR of whatever issue the head routed to made unrelated open
+  # PRs render as triplicate delivery PRs under one issue (all labelled with the
+  # issue's title). The `/prs` panel lists kernel-verified delivery PRs only.
+  def test_user_reported_pull_requests_are_not_listed_as_delivery_prs
+    issue = issue_record(
+      "P1-I4",
+      "title" => "Implement delivery monotonic-ID fixes",
+      "delivery_pull_requests" => [
+        pull_request("93333", "matched_by" => "user_request", "state" => "open"),
+        pull_request("97819", "matched_by" => "user_request", "state" => "open"),
+        pull_request("95975", "matched_by" => "user_request", "state" => "open"),
+        pull_request("90001", "matched_by" => "user_request", "state" => "merged"),
+        pull_request(
+          "98966",
+          "matched_by" => "workspace_branch",
+          "state" => "open",
+          "head_branch" => "meringue/monotonic-id-a1",
+          "title" => "Fix monotonic ID ordering on delivery"
+        )
+      ]
+    )
+    state = empty_state.merge("issues" => [issue])
+
+    entries = OpenPullRequests.entries(state)
+
+    # Only the kernel-verified record appears; the four user-reported links are
+    # not promoted to delivery PRs in the picker.
+    assert_equal %w[98966], entries.map { |entry| entry.fetch("number") }
+    assert_equal "Fix monotonic ID ordering on delivery", entries.first.fetch("title")
+    assert_equal "P1-I4", entries.first.fetch("issue_id")
+    assert_equal "open", entries.first.fetch("status")
+    # The user-reported links are still tracked on the issue record.
+    assert OpenPullRequests.tracked?(state)
+  end
+
+  # A user-reported link that the kernel later verifies (branch match) is
+  # promoted by overwriting `matched_by`, so it re-enters the picker.
+  def test_a_user_reported_pull_request_appears_once_kernel_verified
+    issue = issue_record(
+      "P1-I4",
+      "title" => "Implement delivery monotonic-ID fixes",
+      "delivery_pull_requests" => [
+        pull_request("97819", "matched_by" => "workspace_branch", "state" => "open",
+                     "head_branch" => "meringue/monotonic-id-a1", "title" => "Fix migrated ordering")
+      ]
+    )
+    state = empty_state.merge("issues" => [issue])
+
+    entries = OpenPullRequests.entries(state)
+
+    assert_equal %w[97819], entries.map { |entry| entry.fetch("number") }
+    assert_equal "Fix migrated ordering", entries.first.fetch("title")
+  end
+
   def test_ctrl_b_opens_a_picker_listing_every_open_pull_request
     picker = press_ctrl_b
 
