@@ -287,6 +287,82 @@ not a copy of the per-file failure stream. Prompting a blocked worker after clea
 same reservation with the new instruction; `/info <worker id>` reports the state, attempts, error,
 and next step.
 
+## Project-native sparse provisioning profiles
+
+By default Meringue materializes the full tree per worker with `git worktree add`. For a large
+monorepo that is minutes of avoidable checkout time plus slower downstream git operations. A
+project may instead declare a **sparse provisioning profile** so Meringue checks out only the
+working set the project's own tooling expects, using repository-approved patterns rather than
+model-inferred path narrowing.
+
+The profile is generic and project-configured, never hard-coded for a specific project. A project
+without a declared profile keeps the current full-checkout behavior unchanged. The profile file
+lives at the project root as `.meringue/workspace-profile.toml` and is parsed with Meringue's
+existing TOML parser (no new dependencies):
+
+```toml
+default_profile = "core"
+
+[profiles.core]
+sparse_cone = true
+sparse_patterns = ["/src/", "/docs/"]
+path_template = "{{root}}/{{project}}/{{task}}-{{suffix}}"
+validation_command = ["bin/validate-checkout"]
+```
+
+A single-profile file may use the flat `[profile]` table instead of the `[profiles.<name>]` map.
+All fields except `sparse_patterns` are optional:
+
+- `sparse_patterns` enables sparse provisioning when non-empty. `sparse_cone` selects cone mode.
+- `path_template` declares the project's native checkout layout. Placeholders are `{{root}}`,
+  `{{project}}`, `{{task}}`, and `{{suffix}}`; the default is
+  `{{root}}/{{project}}/{{task}}-{{suffix}}`. A template that escapes the managed workspace root
+  or contains unsafe characters is rejected and the default layout is used.
+- `validation_command` is an argv array run inside the checkout after provisioning. A non-zero
+  exit fails provisioning so a worker never launches in a checkout its project tooling rejects.
+
+When a sparse profile is active, Meringue provisions with `git worktree add --no-checkout`, writes
+per-worktree `core.sparseCheckout` / `core.sparseCheckoutCone` configuration (via the
+`extensions.worktreeConfig` extension so sparse settings stay isolated to each worktree and never
+leak into the shared repository config), writes the declared patterns to the worktree's
+`info/sparse-checkout`, and then materializes only that set with `read-tree -mu HEAD`. Bare
+repository sources are supported: a `--no-checkout` worktree created from a bare common
+repository additionally flips `core.bare=false` per-worktree so the sparse materialization runs.
+
+The selected profile name, path template, sparse record (cone, patterns, materialized file count),
+and validation result are persisted on the workspace plan (`harness_metadata.workspace_plan`) for
+reuse on retry and inspection via `/info`. Allocator ownership, exactly-once safety, collision
+handling, bare-repository protections, and shared-read-only fallback behavior are preserved: a
+shared read-only worker never uses a sparse profile, and a malformed or missing profile file falls
+back to the default full checkout.
+
+### Synthetic large-bare default
+
+A project that declares no profile still gets the full checkout on a normal (non-bare) source or
+on a small bare source. To stop a large bare repository from materializing the whole tree for every
+isolated writable worker, Meringue synthesizes a generic **root-files-only** sparse profile
+automatically when the source is bare and its packed object count crosses a threshold. The
+synthetic profile carries no project-specific paths: it uses the non-cone patterns `/*` (every
+root entry) and `!/*/` (negate all root directories), so only root-level files such as README and
+manifests are materialized and every subdirectory is skipped until the worker expands its working
+set with `git sparse-checkout add <path>` or `git checkout HEAD -- <path>`. The packed object count
+is read from `git count-objects -v` pack `.idx` footers, which is O(number-of-packs) and never
+scans every object, so the gate itself stays cheap.
+
+Two `[workspace]` knobs tune the behavior:
+
+- `bare_sparse_object_threshold` (default `1000000`) — the packed object count at which a bare
+  source with no declared profile switches to the synthetic sparse default. Raise it to narrow the
+  behavior to only the largest sources, or lower it to apply it sooner.
+- `default_bare_checkout_mode` (default `sparse`, or `full`) — set to `full` to opt out entirely
+  and keep the legacy full checkout on every bare source, regardless of size.
+
+A project that declares any profile (sparse or full-checkout) always overrides the synthetic
+default, so a project that wants the full checkout on a large bare repo can declare a full-checkout
+profile (no `sparse_patterns`) or an operator can set `default_bare_checkout_mode = "full"`.
+Allocator ownership, exactly-once safety, collision handling, and bare-repository protections are
+preserved: the synthetic profile flows through the same provisioning path as a declared one.
+
 Commands may be either an argv array (recommended) or a shell-quoted string such as `editor_command = "code --reuse-window"`. Strings are split into arguments, but are **never executed by a shell**: redirects, substitutions, pipes, semicolons, and worktree paths cannot become shell code. `editor_args` is a string or array of strings and defaults to `["."]`.
 
 Defaults, in precedence order:
