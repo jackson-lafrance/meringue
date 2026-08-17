@@ -86,8 +86,9 @@ module Meringue
       # settled; a queued, working, or blocked worker is not. A `supervision_lost` worker is
       # paused runtime, not settled: its transport owner disappeared but its durable session,
       # workspace, and queued work remain valid and recoverable, so it retains its record like
-      # other live work rather than being pruned.
-      PRUNE_BLOCKING_WORKER_STATUSES = %w[queued working blocked supervision_lost].freeze
+      # other live work rather than being pruned. A user-paused worker is equally
+      # recoverable and must remain visible until the user resumes or kills it.
+      PRUNE_BLOCKING_WORKER_STATUSES = %w[queued working paused blocked supervision_lost].freeze
       # How many times workspace provisioning is attempted for one worker before it stops being
       # retried automatically and starts waiting for a human. Two, not more: a retry of a stuck
       # `git worktree add` is cheap and usually works, but each attempt can legitimately take
@@ -184,6 +185,8 @@ module Meringue
         "dismiss_question" => "DismissQuestion",
         "modify_issue" => "ModifyIssue",
         "prompt_agent" => "PromptAgent",
+        "pause_worker" => "PauseWorker",
+        "resume_worker" => "ResumeWorker",
         "retry" => "RetryHead",
         "retry_head" => "RetryHead",
         "noop" => "NoOp",
@@ -228,6 +231,8 @@ module Meringue
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
+        ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."],
+        ["/worker resume <agent_id>", "Resume a paused worker session."],
         ["/prompt <agent_id> \"<message>\"", "Prompt an existing worker agent session."],
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/harness [head|worker] <pi|claude|antigravity>", "Select role-aware harness defaults for future agents; omit the role to update both."],
@@ -267,6 +272,7 @@ module Meringue
         AddProject ModifyProject CreateIssue ModifyIssue SpawnWorker PromptAgent SpawnHead NoOp
         CreateGoal ModifyGoal StopGoal ListGoals
         AskQuestion AnswerQuestion DismissQuestion
+        PauseWorker ResumeWorker
         Kill Prune Recount ClearState SetTheme SetHarness ReconcileSessions
       ].freeze
       HEAD_BLOCKED_COMMANDS = %w[ApplyHeadResult InvalidSlashCommand RetryHead SaveConfiguration].freeze
@@ -770,6 +776,353 @@ module Meringue
         end
       end
 
+      # Pause is a user-directed lifecycle transition, not a kill. The pause request is checkpointed
+      # before the harness call so a dashboard crash cannot make reconciliation race the abort. The
+      # harness session, transcript, workspace, and branch remain attached to the worker record.
+      def pause_worker(command_id, command_type, payload)
+        agent_id = value_at(payload, "agent_id", "AgentID", "agentId", "target_id", "TargetID")
+        return rejected_result(command_id, command_type, "Worker was not paused.", ["agent_id is required"]) if blank?(agent_id)
+
+        operation = synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          return rejected_result(command_id, command_type, "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
+          return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
+          return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"]) if agent.fetch("status", nil) == "killed"
+          return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["missing_harness_session"]) unless agent_has_session_reference?(agent)
+          return rejected_result(command_id, command_type, "Agent #{agent_id} is owned by its native interactive focus; return to the dashboard before pausing it.", ["interactive_focus_active"]) if interactive_focus_active?(agent)
+
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          if agent.fetch("status", nil) == "paused" && !metadata.fetch("pause_request", nil).is_a?(Hash)
+            return accepted_result(command_id, command_type, agent.fetch("id"), "Worker #{agent.fetch("id")} is already paused.", deep_copy(agent), [])
+          end
+
+          allowed = %w[working idle supervision_lost].include?(agent.fetch("status", nil).to_s)
+          unless allowed || metadata.fetch("pause_request", nil).is_a?(Hash)
+            return rejected_result(
+              command_id,
+              command_type,
+              "Worker #{agent_id} can only be paused after its session has started; it is #{agent.fetch("status", "unknown")}.",
+              ["worker_not_pauseable"]
+            )
+          end
+
+          request = metadata.fetch("pause_request", nil)
+          if request.is_a?(Hash) && operation_owned_by_other_live_instance?(request)
+            return accepted_result(command_id, command_type, agent.fetch("id"), "Pause for worker #{agent.fetch("id")} is already being delivered.", deep_copy(agent).merge("pause_queued" => true), [])
+          end
+          operation_id = request.is_a?(Hash) ? request.fetch("id", nil) : nil
+          operation_id = present_string(value_at(payload, "_pause_request_id", "pause_request_id")) ||
+                         operation_id || command_id.to_s.strip
+          operation_id = "pause:#{agent.fetch("id")}:#{SecureRandom.hex(8)}" if operation_id.empty?
+          request ||= {
+            "id" => operation_id,
+            "requested_at" => timestamp,
+            "requested_status" => agent.fetch("status", nil),
+            **instance_ownership_metadata
+          }.compact
+          metadata = metadata.merge("pause_request" => request)
+          agent["harness_metadata"] = metadata
+          agent["updated_at"] = timestamp
+          touch_state!(state)
+          store.save(state)
+          deep_copy(agent)
+        end
+        return operation unless operation.is_a?(Hash) && operation.fetch("type", nil) == "worker"
+
+        client = harness_client_for_agent(operation)
+        session_ref = agent_session_ref(operation)
+        updated_ref = session_ref
+        begin
+          # A supervision-lost session has no local transport to abort. Marking it paused is safe:
+          # resume will attach the same durable session instead of creating a new one.
+          updated_ref = client.abort_session(session_ref) unless operation.fetch("status", nil) == "supervision_lost"
+        rescue StandardError => e
+          # A proved child exit is already a stopped runtime; preserving the durable session and
+          # marking it paused is safer than asking reconciliation to classify the intentional stop
+          # as a completed or failed turn. Other abort failures leave the durable request in place
+          # for the next reconciliation pass rather than silently losing the user's pause intent.
+          if session_process_missing_error?(e)
+            updated_ref = session_ref.merge("is_streaming" => false)
+          else
+            return failed_result(command_id, command_type, "Could not pause worker #{agent_id}: #{sanitized_error_message(e)}", [e.class.name, sanitized_error_message(e)])
+          end
+        end
+
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, operation.fetch("id"))
+          return rejected_result(command_id, command_type, "Worker #{agent_id} no longer exists.", ["agent_not_found"]) unless current
+
+          metadata = current.fetch("harness_metadata", {}) || {}
+          request = metadata.fetch("pause_request", {})
+          return accepted_result(command_id, command_type, current.fetch("id"), "Worker #{current.fetch("id")} is already paused.", deep_copy(current), []) unless request.fetch("id", nil).to_s == operation.dig("harness_metadata", "pause_request", "id").to_s
+
+          merge_session_ref_into_agent!(current, updated_ref || session_ref)
+          now = timestamp
+          previous_status = request.fetch("requested_status", operation.fetch("status", "idle"))
+          pause_count = metadata.fetch("pause_count", 0).to_i + 1
+          current["status"] = "paused"
+          current["updated_at"] = now
+          current["harness_metadata"] = metadata.merge(
+            "paused" => true,
+            "pause_count" => pause_count,
+            "pause" => {
+              "state" => "paused",
+              "requested_at" => request.fetch("requested_at", now),
+              "paused_at" => now,
+              "previous_status" => previous_status,
+              "interrupted_turn" => previous_status == "working",
+              "session_preserved" => true
+            },
+            "pause_request" => nil,
+            "resume_request" => nil,
+            "is_streaming" => false
+          ).compact
+          refresh_worker_parent_statuses!(state, current, now)
+          message = "Paused worker #{current.fetch("id")}; its session and workspace were preserved."
+          log_ids = append_log(
+            state,
+            source_type: "worker",
+            source_id: current.fetch("id"),
+            level: "info",
+            message: message,
+            details: {
+              "agent_id" => current.fetch("id"),
+              "issue_id" => current.fetch("issue_id", nil),
+              "session_id" => current.fetch("harness_session_id", nil),
+              "session_preserved" => true,
+              "interrupted_turn" => previous_status == "working"
+            }.compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(command_id, command_type, current.fetch("id"), message, deep_copy(current), log_ids)
+        end
+      rescue StandardError => e
+        failed_result(command_id, command_type, "Could not pause worker #{agent_id}: #{sanitized_error_message(e)}", [e.class.name, sanitized_error_message(e)])
+      end
+
+      # Resume uses PromptAgent's exactly-once delivery bookkeeping with a durable request marker.
+      # If the dashboard exits after Pi accepts the continuation but before the worker record is
+      # finalized, reconciliation replays the same delivery id and PromptAgent recognizes it as
+      # already delivered rather than sending a second continuation.
+      def resume_worker(command_id, command_type, payload)
+        agent_id = value_at(payload, "agent_id", "AgentID", "agentId", "target_id", "TargetID")
+        return rejected_result(command_id, command_type, "Worker was not resumed.", ["agent_id is required"]) if blank?(agent_id)
+
+        prepared = synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          return rejected_result(command_id, command_type, "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
+          return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
+          return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"]) if agent.fetch("status", nil) == "killed"
+          return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["missing_harness_session"]) unless agent_has_session_reference?(agent)
+          return rejected_result(command_id, command_type, "Agent #{agent_id} is owned by its native interactive focus; return to the dashboard before resuming it.", ["interactive_focus_active"]) if interactive_focus_active?(agent)
+
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          request = metadata.fetch("resume_request", nil)
+          if request.is_a?(Hash)
+            owner = other_live_instance_pid(
+              request.fetch("owner_instance_id", nil),
+              request.fetch("owner_instance_pid", nil),
+              request.fetch("owner_instance_started_at", nil)
+            )
+            if owner
+              return accepted_result(command_id, command_type, agent.fetch("id"), "Resume for worker #{agent.fetch("id")} is already being delivered.", deep_copy(agent).merge("resume_queued" => true), [])
+            end
+          elsif !%w[paused supervision_lost].include?(agent.fetch("status", nil).to_s)
+            delivered_ids = Array(metadata.fetch("prompt_command_ids", [])).map(&:to_s)
+            if present_string(command_id) && delivered_ids.include?(command_id.to_s)
+              return accepted_result(command_id, command_type, agent.fetch("id"), "Worker #{agent.fetch("id")} was already resumed.", deep_copy(agent), [])
+            end
+            return rejected_result(command_id, command_type, "Worker #{agent_id} is not paused; it is #{agent.fetch("status", "unknown")}.", ["worker_not_paused"])
+          end
+
+          # A crash after the prompt was accepted leaves a working worker with its resume marker.
+          # Finalize that marker without sending another prompt.
+          if agent.fetch("status", nil) == "working" && request.is_a?(Hash)
+            return { "kind" => "finalize", "agent_id" => agent.fetch("id"), "request_id" => request.fetch("id") }
+          end
+
+          request_id = request.is_a?(Hash) ? request.fetch("id", nil) : nil
+          request_id = present_string(value_at(payload, "_resume_request_id", "resume_request_id")) || request_id || command_id.to_s.strip
+          request_id = "resume:#{agent.fetch("id")}:#{SecureRandom.hex(8)}" if request_id.empty?
+          request ||= {
+            "id" => request_id,
+            "requested_at" => timestamp,
+            "prompt" => WORKER_RESUME_PROMPT,
+            **instance_ownership_metadata
+          }.compact
+          metadata = metadata.merge("resume_request" => request)
+          agent["harness_metadata"] = metadata
+          agent["updated_at"] = timestamp
+          touch_state!(state)
+          store.save(state)
+          { "kind" => "deliver", "agent" => deep_copy(agent), "request" => request }
+        end
+
+        if prepared.fetch("kind", nil) == "finalize"
+          finalize_worker_resume(prepared.fetch("agent_id"), prepared.fetch("request_id"), command_id: command_id, command_type: command_type)
+          return accepted_result(command_id, command_type, prepared.fetch("agent_id"), "Resumed worker #{prepared.fetch("agent_id")}.", agent_record_snapshot(prepared.fetch("agent_id")), [])
+        end
+
+        agent = prepared.fetch("agent")
+        request = prepared.fetch("request")
+        prompt_payload = {
+          "agent_id" => agent.fetch("id"),
+          "prompt" => request.fetch("prompt", WORKER_RESUME_PROMPT),
+          "mode" => "normal",
+          "_resume_worker" => true,
+          "_resume_request_id" => request.fetch("id")
+        }
+        pending_prompt_id = request.fetch("pending_prompt_id", nil)
+        prompt_payload["_pending_prompt_id"] = pending_prompt_id if pending_prompt_id
+        result = prompt_agent(request.fetch("id"), command_type, prompt_payload)
+        if result.fetch("status", nil) == "accepted" && result.dig("result", "queued")
+          record_worker_resume_pending(agent.fetch("id"), request.fetch("id"), result)
+          return result.merge(
+            "target_id" => agent.fetch("id"),
+            "message" => "Queued resume for worker #{agent.fetch("id")}; it will continue when its session is available."
+          )
+        end
+
+        if result.fetch("status", nil) == "accepted"
+          finalize_worker_resume(agent.fetch("id"), request.fetch("id"), command_id: command_id, command_type: command_type)
+          current = agent_record_snapshot(agent.fetch("id")) || result.fetch("result", nil)
+          return result.merge(
+            "target_id" => agent.fetch("id"),
+            "message" => "Resumed worker #{agent.fetch("id")} using its existing session.",
+            "result" => current
+          )
+        end
+
+        clear_worker_resume_request(agent.fetch("id"), request.fetch("id"))
+        result
+      rescue StandardError => e
+        failed_result(command_id, command_type, "Could not resume worker #{agent_id}: #{sanitized_error_message(e)}", [e.class.name, sanitized_error_message(e)])
+      end
+
+      def clear_worker_pause_request(agent_id, request_id)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          next unless agent
+
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          request = metadata.fetch("pause_request", nil)
+          next unless request.is_a?(Hash) && request.fetch("id", nil).to_s == request_id.to_s
+
+          metadata.delete("pause_request")
+          agent["harness_metadata"] = metadata
+          agent["updated_at"] = timestamp
+          touch_state!(state)
+          store.save(state)
+        end
+      end
+
+      def record_worker_resume_pending(agent_id, request_id, result)
+        pending_id = result.dig("result", "pending_prompt_id")
+        return result unless pending_id
+
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          next result unless agent
+
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          request = metadata.fetch("resume_request", nil)
+          next result unless request.is_a?(Hash) && request.fetch("id", nil).to_s == request_id.to_s
+
+          request["pending_prompt_id"] = pending_id
+          metadata["resume_request"] = request
+          agent["harness_metadata"] = metadata
+          agent["updated_at"] = timestamp
+          touch_state!(state)
+          store.save(state)
+          result
+        end
+      end
+
+      def clear_worker_resume_request(agent_id, request_id)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          next unless agent
+
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          request = metadata.fetch("resume_request", nil)
+          next unless request.is_a?(Hash) && request.fetch("id", nil).to_s == request_id.to_s
+
+          metadata.delete("resume_request")
+          agent["harness_metadata"] = metadata
+          agent["updated_at"] = timestamp
+          touch_state!(state)
+          store.save(state)
+        end
+      end
+
+      def finalize_worker_resume(agent_id, request_id, command_id:, command_type:)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id)
+          return rejected_result(command_id, command_type, "Worker #{agent_id} no longer exists.", ["agent_not_found"]) unless agent
+
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          request = metadata.fetch("resume_request", nil)
+          return accepted_result(command_id, command_type, agent.fetch("id"), "Worker #{agent.fetch("id")} is already resumed.", deep_copy(agent), []) unless request.is_a?(Hash) && request.fetch("id", nil).to_s == request_id.to_s
+
+          now = timestamp
+          pause = metadata.fetch("pause", {})
+          pause = {} unless pause.is_a?(Hash)
+          metadata = metadata.merge(
+            "paused" => false,
+            "pause" => pause.merge("state" => "resumed", "resumed_at" => now),
+            "resume_request" => nil
+          ).compact
+          agent["harness_metadata"] = metadata
+          agent["updated_at"] = now
+          touch_state!(state)
+          store.save(state)
+          agent
+        end
+      end
+
+      # Reconciliation owns unfinished pause/resume side effects. The markers are intentionally
+      # separate from lifecycle status so a crash between state publication and harness I/O is
+      # repaired without polling a session that the user asked us to stop.
+      def reconcile_pending_worker_pauses
+        candidates = synchronized_state do
+          normalized_state.fetch("agents").filter_map do |agent|
+            next unless agent.fetch("type", nil) == "worker"
+            request = (agent.fetch("harness_metadata", {}) || {}).fetch("pause_request", nil)
+            next unless request.is_a?(Hash)
+            next if operation_owned_by_other_live_instance?(request)
+
+            deep_copy(agent)
+          end
+        end
+        candidates.map do |agent|
+          pause_worker(nil, "PauseWorker", "agent_id" => agent.fetch("id"), "_pause_request_id" => agent.dig("harness_metadata", "pause_request", "id"))
+        end
+      end
+
+      def reconcile_pending_worker_resumes
+        candidates = synchronized_state do
+          normalized_state.fetch("agents").filter_map do |agent|
+            next unless agent.fetch("type", nil) == "worker"
+            request = (agent.fetch("harness_metadata", {}) || {}).fetch("resume_request", nil)
+            next unless request.is_a?(Hash)
+            next if operation_owned_by_other_live_instance?(request)
+
+            deep_copy(agent)
+          end
+        end
+        candidates.map do |agent|
+          resume_worker(nil, "ResumeWorker", "agent_id" => agent.fetch("id"), "_resume_request_id" => agent.dig("harness_metadata", "resume_request", "id"))
+        end
+      end
+
       # Native Pi focus is a kernel-owned transport transition, not a TUI-side attach. The managed
       # RPC writer is quiesced before the workspace controller launches the interactive PTY, and a
       # durable marker makes reconciliation stand down while that PTY owns the session file.
@@ -1079,6 +1432,8 @@ module Meringue
           @head_result_mutex.synchronize { apply_head_result(command_id, command_type, payload) }
         elsif command_type == "ReconcileSessions"
           reconcile_sessions(command_id: command_id, command_type: command_type)
+        elsif %w[PauseWorker ResumeWorker].include?(command_type)
+          command_type == "PauseWorker" ? pause_worker(command_id, command_type, payload) : resume_worker(command_id, command_type, payload)
         elsif command_type == "Prune"
           @prune_mutex.synchronize { prune(command_id, command_type, payload) }
         elsif command_type == "SaveConfiguration"
@@ -1154,6 +1509,10 @@ module Meringue
           spawn_worker(command_id, command_type, payload)
         when "PromptAgent"
           prompt_agent(command_id, command_type, payload)
+        when "PauseWorker"
+          pause_worker(command_id, command_type, payload)
+        when "ResumeWorker"
+          resume_worker(command_id, command_type, payload)
         when "NoOp"
           no_op(command_id, command_type, payload)
         when "CreateGoal"
@@ -1310,6 +1669,9 @@ module Meringue
           if %w[completed killed].include?(agent.fetch("status", nil))
             return accepted_result(nil, "MarkWorkerCompleted", agent.fetch("id"), "Worker #{agent.fetch("id")} is already #{agent.fetch("status")}.", agent, [])
           end
+          if agent.fetch("status", nil) == "paused"
+            return accepted_result(nil, "MarkWorkerCompleted", agent.fetch("id"), "Worker #{agent.fetch("id")} is paused; completion will be observed after it resumes.", agent, [])
+          end
 
           merge_session_ref_into_agent!(agent, session_ref) if session_ref
           now = timestamp
@@ -1375,6 +1737,9 @@ module Meringue
           end
           if %w[completed killed].include?(agent.fetch("status", nil))
             return accepted_result(nil, "MarkWorkerSettleFailed", agent.fetch("id"), "Worker #{agent.fetch("id")} is already #{agent.fetch("status")}.", agent, [])
+          end
+          if agent.fetch("status", nil) == "paused"
+            return accepted_result(nil, "MarkWorkerSettleFailed", agent.fetch("id"), "Worker #{agent.fetch("id")} is paused; settle classification is deferred until it resumes.", agent, [])
           end
 
           raw_failure = settle_failure.is_a?(Hash) ? stringify_keys(settle_failure) : {}
@@ -1558,6 +1923,8 @@ module Meringue
         # reconciliation pass into a user-visible "Failed ReconcileSessions" error.
         normalized_state_changed = reconcile_step("normalize_state", false) { persist_normalized_state_if_changed }
         recovered_worker_results = reconcile_step("recover_worker_reservations", []) { recover_worker_reservations }
+        pause_results = reconcile_step("finish_worker_pauses", []) { reconcile_pending_worker_pauses }
+        resume_results = reconcile_step("finish_worker_resumes", []) { reconcile_pending_worker_resumes }
         pending_prompt_results = reconcile_step("deliver_pending_prompts", []) { deliver_pending_agent_prompts }
         recovered_results = reconcile_step("recover_head_results", []) { recover_unapplied_head_results }
         prune_result = reconcile_step("prune_killed_records", { "changed" => false, "log_entry_ids" => [] }) { prune_killed_records }
@@ -1602,6 +1969,8 @@ module Meringue
         changed_count += gate_check_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += deferred_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += recovered_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
+        changed_count += pause_results.count { |result| result.fetch("status", nil) == "accepted" }
+        changed_count += resume_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += pending_prompt_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += recovered_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += 1 if normalized_state_changed
@@ -1621,6 +1990,8 @@ module Meringue
             "pruned_agent_ids" => prune_result.fetch("removed_agent_ids", []),
             "pruned_project_ids" => prune_result.fetch("removed_project_ids", []),
             "recovered_worker_results" => recovered_worker_results,
+            "pause_results" => pause_results,
+            "resume_results" => resume_results,
             "pending_prompt_results" => pending_prompt_results,
             "recovered_head_results" => recovered_results,
             "delivery_pull_request_refreshes" => delivery_pr_refreshes,
@@ -1631,7 +2002,7 @@ module Meringue
             "goal_loop_steps" => goal_steps,
             "poll_results" => applied_results
           },
-          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + completion_continuation_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + gate_check_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) }).uniq
+          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pause_results.flat_map { |result| result.fetch("log_entry_ids", []) } + resume_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + completion_continuation_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + gate_check_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) }).uniq
         )
       rescue StandardError => e
         error = error_payload(e)
@@ -1720,6 +2091,24 @@ module Meringue
           "owner_instance_id" => instance_id,
           "owner_instance_started_at" => instance_started_at
         }.compact
+      end
+
+      def operation_owned_by_other_live_instance?(operation)
+        return false unless operation.is_a?(Hash)
+
+        !other_live_instance_pid(
+          operation.fetch("owner_instance_id", nil),
+          operation.fetch("owner_instance_pid", nil),
+          operation.fetch("owner_instance_started_at", nil)
+        ).nil?
+      end
+
+      def session_process_missing_error?(error)
+        return true if Harness.session_process_gone_error?(error)
+
+        error.class.name.to_s.end_with?("ProcessNotFoundError", "ProcessExitedError")
+      rescue StandardError
+        false
       end
 
       # Adds a durable reservation to this process's bounded executor. The in-memory set is only a
@@ -6901,6 +7290,14 @@ module Meringue
           )
         end
         return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        resume_prompt = truthy?(value_at(payload, "_resume_worker", "resume_worker"))
+        if agent.fetch("status", nil) == "paused" && !resume_prompt
+          return rejected_result(command_id, command_type, "Worker #{agent_id} is paused. Resume it before sending another prompt.", ["worker_paused"])
+        end
+        if metadata.fetch("pause_request", nil).is_a?(Hash) && !resume_prompt
+          return rejected_result(command_id, command_type, "Worker #{agent_id} is being paused; wait for the pause to finish before prompting it.", ["worker_pause_in_progress"])
+        end
         if worker_prune_cleanup_claimed?(agent)
           return rejected_result(
             command_id,
@@ -6917,7 +7314,6 @@ module Meringue
             ["interactive_focus_active"]
           )
         end
-        metadata = agent.fetch("harness_metadata", {}) || {}
         if metadata.fetch("interactive_handoff", nil).is_a?(Hash)
           metadata = metadata.dup
           metadata.delete("interactive_handoff")
@@ -7214,7 +7610,11 @@ module Meringue
 
         # The harness accepted the prompt, so the delivery is logged exactly once, here.
         remove_pending_prompts!(agent, pending_prompt_id: pending_prompt_id, command_id: command_id)
-        delivery_message = prompt_log_message(agent, delivered_mode, requested_mode: coerced ? mode : nil, note: mode_note)
+        delivery_message = if resume_prompt
+                             "Resumed worker #{agent.fetch("id")} using its existing session."
+                           else
+                             prompt_log_message(agent, delivered_mode, requested_mode: coerced ? mode : nil, note: mode_note)
+                           end
         log_ids = append_log(
           state,
           source_type: "kernel",
@@ -7228,7 +7628,8 @@ module Meringue
             "mode" => delivered_mode,
             "requested_mode" => mode,
             "prompt_mode_note" => mode_note,
-            "routing_action" => prompt_routing_action(delivered_mode),
+            "routing_action" => resume_prompt ? "resume_session" : prompt_routing_action(delivered_mode),
+            "resume" => resume_prompt,
             "is_streaming" => session_ref.fetch("is_streaming", false)
           }.compact
         )
@@ -7583,6 +7984,10 @@ module Meringue
         pending = synchronized_state do
           normalized_state.fetch("agents").flat_map do |agent|
             next [] unless agent.fetch("type", nil) == "worker"
+            # Explicitly paused workers own their queued prompts, but resume owns delivery so a
+            # prompt cannot wake a session the user deliberately stopped.
+            next [] if agent.fetch("status", nil) == "paused"
+            next [] if (agent.fetch("harness_metadata", {}) || {}).fetch("pause_request", nil).is_a?(Hash)
             # A prompt queued while the worker was mid-turn must not be dropped just because that
             # turn then died from a transport failure; that session is still resumable.
             if TERMINAL_AGENT_STATUSES.include?(agent.fetch("status", nil)) && !worker_resumable_after_settle_failure?(agent)
@@ -14818,6 +15223,8 @@ module Meringue
                             "blocked"
                           elsif workers.any? { |worker| worker.fetch("status", nil) == "working" }
                             "working"
+                          elsif workers.any? { |worker| worker.fetch("status", nil) == "paused" }
+                            "idle"
                           else
                             issue.fetch("status", "idle")
                           end
@@ -14836,6 +15243,8 @@ module Meringue
                               "blocked"
                             elsif issues.any? { |issue| issue.fetch("status", nil) == "working" }
                               "working"
+                            elsif issues.all? { |issue| %w[idle paused].include?(issue.fetch("status", nil).to_s) }
+                              "idle"
                             else
                               project.fetch("status", "idle")
                             end
@@ -15661,7 +16070,11 @@ module Meringue
         return false if agent.fetch("type", nil) == "head" && owned_by_other_live_instance?(agent)
         return false if blank?(agent.fetch("harness", nil)) || agent.fetch("harness", nil) == "fake"
         return false unless agent_has_session_reference?(agent) || recoverable_untracked_head?(agent)
-        return false if %w[completed killed].include?(agent.fetch("status", nil))
+        return false if %w[completed killed paused].include?(agent.fetch("status", nil))
+        # Pause/resume side effects are checkpointed before harness I/O. Their dedicated
+        # reconciliation steps own the session until the marker is cleared.
+        return false if metadata.fetch("pause_request", nil).is_a?(Hash)
+        return false if metadata.fetch("resume_request", nil).is_a?(Hash)
         # The native interactive process is the sole session writer during a focus handoff. Do not
         # let the background reconciler read or resume the same JSONL file until focus returns.
         return false if interactive_focus_active?(agent)
@@ -15939,7 +16352,7 @@ module Meringue
           session_ref: poll_result.fetch("polled_session_ref", poll_result.fetch("session_ref", nil))
         )
         return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless agent
-        return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if %w[completed killed].include?(agent.fetch("status", nil))
+        return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if %w[completed killed paused].include?(agent.fetch("status", nil))
 
         now = timestamp
         previous_agent = deep_copy(agent)
@@ -16051,7 +16464,7 @@ module Meringue
           state = normalized_state
           head = find_agent(state, poll_result.fetch("agent_id"))
           return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "agent_not_found") unless head
-          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if TERMINAL_AGENT_STATUSES.include?(head.fetch("status", nil))
+          return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if TERMINAL_AGENT_STATUSES.include?(head.fetch("status", nil)) || head.fetch("status", nil) == "paused"
 
           now = timestamp
           metadata = head.fetch("harness_metadata", {}) || {}
