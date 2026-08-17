@@ -120,11 +120,14 @@ module Meringue
 
       # Short label describing the snapshot's freshness, or nil when it is
       # simply current. Rendered next to the count, never per row.
-      def state_label(state, harness: nil)
+      def state_label(state, harness: nil, now: Time.now)
         harness = harness_for(state, harness)
         snapshot = catalog(state, harness)
         return nil if snapshot.available?
-        return "last confirmed #{snapshot.fetched_at}" if snapshot.stale?
+        if snapshot.stale?
+          timestamp = Timestamps.display(snapshot.fetched_at, now: now)
+          return "last confirmed #{timestamp || snapshot.fetched_at}"
+        end
 
         "unverified"
       end
