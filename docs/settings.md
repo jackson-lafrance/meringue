@@ -17,7 +17,7 @@ Categories:
 7. **Keybindings** — every action registered by `TUI::Keybindings`, including intentional unbinding with an empty list.
 8. **Setup** — completion metadata plus **Run setup again**.
 
-Advanced provider, workspace, and keybinding rows start collapsed. Select **Show advanced settings** or press `a` to reveal them. Every supported editable path is still reachable; internal compatibility keys are represented by their role-aware rows instead of duplicated.
+Advanced provider, workspace, and keybinding rows start collapsed **inside the category that owns them**. Each category shows its exact hidden count in the category rail and in a **Show advanced settings (N)** row; selecting it or pressing `a` reveals only that category's rows. Other categories keep their own advanced rows collapsed, so the reveal count never describes settings somewhere else. Every supported editable path is still reachable; internal compatibility keys are represented by their role-aware rows instead of duplicated.
 
 ## Interaction
 
@@ -26,13 +26,13 @@ Advanced provider, workspace, and keybinding rows start collapsed. Select **Show
 - `Tab` / `Shift-Tab`: change category.
 - `PageUp` / `PageDown`, `Home` / `End`: move through long lists.
 - `Space`: toggle a checkbox.
-- `Enter`: change a selector, run an action, or open/apply a text editor.
+- `Enter`: change a selector, run an action, or open/apply an editor. On a Keybindings row, it enters dedicated key capture; the next keyboard key replaces that binding.
 - `Ctrl-S`: validate and submit one save transaction.
 - `Esc`: cancel an editor; at the root, close a clean draft or show discard confirmation for a dirty draft.
 
 `Esc` and `Ctrl-S` are fixed recovery keys inside Settings even when dashboard bindings are customized. Existing configured navigation bindings supplement the fixed keys.
 
-Left-click selects a visible category or row. Clicking a checkbox toggles it. Save and Cancel are clickable in layouts that have room for the buttons. The wheel moves the visible row window. Empty space, chrome, right-click, release, and drag reports are inert.
+Left-click selects a visible category or row. Clicking a checkbox toggles it. Save and Cancel are clickable in layouts that have room for the buttons. The wheel moves the visible row window. Empty space, chrome, right-click, release, and drag reports are inert. While key capture is active, mouse events and invalid multi-character input stay inside the capture view and never move or activate another row; `Esc` cancels, while `Backspace` or `Delete` clears/unbinds.
 
 Theme selection previews immediately in memory. Cancel/discard restores the original theme. No config or state write occurs until Save succeeds.
 

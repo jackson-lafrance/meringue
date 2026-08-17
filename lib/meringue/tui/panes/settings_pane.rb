@@ -82,6 +82,7 @@ module Meringue
           categories = Array(snap.fetch("categories", []))
           selected = snap.fetch("category_index", 0).to_i.clamp(0, [categories.length - 1, 0].max)
           setup = snap.fetch("mode", "settings") == "setup"
+          counts = snap.fetch("category_counts", {})
           categories.first([height.to_i, 0].max).map.with_index do |category, index|
             marker = if index == selected
                        "› "
@@ -90,14 +91,17 @@ module Meringue
                      else
                        "  "
                      end
+            hidden = counts.dig(category, "hidden_advanced").to_i
+            suffix = hidden.positive? ? " (#{hidden} advanced hidden)" : ""
             style = index == selected ? Style::ACCENT_BOLD : Style::MUTED
-            [["#{marker}#{category}", style]]
+            [["#{marker}#{category}#{suffix}", style]]
           end
         end
 
         def detail(state, width:, height:)
           snap = snapshot(state)
           return confirmation_detail(snap, width: width, height: height) if snap.fetch("discard_confirm", false)
+          return keybinding_capture_detail(snap, width: width, height: height) if snap.fetch("keybinding_capture", nil).is_a?(Hash)
           return editor_detail(snap, width: width, height: height) if snap.fetch("editor", nil).is_a?(Hash)
 
           rows = Array(snap.fetch("rows", []))
@@ -121,7 +125,15 @@ module Meringue
           end
           global_error = snap.fetch("global_error", nil).to_s
           lines << [["! #{global_error}", Style::ERROR]] unless global_error.empty?
-          counter = rows.empty? ? "No settings in this category" : "#{start + 1}–#{start + visible.length} of #{rows.length}"
+          visible_settings = snap.fetch("visible_setting_count", rows.length).to_i
+          hidden_advanced = snap.fetch("hidden_advanced_count", 0).to_i
+          counter = if hidden_advanced.positive?
+                      "#{visible_settings} setting#{visible_settings == 1 ? "" : "s"} · #{hidden_advanced} advanced hidden"
+                    elsif rows.empty?
+                      "No settings in this category"
+                    else
+                      "#{start + 1}–#{start + visible.length} of #{rows.length} settings"
+                    end
           {
             lines: lines.first([height.to_i, 1].max),
             window_start: start,
@@ -141,6 +153,9 @@ module Meringue
               return [["Enter skip setup", Style::WARNING], [" · Esc keep setting up", Style::MUTED]]
             end
             return [["Enter discard", Style::ERROR], [" · Esc keep editing", Style::MUTED]]
+          end
+          if snap.fetch("keybinding_capture", nil).is_a?(Hash)
+            return [["Press a key to bind", Style::ACCENT_BOLD], [" · Esc cancel · Backspace/Delete clear", Style::MUTED]]
           end
           if snap.fetch("editor", nil).is_a?(Hash)
             return [["Enter apply field", Style::ACCENT_BOLD], [" · Esc cancel field", Style::MUTED]]
@@ -169,6 +184,8 @@ module Meringue
 
         def action_segments(state)
           snap = snapshot(state)
+          return [] if snap.fetch("keybinding_capture", nil).is_a?(Hash)
+
           save_style = snap.fetch("saving", false) ? Style::DIM : Style::ACCENT_BOLD
           [[primary_label(snap), save_style], [" ", Style::DIM], [CANCEL_LABEL, Style::MUTED]]
         end
@@ -180,6 +197,8 @@ module Meringue
           return :inert if geometry.fetch(:too_small)
 
           snap = snapshot(state)
+          return :inert if snap.fetch("keybinding_capture", nil).is_a?(Hash)
+
           if y.to_i == geometry.fetch(:footer_y)
             primary = primary_label(snap)
             action_width = primary.length + 1 + CANCEL_LABEL.length
@@ -237,6 +256,28 @@ module Meringue
             segments << [badge, selected ? Style::AGENT_TREE_SELECTED_DIM : Style::DIM]
           end
           segments
+        end
+
+        def keybinding_capture_detail(snap, width:, height:)
+          capture = snap.fetch("keybinding_capture")
+          row = capture.fetch("row", {}) || {}
+          current = row.fetch("display_value", "(unbound)").to_s
+          lines = [
+            [["Set #{row.fetch("label", row.fetch("id", "keybinding"))}", Style::PANEL_TITLE]],
+            [["Press the next keyboard key to replace this binding.", Style::MUTED]],
+            [["current: ", Style::DIM], [current, Style::TEXT]],
+            [["", Style::DIM]],
+            [["Esc", Style::ACCENT_BOLD], [" cancel", Style::TEXT], [" · Backspace/Delete", Style::ACCENT_BOLD], [" clear / unbind", Style::TEXT]]
+          ]
+          error = capture.fetch("error", nil).to_s
+          lines << [["! #{error}", Style::ERROR]] unless error.empty?
+          {
+            lines: lines.first([height.to_i, 1].max),
+            window_start: 0,
+            visible_count: 0,
+            counter: "key capture",
+            selected_row: row
+          }
         end
 
         def editor_detail(snap, width:, height:)
