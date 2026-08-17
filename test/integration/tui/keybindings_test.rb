@@ -95,6 +95,21 @@ class TuiKeybindingsTest < Minitest::Test
     assert_equal "A", Keybindings.display_name("a")
   end
 
+  def test_capture_names_round_trip_terminal_keys_without_action_context
+    assert_equal "enter", Keybindings.capture_name("\r")
+    assert_equal "up", Keybindings.capture_name("\e[A")
+    assert_equal "ctrl-s", Keybindings.capture_name("\u0013")
+    assert_equal "ctrl-space", Keybindings.capture_name("\u0000")
+    assert_equal "x", Keybindings.capture_name("x")
+    assert_equal "space", Keybindings.capture_name(" ")
+    assert_equal "raw:\\e[99~", Keybindings.capture_name("\e[99~")
+    assert_nil Keybindings.capture_name("paste me")
+    assert_nil Keybindings.capture_name({ "type" => "mouse" })
+
+    raw = Keybindings.capture_name("\e[99~")
+    assert_equal ["\e[99~"], Keybindings.compile_names([raw])
+  end
+
   def test_action_names_are_canonicalized_and_legacy_aliases_resolve
     assert_equal "focus_next", Keybindings.canonical_action(" Focus Next ")
     assert_equal "workspace_open_agent_session", Keybindings.canonical_action("workspace_open_pi_session")
