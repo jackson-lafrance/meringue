@@ -37,6 +37,8 @@ class InputSlashCommandParserTest < Minitest::Test
       "/project rename P1 \"Renamed app\"" => ["ModifyProject", { "project_id" => "P1", "name" => "Renamed app" }],
       "/issue rename P1-I1 \"Renamed issue\"" => ["ModifyIssue", { "issue_id" => "P1-I1", "title" => "Renamed issue" }],
       "/kill P1-I1" => ["Kill", { "target_id" => "P1-I1" }],
+      "/worker pause P1-I1-W1" => ["PauseWorker", { "agent_id" => "P1-I1-W1" }],
+      "/worker resume P1-I1-W1" => ["ResumeWorker", { "agent_id" => "P1-I1-W1" }],
       "/dismiss Q1" => ["DismissQuestion", { "question_id" => "Q1" }],
       "/setup complete" => ["CompleteOnboarding", { "outcome" => "completed" }],
       "/setup skip" => ["CompleteOnboarding", { "outcome" => "skipped" }]
@@ -153,6 +155,14 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_equal "SpawnWorker", spawn.fetch("type")
     assert_equal({ "issue_id" => "P1-I1", "prompt" => "Fix it please" }, spawn.fetch("payload"))
 
+    pause = parse_slash("/worker pause P1-I1-W1")
+    assert_equal "PauseWorker", pause.fetch("type")
+    assert_equal({ "agent_id" => "P1-I1-W1" }, pause.fetch("payload"))
+
+    resume = parse_slash("/worker resume P1-I1-W1")
+    assert_equal "ResumeWorker", resume.fetch("type")
+    assert_equal({ "agent_id" => "P1-I1-W1" }, resume.fetch("payload"))
+
     prompt = parse_slash('/prompt P1-I1-W1 "any update?"')
     assert_equal "PromptAgent", prompt.fetch("type")
     assert_equal({ "agent_id" => "P1-I1-W1", "prompt" => "any update?" }, prompt.fetch("payload"))
@@ -205,7 +215,7 @@ class InputSlashCommandParserTest < Minitest::Test
      "/thinking", "/thinking high extra", "/thinking reviewer high", "/thinking head high extra",
      "/model head anthropic/x extra", "/model reviewer anthropic/x",
      "/model P1 extra", "/thinking P1 extra", "/project", "/project list /tmp", "/issue", "/issue delete P1",
-     "/worker", "/worker kill P1-I1", "/retry", "/retry H7 again", "/dismiss", "/dismiss Q1 Q2", "/recount now", "/prune bogus",
+     "/worker", "/worker kill P1-I1", "/worker pause", "/worker pause P1-I1-W1 extra", "/worker resume", "/worker resume P1-I1-W1 extra", "/retry", "/retry H7 again", "/dismiss", "/dismiss Q1 Q2", "/recount now", "/prune bogus",
      "/prune resolved errored", "/project rename P1", "/issue rename P1-I1"].each do |input|
       parsed = parse_slash(input)
       assert_equal "InvalidSlashCommand", parsed.fetch("type"), "expected #{input.inspect} to be invalid"
