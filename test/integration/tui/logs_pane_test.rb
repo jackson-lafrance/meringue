@@ -40,10 +40,10 @@ class TuiLogsPaneTest < Minitest::Test
 
   def test_role_lines_carry_timestamp_icon_participant_and_title
     lines = plain_lines(@pane.log_lines(mixed_state, width: 70))
-    clock = Timestamps.format("2026-07-11T00:02:00Z", "%H:%M")
+    clock = Timestamps.display("2026-07-11T00:02:00Z")
 
-    assert_includes lines, "[#{Timestamps.format("2026-07-11T00:01:00Z", "%H:%M")}] ● you"
-    assert_includes lines, "[#{clock}] ◆ H1 · Head title"
+    assert_includes lines, "#{Timestamps.display("2026-07-11T00:01:00Z")} ● you"
+    assert_includes lines, "#{clock} ◆ H1 · Head title"
     assert_includes lines.join("\n"), "✓ P1-I1-W1 · Worker title · done"
   end
 
@@ -68,7 +68,7 @@ class TuiLogsPaneTest < Minitest::Test
     assert_includes plain_line(attributed), "▪ meringue · via H127 · cmd"
     assert_includes styles_in(attributed), Style::ACCENT_BOLD
     assert_includes styles_in(attributed), Style.agent_style("H127", kind: "head")
-    assert_equal "[#{Timestamps.format("2026-07-11T00:00:00Z", "%H:%M")}] ▪ meringue", plain_line(generic)
+    assert_equal "#{Timestamps.display("2026-07-11T00:00:00Z")} ▪ meringue", plain_line(generic)
   end
 
   def test_log_levels_render_status_labels_and_semantic_styles
@@ -279,7 +279,7 @@ class TuiLogsPaneTest < Minitest::Test
       chat: { "messages" => [{ "role" => "meringue", "text" => "queued", "status" => "working", "timestamp" => "2026-07-11T00:00:00Z" }] }
     )
 
-    assert_equal ["[#{Timestamps.format("2026-07-11T00:00:00Z", "%H:%M")}] ▪ meringue", "  queued", "  working"],
+    assert_equal ["#{Timestamps.display("2026-07-11T00:00:00Z")} ▪ meringue", "  queued", "  working"],
                  plain_lines(@pane.log_lines(state, width: 60))
   end
 
@@ -321,7 +321,7 @@ class TuiLogsPaneTest < Minitest::Test
       chat: { "messages" => [{ "role" => "agent", "source_id" => "P1-I1-W1", "text" => "final answer", "timestamp" => "2026-07-11T00:02:00Z" }] }
     )
 
-    assert_equal ["[#{Timestamps.format("2026-07-11T00:02:00Z", "%H:%M")}] ✦ P1-I1-W1 · P1-I1-W1 session", "▌ final answer"],
+    assert_equal ["#{Timestamps.display("2026-07-11T00:02:00Z")} ✦ P1-I1-W1 · P1-I1-W1 session", "▌ final answer"],
                  plain_lines(@pane.log_lines(state, width: 60))
   end
 
@@ -453,9 +453,9 @@ class TuiLogsPaneTest < Minitest::Test
         "logs" => [log_record("L1", "source_type" => "worker", "source_id" => "P1-I1-W1", "message" => "working")]
       )
     )
-    lines = plain_lines(@pane.log_lines(state, width: 20))
+    lines = plain_lines(@pane.log_lines(state, width: 26))
 
-    assert lines.all? { |line| line.length <= 20 }, "longest: #{lines.map(&:length).max}"
+    assert lines.all? { |line| line.length <= 26 }, "longest: #{lines.map(&:length).max}"
     assert_includes lines.join(" ").gsub(/\s+/, " "), "visible suffix"
   end
 

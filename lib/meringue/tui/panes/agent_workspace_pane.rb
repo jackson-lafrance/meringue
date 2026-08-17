@@ -444,9 +444,9 @@ module Meringue
                       else
                         value
                       end
-          # Pi emits UTC ISO8601 or epoch timestamps. Use the same local-clock
-          # conversion as the dashboard instead of formatting the source zone.
-          Timestamps.format(timestamp, "%H:%M:%S") || value.to_s
+          # Pi emits UTC ISO8601 or epoch timestamps. Use the same recency-aware
+          # local-clock formatting as the dashboard instead of the source zone.
+          Timestamps.display(timestamp) || value.to_s
         rescue ArgumentError, RangeError, TypeError
           value.to_s
         end
