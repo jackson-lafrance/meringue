@@ -1,14 +1,14 @@
 # First-run setup
 
-The first interactive launch opens **Setup**, a curated mode of the same full-screen configuration overlay used by `/config`. It lets a user review defaults, choose a theme, and opt into experiments before anything is written.
+The first interactive launch opens **Setup**, a centered welcome card distinct from the dense `/config` editor. It lets a user review defaults, choose a theme, and opt into experiments before anything is written.
 
-Setup is not a chat prompt and does not maintain a second settings implementation. It uses `Config::Schema`, `Settings::Draft`, `Panes::SettingsPane`, the shared editors and hit testing, and the same `SaveConfiguration` transaction as `/config`.
+Setup is not a chat prompt and does not maintain a second settings implementation. It uses `Config::Schema`, `Settings::Draft`, the shared editors and hit testing, and the same `SaveConfiguration` transaction as `/config`; only the presentation and navigation are first-run friendly.
 
 ## Steps
 
-The rail has six steps:
+The centered card shows six numbered steps with a current-step marker and `Step N of 6` progress text:
 
-1. **Welcome** — explains that the draft is transactional.
+1. **Welcome** — explains the draft and starts the flow.
 2. **Theme** — theme and animation preference. Theme changes preview immediately in memory.
 3. **Head defaults** — harness, Pi model, and Pi thinking level for future routing heads.
 4. **Worker defaults** — independently chosen harness, Pi model, and Pi thinking level for future workers.
@@ -19,11 +19,11 @@ The complete `/config` editor remains available for provider commands and enviro
 
 ## Interaction
 
-- `↑` / `↓`: move through rows.
+- `↑` / `↓`: move through the current card's rows, including its **Continue** action.
 - `←` / `→`: change a selector or cached Pi model. On a row without choices, move between steps.
-- `Space`: toggle a checkbox.
-- `Enter`: change/edit the selected value, begin from Welcome, revisit a value from Review, or Finish.
-- `Tab` / `Shift-Tab`: next/back through setup steps.
+- `Space`: toggle the selected checkbox.
+- `Enter`: begin from Welcome, edit/change a value, activate **Continue**, revisit a value from Review, or Finish.
+- `Tab` / `Shift-Tab`: next/back through setup steps; the card also provides a visible Continue/Finish action.
 - `Ctrl-S`: go to Review; on Review, finish.
 - `Esc`: first-run skip or manual cancel, as described below.
 - Left-click: select a visible step/row, toggle a checkbox, or use the visible Next/Finish/Cancel buttons on wide terminals.
@@ -67,12 +67,14 @@ Setup automatically opens only when:
 
 `/setup` reopens the overlay from Welcome regardless of the existing marker. A `/setup` request below `32×10` gets an explanatory message instead of an invisible modal. If the terminal shrinks below the minimum while setup is open, a minimal full-screen message keeps `Esc cancel` visible; cancelling writes no outcome. Resizing back simply redraws the draft.
 
-Responsive presentation matches `/config`:
+Responsive presentation keeps the setup card centered without requiring a large terminal:
 
-- **80+ columns:** setup-step rail plus detail pane and clickable actions.
-- **46–79 columns:** one-column step/detail view with keyboard recovery hints first.
-- **32–45 columns:** compact labels and reduced chrome.
+- **80+ columns:** a spacious centered card with a readable progress bar and clickable Begin/Next/Finish/Cancel actions.
+- **46–79 columns:** the same card shrinks to the available width while retaining the heading, progress count, and keyboard hints.
+- **32–45 columns:** compact card copy and abbreviated progress, with `Esc` recovery always visible.
 - **below 32×10:** terminal-too-small message and `Esc cancel` only.
+
+The welcome marker has a restrained four-frame shimmer when Animations is enabled. Disabling Animations freezes it. `NO_COLOR` affects only styling; `MERINGUE_ASCII_GLYPHS=1` replaces progress and welcome glyphs with ASCII markers, so the step number and action text remain understandable in screen readers, plain terminals, and screenshots.
 
 ## Marker and compatibility
 

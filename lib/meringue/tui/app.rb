@@ -2893,6 +2893,15 @@ module Meringue
         @settings_mode == "setup"
       end
 
+      def setup_animation_phase
+        return 0 unless setup_mode? && @settings_draft
+        return 0 unless @settings_draft.value("appearance.animations") == true
+
+        (monotonic_time * 3).floor % 4
+      rescue StandardError
+        0
+      end
+
       def settings_categories
         return [] unless @settings_draft
 
@@ -2928,17 +2937,26 @@ module Meringue
         when "Welcome"
           [synthetic_settings_row(
             "_setup_begin",
-            "Review setup",
+            "Begin setup",
             "Choose a theme, then review separate head and worker defaults and opt-in experiments. Nothing is written until Finish succeeds.",
-            "Enter to begin"
+            "Enter"
           )]
         when "Review"
           setup_review_rows
         else
-          Settings::SetupFlow.setting_ids(settings_category).filter_map do |id|
+          rows = Settings::SetupFlow.setting_ids(settings_category).filter_map do |id|
             definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
             @settings_draft.row(definition) if definition
           end
+          category_index = settings_categories.index(settings_category) || 0
+          next_step = settings_categories[category_index + 1]
+          rows << synthetic_settings_row(
+            "_setup_next",
+            "Continue to #{next_step}",
+            "Move to the next setup step. Your draft stays local until Finish.",
+            "Enter"
+          ) if next_step
+          rows
         end
       end
 
@@ -3038,6 +3056,8 @@ module Meringue
           "setup_auto" => @settings_setup_auto,
           "setup_step" => setup_mode? ? @settings_category_index + 1 : nil,
           "setup_step_count" => setup_mode? ? settings_categories.length : nil,
+          "setup_animations" => setup_mode? ? @settings_draft.value("appearance.animations") == true : nil,
+          "setup_animation_phase" => setup_mode? ? setup_animation_phase : nil,
           "error_count" => @settings_draft.errors.length,
           "global_error" => @settings_draft.global_error,
           "width" => render_width,
@@ -3315,6 +3335,10 @@ module Meringue
           return handle_local_setup_command(state)
         end
         if id == "_setup_begin"
+          move_settings_category(1)
+          return true
+        end
+        if id == "_setup_next"
           move_settings_category(1)
           return true
         end
