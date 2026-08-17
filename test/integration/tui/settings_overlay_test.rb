@@ -78,6 +78,19 @@ class TuiSettingsOverlayTest < Minitest::Test
     assert messages.any? { |message| message.fetch("text", "").include?("Configuration (read-only)") }
   end
 
+  def test_settings_header_offers_friendly_agent_help_without_cluttering_setup
+    @app.send(:open_settings, @state)
+    header = @layout.send(:settings_pane).header_segments(compose, width: 100)
+    assert_includes header.map(&:first).join, "Not sure what to change? Ask your agent for help."
+    assert_includes @app.render(compose, width: 100, height: 30, color: false), "Ask your agent for help"
+    compact_header = @layout.send(:settings_pane).header_segments(compose, width: 46)
+    assert_includes compact_header.map(&:first).join, "Need help? Ask your agent."
+
+    @app.send(:open_settings, @state, mode: "setup")
+    setup_header = @layout.send(:settings_pane).header_segments(compose, width: 100)
+    refute_includes setup_header.map(&:first).join, "Ask your agent"
+  end
+
   def test_wide_medium_compact_and_too_small_layouts_are_recoverable
     @app.send(:open_settings, @state)
     {

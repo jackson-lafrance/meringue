@@ -2,6 +2,8 @@
 
 `/config` opens a full-screen configuration editor. The older diagnostic listing remains available as `/config --text`; it is intentionally read-only and redacts provider environment values.
 
+The Settings header keeps a small reminder in view: **“Not sure what to change? Ask your agent for help.”** On narrower terminals it shortens to “Need help? Ask your agent.”, while the first-run setup card stays focused on its welcome and step guidance.
+
 ## Schema and categories
 
 One schema (`Meringue::Config::Schema`) owns the supported paths, compatibility aliases, defaults, validation, category, editor type, description, sensitivity, and live/restart apply mode. The overlay is generated from that schema rather than keeping its own setting list.
