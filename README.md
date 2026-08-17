@@ -79,6 +79,7 @@ docs/keybindings.md                # TUI keyboard and jump-mode controls
 docs/onboarding.md                 # first-run setup flow, keys, and completion marker
 docs/kernel-command-application.md # exactly-once command application invariants
 docs/goal_loops.md                 # goal loops: metric, judge, budgets, and interruption
+docs/worker-pause-resume.md         # user-directed worker pause and resume semantics
 docs/scalability.md                # hermetic process-level responsiveness sweep
 docs/testing.md                    # test-suite guide and coverage boundaries
 fixtures/config.example.toml       # example local config
@@ -171,6 +172,8 @@ Useful slash commands inside the TUI include:
 - `/issue create <project_id> "<title>" ["description"]` — create an issue manually.
 - `/issue rename <issue_id> "<title>"` — rename an issue. For both rename commands, focus the AgentTree, select a row, and press `r` to prefill the one that matches the selected row (a worker resolves to its issue).
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
+- `/worker pause <agent_id>` — stop the current worker turn without killing its resumable session.
+- `/worker resume <agent_id>` — continue a paused worker from the same session and workspace.
 - `/prompt <agent_id> "<message>"` — follow up with an existing worker, or retry a head (`H<n>`) that failed, or was left blocked, without routing your request.
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
 - `/prs` — with **Settings → Experiments → GitHub support** enabled, open the picker for every tracked pull request that is still open. Use `↑`/`↓` to move, `Enter` to open, and `Esc` to close.

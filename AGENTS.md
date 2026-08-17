@@ -143,6 +143,7 @@ Lifecycle statuses apply to projects, issues, and agents:
 - `working`
 - `idle`
 - `blocked`
+- `paused`
 - `completed`
 - `errored`
 - `killed`
@@ -164,7 +165,9 @@ The TUI should never invent new lifecycle statuses, question statuses, or log le
 
 That errored state must stay recoverable. A worker whose turn was cut short keeps its harness session reference, workspace, worktree, and branch, keeps any prompt that was queued for it, and can be prompted to continue; only a worker whose session is genuinely gone is terminal for prompting.
 
-`supervision_lost` is the explicit paused-runtime state, distinct from `working` (a live turn) and from `errored` (a terminal settle). It means the supervisor that owns a session's transport has disappeared: both the recorded transport owner and the harness child are gone, so the session's runtime is paused even though the durable session, workspace, worktree, branch, queued prompts, and deferred-chain references remain valid. It is recoverable rather than terminal: a fresh supervisor re-attaches to the durable session, and when the original turn can remain alive it keeps running instead of being re-prompted or restarted. The supervisor records a downtime metric so paused runtime is visible and measurable rather than silently conflated with active working. See `docs/supervisor-transport-ownership.md`.
+`paused` is the explicit user-directed worker state. It means the current turn has been stopped through the harness abort boundary while the durable session, workspace, worktree, branch, queued prompts, and deferred-chain references remain intact. Reconciliation does not poll or complete a paused worker, and `/worker resume <agent_id>` continues the same session with a durable continuation prompt. A pause request and resume delivery are checkpointed before harness I/O so restart recovery cannot lose or duplicate the transition.
+
+`supervision_lost` is the separate paused-runtime state caused by supervisor failure, distinct from user-directed `paused`, `working` (a live turn), and `errored` (a terminal settle). It means the supervisor that owns a session's transport has disappeared: both the recorded transport owner and the harness child are gone, so the session's runtime is paused even though the durable session, workspace, worktree, branch, queued prompts, and deferred-chain references remain valid. It is recoverable rather than terminal: a fresh supervisor re-attaches to the durable session, and when the original turn can remain alive it keeps running instead of being re-prompted or restarted. The supervisor records a downtime metric so paused runtime is visible and measurable rather than silently conflated with active working. See `docs/supervisor-transport-ownership.md`.
 
 ## Persistence
 Store Meringue state in JSON.
@@ -333,6 +336,8 @@ Do the same thing as coding harnesses for these aswell we want it to be familiar
 /project add <path> [name]
 /issue create <project_id> "<title>" ["description"]
 /worker spawn <issue_id> "<prompt>"
+/worker pause <agent_id>
+/worker resume <agent_id>
 /prompt <agent_id> "<message>"
 /models [harness] [refresh]   (opens the model picker; `refresh` re-fetches the catalog instead)
 /model [head|worker] <provider>/<model-id>

@@ -40,6 +40,7 @@ module Meringue
           "queued" => "○",
           "working" => "●",
           "idle" => "·",
+          "paused" => "⏸",
           "blocked" => "!",
           "completed" => "✓",
           "errored" => "×",
@@ -51,6 +52,7 @@ module Meringue
           "queued" => Style::QUEUED,
           "working" => Style::WORKING,
           "idle" => Style::IDLE,
+          "paused" => Style::WARNING,
           "blocked" => Style::WARNING,
           "completed" => Style::SUCCESS,
           "errored" => Style::ERROR,
@@ -851,10 +853,19 @@ module Meringue
           # Delivery PRs belong to the issue row. Worker rows retain only worker/session state,
           # so a replacement or a second worker cannot duplicate the issue's PR affordance.
           [
+            paused_marker(worker),
             provisioning_marker(worker),
             unfinished_marker(worker),
             worker_relationship_marker(worker)
           ].reject(&:empty?).join(" ")
+        end
+
+        def paused_marker(worker)
+          return "" unless worker.is_a?(Hash)
+
+          metadata = worker.fetch("harness_metadata", {})
+          return "pausing" if metadata.is_a?(Hash) && metadata.fetch("pause_request", nil).is_a?(Hash)
+          worker.fetch("status", nil).to_s == "paused" ? "paused" : ""
         end
 
         # A worker with no session yet is either having its workspace checked out, waiting for an

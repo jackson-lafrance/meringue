@@ -106,6 +106,20 @@ class TuiAgentTreePaneTest < Minitest::Test
     end
   end
 
+  def test_paused_worker_renders_an_explicit_pause_status
+    state = tree_state(
+      projects: [project_record("P1")],
+      issues: [issue_record("P1-I1")],
+      agents: [agent_record("P1-I1-W1", "issue_id" => "P1-I1", "status" => "paused", "harness_metadata" => { "title" => "waiting for review" })]
+    )
+
+    row = plain_lines(@pane.lines(state, width: 60)).find { |line| line.include?("waiting for review") }
+
+    assert_includes row, "⏸ W1"
+    assert_includes row, "paused"
+    assert_includes styles_in(@pane.lines(state, width: 60).find { |line| plain_line(line).include?("waiting for review") }), Pane::STATUS_STYLES.fetch("paused")
+  end
+
   def test_unknown_status_falls_back_to_a_question_mark_glyph
     state = tree_state(
       projects: [project_record("P1", "status" => "surprising")],
