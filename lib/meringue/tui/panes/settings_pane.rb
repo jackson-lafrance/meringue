@@ -10,6 +10,8 @@ module Meringue
         BEGIN_LABEL = "[ Begin ]"
         FINISH_LABEL = "[ Finish ]"
         CANCEL_LABEL = "[ Cancel ]"
+        HELP_TAGLINE = "Not sure what to change? Ask your agent for help."
+        COMPACT_HELP_TAGLINE = "Need help? Ask your agent."
         SETUP_HEADINGS = {
           "Welcome" => "Welcome to Meringue",
           "Theme" => "Make the workspace yours",
@@ -90,6 +92,14 @@ module Meringue
             title = "#{title}  #{snap.fetch("setup_step", 1)}/#{snap.fetch("setup_step_count", 1)}"
           end
           segments = [[title, Style::TITLE]]
+          unless setup
+            helper = if width.to_i >= Settings::WIDE_WIDTH
+                       HELP_TAGLINE
+                     elsif width.to_i >= Settings::COMPACT_WIDTH
+                       COMPACT_HELP_TAGLINE
+                     end
+            segments << ["  · #{helper}", Style::MUTED] if helper
+          end
           segments << ["  • unsaved", Style::WARNING] if snap.fetch("dirty", false)
           segments << ["  • saving…", Style::ACCENT] if snap.fetch("saving", false)
           segments
