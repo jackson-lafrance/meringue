@@ -28,6 +28,8 @@ module Meringue
         raw_height = [height.to_i, 1].max
         if settings_active?(state)
           canvas = Canvas.new(width: raw_width, height: raw_height)
+          return render_setup(canvas, state, raw_width, raw_height, color: color) if Settings.snapshot(state).fetch("mode", "settings") == "setup"
+
           return render_settings(canvas, state, raw_width, raw_height, color: color)
         end
         width = bounded_width(width)
@@ -467,6 +469,46 @@ module Meringue
 
         workspace = state.fetch("_agent_workspace", {}) || {}
         !!workspace.fetch("active", false)
+      end
+
+      def render_setup(canvas, state, width, height, color:)
+        geometry = settings_pane.geometry(state, width: width, height: height)
+        if geometry.fetch(:too_small)
+          message = "Terminal too small for Setup (need #{Settings::MIN_WIDTH}×#{Settings::MIN_HEIGHT})"
+          canvas.write_segments(
+            [(width - message.length) / 2, 0].max,
+            [height / 2, 0].max,
+            [[message, Style::WARNING]],
+            max_width: width
+          )
+          canvas.write_segments(1, [height - 1, 0].max, [["Esc cancel", Style::ACCENT_BOLD]], max_width: [width - 2, 1].max)
+          return canvas.render(color: color)
+        end
+
+        view = settings_pane.setup_view(state, width: width, height: height)
+        card = geometry.fetch(:card)
+        canvas.draw_box(card.fetch(:x), card.fetch(:y), card.fetch(:width), card.fetch(:height), title: view.fetch(:card_title), style: Style::BORDER_ACTIVE, title_style: Style::TITLE)
+        content_width = view.fetch(:content_width)
+        heading = [["#{settings_pane.setup_animation_marker(state)} #{view.fetch(:heading)}", Style::PANEL_TITLE]]
+        write_centered_segments(canvas, card.fetch(:x) + 2, card.fetch(:y) + 1, content_width, heading)
+        progress = view.fetch(:progress)
+        write_centered_segments(canvas, card.fetch(:x) + 2, card.fetch(:y) + 2, content_width, progress.fetch(:caption))
+        write_centered_segments(canvas, card.fetch(:x) + 2, card.fetch(:y) + 3, content_width, progress.fetch(:bar))
+        view.fetch(:lines).each_with_index do |line, index|
+          draw_line(canvas, view.fetch(:content_x), view.fetch(:content_y) + index, content_width, line)
+        end
+        counter = view.fetch(:counter).to_s
+        unless counter.empty?
+          write_centered_segments(canvas, card.fetch(:x) + 2, card.fetch(:y) + card.fetch(:height) - 2, content_width, [[counter, Style::DIM]])
+        end
+
+        footer_y = geometry.fetch(:footer_y)
+        footer = settings_pane.setup_footer_segments(state, width: width)
+        actions = width >= Settings::WIDE_WIDTH && !view.fetch(:modal, false) ? settings_pane.action_segments(state) : []
+        action_width = segment_text_width(actions)
+        canvas.write_segments(1, footer_y, footer, max_width: [width - action_width - 3, 1].max, default_style: Style::DIM)
+        canvas.write_segments([width - action_width - 1, 0].max, footer_y, actions, max_width: action_width)
+        canvas.render(color: color)
       end
 
       def render_settings(canvas, state, width, height, color:)
@@ -922,6 +964,12 @@ module Meringue
       def hint_left_width(width, right_line)
         right_width = segment_text_width(right_line)
         right_width.positive? && right_width < width ? [width - right_width - 2, 0].max : width
+      end
+
+      def write_centered_segments(canvas, x, y, width, segments)
+        line_width = segment_text_width(segments)
+        offset = [(width.to_i - line_width) / 2, 0].max
+        canvas.write_segments(x.to_i + offset, y, segments, max_width: [width.to_i - offset, 0].max, default_style: Style::TEXT)
       end
 
       def segment_text_width(segments)

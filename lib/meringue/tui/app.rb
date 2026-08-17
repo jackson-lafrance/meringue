@@ -153,8 +153,9 @@ module Meringue
         @settings_draft = nil
         @settings_category_index = 0
         @settings_row_index = 0
-        @settings_show_advanced = false
+        @settings_expanded_advanced = {}
         @settings_editor = nil
+        @settings_keybinding_capture = nil
         @settings_discard_confirm = false
         @settings_saving = false
         @settings_mode = "settings"
@@ -2856,8 +2857,9 @@ module Meringue
         @settings_setup_outcome = nil
         @settings_category_index = 0
         @settings_row_index = 0
-        @settings_show_advanced = false
+        @settings_expanded_advanced = {}
         @settings_editor = nil
+        @settings_keybinding_capture = nil
         @settings_discard_confirm = false
         @settings_saving = false
         close_delivery_pr_picker
@@ -2875,7 +2877,9 @@ module Meringue
         @settings_draft = nil
         @settings_category_index = 0
         @settings_row_index = 0
+        @settings_expanded_advanced = {}
         @settings_editor = nil
+        @settings_keybinding_capture = nil
         @settings_discard_confirm = false
         @settings_saving = false
         @settings_setup_auto = false
@@ -2887,6 +2891,15 @@ module Meringue
 
       def setup_mode?
         @settings_mode == "setup"
+      end
+
+      def setup_animation_phase
+        return 0 unless setup_mode? && @settings_draft
+        return 0 unless @settings_draft.value("appearance.animations") == true
+
+        (monotonic_time * 3).floor % 4
+      rescue StandardError
+        0
       end
 
       def settings_categories
@@ -2904,14 +2917,15 @@ module Meringue
         return [] unless @settings_draft
         return setup_rows if setup_mode?
 
-        definitions = @settings_draft.definitions_for(settings_category, include_advanced: @settings_show_advanced)
+        expanded = @settings_expanded_advanced.fetch(settings_category, false)
+        definitions = @settings_draft.definitions_for(settings_category, include_advanced: expanded)
         rows = definitions.map { |definition| @settings_draft.row(definition) }
         hidden = @settings_draft.definitions_for(settings_category, include_advanced: true).count(&:advanced)
-        if !@settings_show_advanced && hidden.positive?
+        if !expanded && hidden.positive?
           rows << synthetic_settings_row(
             "_show_advanced",
-            "Show advanced settings",
-            "Reveal #{hidden} advanced setting#{hidden == 1 ? "" : "s"} in this and every category.",
+            "Show advanced settings (#{hidden})",
+            "Reveal #{hidden} advanced setting#{hidden == 1 ? "" : "s"} in #{settings_category}. Other categories keep their own advanced settings hidden.",
             "#{hidden} hidden"
           )
         end
@@ -2923,17 +2937,26 @@ module Meringue
         when "Welcome"
           [synthetic_settings_row(
             "_setup_begin",
-            "Review setup",
+            "Begin setup",
             "Choose a theme, then review separate head and worker defaults and opt-in experiments. Nothing is written until Finish succeeds.",
-            "Enter to begin"
+            "Enter"
           )]
         when "Review"
           setup_review_rows
         else
-          Settings::SetupFlow.setting_ids(settings_category).filter_map do |id|
+          rows = Settings::SetupFlow.setting_ids(settings_category).filter_map do |id|
             definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
             @settings_draft.row(definition) if definition
           end
+          category_index = settings_categories.index(settings_category) || 0
+          next_step = settings_categories[category_index + 1]
+          rows << synthetic_settings_row(
+            "_setup_next",
+            "Continue to #{next_step}",
+            "Move to the next setup step. Your draft stays local until Finish.",
+            "Enter"
+          ) if next_step
+          rows
         end
       end
 
@@ -2978,34 +3001,63 @@ module Meringue
         }
       end
 
+      def settings_category_counts
+        settings_categories.to_h do |category|
+          if setup_mode?
+            rows = setup_rows
+            count = category == settings_category ? rows.length : 0
+            [category, { "visible" => count, "total" => count, "hidden_advanced" => 0 }]
+          else
+            definitions = @settings_draft.definitions_for(category, include_advanced: true)
+            advanced = definitions.count(&:advanced)
+            hidden = @settings_expanded_advanced.fetch(category, false) ? 0 : advanced
+            visible = definitions.length - hidden
+            [category, { "visible" => visible, "total" => definitions.length, "hidden_advanced" => hidden }]
+          end
+        end
+      end
+
       def settings_snapshot
         return nil unless @settings_active && @settings_draft
 
         rows = settings_rows
         @settings_row_index = @settings_row_index.to_i.clamp(0, [rows.length - 1, 0].max)
+        counts = settings_category_counts
+        current_counts = counts.fetch(settings_category, {})
         editor = if @settings_editor
                    row = @settings_editor.fetch("row", {}).merge(
                      "error" => @settings_draft.errors[@settings_editor.fetch("id")]
                    ).compact
                    @settings_editor.merge("row" => row)
                  end
+        capture = if @settings_keybinding_capture
+                    @settings_keybinding_capture.merge("row" => @settings_keybinding_capture.fetch("row", {}).merge(
+                      "error" => @settings_keybinding_capture.fetch("error", nil)
+                    ).compact)
+                  end
         {
           "active" => true,
           "mode" => @settings_mode,
           "categories" => settings_categories,
           "category" => settings_category,
           "category_index" => @settings_category_index,
+          "category_counts" => counts,
+          "visible_setting_count" => current_counts.fetch("visible", rows.length),
+          "hidden_advanced_count" => current_counts.fetch("hidden_advanced", 0),
           "rows" => rows,
           "row_index" => @settings_row_index,
           "dirty" => @settings_draft.dirty?,
           "saving" => @settings_saving,
-          "advanced" => @settings_show_advanced,
+          "advanced" => @settings_expanded_advanced.fetch(settings_category, false),
           "editor" => editor,
+          "keybinding_capture" => capture,
           "discard_confirm" => @settings_discard_confirm.is_a?(String),
           "confirmation" => (@settings_discard_confirm if @settings_discard_confirm.is_a?(String)),
           "setup_auto" => @settings_setup_auto,
           "setup_step" => setup_mode? ? @settings_category_index + 1 : nil,
           "setup_step_count" => setup_mode? ? settings_categories.length : nil,
+          "setup_animations" => setup_mode? ? @settings_draft.value("appearance.animations") == true : nil,
+          "setup_animation_phase" => setup_mode? ? setup_animation_phase : nil,
           "error_count" => @settings_draft.errors.length,
           "global_error" => @settings_draft.global_error,
           "width" => render_width,
@@ -3018,6 +3070,9 @@ module Meringue
         if render_width < Settings::MIN_WIDTH || render_height < Settings::MIN_HEIGHT
           close_settings(discard: true) if hard_escape_key?(key)
           return unchanged
+        end
+        if @settings_keybinding_capture
+          return handle_settings_keybinding_capture_key(key, unchanged)
         end
         return handle_settings_mouse(key, unchanged, on_submit, state) if mouse_event?(key)
 
@@ -3069,12 +3124,49 @@ module Meringue
         elsif ENTER_KEYS.include?(key)
           activate_settings_row(state, on_submit: on_submit)
         elsif key.to_s.downcase == "a" && !setup_mode?
-          @settings_show_advanced = !@settings_show_advanced
-          @settings_row_index = 0
+          category = settings_category
+          if @settings_draft.definitions_for(category, include_advanced: true).any?(&:advanced)
+            @settings_expanded_advanced[category] = !@settings_expanded_advanced.fetch(category, false)
+            @settings_row_index = 0
+          end
         end
         unchanged
       rescue StandardError => e
         @settings_draft&.apply_save_failure("Settings input failed: #{e.message}")
+        unchanged
+      end
+
+      def handle_settings_keybinding_capture_key(key, unchanged)
+        capture = @settings_keybinding_capture
+        if mouse_event?(key)
+          capture["error"] = "Mouse input cannot be bound here; press a keyboard key, Esc, or Backspace."
+          return unchanged
+        end
+        if key == "\e"
+          @settings_keybinding_capture = nil
+          return unchanged
+        end
+        if BACKSPACE_KEYS.include?(key) || DELETE_KEYS.include?(key)
+          id = capture.fetch("id")
+          @settings_draft.set(id, [])
+          @settings_keybinding_capture = nil unless @settings_draft.errors.key?(id)
+          capture["error"] = @settings_draft.errors[id] if @settings_keybinding_capture
+          return unchanged
+        end
+
+        name = Keybindings.capture_name(key)
+        unless name
+          capture["error"] = "That input cannot be used as a keybinding; press one key at a time."
+          return unchanged
+        end
+
+        id = capture.fetch("id")
+        @settings_draft.set(id, [name])
+        if @settings_draft.errors.key?(id)
+          capture["error"] = @settings_draft.errors[id]
+        else
+          @settings_keybinding_capture = nil
+        end
         unchanged
       end
 
@@ -3234,7 +3326,7 @@ module Meringue
 
         id = row.fetch("id")
         if id == "_show_advanced"
-          @settings_show_advanced = true
+          @settings_expanded_advanced[settings_category] = true
           @settings_row_index = 0
           return true
         end
@@ -3243,6 +3335,10 @@ module Meringue
           return handle_local_setup_command(state)
         end
         if id == "_setup_begin"
+          move_settings_category(1)
+          return true
+        end
+        if id == "_setup_next"
           move_settings_category(1)
           return true
         end
@@ -3257,6 +3353,9 @@ module Meringue
         case row.fetch("editor", nil)
         when "checkbox"
           @settings_draft.toggle(id)
+        when "keybinding"
+          return false if toggle_only
+          open_settings_keybinding_capture(row)
         when "selector"
           return false if toggle_only
           @settings_draft.cycle(id, 1)
@@ -3278,6 +3377,15 @@ module Meringue
         @settings_category_index = settings_categories.index(step) || 0
         @settings_row_index = settings_rows.index { |row| row.fetch("id", nil) == id.to_s } || 0
         true
+      end
+
+      def open_settings_keybinding_capture(row)
+        @settings_draft.errors.delete(row.fetch("id"))
+        @settings_keybinding_capture = {
+          "id" => row.fetch("id"),
+          "row" => row,
+          "error" => nil
+        }
       end
 
       def open_settings_editor(row)
@@ -3359,7 +3467,9 @@ module Meringue
         definition = @settings_draft.definitions.find { |candidate| candidate.id == id.to_s }
         return unless definition
 
-        @settings_show_advanced = true if definition.advanced
+        if definition.advanced
+          @settings_expanded_advanced[definition.category] = true
+        end
         @settings_category_index = settings_categories.index(definition.category) || 0
         @settings_row_index = settings_rows.index { |row| row.fetch("id", nil) == definition.id } || 0
       end

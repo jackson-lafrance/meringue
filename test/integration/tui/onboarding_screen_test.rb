@@ -35,10 +35,10 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     open_setup
 
     {
-      [100, 32] => ["meringue · setup", "setup steps", "Welcome", "Esc cancel", "[ Next ]"],
-      [79, 24] => ["meringue · setup", "1/6 · Welcome", "Tab steps"],
-      [46, 18] => ["meringue · setup", "Welcome", "Esc cancel"],
-      [32, 10] => ["setup", "Esc cancel"],
+      [100, 32] => ["setup · 1/6", "Welcome to Meringue", "Step 1 of 6", "Enter begin", "[ Begin ]"],
+      [79, 24] => ["setup · 1/6", "Welcome to Meringue", "Step 1 of 6", "Enter begin"],
+      [46, 18] => ["setup · 1/6", "Welcome to Meringue", "Esc skip for now"],
+      [32, 10] => ["setup · 1/6", "Welcome", "Esc skip"],
       [31, 9] => ["Terminal too small for Setup", "Esc cancel"]
     }.each do |(width, height), expected|
       frame = render(width: width, height: height)
@@ -55,8 +55,9 @@ class TuiSetupOverlayScreenTest < Minitest::Test
   def test_wide_step_rail_and_review_are_compact_but_complete
     open_setup
     frame = render
-    assert_includes frame, "setup steps"
-    Meringue::TUI::Settings::SetupFlow.steps.each { |step| assert_includes frame, step }
+    assert_includes frame, "Step 1 of 6"
+    assert_includes frame, "Welcome to Meringue"
+    refute_includes frame, "setup steps"
 
     send_key(ENTER)
     4.times { send_key(TAB) }
@@ -76,11 +77,12 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     send_key(ENTER)
     3.times { send_key(TAB) }
     assert_equal "Experiments", snapshot.fetch("category")
-    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, snapshot.fetch("rows").map { |row| row.fetch("id") }
+    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" } + ["_setup_next"], snapshot.fetch("rows").map { |row| row.fetch("id") }
 
     geometry = @layout.send(:settings_pane).geometry(compose, width: WIDTH, height: HEIGHT)
-    detail = geometry.fetch(:detail)
-    send_mouse("x" => detail.fetch(:x) + 2, "y" => detail.fetch(:y) + 1)
+    card = geometry.fetch(:card)
+    view = @layout.send(:settings_pane).setup_view(compose, width: WIDTH, height: HEIGHT)
+    send_mouse("x" => card.fetch(:x) + 2, "y" => view.fetch(:row_y))
     assert_equal true, snapshot.fetch("rows").first.fetch("value")
 
     before = snapshot.slice("category", "row_index", "dirty")
@@ -88,12 +90,15 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     assert_equal before, snapshot.slice("category", "row_index", "dirty")
   end
 
-  def test_step_rail_clicks_navigate_without_writing_and_next_button_advances
+  def test_centered_card_click_and_next_button_advance_without_writing
     open_setup
     geometry = @layout.send(:settings_pane).geometry(compose, width: WIDTH, height: HEIGHT)
-    rail = geometry.fetch(:rail)
-    send_mouse("x" => rail.fetch(:x) + 2, "y" => rail.fetch(:y) + 4)
-    assert_equal "Worker defaults", snapshot.fetch("category")
+    refute geometry.key?(:rail)
+    card = geometry.fetch(:card)
+    assert_equal (WIDTH - card.fetch(:width)) / 2, card.fetch(:x)
+    view = @layout.send(:settings_pane).setup_view(compose, width: WIDTH, height: HEIGHT)
+    send_mouse("x" => card.fetch(:x) + 2, "y" => view.fetch(:row_y))
+    assert_equal "Theme", snapshot.fetch("category")
     assert_empty drain_submitted
 
     snap = compose
@@ -102,8 +107,37 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     actions = @layout.send(:settings_pane).action_segments(snap)
     action_width = actions.sum { |text, _style| text.length }
     send_mouse("x" => WIDTH - action_width, "y" => footer_y)
-    assert_equal "Experiments", snapshot.fetch("category")
+    assert_equal "Head defaults", snapshot.fetch("category")
     assert_empty drain_submitted
+  end
+
+  def test_setup_arrow_navigation_and_explicit_next_action
+    open_setup
+    send_key(ENTER) # Theme
+    assert_equal "Theme", snapshot.fetch("category")
+    send_key("\e[C")
+    assert snapshot.fetch("dirty")
+    2.times { send_key("\e[B") }
+    assert_equal "_setup_next", snapshot.fetch("rows")[snapshot.fetch("row_index")].fetch("id")
+    send_key(ENTER)
+    assert_equal "Head defaults", snapshot.fetch("category")
+    assert_empty drain_submitted
+  end
+
+  def test_setup_animation_and_ascii_fallbacks_are_restrained_and_accessible
+    open_setup
+    assert_operator snapshot.fetch("setup_step_count"), :>, 1
+
+    with_env("MERINGUE_ASCII_GLYPHS" => "1") do
+      frame = render
+      refute_includes frame, "✦"
+      refute_includes frame, "●"
+      assert_includes frame, "Step 1 of 6"
+    end
+
+    @app.instance_variable_get(:@settings_draft).set("appearance.animations", false)
+    assert_equal 0, snapshot.fetch("setup_animation_phase")
+    assert_includes render, "Welcome to Meringue"
   end
 
   def test_resize_below_minimum_is_recoverable_and_does_not_record_an_outcome
