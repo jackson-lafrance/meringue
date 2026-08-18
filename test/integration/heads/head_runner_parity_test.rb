@@ -176,6 +176,72 @@ class HeadRunnerParityTest < Minitest::Test
     assert_equal "Shopify", result.dig("commands", 0, "payload", "name")
   end
 
+  def test_fake_runner_uses_the_explicit_project_name_before_an_unrelated_active_issue
+    snapshot = head_snapshot
+    snapshot.fetch("projects").first["name"] = "Simply Schedule"
+    snapshot.fetch("projects") << {
+      "id" => "P2",
+      "name" => "Simply Lift",
+      "root_path" => "/tmp/simply-lift",
+      "status" => "working",
+      "updated_at" => "2024-01-04T00:00:00Z"
+    }
+
+    result = Meringue::Heads::FakeRunner.new.run(
+      user_message: "submit the latest Simply Lift build",
+      snapshot: snapshot
+    )
+
+    assert_equal %w[CreateIssue SpawnWorker], result.fetch("commands").map { |command| command.fetch("type") }
+    assert_equal "P2", result.dig("commands", 0, "payload", "project_id")
+    assert_equal "create-issue", result.dig("commands", 1, "payload", "issue_from_command")
+  end
+
+  def test_fake_runner_registers_a_clearly_identified_unregistered_local_project_first
+    root = head_temp_root
+    FileUtils.mkdir_p(File.join(root, ".git"))
+    File.write(File.join(root, "README.md"), "# Simply Lift\n")
+    snapshot = head_snapshot
+    snapshot.fetch("projects").first["name"] = "Simply Schedule"
+    context = build_head_context(snapshot: snapshot, cwd: root)
+
+    result = Meringue::Heads::FakeRunner.new.run(
+      user_message: "submit the latest Simply Lift build",
+      snapshot: snapshot,
+      context: context
+    )
+
+    assert_equal %w[AddProject CreateIssue SpawnWorker], result.fetch("commands").map { |command| command.fetch("type") }
+    assert_equal root, result.dig("commands", 0, "payload", "path")
+    assert_equal "Simply Lift", result.dig("commands", 0, "payload", "name")
+    assert_equal "P2", result.dig("commands", 1, "payload", "project_id")
+    assert_equal "create-issue", result.dig("commands", 2, "payload", "issue_from_command")
+  end
+
+  def test_fake_runner_asks_before_routing_when_project_identity_is_ambiguous
+    snapshot = head_snapshot
+    snapshot.fetch("projects").first["name"] = "Simply Schedule"
+    snapshot.fetch("projects") << {
+      "id" => "P2",
+      "name" => "Simply Lift",
+      "root_path" => "/tmp/simply-lift",
+      "status" => "working",
+      "updated_at" => "2024-01-04T00:00:00Z"
+    }
+
+    result = Meringue::Heads::FakeRunner.new.run(
+      user_message: "submit the latest build",
+      snapshot: snapshot
+    )
+
+    assert_empty result.fetch("commands")
+    assert_equal 1, result.fetch("questions").length
+    question = result.fetch("questions").first
+    assert_includes question.fetch("question"), "Simply Schedule"
+    assert_includes question.fetch("question"), "Simply Lift"
+    assert_includes question.fetch("context"), "not safe routing evidence"
+  end
+
   def test_harness_runner_owns_a_session_for_one_run_and_closes_it
     raw = JSON.generate(head_result(commands: [kernel_command("AnswerQuestion", "question_id" => "Q4", "answer" => "keep it")]))
     client = HeadResultHarnessClient.new(raw_output: raw)

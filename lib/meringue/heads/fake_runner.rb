@@ -8,13 +8,14 @@ module Meringue
       ISSUE_COMMAND_ID = "create-issue"
 
       def run(user_message:, snapshot:, context: nil, question_id: nil)
-        commands = build_commands(user_message: user_message, snapshot: snapshot, context: context)
+        routing = build_commands(user_message: user_message, snapshot: snapshot, context: context)
+        commands = routing.fetch("commands")
 
         {
           "title" => title_from(user_message),
           "summary" => "Fake head proposed #{commands.length} deterministic kernel command(s): reuse the best issue and worker session when possible.",
           "commands" => commands,
-          "questions" => []
+          "questions" => routing.fetch("questions")
         }
       end
 
@@ -23,7 +24,7 @@ module Meringue
       def build_commands(user_message:, snapshot:, context:)
         commands = []
         maintenance = maintenance_commands(user_message: user_message, snapshot: snapshot)
-        return maintenance if maintenance
+        return { "commands" => maintenance, "questions" => [] } if maintenance
 
         selected_target = selected_target_from(context)
         selected_issue = snapshot.fetch("issues", []).find do |issue|
@@ -33,27 +34,37 @@ module Meringue
           agent.fetch("id", nil).to_s == selected_target.fetch("selected_agent_id", nil).to_s &&
             agent.fetch("issue_id", nil).to_s == selected_issue&.fetch("id", nil).to_s
         end
-        return [prompt_worker_command(selected_worker, user_message)] if resumable_worker?(selected_worker)
+        if resumable_worker?(selected_worker)
+          return { "commands" => [prompt_worker_command(selected_worker, user_message)], "questions" => [] }
+        end
 
         explicit_worker = referenced_worker(snapshot, user_message) unless selected_issue
-        return [prompt_worker_command(explicit_worker, user_message)] if resumable_worker?(explicit_worker)
+        if resumable_worker?(explicit_worker)
+          return { "commands" => [prompt_worker_command(explicit_worker, user_message)], "questions" => [] }
+        end
 
         explicit_issue = selected_issue || referenced_issue(snapshot, user_message)
-        project = project_for_issue(snapshot, explicit_issue) || referenced_project(snapshot, user_message) ||
-                  matching_project(snapshot, user_message) || snapshot.fetch("projects", []).first
-        project_match = matching_project(snapshot, user_message)
-        existing_issue = explicit_issue || matching_issue(
-          snapshot,
-          user_message,
-          project_id: project_match&.fetch("id", nil)
-        )
+        route = project_route(snapshot, user_message, context, explicit_issue)
+        if route.fetch("ambiguous")
+          return {
+            "commands" => [],
+            "questions" => [project_clarification_question(user_message, route.fetch("candidates"))]
+          }
+        end
 
-        unless project
+        project = route.fetch("project")
+        project_id = project&.fetch("id", nil)
+        unless project_id
           project_id = next_project_id(snapshot)
           commands << add_project_command(context)
         end
 
-        project_id ||= project.fetch("id")
+        existing_issue = explicit_issue || matching_issue(
+          snapshot,
+          user_message,
+          project_id: project_id,
+          allow_recent_fallback: !route.fetch("request_identified")
+        )
         existing_issue = nil if existing_issue && existing_issue.fetch("project_id", nil) != project_id
         title = title_from(user_message)
 
@@ -62,7 +73,7 @@ module Meringue
           prior_worker = latest_worker(snapshot, issue_id)
           if resumable_worker?(prior_worker)
             commands << prompt_worker_command(prior_worker, user_message)
-            return commands
+            return { "commands" => commands, "questions" => [] }
           end
         else
           # Never predict the id of an issue this batch creates; point the worker at the
@@ -85,7 +96,7 @@ module Meringue
           follow_up_of_agent_id: follow_up_worker_id(prior_worker),
           replace_agent_id: replacement_worker_id(prior_worker)
         )
-        commands
+        { "commands" => commands, "questions" => [] }
       end
 
       def selected_target_from(context)
@@ -220,19 +231,140 @@ module Meringue
         snapshot.fetch("projects", []).find { |project| project.fetch("id", nil) == issue.fetch("project_id", nil) }
       end
 
-      def matching_project(snapshot, user_message)
+      def project_route(snapshot, user_message, context, explicit_issue)
+        return {
+          "project" => project_for_issue(snapshot, explicit_issue),
+          "request_identified" => true,
+          "ambiguous" => false,
+          "candidates" => []
+        } if explicit_issue
+
+        explicit_project = referenced_project(snapshot, user_message)
+        if explicit_project
+          return {
+            "project" => explicit_project,
+            "request_identified" => true,
+            "ambiguous" => false,
+            "candidates" => []
+          }
+        end
+
+        candidates = matching_project_candidates(snapshot, user_message, context)
+        if candidates.any?
+          top_score = candidates.first.fetch("score")
+          top = candidates.take_while { |candidate| candidate.fetch("score") == top_score }
+          return {
+            "project" => top.first.fetch("project"),
+            "request_identified" => true,
+            "ambiguous" => false,
+            "candidates" => top.map { |candidate| candidate.fetch("project") }
+          } if top.length == 1
+
+          return {
+            "project" => nil,
+            "request_identified" => true,
+            "ambiguous" => true,
+            "candidates" => top.map { |candidate| candidate.fetch("project") }
+          }
+        end
+
+        current_project = current_project(snapshot, context)
+        if current_project
+          return {
+            "project" => current_project,
+            "request_identified" => false,
+            "ambiguous" => false,
+            "candidates" => []
+          }
+        end
+
+        projects = snapshot.fetch("projects", [])
+        return {
+          "project" => projects.first,
+          "request_identified" => false,
+          "ambiguous" => false,
+          "candidates" => []
+        } if projects.length == 1
+
+        return {
+          "project" => nil,
+          "request_identified" => false,
+          "ambiguous" => false,
+          "candidates" => []
+        } if projects.empty?
+
+        {
+          "project" => nil,
+          "request_identified" => false,
+          "ambiguous" => true,
+          "candidates" => projects
+        }
+      end
+
+      def matching_project_candidates(snapshot, user_message, context)
+        projects = snapshot.fetch("projects", []).map { |project| [project, false] }
+        local_project = current_local_project(context)
+        if local_project && !projects.any? { |project, _| same_project_root?(project, local_project) }
+          projects << [local_project, true]
+        end
+
         prompt_terms = routing_terms(user_message)
-        scored = snapshot.fetch("projects", []).filter_map do |project|
+        projects.filter_map do |project, _local|
           project_name = Meringue::ProjectNaming.canonical_name(project.fetch("name", ""))
           repository_name = Meringue::ProjectNaming.canonical_name(File.basename(project.fetch("root_path", "")))
           project_terms = routing_terms([project_name, repository_name].compact.join(" "))
           score = prompt_terms.count { |term| project_terms.include?(term) }
-          score.positive? ? [score, project] : nil
+          score.positive? ? { "score" => score, "project" => project } : nil
+        end.sort_by do |candidate|
+          project = candidate.fetch("project")
+          [-candidate.fetch("score"), project.fetch("id", "").to_s, project.fetch("name", "").to_s]
         end
-        scored.max_by { |score, project| [score, project.fetch("updated_at", "").to_s] }&.last
       end
 
-      def matching_issue(snapshot, user_message, project_id: nil)
+      def current_project(snapshot, context)
+        local_project = current_local_project(context)
+        return nil unless local_project
+
+        snapshot.fetch("projects", []).find { |project| same_project_root?(project, local_project) }
+      end
+
+      def current_local_project(context)
+        return nil unless context&.respond_to?(:cwd)
+
+        root = default_project_root(context.cwd)
+        return nil unless File.directory?(root)
+        return nil unless File.exist?(File.join(root, ".git"))
+
+        {
+          "id" => nil,
+          "name" => Meringue::ProjectNaming.name_for(root),
+          "root_path" => root,
+          "status" => "working",
+          "updated_at" => ""
+        }
+      end
+
+      def same_project_root?(left, right)
+        left_root = left.fetch("root_path", nil).to_s
+        right_root = right.fetch("root_path", nil).to_s
+        !left_root.empty? && !right_root.empty? && File.expand_path(left_root) == File.expand_path(right_root)
+      end
+
+      def project_clarification_question(user_message, candidates)
+        choices = candidates.map do |project|
+          label = project.fetch("name", nil).to_s.strip
+          path = project.fetch("root_path", nil).to_s.strip
+          label = path if label.empty?
+          path.empty? || path == label ? label : "#{label} (#{path})"
+        end.uniq
+
+        {
+          "question" => "Which project should receive #{user_message.to_s.inspect}? Choose one of: #{choices.join(", ")}",
+          "context" => "The request did not identify one project clearly enough, and recent issue activity is not safe routing evidence."
+        }
+      end
+
+      def matching_issue(snapshot, user_message, project_id: nil, allow_recent_fallback: true)
         issues = snapshot.fetch("issues", [])
         issues = issues.select { |issue| issue.fetch("project_id", nil) == project_id } if project_id
         prompt_terms = routing_terms(user_message)
@@ -242,7 +374,7 @@ module Meringue
         end
         score, issue = scored.max_by { |candidate_score, candidate| [candidate_score, candidate.fetch("updated_at", "").to_s] }
         return issue if score.to_i.positive?
-        return issues.max_by { |candidate| candidate.fetch("updated_at", candidate.fetch("created_at", "")).to_s } if follow_up_language?(user_message)
+        return issues.max_by { |candidate| candidate.fetch("updated_at", candidate.fetch("created_at", "")).to_s } if allow_recent_fallback && follow_up_language?(user_message)
 
         nil
       end
