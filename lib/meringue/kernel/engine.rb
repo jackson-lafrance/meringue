@@ -234,7 +234,7 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."],
         ["/worker resume <agent_id>", "Resume a paused worker session."],
-        ["/prompt <agent_id> \"<message>\"", "Continue a worker session or take over a still-routing head."]
+        ["/prompt <agent_id> \"<message>\"", "Continue a worker session or take over a still-routing head."],
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/harness [head|worker] <pi|claude|antigravity>", "Select role-aware harness defaults for future agents; omit the role to update both."],
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
