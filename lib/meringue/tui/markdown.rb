@@ -19,6 +19,10 @@ module Meringue
       module_function
 
       def render(text, width:, gutter:, base_style:, accent_style:)
+        # The gutter consumes terminal columns for identity/indentation, but it
+        # is pane chrome rather than authored Markdown. Keep it in every
+        # rendered row while making that distinction available to selection.
+        gutter = Selection.display_only_segment(gutter)
         lines = sanitized_lines(text)
         rendered = []
         paragraph = []

@@ -133,6 +133,8 @@ Markdown soft line breaks are reflowed to the current pane width. Every wrapped 
 
 Before parsing, the renderer normalizes invalid UTF-8 and strips CSI, OSC, other escape sequences, and control characters. Styles are supplied separately to `Canvas`; untrusted agent text is never treated as ANSI. `Canvas` performs a final control-character sanitization and clips every segment to its pane.
 
+The logs renderer also marks its leading body gutters as display-only Canvas segments. Selection geometry still follows the visible columns, so highlights and mouse hit-testing do not move, but clipboard extraction skips the colored `▌ ` (or plain body indent) wherever a selection intersects it. Mouse auto-copy, explicit copy, and the keyboard cursor's whole-line copy all use that same segment-aware extraction. Markdown bullets and block markers, inline-code backticks, command text, paragraph gaps, and line breaks remain copyable; authored text that happens to contain `▌` is not stripped by glyph matching.
+
 Agent identity colors remain deterministic per id and active theme. Markdown headings and structural markers reuse the same agent palette entry as the header and `▌` gutter. The explicit agent id, head/worker/result icon, Markdown markers, status text, and gutter remain present when `NO_COLOR` is set, so identity and document structure do not depend on color alone.
 
 Two other surfaces reuse that same identity assignment, so one agent is one color everywhere:

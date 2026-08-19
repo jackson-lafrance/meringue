@@ -8,6 +8,12 @@ module Meringue
     # log lines plus a column into that line) so highlights follow the content
     # when the pane scrolls, and so a drag can never leak into another pane.
     module Selection
+      # Segment metadata used by renderers for chrome that occupies display
+      # columns but should never become clipboard text. Selection coordinates
+      # remain tied to what is visible; extraction skips only the intersecting
+      # display-only segment instead of guessing from a glyph or prefix.
+      DISPLAY_ONLY = :display_only
+
       # Characters that read as one "word" when the user double-clicks.
       #
       # Alphanumerics and underscore are the core. The joiners are only part of a
@@ -124,19 +130,69 @@ module Meringue
         WORD_JOINERS.include?(text) && !text.match?(WORD_CORE_PATTERN)
       end
 
-      # Joins the selected substrings of `texts` (a Hash of content line index
-      # to plain text) into clipboard-ready text.
-      def text_for(selection, texts)
+      # Marks one [text, style] Canvas segment as visible but not copyable.
+      # Existing segment consumers read only the first two values, so the marker
+      # changes clipboard extraction without changing layout or styling.
+      def display_only_segment(segment, style = nil)
+        return segment if display_only_segment?(segment)
+
+        if segment.is_a?(Array)
+          [segment.fetch(0, "").to_s, segment.fetch(1, style), DISPLAY_ONLY]
+        else
+          [segment.to_s, style, DISPLAY_ONLY]
+        end
+      end
+
+      def display_only_segment?(segment)
+        segment.is_a?(Array) && segment.fetch(2, nil) == DISPLAY_ONLY
+      end
+
+      # Joins selected portions of rendered lines into clipboard-ready text.
+      # Values may be plain strings or arrays of Canvas segments. Display
+      # columns still determine the selected range, while segments explicitly
+      # marked as presentation are omitted from the resulting text.
+      def text_for(selection, lines)
         return "" unless selection.is_a?(Hash)
         return "" if empty?(selection)
 
         start_line = (selection.fetch("start", {}) || {}).fetch("line", 0).to_i
         end_line = (selection.fetch("end", {}) || {}).fetch("line", 0).to_i
         (start_line..end_line).map do |line_index|
-          text = texts.fetch(line_index, "").to_s
-          range = columns_for(selection, line_index, text.length)
-          range ? text[range].to_s : ""
+          line = lines.fetch(line_index, "")
+          range = columns_for(selection, line_index, display_length(line))
+          range ? text_from_range(line, range) : ""
         end.join("\n")
+      end
+
+      def display_length(line)
+        return line.to_s.length unless line.is_a?(Array)
+
+        line.sum { |segment| segment_text(segment).length }
+      end
+
+      def text_from_range(line, range)
+        return line.to_s[range].to_s unless line.is_a?(Array)
+
+        selected = +""
+        display_offset = 0
+        line.each do |segment|
+          text = segment_text(segment)
+          segment_start = display_offset
+          segment_end = segment_start + text.length
+          display_offset = segment_end
+          next if display_only_segment?(segment)
+
+          overlap_start = [range.begin, segment_start].max
+          overlap_end = [range.end, segment_end].min
+          next if overlap_end <= overlap_start
+
+          selected << text[(overlap_start - segment_start)...(overlap_end - segment_start)].to_s
+        end
+        selected
+      end
+
+      def segment_text(segment)
+        segment.is_a?(Array) ? segment.fetch(0, "").to_s : segment.to_s
       end
     end
   end

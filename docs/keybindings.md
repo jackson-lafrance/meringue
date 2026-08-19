@@ -193,6 +193,8 @@ A word lives on one wrapped row: log text wraps at whitespace, so only a single 
 
 Copy uses a local clipboard command when one is available (`pbcopy` on macOS, then `wl-copy`, `xclip`, or `xsel` on Linux) and falls back to the OSC 52 terminal escape so remote sessions can still reach the local clipboard. Paste reads `pbpaste`, `wl-paste`, `xclip`, or `xsel`. The bottom hint line confirms a copy or reports `clipboard unavailable`.
 
+Logs copy authored/rendered content rather than pane chrome. The colored `▌ ` beside agent body rows and the equivalent plain body indent remain visible and selectable on screen, but they are omitted from mouse-release, double-/triple-click, and keyboard-caret clipboard text. Bullets, inline-code backticks, block markers, commands, paragraph gaps, and selected line breaks remain intact. This is segment metadata, not a glyph-based cleanup rule, so an authored `▌` inside log content is still copied.
+
 Paste is composer-only; the logs pane is copy-only.
 
 ### Large pastes collapse to a placeholder
