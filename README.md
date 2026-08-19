@@ -4,6 +4,65 @@ Meringue is an open-source, terminal-first control plane for running many coding
 
 The goal is simple: keep the developer in one place while many agents work in parallel. Meringue organizes that work as projects, issues, agents, questions, and logs, then routes each task to the configured harness behind a small integration layer.
 
+## Quick start
+
+> **Current distribution:** Meringue is not yet published to RubyGems or GitHub Releases. The supported installation is a source checkout.
+
+### 1. Check the prerequisites
+
+You need:
+
+- Git;
+- Ruby 3.1 or newer;
+- Bundler (included with most Ruby installations);
+- for real agent work, a supported harness CLI installed and authenticated. Meringue defaults to Pi (`pi`) and also recognizes Claude Code (`claude`) and Antigravity (`agy`). A harness is not needed for demo mode.
+
+Confirm the required development tools are available:
+
+```bash
+git --version
+ruby --version     # must report 3.1 or newer
+bundle --version
+```
+
+### 2. Install and verify Meringue
+
+```bash
+git clone https://github.com/jackson-lafrance/meringue.git
+cd meringue
+bundle install
+bundle exec meringue --version
+```
+
+The last command prints the installed checkout's Meringue version and confirms that Bundler can find its packaged `meringue` executable.
+
+### 3. Launch it
+
+```bash
+bundle exec meringue
+```
+
+The first interactive launch opens the guided setup for harness, model, thinking, theme, and optional experiments. To explore the interface without starting or authenticating a harness, run `bundle exec meringue demo` instead. See [first-run onboarding](docs/onboarding.md) and the [configuration reference](docs/config.md) for details.
+
+### 4. Update it later
+
+There is no in-app updater yet. After exiting Meringue, update the same checkout and refresh its dependencies:
+
+```bash
+cd /path/to/meringue
+git pull --ff-only
+bundle install
+bundle exec meringue --version
+```
+
+Your config and state live under `~/.meringue/`, outside the checkout, so this does not replace them.
+
+### Troubleshooting executable discovery
+
+- **`meringue: command not found`:** the source install does not add a global command. Run `bundle exec meringue` from the checkout. If Bundler cannot discover the executable, `./bin/meringue --version` verifies the checked-in entrypoint directly.
+- **`bundle: command not found`:** install Bundler for the Ruby you intend to use with `gem install --user-install bundler -v '~> 2.5'`. If RubyGems says its executable directory is not on `PATH`, add it for the current shell with `export PATH="$(ruby -r rubygems -e 'print Gem.user_dir')/bin:$PATH"`, then persist that line in your shell startup file.
+- **A harness executable is missing:** check it with `command -v pi` (or `claude` / `agy`). Put the executable's directory on `PATH`, or set that provider's `command` to its absolute path as described in [harness configuration](docs/config.md#provider-sections).
+
 ## The problem
 
 Modern coding harnesses are excellent at giving one agent a focused environment for one task. The new bottleneck is what happens when a developer wants ten agents moving in parallel:
@@ -89,57 +148,11 @@ test/e2e/                          # end-to-end flows across CLI/kernel/heads
 test/support/                      # shared test helpers and fakes
 ```
 
-## Setup
-
-Meringue is a Ruby application with a checked-in executable and a Bundler setup for local development.
-
-Requirements:
-
-- Ruby 3.1 or newer.
-- Bundler, which is included with most Ruby installs.
-- At least one supported harness CLI installed and authenticated when you want to spawn real agents. You can use `demo` first without any harness.
-
-Clone and install:
-
-```bash
-git clone https://github.com/jackson-lafrance/meringue.git
-cd meringue
-bundle install
-bundle exec meringue --help
-```
-
-You can also run the repository executable directly without installing anything beyond Ruby:
-
-```bash
-bin/meringue --help
-```
-
-Optional local config lives at `~/.meringue/config.toml`. Start from the fixture if you want to customize colors, harness commands, or role-specific harness arguments:
-
-```bash
-mkdir -p ~/.meringue
-cp fixtures/config.example.toml ~/.meringue/config.toml
-```
-
-Do not store API keys or secrets in this file. Use each harness CLI's normal authentication flow or environment variables.
-
 ## Usage
 
-Open the interactive TUI:
-
-```bash
-bundle exec meringue
-# or
-bundle exec meringue tui
-```
+The [quick start](#quick-start) covers the normal interactive launch and the harness-free demo. `bundle exec meringue tui` is an explicit equivalent of `bundle exec meringue`.
 
 The first interactive launch opens Setup as the same polished full-screen overlay used by `/config`. Review separate head and worker harness/model/thinking defaults, preview a theme, and opt into experiments such as GitHub support, then confirm the complete draft on one Review screen. Back never loses edits and nothing is written until Finish atomically saves the settings and `[onboarding]` marker together. Automatic first-run `Esc` confirms a safe skip; `Esc` on a manual `/setup` rerun cancels without changing the marker. The overlay remains recoverable through resize, validation, and persistence failures. See [`docs/onboarding.md`](docs/onboarding.md).
-
-Open a safe demo state without spawning real agents:
-
-```bash
-bundle exec meringue demo
-```
 
 Print the CLI help:
 
@@ -162,7 +175,7 @@ bundle exec meringue tui --state /tmp/meringue-state.json
 bundle exec meringue tui --config ./fixtures/config.example.toml
 ```
 
-If you skip Bundler, replace `bundle exec meringue` with `bin/meringue` in the commands above.
+From the checkout, the checked-in `bin/meringue` entrypoint accepts the same commands when you need to bypass Bundler's executable lookup.
 
 Useful slash commands inside the TUI include:
 
@@ -275,7 +288,7 @@ Default paths:
 ~/.meringue/state.json    # persisted Meringue state
 ```
 
-The config supports TUI colorschemes, animations, every TUI keybinding, separate head/worker harness/model/thinking defaults, provider commands/environment/arguments, workspace and launcher bounds, safety policy, experiments, and the first-run setup marker. `/config` edits these through one schema-backed atomic transaction. GitHub support is an opt-in experiment for new installations; disabling it removes built-in `gh` lookups and GitHub-specific commands/status/UI without deleting historical PR records. See [`docs/config.md`](docs/config.md) and [`docs/settings.md`](docs/settings.md). Workers may commit assigned work only under the user's repository identity; see [`docs/commit-authorship.md`](docs/commit-authorship.md) for the enforcement path and history audit. Branches, commits, and pull request metadata must describe only the product task; see [`docs/delivery-artifact-privacy.md`](docs/delivery-artifact-privacy.md).
+The config supports TUI colorschemes, animations, every TUI keybinding, separate head/worker harness/model/thinking defaults, provider commands/environment/arguments, workspace and launcher bounds, safety policy, experiments, and the first-run setup marker. `/config` edits these through one schema-backed atomic transaction. For a file-based starting point, copy [`fixtures/config.example.toml`](fixtures/config.example.toml) to `~/.meringue/config.toml`; keep API keys out of this file and use each harness's normal authentication or environment variables. GitHub support is an opt-in experiment for new installations; disabling it removes built-in `gh` lookups and GitHub-specific commands/status/UI without deleting historical PR records. See [`docs/config.md`](docs/config.md) and [`docs/settings.md`](docs/settings.md). Workers may commit assigned work only under the user's repository identity; see [`docs/commit-authorship.md`](docs/commit-authorship.md) for the enforcement path and history audit. Branches, commits, and pull request metadata must describe only the product task; see [`docs/delivery-artifact-privacy.md`](docs/delivery-artifact-privacy.md).
 
 The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state. Durable logs retain the newest 500 entries so lifecycle history cannot grow without bound. Independent events remain chronological, while explicitly identified evolving statuses—currently per-worker workspace-provisioning elapsed time and checkout percentage—replace only their own preceding entry so the dashboard shows one latest value. See [`docs/log-retention.md`](docs/log-retention.md) for replacement/retention semantics and the measured rationale, and [`docs/scalability.md`](docs/scalability.md) for the hermetic process-level responsiveness sweep.
 
