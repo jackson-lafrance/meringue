@@ -1578,7 +1578,7 @@ module Meringue
                      candidate = File.expand_path(name, cwd.to_s)
                      candidate if File.file?(candidate) && File.executable?(candidate)
                    else
-                     path.split(File::PATH_SEPARATOR).each do |directory|
+                     path.split(File::PATH_SEPARATOR).each_with_object(nil) do |directory, _unused|
                        directory = "." if directory.empty?
                        candidate = File.expand_path(File.join(directory, name), cwd.to_s)
                        break candidate if File.file?(candidate) && File.executable?(candidate)
@@ -1587,8 +1587,9 @@ module Meringue
         return resolved if resolved
 
         raise Error,
-              "The configured Pi command #{name.inspect} could not be resolved for native interactive focus. " \
-              "Configure [harness.pi] command with an executable path or make it available in the harness PATH."
+              "The configured Pi command #{name.inspect} could not be resolved for native interactive focus " \
+              "with PATH=#{path.inspect}. Configure [harness.pi] command with an executable path or make it " \
+              "available in [harness.pi.env] PATH, then restart Meringue."
       end
 
       def interactive_handoff_metadata(was_streaming:, events:, prompt:, latest_user_intent:, session_summary:, interrupted_turn_outcome:, turn_checkpoint:, replacement:)

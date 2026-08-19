@@ -27,7 +27,7 @@ class WorkspaceControllerTest < Minitest::Test
 
   class InteractiveFocusDouble
     attr_reader :begun, :started, :ended
-    attr_accessor :end_result
+    attr_accessor :begin_result, :end_result
 
     def initialize
       @begun = []
@@ -37,7 +37,7 @@ class WorkspaceControllerTest < Minitest::Test
 
     def begin_agent_interactive_focus(agent_id)
       @begun << agent_id
-      { "status" => "accepted", "result" => { "interactive_argv" => ["pi", "--session", "session.json"], "interactive_env" => {} }, "message" => "prepared" }
+      @begin_result || { "status" => "accepted", "result" => { "interactive_argv" => ["pi", "--session", "session.json"], "interactive_env" => {} }, "message" => "prepared" }
     end
 
     def mark_agent_interactive_focus_started(agent_id, pid:)
@@ -112,6 +112,44 @@ class WorkspaceControllerTest < Minitest::Test
       assert_equal ["x\n", "\u0003"], @sessions.last.writes
       assert_equal 1, @sessions.last.closes
       assert_equal [agent.fetch("id")], focus.ended
+    ensure
+      controller&.close
+    end
+  end
+
+  def test_native_focus_uses_the_provider_resolved_executable_and_effective_path
+    with_workspace_tmpdir do |tmp|
+      workspace = File.join(tmp, "worktree")
+      FileUtils.mkdir_p(workspace)
+      executable = File.join(tmp, "provider-bin", "pi")
+      FileUtils.mkdir_p(File.dirname(executable))
+      File.write(executable, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, executable)
+      focus = InteractiveFocusDouble.new
+      focus.begin_result = {
+        "status" => "accepted",
+        "result" => {
+          "interactive_argv" => ["pi", "--session", "session.json"],
+          "interactive_executable" => executable,
+          "interactive_env" => { "PATH" => File.dirname(executable) }
+        }
+      }
+      controller = Meringue::Workspace::Controller.new(
+        editor_launcher: @editor,
+        focus_session_service: focus,
+        interactive_session_factory: lambda { |command:, env:|
+          assert_equal [executable, "--session", "session.json"], command
+          assert_equal File.dirname(executable), env.fetch("PATH")
+          session = WorkspaceSupport::FakeTerminalSession.new
+          @sessions << session
+          session
+        }
+      )
+
+      result = controller.open_workspace(agent: worker_agent(workspace_path: workspace, **{ "harness" => "pi" }))
+
+      assert_equal "active", result.fetch("status")
+      assert_equal true, result.fetch("interactive")
     ensure
       controller&.close
     end

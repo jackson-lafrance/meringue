@@ -248,6 +248,59 @@ class TuiLayoutTest < Minitest::Test
     assert_operator @layout.agent_workspace_scroll_max(workspace_state, width: 100, height: 20), :>=, 0
   end
 
+  def test_native_focus_replaces_only_logs_and_keeps_dashboard_panes_live
+    workspace_state = composed_state(
+      demo_state,
+      chat: { "input_buffer" => "monitor the other workers", "input_cursor" => 25 },
+      workspace: {
+        "active" => true,
+        "embedded" => true,
+        "interactive" => true,
+        "agent_id" => "P1-I1-W1",
+        "view" => "agent",
+        "leader_label" => "Ctrl-Space",
+        "leader_commands" => [{ "action" => "workspace_close", "key" => "Q", "label" => "return" }],
+        "agent_session" => {
+          "lines" => ["Pi is ready"],
+          "styled_lines" => [[ ["Pi is ready", nil] ]],
+          "cursor" => [0, 11],
+          "revision" => 1,
+          "status" => "running"
+        }
+      }
+    )
+
+    frame = @layout.render(workspace_state, width: 100, height: 32)
+
+    assert_includes frame, "─ agent tree "
+    assert_includes frame, "Pi interactive · P1-I1-W1"
+    assert_includes frame, "Pi is ready"
+    assert_includes frame, "monitor the other workers"
+    assert_includes frame, "─ chat"
+    refute_includes frame, "─ logs ─"
+    assert_equal "agent_tree", @layout.pane_at(workspace_state, width: 100, height: 32, x: 5, y: 3)
+    assert_equal "logs", @layout.pane_at(workspace_state, width: 100, height: 32, x: 50, y: 3)
+    assert_equal "chat", @layout.pane_at(workspace_state, width: 100, height: 32, x: 50, y: 29)
+    assert_equal "H1", @layout.agent_tree_item_at(workspace_state, width: 100, height: 32, x: 5, y: 3)
+    assert_nil @layout.logs_text_position(workspace_state, width: 100, height: 32, x: 50, y: 3)
+    assert_equal 0, @layout.scroll_limits(workspace_state, width: 100, height: 32).fetch("logs")
+
+    dimensions = @layout.embedded_agent_workspace_dimensions(workspace_state, width: 100, height: 32)
+    assert_operator dimensions.fetch("rows"), :>, 0
+    assert_operator dimensions.fetch("columns"), :>, 0
+
+    refreshed = workspace_state.merge(
+      "agents" => workspace_state.fetch("agents") + [agent_record(
+        "H99",
+        "type" => "head",
+        "status" => "working",
+        "harness" => "pi",
+        "harness_metadata" => { "title" => "New live monitor" }
+      )]
+    )
+    assert_includes @layout.render(refreshed, width: 100, height: 32), "H99"
+  end
+
   def test_focused_workspace_uses_open_session_to_avoid_colliding_with_settings_inspection
     advertised = Meringue::TUI::WorkspaceCommands::COMMAND_SPECS.map(&:first)
 

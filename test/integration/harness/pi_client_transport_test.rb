@@ -448,6 +448,58 @@ class HarnessPiClientTransportTest < HarnessIntegrationTest
     end
   end
 
+  def test_prepare_interactive_session_preserves_the_inherited_path_that_started_rpc
+    stub = write_pi_stub(tmpdir, stub_config: { "session_id" => "sess-inherited" })
+    bin_dir = File.join(tmpdir, "inherited-bin")
+    pi_path = write_executable(
+      tmpdir,
+      "inherited-bin/pi",
+      "#!/bin/sh\nexec #{RUBY_BIN} #{stub.fetch("command").fetch(1)} \"$@\"\n"
+    )
+    client = PiClient.new(
+      command: "pi",
+      env: { "PI_STUB_CONFIG" => stub.fetch("env").fetch("PI_STUB_CONFIG") },
+      session_dir: File.join(tmpdir, "pi-sessions"),
+      command_timeout: 10,
+      event_timeout: 10,
+      shutdown_timeout: 1,
+      transport_ownership: build_transport_ownership(tmpdir)
+    )
+
+    with_env("PATH" => bin_dir) do
+      session_file = pi_session_file(tmpdir, session_id: "sess-inherited")
+      managed = client.attach_session(pi_session_ref(session_file: session_file, cwd: tmpdir))
+      @harness_sessions << [client, managed]
+
+      prepared = client.prepare_interactive_session(managed)
+
+      assert_equal pi_path, prepared.fetch("interactive_executable")
+      assert_equal bin_dir, prepared.fetch("interactive_env").fetch("PATH")
+    end
+  end
+
+  def test_prepare_interactive_session_reports_the_effective_path_when_pi_cannot_be_resolved
+    missing_path = File.join(tmpdir, "missing-bin")
+    client = PiClient.new(
+      command: "pi-not-installed",
+      env: { "PATH" => missing_path },
+      session_dir: File.join(tmpdir, "pi-sessions"),
+      command_timeout: 10,
+      event_timeout: 10,
+      shutdown_timeout: 1,
+      transport_ownership: build_transport_ownership(tmpdir)
+    )
+    session_file = pi_session_file(tmpdir, session_id: "sess-missing")
+
+    error = assert_raises(PiClient::Error) do
+      client.prepare_interactive_session(pi_session_ref(session_file: session_file, cwd: tmpdir))
+    end
+
+    assert_includes error.message, 'Pi command "pi-not-installed"'
+    assert_includes error.message, "PATH=#{missing_path.inspect}"
+    assert_includes error.message, "[harness.pi.env] PATH"
+  end
+
   def test_prepare_interactive_session_rebuilds_a_replacement_jsonl_when_rpc_has_no_session_path
     entry = {
       "type" => "message",

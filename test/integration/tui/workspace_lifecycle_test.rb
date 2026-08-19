@@ -44,16 +44,19 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
   end
 
   class InteractiveController
-    attr_reader :keys, :terminal_keys, :closed
+    attr_reader :keys, :terminal_keys, :closed, :opened_sizes, :resized_sizes
 
     def initialize
       @keys = []
       @terminal_keys = []
       @closed = 0
+      @opened_sizes = []
+      @resized_sizes = []
     end
 
     def open_workspace(agent:, state:, rows:, columns:)
-      _ = [agent, state, rows, columns]
+      _ = [agent, state]
+      @opened_sizes << [rows, columns]
       { "status" => "active", "interactive" => true, "message" => "native Pi focus" }
     end
 
@@ -66,6 +69,12 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       _ = [agent, state]
       @keys << key
       { "status" => "written", "bytes" => key.to_s.bytesize }
+    end
+
+    def resize_agent(agent:, rows:, columns:)
+      _ = agent
+      @resized_sizes << [rows, columns]
+      { "status" => "resized" }
     end
 
     def open_terminal(agent:, state:, rows:, columns:)
@@ -101,10 +110,11 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
   end
 
   class BlockingFocusService
-    attr_reader :begun
+    attr_reader :begun, :ended
 
     def initialize
       @begun = Queue.new
+      @ended = Queue.new
       @release = Queue.new
     end
 
@@ -122,7 +132,8 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       { "status" => "accepted", "agent_id" => agent_id, "pid" => pid }
     end
 
-    def end_agent_interactive_focus(_agent_id)
+    def end_agent_interactive_focus(agent_id)
+      @ended << agent_id
       { "status" => "accepted" }
     end
   end
@@ -258,7 +269,22 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       # for the active turn to settle.
       snapshot = app.send(:agent_workspace_snapshot, state, "", 0)
       assert_equal true, snapshot.fetch("active")
+      assert_equal true, snapshot.fetch("embedded")
+      assert_equal true, snapshot.fetch("opening")
       refute snapshot.fetch("interactive")
+      frame = app.render(state.merge(
+        "_chat" => { "input_buffer" => "monitor workers", "input_cursor" => 15 },
+        "_scroll" => { "active_pane" => "logs", "offsets" => {} },
+        "_agent_workspace" => snapshot
+      ), width: 100, height: 32)
+      assert_includes frame, "─ agent tree "
+      assert_includes frame, "Pi focus preparing"
+      assert_includes frame, "monitor workers"
+
+      # Focus can move back to the external composer while handoff is blocked.
+      buffer, cursor, = app.send(:handle_key, "\t", "", 0, -1, nil, state)
+      buffer, cursor, = app.send(:handle_key, "m", buffer, cursor, -1, nil, state)
+      assert_equal "m", buffer
 
       focus.release
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
@@ -273,6 +299,110 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       app&.send(:close_agent_workspace)
       controller&.close
     end
+  end
+
+  def test_cancelling_a_pending_focus_restores_dashboard_ownership_without_starting_a_pty
+    Dir.mktmpdir("meringue-cancelled-focus-") do |workspace|
+      focus = BlockingFocusService.new
+      controller = Meringue::Workspace::Controller.new(
+        focus_session_service: focus,
+        interactive_session_factory: ->(**) { raise "cancelled focus must not start a PTY" }
+      )
+      app = Meringue::TUI::App.new(
+        layout: Meringue::TUI::Layout.new,
+        terminal: TUISupport::FakeTerminal.new,
+        workspace_controller: controller
+      )
+      state = @state.merge("agents" => [agent_record(
+        "P1-I1-W1",
+        "type" => "worker",
+        "status" => "working",
+        "harness" => "pi",
+        "workspace_path" => workspace,
+        "project_id" => "P1",
+        "issue_id" => "P1-I1"
+      )])
+
+      assert app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+      assert_equal "P1-I1-W1", focus.begun.pop
+      app.send(:close_agent_workspace)
+      refute app.instance_variable_get(:@agent_workspace_active)
+      assert_equal "chat", app.instance_variable_get(:@focused_pane)
+
+      focus.release
+      assert_equal "P1-I1-W1", Timeout.timeout(2) { focus.ended.pop }
+      refute controller.agent_interactive?(agent: state.fetch("agents").first)
+    ensure
+      app&.send(:close_agent_workspace)
+      controller&.close
+    end
+  end
+
+  def test_embedded_native_focus_routes_input_by_pane_and_returns_to_prior_focus
+    controller = InteractiveController.new
+    app = Meringue::TUI::App.new(
+      layout: Meringue::TUI::Layout.new,
+      terminal: TUISupport::FakeTerminal.new,
+      workspace_controller: controller
+    )
+    state = @state.merge(
+      "projects" => [project_record("P1")],
+      "issues" => [issue_record("P1-I1", "project_id" => "P1", "title" => "Keep dashboard visibility")],
+      "agents" => [agent_record(
+        "P1-I1-W1",
+        "type" => "worker",
+        "status" => "working",
+        "harness" => "pi",
+        "project_id" => "P1",
+        "issue_id" => "P1-I1"
+      )]
+    )
+    submitted = Queue.new
+    handler = lambda do |text, **_options|
+      submitted << text
+      { "summary" => "routed" }
+    end
+
+    assert app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+    assert_equal "logs", app.instance_variable_get(:@focused_pane)
+    assert_equal true, app.send(:agent_workspace_snapshot, state, "", 0).fetch("embedded")
+
+    app.send(:handle_key, "x", "", 0, -1, handler, state)
+    app.send(:handle_key, "\u0003", "", 0, -1, handler, state)
+    assert_equal ["x", "\u0003"], controller.keys
+
+    buffer, cursor, = app.send(:handle_key, "\t", "", 0, -1, handler, state)
+    assert_equal "chat", app.instance_variable_get(:@focused_pane)
+    "monitor workers".each_char do |character|
+      buffer, cursor, = app.send(:handle_key, character, buffer, cursor, -1, handler, state)
+    end
+    assert_equal "monitor workers", buffer
+    assert_equal ["x", "\u0003"], controller.keys, "chat input must not leak into Pi"
+    app.send(:handle_key, "\r", buffer, cursor, -1, handler, state)
+    assert_equal "monitor workers", Timeout.timeout(5) { submitted.pop }
+
+    # Keyboard focus can reach the live AgentTree without sending navigation
+    # bytes to Pi; Enter then enables the existing tree-management mode.
+    app.send(:handle_key, "\e[Z", "", 0, -1, handler, state)
+    app.send(:handle_key, "\e[Z", "", 0, -1, handler, state)
+    assert_equal "agent_tree", app.instance_variable_get(:@focused_pane)
+    app.send(:handle_key, "\r", "", 0, -1, handler, state)
+    assert app.instance_variable_get(:@agent_tree_navigation_active)
+    assert_equal ["x", "\u0003"], controller.keys
+
+    # Resizing the dashboard changes the actual PTY, not only the screen model.
+    app.instance_variable_set(:@last_render_width, 120)
+    app.instance_variable_set(:@last_render_height, 40)
+    app.send(:agent_workspace_snapshot, state, "", 0)
+    expected = Meringue::TUI::Layout.new.embedded_agent_workspace_dimensions(state, width: 120, height: 40)
+    assert_equal [expected.fetch("rows"), expected.fetch("columns")], controller.resized_sizes.last
+
+    app.instance_variable_set(:@focused_pane, "logs")
+    app.send(:handle_key, "\u0000", "", 0, -1, handler, state)
+    app.send(:handle_key, "q", "", 0, -1, handler, state)
+    refute app.instance_variable_get(:@agent_workspace_active)
+    assert_equal "chat", app.instance_variable_get(:@focused_pane)
+    assert_equal 1, controller.closed
   end
 
   def test_native_pi_focus_uses_controller_screen_and_forwards_input_without_custom_view

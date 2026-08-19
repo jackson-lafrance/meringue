@@ -25,15 +25,25 @@ module Meringue
         def title(state)
           workspace = workspace_state(state)
           agent = workspace_agent(state)
-          view = if workspace.fetch("interactive", false)
-                   "Pi interactive"
-                 elsif workspace.fetch("view", "agent") == "terminal"
+          view = if workspace.fetch("view", "agent") == "terminal"
                    "worktree terminal"
+                 elsif workspace.fetch("opening", false)
+                   "Pi focus preparing"
+                 elsif workspace.fetch("interactive", false)
+                   "Pi interactive"
                  else
                    "focused worker"
                  end
           id = agent&.fetch("id", nil) || workspace.fetch("agent_id", "worker")
-          "#{view} · #{id}"
+          title = "#{view} · #{id}"
+          return title unless workspace.fetch("embedded", false)
+
+          close_command = Array(workspace.fetch("leader_commands", [])).find do |command|
+            command.is_a?(Hash) && command.fetch("action", nil).to_s == "workspace_close"
+          end
+          close_key = close_command&.fetch("key", nil).to_s
+          leader = workspace.fetch("leader_label", "Ctrl-Space").to_s
+          close_key.empty? ? title : "#{title} · #{leader} #{close_key} returns"
         end
 
         # The focused pane title takes the worker's identity color, the same one
@@ -57,10 +67,10 @@ module Meringue
           cached = @line_cache[view]
           return cached.fetch("lines") if signature && cached && cached.fetch("signature") == signature
 
-          lines = if workspace.fetch("interactive", false)
-                    interactive_lines(workspace, width: width)
-                  elsif view == "terminal"
+          lines = if view == "terminal"
                     terminal_lines(workspace, width: width)
+                  elsif workspace.fetch("interactive", false) || workspace.fetch("opening", false)
+                    interactive_lines(workspace, width: width)
                   else
                     agent_lines(state, workspace, width: width)
                   end
@@ -109,6 +119,7 @@ module Meringue
         # focused view stays discoverable without adding another hint line.
         def slash_suggestions?(state)
           workspace = workspace_state(state)
+          return false if workspace.fetch("embedded", false)
           return false unless workspace.fetch("view", "agent") == "agent"
 
           WorkspaceCommands.slash_prompt?(workspace.fetch("input_buffer", ""))
@@ -180,6 +191,8 @@ module Meringue
             width.to_i,
             workspace.fetch("agent_id", nil).to_s,
             workspace.fetch("interactive", false),
+            workspace.fetch("embedded", false),
+            workspace.fetch("opening", false),
             workspace.fetch("filter", "all").to_s,
             Settings.github_enabled?(state),
             revision,
