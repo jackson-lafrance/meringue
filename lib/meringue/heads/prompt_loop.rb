@@ -234,9 +234,10 @@ module Meringue
       end
 
       def apply_kernel(command)
-        # SpawnHead has always been independently synchronized by the engine. Prune now does the
-        # same and deliberately performs bounded forge I/O outside the state lock; do not hold the
-        # prompt-loop mutex across that I/O or every later submission would queue behind `/prune`.
+        # SpawnHead has always been independently synchronized by the engine. Prune and Kill now
+        # do the same and deliberately perform unbounded work (forge I/O, harness process exit)
+        # outside the state lock; do not hold the prompt-loop mutex across that work or every later
+        # submission would queue behind `/prune` or a storm of `/kill` commands.
         return engine.apply(command) if independently_synchronized_command?(command)
 
         @engine_mutex.synchronize { engine.apply(command) }
@@ -244,7 +245,10 @@ module Meringue
 
       def independently_synchronized_command?(command)
         type = command.respond_to?(:[]) && (command["type"] || command[:type] || command["command_type"] || command[:command_type])
-        %w[SpawnHead spawn_head Prune prune].include?(type.to_s)
+        # Kill manages its own state lock and defers unbounded harness process termination until
+        # after the lock is released, so the prompt-loop mutex must not be held across a kill or
+        # rapid `/kill` commands would queue behind each other instead of running concurrently.
+        %w[SpawnHead spawn_head Prune prune Kill kill].include?(type.to_s)
       end
 
       def mark_worker_completed(agent_id:, harness_events:, last_assistant_text:, session_ref: nil)
