@@ -8,52 +8,20 @@ The goal is simple: keep the developer in one place while many agents work in pa
 
 > **Current distribution:** Meringue is not yet published to RubyGems or GitHub Releases. The supported installation is a source checkout.
 
-### 1. Check the prerequisites
-
-You need:
-
-- Git;
-- Ruby 3.1 or newer;
-- Bundler (included with most Ruby installations);
-- for real agent work, a supported harness CLI installed and authenticated. Meringue defaults to Pi (`pi`) and also recognizes Claude Code (`claude`) and Antigravity (`agy`). A harness is not needed for demo mode.
-
-Confirm the required development tools are available:
-
-```bash
-git --version
-ruby --version     # must report 3.1 or newer
-bundle --version
-```
-
-### 2. Install and verify Meringue
+### 1. Install and launch Meringue
 
 ```bash
 git clone https://github.com/jackson-lafrance/meringue.git
 cd meringue
 bundle install
-bundle exec meringue --version
-```
-
-The last command prints the installed checkout's Meringue version and confirms that Bundler can find its packaged `meringue` executable.
-
-### 3. Launch it
-
-```bash
 bundle exec meringue
 ```
 
 The first interactive launch opens the guided setup for harness, model, thinking, theme, and optional experiments. To explore the interface without starting or authenticating a harness, run `bundle exec meringue demo` instead. See [first-run onboarding](docs/onboarding.md) and the [configuration reference](docs/config.md) for details.
 
-### 4. Update it later
+### 2. Update it later
 
-There is no in-app updater yet. After exiting Meringue, update the same checkout and refresh its dependencies:
-
-```bash
-cd /path/to/meringue
-git pull --ff-only
-bundle install
-bundle exec meringue --version
-```
+run `/update` in meringue or `git pull` and `bundle install` yourself
 
 Your config and state live under `~/.meringue/`, outside the checkout, so this does not replace them.
 
@@ -75,23 +43,9 @@ Modern coding harnesses are excellent at giving one agent a focused environment 
 
 Meringue keeps that parallel work in one place. The developer can keep typing, monitor structured progress, jump into a specific worker only when needed, and stay oriented around the product goals instead of terminal bookkeeping.
 
-## Why open source and harness agnostic
-
-Meringue is meant to be infrastructure that developers can adapt, inspect, and extend. Coding-agent harnesses will keep changing, and different teams will prefer different backends. Meringue should make those choices pluggable rather than forcing a single blessed agent runtime.
-
-The MVP backend is Pi because it is the fastest path for this project today. The architecture still keeps harness-specific behavior behind provider clients so the kernel and TUI can depend on generic operations such as spawning a session, prompting a session, reading events, aborting work, and attaching to a session.
-
-Supported provider names in the current config surface include:
-
-- `pi`
-- `claude` / `claude_code` / `claude-code` / `cc`
-- `antigravity`
-
-That provider list should grow over time without changing the core product model.
-
 ## Product value
 
-Meringue provides a single control plane for multi-agent development:
+Meringue provides an orchestrator for multi-agent development:
 
 - **Bring your own harness.** Use the coding-agent backend you want while Meringue handles orchestration, state, logs, and navigation.
 - **One chat stream for new work.** Natural-language prompts spawn short-lived head agents that decide what should happen next.
