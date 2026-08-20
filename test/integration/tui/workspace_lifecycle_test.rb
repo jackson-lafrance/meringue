@@ -138,6 +138,39 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     end
   end
 
+  class CompactingFocusService
+    attr_reader :resume_started, :ended
+
+    def initialize
+      @resume_started = Queue.new
+      @resume_release = Queue.new
+      @ended = []
+    end
+
+    def begin_agent_interactive_focus(agent_id)
+      {
+        "status" => "accepted",
+        "result" => { "interactive_argv" => ["/bin/sh"], "interactive_env" => {} },
+        "agent_id" => agent_id
+      }
+    end
+
+    def mark_agent_interactive_focus_started(agent_id, pid:)
+      { "status" => "accepted", "agent_id" => agent_id, "pid" => pid }
+    end
+
+    def end_agent_interactive_focus(agent_id)
+      @ended << agent_id
+      @resume_started << agent_id
+      @resume_release.pop
+      { "status" => "accepted", "message" => "resumed after compaction" }
+    end
+
+    def release_resume
+      @resume_release << true
+    end
+  end
+
   class ImmediateInteractiveSession
     attr_reader :writes
 
@@ -301,6 +334,11 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       end
       assert_equal false, app.instance_variable_get(:@agent_workspace_open_pending)
       app.send(:close_agent_workspace)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      while controller.agent_interactive?(agent: state.fetch("agents").first)
+        raise "native focus did not close" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
       refute controller.agent_interactive?(agent: state.fetch("agents").first)
     ensure
       app&.send(:close_agent_workspace)
@@ -367,6 +405,71 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       assert_equal "P1-I1-W1", Timeout.timeout(2) { focus.ended.pop }
     ensure
       focus&.release unless released
+      app&.send(:close_agent_workspace)
+      controller&.close
+    end
+  end
+
+  def test_quitting_focus_during_compaction_returns_to_a_usable_dashboard_immediately
+    Dir.mktmpdir("meringue-compacting-focus-") do |workspace|
+      focus = CompactingFocusService.new
+      interactive_session = ImmediateInteractiveSession.new
+      controller = Meringue::Workspace::Controller.new(
+        focus_session_service: focus,
+        interactive_session_factory: ->(command:, env:) { interactive_session }
+      )
+      app = Meringue::TUI::App.new(
+        layout: Meringue::TUI::Layout.new,
+        terminal: TUISupport::FakeTerminal.new,
+        workspace_controller: controller
+      )
+      state = @state.merge("agents" => [agent_record(
+        "P1-I1-W1",
+        "type" => "worker",
+        "status" => "working",
+        "harness" => "pi",
+        "workspace_path" => workspace,
+        "project_id" => "P1",
+        "issue_id" => "P1-I1"
+      )])
+
+      assert app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      until compose_app_state(app, state).dig("_agent_workspace", "interactive")
+        raise "native focus did not open" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
+
+      # Model Pi autocompaction by holding dashboard reattachment after the native PTY closes.
+      # The old synchronous quit path blocked the complete render/input loop at this boundary.
+      releaser = Thread.new do
+        focus.resume_started.pop
+        sleep 0.5
+        focus.release_resume
+      end
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      app.send(:close_agent_workspace, preserve_terminal: true)
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
+      assert_operator elapsed, :<, 0.2
+      refute app.instance_variable_get(:@agent_workspace_active)
+      assert_equal "chat", app.instance_variable_get(:@focused_pane)
+      buffer, = app.send(:handle_key, "m", "", 0, -1, nil, state)
+      assert_equal "m", buffer, "dashboard input must stay usable while ownership resumes"
+      refute app.instance_variable_get(:@quit_requested)
+
+      releaser.join
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      while controller.interactive_close_pending?(agent: state.fetch("agents").first)
+        raise "dashboard ownership did not finish resuming" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
+      compose_app_state(app, state)
+      assert_equal ["\e"], interactive_session.writes
+      assert_equal ["P1-I1-W1"], focus.ended
+    ensure
+      focus&.release_resume
+      releaser&.join(0.1)
       app&.send(:close_agent_workspace)
       controller&.close
     end

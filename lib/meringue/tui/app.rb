@@ -182,6 +182,7 @@ module Meringue
         @agent_workspace_open_pending = false
         @agent_workspace_open_generation = 0
         @agent_workspace_open_result = nil
+        @agent_workspace_close_results = []
         @agent_workspace_return_pane = "chat"
         @agent_workspace_view = "agent"
         @agent_workspace_filter = "all"
@@ -356,7 +357,7 @@ module Meringue
         close_settings(discard: true) if @settings_active
         persist_agent_workspace if @agent_workspace_active
         if @agent_workspace_active
-          close_agent_workspace
+          close_agent_workspace(async_interactive: false)
         else
           close_agent_workspace_session
         end
@@ -2878,7 +2879,7 @@ module Meringue
         nil
       end
 
-      def close_agent_workspace(preserve_terminal: false)
+      def close_agent_workspace(preserve_terminal: false, async_interactive: true)
         was_embedded = embedded_agent_workspace?
         return_pane = @agent_workspace_return_pane.to_s
         return_pane = "chat" unless FOCUS_ORDER.include?(return_pane)
@@ -2890,7 +2891,7 @@ module Meringue
         @chat_mutex.synchronize { @agent_workspace_open_result = nil }
         close_agent_workspace_session
         if @agent_workspace_interactive && workspace_controller&.respond_to?(:close_workspace)
-          apply_workspace_controller_result(workspace_controller.close_workspace(agent: @agent_workspace_agent_id))
+          close_interactive_agent_workspace(@agent_workspace_agent_id, asynchronous: async_interactive)
         elsif !preserve_terminal && workspace_controller&.respond_to?(:close_terminal)
           workspace_controller.close_terminal(agent: @agent_workspace_agent_id)
         end
@@ -2907,6 +2908,17 @@ module Meringue
         @agent_tree_navigation_active = !was_embedded && !@agent_workspace_agent_id.to_s.empty?
         @selected_agent_id = @agent_workspace_agent_id if @agent_tree_navigation_active
         persist_agent_workspace
+      end
+
+      def close_interactive_agent_workspace(agent_id, asynchronous: true)
+        if asynchronous && workspace_controller.respond_to?(:close_workspace_async)
+          result = workspace_controller.close_workspace_async(agent: agent_id) do |completion|
+            @chat_mutex.synchronize { @agent_workspace_close_results << completion }
+          end
+          @chat_mutex.synchronize { @agent_workspace_close_results << result } unless result.fetch("status", nil).to_s == "pending"
+        else
+          apply_workspace_controller_result(workspace_controller.close_workspace(agent: agent_id))
+        end
       end
 
       # `item_id` can come from a typed `/jump <id>`, so it is matched case-insensitively against
@@ -4573,6 +4585,7 @@ module Meringue
         @workspace_draft = input_buffer.to_s if @agent_workspace_active && !embedded_agent_workspace?
         state = state_provider.call || State::Models.empty_state
         sync_state_logs!(state)
+        complete_pending_workspace_closes
         if @agent_tree_navigation_active
           ids = agent_tree_selectable_agent_ids(state)
           @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
@@ -4633,6 +4646,20 @@ module Meringue
           last_line_index: range.last
         )
         @scroll_offsets["agent_tree"] = offset.to_i unless offset.nil?
+      end
+
+      def complete_pending_workspace_closes
+        results = @chat_mutex.synchronize do
+          pending = @agent_workspace_close_results
+          @agent_workspace_close_results = []
+          pending
+        end
+        failed = results.reverse.find do |result|
+          %w[failed rejected errored].include?(result.fetch("status", nil).to_s)
+        end
+        return unless failed
+
+        set_selection_status(failed.fetch("message", "Could not restore dashboard session ownership."))
       end
 
       def complete_pending_workspace_open(state)
@@ -4797,7 +4824,7 @@ module Meringue
         if @agent_workspace_open_pending && workspace_controller&.respond_to?(:cancel_workspace_open)
           workspace_controller.cancel_workspace_open(agent: @agent_workspace_agent_id)
         elsif @agent_workspace_interactive && workspace_controller&.respond_to?(:close_workspace)
-          workspace_controller.close_workspace(agent: @agent_workspace_agent_id)
+          close_interactive_agent_workspace(@agent_workspace_agent_id)
         else
           close_agent_workspace_session
         end

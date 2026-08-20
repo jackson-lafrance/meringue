@@ -23,6 +23,7 @@ module Meringue
         @interactive_sessions = {}
         @interactive_screens = {}
         @pending_interactive_opens = {}
+        @pending_interactive_closes = {}
         @mutex = Mutex.new
       end
 
@@ -52,6 +53,55 @@ module Meringue
           "message" => "Preparing focused workspace for #{agent.fetch("id", "worker")}…",
           "pending" => true
         }
+      end
+
+      # Returning ownership can wait for native Pi to abort compaction, stop its PTY, and start the
+      # dashboard RPC transport. Keep that bounded work off the TUI input/render thread while the
+      # durable kernel handoff marker continues enforcing one writer.
+      def close_workspace_async(agent:, &callback)
+        key = agent_key(agent)
+        operation = nil
+        start_operation = false
+        @mutex.synchronize do
+          operation = @pending_interactive_closes[key]
+          if operation
+            operation.fetch("callbacks") << callback if callback
+          else
+            operation = { "callbacks" => callback ? [callback] : [], "thread" => nil }
+            @pending_interactive_closes[key] = operation
+            start_operation = true
+          end
+        end
+        return pending_workspace_close(agent) unless start_operation
+
+        @mutex.synchronize do
+          # Creating and registering the thread under the same lock means shutdown can never see a
+          # close reservation without the thread it must join. The thread blocks on this mutex when
+          # it first looks up the interactive entry, so it cannot finish before registration.
+          thread = Thread.new do
+            Thread.current.name = "meringue-interactive-focus-close" if Thread.current.respond_to?(:name=)
+            result = begin
+              close_workspace(agent: agent)
+            rescue StandardError => e
+              failed("Could not close native Pi focus: #{e.message}")
+            end
+            callbacks = @mutex.synchronize do
+              @pending_interactive_closes.delete(key) if @pending_interactive_closes[key].equal?(operation)
+              operation.fetch("callbacks").dup
+            end
+            callbacks.each do |registered|
+              registered.call(result)
+            rescue StandardError
+              nil
+            end
+          end
+          operation["thread"] = thread
+        end
+        pending_workspace_close(agent)
+      end
+
+      def interactive_close_pending?(agent:)
+        @mutex.synchronize { @pending_interactive_closes.key?(agent_key(agent)) }
       end
 
       def cancel_workspace_open(agent:)
@@ -288,16 +338,23 @@ module Meringue
       end
 
       def close
-        pending = @mutex.synchronize do
+        close_threads = @mutex.synchronize do
           @pending_interactive_opens.each_value { |operation| operation["cancelled"] = true }
           @pending_interactive_opens.clear
+          @pending_interactive_closes.values.map { |operation| operation.fetch("thread") }
+        end
+        # A pending return already owns closure for its worker. Join it before enumerating active
+        # entries so shutdown cannot race a second PTY close or dashboard reattachment against it.
+        close_threads.each { |thread| thread.join unless thread == Thread.current }
+        active_agents = @mutex.synchronize do
           @interactive_sessions.values.map { |entry| entry.fetch("agent") }
         end
-        pending.each { |agent| close_workspace(agent: agent) }
+        active_agents.each { |agent| close_workspace(agent: agent) }
         @mutex.synchronize do
           @screens.clear
           @interactive_screens.clear
           @interactive_sessions.clear
+          @pending_interactive_closes.clear
         end
         terminal_manager.close_all
       end
@@ -323,6 +380,14 @@ module Meringue
         { "status" => "cancelled", "message" => "Focused workspace opening was cancelled." }
       end
 
+      def pending_workspace_close(agent)
+        {
+          "status" => "pending",
+          "message" => "Returning #{agent_key(agent)} to dashboard ownership…",
+          "pending" => true
+        }
+      end
+
       def interactive_screen(agent, rows: TerminalScreen::DEFAULT_ROWS, columns: TerminalScreen::DEFAULT_COLUMNS)
         key = agent_key(agent)
         @mutex.synchronize do
@@ -339,10 +404,10 @@ module Meringue
 
         @mutex.synchronize { @interactive_screens.delete(key) }
         session = entry.fetch("session")
-        # Leaving focus is a handoff too: ask Pi to abort its current interactive turn before
-        # terminating the PTY so the persisted session is settled before RPC reattaches.
+        # Escape is Pi's interrupt key for both active turns and autocompaction. Ctrl-C only clears
+        # its editor, so using it here leaves compaction running until the later process signals.
         begin
-          session.write("\u0003") if session.alive?
+          session.write("\e") if session.alive?
         rescue StandardError
           nil
         end
