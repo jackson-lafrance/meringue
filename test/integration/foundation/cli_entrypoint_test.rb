@@ -27,6 +27,8 @@ class FoundationCliEntrypointTest < Minitest::Test
       assert_includes stdout, "meringue tui"
       assert_includes stdout, "meringue demo"
       assert_includes stdout, "--version"
+      assert_includes stdout, "/reload"
+      assert_includes stdout, "/update"
     end
   end
 

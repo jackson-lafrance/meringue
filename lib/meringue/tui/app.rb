@@ -119,7 +119,7 @@ module Meringue
       # agent_session_service may open the generic live worker-session view.
       # Returning from this TUI workspace closes only that read handle and never
       # calls an abort/kill worker lifecycle operation.
-      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, workspace_controller: nil, agent_session_service: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default, config: nil, onboarding_enabled: false, harness_configured_check: nil)
+      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, workspace_controller: nil, agent_session_service: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default, config: nil, onboarding_enabled: false, harness_configured_check: nil, lifecycle: nil)
         @layout = layout
         @out = out
         @terminal = terminal || Terminal.new(input: input, output: out)
@@ -184,6 +184,12 @@ module Meringue
         # chat when no backend is chosen yet; tests and demo default to "ready"
         # so existing behavior is unchanged.
         @harness_configured_check = harness_configured_check || -> { true }
+        # Lifecycle is supplied by the CLI so update/reload can leave the TUI
+        # through its normal ensure path before the process is replaced.
+        @lifecycle = lifecycle
+        @lifecycle_mutex = Mutex.new
+        @lifecycle_update_thread = nil
+        @reload_requested = false
         @workspace_draft = ""
         @workspace_agent_scroll_offset = 0
         @workspace_terminal_scroll_offset = 0
@@ -293,6 +299,7 @@ module Meringue
         return render_once(compose_state(state_provider, "")) unless terminal.interactive?
 
         @quit_requested = false
+        @lifecycle_mutex.synchronize { @reload_requested = false }
         maybe_open_onboarding(state_provider)
         input_buffer = +""
         input_cursor = 0
@@ -337,12 +344,12 @@ module Meringue
                 on_submit,
                 current_state
               )
-              break if @quit_requested
+              break if @quit_requested || reload_requested?
             end
           end
         end
 
-        0
+        reload_requested? ? :reload : 0
       rescue Interrupt
         0
       ensure
@@ -351,7 +358,7 @@ module Meringue
 
       private
 
-      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :workspace_controller, :agent_session_service, :log_store, :keybindings, :config
+      attr_reader :layout, :out, :terminal, :session_opener, :pull_request_opener, :workspace_controller, :agent_session_service, :log_store, :keybindings, :config, :lifecycle
 
       def handle_key_safely(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
         handle_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
@@ -408,6 +415,9 @@ module Meringue
       def quit_key?(key, input_buffer)
         return false unless key
         return false if @agent_workspace_active
+        # Do not tear down the dashboard halfway through a source/dependency
+        # update. The update thread will request the clean reload when it ends.
+        return false if lifecycle_update_running?
         return true if keybinding?("quit", key)
         # An active selection or logs caret makes Ctrl-C a copy action, never a quit.
         return false if selection_active? || @logs_cursor_active
@@ -2613,6 +2623,8 @@ module Meringue
         return handle_local_setup_command(state) if setup_command?(text)
         return handle_local_keybind_command if keybind_command?(text)
         return handle_local_config_command(text, state) if config_command?(text)
+        return handle_local_reload_command if reload_command?(text)
+        return handle_local_update_command if update_command?(text)
         return handle_local_quit_command if quit_command?(text)
 
         false
@@ -2643,8 +2655,88 @@ module Meringue
       end
 
       def handle_local_quit_command
+        if lifecycle_update_running?
+          append_jump_response("Cannot quit while a Meringue update is still running.")
+          return true
+        end
+
         @quit_requested = true
         true
+      end
+
+      # `/reload` is requested on the TUI thread but executed by the CLI only
+      # after this app has unwound its terminal/workspace ensure block.
+      def handle_local_reload_command
+        unless lifecycle_available?(:reload)
+          append_jump_response("Reload is unavailable because this TUI was not started by the Meringue CLI.")
+          return true
+        end
+
+        if lifecycle_update_running?
+          append_jump_response("Cannot reload while a Meringue update is still running.")
+          return true
+        end
+
+        request_reload
+        true
+      end
+
+      # Updating can involve network or dependency-manager I/O, so keep it off
+      # the input/render thread. A successful update invokes the same reload
+      # request as `/reload`; a failed or unsafe update leaves this process alive
+      # and reports an actionable message instead.
+      def handle_local_update_command
+        unless lifecycle_available?(:update)
+          append_jump_response("Update is unavailable because this TUI was not started by the Meringue CLI.")
+          return true
+        end
+
+        if lifecycle_update_running?
+          append_jump_response("A Meringue update is already running.")
+          return true
+        end
+
+        append_jump_response("Updating Meringue…")
+        thread = Thread.new do
+          begin
+            result = lifecycle.update
+            if lifecycle_update_succeeded?(result)
+              request_reload
+            else
+              append_jump_response(result_message(result, "Meringue update failed."))
+            end
+          rescue StandardError => e
+            append_jump_response("Meringue update failed: #{e.message}")
+          end
+        end
+        @lifecycle_mutex.synchronize { @lifecycle_update_thread = thread }
+        true
+      end
+
+      def lifecycle_available?(operation)
+        lifecycle && lifecycle.respond_to?(operation)
+      end
+
+      def lifecycle_update_running?
+        @lifecycle_mutex.synchronize { @lifecycle_update_thread&.alive? }
+      end
+
+      def lifecycle_update_succeeded?(result)
+        result == true || (result.is_a?(Hash) && %w[updated reloaded success].include?(result.fetch("status", nil).to_s))
+      end
+
+      def result_message(result, fallback)
+        return fallback unless result.is_a?(Hash)
+
+        result.fetch("message", fallback).to_s
+      end
+
+      def request_reload
+        @lifecycle_mutex.synchronize { @reload_requested = true }
+      end
+
+      def reload_requested?
+        @lifecycle_mutex.synchronize { @reload_requested }
       end
 
       def keybinding_help_text
@@ -2873,6 +2965,14 @@ module Meringue
 
       def config_command?(text)
         ["/config", "/config --text"].include?(text.to_s.strip)
+      end
+
+      def reload_command?(text)
+        text.to_s.strip == "/reload"
+      end
+
+      def update_command?(text)
+        text.to_s.strip == "/update"
       end
 
       def quit_command?(text)
