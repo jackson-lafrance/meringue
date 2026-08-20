@@ -402,6 +402,26 @@ module Meringue
         )
       end
 
+      # Where a click landed relative to the open-question picker: the entry index
+      # for a row, `:chrome` for the picker's own border/footer, and `:outside`
+      # for anywhere else (which is what dismisses it).
+      def question_picker_hit(state, width:, height:, x:, y:)
+        return :outside unless chat_pane.question_picker?(state)
+
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        return :outside unless metrics.fetch(:suggestion_height).positive?
+
+        bounds = pane_bounds(metrics, :suggestion_x, :suggestion_y, :suggestion_width, :suggestion_height)
+        bounds = bounds.merge(height: bounds.fetch(:height) + metrics.fetch(:suggestion_footer_height))
+        return :outside unless point_in_bounds?(x.to_i, y.to_i, bounds)
+
+        row = y.to_i - metrics.fetch(:suggestion_y) - 1
+        return :chrome if row.negative? || row >= Panes::ChatPane::QUESTION_PICKER_VISIBLE_LIMIT
+
+        index = chat_pane.question_picker_window_start(state) + row
+        index < QuestionPicker.entries(state).length ? index : :chrome
+      end
+
       # Where a click landed relative to the open-PR picker: the entry index for a
       # row, `:chrome` for the picker's own border/footer, and `:outside` for
       # anywhere else (which is what dismisses it).
@@ -1006,10 +1026,10 @@ module Meringue
       end
 
       # One popup slot above the composer, shared by slash suggestions and every
-      # interactive choice picker (models, thinking, themes, harnesses, and open
-      # PRs; see ChatPane#popup?), so all of them stay on-screen instead of
-      # duplicating feedback in chat. Only the number of visible rows differs:
-      # browsed pickers are allowed to be taller. First-run setup is
+      # interactive choice picker (models, thinking, themes, harnesses, open
+      # questions, and open PRs; see ChatPane#popup?), so all of them stay on-screen
+      # instead of duplicating feedback in chat. Only the number of visible rows
+      # differs: browsed pickers are allowed to be taller. First-run setup is
       # not in this slot; it takes over the screen.
       #
       # The caption under the box gets its own reserved row, so the box keeps every

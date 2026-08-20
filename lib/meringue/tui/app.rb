@@ -160,6 +160,10 @@ module Meringue
         @model_picker_harness = nil
         @model_picker_role = "head"
         @model_picker_kind = "model"
+        # Open-question picker: transient UI that leaves `/answer <id> ` in the
+        # composer so the user can type the answer before submitting it.
+        @question_picker_active = false
+        @question_picker_index = 0
         # Full-screen schema-backed Settings. The draft is purely in memory until
         # one SaveConfiguration command succeeds.
         @settings_active = false
@@ -459,6 +463,11 @@ module Meringue
         # keys regardless of configured dashboard bindings.
         if @settings_active
           return handle_settings_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
+
+        if @question_picker_active
+          picker_result = handle_question_picker_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+          return picker_result if picker_result
         end
 
         if @model_picker_active
@@ -2593,6 +2602,7 @@ module Meringue
         text = input_buffer.to_s.strip
         return handle_local_jump_command(text, state) if jump_command?(text)
         return handle_local_pull_requests_command(state) if pull_requests_picker_command?(text)
+        return handle_local_questions_command(state) if questions_picker_command?(text)
         return handle_local_models_command(text, state) if models_picker_command?(text)
         return handle_local_thinking_command(text, state) if thinking_picker_command?(text)
         return handle_local_theme_command(text, state) if theme_picker_command?(text)
@@ -2651,6 +2661,7 @@ module Meringue
           Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
           Pull-request picker: /prs opens every tracked PR that is still open, regardless of the AgentTree selection; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} opens the highlighted PR, and #{keys_for("cancel_navigation")} closes. #{keys_for("open_delivery_pr")} keeps its selection-aware behavior: it opens the selected issue's PR, or this picker when chat is unscoped.
           Settings pickers: bare /model or /models opens models, bare /thinking opens thinking levels, bare /theme opens themes, and bare /harness opens harnesses. They are bordered popovers; #{keys_for("cursor_left")}/#{keys_for("cursor_right")} switches role tabs where shown, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} moves, #{keys_for("submit")} applies, #{keys_for("refresh_model_catalog")} refreshes the model catalog, and #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker. /prs opens the pull-request popover.
+          Question picker: /questions opens existing open questions with local 1-based display numbers; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} inserts /answer <question_id> into chat, and #{keys_for("cancel_navigation")} closes.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace or a selected head's saved harness session; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
           Head/session debugging: select a head and press #{keys_for("open_agent_workspace")}, or use /open-session <agent_id>, to open its saved harness session externally without turning it into a chat target.
           Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
@@ -2733,6 +2744,15 @@ module Meringue
 
       def pull_requests_picker_command?(text)
         text.to_s.strip.downcase == "/prs"
+      end
+
+      def questions_picker_command?(text)
+        text.to_s.strip.downcase == "/questions"
+      end
+
+      def handle_local_questions_command(state)
+        open_question_picker(state)
+        true
       end
 
       def handle_local_pull_requests_command(state)
@@ -2869,7 +2889,7 @@ module Meringue
 
       def local_navigation_command_without_id?(input_buffer)
         text = input_buffer.to_s.strip.downcase
-        return true if ["/jump", "/prs", "/setup", "/config", "/open-session"].include?(text)
+        return true if ["/jump", "/prs", "/questions", "/setup", "/config", "/open-session"].include?(text)
         return true if models_picker_command?(text)
         return true if thinking_picker_command?(text)
         return true if theme_picker_command?(text)
@@ -2981,10 +3001,11 @@ module Meringue
         # The logs caret belongs to the dashboard logs pane, so opening the
         # focused workspace disarms it instead of leaving Ctrl-C bound to copy.
         deactivate_logs_cursor_quietly
-        # The open-PR and model pickers are dashboard chrome, so they must not
-        # survive into the focused workspace and reappear on return.
+        # The picker overlays are dashboard chrome, so they must not survive
+        # into the focused workspace and reappear on return.
         close_delivery_pr_picker
         close_model_picker
+        close_question_picker
         @agent_workspace_active = true
         @agent_workspace_interactive = false
         @force_full_redraw = true
@@ -3213,6 +3234,12 @@ module Meringue
         { "active" => true, "index" => @delivery_pr_picker_index }
       end
 
+      def question_picker_snapshot
+        return nil unless @question_picker_active
+
+        { "active" => true, "index" => @question_picker_index }
+      end
+
       # --- full-screen settings --------------------------------------------
 
       def github_support_enabled?(state = nil)
@@ -3245,6 +3272,7 @@ module Meringue
         @settings_saving = false
         close_delivery_pr_picker
         close_model_picker
+        close_question_picker
         @force_full_redraw = true
         true
       rescue StandardError => e
@@ -3268,6 +3296,7 @@ module Meringue
         @settings_setup_auto = false
         @settings_setup_outcome = nil
         @settings_mode = "settings"
+        close_question_picker
         @force_full_redraw = true
         true
       end
@@ -4054,6 +4083,7 @@ module Meringue
         @model_picker_role = %w[head worker].include?(role.to_s.downcase) ? role.to_s.downcase : "head"
         @model_picker_kind = "harness"
         close_delivery_pr_picker
+        close_question_picker
         true
       end
 
@@ -4240,6 +4270,92 @@ module Meringue
         true
       end
 
+      def open_question_picker(state)
+        @question_picker_active = true
+        @question_picker_index = 0
+        close_delivery_pr_picker
+        close_model_picker
+        true
+      end
+
+      def close_question_picker
+        @question_picker_active = false
+        @question_picker_index = 0
+      end
+
+      def question_picker_entries(state)
+        QuestionPicker.entries(state)
+      end
+
+      def handle_question_picker_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
+        entries = question_picker_entries(state)
+        return handle_question_picker_mouse(key, unchanged, state, entries) if mouse_event?(key)
+
+        if keybinding?("suggestion_previous", key)
+          move_question_picker(-1, entries.length)
+          return unchanged
+        end
+        if keybinding?("suggestion_next", key)
+          move_question_picker(1, entries.length)
+          return unchanged
+        end
+        if keybinding?("submit", key)
+          return apply_question_picker_entry(selected_question_picker_entry(entries), unchanged)
+        end
+        if keybinding?("cancel_navigation", key)
+          close_question_picker
+          return unchanged
+        end
+
+        close_question_picker
+        nil
+      end
+
+      def handle_question_picker_mouse(key, unchanged, state, entries)
+        return unchanged unless mouse_button_press?(key) || mouse_wheel?(key)
+
+        hit = layout.question_picker_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+        if mouse_wheel?(key)
+          return nil if hit == :outside
+
+          move_question_picker(mouse_wheel_up?(key) ? -1 : 1, entries.length)
+          return unchanged
+        end
+
+        if hit.is_a?(Integer)
+          apply_question_picker_entry(entries[hit], unchanged)
+        elsif hit == :outside
+          close_question_picker
+          unchanged
+        else
+          unchanged
+        end
+      end
+
+      def move_question_picker(step, count)
+        return if count <= 0
+
+        @question_picker_index = (@question_picker_index.to_i + step) % count
+      end
+
+      def selected_question_picker_entry(entries)
+        return nil if entries.empty?
+
+        entries[@question_picker_index.to_i.clamp(0, entries.length - 1)]
+      end
+
+      def apply_question_picker_entry(entry, unchanged)
+        unless entry
+          append_jump_response("No open questions.")
+          return unchanged
+        end
+
+        close_question_picker
+        command = "/answer #{entry.fetch("id")} "
+        [command, command.chars.length, NO_SLASH_SELECTION]
+      end
+
       def open_delivery_pr_picker(state)
         unless github_support_enabled?(state)
           append_jump_response(github_support_disabled_message)
@@ -4253,8 +4369,8 @@ module Meringue
         # available at that instant.
         @delivery_pr_picker_active = true
         @delivery_pr_picker_index = @delivery_pr_picker_index.to_i.clamp(0, [entries.length - 1, 0].max)
-        return true if entries.empty?
-
+        close_question_picker
+        close_model_picker
         true
       end
 
@@ -5644,7 +5760,8 @@ module Meringue
             "selection" => @chat_selection,
             "pending_count" => @pending_count,
             "delivery_pr_picker" => delivery_pr_picker_snapshot,
-            "model_picker" => model_picker_snapshot
+            "model_picker" => model_picker_snapshot,
+            "question_picker" => question_picker_snapshot
           }
         end
       end
