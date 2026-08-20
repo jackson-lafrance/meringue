@@ -75,9 +75,9 @@ module Meringue
       # exhausted auto-retries): the turn ended without finishing its work.
       TURN_FAILURE_STOP_REASONS = %w[error].freeze
       # A settled session whose last assistant message is still waiting on a tool
-      # call never reached a final answer either, but that is not by itself a
-      # transport failure, so it is reported separately.
-      TURN_INCOMPLETE_STOP_REASONS = %w[toolUse].freeze
+      # call—or was intentionally aborted for an ownership handoff—never reached a
+      # final answer. These are recoverable interruptions rather than completions.
+      TURN_INCOMPLETE_STOP_REASONS = %w[toolUse abort aborted].freeze
       # Reading the tail is enough to find the final assistant message, and keeps
       # the 2s reconciliation loop from re-parsing multi-megabyte session files.
       TURN_OUTCOME_TAIL_BYTES = 64 * 1024
@@ -951,7 +951,7 @@ module Meringue
         unless process
           if unmanaged_process_alive?(session_ref)
             raise SessionTransportUnavailableError,
-                  "Refusing native interactive focus while another live Pi process still owns this session"
+                  "Refusing the Agent session while another live Pi process still owns this session"
           end
 
           release_transport(session_ref, pid: session_ref.fetch("pid", nil))
@@ -1537,7 +1537,7 @@ module Meringue
         end
 
         sections = [
-          "Meringue interrupted the dashboard-managed turn because the user requested native interactive focus. " \
+          "Meringue interrupted the dashboard-managed turn because the user requested an Agent session. " \
           "Continue the same task in this existing workspace and session. Inspect the transcript and current files " \
           "before repeating tool calls; work completed before the interruption may already be present."
         ]
@@ -1587,7 +1587,7 @@ module Meringue
         return resolved if resolved
 
         raise Error,
-              "The configured Pi command #{name.inspect} could not be resolved for native interactive focus " \
+              "The configured Pi command #{name.inspect} could not be resolved for the Agent session " \
               "with PATH=#{path.inspect}. Configure [harness.pi] command with an executable path or make it " \
               "available in [harness.pi.env] PATH, then restart Meringue."
       end
@@ -1972,10 +1972,12 @@ module Meringue
       end
 
       def incomplete_turn_outcome(stop_reason, ended_at)
+        interrupted = %w[abort aborted].include?(stop_reason.to_s)
         {
           "state" => "incomplete",
-          "kind" => "pending_tool_call",
-          "reason" => "its last turn stopped while a tool call was still pending",
+          "kind" => interrupted ? "interrupted_turn" : "pending_tool_call",
+          "reason" => interrupted ? "its last turn was interrupted before a final assistant result" :
+                                    "its last turn stopped while a tool call was still pending",
           "stop_reason" => stop_reason.to_s,
           "turn_ended_at" => ended_at
         }.compact
@@ -2085,7 +2087,7 @@ module Meringue
         return false unless record
 
         stop_reason = record["stopReason"] || record.dig("message", "stopReason")
-        return false if stop_reason.to_s == "toolUse"
+        return false if TURN_INCOMPLETE_STOP_REASONS.include?(stop_reason.to_s)
         return true if present?(stop_reason)
 
         Array(record.dig("message", "content")).any? do |part|

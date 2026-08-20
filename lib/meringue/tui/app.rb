@@ -22,6 +22,9 @@ module Meringue
       # A double-click has to land on the same row, but a one column wobble
       # between the two presses is normal on a trackpad and still counts.
       DOUBLE_CLICK_COLUMN_TOLERANCE = 1
+      # The leader highlight remains visible long enough to show that the next
+      # key is a destination, without leaving the workspace in a pending mode.
+      WORKSPACE_LEADER_TIMEOUT_SECONDS = 1.5
       # How long a copy/cut confirmation stays in the bottom hint line.
       SELECTION_STATUS_SECONDS = 3.0
       # A short single-line copy is echoed back in the hint line, which reads
@@ -182,6 +185,7 @@ module Meringue
         @agent_workspace_open_pending = false
         @agent_workspace_open_generation = 0
         @agent_workspace_open_result = nil
+        @agent_workspace_close_results = []
         @agent_workspace_return_pane = "chat"
         @agent_workspace_view = "agent"
         @agent_workspace_filter = "all"
@@ -190,6 +194,7 @@ module Meringue
         @agent_workspace_pending_count = 0
         @agent_workspace_terminal_size = nil
         @workspace_leader_pending = false
+        @workspace_leader_started_at = nil
         @force_full_redraw = false
         @agent_workspace_messages = Hash.new { |messages, agent_id| messages[agent_id] = [] }
         @agent_workspace_events = Hash.new { |events, agent_id| events[agent_id] = [] }
@@ -356,7 +361,7 @@ module Meringue
         close_settings(discard: true) if @settings_active
         persist_agent_workspace if @agent_workspace_active
         if @agent_workspace_active
-          close_agent_workspace
+          close_agent_workspace(async_interactive: false)
         else
           close_agent_workspace_session
         end
@@ -761,6 +766,21 @@ module Meringue
         end
         @last_open_pull_requests_summary_click = nil
 
+        if embedded_agent_workspace?
+          action = layout.agent_workspace_control_at(
+            state,
+            width: render_width,
+            height: render_height,
+            x: mouse_x(key),
+            y: mouse_y(key)
+          )
+          if action
+            cancel_workspace_leader!
+            run_workspace_command(action, state)
+            return [input_buffer, input_cursor, slash_suggestion_index]
+          end
+        end
+
         pane = pane_at_mouse_position(key, state)
         return [input_buffer, input_cursor, slash_suggestion_index] unless pane
 
@@ -772,6 +792,12 @@ module Meringue
           # before and after a tree click never pair up into a word selection.
           @last_text_click = nil
           item_id = agent_tree_item_at_mouse_position(key, state)
+          # The focused Agent session owns the logs pane, but the AgentTree must
+          # remain a way out of it. A click on another agent closes the current
+          # session before applying the ordinary tree selection/double-click action.
+          if embedded_agent_workspace? && item_id && item_id.to_s != @agent_workspace_agent_id.to_s
+            close_agent_workspace(preserve_terminal: true)
+          end
           opened = handle_agent_tree_item_click(item_id, key, state, on_submit)
           if opened
             return [input_buffer, input_cursor, NO_SLASH_SELECTION] if embedded_agent_workspace?
@@ -855,7 +881,16 @@ module Meringue
       # the focused pane, which is the older behavior.
       def handle_mouse_wheel_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         if embedded_agent_workspace? && pane_at_mouse_position(key, state) == "logs"
-          @focused_pane = "logs"
+          event = layout.agent_workspace_mouse_event(
+            state,
+            width: render_width,
+            height: render_height,
+            x: mouse_x(key),
+            y: mouse_y(key),
+            event: key
+          )
+          forward_agent_workspace_interactive_key(event, state) if event && @agent_workspace_view != "terminal"
+          forward_agent_workspace_terminal_key(event, state) if event && @agent_workspace_view == "terminal"
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
@@ -1706,6 +1741,20 @@ module Meringue
         Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
 
+      def cancel_workspace_leader!
+        @workspace_leader_pending = false
+        @workspace_leader_started_at = nil
+        @agent_workspace_notice = nil
+      end
+
+      def expire_workspace_leader!
+        return unless @workspace_leader_pending
+        return unless @workspace_leader_started_at
+        return if monotonic_time - @workspace_leader_started_at < WORKSPACE_LEADER_TIMEOUT_SECONDS
+
+        cancel_workspace_leader!
+      end
+
       def reset_base_state_cache
         @cached_base_state = nil
         @cached_base_state_at = nil
@@ -1907,7 +1956,10 @@ module Meringue
       # back to the active worker/terminal view rather than silently discarded.
       def consume_workspace_command(key)
         if @workspace_leader_pending
-          @workspace_leader_pending = false
+          pending = @workspace_leader_pending
+          cancel_workspace_leader!
+          return [nil, nil] if pending && ctrl_c_key?(key)
+
           action, remainder = workspace_action_prefix(key)
           if action
             @agent_workspace_notice = nil
@@ -1922,6 +1974,7 @@ module Meringue
         return [nil, key] unless remainder
 
         @workspace_leader_pending = true
+        @workspace_leader_started_at = monotonic_time
         @agent_workspace_notice = workspace_leader_help
         return [nil, nil] if remainder.empty?
 
@@ -2238,7 +2291,7 @@ module Meringue
 
       def forward_agent_workspace_interactive_key(key, state)
         unless workspace_controller&.respond_to?(:handle_agent_key)
-          @agent_workspace_error = "Native Pi focus is unavailable."
+          @agent_workspace_error = "Agent session is unavailable."
           return
         end
 
@@ -2248,7 +2301,7 @@ module Meringue
         result = workspace_controller.handle_agent_key(key: key, agent: agent, state: state)
         apply_workspace_controller_result(result)
       rescue StandardError => e
-        @agent_workspace_error = "Pi interactive input failed: #{e.message}"
+        @agent_workspace_error = "Agent session input failed: #{e.message}"
       end
 
       # Reuses the established detached terminal launcher. It validates the
@@ -2256,7 +2309,7 @@ module Meringue
       # replacing, signaling, or taking ownership of Meringue's RPC process.
       def open_agent_workspace_harness_session(state)
         if @agent_workspace_interactive
-          @agent_workspace_notice = "The native Pi session is already open in this workspace."
+          @agent_workspace_notice = "The Agent session is already open in this workspace."
           return
         end
 
@@ -2775,6 +2828,7 @@ module Meringue
         @agent_workspace_view = restored_view
         @agent_workspace_terminal_size = nil
         @workspace_leader_pending = false
+        @workspace_leader_started_at = nil
         @agent_workspace_notice = nil
         @agent_workspace_error = nil
         @agent_workspace_open_generation += 1
@@ -2878,7 +2932,7 @@ module Meringue
         nil
       end
 
-      def close_agent_workspace(preserve_terminal: false)
+      def close_agent_workspace(preserve_terminal: false, async_interactive: true)
         was_embedded = embedded_agent_workspace?
         return_pane = @agent_workspace_return_pane.to_s
         return_pane = "chat" unless FOCUS_ORDER.include?(return_pane)
@@ -2890,7 +2944,7 @@ module Meringue
         @chat_mutex.synchronize { @agent_workspace_open_result = nil }
         close_agent_workspace_session
         if @agent_workspace_interactive && workspace_controller&.respond_to?(:close_workspace)
-          apply_workspace_controller_result(workspace_controller.close_workspace(agent: @agent_workspace_agent_id))
+          close_interactive_agent_workspace(@agent_workspace_agent_id, asynchronous: async_interactive)
         elsif !preserve_terminal && workspace_controller&.respond_to?(:close_terminal)
           workspace_controller.close_terminal(agent: @agent_workspace_agent_id)
         end
@@ -2901,12 +2955,24 @@ module Meringue
         @force_full_redraw = true
         @agent_workspace_terminal_size = nil
         @workspace_leader_pending = false
+        @workspace_leader_started_at = nil
         @agent_workspace_notice = nil
         @agent_workspace_error = nil
         @focused_pane = was_embedded ? return_pane : "agent_tree"
         @agent_tree_navigation_active = !was_embedded && !@agent_workspace_agent_id.to_s.empty?
         @selected_agent_id = @agent_workspace_agent_id if @agent_tree_navigation_active
         persist_agent_workspace
+      end
+
+      def close_interactive_agent_workspace(agent_id, asynchronous: true)
+        if asynchronous && workspace_controller.respond_to?(:close_workspace_async)
+          result = workspace_controller.close_workspace_async(agent: agent_id) do |completion|
+            @chat_mutex.synchronize { @agent_workspace_close_results << completion }
+          end
+          @chat_mutex.synchronize { @agent_workspace_close_results << result } unless result.fetch("status", nil).to_s == "pending"
+        else
+          apply_workspace_controller_result(workspace_controller.close_workspace(agent: agent_id))
+        end
       end
 
       # `item_id` can come from a typed `/jump <id>`, so it is matched case-insensitively against
@@ -4573,6 +4639,7 @@ module Meringue
         @workspace_draft = input_buffer.to_s if @agent_workspace_active && !embedded_agent_workspace?
         state = state_provider.call || State::Models.empty_state
         sync_state_logs!(state)
+        complete_pending_workspace_closes
         if @agent_tree_navigation_active
           ids = agent_tree_selectable_agent_ids(state)
           @selected_agent_id = ids.include?(@selected_agent_id) ? @selected_agent_id : ids.first
@@ -4635,6 +4702,20 @@ module Meringue
         @scroll_offsets["agent_tree"] = offset.to_i unless offset.nil?
       end
 
+      def complete_pending_workspace_closes
+        results = @chat_mutex.synchronize do
+          pending = @agent_workspace_close_results
+          @agent_workspace_close_results = []
+          pending
+        end
+        failed = results.reverse.find do |result|
+          %w[failed rejected errored].include?(result.fetch("status", nil).to_s)
+        end
+        return unless failed
+
+        set_selection_status(failed.fetch("message", "Could not restore dashboard session ownership."))
+      end
+
       def complete_pending_workspace_open(state)
         pending = @chat_mutex.synchronize do
           result = @agent_workspace_open_result
@@ -4687,6 +4768,7 @@ module Meringue
       end
 
       def agent_workspace_snapshot(state, input_buffer, input_cursor, slash_suggestion_index = NO_SLASH_SELECTION)
+        expire_workspace_leader!
         complete_pending_workspace_open(state)
         snapshot = @chat_mutex.synchronize do
           {
@@ -4784,13 +4866,20 @@ module Meringue
         current = Array(state.fetch("agents", [])).find do |agent|
           agent.is_a?(Hash) && agent["type"] == "worker" && agent["id"].to_s == @agent_workspace_agent_id.to_s
         end
-        return if current && !%w[completed killed].include?(current.fetch("status", nil).to_s)
+        if current
+          status = current.fetch("status", nil).to_s
+          return unless %w[completed killed].include?(status)
+          # A completed Pi worker is already terminal when native focus begins. Keep its pending
+          # or active PTY alive; treating that pre-existing status as a new settle cancels the
+          # handoff on the next frame and immediately resumes the dashboard session.
+          return if status == "completed" && embedded_agent_workspace?
+        end
 
         was_embedded = embedded_agent_workspace?
         if @agent_workspace_open_pending && workspace_controller&.respond_to?(:cancel_workspace_open)
           workspace_controller.cancel_workspace_open(agent: @agent_workspace_agent_id)
         elsif @agent_workspace_interactive && workspace_controller&.respond_to?(:close_workspace)
-          workspace_controller.close_workspace(agent: @agent_workspace_agent_id)
+          close_interactive_agent_workspace(@agent_workspace_agent_id)
         else
           close_agent_workspace_session
         end
@@ -4806,6 +4895,7 @@ module Meringue
         @agent_workspace_view = "agent"
         @agent_workspace_filter = "all"
         @workspace_leader_pending = false
+        @workspace_leader_started_at = nil
         @workspace_draft = ""
         persist_agent_workspace(deferred: true)
       end
@@ -4967,10 +5057,12 @@ module Meringue
       end
 
       def agent_tree_navigation_snapshot
+        focused_agent_id = embedded_agent_workspace? ? @agent_workspace_agent_id : nil
+        selected_agent_id = focused_agent_id || (@agent_tree_navigation_active ? @selected_agent_id : nil)
         {
           "active" => @agent_tree_navigation_active,
           "mode" => @agent_tree_navigation_active ? @agent_tree_navigation_mode.to_s : nil,
-          "selected_agent_id" => @agent_tree_navigation_active ? @selected_agent_id : nil
+          "selected_agent_id" => selected_agent_id
         }
       end
 

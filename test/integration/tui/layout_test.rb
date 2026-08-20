@@ -313,7 +313,11 @@ class TuiLayoutTest < Minitest::Test
         "agent_id" => "P1-I1-W1",
         "view" => "agent",
         "leader_label" => "Ctrl-Space",
-        "leader_commands" => [{ "action" => "workspace_close", "key" => "Q", "label" => "return" }],
+        "leader_commands" => [
+          { "action" => "workspace_switch_view", "key" => "T", "label" => "switch view" },
+          { "action" => "workspace_open_editor", "key" => "B", "label" => "editor" },
+          { "action" => "workspace_close", "key" => "Q", "label" => "return" }
+        ],
         "agent_session" => {
           "lines" => ["Pi is ready"],
           "styled_lines" => [[ ["Pi is ready", nil] ]],
@@ -327,7 +331,11 @@ class TuiLayoutTest < Minitest::Test
     frame = @layout.render(workspace_state, width: 100, height: 32)
 
     assert_includes frame, "─ agent tree "
-    assert_includes frame, "Pi interactive · P1-I1-W1"
+    assert_includes frame, "Agent session · P1-I1-W1"
+    assert_includes frame, "Ctrl-Space"
+    assert_includes frame, "[T]"
+    assert_includes frame, "[B]"
+    assert_includes frame, "[Q]"
     assert_includes frame, "Pi is ready"
     assert_includes frame, "monitor the other workers"
     assert_includes frame, "─ chat"
@@ -342,6 +350,23 @@ class TuiLayoutTest < Minitest::Test
     dimensions = @layout.embedded_agent_workspace_dimensions(workspace_state, width: 100, height: 32)
     assert_operator dimensions.fetch("rows"), :>, 0
     assert_operator dimensions.fetch("columns"), :>, 0
+
+    controls = (0...100).filter_map do |x|
+      @layout.agent_workspace_control_at(workspace_state, width: 100, height: 32, x: x, y: 0)
+    end.uniq
+    assert_equal %w[workspace_switch_view workspace_open_editor workspace_close], controls
+
+    mouse_event = @layout.agent_workspace_mouse_event(
+      workspace_state,
+      width: 100,
+      height: 32,
+      x: 50,
+      y: 3,
+      event: { "type" => "mouse", "kind" => "wheel_down", "count" => 1 }
+    )
+    assert_equal "wheel_down", mouse_event.fetch("kind")
+    assert mouse_event.fetch("x").between?(1, dimensions.fetch("columns"))
+    assert mouse_event.fetch("y").between?(1, dimensions.fetch("rows"))
 
     refreshed = workspace_state.merge(
       "agents" => workspace_state.fetch("agents") + [agent_record(

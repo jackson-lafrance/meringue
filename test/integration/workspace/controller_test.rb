@@ -16,7 +16,7 @@ class WorkspaceControllerTest < Minitest::Test
     end
 
     def start(workspace_path:, rows:, columns:, on_started: nil)
-      { "status" => "failed", "message" => "native Pi could not launch" }
+      { "status" => "failed", "message" => "Agent session could not launch" }
     end
 
     def close
@@ -48,6 +48,27 @@ class WorkspaceControllerTest < Minitest::Test
     def end_agent_interactive_focus(agent_id)
       @ended << agent_id
       @end_result || { "status" => "accepted", "message" => "resumed" }
+    end
+  end
+
+  class CompactingFocusDouble < InteractiveFocusDouble
+    attr_reader :resume_started
+
+    def initialize
+      super
+      @resume_started = Queue.new
+      @resume_release = Queue.new
+    end
+
+    def end_agent_interactive_focus(agent_id)
+      @ended << agent_id
+      @resume_started << agent_id
+      @resume_release.pop
+      { "status" => "accepted", "message" => "resumed after compaction" }
+    end
+
+    def release_resume
+      @resume_release << true
     end
   end
 
@@ -109,10 +130,60 @@ class WorkspaceControllerTest < Minitest::Test
 
       closed = controller.close_workspace(agent: agent)
       assert_equal "closed", closed.fetch("status")
-      assert_equal ["x\n", "\u0003"], @sessions.last.writes
+      assert_equal ["x\n", "\e"], @sessions.last.writes
       assert_equal 1, @sessions.last.closes
       assert_equal [agent.fetch("id")], focus.ended
     ensure
+      controller&.close
+    end
+  end
+
+  def test_async_native_close_interrupts_compaction_without_blocking_the_caller
+    with_workspace_tmpdir do |tmp|
+      workspace = File.join(tmp, "worktree")
+      FileUtils.mkdir_p(workspace)
+      focus = CompactingFocusDouble.new
+      interactive_session = WorkspaceSupport::FakeTerminalSession.new
+      controller = Meringue::Workspace::Controller.new(
+        editor_launcher: @editor,
+        focus_session_service: focus,
+        interactive_session_factory: ->(command:, env:) { interactive_session }
+      )
+      agent = worker_agent(workspace_path: workspace, **{ "harness" => "pi" })
+      assert_equal "active", controller.open_workspace(agent: agent).fetch("status")
+      completion = Queue.new
+
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      closing = controller.close_workspace_async(agent: agent) { |result| completion << result }
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
+      assert_operator elapsed, :<, 0.2
+      assert_equal "pending", closing.fetch("status")
+      assert_equal agent.fetch("id"), Timeout.timeout(2) { focus.resume_started.pop }
+      assert_equal ["\e"], interactive_session.writes,
+                   "Pi's interrupt key must cancel autocompaction before PTY shutdown"
+      refute controller.agent_interactive?(agent: agent)
+      assert controller.interactive_close_pending?(agent: agent)
+
+      shutdown_finished = Queue.new
+      shutdown_thread = Thread.new do
+        controller.close
+        shutdown_finished << true
+      end
+      sleep 0.02
+      assert shutdown_thread.alive?, "shutdown must join the ownership return instead of abandoning it"
+      assert_equal [agent.fetch("id")], focus.ended,
+                   "shutdown must not start a duplicate dashboard reattachment"
+
+      focus.release_resume
+      closed = Timeout.timeout(2) { completion.pop }
+      assert_equal "closed", closed.fetch("status")
+      assert Timeout.timeout(2) { shutdown_finished.pop }
+      refute controller.interactive_close_pending?(agent: agent)
+      assert_equal [agent.fetch("id")], focus.ended
+    ensure
+      focus&.release_resume
+      shutdown_thread&.join(0.1)
       controller&.close
     end
   end
@@ -205,7 +276,7 @@ class WorkspaceControllerTest < Minitest::Test
       result = controller.open_workspace(agent: agent)
 
       assert_equal "failed", result.fetch("status")
-      assert_equal "native Pi could not launch", result.fetch("message")
+      assert_equal "Agent session could not launch", result.fetch("message")
       assert_equal 1, launch.closes
       assert_empty focus.started
       assert_equal [agent.fetch("id")], focus.ended
@@ -345,10 +416,10 @@ class WorkspaceControllerTest < Minitest::Test
 
       assert_equal({ "status" => "written", "bytes" => 3 }, controller.handle_terminal_key(key: "ls\r", agent: agent))
       assert_equal({ "status" => "written", "bytes" => 4 }, controller.handle_terminal_key(key: { "type" => "paste", "text" => "a\r\nb" }, agent: agent))
-      assert_equal({ "status" => "ignored" }, controller.handle_terminal_key(key: { "type" => "mouse", "kind" => "wheel_up" }, agent: agent))
+      assert_equal({ "status" => "written", "bytes" => 10 }, controller.handle_terminal_key(key: { "type" => "mouse", "kind" => "wheel_up" }, agent: agent))
       assert_equal({ "status" => "ignored" }, controller.handle_terminal_key(key: { "type" => "paste", "text" => "" }, agent: agent))
 
-      assert_equal ["ls\r", "a\n\nb"], @sessions.first.writes
+      assert_equal ["ls\r", "a\n\nb", "\e[<64;1;1M"], @sessions.first.writes
     ensure
       controller&.close
     end

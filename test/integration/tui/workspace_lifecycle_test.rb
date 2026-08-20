@@ -57,7 +57,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     def open_workspace(agent:, state:, rows:, columns:)
       _ = [agent, state]
       @opened_sizes << [rows, columns]
-      { "status" => "active", "interactive" => true, "message" => "native Pi focus" }
+      { "status" => "active", "interactive" => true, "message" => "Agent session" }
     end
 
     def agent_snapshot(agent:, state:, rows:, columns:)
@@ -138,7 +138,46 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     end
   end
 
+  class CompactingFocusService
+    attr_reader :resume_started, :ended
+
+    def initialize
+      @resume_started = Queue.new
+      @resume_release = Queue.new
+      @ended = []
+    end
+
+    def begin_agent_interactive_focus(agent_id)
+      {
+        "status" => "accepted",
+        "result" => { "interactive_argv" => ["/bin/sh"], "interactive_env" => {} },
+        "agent_id" => agent_id
+      }
+    end
+
+    def mark_agent_interactive_focus_started(agent_id, pid:)
+      { "status" => "accepted", "agent_id" => agent_id, "pid" => pid }
+    end
+
+    def end_agent_interactive_focus(agent_id)
+      @ended << agent_id
+      @resume_started << agent_id
+      @resume_release.pop
+      { "status" => "accepted", "message" => "resumed after compaction" }
+    end
+
+    def release_resume
+      @resume_release << true
+    end
+  end
+
   class ImmediateInteractiveSession
+    attr_reader :writes
+
+    def initialize
+      @writes = []
+    end
+
     def start(workspace_path:, rows:, columns:, on_started:)
       on_started.call(4242)
       { "status" => "active", "pid" => 4242, "workspace_path" => workspace_path }
@@ -159,7 +198,8 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       { "status" => "resized", "rows" => rows, "columns" => columns }
     end
 
-    def write(_bytes)
+    def write(bytes)
+      @writes << bytes
       { "status" => "written" }
     end
 
@@ -278,7 +318,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
         "_agent_workspace" => snapshot
       ), width: 100, height: 32)
       assert_includes frame, "─ agent tree "
-      assert_includes frame, "Pi focus preparing"
+      assert_includes frame, "Agent session preparing"
       assert_includes frame, "monitor workers"
 
       # Focus can move back to the external composer while handoff is blocked.
@@ -294,8 +334,142 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       end
       assert_equal false, app.instance_variable_get(:@agent_workspace_open_pending)
       app.send(:close_agent_workspace)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      while controller.agent_interactive?(agent: state.fetch("agents").first)
+        raise "native focus did not close" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
       refute controller.agent_interactive?(agent: state.fetch("agents").first)
     ensure
+      app&.send(:close_agent_workspace)
+      controller&.close
+    end
+  end
+
+  def test_completed_resumable_worker_stays_in_native_focus_and_accepts_input
+    Dir.mktmpdir("meringue-completed-focus-") do |workspace|
+      focus = BlockingFocusService.new
+      interactive_session = ImmediateInteractiveSession.new
+      controller = Meringue::Workspace::Controller.new(
+        focus_session_service: focus,
+        interactive_session_factory: ->(command:, env:) { interactive_session }
+      )
+      app = Meringue::TUI::App.new(
+        layout: Meringue::TUI::Layout.new,
+        terminal: TUISupport::FakeTerminal.new,
+        workspace_controller: controller
+      )
+      state = @state.merge("agents" => [agent_record(
+        "P1-I1-W1",
+        "type" => "worker",
+        "status" => "completed",
+        "harness" => "pi",
+        "workspace_path" => workspace,
+        "project_id" => "P1",
+        "issue_id" => "P1-I1",
+        "harness_session_id" => "completed-session",
+        "harness_session_file" => File.join(workspace, "completed-session.jsonl")
+      )])
+      released = false
+
+      assert app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+      assert_equal "P1-I1-W1", focus.begun.pop
+
+      # The normal frame reconciliation used to mistake this already-completed worker for a
+      # newly terminal selection, cancel the pending handoff, and immediately return to dashboard.
+      opening = compose_app_state(app, state).fetch("_agent_workspace")
+      assert_equal true, opening.fetch("active")
+      assert_equal true, opening.fetch("opening")
+      assert focus.ended.empty?, "dashboard ownership must not resume while focus is opening"
+
+      focus.release
+      released = true
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      focused = nil
+      loop do
+        focused = compose_app_state(app, state).fetch("_agent_workspace")
+        break if focused.fetch("interactive", false)
+
+        raise "completed native focus did not open" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
+
+      assert_equal true, focused.fetch("active")
+      refute focused.fetch("opening")
+      assert focus.ended.empty?, "a completed worker must stay under native focus ownership"
+
+      app.send(:handle_key, "x", "", 0, -1, nil, state)
+      assert_equal ["x"], interactive_session.writes
+
+      app.send(:close_agent_workspace)
+      assert_equal "P1-I1-W1", Timeout.timeout(2) { focus.ended.pop }
+    ensure
+      focus&.release unless released
+      app&.send(:close_agent_workspace)
+      controller&.close
+    end
+  end
+
+  def test_quitting_focus_during_compaction_returns_to_a_usable_dashboard_immediately
+    Dir.mktmpdir("meringue-compacting-focus-") do |workspace|
+      focus = CompactingFocusService.new
+      interactive_session = ImmediateInteractiveSession.new
+      controller = Meringue::Workspace::Controller.new(
+        focus_session_service: focus,
+        interactive_session_factory: ->(command:, env:) { interactive_session }
+      )
+      app = Meringue::TUI::App.new(
+        layout: Meringue::TUI::Layout.new,
+        terminal: TUISupport::FakeTerminal.new,
+        workspace_controller: controller
+      )
+      state = @state.merge("agents" => [agent_record(
+        "P1-I1-W1",
+        "type" => "worker",
+        "status" => "working",
+        "harness" => "pi",
+        "workspace_path" => workspace,
+        "project_id" => "P1",
+        "issue_id" => "P1-I1"
+      )])
+
+      assert app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      until compose_app_state(app, state).dig("_agent_workspace", "interactive")
+        raise "native focus did not open" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
+
+      # Model Pi autocompaction by holding dashboard reattachment after the native PTY closes.
+      # The old synchronous quit path blocked the complete render/input loop at this boundary.
+      releaser = Thread.new do
+        focus.resume_started.pop
+        sleep 0.5
+        focus.release_resume
+      end
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      app.send(:close_agent_workspace, preserve_terminal: true)
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
+      assert_operator elapsed, :<, 0.2
+      refute app.instance_variable_get(:@agent_workspace_active)
+      assert_equal "chat", app.instance_variable_get(:@focused_pane)
+      buffer, = app.send(:handle_key, "m", "", 0, -1, nil, state)
+      assert_equal "m", buffer, "dashboard input must stay usable while ownership resumes"
+      refute app.instance_variable_get(:@quit_requested)
+
+      releaser.join
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      while controller.interactive_close_pending?(agent: state.fetch("agents").first)
+        raise "dashboard ownership did not finish resuming" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
+      compose_app_state(app, state)
+      assert_equal ["\e"], interactive_session.writes
+      assert_equal ["P1-I1-W1"], focus.ended
+    ensure
+      focus&.release_resume
+      releaser&.join(0.1)
       app&.send(:close_agent_workspace)
       controller&.close
     end
@@ -371,13 +545,34 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     app.send(:handle_key, "\u0003", "", 0, -1, handler, state)
     assert_equal ["x", "\u0003"], controller.keys
 
+    workspace_snapshot = app.send(:agent_workspace_snapshot, state, "", 0)
+    mouse_state = state.merge("_agent_workspace" => workspace_snapshot)
+    app.send(
+      :handle_key,
+      { "type" => "mouse", "kind" => "wheel_down", "pressed" => true, "button" => 65, "count" => 1, "x" => 50, "y" => 3 },
+      "",
+      0,
+      -1,
+      handler,
+      mouse_state
+    )
+    wheel = controller.keys.last
+    assert_equal "wheel_down", wheel.fetch("kind")
+    assert_operator wheel.fetch("x"), :>=, 1
+    assert_operator wheel.fetch("y"), :>=, 1
+
+    app.send(:handle_key, "\u0000", "", 0, -1, handler, state)
+    assert app.instance_variable_get(:@workspace_leader_pending)
+    app.instance_variable_set(:@workspace_leader_started_at, app.send(:monotonic_time) - 2)
+    refute app.send(:agent_workspace_snapshot, state, "", 0).fetch("leader_pending"), "an abandoned leader sequence must expire"
+
     buffer, cursor, = app.send(:handle_key, "\t", "", 0, -1, handler, state)
     assert_equal "chat", app.instance_variable_get(:@focused_pane)
     "monitor workers".each_char do |character|
       buffer, cursor, = app.send(:handle_key, character, buffer, cursor, -1, handler, state)
     end
     assert_equal "monitor workers", buffer
-    assert_equal ["x", "\u0003"], controller.keys, "chat input must not leak into Pi"
+    assert_equal 3, controller.keys.length, "chat input must not leak into Pi"
     app.send(:handle_key, "\r", buffer, cursor, -1, handler, state)
     assert_equal "monitor workers", Timeout.timeout(5) { submitted.pop }
 
@@ -388,7 +583,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     assert_equal "agent_tree", app.instance_variable_get(:@focused_pane)
     app.send(:handle_key, "\r", "", 0, -1, handler, state)
     assert app.instance_variable_get(:@agent_tree_navigation_active)
-    assert_equal ["x", "\u0003"], controller.keys
+    assert_equal 3, controller.keys.length
 
     # Resizing the dashboard changes the actual PTY, not only the screen model.
     app.instance_variable_set(:@last_render_width, 120)
