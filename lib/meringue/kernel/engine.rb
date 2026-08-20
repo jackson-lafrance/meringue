@@ -587,6 +587,10 @@ module Meringue
       # occupy a submission thread for ten minutes; unvisited worktrees remain claimed only until
       # this pass commits and are retried by the next explicit prune.
       PRUNE_WORKSPACE_CLEANUP_BUDGET_SECONDS = 30.0
+      # A prune pass that ran out of budget or timed out mid-cleanup can leave managed worktrees
+      # on disk after their worker records are removed. A post-commit retry runs the same safe
+      # removal with a fresh budget and never force-removes dirty, locked, or referenced worktrees.
+      POST_PRUNE_CLEANUP_BUDGET_SECONDS = 30.0
       # Harness model catalogs change when a user logs into a provider, installs an
       # extension, or edits models.json, so a persisted snapshot is refreshed
       # periodically in the background instead of on every completion keystroke.
@@ -615,7 +619,7 @@ module Meringue
 
       attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path,
                   :config, :state_lock, :instance_pid, :instance_id, :prune_forge_lookup_budget,
-                  :prune_workspace_cleanup_budget, :metric_probe, :goal_advance_budget,
+                  :prune_workspace_cleanup_budget, :post_prune_cleanup_budget, :metric_probe, :goal_advance_budget,
                   :delivery_pull_request_refresh_budget, :worker_provisioning_concurrency
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
@@ -643,6 +647,7 @@ module Meringue
                      prune_workspace_cleanup_budget: PRUNE_WORKSPACE_CLEANUP_BUDGET_SECONDS,
                      delivery_pull_request_refresh_budget: DELIVERY_PULL_REQUEST_REFRESH_BUDGET_SECONDS,
                      goal_advance_budget: GOAL_ADVANCE_BUDGET_SECONDS,
+                     post_prune_cleanup_budget: POST_PRUNE_CLEANUP_BUDGET_SECONDS,
                      state_lock: nil,
                      instance_pid: Process.pid,
                      instance_id: nil)
@@ -674,6 +679,7 @@ module Meringue
                                              Config::MAX_WORKER_PROVISIONING_CONCURRENCY].min
         @prune_forge_lookup_budget = Float(prune_forge_lookup_budget)
         @prune_workspace_cleanup_budget = Float(prune_workspace_cleanup_budget)
+        @post_prune_cleanup_budget = Float(post_prune_cleanup_budget)
         @delivery_pull_request_refresh_budget = Float(delivery_pull_request_refresh_budget)
         @goal_advance_budget = Float(goal_advance_budget)
         @harness_client_resolver = harness_client_resolver
@@ -5696,7 +5702,7 @@ module Meringue
           deadline: monotonic_time + [prune_workspace_cleanup_budget, 0.0].max
         )
         cleanup_finished_at = monotonic_time
-        synchronized_state do
+        result = synchronized_state do
           with_prune_forge_lookup_context(lookup_context) do
             prune_records(
               command_id,
@@ -5716,6 +5722,12 @@ module Meringue
             )
           end
         end
+        # The logical prune is now committed and its claims are clear. Retry failed physical
+        # cleanup with no outer state lock, so a slow provider or Git command cannot block later
+        # kernel commands. The retry reacquires the lock only to snapshot protected paths and log
+        # its final outcome.
+        post_prune = run_post_prune_worktree_cleanup(result.fetch("result", {}), source: "prune")
+        apply_post_prune_cleanup_result(result, post_prune)
       rescue StandardError
         release_prune_cleanup_claims(operation_id)
         raise
@@ -6077,6 +6089,206 @@ module Meringue
         store.save(state)
 
         accepted_result(command_id, command_type, nil, message, details, log_ids)
+      end
+
+      # After a prune pass commits, retry worktrees it could not remove within the bounded cleanup
+      # budget. The same manager safety path still refuses dirty, locked, mismatched, or actively
+      # referenced worktrees. This method runs without an outer state lock; it holds the lock only
+      # for the current protected-path snapshot and the final durable outcome log.
+      def run_post_prune_worktree_cleanup(prune_result, source:)
+        blocked = post_prune_blocked_cleanups(prune_result)
+        return nil if blocked.empty?
+
+        started_at = monotonic_time
+        deadline = started_at + [post_prune_cleanup_budget, 0.0].max
+        exclude_agent_ids = blocked.filter_map { |outcome| present_string(outcome["agent_id"]) }
+        protected_paths = synchronized_state do
+          current_workspace_protected_paths(normalized_state, exclude_agent_ids: exclude_agent_ids)
+        end
+        retry_outcomes = blocked.map do |outcome|
+          retry_blocked_worktree_cleanup(outcome, protected_paths: protected_paths, deadline: deadline)
+        end
+        # Clear dangling registrations for any git root we touched. `git worktree prune` only
+        # removes administrative files for worktrees whose directories are already gone, so it is
+        # safe to run unconditionally and never affects a live worktree.
+        retry_outcomes.filter_map { |outcome| present_string(outcome["git_root"]) }.uniq.each do |git_root|
+          workspace_manager.prune_dangling_worktrees(git_root)
+        end
+        synchronized_state do
+          state = normalized_state
+          summary = post_prune_cleanup_summary(retry_outcomes)
+          log_ids = append_post_prune_cleanup_log(state, retry_outcomes, summary: summary, source: source)
+          touch_state!(state)
+          store.save(state)
+          { "outcomes" => retry_outcomes, "log_entry_ids" => log_ids, "summary" => summary }
+        end
+      end
+
+      def apply_post_prune_cleanup_result(result, post_prune)
+        return result unless post_prune
+
+        updated = deep_copy(result)
+        summary = post_prune.fetch("summary")
+        updated["message"] = append_post_prune_cleanup_message(updated.fetch("message", ""), summary)
+        updated["result"] = updated.fetch("result", {}).merge(
+          "post_prune_cleanup" => {
+            "summary" => summary,
+            "outcomes" => post_prune.fetch("outcomes", [])
+          }
+        )
+        updated["log_entry_ids"] = (
+          Array(updated.fetch("log_entry_ids", [])) + Array(post_prune.fetch("log_entry_ids", []))
+        ).uniq
+        updated
+      end
+
+      # Only genuine cleanup failures are revisited. Skipped workspaces (project root, shared
+      # checkout, handed-over worktree) and successful cleanups are already settled by the pass.
+      def post_prune_blocked_cleanups(prune_result)
+        Array(prune_result.fetch("workspace_cleanup_outcomes", [])).select do |outcome|
+          outcome.fetch("success", false) == false && outcome.fetch("status", "failed") != "skipped"
+        end
+      end
+
+      def retry_blocked_worktree_cleanup(outcome, protected_paths:, deadline:)
+        worktree_root = present_string(outcome["worktree_root_path"])
+        branch = present_string(outcome["workspace_branch"])
+        git_root = present_string(outcome["git_root"])
+        agent_id = present_string(outcome["agent_id"])
+        original_reason = outcome.fetch("reason", "unknown")
+        base = {
+          "agent_id" => agent_id,
+          "issue_id" => outcome["issue_id"],
+          "project_id" => outcome["project_id"],
+          "original_reason" => original_reason,
+          "worktree_root_path" => worktree_root,
+          "workspace_branch" => branch,
+          "git_root" => git_root,
+          "workspace_owner_id" => outcome["workspace_owner_id"],
+          "requested_worktree_provider" => outcome["requested_worktree_provider"],
+          "worktree_provider" => outcome["worktree_provider"],
+          "worktree_provider_identifier" => outcome["worktree_provider_identifier"],
+          "worktree_provider_cwd" => outcome["worktree_provider_cwd"],
+          "project_root" => outcome["project_root"],
+          "post_prune_retry" => true
+        }.compact
+
+        unless worktree_root && branch && git_root
+          return base.merge("status" => "failed", "reason" => "cleanup_blocked_missing_path",
+                            "success" => false, "attempted" => false)
+        end
+
+        record = {
+          "strategy" => "git_worktree",
+          "worktree_root_path" => worktree_root,
+          "workspace_branch" => branch,
+          "git_root" => git_root,
+          "workspace_owner_id" => outcome["workspace_owner_id"] || agent_id,
+          "requested_worktree_provider" => outcome["requested_worktree_provider"],
+          "worktree_provider" => outcome["worktree_provider"],
+          "worktree_provider_identifier" => outcome["worktree_provider_identifier"],
+          "worktree_provider_cwd" => outcome["worktree_provider_cwd"],
+          "project_root" => outcome["project_root"]
+        }.compact
+        method = workspace_manager.method(:cleanup_pruned_worker_workspace)
+        options = { protected_paths: protected_paths }
+        options[:deadline] = deadline if method.parameters.any? { |(kind, name)| kind == :keyrest || name == :deadline }
+        retry_outcome = begin
+          method.call(record, **options)
+        rescue StandardError => e
+          {
+            "status" => "failed",
+            "reason" => "worktree_cleanup_error",
+            "success" => false,
+            "attempted" => false,
+            "error" => sanitized_error_message(e)
+          }
+        end
+        base.merge(retry_outcome)
+      end
+
+      def current_workspace_protected_paths(state, exclude_agent_ids: [])
+        excluded = Array(exclude_agent_ids).compact
+        state.fetch("agents", []).filter_map do |other|
+          next unless other.fetch("type", nil) == "worker"
+          next if excluded.any? { |id| Ids.same?(id, other.fetch("id", nil)) }
+          next if worker_workspace_handed_over?(state, other)
+          worker_worktree_root_path(other)
+        end
+      end
+
+      def post_prune_cleanup_summary(outcomes)
+        removed = outcomes.select { |outcome| outcome.fetch("success", false) && outcome.fetch("status", nil) == "removed" }
+        already_removed = outcomes.select { |outcome| outcome.fetch("success", false) && outcome.fetch("status", nil) == "already_removed" }
+        retained = outcomes.reject { |outcome| outcome.fetch("success", false) }
+        {
+          "removed_count" => removed.length,
+          "already_removed_count" => already_removed.length,
+          "retained_count" => retained.length,
+          "removed_agent_ids" => removed.filter_map { |outcome| present_string(outcome["agent_id"]) },
+          "retained" => retained.map do |outcome|
+            {
+              "agent_id" => outcome.fetch("agent_id", nil),
+              "reason" => outcome.fetch("reason", "unknown"),
+              "original_reason" => outcome.fetch("original_reason", nil)
+            }.compact
+          end,
+          "level" => retained.any? ? "warning" : "info"
+        }
+      end
+
+      def post_prune_cleanup_log_message(summary, source:)
+        removed = summary.fetch("removed_count")
+        retained = summary.fetch("retained_count")
+        parts = []
+        if removed.positive?
+          parts << "Post-prune cleanup removed #{count_phrase(removed, "worktree")} the #{source} pass left behind"
+        end
+        if retained.positive?
+          listed = Array(summary.fetch("retained")).first(PRUNE_RETENTION_REPORT_LIMIT).map do |item|
+            "#{item.fetch("agent_id", "worker")} (#{item.fetch("reason", "unknown")})"
+          end
+          remainder = retained - listed.length
+          listed << "and #{remainder} more" if remainder.positive?
+          parts << "retained #{count_phrase(retained, "worktree")} because cleanup was not safe: #{listed.join(", ")}"
+        end
+        parts.empty? ? "Post-prune cleanup found nothing to revisit." : "#{parts.join("; ")}."
+      end
+
+      def append_post_prune_cleanup_log(state, outcomes, summary:, source:)
+        append_log(
+          state,
+          source_type: "kernel",
+          source_id: nil,
+          level: summary.fetch("level"),
+          message: post_prune_cleanup_log_message(summary, source: source),
+          details: {
+            "kind" => "post_prune_cleanup",
+            "source" => source,
+            "outcomes" => outcomes,
+            "summary" => summary
+          }
+        )
+      end
+
+      # The prune summary line already reports what the pass removed and retained. Append a
+      # post-prune sentence only when the retry actually removed worktrees the pass left
+      # behind, so a pass that retains everything (the dirty/locked safety refusals) reads exactly
+      # as before while a pass that recovers previously-blocked worktrees advertises the recovery.
+      def append_post_prune_cleanup_message(message, summary)
+        removed = summary.fetch("removed_count")
+        return message unless removed.positive?
+        retained = summary.fetch("retained_count")
+        suffix = "Post-prune cleanup removed #{count_phrase(removed, "worktree")} the pass left behind"
+        if retained.positive?
+          listed = Array(summary.fetch("retained")).first(PRUNE_RETENTION_REPORT_LIMIT).map do |item|
+            "#{item.fetch("agent_id", "worker")} (#{item.fetch("reason", "unknown")})"
+          end
+          remainder = retained - listed.length
+          listed << "and #{remainder} more" if remainder.positive?
+          suffix += "; retained #{count_phrase(retained, "worktree")} because cleanup was not safe: #{listed.join(", ")}"
+        end
+        "#{message} #{suffix}."
       end
 
       # One prune pass is one visible line. The counts cover every record class the pass touched:
@@ -6997,18 +7209,21 @@ module Meringue
       def cleanup_pruned_worker_workspaces!(state, worker_ids, now, append_logs: true, deadline: nil)
         pruned_ids = Array(worker_ids).compact
         Array(worker_ids).filter_map do |agent_id|
+          worker = find_agent(state, agent_id)
           if deadline && monotonic_time >= deadline
-            next {
-              "agent_id" => agent_id,
+            # The prune pass ran out of budget before it could attempt this worktree. Carry the
+            # persisted workspace identity so the post-commit cleanup can retry it without
+            # needing the worker record, which is about to be removed.
+            base = blocked_worktree_path_base(worker) || { "agent_id" => agent_id }
+            next base.merge(
               "status" => "failed",
               "reason" => "prune_cleanup_budget_exhausted",
               "success" => false,
               "attempted" => false,
               "checked_at" => now,
               "log_entry_ids" => []
-            }
+            )
           end
-          worker = find_agent(state, agent_id)
           next unless worker && worker.fetch("type", nil) == "worker"
 
           # A worker whose worktree was taken over by a successor no longer owns it, so pruning it
@@ -7155,6 +7370,45 @@ module Meringue
         plan = metadata.fetch("workspace_plan", {})
         plan = {} unless plan.is_a?(Hash)
         plan["worktree_root_path"] || plan["workspace_root_path"] || worker.fetch("workspace_path", nil) || plan["workspace_path"]
+      end
+
+      # The persisted workspace plan is wrapped as `{"workspace" => inner}` by the manager's
+      # allocation result. Unwrap it so path/branch/git_root can be read directly, while still
+      # tolerating a bare inner plan (tests and older records may store either shape).
+      def workspace_plan_record(worker)
+        metadata = worker.fetch("harness_metadata", {}) || {}
+        plan = metadata.fetch("workspace_plan", nil)
+        return {} unless plan.is_a?(Hash)
+        inner = plan.fetch("workspace", nil)
+        inner.is_a?(Hash) ? inner : plan
+      end
+
+      # The prune pass runs out of budget before it can attempt some worktrees. Carry the
+      # persisted workspace identity on the `prune_cleanup_budget_exhausted` outcome so the
+      # post-commit cleanup can retry it without the worker record, which the pass is
+      # about to remove.
+      def blocked_worktree_path_base(worker)
+        return nil unless worker.is_a?(Hash) && worker.fetch("type", nil) == "worker"
+        inner = workspace_plan_record(worker)
+        worktree_root = present_string(inner["worktree_root_path"] || inner["workspace_root_path"] ||
+                                        worker.fetch("workspace_path", nil) || inner["workspace_path"])
+        branch = present_string(inner["workspace_branch"] || worker.fetch("workspace_branch", nil))
+        git_root = present_string(inner["git_root"] || inner["project_root"] || worker.fetch("project_root", nil))
+        return nil unless worktree_root && branch && git_root
+        {
+          "agent_id" => worker.fetch("id", nil),
+          "issue_id" => worker.fetch("issue_id", nil),
+          "project_id" => worker.fetch("project_id", nil),
+          "worktree_root_path" => worktree_root,
+          "workspace_branch" => branch,
+          "git_root" => git_root,
+          "workspace_owner_id" => inner["workspace_owner_id"],
+          "requested_worktree_provider" => inner["requested_worktree_provider"],
+          "worktree_provider" => inner["worktree_provider"],
+          "worktree_provider_identifier" => inner["worktree_provider_identifier"],
+          "worktree_provider_cwd" => inner["worktree_provider_cwd"],
+          "project_root" => inner["project_root"]
+        }.compact
       end
 
       # Only cleanups the user may have to act on get their own line. A successful removal (or a
