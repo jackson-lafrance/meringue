@@ -407,6 +407,25 @@ module Meringue
         settings_pane.hit(state, width: width, height: height, x: x, y: y)
       end
 
+      # Same three answers for the theme picker: a row index, `:chrome` for its
+      # own border/caption, and `:outside` for a click-away dismiss.
+      def theme_picker_hit(state, width:, height:, x:, y:)
+        return :outside unless chat_pane.theme_picker?(state)
+
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        return :outside unless metrics.fetch(:suggestion_height).positive?
+
+        bounds = pane_bounds(metrics, :suggestion_x, :suggestion_y, :suggestion_width, :suggestion_height)
+        bounds = bounds.merge(height: bounds.fetch(:height) + metrics.fetch(:suggestion_footer_height))
+        return :outside unless point_in_bounds?(x.to_i, y.to_i, bounds)
+
+        row = y.to_i - metrics.fetch(:suggestion_y) - 1
+        return :chrome if row.negative? || row >= Panes::ChatPane::THEME_PICKER_VISIBLE_LIMIT
+
+        index = chat_pane.theme_picker_window_start(state) + row
+        index < chat_pane.theme_picker_entries.length ? index : :chrome
+      end
+
       # Same three answers for the model picker: a row index, `:chrome` for its
       # own border/caption, and `:outside` for a click-away dismiss.
       def model_picker_hit(state, width:, height:, x:, y:)

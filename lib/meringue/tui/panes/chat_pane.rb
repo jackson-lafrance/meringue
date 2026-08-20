@@ -11,6 +11,7 @@ module Meringue
         # composer, so it gets a taller window than the slash-command popup while
         # still sharing the same slot, border, and keys.
         MODEL_PICKER_VISIBLE_LIMIT = 10
+        THEME_PICKER_VISIBLE_LIMIT = 8
         HEAD_ICON = "◆"
         WORKER_ICON = "✦"
         RESULT_ICON = "✓"
@@ -439,13 +440,16 @@ module Meringue
         # First-run setup is a full-screen Settings mode rather than a popup in
         # this composer slot.
         def popup?(state)
-          model_picker?(state) || delivery_pr_picker?(state) || slash_suggestions?(state)
+          theme_picker?(state) || model_picker?(state) || delivery_pr_picker?(state) || slash_suggestions?(state)
         end
 
         # How many entry rows the popup shows at once, and therefore how tall the
         # layout should let the box grow.
         def popup_visible_limit(state)
-          model_picker?(state) ? MODEL_PICKER_VISIBLE_LIMIT : VISIBLE_SUGGESTION_LIMIT
+          return THEME_PICKER_VISIBLE_LIMIT if theme_picker?(state)
+          return MODEL_PICKER_VISIBLE_LIMIT if model_picker?(state)
+
+          VISIBLE_SUGGESTION_LIMIT
         end
 
         def popup_max_box_height(state)
@@ -453,6 +457,7 @@ module Meringue
         end
 
         def popup_pane_title(state)
+          return "themes" if theme_picker?(state)
           return "models (#{ModelPicker.harness_for(state, model_picker_state(state).fetch("harness", nil))})" if model_picker?(state)
 
           delivery_pr_picker?(state) ? "open pull requests" : "slash commands"
@@ -463,6 +468,7 @@ module Meringue
         # 27 commands" inside the border reads like a 16th command and costs the
         # list a visible row. The layout draws #popup_footer_line under the box.
         def popup_lines(state)
+          return theme_picker_lines(state) if theme_picker?(state)
           return model_picker_lines(state) if model_picker?(state)
 
           delivery_pr_picker?(state) ? delivery_pr_picker_lines(state) : slash_suggestion_lines(state)
@@ -472,9 +478,80 @@ module Meringue
         # the full list, and the keys that move it. Empty when there is nothing to
         # say, in which case the layout reserves no row for it.
         def popup_footer_line(state)
+          return theme_picker_footer_line(state) if theme_picker?(state)
           return model_picker_footer_line(state) if model_picker?(state)
 
           delivery_pr_picker?(state) ? delivery_pr_picker_footer_line(state) : slash_suggestion_footer_line(state)
+        end
+
+        def theme_picker?(state)
+          theme_picker_state(state).fetch("active", false) == true
+        end
+
+        def theme_picker_state(state)
+          value = chat_state(state).fetch("theme_picker", nil)
+          value.is_a?(Hash) ? value : {}
+        end
+
+        def theme_picker_entries
+          ThemePicker.entries
+        end
+
+        def theme_picker_index(state)
+          entries = theme_picker_entries
+          return NO_SLASH_SELECTION if entries.empty?
+
+          theme_picker_state(state).fetch("index", 0).to_i.clamp(0, entries.length - 1)
+        end
+
+        def theme_picker_window_start(state)
+          slash_suggestion_window_start(
+            theme_picker_entries.length,
+            theme_picker_index(state),
+            limit: THEME_PICKER_VISIBLE_LIMIT
+          )
+        end
+
+        def theme_picker_lines(state)
+          entries = theme_picker_entries
+          return [[[
+            "No TUI themes are available.", Style::MUTED
+          ]]] if entries.empty?
+
+          selected_index = theme_picker_index(state)
+          window_start = theme_picker_window_start(state)
+          entries.drop(window_start).first(THEME_PICKER_VISIBLE_LIMIT).map.with_index do |entry, offset|
+            theme_picker_line(
+              entry,
+              selected: window_start + offset == selected_index,
+              original: theme_picker_state(state).fetch("original", nil)
+            )
+          end
+        end
+
+        def theme_picker_line(entry, selected:, original: nil)
+          marker = selected ? "›" : " "
+          status = if entry.fetch("current", false)
+                     entry.fetch("name") == original.to_s ? "current" : "preview"
+                   end
+          [
+            ["#{marker} ", selected ? Style::ACCENT_BOLD : Style::DIM],
+            [entry.fetch("name"), selected ? Style::ACCENT_BOLD : Style::TEXT],
+            status ? ["  #{status}", Style::MUTED] : nil
+          ].compact
+        end
+
+        def theme_picker_footer_line(state)
+          total = theme_picker_entries.length
+          return [["Esc cancels", Style::DIM]] if total.zero?
+
+          count = if total > THEME_PICKER_VISIBLE_LIMIT
+                    window_start = theme_picker_window_start(state)
+                    "#{window_start + 1}–#{[window_start + THEME_PICKER_VISIBLE_LIMIT, total].min} of #{total} themes"
+                  else
+                    "#{total} themes"
+                  end
+          [[count, Style::MUTED], ["  ·  ↑↓ preview · Enter save · Esc cancel", Style::DIM]]
         end
 
         # The `/models` picker: one searchable list of the models the harness

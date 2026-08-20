@@ -194,7 +194,8 @@ Useful slash commands inside the TUI include:
 - `/questions` — list questions and their statuses.
 - `/answer <question_id> "<answer>"` — answer an open question; the kernel records the answer and routes the work it unblocks.
 - `/dismiss <question_id>` — close an open question without answering it.
-- `/theme <name>` — persist a TUI colorscheme.
+- `/theme [name]` — open the interactive theme picker; with a name, persist that TUI colorscheme.
+- `/themes` — open the interactive theme picker.
 - `/config` — open the full-screen transactional Settings editor for themes, separate head/worker defaults, experiments, harnesses, workspaces, safety, and every keybinding. Use `/config --text` for the old read-only diagnostic listing.
 - `/harness [head|worker] <pi|claude|antigravity>` — select the harness for future agents; omit the role to update both.
 - `/models [harness]` — open the model picker: a searchable list of the models the selected harness reports, with each model's provider/id, name, and supported thinking levels. Type to filter, `↑`/`↓` to move, `Enter` applies the model as the future-session default (exactly like `/model <reference>`), `Ctrl-R` re-asks the harness, `Esc` closes. `/models refresh [harness]` skips the picker and just re-fetches the catalog.

@@ -150,6 +150,12 @@ module Meringue
         @model_picker_index = 0
         @model_picker_query = +""
         @model_picker_harness = nil
+        # Theme picker previews are process-local until Enter submits the existing
+        # `/theme <name>` command. The original is restored on cancellation.
+        @theme_picker_active = false
+        @theme_picker_index = 0
+        @theme_picker_original = nil
+        @theme_picker_pending_original = nil
         # Full-screen schema-backed Settings. The draft is purely in memory until
         # one SaveConfiguration command succeeds.
         @settings_active = false
@@ -359,6 +365,8 @@ module Meringue
         # Quitting with Settings/setup open discards the in-memory draft and
         # restores any theme preview. No setup marker is written on process exit.
         close_settings(discard: true) if @settings_active
+        close_theme_picker
+        restore_pending_theme_picker_preview
         persist_agent_workspace if @agent_workspace_active
         if @agent_workspace_active
           close_agent_workspace(async_interactive: false)
@@ -437,6 +445,11 @@ module Meringue
         # keys regardless of configured dashboard bindings.
         if @settings_active
           return handle_settings_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
+
+        if @theme_picker_active
+          picker_result = handle_theme_picker_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+          return picker_result if picker_result
         end
 
         if @model_picker_active
@@ -2491,6 +2504,7 @@ module Meringue
         text = input_buffer.to_s.strip
         return handle_local_jump_command(text, state) if jump_command?(text)
         return handle_local_pull_requests_command(state) if pull_requests_picker_command?(text)
+        return handle_local_theme_command(state) if theme_picker_command?(text)
         return handle_local_models_command(text, state) if models_picker_command?(text)
         return handle_local_open_session_command(text, state) if open_session_command?(text)
         return handle_local_setup_command(state) if setup_command?(text)
@@ -2546,6 +2560,7 @@ module Meringue
           Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
           Pull-request picker: /prs opens every tracked PR that is still open, regardless of the AgentTree selection; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} opens the highlighted PR, and #{keys_for("cancel_navigation")} closes. #{keys_for("open_delivery_pr")} keeps its selection-aware behavior: it opens the selected issue's PR, or this picker when chat is unscoped.
           Model picker: /models or bare /model opens a searchable list of the models the harness reports (/models claude scopes it to another harness); type to filter, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} applies the model as the future-session default (same as /model <reference>), #{keys_for("refresh_model_catalog")} re-fetches the catalog, #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker.
+          Theme picker: /theme without a name or /themes previews the highlighted colorscheme live; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} saves through /theme <name>, and #{keys_for("cancel_navigation")} cancels and restores the original theme. Click-away also cancels.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace or a selected head's saved harness session; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
           Head/session debugging: select a head and press #{keys_for("open_agent_workspace")}, or use /open-session <agent_id>, to open its saved harness session externally without turning it into a chat target.
           Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
@@ -2637,6 +2652,13 @@ module Meringue
         text == "/open-session" || text.start_with?("/open-session ")
       end
 
+      def theme_picker_command?(text)
+        tokens = text.to_s.strip.split(/\s+/)
+        return false unless tokens.length == 1
+
+        %w[/theme /themes].include?(tokens.first.to_s.downcase)
+      end
+
       # `/models` and its bare singular alias `/model` are local TUI commands
       # that open the model picker. A singular command with any argument keeps
       # its existing setting behavior. `/models refresh` stays a kernel command
@@ -2651,6 +2673,11 @@ module Meringue
         return false if arguments.any? { |token| Input::SlashCommandParser::MODEL_CATALOG_REFRESH_WORDS.include?(token) }
 
         arguments.length <= 1
+      end
+
+      def handle_local_theme_command(state)
+        open_theme_picker(state)
+        true
       end
 
       def handle_local_models_command(text, state)
@@ -2713,7 +2740,7 @@ module Meringue
       end
 
       def local_navigation_command_without_id?(input_buffer)
-        ["/jump", "/prs", "/model", "/models", "/setup", "/config", "/open-session"].include?(input_buffer.to_s.strip.downcase)
+        ["/jump", "/prs", "/theme", "/themes", "/model", "/models", "/setup", "/config", "/open-session"].include?(input_buffer.to_s.strip.downcase)
       end
 
       def enter_agent_tree_navigation(state)
@@ -2816,10 +2843,11 @@ module Meringue
         # The logs caret belongs to the dashboard logs pane, so opening the
         # focused workspace disarms it instead of leaving Ctrl-C bound to copy.
         deactivate_logs_cursor_quietly
-        # The open-PR and model pickers are dashboard chrome, so they must not
-        # survive into the focused workspace and reappear on return.
+        # Dashboard pickers are transient chrome, so they must not survive into
+        # the focused workspace and reappear on return.
         close_delivery_pr_picker
         close_model_picker
+        close_theme_picker
         @agent_workspace_active = true
         @agent_workspace_interactive = false
         @force_full_redraw = true
@@ -3078,6 +3106,7 @@ module Meringue
         @settings_saving = false
         close_delivery_pr_picker
         close_model_picker
+        close_theme_picker
         @force_full_redraw = true
         true
       rescue StandardError => e
@@ -3748,6 +3777,141 @@ module Meringue
         Onboarding.fits?(width: render_width, height: render_height)
       end
 
+      def theme_picker_snapshot
+        return nil unless @theme_picker_active
+
+        {
+          "active" => true,
+          "index" => @theme_picker_index,
+          "original" => @theme_picker_original
+        }
+      end
+
+      def open_theme_picker(_state)
+        restore_pending_theme_picker_preview
+        @theme_picker_original = Style.current_colorscheme
+        @theme_picker_index = ThemePicker.index_for(@theme_picker_original)
+        @theme_picker_active = true
+        close_delivery_pr_picker
+        close_model_picker
+        true
+      end
+
+      def close_theme_picker(restore: true)
+        restore_theme_picker_preview if restore && @theme_picker_original
+        restore_pending_theme_picker_preview if restore
+        @theme_picker_active = false
+        @theme_picker_index = 0
+        @theme_picker_original = nil
+      end
+
+      def restore_theme_picker_preview
+        return if @theme_picker_original.to_s.empty?
+        return if Style.current_colorscheme == @theme_picker_original
+
+        Style.configure!(@theme_picker_original)
+      rescue ArgumentError
+        nil
+      end
+
+      def restore_pending_theme_picker_preview
+        original = @theme_picker_pending_original
+        @theme_picker_pending_original = nil
+        return if original.to_s.empty? || Style.current_colorscheme == original
+
+        Style.configure!(original)
+      rescue ArgumentError
+        nil
+      end
+
+      def theme_picker_entries
+        ThemePicker.entries
+      end
+
+      def handle_theme_picker_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
+        entries = theme_picker_entries
+        return handle_theme_picker_mouse(key, unchanged, on_submit, state, entries) if mouse_event?(key)
+
+        if keybinding?("suggestion_previous", key)
+          move_theme_picker(-1, entries.length)
+          return unchanged
+        end
+        if keybinding?("suggestion_next", key)
+          move_theme_picker(1, entries.length)
+          return unchanged
+        end
+        if keybinding?("submit", key)
+          apply_theme_picker_entry(selected_theme_picker_entry(entries), on_submit, state)
+          return unchanged
+        end
+        if keybinding?("cancel_navigation", key)
+          close_theme_picker
+          return unchanged
+        end
+
+        # A printable key is not a theme-search mode. Close the modal and let
+        # the normal composer process it so a picker can never trap typing.
+        close_theme_picker
+        nil
+      end
+
+      def handle_theme_picker_mouse(key, unchanged, on_submit, state, entries)
+        return unchanged unless mouse_button_press?(key) || mouse_wheel?(key)
+
+        hit = layout.theme_picker_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+        if mouse_wheel?(key)
+          return nil if hit == :outside
+
+          move_theme_picker(mouse_wheel_up?(key) ? -1 : 1, entries.length)
+          return unchanged
+        end
+
+        if hit.is_a?(Integer)
+          apply_theme_picker_entry(entries[hit], on_submit, state)
+        elsif hit == :outside
+          close_theme_picker
+        end
+        unchanged
+      end
+
+      def move_theme_picker(step, count)
+        return if count <= 0
+
+        @theme_picker_index = (@theme_picker_index.to_i + step) % count
+        preview_theme_picker
+      end
+
+      def preview_theme_picker
+        entry = selected_theme_picker_entry(theme_picker_entries)
+        return unless entry
+        return if Style.current_colorscheme == entry.fetch("name")
+
+        Style.configure!(entry.fetch("name"))
+      rescue ArgumentError
+        nil
+      end
+
+      def selected_theme_picker_entry(entries)
+        return nil if entries.empty?
+
+        entries[@theme_picker_index.to_i.clamp(0, entries.length - 1)]
+      end
+
+      def apply_theme_picker_entry(entry, on_submit, state)
+        unless entry
+          close_theme_picker
+          return false
+        end
+
+        original = @theme_picker_original
+        selected = entry.fetch("name")
+        close_theme_picker(restore: false)
+        @theme_picker_pending_original = original
+        submit_prompt("/theme #{selected}", on_submit, state)
+        true
+      end
+
       def model_picker_snapshot
         return nil unless @model_picker_active
 
@@ -3769,6 +3933,7 @@ module Meringue
         @model_picker_query = +""
         @model_picker_harness = harness.to_s.strip.empty? ? nil : harness.to_s.strip
         close_delivery_pr_picker
+        close_theme_picker
         true
       end
 
@@ -4322,13 +4487,16 @@ module Meringue
                        unavailable_prompt_handler_result
                      end
             if slash_command
-              apply_slash_command_results(result.fetch("command_results", []) || []) if result.fetch("event", nil) == "slash_command_applied"
+              command_results = result.fetch("command_results", []) || []
+              apply_slash_command_results(command_results) if result.fetch("event", nil) == "slash_command_applied"
+              resolve_theme_picker_submission(command_results)
             else
               final_text = result_logged_to_kernel?(result) ? "" : log_text_for(result)
               visible = !final_text.to_s.strip.empty?
               update_message(assistant_message_id, text: final_text, status: nil, visible: visible, persist: visible)
             end
           rescue StandardError => e
+            restore_pending_theme_picker_preview if slash_command && text.start_with?("/theme ")
             if slash_command && text.start_with?("/config save ") && @settings_active && @settings_draft
               @settings_saving = false
               @settings_draft.apply_save_failure("Configuration save failed: #{e.class}: #{e.message}")
@@ -4515,15 +4683,28 @@ module Meringue
       end
 
       def apply_theme_command_results(command_results)
-        Array(command_results).each do |result|
-          next unless result.fetch("command_type", nil) == "SetTheme"
-          next unless result.fetch("status", nil) == "accepted"
+        theme_result = Array(command_results).reverse.find { |result| result.fetch("command_type", nil) == "SetTheme" }
+        return unless theme_result
 
-          theme = (result.fetch("result", {}) || {})["theme"]
+        if theme_result.fetch("status", nil) == "accepted"
+          theme = (theme_result.fetch("result", {}) || {})["theme"]
           Style.configure!(theme) if theme
+          @theme_picker_pending_original = nil
+        else
+          restore_pending_theme_picker_preview
         end
       rescue StandardError
         nil
+      end
+
+      # A picker selection is submitted asynchronously. If the handler returns
+      # without a SetTheme result, the preview was not persisted and must not
+      # leak into the rest of the dashboard.
+      def resolve_theme_picker_submission(command_results)
+        return if @theme_picker_pending_original.nil?
+        return if Array(command_results).any? { |result| result.fetch("command_type", nil) == "SetTheme" }
+
+        restore_pending_theme_picker_preview
       end
 
       def append_head_result_applied_summary(message_id, event)
@@ -5220,7 +5401,8 @@ module Meringue
             "selection" => @chat_selection,
             "pending_count" => @pending_count,
             "delivery_pr_picker" => delivery_pr_picker_snapshot,
-            "model_picker" => model_picker_snapshot
+            "model_picker" => model_picker_snapshot,
+            "theme_picker" => theme_picker_snapshot
           }
         end
       end

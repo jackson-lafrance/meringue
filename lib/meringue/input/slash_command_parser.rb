@@ -12,7 +12,8 @@ module Meringue
       COMMAND_SPECS = [
         ["/help", "Show slash command help."],
         ["/quit", "Quit the interactive TUI."],
-        ["/theme <name>", "Set and persist the TUI theme."],
+        ["/theme [name]", "Open the interactive theme picker, or set and persist the TUI theme when a name is supplied."],
+        ["/themes", "Open the interactive theme picker."],
         ["/project add <path> [name]", "Register a project directory."],
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
@@ -721,6 +722,8 @@ module Meringue
           invalid("/quit is a local TUI command. Run it in the interactive TUI to exit.", usage: "/quit")
         when "theme"
           parse_theme(arguments)
+        when "themes"
+          parse_themes(arguments)
         when "harness"
           parse_harness(arguments)
         when "models"
@@ -815,9 +818,20 @@ module Meringue
 
       def parse_theme(arguments)
         tokens = split_arguments(arguments)
-        return invalid("Usage: /theme <name>") unless tokens.length == 1
+        return invalid(
+          "Usage: /theme [name]. Without a name, run it in the interactive TUI to open the theme picker.",
+          usage: "/theme [name]"
+        ) if tokens.empty?
+        return invalid("Usage: /theme [name]") unless tokens.length == 1
 
         kernel_command("SetTheme", "theme" => tokens[0])
+      end
+
+      def parse_themes(arguments)
+        tokens = split_arguments(arguments)
+        return invalid("/themes is a local TUI command. Run it in the interactive TUI to open the theme picker.", usage: "/themes") if tokens.empty?
+
+        invalid("Usage: /themes")
       end
 
       def parse_harness(arguments)

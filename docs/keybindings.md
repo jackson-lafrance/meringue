@@ -301,6 +301,17 @@ Open it with `/models` (optionally `/models claude` to scope it to another harne
 - `Esc`, a click outside the list, or any unhandled control key: close it without changing anything.
 - The list is never blank: an unavailable catalog, an unsupported harness, a snapshot that has never been fetched, and a filter that matched nothing each render their own explanation and say what to do next.
 
+## Theme picker
+
+Open the interactive theme picker with `/theme` without an argument or its `/themes` alias. The current colorscheme is highlighted initially.
+
+- `↑` / `↓`: move through themes and preview the highlighted colorscheme immediately.
+- `Enter`: persist the highlighted theme through the existing `/theme <name>` command.
+- `Esc` or a click outside the list: cancel and restore the theme that was active when the picker opened.
+- Mouse wheel: move and preview themes; clicking a row saves the highlighted theme.
+
+The picker is transient and does not write config while previewing. An unrelated key closes it and returns that key to the dashboard composer.
+
 ## Jump mode
 
 Start jump mode with `/jump` or by focusing the agent tree or logs pane and pressing `Enter`.

@@ -210,6 +210,19 @@ class InputSlashCommandParserTest < Minitest::Test
     )
   end
 
+  def test_bare_theme_commands_are_local_picker_commands_outside_the_tui
+    ["/theme", "/themes"].each do |input|
+      parsed = parse_slash(input)
+
+      assert_equal "InvalidSlashCommand", parsed.fetch("type"), "expected #{input.inspect} to be local"
+      assert_includes parsed.fetch("payload").fetch("message"), "theme picker"
+    end
+
+    parsed = parse_slash("/themes catppuccin")
+    assert_equal "InvalidSlashCommand", parsed.fetch("type")
+    assert_equal "Usage: /themes", parsed.fetch("payload").fetch("message")
+  end
+
   def test_missing_arguments_for_strict_commands_return_invalid_slash_command
     ["/theme", "/theme a b", "/harness", "/model a b",
      "/thinking", "/thinking high extra", "/thinking reviewer high", "/thinking head high extra",

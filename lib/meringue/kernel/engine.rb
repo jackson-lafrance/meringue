@@ -238,7 +238,8 @@ module Meringue
 
       HELP_COMMANDS = [
         ["/help", "Show slash command help."],
-        ["/theme <name>", "Set and persist the TUI theme. Available: catppuccin, gruvbox, kanagawa, meringue, rose-pine, tokyonight."],
+        ["/theme [name]", "Open the interactive theme picker, or set and persist the TUI theme when a name is supplied. Available: catppuccin, gruvbox, kanagawa, meringue, rose-pine, tokyonight."],
+        ["/themes", "TUI local: open the interactive theme picker."],
         ["/project add <path> [name]", "Register a project directory."],
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
