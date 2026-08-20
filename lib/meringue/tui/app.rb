@@ -4784,7 +4784,14 @@ module Meringue
         current = Array(state.fetch("agents", [])).find do |agent|
           agent.is_a?(Hash) && agent["type"] == "worker" && agent["id"].to_s == @agent_workspace_agent_id.to_s
         end
-        return if current && !%w[completed killed].include?(current.fetch("status", nil).to_s)
+        if current
+          status = current.fetch("status", nil).to_s
+          return unless %w[completed killed].include?(status)
+          # A completed Pi worker is already terminal when native focus begins. Keep its pending
+          # or active PTY alive; treating that pre-existing status as a new settle cancels the
+          # handoff on the next frame and immediately resumes the dashboard session.
+          return if status == "completed" && embedded_agent_workspace?
+        end
 
         was_embedded = embedded_agent_workspace?
         if @agent_workspace_open_pending && workspace_controller&.respond_to?(:cancel_workspace_open)

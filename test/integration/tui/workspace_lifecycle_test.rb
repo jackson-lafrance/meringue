@@ -139,6 +139,12 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
   end
 
   class ImmediateInteractiveSession
+    attr_reader :writes
+
+    def initialize
+      @writes = []
+    end
+
     def start(workspace_path:, rows:, columns:, on_started:)
       on_started.call(4242)
       { "status" => "active", "pid" => 4242, "workspace_path" => workspace_path }
@@ -159,7 +165,8 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       { "status" => "resized", "rows" => rows, "columns" => columns }
     end
 
-    def write(_bytes)
+    def write(bytes)
+      @writes << bytes
       { "status" => "written" }
     end
 
@@ -296,6 +303,70 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       app.send(:close_agent_workspace)
       refute controller.agent_interactive?(agent: state.fetch("agents").first)
     ensure
+      app&.send(:close_agent_workspace)
+      controller&.close
+    end
+  end
+
+  def test_completed_resumable_worker_stays_in_native_focus_and_accepts_input
+    Dir.mktmpdir("meringue-completed-focus-") do |workspace|
+      focus = BlockingFocusService.new
+      interactive_session = ImmediateInteractiveSession.new
+      controller = Meringue::Workspace::Controller.new(
+        focus_session_service: focus,
+        interactive_session_factory: ->(command:, env:) { interactive_session }
+      )
+      app = Meringue::TUI::App.new(
+        layout: Meringue::TUI::Layout.new,
+        terminal: TUISupport::FakeTerminal.new,
+        workspace_controller: controller
+      )
+      state = @state.merge("agents" => [agent_record(
+        "P1-I1-W1",
+        "type" => "worker",
+        "status" => "completed",
+        "harness" => "pi",
+        "workspace_path" => workspace,
+        "project_id" => "P1",
+        "issue_id" => "P1-I1",
+        "harness_session_id" => "completed-session",
+        "harness_session_file" => File.join(workspace, "completed-session.jsonl")
+      )])
+      released = false
+
+      assert app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+      assert_equal "P1-I1-W1", focus.begun.pop
+
+      # The normal frame reconciliation used to mistake this already-completed worker for a
+      # newly terminal selection, cancel the pending handoff, and immediately return to dashboard.
+      opening = compose_app_state(app, state).fetch("_agent_workspace")
+      assert_equal true, opening.fetch("active")
+      assert_equal true, opening.fetch("opening")
+      assert focus.ended.empty?, "dashboard ownership must not resume while focus is opening"
+
+      focus.release
+      released = true
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      focused = nil
+      loop do
+        focused = compose_app_state(app, state).fetch("_agent_workspace")
+        break if focused.fetch("interactive", false)
+
+        raise "completed native focus did not open" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+        sleep 0.01
+      end
+
+      assert_equal true, focused.fetch("active")
+      refute focused.fetch("opening")
+      assert focus.ended.empty?, "a completed worker must stay under native focus ownership"
+
+      app.send(:handle_key, "x", "", 0, -1, nil, state)
+      assert_equal ["x"], interactive_session.writes
+
+      app.send(:close_agent_workspace)
+      assert_equal "P1-I1-W1", Timeout.timeout(2) { focus.ended.pop }
+    ensure
+      focus&.release unless released
       app&.send(:close_agent_workspace)
       controller&.close
     end
