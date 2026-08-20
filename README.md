@@ -207,7 +207,7 @@ Useful slash commands inside the TUI include:
 - `/setup` — reopen the shared full-screen Setup overlay for theme, separate head/worker defaults, and experiment checkboxes. Manual cancel writes nothing.
 - `/reload` — restart Meringue with the current source and configuration.
 - `/update` — update the clean source checkout, install missing dependencies, and reload automatically.
-- `/questions` — list questions and their statuses.
+- `/questions` — open the picker for existing open questions; use `↑`/`↓` to move, `Enter` to insert `/answer <question_id>`, and `Esc` to close.
 - `/answer <question_id> "<answer>"` — answer an open question; the kernel records the answer and routes the work it unblocks.
 - `/dismiss <question_id>` — close an open question without answering it.
 - `/theme [name]` — with no name, open the on-screen theme picker; otherwise persist a TUI colorscheme. The `/themes` alias opens the same picker.
@@ -248,7 +248,7 @@ When a head cannot route a request safely it asks a clarifying question, and the
 - Replying in plain chat also works. A head reads the open questions in its context; if your message clearly answers exactly one of them, it closes that question and routes the unblocked work in the same step. If several questions could match, or the message is a new goal, the questions stay open and the message is routed as its own request.
 - `/dismiss Q1` closes a question you no longer care about without routing any work.
 
-Open questions are visible as a `? <count>` marker in the chat header and through `/questions`, which also prints the exact `/answer` command to use.
+Open questions are visible as a `? <count>` marker in the chat header and through the `/questions` picker, which shows local display numbers and inserts the exact `/answer <question_id>` command to use.
 
 ### Reading the logs pane
 

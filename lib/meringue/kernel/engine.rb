@@ -279,7 +279,7 @@ module Meringue
         ["/github test", "Test read-only GitHub authentication and repository access."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
-        ["/questions", "List questions and their statuses."],
+        ["/questions", "Open the picker for existing open questions."],
         ["/answer <question_id> \"<answer>\"", "Answer an open question; the kernel records the answer and routes the work it unblocks."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
         ["/prune", "Remove resolved and errored records plus their safely cleanable managed worktrees."],
