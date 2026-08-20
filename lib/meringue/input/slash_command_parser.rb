@@ -20,7 +20,7 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."],
         ["/worker resume <agent_id>", "Resume a paused worker session."],
-        ["/prompt <agent_id> \"<message>\"", "Prompt a worker session."],
+        ["/prompt <agent_id> \"<message>\"", "Continue a worker session or take over a still-routing head."],
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
         ["/harness [head|worker] <pi|claude|antigravity>", "Select role-aware harness defaults for future agents; omit the role to update both."],
@@ -60,7 +60,7 @@ module Meringue
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
         { "prefix" => "/worker pause", "source" => "workers", "append_space" => false },
         { "prefix" => "/worker resume", "source" => "workers", "append_space" => false },
-        { "prefix" => "/prompt", "source" => "workers", "append_space" => true },
+        { "prefix" => "/prompt", "source" => "prompt_targets", "append_space" => true },
         { "prefix" => "/retry", "source" => "retry_heads", "append_space" => false },
         { "prefix" => "/open-session", "source" => "agents", "append_space" => false },
         { "prefix" => "/model head", "source" => "session_models", "append_space" => false, "model_role" => "head" },
@@ -242,6 +242,13 @@ module Meringue
                   Array(state["issues"])
                 when "workers"
                   Array(state["agents"]).select { |agent| agent["type"] == "worker" }
+                when "prompt_targets"
+                  Array(state["agents"]).select do |agent|
+                    next true if agent["type"] == "worker"
+                    next false unless agent["type"] == "head"
+
+                    %w[queued working idle].include?(agent["status"].to_s) && !Meringue::State::Models.head_result_applied?(agent)
+                  end
                 when "retry_heads"
                   Array(state["agents"]).select { |agent| Meringue::State::Models.head_retry_target?(agent) }
                 when "themes"
@@ -660,8 +667,8 @@ module Meringue
           ["project", item["name"], item["status"]].compact.join(" · ")
         when "issues"
           ["issue", item["title"], item["status"]].compact.join(" · ")
-        when "workers"
-          ["worker", item["status"], item["issue_id"]].compact.join(" · ")
+        when "workers", "prompt_targets"
+          [item["type"] == "head" ? "head" : "worker", item["status"], item["issue_id"]].compact.join(" · ")
         when "retry_heads"
           ["head", item["status"], "retry"].compact.join(" · ")
         when "themes"

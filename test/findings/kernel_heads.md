@@ -35,7 +35,8 @@ every state/config file lives under a per-test `Dir.mktmpdir`.
   never happened. Retry is explicit (`/retry H<n>` or the TUI's retryable-head double-click),
   always starts a fresh head, never resumes or messages the old head session, and removes the old
   head row from the active tree while preserving lineage in logs/metadata. Selecting the head and
-  typing is ordinary unscoped chat, and `/prompt` is worker-only. The retry head's prompt names
+  typing is ordinary unscoped chat, and `/prompt` takes over only a still-routing head (stopped
+  heads use `/retry`). The retry head's prompt names
   the batch's accepted commands (reuse, never re-propose) and its rejected/failed ones (still
   unrouted), so a partially applied batch is recovered without routing the same work twice. Only a
   head that is still routing, or that applied every command it proposed, is refused. See
