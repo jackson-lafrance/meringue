@@ -36,14 +36,15 @@ module Meringue
     #     routing, chat routing) and in text it is marked `(old id)`, so the line stays readable
     #     and attributable to something historical while resolving to no record at all.
     module Recounter
-      # Correlation identifiers that are only ever compared against copies of themselves. They
-      # are never resolved back to an AgentTree record, so they are preserved verbatim even when
+      # Correlation and external workspace-ownership identifiers are compared against durable
+      # copies outside the state document. They are never resolved back to an AgentTree record, so
+      # they are preserved verbatim even when
       # they embed a renamed id (`<agent id>-PP1` pending prompts, `<goal id>-IT2-ATTEMPT`
       # attempt commands, `session-restart-<agent id>-1`). Rewriting one copy and not another
       # would break exactly-once dedupe, which is strictly worse than a stale-looking key.
       OPAQUE_ID_KEYS = %w[
         command_id event_id harness_session_id log_entry_ids message_id next_message_id
-        pid session_id tool_call_id
+        pid session_id tool_call_id workspace_owner_id
       ].freeze
 
       # Subtrees that record a *previous* rename. They are history: their old ids intentionally

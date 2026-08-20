@@ -17,6 +17,7 @@ module Meringue
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
+        ["/move <agent_id> <issue_id>", "Move an existing worker to a different issue without restarting its harness session."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."],
         ["/worker resume <agent_id>", "Resume a paused worker session."],
@@ -65,6 +66,7 @@ module Meringue
         { "prefix" => "/issue create", "source" => "projects", "append_space" => true },
         { "prefix" => "/project rename", "source" => "projects", "append_space" => true },
         { "prefix" => "/issue rename", "source" => "issues", "append_space" => true },
+        { "prefix" => "/move", "source" => "workers", "append_space" => true },
         { "prefix" => "/worker spawn", "source" => "issues", "append_space" => true },
         { "prefix" => "/worker pause", "source" => "workers", "append_space" => false },
         { "prefix" => "/worker resume", "source" => "workers", "append_space" => false },
@@ -733,6 +735,8 @@ module Meringue
           parse_issue(arguments)
         when "rename"
           invalid(RENAME_REMOVED_MESSAGE, usage: RENAME_USAGE_MESSAGE)
+        when "move", "reparent"
+          parse_move(arguments)
         when "worker"
           parse_worker(arguments)
         when "prompt"
@@ -975,6 +979,16 @@ module Meringue
         return invalid("Usage: /retry <head_id>") unless tokens.length == 1
 
         kernel_command("RetryHead", "head_id" => tokens[0])
+      end
+
+      # `/move <agent_id> <issue_id>` reparents an existing worker onto a different issue. The
+      # kernel keeps the harness session, worktree, and branch intact; only the AgentTree
+      # assignment (and the worker's composite id) changes. `/reparent` is the same command.
+      def parse_move(arguments)
+        tokens = split_arguments(arguments)
+        return invalid("Usage: /move <agent_id> <issue_id>") unless tokens.length == 2
+
+        kernel_command("MoveWorker", "agent_id" => tokens[0], "target_issue_id" => tokens[1])
       end
 
       def parse_kill(arguments)
