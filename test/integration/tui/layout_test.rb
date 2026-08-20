@@ -60,7 +60,9 @@ class TuiLayoutTest < Minitest::Test
     assert_includes frame, "─ agent tree "
     assert_includes frame, "─ logs ─"
     assert_includes frame, "─ chat ─"
-    assert_includes frame, "Enter send"
+    assert_includes frame, "● 1W 1H"
+    refute_includes frame, "Enter send"
+    refute_includes frame, "/keybind keys"
   end
 
   def test_sidebar_width_stays_inside_its_configured_bounds_across_resizes
@@ -111,8 +113,12 @@ class TuiLayoutTest < Minitest::Test
     assert_operator lines.index { |line| line.include?("─ slash commands ─") }, :<,
                     lines.index { |line| line.include?("─ chat") }
     # A slash command bypasses any selection, so the composer says so instead of
-    # advertising a chat target it will not use.
+    # advertising a chat target it will not use. The popup owns command discovery;
+    # the dashboard footer does not repeat it.
     assert_includes frame, "─ chat · slash command ─"
+    assert_includes frame, "↑↓ scroll · keep typing to filter"
+    refute_includes frame, "Enter send"
+    refute_includes frame, "/keybind keys"
   end
 
   # The counter/scroll caption is about the list, not a member of it, so it renders

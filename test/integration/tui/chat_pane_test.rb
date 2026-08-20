@@ -90,14 +90,12 @@ class TuiChatPaneTest < Minitest::Test
     assert_equal 0, @pane.composer_char_index_at(chat_state(""), row: 0, column: 4, width: 20)
   end
 
-  def test_bottom_hint_line_always_advertises_the_core_interactions
+  def test_idle_bottom_hint_line_keeps_only_concise_discovery_actions
     text = plain_line(@pane.bottom_hint_line(composed_state(empty_state)))
 
-    assert_includes text, "Enter send"
-    assert_includes text, "Ctrl-C clear/quit"
-    assert_includes text, "Tab focus"
-    assert_includes text, "/ commands"
-    assert_includes text, "/keybind keys"
+    assert_equal "Ctrl-C clear/quit · Tab focus · / commands", text
+    refute_includes text, "Enter"
+    refute_includes text, "/keybind"
   end
 
   def test_bottom_hint_line_reports_active_agents_open_questions_and_pending_prompts
@@ -107,12 +105,16 @@ class TuiChatPaneTest < Minitest::Test
     assert_includes demo, "● 1W 1H"
     refute_includes demo, "active"
     assert_includes demo, "? 1"
+    refute_includes demo, "Tab focus"
+    refute_includes demo, "/ commands"
 
     pending = plain_line(@pane.bottom_hint_line(composed_state(empty_state, chat: { "pending_count" => 2 })))
     assert_includes pending, "2 prompts running"
+    refute_includes pending, "Tab focus"
 
     single = plain_line(@pane.bottom_hint_line(composed_state(empty_state, chat: { "pending_count" => 1 })))
     assert_includes single, "1 prompt running"
+    refute_includes single, "/ commands"
   end
 
   def test_answered_questions_are_not_counted_in_the_hint_line

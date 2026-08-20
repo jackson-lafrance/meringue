@@ -352,9 +352,14 @@ module Meringue
             prefix += [["  ·  ", Style::DIM]] unless prefix.empty?
             prefix += delivery_pr
           end
-          separator = prefix.empty? ? [] : [["  ·  ", Style::DIM]]
 
-          prefix + separator + interaction_hint_segments
+          # The idle dashboard is the only place for standing discovery hints.
+          # Once the row has changing state, a selection, or a transient command
+          # popup, show that context instead of appending a shortcut inventory.
+          return prefix unless prefix.empty?
+          return [] if slash_prompt?(chat.fetch("input_buffer", ""))
+
+          interaction_hint_segments
         end
 
         def bottom_right_status_line(state)
@@ -876,9 +881,8 @@ module Meringue
 
         # Gestures for the current selection, never its identity: the composer
         # title one row above already names the target, so this only says that a
-        # fresh head routes the message (or that a slash command ignores the
-        # selection) and that Esc clears it. With nothing selected it is empty,
-        # leaving the width to the status, delivery-PR, and interaction hints.
+        # slash command ignores the selection or that Esc clears it. With nothing
+        # selected it is empty, leaving the width to status and discovery hints.
         def log_scope_hint_segments(state)
           ChatTarget.hint_segments(state)
         end
@@ -1612,16 +1616,15 @@ module Meringue
           (state.fetch("_scroll", {}) || {}).fetch("active_pane", nil).to_s == "logs"
         end
 
-        # Shares the focused workspace's bottom-bar styling: accented keys with
-        # muted labels and dim dividers, so both bars read as one product.
+        # Keep only the small idle-state discovery line here. Enter is the
+        # familiar submit action, and complete bindings belong in /keybind rather
+        # than consuming a row on every frame.
         def interaction_hint_segments
           HintLine.segments(
             [
-              ["Enter", "send"],
               ["Ctrl-C", "clear/quit"],
               ["Tab", "focus"],
-              ["/", "commands"],
-              ["/keybind", "keys"]
+              ["/", "commands"]
             ]
           )
         end
