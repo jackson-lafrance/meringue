@@ -10151,6 +10151,9 @@ module Meringue
               "workspace_mode" => agent.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED),
               "effective_workspace_mode" => agent.fetch("effective_workspace_mode", WORKSPACE_MODE_ISOLATED),
               "workspace_mode_fallback_reason" => agent.fetch("workspace_mode_fallback_reason", nil),
+              "requested_worktree_provider" => workspace.dig("plan", "requested_worktree_provider"),
+              "worktree_provider" => workspace.dig("plan", "worktree_provider"),
+              "worktree_provider_fallback_reason" => workspace.dig("plan", "worktree_provider_fallback_reason"),
               "title" => agent.fetch("harness_metadata", {}).fetch("title", nil),
               "rerouted_from_issue_id" => rerouted_from_issue_id,
               "workspace_reuse" => workspace_reuse,
@@ -13402,12 +13405,18 @@ module Meringue
         end
 
         if create && plan.fetch("created", false) && Dir.exist?(plan.fetch("workspace_path"))
+          provider_note = if present_string(plan.fetch("worktree_provider_fallback_reason", nil))
+                            "Requested #{plan.fetch("requested_worktree_provider", "external")} worktree provider was unavailable; " \
+                              "used native Git (#{plan.fetch("worktree_provider_fallback_reason")})."
+                          elsif plan.fetch("worktree_provider", "native_git") != "native_git"
+                            "Provisioned and managed by the configured command provider with Git safety validation."
+                          end
           return {
             "workspace_path" => File.expand_path(plan.fetch("workspace_path")),
             "workspace_strategy" => plan.fetch("strategy"),
             "workspace_branch" => plan.fetch("workspace_branch"),
             "plan" => plan,
-            "note" => nil,
+            "note" => provider_note,
             "created" => true,
             "errors" => []
           }

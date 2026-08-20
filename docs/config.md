@@ -220,6 +220,120 @@ editor_args = ["."]
 terminal_buffer_bytes = 4194304
 ```
 
+## Pluggable worktree provider
+
+Native Git remains the default for isolated worker workspaces:
+
+```toml
+[workspace]
+worktree_provider = "native_git"
+```
+
+A user may opt into a private local adapter executable without adding provider-specific knowledge to
+Meringue:
+
+```toml
+[workspace]
+worktree_provider = "command"
+worktree_provider_command = ["/absolute/path/to/private-worktree-adapter"]
+worktree_provider_fallback = "native_git" # default; use "none" to fail closed
+```
+
+The command setting is argv, not a shell snippet. A string is accepted for compatibility and split
+with shell quoting rules, but Meringue always spawns the resulting arguments directly. Task names,
+branches, paths, substitutions, semicolons, redirects, and provider output are never evaluated by a
+shell. Keep provider-specific commands and configuration in the local adapter and user config; the
+public repository only defines this protocol.
+
+### Command protocol
+
+The configured argv prefix receives one of two actions. Provisioning receives:
+
+```txt
+<command...> provision \
+  --name <stable-name> \
+  --branch <reserved-branch> \
+  --base-ref <verified-base-ref> \
+  --git-root <absolute-common-repository-path> \
+  --project-root <absolute-configured-project-path>
+```
+
+The provider may choose any destination layout, but must leave exactly one ordinary, non-bare Git
+worktree registered on the reserved branch. It writes exactly one JSON object to stdout; progress and
+human diagnostics belong on stderr:
+
+```json
+{"identifier":"opaque-provider-id"}
+```
+
+`identifier` is optional. When omitted, Meringue uses the requested stable name for release. An
+adapter must also be able to reconcile release from the stable name and exact worktree path after an
+interruption that occurs before an opaque response can be persisted. Meringue does not trust a
+provider-reported path: after the command exits it finds the branch through
+`git worktree list --porcelain`, derives the configured project's relative path, verifies that the
+directory exists, and records ownership of that exact worktree root.
+
+Release receives:
+
+```txt
+<command...> release \
+  --identifier <opaque-provider-id> \
+  --worktree-path <absolute-worktree-root> \
+  --branch <reserved-branch> \
+  --git-root <absolute-common-repository-path> \
+  --project-root <absolute-configured-project-path>
+```
+
+Release is called only after Meringue verifies persisted ownership, Git registration, the expected
+branch, no lock, no other worker reference, and a clean status. Meringue never adds a force option.
+On success the provider writes:
+
+```json
+{"released":true,"worktree_retained":false,"branch_retained":true}
+```
+
+Set `worktree_retained` to `true` when release keeps a reusable registered worktree but moves it off
+the worker branch. Meringue verifies the declared postcondition against Git: a non-retained worktree
+must be deregistered, while a retained worktree must still be registered and no longer have the
+worker branch checked out. `branch_retained` is optional diagnostic metadata. Regardless of that
+value, Meringue checks the local delivery ref and recreates it at its verified pre-release commit if
+the provider removed it.
+
+### Lifecycle and failure policy
+
+The provider boundary changes only create/release mechanics. Meringue continues to own:
+
+- deterministic branch/name reservation and cross-process allocation locks;
+- exact path ownership, worker occupancy exclusion, and final launch validation;
+- continuation adoption only for the same recorded owner and branch;
+- non-bare/editable checks, registered branch and lock checks, and bare-source safety;
+- dirty-worktree refusal, branch preservation, idempotent release detection, pruning, and cleanup
+  diagnostics;
+- bounded command output, stall/absolute timeouts, and direct argv spawning.
+
+A bare repository is still a valid source and never a worker `cwd`. The provider receives both the
+bare Git root and configured project root, but Meringue launches only when the provider returns a
+registered non-bare checkout. Shared read-only workspaces do not invoke the command provider and keep
+their existing checkout/cache behavior.
+
+Project-declared sparse patterns and custom path templates require Meringue's native provisioning
+sequence, so they use the configured native fallback. A generic synthetic large-bare profile may be
+handled by the command provider; project validation commands still run against the resulting
+checkout before launch.
+
+Fallback is intentionally limited. Meringue may use native Git when the command is empty/missing or
+known to be inapplicable **before** provider mutation. Once a provider command starts and fails,
+returns invalid JSON, or leaves ambiguous Git state, Meringue reconciles the exact reserved branch,
+cleans up only a checkout it can prove it owns through the same provider, and reports bounded
+diagnostics. It does not immediately create a second native worktree. If a configured provider later
+becomes unavailable during release, Meringue preserves the checkout rather than guessing whether a
+provider-owned reusable directory may be deleted.
+
+The requested/effective provider, opaque identifier, provider working directory, and fallback reason
+are persisted in the worker workspace plan. Allocation, launch validation, continuation reuse,
+failed-session release, restart recovery, and `/prune` therefore use the same ownership contract.
+Changing provider settings affects future manager instances; restart Meringue after editing them.
+
 ## Worker workspace provisioning concurrency and timeouts
 
 `SpawnWorker` first writes a durable queued reservation and returns without waiting for workspace
@@ -239,16 +353,16 @@ reservation retains its owner identity, prompt, workspace plan, relationships, a
 Meringue exits, reconciliation lets a new live instance re-enqueue it rather than allocating a
 second worker.
 
-Provisioning a worker runs `git worktree add`, which checks the whole tree out. On a large
-monorepo that is minutes of honest work, so the checkout is bounded by how long it goes *quiet*
+Native provisioning runs `git worktree add`, while a command provider runs its configured
+provision action. Either may check out a large tree, so provisioning is bounded by how long it goes *quiet*
 rather than by how long it runs, with a finite backstop so a bound can never turn into a hang:
 
 ```toml
 [workspace]
 # Budget for short git plumbing (rev-parse, show-ref, worktree list). Default: 60.
 git_command_timeout = 60
-# Kill `git worktree add` after this many seconds with no output at all. Git reports checkout
-# progress on stderr at least once a second, so silence this long means the command is stuck
+# Kill a native or external worktree create command after this many seconds with no output at all.
+# Git normally reports checkout progress on stderr, so silence this long means the command is stuck
 # (an unresponsive file-system monitor, a credential prompt, a lock it will never get) rather
 # than slow. Default: 120.
 worktree_stall_timeout = 120
