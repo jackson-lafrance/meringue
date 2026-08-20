@@ -24,7 +24,7 @@ module Meringue
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
         ["/harness [head|worker] <pi|claude|antigravity>", "Select role-aware harness defaults for future agents; omit the role to update both."],
-        ["/model [head|worker] <provider>/<model-id>", "Persist the model for all future Pi sessions; omit the role to update both future heads and workers. Existing sessions are unchanged. The model id may itself contain / and :."],
+        ["/model [head|worker] <provider>/<model-id>", "With no arguments, open the model picker; otherwise persist the model for future Pi sessions. Omit the role to update both future heads and workers. Existing sessions are unchanged. The model id may itself contain / and :."],
         ["/thinking [head|worker] <level>", "Persist a Pi thinking default. Omit the role to update both future heads and workers; existing sessions are unchanged."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
         ["/goal create [issue_id] \"<prompt>\" --metric \"<command>\" --target <number> [flags]", "Start a goal loop: name an issue, or give only a prompt and Meringue creates the issue for it. It iterates until the metric hits its target or a budget guard trips."],
@@ -48,6 +48,14 @@ module Meringue
         ["/recount", "Compact project, issue, worker, and question IDs after records are removed."],
         ["/clear", "Reset persisted Meringue state and clear the visible logs. Dev/debug helper."]
       ].freeze
+
+      # Commands in this table have both accepted singular and plural spellings.
+      # Only an argumentless singular command expands to its plural form; any
+      # argument keeps the singular command's existing parser contract.
+      BARE_SINGULAR_ALIASES = {
+        "model" => "models",
+        "goal" => "goals"
+      }.freeze
 
       ARGUMENT_SUGGESTION_CONTEXTS = [
         { "prefix" => "/harness head", "source" => "harness_providers", "append_space" => false },
@@ -144,6 +152,13 @@ module Meringue
       # gets pointed at the namespaced spelling rather than a generic error.
       RENAME_USAGE_MESSAGE = "Usage: /project rename <project_id> \"<name>\" | /issue rename <issue_id> \"<title>\""
       RENAME_REMOVED_MESSAGE = "/rename was removed. #{RENAME_USAGE_MESSAGE}"
+
+      def self.expand_bare_singular_alias(command_text, arguments)
+        command = command_text.to_s.downcase
+        return command unless arguments.to_s.empty?
+
+        BARE_SINGULAR_ALIASES.fetch(command, command)
+      end
 
       def self.command_suggestions(input = nil, limit: nil, state: nil)
         command_suggestion_records(input, limit: limit, state: state).map do |record|
@@ -695,6 +710,7 @@ module Meringue
         command_text, arguments = stripped.delete_prefix("/").split(/\s+/, 2)
         command_text = command_text.to_s.downcase
         arguments = arguments.to_s
+        command_text = self.class.expand_bare_singular_alias(command_text, arguments)
 
         case command_text
         when "help"

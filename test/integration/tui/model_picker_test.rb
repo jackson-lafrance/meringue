@@ -57,6 +57,27 @@ class TuiModelPickerTest < Minitest::Test
     assert_includes frame, "anthropic/claude-opus-5"
   end
 
+  def test_bare_slash_model_opens_the_same_picker
+    plural_picker = open_picker
+    plural_rows = plain_lines(@pane.popup_lines(plural_picker))
+    send_key("\e")
+
+    singular_picker = open_picker("/model")
+
+    assert @pane.model_picker?(singular_picker)
+    assert_equal "models (pi)", @pane.popup_pane_title(singular_picker)
+    assert_equal plural_rows, plain_lines(@pane.popup_lines(singular_picker))
+    assert_empty @submitted
+  end
+
+  def test_slash_model_with_arguments_keeps_its_setting_behavior
+    command = "/model openai/gpt-5.6-mini"
+    send_key("\r", input_buffer: command)
+
+    assert_equal [command], wait_for_submissions(1)
+    refute @pane.model_picker?(compose)
+  end
+
   def test_the_picker_captions_its_keys_and_count_below_the_list
     caption = plain_line(@pane.popup_footer_line(open_picker))
 

@@ -2492,7 +2492,7 @@ module Meringue
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode. In the AgentTree, #{keys_for("rename_selected")} starts a quick rename for the selected project or issue by pre-filling `/project rename` or `/issue rename`; type its new name in the composer and press Enter.
           Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
           Pull-request picker: /prs opens every tracked PR that is still open, regardless of the AgentTree selection; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} opens the highlighted PR, and #{keys_for("cancel_navigation")} closes. #{keys_for("open_delivery_pr")} keeps its selection-aware behavior: it opens the selected issue's PR, or this picker when chat is unscoped.
-          Model picker: /models opens a searchable list of the models the harness reports (/models claude scopes it to another harness); type to filter, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} applies the model as the future-session default (same as /model), #{keys_for("refresh_model_catalog")} re-fetches the catalog, #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker.
+          Model picker: /models or bare /model opens a searchable list of the models the harness reports (/models claude scopes it to another harness); type to filter, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} applies the model as the future-session default (same as /model <reference>), #{keys_for("refresh_model_catalog")} re-fetches the catalog, #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace or a selected head's saved harness session; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
           Head/session debugging: select a head and press #{keys_for("open_agent_workspace")}, or use /open-session <agent_id>, to open its saved harness session externally without turning it into a chat target.
           Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
@@ -2584,15 +2584,17 @@ module Meringue
         text == "/open-session" || text.start_with?("/open-session ")
       end
 
-      # `/models` is a local TUI command that opens the model picker. `/models
-      # refresh` stays a kernel command (GetModelCatalog), so a forced re-fetch is
-      # still journaled and logged like any other kernel command instead of being
-      # a hidden side effect of a UI toggle.
+      # `/models` and its bare singular alias `/model` are local TUI commands
+      # that open the model picker. A singular command with any argument keeps
+      # its existing setting behavior. `/models refresh` stays a kernel command
+      # (GetModelCatalog), so a forced re-fetch is still journaled and logged
+      # like any other kernel command instead of being a hidden UI side effect.
       def models_picker_command?(text)
         tokens = text.to_s.strip.split(/\s+/)
-        return false unless tokens.first.to_s.downcase == "/models"
-
         arguments = tokens.drop(1).map { |token| token.to_s.downcase }
+        command = tokens.first.to_s.downcase.delete_prefix("/")
+        command = Input::SlashCommandParser.expand_bare_singular_alias(command, arguments.join(" "))
+        return false unless command == "models"
         return false if arguments.any? { |token| Input::SlashCommandParser::MODEL_CATALOG_REFRESH_WORDS.include?(token) }
 
         arguments.length <= 1
@@ -2658,7 +2660,7 @@ module Meringue
       end
 
       def local_navigation_command_without_id?(input_buffer)
-        ["/jump", "/prs", "/models", "/setup", "/config", "/open-session"].include?(input_buffer.to_s.strip.downcase)
+        ["/jump", "/prs", "/model", "/models", "/setup", "/config", "/open-session"].include?(input_buffer.to_s.strip.downcase)
       end
 
       def enter_agent_tree_navigation(state)

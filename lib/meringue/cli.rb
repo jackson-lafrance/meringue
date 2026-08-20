@@ -275,7 +275,7 @@ module Meringue
           /quit                     # quit the TUI
           /theme <name>             # set and persist the TUI theme
           /harness [head|worker] <pi|claude|antigravity> # select role-aware harness defaults
-          /models [harness]         # open the searchable model picker; Enter sets the default model, Ctrl-R refreshes
+          /models [harness]         # open the searchable model picker; bare /model is an alias
           /keybind                  # show all TUI keybindings
           /config                   # open full-screen Settings (/config --text prints diagnostics)
           /jump [agent_id]          # open a focused workspace; omit id to navigate the AgentTree
