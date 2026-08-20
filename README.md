@@ -1,6 +1,6 @@
 # Meringue
 
-Meringue is an open-source, terminal-first control plane for running many coding agents at once. It is designed to sit above the coding-agent harnesses developers already like, so teams can coordinate work across Pi, Claude Code, Antigravity, or future backends without rebuilding their workflow around one vendor.
+Meringue is an open-source, terminal agent orchestrator for running many coding agents at once. It is designed to sit above the agent harnesses developers already like, so teams can coordinate work across any backend without rebuilding their workflow around one vendor.
 
 The goal is simple: keep the developer in one place while many agents work in parallel. Meringue organizes that work as projects, issues, agents, questions, and logs, then routes each task to the configured harness behind a small integration layer.
 
