@@ -112,8 +112,8 @@ The config carries `[settings].schema_version`. Migration runs before `State::St
 
 ## Setup uses the same overlay
 
-First-run Setup is a curated `Settings::Draft` mode, not a second persistence implementation. It presents a centered, welcoming Welcome → Theme → Head defaults → Worker defaults → Experiments → Review card with visible progress, arrow-key navigation, explicit Enter/Space actions, and a restrained optional welcome animation. It reuses the schema, editors, validation, theme preview, hit testing, and persistence result handling without inheriting the dense advanced-settings presentation.
+First-run Setup is a curated `Settings::Draft` mode, not a second persistence implementation. It presents a centered, welcoming Welcome → Theme → Head defaults → Worker defaults → Experiments card with one dynamic step indicator, contextual Enter/picker controls, and a restrained optional welcome animation. Experiments ends the flow with Complete. It reuses the schema, editors, validation, theme preview, hit testing, and persistence result handling without inheriting the dense advanced-settings presentation.
 
-Finish sends the changed settings, explicit absent experiment defaults, and the completed onboarding outcome through one `SaveConfiguration` transaction. Automatic first-run skip saves only the skipped marker and explicit experiment defaults; manual `/setup` cancel writes nothing and preserves the existing marker. `/setup complete|skip` remain compatibility commands, and onboarding version 1 remains valid for existing users.
+Complete sends the changed settings, explicit absent experiment defaults, and the completed onboarding outcome through one `SaveConfiguration` transaction. Automatic first-run skip saves only the skipped marker and explicit experiment defaults; manual `/setup` cancel writes nothing and preserves the existing marker. `/setup complete|skip` remain compatibility commands, and onboarding version 1 remains valid for existing users.
 
-See [`onboarding.md`](onboarding.md) for keys, review/back behavior, first-run versus rerun cancellation, resize handling, and persistence failures.
+See [`onboarding.md`](onboarding.md) for keys, navigation/back behavior, first-run versus rerun cancellation, resize handling, and persistence failures.

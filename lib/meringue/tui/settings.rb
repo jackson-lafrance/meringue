@@ -16,7 +16,7 @@ module Meringue
       # and pane used by /config. Experiment ids are always derived from the
       # registry so setup cannot drift from the complete Settings surface.
       module SetupFlow
-        STEPS = ["Welcome", "Theme", "Head defaults", "Worker defaults", "Experiments", "Review"].freeze
+        STEPS = ["Welcome", "Theme", "Head defaults", "Worker defaults", "Experiments"].freeze
         FIXED_SETTING_IDS = {
           "Theme" => %w[appearance.theme appearance.animations].freeze,
           "Head defaults" => %w[agent.head_harness agent.head_model agent.head_thinking].freeze,

@@ -3073,7 +3073,9 @@ module Meringue
         @settings_row_index = 0
         @settings_expanded_advanced = {}
         @settings_editor = nil
+        @settings_picker = nil
         @settings_keybinding_capture = nil
+        @settings_footer_focus = false
         @settings_discard_confirm = false
         @settings_saving = false
         close_delivery_pr_picker
@@ -3093,7 +3095,9 @@ module Meringue
         @settings_row_index = 0
         @settings_expanded_advanced = {}
         @settings_editor = nil
+        @settings_picker = nil
         @settings_keybinding_capture = nil
+        @settings_footer_focus = false
         @settings_discard_confirm = false
         @settings_saving = false
         @settings_setup_auto = false
@@ -3151,52 +3155,16 @@ module Meringue
         when "Welcome"
           [synthetic_settings_row(
             "_setup_begin",
-            "Begin setup",
-            "Choose a theme, then review separate head and worker defaults and opt-in experiments. Nothing is written until Finish succeeds.",
+            "Begin Setup",
+            "Start choosing your setup defaults.",
             "Enter"
           )]
-        when "Review"
-          setup_review_rows
         else
-          rows = Settings::SetupFlow.setting_ids(settings_category).filter_map do |id|
+          Settings::SetupFlow.setting_ids(settings_category).filter_map do |id|
             definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
             @settings_draft.row(definition) if definition
           end
-          category_index = settings_categories.index(settings_category) || 0
-          next_step = settings_categories[category_index + 1]
-          rows << synthetic_settings_row(
-            "_setup_next",
-            "Continue to #{next_step}",
-            "Move to the next setup step. Your draft stays local until Finish.",
-            "Enter"
-          ) if next_step
-          rows
         end
-      end
-
-      def setup_review_rows
-        ids = Settings::SetupFlow.steps.flat_map { |step| Settings::SetupFlow.setting_ids(step) }
-        rows = ids.filter_map do |id|
-          definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
-          next unless definition
-
-          source = @settings_draft.row(definition)
-          synthetic_settings_row(
-            "_setup_review:#{id}",
-            source.fetch("label"),
-            "Return to #{Settings::SetupFlow.step_for_setting(id)} to edit this value.",
-            source.fetch("display_value"),
-            dirty: source.fetch("dirty", false),
-            source: source.fetch("source", "default")
-          )
-        end
-        rows << synthetic_settings_row(
-          "_setup_finish",
-          "Finish setup",
-          "Validate and save this complete draft with the setup marker in one atomic transaction.",
-          @settings_draft.dirty? ? "Save changes" : "Confirm defaults"
-        )
-        rows
       end
 
       def synthetic_settings_row(id, label, description, display_value, dirty: false, source: "setup")
@@ -3229,6 +3197,16 @@ module Meringue
             [category, { "visible" => visible, "total" => definitions.length, "hidden_advanced" => hidden }]
           end
         end
+      end
+
+      def settings_picker_snapshot
+        return nil unless @settings_picker
+
+        @settings_picker.merge(
+          "row" => @settings_picker.fetch("row", {}).merge(
+            "error" => (@settings_draft ? @settings_draft.errors[@settings_picker.fetch("id")] : nil)
+          ).compact
+        ).compact
       end
 
       def settings_snapshot
@@ -3265,6 +3243,9 @@ module Meringue
           "advanced" => @settings_expanded_advanced.fetch(settings_category, false),
           "editor" => editor,
           "keybinding_capture" => capture,
+          "picker" => settings_picker_snapshot,
+          "footer_focus" => @settings_footer_focus,
+          "setup_last_step" => setup_mode? && @settings_category_index.to_i == settings_categories.length - 1,
           "discard_confirm" => @settings_discard_confirm.is_a?(String),
           "confirmation" => (@settings_discard_confirm if @settings_discard_confirm.is_a?(String)),
           "setup_auto" => @settings_setup_auto,
@@ -3288,6 +3269,9 @@ module Meringue
         if @settings_keybinding_capture
           return handle_settings_keybinding_capture_key(key, unchanged)
         end
+        if @settings_picker
+          return handle_settings_picker_key(key, unchanged, on_submit, state)
+        end
         return handle_settings_mouse(key, unchanged, on_submit, state) if mouse_event?(key)
 
         if @settings_discard_confirm.is_a?(String)
@@ -3310,9 +3294,11 @@ module Meringue
 
         rows = settings_rows
         if hard_save_key?(key)
-          setup_mode? ? setup_next_or_finish(on_submit, state, jump_to_review: true) : save_settings(on_submit, state)
+          setup_mode? ? setup_next_or_finish(on_submit, state) : save_settings(on_submit, state)
         elsif hard_escape_key?(key)
           request_settings_cancel
+        elsif setup_mode? && (BACKSPACE_KEYS.include?(key) || DELETE_KEYS.include?(key))
+          move_settings_category(-1)
         elsif TAB_KEYS.include?(key) || FOCUS_FORWARD_KEYS.include?(key)
           move_settings_category(1)
         elsif SHIFT_TAB_KEYS.include?(key)
@@ -3327,16 +3313,22 @@ module Meringue
           move_settings_row(settings_page_size)
         elsif HOME_KEYS.include?(key)
           @settings_row_index = 0
+          @settings_footer_focus = false
         elsif END_KEYS.include?(key)
           @settings_row_index = [rows.length - 1, 0].max
+          @settings_footer_focus = false
         elsif LEFT_KEYS.include?(key)
           cycle_or_move_settings(-1, state)
         elsif RIGHT_KEYS.include?(key)
           cycle_or_move_settings(1, state)
         elsif key == " "
-          activate_settings_row(state, toggle_only: true, on_submit: on_submit)
+          activate_settings_row(state, toggle_only: true, on_submit: on_submit) unless setup_mode?
         elsif ENTER_KEYS.include?(key)
-          activate_settings_row(state, on_submit: on_submit)
+          if setup_mode? && @settings_footer_focus
+            setup_next_or_finish(on_submit, state)
+          else
+            activate_settings_row(state, on_submit: on_submit)
+          end
         elsif key.to_s.downcase == "a" && !setup_mode?
           category = settings_category
           if @settings_draft.definitions_for(category, include_advanced: true).any?(&:advanced)
@@ -3393,7 +3385,7 @@ module Meringue
         if hard_save_key?(key)
           if apply_settings_editor
             @settings_editor = nil
-            setup_mode? ? setup_next_or_finish(on_submit, state, jump_to_review: true) : save_settings(on_submit, state)
+            setup_mode? ? setup_next_or_finish(on_submit, state) : save_settings(on_submit, state)
           end
           return unchanged
         end
@@ -3457,17 +3449,29 @@ module Meringue
 
         hit = layout.settings_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
         case hit
-        when :save
+        when :save, :next
           setup_mode? ? setup_next_or_finish(on_submit, state) : save_settings(on_submit, state)
+        when :back
+          setup_mode? ? move_settings_category(-1) : request_settings_cancel
         when :cancel
           request_settings_cancel
         when Array
           kind, index = hit
-          if kind == :category
+          if kind == :picker
+            option = Array(@settings_picker&.fetch("options", []))[index.to_i]
+            if option
+              id = @settings_picker.fetch("id")
+              value = option.is_a?(Hash) ? option.fetch("reference") : option
+              @settings_draft.set(id, value)
+              @settings_draft.preview_theme if id == "appearance.theme"
+              @settings_picker = nil
+            end
+          elsif kind == :category
             @settings_category_index = index.to_i.clamp(0, [settings_categories.length - 1, 0].max)
             @settings_row_index = 0
           elsif %i[row toggle].include?(kind)
             @settings_row_index = index.to_i.clamp(0, [settings_rows.length - 1, 0].max)
+            @settings_footer_focus = false
             activate_settings_row(state, toggle_only: kind == :toggle, on_submit: on_submit)
           end
         end
@@ -3492,11 +3496,32 @@ module Meringue
                                      (@settings_category_index.to_i + delta.to_i) % count
                                    end
         @settings_row_index = 0
+        @settings_footer_focus = false
       end
 
       def move_settings_row(delta)
         count = settings_rows.length
         return if count.zero?
+
+        if setup_mode?
+          if delta.to_i.positive?
+            if @settings_footer_focus
+              return
+            elsif @settings_row_index.to_i >= count - 1
+              @settings_footer_focus = true
+            else
+              @settings_row_index += 1
+            end
+          elsif delta.to_i.negative?
+            if @settings_footer_focus
+              @settings_footer_focus = false
+              @settings_row_index = [count - 1, 0].max
+            else
+              @settings_row_index = [@settings_row_index.to_i - 1, 0].max
+            end
+          end
+          return
+        end
 
         @settings_row_index = (@settings_row_index.to_i + delta.to_i) % count
       end
@@ -3511,9 +3536,23 @@ module Meringue
       end
 
       def cycle_or_move_settings(delta, state)
-        row = selected_settings_row
-        return move_settings_category(delta) unless row
+        return if setup_mode? && @settings_footer_focus
 
+        row = selected_settings_row
+        return move_settings_row(delta) if setup_mode? && !row
+
+        if setup_mode?
+          if row.fetch("editor", nil) == "checkbox"
+            @settings_draft.set(row.fetch("id"), delta.to_i.positive?)
+          else
+            # In Setup, horizontal movement never changes pages. It either changes
+            # a focused boolean toggle or moves focus to another control.
+            move_settings_row(delta)
+          end
+          return
+        end
+
+        return move_settings_category(delta) unless row
         if %w[selector enum].include?(row.fetch("editor", nil))
           @settings_draft.cycle(row.fetch("id"), delta)
           @settings_draft.preview_theme if row.fetch("id") == "appearance.theme"
@@ -3552,16 +3591,6 @@ module Meringue
           move_settings_category(1)
           return true
         end
-        if id == "_setup_next"
-          move_settings_category(1)
-          return true
-        end
-        if id == "_setup_finish"
-          return save_settings(on_submit, state, onboarding_outcome: "completed")
-        end
-        if id.start_with?("_setup_review:")
-          return focus_setup_setting(id.delete_prefix("_setup_review:"))
-        end
         return false if row.fetch("read_only", false)
 
         case row.fetch("editor", nil)
@@ -3570,13 +3599,10 @@ module Meringue
         when "keybinding"
           return false if toggle_only
           open_settings_keybinding_capture(row)
-        when "selector"
+        when "selector", "model"
           return false if toggle_only
-          @settings_draft.cycle(id, 1)
-          @settings_draft.preview_theme if id == "appearance.theme"
-        when "model"
-          return false if toggle_only
-          open_settings_editor(row)
+          setup_mode? ? open_settings_picker(row, state) : (row.fetch("editor") == "model" ? open_settings_editor(row) : @settings_draft.cycle(id, 1))
+          @settings_draft.preview_theme if id == "appearance.theme" && !@settings_picker
         else
           return false if toggle_only
           open_settings_editor(row)
@@ -3591,6 +3617,52 @@ module Meringue
         @settings_category_index = settings_categories.index(step) || 0
         @settings_row_index = settings_rows.index { |row| row.fetch("id", nil) == id.to_s } || 0
         true
+      end
+
+      def open_settings_picker(row, state)
+        id = row.fetch("id")
+        options = if row.fetch("editor") == "model"
+                    ModelPicker.entries(state, harness: "pi", query: "").map do |entry|
+                      { "reference" => entry.fetch("reference"), "name" => entry.fetch("name", entry.fetch("reference")) }
+                    end
+                  else
+                    Array(row.fetch("options", [])).map(&:to_s)
+                  end
+        current = @settings_draft.value(id).to_s
+        unless options.any? { |option| option.is_a?(Hash) ? option.fetch("reference") == current : option == current }
+          options.unshift(row.fetch("editor") == "model" ? { "reference" => current, "name" => current } : current)
+        end
+        @settings_picker = {
+          "id" => id,
+          "row" => row,
+          "options" => options,
+          "index" => [options.index { |option| option.is_a?(Hash) ? option.fetch("reference") == current : option == current } || 0, 0].max
+        }
+        true
+      end
+
+      def handle_settings_picker_key(key, unchanged, _on_submit, _state)
+        if mouse_event?(key)
+          return handle_settings_mouse(key, unchanged, _on_submit, _state)
+        end
+        options = Array(@settings_picker.fetch("options", []))
+        if UP_KEYS.include?(key)
+          @settings_picker["index"] = (@settings_picker.fetch("index", 0).to_i - 1) % [options.length, 1].max
+        elsif DOWN_KEYS.include?(key)
+          @settings_picker["index"] = (@settings_picker.fetch("index", 0).to_i + 1) % [options.length, 1].max
+        elsif ENTER_KEYS.include?(key)
+          option = options[@settings_picker.fetch("index", 0).to_i]
+          if option
+            id = @settings_picker.fetch("id")
+            value = option.is_a?(Hash) ? option.fetch("reference") : option
+            @settings_draft.set(id, value)
+            @settings_draft.preview_theme if id == "appearance.theme"
+            @settings_picker = nil
+          end
+        elsif hard_escape_key?(key) || BACKSPACE_KEYS.include?(key) || DELETE_KEYS.include?(key)
+          @settings_picker = nil
+        end
+        unchanged
       end
 
       def open_settings_keybinding_capture(row)
@@ -3631,16 +3703,11 @@ module Meringue
         true
       end
 
-      def setup_next_or_finish(on_submit, state, jump_to_review: false)
-        if settings_category == "Review"
+      def setup_next_or_finish(on_submit, state)
+        if setup_mode? && @settings_category_index.to_i >= settings_categories.length - 1
           save_settings(on_submit, state, onboarding_outcome: "completed")
-        elsif jump_to_review
-          @settings_category_index = settings_categories.index("Review")
-          @settings_row_index = [settings_rows.length - 1, 0].max
-          true
         else
           move_settings_category(1)
-          true
         end
       end
 

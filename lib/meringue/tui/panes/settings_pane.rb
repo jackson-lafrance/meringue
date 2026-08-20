@@ -8,7 +8,8 @@ module Meringue
         SAVE_LABEL = "[ Save ]"
         NEXT_LABEL = "[ Next ]"
         BEGIN_LABEL = "[ Begin ]"
-        FINISH_LABEL = "[ Finish ]"
+        FINISH_LABEL = "[ Complete ]"
+        BACK_LABEL = "[ Back ]"
         CANCEL_LABEL = "[ Cancel ]"
         HELP_TAGLINE = "Not sure what to change? Ask your agent for help."
         COMPACT_HELP_TAGLINE = "Need help? Ask your agent."
@@ -17,16 +18,14 @@ module Meringue
           "Theme" => "Make the workspace yours",
           "Head defaults" => "Choose how heads think",
           "Worker defaults" => "Choose how workers work",
-          "Experiments" => "Opt into what is useful",
-          "Review" => "Review before saving"
+          "Experiments" => "Opt into what is useful"
         }.freeze
         SETUP_INTROS = {
-          "Welcome" => "A few calm choices now make every future session feel like yours.",
+          "Welcome" => "Set up the defaults for your future sessions.",
           "Theme" => "Pick a comfortable look. Your preview stays local until you finish.",
           "Head defaults" => "Heads route your requests. These defaults apply only to future heads.",
           "Worker defaults" => "Workers do the work. Keep their future defaults independent from heads.",
-          "Experiments" => "Optional capabilities start off until you choose them.",
-          "Review" => "Nothing is written yet. Select a value to revisit it, then finish when ready."
+          "Experiments" => "Optional capabilities start off until you choose them."
         }.freeze
 
         def active?(state)
@@ -137,7 +136,7 @@ module Meringue
           card = geometry.fetch(:card)
           content_width = [card.fetch(:width) - 4, 1].max
           card_content_height = [card.fetch(:height) - 2, 1].max
-          detail = if snap.fetch("discard_confirm", false) || snap.fetch("editor", nil).is_a?(Hash)
+          detail = if snap.fetch("discard_confirm", false) || snap.fetch("editor", nil).is_a?(Hash) || snap.fetch("picker", nil).is_a?(Hash)
                      detail(state, width: content_width, height: card_content_height)
                    end
           return setup_modal_view(snap, detail, geometry) if detail
@@ -188,20 +187,18 @@ module Meringue
         def setup_footer_segments(state, width:)
           snap = snapshot(state)
           return footer_segments(state, width: width) unless snap.fetch("mode", "settings") == "setup"
-          return footer_segments(state, width: width) if snap.fetch("discard_confirm", false) || snap.fetch("editor", nil).is_a?(Hash)
-
-          category = snap.fetch("category", "Welcome")
-          if category == "Welcome"
-            return [["Enter begin", Style::ACCENT_BOLD], [" · Esc skip for now", Style::MUTED]]
+          if snap.fetch("discard_confirm", false) || snap.fetch("editor", nil).is_a?(Hash)
+            return footer_segments(state, width: width)
           end
-          if category == "Review"
-            return [["↑↓ choose", Style::ACCENT_BOLD], [" · Enter open/finish", Style::MUTED], [" · Esc cancel", Style::MUTED]]
+          if snap.fetch("picker", nil).is_a?(Hash)
+            return [["Enter choose", Style::ACCENT_BOLD], [" · Esc close", Style::MUTED]]
           end
 
+          next_label = snap.fetch("setup_last_step", false) ? "Complete" : "Next"
           hint = if width.to_i < Settings::COMPACT_WIDTH
-                   "↑↓ move · ←→ change · Space toggle · Enter edit · Esc cancel"
+                   "Navigate"
                  else
-                   "↑↓ move · ←→ change · Space toggle · Enter edit · Tab next step · Esc cancel"
+                   "Navigate: Enter #{next_label} · Delete/Backspace Back · Tab next"
                  end
           [[hint, Style::DIM]]
         end
@@ -232,6 +229,7 @@ module Meringue
           return confirmation_detail(snap, width: width, height: height) if snap.fetch("discard_confirm", false)
           return keybinding_capture_detail(snap, width: width, height: height) if snap.fetch("keybinding_capture", nil).is_a?(Hash)
           return editor_detail(snap, width: width, height: height) if snap.fetch("editor", nil).is_a?(Hash)
+          return setup_picker_detail(snap, width: width, height: height) if snap.fetch("picker", nil).is_a?(Hash)
 
           rows = Array(snap.fetch("rows", []))
           selected = snap.fetch("row_index", 0).to_i.clamp(0, [rows.length - 1, 0].max)
@@ -314,8 +312,14 @@ module Meringue
         def action_segments(state)
           snap = snapshot(state)
           return [] if snap.fetch("keybinding_capture", nil).is_a?(Hash)
+          return [] if snap.fetch("picker", nil).is_a?(Hash) || snap.fetch("editor", nil).is_a?(Hash)
 
           save_style = snap.fetch("saving", false) ? Style::DIM : Style::ACCENT_BOLD
+          if snap.fetch("mode", "settings") == "setup"
+            next_label = snap.fetch("setup_last_step", false) ? FINISH_LABEL : NEXT_LABEL
+            next_style = snap.fetch("footer_focus", false) ? Style::ACCENT_BOLD : Style::MUTED
+            return [[next_label, save_style == Style::DIM ? Style::DIM : next_style], [" ", Style::DIM], [BACK_LABEL, Style::MUTED]]
+          end
           [[primary_label(snap), save_style], [" ", Style::DIM], [CANCEL_LABEL, Style::MUTED]]
         end
 
@@ -359,15 +363,20 @@ module Meringue
         end
 
         def setup_hit(state, snap, geometry, width:, height:, x:, y:)
+          if snap.fetch("picker", nil).is_a?(Hash)
+            return setup_picker_hit(snap, geometry, x: x, y: y)
+          end
           return :inert if snap.fetch("discard_confirm", false) || snap.fetch("editor", nil).is_a?(Hash)
 
           if y.to_i == geometry.fetch(:footer_y)
-            primary = primary_label(snap)
             actions = action_segments(state)
             action_width = actions.sum { |text, _style| text.to_s.length }
             start = width.to_i - action_width - 1
-            return :save if x.to_i >= start && x.to_i < start + primary.length
-            return :cancel if x.to_i >= start + primary.length + 1 && x.to_i < start + action_width
+            next_label = actions.first&.first.to_s
+            back = actions.last&.first.to_s
+            return :next if x.to_i >= start && x.to_i < start + next_label.length
+            back_start = start + next_label.length + 1
+            return :back if x.to_i >= back_start && x.to_i < back_start + back.length
             return :inert
           end
 
@@ -414,8 +423,8 @@ module Meringue
           }
         end
 
-        def setup_card_title(snap)
-          "setup · #{snap.fetch("setup_step", 1)}/#{snap.fetch("setup_step_count", 1)}"
+        def setup_card_title(_snap)
+          "Setup"
         end
 
         def setup_heading(snap)
@@ -430,7 +439,7 @@ module Meringue
               [["A focused home for your coding agents.", Style::TEXT]],
               [[intro, Style::MUTED]],
               [["", Style::DIM]],
-              [["Nothing is saved until you choose Finish.", Style::ACCENT_BOLD]],
+              [["", Style::DIM]],
               [["", Style::DIM]]
             ]
           end
@@ -438,7 +447,7 @@ module Meringue
           description = selected_row ? selected_row.fetch("description", "").to_s : ""
           lines = wrap(intro, [width.to_i, 8].max).first(2).map { |line| [[line, Style::MUTED]] }
           lines << [["", Style::DIM]]
-          unless description.empty? || category == "Review"
+          unless description.empty?
             lines << [[wrap(description, [width.to_i, 8].max).first.to_s, Style::DIM]]
             lines << [["", Style::DIM]]
           end
@@ -446,20 +455,11 @@ module Meringue
         end
 
         def setup_progress(snap, width:)
-          ascii = ascii_glyphs?
           steps = Array(snap.fetch("categories", []))
           selected = snap.fetch("category_index", 0).to_i
-          complete = ascii ? "*" : "✓"
-          current = ascii ? ">" : "●"
-          pending = ascii ? "." : "○"
-          bar = steps.each_index.map do |index|
-            marker = index < selected ? complete : index == selected ? current : pending
-            "#{index + 1}#{marker}"
-          end.join(ascii ? " - " : " ─ ")
-          caption = "Step #{snap.fetch("setup_step", selected + 1)} of #{snap.fetch("setup_step_count", steps.length)} · #{snap.fetch("category", "Setup")}"
           {
-            caption: [[caption, Style::ACCENT_BOLD]],
-            bar: [[bar[0, [bar.length, width.to_i].min], Style::DIM]]
+            caption: [["Step #{snap.fetch("setup_step", selected + 1)} of #{snap.fetch("setup_step_count", steps.length)}", Style::ACCENT_BOLD]],
+            bar: []
           }
         end
 
@@ -472,11 +472,26 @@ module Meringue
           value = row.fetch("value", false) == true ? "[x]" : "[ ]" if editor == "checkbox"
           value = "Enter" if editor == "action"
           label = row.fetch("label", row.fetch("id", "setting")).to_s
-          available = [width.to_i - marker.length - dirty.length - label.length - 6, 4].max
+          hint = selected ? setup_control_hint(row) : ""
+          available = [width.to_i - marker.length - dirty.length - label.length - hint.length - 6, 4].max
           value = value.length > available ? "…#{value[-(available - 1), available - 1]}" : value
           style = selected ? Style::AGENT_TREE_SELECTED : Style::TEXT
           secondary = selected ? Style::AGENT_TREE_SELECTED_DIM : Style::MUTED
-          [["#{marker}#{dirty} #{label}", style], ["  #{value}", secondary]]
+          if selected && row.fetch("id", nil) == "_setup_begin"
+            button = "[ Begin Setup ]"
+            padding = [((width.to_i - button.length) / 2) - marker.length, 0].max
+            return [["#{" " * padding}#{button}", Style::ACCENT_BOLD]]
+          end
+          [["#{marker}#{dirty} #{label}", style], ["  #{value}", secondary], [hint, Style::DIM]]
+        end
+
+        def setup_control_hint(row)
+          case row.fetch("editor", nil)
+          when "checkbox" then "  · Enter toggle"
+          when "selector", "model" then "  · Enter open picker"
+          when "action" then "  · Enter select"
+          else ""
+          end
         end
 
         def setup_counter(total, start, visible, snap)
@@ -493,7 +508,7 @@ module Meringue
           return SAVE_LABEL unless snap.fetch("mode", "settings") == "setup"
           return BEGIN_LABEL if snap.fetch("category", "") == "Welcome"
 
-          snap.fetch("category", "") == "Review" ? FINISH_LABEL : NEXT_LABEL
+          snap.fetch("setup_last_step", false) ? FINISH_LABEL : NEXT_LABEL
         end
 
         def row_line(row, selected:, width:)
@@ -536,6 +551,36 @@ module Meringue
             window_start: 0,
             visible_count: 0,
             counter: "key capture",
+            selected_row: row
+          }
+        end
+
+        def setup_picker_detail(snap, width:, height:)
+          picker = snap.fetch("picker")
+          row = picker.fetch("row", {}) || {}
+          options = Array(picker.fetch("options", []))
+          selected = picker.fetch("index", 0).to_i.clamp(0, [options.length - 1, 0].max)
+          capacity = [[height.to_i - 3, 1].max, 1].max
+          start = window_start(options.length, selected, capacity)
+          visible = options.drop(start).first(capacity)
+          lines = [
+            [["Choose #{row.fetch("label", "value")}", Style::PANEL_TITLE]],
+            [["↑↓ move", Style::MUTED], [" · Enter choose", Style::ACCENT_BOLD], [" · Esc close", Style::MUTED]],
+            [["", Style::DIM]]
+          ]
+          visible.each_with_index do |option, offset|
+            index = start + offset
+            label = option.is_a?(Hash) ? option.fetch("name", option.fetch("reference", "")) : option.to_s
+            reference = option.is_a?(Hash) ? option.fetch("reference", label) : label
+            marker = index == selected ? "› " : "  "
+            lines << [["#{marker}#{label}", index == selected ? Style::AGENT_TREE_SELECTED : Style::TEXT], ["  #{reference}", Style::DIM]]
+          end
+          lines = [[["No choices are available yet.", Style::MUTED]]] if options.empty?
+          {
+            lines: lines.first([height.to_i, 1].max),
+            window_start: start,
+            visible_count: visible.length,
+            counter: options.empty? ? "No choices available" : "#{start + 1}–#{start + visible.length} of #{options.length}",
             selected_row: row
           }
         end
@@ -600,6 +645,22 @@ module Meringue
               end
             end.flat_map { |line| line.length <= limit ? [line] : line.scan(/.{1,#{limit}}/) }
           end
+        end
+
+        def setup_picker_hit(snap, geometry, x:, y:)
+          picker = snap.fetch("picker", {})
+          options = Array(picker.fetch("options", []))
+          card = geometry.fetch(:card)
+          content_height = [card.fetch(:height) - 2, 1].max
+          capacity = [[content_height - 3, 1].max, 1].max
+          selected = picker.fetch("index", 0).to_i.clamp(0, [options.length - 1, 0].max)
+          start = window_start(options.length, selected, capacity)
+          option_y = card.fetch(:y) + 4 + 3
+          offset = y.to_i - option_y
+          index = start + offset
+          return [:picker, index] if offset >= 0 && offset < [options.length - start, capacity].min
+
+          :inert
         end
 
         def inside?(x, y, bounds)
