@@ -422,6 +422,17 @@ class HeadContextTest < Minitest::Test
     assert_includes prompt, "never write prose without the JSON wrapper"
   end
 
+  def test_project_routing_guidance_prioritizes_request_identity_and_safe_discovery
+    context = build_head_context
+    prompt = context.system_prompt
+    rules = context.to_prompt_h.dig("routing_context", "decision_rules")
+
+    assert_includes prompt, "Resolve project identity from the current user request before considering recent activity"
+    assert(rules.any? { |rule| rule.include?("named project, repository path, or clearly identified local repository wins") })
+    assert(rules.any? { |rule| rule.include?("propose AddProject for that repository before CreateIssue") })
+    assert(rules.any? { |rule| rule.include?("multiple plausible repositories") })
+  end
+
   # H177 asked for a causal explanation across several dependency records. The old contract's
   # broad "status -> GetInfo" example caused the head to dump raw fields instead of answering.
   def test_informational_routing_distinguishes_direct_lookup_response_and_investigation
