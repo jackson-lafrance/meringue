@@ -1570,6 +1570,8 @@ module Meringue
           # Reading a catalog may start a short-lived harness process, so it must
           # not hold the state lock while it waits on that process.
           get_model_catalog(command_id, command_type, payload)
+        elsif command_type == "Kill"
+          kill(command_id, command_type, payload)
         elsif command_type == "Recount"
           @worker_spawn_mutex.synchronize { synchronized_state { dispatch_command(command_id, command_type, payload) } }
         else
@@ -3749,82 +3751,109 @@ module Meringue
         target_id = value_at(payload, "target_id", "TargetID", "targetId", "id")
         return rejected_result(command_id, command_type, "Target was not killed.", ["target_id is required"]) if blank?(target_id)
 
-        state = normalized_state
-        target = find_agent(state, target_id) || find_goal(state, target_id) || find_issue(state, target_id) || find_project(state, target_id)
-        return rejected_result(command_id, command_type, "Target #{target_id} does not exist.", ["target_not_found"]) unless target
+        # Harness process termination is unbounded: kill_session_safely waits up to the harness
+        # shutdown timeout for each child process to exit. Running it while the shared state lock
+        # is held makes rapid `/kill` commands serialize on the lock for N x (process exit + full
+        # state read/write) and starves reconciliation and every later command. State mutation,
+        # record removal, worktree cleanup, and persistence remain atomic under the state lock;
+        # only the OS-level session stop moves outside it, mirroring the Prune pattern. The head
+        # session is already marked released under the lock, so a concurrent reconcile will not
+        # double-stop or reuse the session even if the engine dies before the stop completes.
+        session_stops = []
+        takeover_previous_head_id = nil
+        result = synchronized_state do
+          state = normalized_state
+          target = find_agent(state, target_id) || find_goal(state, target_id) || find_issue(state, target_id) || find_project(state, target_id)
+          break(rejected_result(command_id, command_type, "Target #{target_id} does not exist.", ["target_not_found"])) unless target
 
-        now = timestamp
-        takeover_previous_head_id = if target.fetch("type", nil) == "head"
-                                      present_string(target.dig("harness_metadata", "takeover_of_head_id"))
-                                    end
-        killed_agent_ids = kill_target_in_state!(state, target_id.to_s, now)
-        # A worker queued behind a killed agent can never settle its predecessor, so it is cancelled
-        # in the same command instead of waiting forever on a record that is being removed.
-        cancelled_dependents = cancel_deferred_dependents_in_state!(
-          state,
-          killed_agent_ids,
-          now: now,
-          reason: "predecessor_killed",
-          trigger: "kill"
-        )
-        killed_agent_ids = (killed_agent_ids + cancelled_dependents.fetch("agent_ids")).uniq
-        killed_agent_ids.each do |agent_id|
-          agent = find_agent(state, agent_id)
-          next unless agent
+          now = timestamp
+          takeover_previous_head_id = if target.fetch("type", nil) == "head"
+                                        present_string(target.dig("harness_metadata", "takeover_of_head_id"))
+                                      end
+          killed_agent_ids = kill_target_in_state!(state, target_id.to_s, now)
+          # A worker queued behind a killed agent can never settle its predecessor, so it is cancelled
+          # in the same command instead of waiting forever on a record that is being removed.
+          cancelled_dependents = cancel_deferred_dependents_in_state!(
+            state,
+            killed_agent_ids,
+            now: now,
+            reason: "predecessor_killed",
+            trigger: "kill"
+          )
+          killed_agent_ids = (killed_agent_ids + cancelled_dependents.fetch("agent_ids")).uniq
 
-          kill_session_safely(session_ref_from_agent(agent), agent: agent) if present_string(agent.fetch("harness", nil))
-        end
+          # Snapshot the session refs and harness providers needed for out-of-lock termination.
+          # Deep copy so the outside-lock iteration never reads state mutated by a concurrent command.
+          killed_agent_ids.each do |agent_id|
+            agent = find_agent(state, agent_id)
+            next unless agent
+            next unless present_string(agent.fetch("harness", nil))
 
-        result = deep_copy(target)
-        removal = remove_killed_target_records!(state, target_id.to_s, killed_agent_ids, now)
-        result = result.merge(
-          "removed_worktree_agent_ids" => removal.fetch("removed_worktree_agent_ids", []),
-          "workspace_cleanup_outcomes" => removal.fetch("workspace_cleanup_outcomes", []),
-          "workspace_cleanup_blocked_agent_ids" => removal.fetch("workspace_cleanup_blocked_agent_ids", [])
-        )
+            session_stops << { "session_ref" => deep_copy(session_ref_from_agent(agent)), "agent" => deep_copy(agent) }
+          end
 
-        log_ids = cancelled_dependents.fetch("log_entry_ids").dup
-        log_ids.concat(removal.fetch("workspace_cleanup_log_entry_ids", []))
-        log_ids.concat(append_log(
-          state,
-          source_type: "kernel",
-          source_id: target_id.to_s,
-          level: "info",
-          message: "Killed #{target_id}.",
-          details: {
-            "target_id" => target_id.to_s,
-            "killed_agent_ids" => killed_agent_ids,
-            "cancelled_deferred_agent_ids" => cancelled_dependents.fetch("agent_ids"),
-            "removed_issue_ids" => removal.fetch("removed_issue_ids", []),
-            "removed_agent_ids" => removal.fetch("removed_agent_ids", []),
-            "removed_project_ids" => removal.fetch("removed_project_ids", []),
+          result_value = deep_copy(target)
+          removal = remove_killed_target_records!(state, target_id.to_s, killed_agent_ids, now)
+          result_value = result_value.merge(
             "removed_worktree_agent_ids" => removal.fetch("removed_worktree_agent_ids", []),
             "workspace_cleanup_outcomes" => removal.fetch("workspace_cleanup_outcomes", []),
             "workspace_cleanup_blocked_agent_ids" => removal.fetch("workspace_cleanup_blocked_agent_ids", [])
-          }.compact
-        ))
-        worktree_summary = kill_worktree_summary(removal)
-        if present_string(worktree_summary)
+          )
+
+          log_ids = cancelled_dependents.fetch("log_entry_ids").dup
+          log_ids.concat(removal.fetch("workspace_cleanup_log_entry_ids", []))
           log_ids.concat(append_log(
             state,
             source_type: "kernel",
             source_id: target_id.to_s,
-            level: kill_worktree_summary_level(removal),
-            message: worktree_summary,
+            level: "info",
+            message: "Killed #{target_id}.",
             details: {
               "target_id" => target_id.to_s,
+              "killed_agent_ids" => killed_agent_ids,
+              "cancelled_deferred_agent_ids" => cancelled_dependents.fetch("agent_ids"),
+              "removed_issue_ids" => removal.fetch("removed_issue_ids", []),
+              "removed_agent_ids" => removal.fetch("removed_agent_ids", []),
+              "removed_project_ids" => removal.fetch("removed_project_ids", []),
               "removed_worktree_agent_ids" => removal.fetch("removed_worktree_agent_ids", []),
-              "workspace_cleanup_outcomes" => removal.fetch("workspace_cleanup_outcomes", [])
+              "workspace_cleanup_outcomes" => removal.fetch("workspace_cleanup_outcomes", []),
+              "workspace_cleanup_blocked_agent_ids" => removal.fetch("workspace_cleanup_blocked_agent_ids", [])
             }.compact
           ))
-        end
-        touch_state!(state, now)
-        store.save(state)
-        if takeover_previous_head_id
-          log_ids.concat(Array(rollback_head_takeover!(takeover_previous_head_id, target_id.to_s, reason: "successor_head_killed")))
+          worktree_summary = kill_worktree_summary(removal)
+          if present_string(worktree_summary)
+            log_ids.concat(append_log(
+              state,
+              source_type: "kernel",
+              source_id: target_id.to_s,
+              level: kill_worktree_summary_level(removal),
+              message: worktree_summary,
+              details: {
+                "target_id" => target_id.to_s,
+                "removed_worktree_agent_ids" => removal.fetch("removed_worktree_agent_ids", []),
+                "workspace_cleanup_outcomes" => removal.fetch("workspace_cleanup_outcomes", [])
+              }.compact
+            ))
+          end
+          touch_state!(state, now)
+          store.save(state)
+
+          accepted_result(command_id, command_type, target_id.to_s, "Killed #{target_id}.", result_value, log_ids)
         end
 
-        accepted_result(command_id, command_type, target_id.to_s, "Killed #{target_id}.", result, log_ids)
+        if takeover_previous_head_id
+          rollback_log_ids = Array(rollback_head_takeover!(takeover_previous_head_id, target_id.to_s, reason: "successor_head_killed"))
+          result["log_entry_ids"] = Array(result.fetch("log_entry_ids", [])) + rollback_log_ids
+        end
+
+        # Phase 2: stop harness sessions outside the state lock. Best-effort; the state already
+        # records each head session as released, so failure to terminate an OS process does not
+        # corrupt lifecycle state and the reconciler reaps orphans on the next tick.
+        session_stops.each do |stop|
+          kill_session_safely(stop.fetch("session_ref"), agent: stop.fetch("agent"))
+        end
+
+        result
       end
 
       # Kill is an immediate stop-and-remove operation: lifecycle state is marked first so
