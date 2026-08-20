@@ -272,9 +272,30 @@ module Meringue
         view = logs_text_view(state, width: width, height: height)
         return "" unless view
 
-        texts = {}
-        view.fetch(:lines).each_with_index { |line, index| texts[index] = line_plain_text(line) }
-        Selection.text_for(selection, texts)
+        lines = {}
+        view.fetch(:lines).each_with_index { |line, index| lines[index] = line }
+        Selection.text_for(selection, lines)
+      end
+
+      # Copy one complete displayed logs row through the same segment-aware path
+      # as an extended selection. Keyboard selection mode uses this for its
+      # unextended caret, so mouse and keyboard copies omit identical chrome.
+      def logs_line_copy_text(state, width:, height:, line_index:)
+        view = logs_text_view(state, width: width, height: height)
+        return "" unless view
+
+        line = view.fetch(:lines)[line_index.to_i]
+        return "" unless line
+
+        length = Selection.display_length(line)
+        return "" if length.zero?
+
+        selection = Selection.normalize(
+          "logs",
+          Selection.point(line_index, 0),
+          Selection.point(line_index, length)
+        )
+        Selection.text_for(selection, { line_index.to_i => line })
       end
 
       # Composer selection is stored as character offsets into the input buffer,

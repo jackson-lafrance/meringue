@@ -1330,11 +1330,12 @@ module Meringue
       def logs_cursor_line_text(state)
         return "" unless @logs_cursor_active && @logs_selection_focus
 
-        lines = logs_selection_lines(state)
-        line = @logs_selection_focus.fetch("line", 0).to_i
-        return "" unless line.between?(0, lines.length - 1)
-
-        lines.fetch(line)
+        layout.logs_line_copy_text(
+          state,
+          width: render_width,
+          height: render_height,
+          line_index: @logs_selection_focus.fetch("line", 0).to_i
+        )
       end
 
       def clear_chat_selection
@@ -1425,10 +1426,14 @@ module Meringue
       def selection_text(state, input_buffer)
         case @selection_pane
         when "logs"
-          text = layout.logs_selection_text(state, width: render_width, height: render_height, selection: logs_selection)
+          selection = logs_selection
           # An unextended caret copies its whole line, so keyboard users never
-          # have to select a full line by hand to grab one log entry.
-          text.to_s.empty? ? logs_cursor_line_text(state) : text
+          # have to select a full line by hand to grab one log entry. Test the
+          # geometry rather than the extracted text: a real selection may cover
+          # only a non-copyable gutter and should then copy nothing.
+          return logs_cursor_line_text(state) if Selection.empty?(selection)
+
+          layout.logs_selection_text(state, width: render_width, height: render_height, selection: selection)
         when "chat"
           range = chat_selection_range
           return "" unless range

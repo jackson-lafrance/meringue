@@ -74,6 +74,39 @@ class TuiSelectionAndClipboardTest < Minitest::Test
     assert_equal "abc\n\n", Selection.text_for(selection, { 0 => "abc" })
   end
 
+  def test_text_for_omits_display_only_gutters_and_preserves_content_structure
+    gutter = Selection.display_only_segment("▌ ", Meringue::TUI::Style::DIM)
+    lines = {
+      0 => [gutter, ["• Keep the bullet and `inline code`.", Meringue::TUI::Style::TEXT]],
+      1 => [gutter],
+      2 => [gutter, ["Run `bundle exec rake test`.", Meringue::TUI::Style::TEXT]]
+    }
+    selection = Selection.normalize(
+      "logs",
+      Selection.point(0, 0),
+      Selection.point(2, Selection.display_length(lines.fetch(2)))
+    )
+
+    assert_equal "• Keep the bullet and `inline code`.\n\nRun `bundle exec rake test`.",
+                 Selection.text_for(selection, lines)
+  end
+
+  def test_text_for_uses_display_columns_when_a_partial_selection_crosses_a_gutter
+    line = [
+      Selection.display_only_segment("▌ ", Meringue::TUI::Style::DIM),
+      ["hello", Meringue::TUI::Style::TEXT]
+    ]
+    selection = Selection.normalize("logs", Selection.point(0, 1), Selection.point(0, 6))
+
+    assert_equal "hell", Selection.text_for(selection, { 0 => line })
+  end
+
+  def test_text_for_does_not_strip_an_authored_gutter_glyph
+    selection = Selection.normalize("logs", Selection.point(0, 0), Selection.point(0, 10))
+
+    assert_equal "▌ authored", Selection.text_for(selection, { 0 => "▌ authored" })
+  end
+
   def test_clipboard_falls_back_to_osc52_when_no_command_is_available
     with_path("") do
       output = StringIO.new

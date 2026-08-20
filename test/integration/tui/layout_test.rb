@@ -202,6 +202,60 @@ class TuiLayoutTest < Minitest::Test
     refute_empty text.strip
   end
 
+  def test_logs_copy_omits_rendered_gutters_without_losing_markdown_content
+    markdown = <<~MARKDOWN
+      First paragraph with `inline code`.
+
+      - Keep this bullet
+      - Run `bundle exec rake test`.
+
+      Second paragraph.
+    MARKDOWN
+    state = composed_state(
+      empty_state,
+      chat: {
+        "messages" => [{
+          "role" => "agent",
+          "source_id" => "P1-I1-W1",
+          "text" => markdown,
+          "timestamp" => "2026-07-11T00:00:00Z"
+        }]
+      }
+    )
+    lines = @layout.logs_text_lines(state, width: 100, height: 32)
+    first_line = lines.index { |line| line.include?("First paragraph") }
+    last_line = lines.index { |line| line.include?("Second paragraph") }
+    selection = Meringue::TUI::Selection.normalize(
+      "logs",
+      Meringue::TUI::Selection.point(first_line, 0),
+      Meringue::TUI::Selection.point(last_line, lines.fetch(last_line).length)
+    )
+
+    assert lines[first_line..last_line].all? { |line| line.start_with?("▌") }
+    assert_equal <<~TEXT.chomp, @layout.logs_selection_text(state, width: 100, height: 32, selection: selection)
+      First paragraph with `inline code`.
+
+      • Keep this bullet
+      • Run `bundle exec rake test`.
+
+      Second paragraph.
+    TEXT
+  end
+
+  def test_logs_copy_omits_the_plain_body_indent_from_kernel_rows
+    state = composed_state(empty_state.merge("logs" => [log_record("L1", "message" => "Kernel detail")]))
+    lines = @layout.logs_text_lines(state, width: 100, height: 32)
+    body_line = lines.index { |line| line.include?("Kernel detail") }
+    selection = Meringue::TUI::Selection.normalize(
+      "logs",
+      Meringue::TUI::Selection.point(body_line, 0),
+      Meringue::TUI::Selection.point(body_line, lines.fetch(body_line).length)
+    )
+
+    assert lines.fetch(body_line).start_with?("  Kernel detail")
+    assert_equal "Kernel detail", @layout.logs_selection_text(state, width: 100, height: 32, selection: selection)
+  end
+
   def test_selection_highlight_only_restyles_already_drawn_logs_cells
     start_point = @layout.logs_text_position(@state, width: 100, height: 32, x: 40, y: 3)
     end_point = @layout.logs_text_position(@state, width: 100, height: 32, x: 60, y: 5)
