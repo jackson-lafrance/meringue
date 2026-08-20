@@ -192,7 +192,7 @@ Useful slash commands inside the TUI include:
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
 - `/prs` — with **Settings → Experiments → GitHub support** enabled, open the picker for every tracked pull request that is still open. Use `↑`/`↓` to move, `Enter` to open, and `Esc` to close.
 - `/setup` — reopen the shared full-screen Setup overlay for theme, separate head/worker defaults, and experiment checkboxes. Manual cancel writes nothing.
-- `/questions` — list questions and their statuses.
+- `/questions` — open the picker for existing open questions; use `↑`/`↓` to move, `Enter` to insert `/answer <question_id>`, and `Esc` to close.
 - `/answer <question_id> "<answer>"` — answer an open question; the kernel records the answer and routes the work it unblocks.
 - `/dismiss <question_id>` — close an open question without answering it.
 - `/theme <name>` — with no arguments, open the on-screen theme picker; otherwise persist a TUI colorscheme.
@@ -233,7 +233,7 @@ When a head cannot route a request safely it asks a clarifying question, and the
 - Replying in plain chat also works. A head reads the open questions in its context; if your message clearly answers exactly one of them, it closes that question and routes the unblocked work in the same step. If several questions could match, or the message is a new goal, the questions stay open and the message is routed as its own request.
 - `/dismiss Q1` closes a question you no longer care about without routing any work.
 
-Open questions are visible as a `? <count>` marker in the chat header and through `/questions`, which also prints the exact `/answer` command to use.
+Open questions are visible as a `? <count>` marker in the chat header and through the `/questions` picker, which shows local display numbers and inserts the exact `/answer <question_id>` command to use.
 
 ### Reading the logs pane
 

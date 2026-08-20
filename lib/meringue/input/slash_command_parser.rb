@@ -44,7 +44,7 @@ module Meringue
         ["/config", "Open full-screen Settings; /config --text prints read-only diagnostics."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
-        ["/questions", "List questions and their statuses."],
+        ["/questions", "Open the picker for existing open questions."],
         ["/answer <question_id> \"<answer>\"", "Answer an open question and let a head route the work it unblocks."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
         ["/prune", "Remove resolved and errored records plus their safely cleanable managed worktrees."],
