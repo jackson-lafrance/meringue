@@ -997,9 +997,10 @@ module Meringue
         }
       end
 
-      # One popup slot above the composer, shared by the slash-command list, the
-      # open-PR picker, and the model picker (see ChatPane#popup?), so all three
-      # are bounded the same way. Only the number of visible rows differs: the
+      # One visible popup slot above the composer, shared by the slash-command,
+      # theme, model, and open-PR pickers (see ChatPane#popup?). Every picker is
+      # rendered on-screen with the same border, geometry, and input ownership.
+      # Only the number of visible rows differs: the
       # model picker is browsed, so it is allowed to be taller. First-run setup is
       # not in this slot; it takes over the screen.
       #

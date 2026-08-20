@@ -431,9 +431,9 @@ module Meringue
           slash_suggestion_records(state).any?
         end
 
-        # The popup slot between the logs pane and the composer. The model picker,
-        # the open-PR picker, and the slash-command list are all transient lists
-        # over the composer, so they share one geometry, one border, and one
+        # The popup slot between the logs pane and the composer. The theme/model
+        # pickers, the open-PR picker, and the slash-command list are all transient
+        # lists over the composer, so they share one geometry, one border, and one
         # keyboard shape instead of introducing another overlay mechanism. A picker
         # wins while it is up.
         #

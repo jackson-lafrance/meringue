@@ -39,6 +39,12 @@ class TuiThemePickerTest < Minitest::Test
     assert_equal ThemePicker.names, plain_lines(@pane.popup_lines(picker)).map { |line| line.sub(/\A› /, "").sub(/\A  /, "").split("  ").first }
     assert_empty @submitted
 
+    frame = render_frame(picker, width: WIDTH, height: HEIGHT)
+    assert_includes frame, "─ themes ─"
+    assert_includes frame, "catppuccin"
+    assert_operator frame.index("─ themes ─"), :<, frame.index("─ chat")
+    assert_empty @app.instance_variable_get(:@messages), "picker choices must not be emitted as chat output"
+
     send_key("\e")
     picker = open_picker("/themes")
     assert @pane.theme_picker?(picker)

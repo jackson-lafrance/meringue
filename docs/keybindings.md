@@ -303,7 +303,7 @@ Open it with `/models` (optionally `/models claude` to scope it to another harne
 
 ## Theme picker
 
-Open the interactive theme picker with `/theme` without an argument or its `/themes` alias. The current colorscheme is highlighted initially.
+Open the interactive theme picker with `/theme` without an argument or its `/themes` alias. It appears as an on-screen dashboard popover above the composer, never as chat output; the current colorscheme is highlighted initially.
 
 - `↑` / `↓`: move through themes and preview the highlighted colorscheme immediately.
 - `Enter`: persist the highlighted theme through the existing `/theme <name>` command.
