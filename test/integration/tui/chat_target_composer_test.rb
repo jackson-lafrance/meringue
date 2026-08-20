@@ -12,8 +12,8 @@ require "support/tui_support"
 # covered here, including the untinted ones that must not read as agent-scoped.
 #
 # The destination is named exactly once, in the composer pane title above the
-# chat bar. The bottom hint line under it carries gestures only (`head routes ·
-# Esc clears`, `slash ignores target · Esc clears`, or nothing at all), so the
+# chat bar. The bottom hint line under it carries gestures only (`Esc clears`,
+# `slash ignores target · Esc clears`, or nothing at all), so the
 # same id is never printed twice one row apart.
 class TuiChatTargetComposerTest < Minitest::Test
   include TUISupport
@@ -82,10 +82,10 @@ class TuiChatTargetComposerTest < Minitest::Test
   def test_agent_selection_leaves_only_gestures_on_the_bottom_line
     composed = select("P1-I1-W1")
 
-    assert_equal [["head routes · Esc clears", Style::MUTED]], ChatTarget.hint_segments(composed)
+    assert_equal [["Esc clears", Style::MUTED]], ChatTarget.hint_segments(composed)
 
     hint = plain_line(@pane.bottom_hint_line(composed))
-    assert_includes hint, "head routes"
+    refute_includes hint, "head routes"
     assert_includes hint, "Esc clears"
     # The composer title is the single place the target is named.
     assert_includes @pane.composer_pane_title(composed), "P1-I1-W1"
@@ -102,7 +102,7 @@ class TuiChatTargetComposerTest < Minitest::Test
 
     assert_equal "agent", ChatTarget.presentation(composed).fetch("kind")
     assert_equal "chat → A84 → P1-I1 · Fix retries", @pane.composer_pane_title(composed)
-    assert_equal [["head routes · Esc clears", Style::MUTED]], ChatTarget.hint_segments(composed)
+    assert_equal [["Esc clears", Style::MUTED]], ChatTarget.hint_segments(composed)
     # A worker id already carries its issue, so it is not repeated there.
     assert_equal "chat → P1-I1-W1 · Fix retries", @pane.composer_pane_title(select("P1-I1-W1"))
   end
@@ -130,7 +130,7 @@ class TuiChatTargetComposerTest < Minitest::Test
     assert_equal "issue", ChatTarget.presentation(composed).fetch("kind")
     assert_equal "chat → P1-I1 · Fix retries", @pane.composer_pane_title(composed)
     assert_equal Style.agent_chrome_style("P1-I1", bold: true), @pane.composer_title_style(composed)
-    assert_equal [["head routes · Esc clears", Style::MUTED]], ChatTarget.hint_segments(composed)
+    assert_equal [["Esc clears", Style::MUTED]], ChatTarget.hint_segments(composed)
     # An issue and a worker under it are different targets, so they must not be
     # indistinguishable in the composer.
     refute_equal @pane.composer_title_style(select("P1-I1-W1")), @pane.composer_title_style(composed)
@@ -149,14 +149,14 @@ class TuiChatTargetComposerTest < Minitest::Test
     composed = select("P1")
 
     assert_equal "log_only", ChatTarget.presentation(composed).fetch("kind")
-    assert_equal "chat · head routes · P1 logs only", @pane.composer_pane_title(composed)
+    assert_equal "chat · P1 logs only", @pane.composer_pane_title(composed)
     assert_nil @pane.composer_border_style(composed, active: true)
     assert_nil @pane.composer_title_style(composed)
     assert_equal Style::ACCENT_BOLD, ChatTarget.prompt_style(composed)
     assert_equal "enter a prompt", ChatTarget.placeholder(composed)
     # The title carries the log-only label (`P1 logs only`) and the logs pane
-    # title repeats it, so the bottom line keeps only the gestures.
-    assert_equal [["head routes · Esc clears", Style::MUTED]], ChatTarget.hint_segments(composed)
+    # title repeats it, so the bottom line keeps only the clear gesture.
+    assert_equal [["Esc clears", Style::MUTED]], ChatTarget.hint_segments(composed)
     assert_equal "logs — P1", @pane.log_pane_title(composed)
   end
 
@@ -164,9 +164,9 @@ class TuiChatTargetComposerTest < Minitest::Test
     composed = select("H83")
 
     assert_equal "log_only", ChatTarget.presentation(composed).fetch("kind")
-    assert_equal "chat · head routes · H83 logs only", @pane.composer_pane_title(composed)
+    assert_equal "chat · H83 logs only", @pane.composer_pane_title(composed)
     assert_nil @pane.composer_border_style(composed, active: true)
-    assert_equal [["head routes · Esc clears", Style::MUTED]], ChatTarget.hint_segments(composed)
+    assert_equal [["Esc clears", Style::MUTED]], ChatTarget.hint_segments(composed)
   end
 
   def test_no_selection_is_untinted_and_uses_the_plain_chat_label
@@ -232,6 +232,8 @@ class TuiChatTargetComposerTest < Minitest::Test
 
     assert_equal "chat · slash command", @pane.composer_pane_title(composed)
     assert_empty ChatTarget.hint_segments(composed)
+    refute_includes plain_line(@pane.bottom_hint_line(composed)), "/ commands"
+    refute_includes plain_line(@pane.bottom_hint_line(composed)), "/keybind"
   end
 
   def test_rendered_frame_tints_the_composer_box_and_the_filtered_logs_title
@@ -263,8 +265,8 @@ class TuiChatTargetComposerTest < Minitest::Test
     hint_row = frame.split("\n", -1).last
 
     assert_includes frame, "chat → P1-I1-W1 · Fix retries"
-    # Identity above the chat bar, gestures below it, and never both.
-    assert_includes hint_row, "head routes · Esc clears"
+    # Identity above the chat bar, the clear gesture below it, and never both.
+    assert_includes hint_row, "Esc clears"
     refute_includes hint_row, "P1-I1-W1"
     refute_match TUISupport::ANSI_PATTERN, frame
   end
@@ -279,9 +281,10 @@ class TuiChatTargetComposerTest < Minitest::Test
     @state["agents"] = @state.fetch("agents").map { |agent| agent.merge("status" => "idle") }
     row = render_frame(select("P1-I1-W1"), width: Meringue::TUI::Layout::MIN_WIDTH, height: 18, color: false).split("\n", -1).last
 
-    assert_includes row, "head routes · Esc clears"
+    assert_includes row, "Esc clears"
     assert_includes row, "no PR yet"
-    assert_includes row, "Enter send"
+    refute_includes row, "Enter send"
+    refute_includes row, "Tab focus"
     refute_includes row, "P1-I1-W1"
   end
 

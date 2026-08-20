@@ -8,13 +8,12 @@ module Meringue
     # always returns a Hash for renderers and `chat_target` returns Hash-or-nil
     # for routing. This module turns that one fact into the composer's chrome:
     # its pane title, border/title styles, prompt marker, placeholder, and the
-    # routing hint on the bottom line.
+    # clear-selection hint on the bottom line.
     #
     # The destination is named in exactly one place: the composer pane title,
     # which sits on the border row directly above the chat bar. The bottom hint
     # line deliberately repeats none of it and carries only the gestures a title
-    # cannot express (a fresh head still routes the message, a slash command
-    # ignores the selection, Esc clears it).
+    # cannot express (a slash command ignores the selection, Esc clears it).
     #
     # The tint is deliberately *not* a new palette. It is the same per-id color
     # the logs pane already uses for that agent's rows (Style::AGENT_PALETTE via
@@ -30,12 +29,11 @@ module Meringue
     #                with the selected agent's own log color.
     # - `issue`      an issue row is selected. Tinted with that issue id's color.
     # - `log_only`   a project, or a head that is still routing, is selected. It
-    #                filters logs but does not scope chat, so it stays untinted
-    #                and says the head still routes.
+    #                filters logs but does not scope chat, so it stays untinted.
     # - `none`       nothing is selected (including a stale selection the kernel
     #                or reconciliation already dropped). Quiet, untinted, and it
     #                adds nothing to the bottom line because there is no selection
-    #                to explain or clear.
+    #                to clear.
     #
     # Colors are never the only cue: every state also spells the target out in
     # the composer title, so `NO_COLOR`, a 16-color terminal, or a screenshot
@@ -48,12 +46,11 @@ module Meringue
       NONE = "none"
       SLASH = "slash"
 
-      # What the bottom hint line still owes the user once the title above the
-      # chat bar names the destination: that a fresh head (not the selected row)
-      # receives the message, and how to drop the selection.
-      ROUTING_HINT = "head routes · Esc clears"
+      # The title above the chat bar names the destination. The only persistent
+      # selection affordance needed below it is how to drop that selection.
+      CLEAR_SELECTION_HINT = "Esc clears"
       # A slash command bypasses the selection, so its hint has to warn rather
-      # than promise head routing for the selected node.
+      # than imply that the selected node receives it.
       SLASH_HINT = "slash ignores target · Esc clears"
       # Issue titles are user-written and can be long; the composer title is one
       # border row, so keep it scannable.
@@ -91,7 +88,7 @@ module Meringue
         when SLASH then slash_title(target)
         when AGENT then agent_title(target)
         when ISSUE then "chat → #{target.fetch("issue_id")}#{title_suffix(target)}"
-        when LOG_ONLY then "chat · head routes · #{target.fetch("label")} logs only"
+        when LOG_ONLY then "chat · #{target.fetch("label")} logs only"
         else "chat"
         end
       end
@@ -136,8 +133,7 @@ module Meringue
       # so repeating the id here only spent width the interaction hints and the
       # delivery-PR indicator need on a narrow terminal.
       #
-      # - agent/issue/log-only: a fresh head routes the message, Esc clears the
-      #   selection.
+      # - agent/issue/log-only: Esc clears the selection.
       # - slash with a selection: that selection is ignored, Esc clears it.
       # - nothing selected (or a slash command with nothing selected): no
       #   segments at all. There is no selection to explain or clear.
@@ -145,7 +141,7 @@ module Meringue
         target = presentation(state)
         case target.fetch("kind")
         when SLASH then slash_hint_segments(target)
-        when AGENT, ISSUE, LOG_ONLY then [[ROUTING_HINT, Style::MUTED]]
+        when AGENT, ISSUE, LOG_ONLY then [[CLEAR_SELECTION_HINT, Style::MUTED]]
         else []
         end
       end

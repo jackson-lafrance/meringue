@@ -65,9 +65,10 @@ class TuiBlockedHeadRecoveryTest < Minitest::Test
     assert_nil Meringue::TUI::LogScope.chat_target(state)
 
     pane = Meringue::TUI::Panes::ChatPane.new
-    assert_equal "chat · head routes · H26 logs only", pane.composer_pane_title(state)
+    assert_equal "chat · H26 logs only", pane.composer_pane_title(state)
     assert_equal "enter a prompt", Meringue::TUI::ChatTarget.placeholder(state)
-    assert_includes plain_line(pane.bottom_hint_line(state)), "head routes"
+    refute_includes plain_line(pane.bottom_hint_line(state)), "head routes"
+    assert_includes plain_line(pane.bottom_hint_line(state)), "Esc clears"
   end
 
   # `/retry` is the explicit command entry point, so its completion offers blocked heads while

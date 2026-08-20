@@ -65,9 +65,10 @@ class TuiSelectedChatTargetTest < Minitest::Test
     # plus its issue's short title. The worker id already contains the durable
     # issue id a fresh head will receive.
     assert_equal "chat → P1-I1-W1 · Fix retries", pane.composer_pane_title(composed)
-    # The line below the chat bar carries gestures only, so it does not repeat it.
+    # The line below the chat bar carries only the clear gesture, so it does not
+    # repeat the destination or explain the ordinary routing model.
     hint = plain_line(pane.bottom_hint_line(composed))
-    assert_includes hint, "head routes"
+    refute_includes hint, "head routes"
     assert_includes hint, "Esc clears"
     refute_includes hint, "P1-I1-W1"
   end
@@ -87,6 +88,22 @@ class TuiSelectedChatTargetTest < Minitest::Test
     cleared = compose_app_state(@app, @state)
     assert_empty Meringue::TUI::LogScope.selected_target(cleared)
     assert_equal "chat", Meringue::TUI::Panes::ChatPane.new.composer_pane_title(cleared)
+  end
+
+  def test_escape_clears_the_sticky_target_advertised_by_the_footer
+    select_chat_target("P1-I1")
+    selected = compose_app_state(@app, @state)
+
+    assert_includes plain_line(Meringue::TUI::Panes::ChatPane.new.bottom_hint_line(selected)), "Esc clears"
+
+    result = @app.send(:handle_key, "\e", "", 0, -1, nil, selected)
+
+    assert_equal ["", 0, -1], result
+    cleared = compose_app_state(@app, @state)
+    assert_empty Meringue::TUI::LogScope.selected_target(cleared)
+    cleared_hint = plain_line(Meringue::TUI::Panes::ChatPane.new.bottom_hint_line(cleared))
+    assert_equal "● 1W 1H", cleared_hint
+    refute_includes cleared_hint, "Tab focus"
   end
 
   def test_subsequent_chat_passes_the_selection_to_the_head_callback
@@ -217,9 +234,10 @@ class TuiSelectedChatTargetTest < Minitest::Test
     assert_nil Meringue::TUI::LogScope.chat_target(composed)
 
     pane = Meringue::TUI::Panes::ChatPane.new
-    assert_equal "chat · head routes · H84 logs only", pane.composer_pane_title(composed)
+    assert_equal "chat · H84 logs only", pane.composer_pane_title(composed)
     assert_nil pane.composer_title_style(composed)
-    assert_includes plain_line(pane.bottom_hint_line(composed)), "head routes"
+    refute_includes plain_line(pane.bottom_hint_line(composed)), "head routes"
+    assert_includes plain_line(pane.bottom_hint_line(composed)), "Esc clears"
     assert_equal "enter a prompt", Meringue::TUI::ChatTarget.placeholder(composed)
 
     submissions, handler = recording_prompt_handler
