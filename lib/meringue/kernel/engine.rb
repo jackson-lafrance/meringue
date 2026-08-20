@@ -59,6 +59,14 @@ module Meringue
       WORKSPACE_MODE_ISOLATED = "isolated"
       WORKSPACE_MODE_SHARED_READ_ONLY = "shared_read_only"
       WORKSPACE_MODES = [WORKSPACE_MODE_ISOLATED, WORKSPACE_MODE_SHARED_READ_ONLY].freeze
+      # Every durable phase in which focus handoff, native ownership, or dashboard return still
+      # owns worker settlement. Ordinary reconciliation must not poll through any of these phases.
+      INTERACTIVE_HANDOFF_STATES = %w[
+        preparing interactive_pending interactive resuming resume_failed reclaiming reclaim_failed
+      ].freeze
+      INTERACTIVE_RETURN_STATES = %w[
+        interactive_pending interactive resuming resume_failed reclaiming
+      ].freeze
 
       WORKER_RESUME_PROMPT = <<~PROMPT.freeze
         Continue this Meringue worker session from the existing session history and workspace state.
@@ -791,7 +799,7 @@ module Meringue
           return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
           return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"]) if agent.fetch("status", nil) == "killed"
           return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["missing_harness_session"]) unless agent_has_session_reference?(agent)
-          return rejected_result(command_id, command_type, "Agent #{agent_id} is owned by its native interactive focus; return to the dashboard before pausing it.", ["interactive_focus_active"]) if interactive_focus_active?(agent)
+          return rejected_result(command_id, command_type, "Agent #{agent_id} is owned by its Agent session; return to the dashboard before pausing it.", ["interactive_focus_active"]) if interactive_focus_active?(agent)
 
           metadata = agent.fetch("harness_metadata", {}) || {}
           if agent.fetch("status", nil) == "paused" && !metadata.fetch("pause_request", nil).is_a?(Hash)
@@ -919,7 +927,7 @@ module Meringue
           return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
           return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"]) if agent.fetch("status", nil) == "killed"
           return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["missing_harness_session"]) unless agent_has_session_reference?(agent)
-          return rejected_result(command_id, command_type, "Agent #{agent_id} is owned by its native interactive focus; return to the dashboard before resuming it.", ["interactive_focus_active"]) if interactive_focus_active?(agent)
+          return rejected_result(command_id, command_type, "Agent #{agent_id} is owned by its Agent session; return to the dashboard before resuming it.", ["interactive_focus_active"]) if interactive_focus_active?(agent)
 
           metadata = agent.fetch("harness_metadata", {}) || {}
           request = metadata.fetch("resume_request", nil)
@@ -1124,7 +1132,113 @@ module Meringue
         end
       end
 
-      # Native Pi focus is a kernel-owned transport transition, not a TUI-side attach. The managed
+      # A dashboard crash can leave any durable focus phase behind. Claim it before process I/O,
+      # reclaim a surviving native writer through the harness identity check, and return dashboard
+      # ownership before ordinary polling. That ordering preserves the continuation obligation and
+      # prevents the aborted pre-focus assistant checkpoint from being promoted to a completion.
+      def reconcile_stale_interactive_focuses
+        candidates = synchronized_state do
+          normalized_state.fetch("agents").filter_map do |agent|
+            next unless agent.fetch("type", nil) == "worker"
+            next unless interactive_handoff_marker?(agent)
+
+            marker = agent.dig("harness_metadata", "interactive_handoff")
+            next if interactive_focus_owner_alive?(marker)
+
+            deep_copy(agent)
+          end
+        end
+
+        candidates.filter_map do |candidate|
+          agent = claim_stale_interactive_focus_recovery(candidate.fetch("id"))
+          next unless agent
+
+          marker = agent.dig("harness_metadata", "interactive_handoff") || {}
+          interactive_pid = (marker["interactive_pid"] || marker["reclaim_interactive_pid"]).to_i
+          if interactive_pid.positive? && interactive_process_alive?(marker)
+            harness_client_for_agent(agent).reclaim_interactive_session(
+              agent_session_ref(agent),
+              pid: interactive_pid
+            )
+          end
+          end_agent_interactive_focus(agent.fetch("id"))
+        rescue StandardError => e
+          mark_stale_interactive_focus_recovery_failed(candidate.fetch("id"), e)
+        end
+      end
+
+      def claim_stale_interactive_focus_recovery(agent_id)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id.to_s)
+          next unless agent
+
+          metadata = agent.fetch("harness_metadata", {}) || {}
+          marker = metadata.fetch("interactive_handoff", nil)
+          next unless marker.is_a?(Hash) && INTERACTIVE_HANDOFF_STATES.include?(marker.fetch("state", nil).to_s)
+          next if interactive_focus_owner_alive?(marker)
+
+          now = timestamp
+          original_state = marker.fetch("recovery_from_state", nil) || marker.fetch("state", nil)
+          marker = stale_interactive_focus_recovery_marker(marker, original_state)
+          agent["harness_metadata"] = metadata.merge(
+            "interactive_handoff" => marker.merge(instance_ownership_metadata).merge(
+              "state" => "reclaiming",
+              "recovery_from_state" => original_state,
+              "recovery_started_at" => now
+            )
+          )
+          agent["updated_at"] = now
+          touch_state!(state, now)
+          store.save(state)
+          deep_copy(agent)
+        end
+      end
+
+      def stale_interactive_focus_recovery_marker(marker, original_state)
+        return marker unless original_state.to_s == "preparing"
+        return marker unless marker.fetch("managed_turn_was_streaming", false)
+        return marker if marker.fetch("handoff", nil).is_a?(Hash)
+
+        marker.merge(
+          "handoff" => {
+            "continuation_required" => true,
+            "prompt" => WORKER_RESUME_PROMPT.strip,
+            "recovery" => "dashboard_restart_during_focus_preparation"
+          }
+        )
+      end
+
+      def mark_stale_interactive_focus_recovery_failed(agent_id, exception)
+        synchronized_state do
+          state = normalized_state
+          agent = find_agent(state, agent_id.to_s)
+          if agent
+            metadata = agent.fetch("harness_metadata", {}) || {}
+            marker = metadata.fetch("interactive_handoff", {}) || {}
+            now = timestamp
+            agent["harness_metadata"] = metadata.merge(
+              "interactive_handoff" => marker.merge(
+                "state" => "reclaim_failed",
+                "recovery_failed_at" => now,
+                "recovery_error" => exception.message
+              )
+            )
+            agent["updated_at"] = now
+            touch_state!(state, now)
+            store.save(state)
+          end
+        end
+        error = error_payload(exception)
+        failed_result(
+          nil,
+          "RecoverInteractiveFocus",
+          "Could not recover focused session ownership for worker #{agent_id}: #{error.fetch("message")}",
+          [error.fetch("class"), error.fetch("message")]
+        )
+      end
+
+      # The Agent session is a kernel-owned transport transition, not a TUI-side attach. The managed
       # RPC writer is quiesced before the workspace controller launches the interactive PTY, and a
       # durable marker makes reconciliation stand down while that PTY owns the session file.
       def begin_agent_interactive_focus(agent_id)
@@ -1140,7 +1254,7 @@ module Meringue
 
           metadata = candidate.fetch("harness_metadata", {}) || {}
           existing = metadata.fetch("interactive_handoff", nil)
-          if existing.is_a?(Hash) && %w[preparing interactive interactive_pending resuming reclaiming reclaim_failed].include?(existing.fetch("state", nil).to_s)
+          if existing.is_a?(Hash) && INTERACTIVE_HANDOFF_STATES.include?(existing.fetch("state", nil).to_s)
             retrying_reclaim = existing.fetch("state", nil).to_s == "reclaim_failed"
             if interactive_focus_owner_alive?(existing) && !retrying_reclaim
               return rejected_result(nil, "BeginInteractiveFocus", "Worker #{agent_id} already has an interactive focus transition in progress.", ["interactive_focus_active"])
@@ -1160,7 +1274,7 @@ module Meringue
 
           client = harness_client_for_agent(candidate)
           unless client.respond_to?(:interactive_session_supported?) && client.interactive_session_supported?
-            return rejected_result(nil, "BeginInteractiveFocus", "The selected harness does not provide a native interactive session.", ["interactive_session_unsupported"])
+            return rejected_result(nil, "BeginInteractiveFocus", "The selected harness does not provide an Agent session.", ["interactive_session_unsupported"])
           end
 
           now = timestamp
@@ -1168,6 +1282,7 @@ module Meringue
             "interactive_handoff" => instance_ownership_metadata.merge(
               "state" => "preparing",
               "started_at" => now,
+              "managed_turn_was_streaming" => !!metadata.fetch("is_streaming", false),
               "context" => interactive_focus_context(state, candidate),
               "reclaim_interactive_pid" => reclaim_pid,
               "reclaim_interactive_started_at" => reclaim_started_at
@@ -1212,9 +1327,9 @@ module Meringue
             source_id: current.fetch("id"),
             level: handoff.fetch("exact_stream_transfer", true) ? "info" : "warning",
             message: if handoff.fetch("was_streaming", false)
-                       "Safely settled worker #{current.fetch("id")}'s active managed turn and transferred sole session ownership to native interactive focus."
+                       "Safely settled worker #{current.fetch("id")}'s active managed turn and transferred sole session ownership to the Agent session."
                      else
-                       "Prepared worker #{current.fetch("id")} for native interactive focus; the managed session is quiesced."
+                       "Prepared worker #{current.fetch("id")} for an Agent session; the managed session is quiesced."
                      end,
             details: handoff.merge("agent_id" => current.fetch("id"), "routing_action" => "interactive_focus")
           )
@@ -1224,7 +1339,7 @@ module Meringue
             nil,
             "BeginInteractiveFocus",
             current.fetch("id"),
-            "Prepared worker #{current.fetch("id")} for native interactive focus.",
+            "Prepared worker #{current.fetch("id")} for an Agent session.",
             {
               "interactive_argv" => prepared.fetch("interactive_argv"),
               "interactive_executable" => prepared.fetch("interactive_executable", nil),
@@ -1334,14 +1449,20 @@ module Meringue
           return rejected_result(nil, "EndInteractiveFocus", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless candidate
 
           marker = (candidate.fetch("harness_metadata", {}) || {}).fetch("interactive_handoff", {}) || {}
-          unless %w[interactive interactive_pending resume_failed].include?(marker.fetch("state", nil).to_s)
+          unless INTERACTIVE_RETURN_STATES.include?(marker.fetch("state", nil).to_s)
             return accepted_result(nil, "EndInteractiveFocus", candidate.fetch("id"), "Worker #{candidate.fetch("id")} has no active interactive focus.", candidate, [])
+          end
+          if marker.fetch("state", nil).to_s == "resuming" && interactive_focus_owner_alive?(marker)
+            return rejected_result(nil, "EndInteractiveFocus", "Worker #{candidate.fetch("id")} is already returning focus to a live dashboard.", ["interactive_focus_resume_active"])
           end
 
           handoff_marker = deep_copy(marker)
           now = timestamp
           candidate["harness_metadata"] = (candidate.fetch("harness_metadata", {}) || {}).merge(
-            "interactive_handoff" => marker.merge("state" => "resuming", "resume_started_at" => now)
+            "interactive_handoff" => marker.merge(instance_ownership_metadata).merge(
+              "state" => "resuming",
+              "resume_started_at" => now
+            )
           )
           candidate["updated_at"] = now
           touch_state!(state, now)
@@ -1361,7 +1482,8 @@ module Meringue
           merge_session_ref_into_agent!(current, resumed)
           metadata = current.fetch("harness_metadata", {}) || {}
           metadata.delete("interactive_handoff")
-          handoff_outcome = if handoff_marker.fetch("state", nil).to_s == "interactive_pending"
+          recovery_from_state = handoff_marker.fetch("recovery_from_state", nil) || handoff_marker.fetch("state", nil)
+          handoff_outcome = if recovery_from_state.to_s == "interactive_pending"
                               "launch_not_started"
                             elsif resumed.dig("metadata", "interactive_dashboard_continuation") == "started"
                               "dashboard_continuation_started"
@@ -1386,7 +1508,7 @@ module Meringue
             source_type: "kernel",
             source_id: current.fetch("id"),
             level: "info",
-            message: "Resumed dashboard-managed session for worker #{current.fetch("id")} after native interactive focus.",
+            message: "Resumed dashboard-managed session for worker #{current.fetch("id")} after the Agent session.",
             details: { "agent_id" => current.fetch("id"), "routing_action" => "interactive_focus_return" }
           )
           touch_state!(state, now)
@@ -1927,6 +2049,7 @@ module Meringue
         recovered_worker_results = reconcile_step("recover_worker_reservations", []) { recover_worker_reservations }
         pause_results = reconcile_step("finish_worker_pauses", []) { reconcile_pending_worker_pauses }
         resume_results = reconcile_step("finish_worker_resumes", []) { reconcile_pending_worker_resumes }
+        interactive_focus_results = reconcile_step("recover_interactive_focus", []) { reconcile_stale_interactive_focuses }
         pending_prompt_results = reconcile_step("deliver_pending_prompts", []) { deliver_pending_agent_prompts }
         recovered_results = reconcile_step("recover_head_results", []) { recover_unapplied_head_results }
         prune_result = reconcile_step("prune_killed_records", { "changed" => false, "log_entry_ids" => [] }) { prune_killed_records }
@@ -1971,6 +2094,7 @@ module Meringue
         changed_count += gate_check_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += deferred_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += recovered_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
+        changed_count += interactive_focus_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += pause_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += resume_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += pending_prompt_results.count { |result| result.fetch("status", nil) == "accepted" }
@@ -1992,6 +2116,7 @@ module Meringue
             "pruned_agent_ids" => prune_result.fetch("removed_agent_ids", []),
             "pruned_project_ids" => prune_result.fetch("removed_project_ids", []),
             "recovered_worker_results" => recovered_worker_results,
+            "interactive_focus_results" => interactive_focus_results,
             "pause_results" => pause_results,
             "resume_results" => resume_results,
             "pending_prompt_results" => pending_prompt_results,
@@ -2004,7 +2129,7 @@ module Meringue
             "goal_loop_steps" => goal_steps,
             "poll_results" => applied_results
           },
-          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pause_results.flat_map { |result| result.fetch("log_entry_ids", []) } + resume_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + completion_continuation_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + gate_check_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) }).uniq
+          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + interactive_focus_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pause_results.flat_map { |result| result.fetch("log_entry_ids", []) } + resume_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + completion_continuation_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + gate_check_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) }).uniq
         )
       rescue StandardError => e
         error = error_payload(e)
@@ -7604,7 +7729,7 @@ module Meringue
           return rejected_result(
             command_id,
             command_type,
-            "Agent #{agent_id} is owned by its native interactive focus; return to the dashboard before prompting it.",
+            "Agent #{agent_id} is owned by its Agent session; return to the dashboard before prompting it.",
             ["interactive_focus_active"]
           )
         end
@@ -16548,8 +16673,10 @@ module Meringue
         return false if metadata.fetch("pause_request", nil).is_a?(Hash)
         return false if metadata.fetch("resume_request", nil).is_a?(Hash)
         # The native interactive process is the sole session writer during a focus handoff. Do not
-        # let the background reconciler read or resume the same JSONL file until focus returns.
-        return false if interactive_focus_active?(agent)
+        # let the background reconciler read or resume the same JSONL file until focus returns. A
+        # stale marker is recovered above; if recovery failed, keep it out of polling as well so an
+        # old assistant message cannot be promoted to a completion.
+        return false if interactive_handoff_marker?(agent)
         # A prompt RPC can time out while Pi is still compacting and before its response reaches us.
         # Pending-prompt delivery checks the durable receipt first; ordinary polling/resume is
         # suppressed because it could race that live request and write a duplicate continuation.
@@ -16569,22 +16696,16 @@ module Meringue
 
       # The durable "reconciliation is done trying" marker: an errored record whose persisted
       # reconcile details already say `terminal_error`.
-      def interactive_focus_active?(agent)
+      def interactive_handoff_marker?(agent)
         metadata = agent.fetch("harness_metadata", {}) || {}
-        marker = metadata.fetch("interactive_handoff", {}) || {}
-        return false unless marker.is_a?(Hash)
-        return false unless %w[preparing interactive_pending interactive resuming reclaiming reclaim_failed].include?(marker.fetch("state", nil).to_s)
+        marker = metadata.fetch("interactive_handoff", nil)
+        marker.is_a?(Hash) && INTERACTIVE_HANDOFF_STATES.include?(marker.fetch("state", nil).to_s)
+      end
 
-        if marker.fetch("state", nil).to_s == "reclaim_failed"
-          return interactive_process_alive?(marker)
-        end
-        return true if interactive_focus_owner_alive?(marker)
-        return interactive_process_alive?(marker) if marker["interactive_pid"] || marker["reclaim_interactive_pid"]
-
-        # A pending marker owned by a process that is gone is recoverable: its RPC process was
-        # already quiesced, and no interactive pid was recorded, so the next reconciliation/prompt
-        # may safely repair the durable session. Be conservative for legacy markers with no owner.
-        marker.key?("owner_instance_id") || marker.key?("owner_instance_pid") ? false : true
+      def interactive_focus_active?(agent)
+        # A stale phase is still an ownership barrier: startup recovery must clear it before pause,
+        # prompt, supervisor recovery, or ordinary settlement can touch the same saved session.
+        interactive_handoff_marker?(agent)
       end
 
       def interactive_focus_owner_alive?(marker)

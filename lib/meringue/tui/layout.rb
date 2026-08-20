@@ -60,12 +60,19 @@ module Meringue
             metrics.fetch(:top_y),
             metrics.fetch(:main_width),
             metrics.fetch(:logs_height),
-            agent_workspace_pane.title(state),
+            nil,
             agent_workspace_pane.content_lines(state, width: metrics.fetch(:main_width) - 4),
             active: scroll_pane_active?(state, "logs"),
             overflow: :terminal,
             scroll_offset: 0,
             title_style: agent_workspace_title_style(state)
+          )
+          status = agent_workspace_pane.top_status_layout(state, width: metrics.fetch(:main_width) - 4)
+          canvas.write_segments(
+            metrics.fetch(:main_x) + 2,
+            metrics.fetch(:top_y),
+            status.fetch(:segments),
+            max_width: [metrics.fetch(:main_width) - 4, 0].max
           )
         else
           draw_pane(
@@ -146,6 +153,49 @@ module Meringue
         focusable_pane_bounds(metrics).find do |_pane, bounds|
           point_in_bounds?(x.to_i, y.to_i, bounds)
         end&.first
+      end
+
+      # Resolves clicks on the embedded Agent session's top control strip. The
+      # leader itself is a visual state indicator; destination controls return
+      # their normal workspace action.
+      def agent_workspace_control_at(state, width:, height:, x:, y:)
+        return nil unless embedded_agent_workspace?(state)
+
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        return nil unless point_in_bounds?(x.to_i, y.to_i, {
+          x: metrics.fetch(:main_x),
+          y: metrics.fetch(:top_y),
+          width: metrics.fetch(:main_width),
+          height: metrics.fetch(:logs_height)
+        })
+        return nil unless y.to_i == metrics.fetch(:top_y)
+
+        relative_x = x.to_i - metrics.fetch(:main_x) - 2
+        status = agent_workspace_pane.top_status_layout(state, width: metrics.fetch(:main_width) - 4)
+        status.fetch(:controls).find do |record|
+          relative_x >= record.fetch(:start) && relative_x < record.fetch(:finish)
+        end&.fetch(:action)
+      end
+
+      # Converts dashboard coordinates into the one-based coordinates of the
+      # embedded Agent session's PTY. Hovering the pane is enough; dashboard
+      # focus does not need to move first.
+      def agent_workspace_mouse_event(state, width:, height:, x:, y:, event:)
+        return nil unless embedded_agent_workspace?(state)
+
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        return nil unless point_in_bounds?(x.to_i, y.to_i, {
+          x: metrics.fetch(:main_x),
+          y: metrics.fetch(:top_y),
+          width: metrics.fetch(:main_width),
+          height: metrics.fetch(:logs_height)
+        })
+
+        dimensions = embedded_agent_workspace_dimensions(state, width: width, height: height)
+        event.merge(
+          "x" => (x.to_i - metrics.fetch(:main_x) - 1).clamp(1, dimensions.fetch("columns")),
+          "y" => (y.to_i - metrics.fetch(:top_y)).clamp(1, dimensions.fetch("rows"))
+        )
       end
 
       # The all-open-PR count is one actionable segment in the dashboard summary

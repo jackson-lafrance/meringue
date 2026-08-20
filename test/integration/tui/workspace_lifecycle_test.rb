@@ -57,7 +57,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     def open_workspace(agent:, state:, rows:, columns:)
       _ = [agent, state]
       @opened_sizes << [rows, columns]
-      { "status" => "active", "interactive" => true, "message" => "native Pi focus" }
+      { "status" => "active", "interactive" => true, "message" => "Agent session" }
     end
 
     def agent_snapshot(agent:, state:, rows:, columns:)
@@ -278,7 +278,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
         "_agent_workspace" => snapshot
       ), width: 100, height: 32)
       assert_includes frame, "─ agent tree "
-      assert_includes frame, "Pi focus preparing"
+      assert_includes frame, "Agent session preparing"
       assert_includes frame, "monitor workers"
 
       # Focus can move back to the external composer while handoff is blocked.
@@ -371,13 +371,34 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     app.send(:handle_key, "\u0003", "", 0, -1, handler, state)
     assert_equal ["x", "\u0003"], controller.keys
 
+    workspace_snapshot = app.send(:agent_workspace_snapshot, state, "", 0)
+    mouse_state = state.merge("_agent_workspace" => workspace_snapshot)
+    app.send(
+      :handle_key,
+      { "type" => "mouse", "kind" => "wheel_down", "pressed" => true, "button" => 65, "count" => 1, "x" => 50, "y" => 3 },
+      "",
+      0,
+      -1,
+      handler,
+      mouse_state
+    )
+    wheel = controller.keys.last
+    assert_equal "wheel_down", wheel.fetch("kind")
+    assert_operator wheel.fetch("x"), :>=, 1
+    assert_operator wheel.fetch("y"), :>=, 1
+
+    app.send(:handle_key, "\u0000", "", 0, -1, handler, state)
+    assert app.instance_variable_get(:@workspace_leader_pending)
+    app.instance_variable_set(:@workspace_leader_started_at, app.send(:monotonic_time) - 2)
+    refute app.send(:agent_workspace_snapshot, state, "", 0).fetch("leader_pending"), "an abandoned leader sequence must expire"
+
     buffer, cursor, = app.send(:handle_key, "\t", "", 0, -1, handler, state)
     assert_equal "chat", app.instance_variable_get(:@focused_pane)
     "monitor workers".each_char do |character|
       buffer, cursor, = app.send(:handle_key, character, buffer, cursor, -1, handler, state)
     end
     assert_equal "monitor workers", buffer
-    assert_equal ["x", "\u0003"], controller.keys, "chat input must not leak into Pi"
+    assert_equal 3, controller.keys.length, "chat input must not leak into Pi"
     app.send(:handle_key, "\r", buffer, cursor, -1, handler, state)
     assert_equal "monitor workers", Timeout.timeout(5) { submitted.pop }
 
@@ -388,7 +409,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     assert_equal "agent_tree", app.instance_variable_get(:@focused_pane)
     app.send(:handle_key, "\r", "", 0, -1, handler, state)
     assert app.instance_variable_get(:@agent_tree_navigation_active)
-    assert_equal ["x", "\u0003"], controller.keys
+    assert_equal 3, controller.keys.length
 
     # Resizing the dashboard changes the actual PTY, not only the screen model.
     app.instance_variable_set(:@last_render_width, 120)
