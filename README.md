@@ -187,7 +187,7 @@ Useful slash commands inside the TUI include:
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
 - `/worker pause <agent_id>` — stop the current worker turn without killing its resumable session.
 - `/worker resume <agent_id>` — continue a paused worker from the same session and workspace.
-- `/prompt <agent_id> "<message>"` — follow up with an existing worker, or retry a head (`H<n>`) that failed, or was left blocked, without routing your request.
+- `/prompt <agent_id> "<message>"` — follow up with an existing worker, or take over a still-routing head; use `/retry <head_id>` for a stopped head.
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
 - `/prs` — with **Settings → Experiments → GitHub support** enabled, open the picker for every tracked pull request that is still open. Use `↑`/`↓` to move, `Enter` to open, and `Esc` to close.
 - `/setup` — reopen the shared full-screen Setup overlay for theme, separate head/worker defaults, and experiment checkboxes. Manual cancel writes nothing.

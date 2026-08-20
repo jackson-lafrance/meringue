@@ -689,14 +689,16 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_equal ["P1"], projects.map { |record| record.fetch("usage") }
   end
 
-  # `/prompt` is worker-only. Retryable heads are suggested by the explicit `/retry` command.
-  def test_retry_suggestions_include_failed_heads_and_prompt_does_not
+  # `/prompt` offers workers and heads that are still routing. Stopped heads are suggested by
+  # the explicit `/retry` command instead.
+  def test_retry_suggestions_include_failed_heads_and_prompt_offers_active_heads
     state = sample_state
     state.fetch("agents") << { "id" => "H7", "type" => "head", "status" => "errored" }
     state.fetch("agents") << { "id" => "H8", "type" => "head", "status" => "working" }
 
     prompt_records = Meringue::Input::SlashCommandParser.command_suggestion_records("/prompt ", limit: 5, state: state)
-    assert_equal %w[P1-I1-W1], prompt_records.map { |record| record.fetch("usage") }
+    assert_equal %w[P1-I1-W1 H8], prompt_records.map { |record| record.fetch("usage") }
+    assert_includes prompt_records.last.fetch("description"), "head"
 
     retry_records = Meringue::Input::SlashCommandParser.command_suggestion_records("/retry ", limit: 5, state: state)
     assert_equal %w[H7], retry_records.map { |record| record.fetch("usage") }
@@ -786,7 +788,7 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   # Ranking only reorders matches; with nothing typed each source keeps its own order. `/prompt`
-  # remains worker-only, while retryable heads are offered by `/retry`.
+  # includes active heads, while retryable heads are offered by `/retry`.
   def test_id_suggestions_keep_source_order_when_nothing_is_typed
     state = tree_suggestion_state
     state.fetch("agents") << { "id" => "H7", "type" => "head", "status" => "errored" }

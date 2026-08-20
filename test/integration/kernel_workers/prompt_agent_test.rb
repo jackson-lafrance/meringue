@@ -376,9 +376,9 @@ class KernelWorkersPromptAgentTest < Minitest::Test
     assert_includes result.fetch("errors"), "agent_not_resumable"
   end
 
-  # Heads are not worker sessions. Prompting one must never reach the harness; retrying a failed
-  # head is the separate `/retry H<n>` command.
-  def test_working_head_agents_are_not_promptable_as_workers
+  # A head record without its original request cannot be safely taken over. Stopped heads still
+  # use the separate `/retry H<n>` command.
+  def test_working_head_agents_without_a_recorded_request_are_not_promptable_as_workers
     engine = build_engine
     spawned_worker(engine)
     patch_state! do |state|
@@ -401,8 +401,8 @@ class KernelWorkersPromptAgentTest < Minitest::Test
     result = apply_raw(engine, "PromptAgent", { "agent_id" => "H1", "prompt" => "Go." })
 
     assert_equal "rejected", result.fetch("status")
-    assert_includes result.fetch("errors"), "use_retry_head"
-    assert_includes result.fetch("message"), "/retry H1"
+    assert_includes result.fetch("errors"), "head_request_unavailable"
+    assert_includes result.fetch("message"), "fresh prompt"
     assert_empty @harness_client.prompts
     assert_equal "head", agent(engine, "H1").fetch("type")
     assert_equal "working", agent(engine, "H1").fetch("status")
