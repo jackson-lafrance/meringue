@@ -22,10 +22,48 @@ module Meringue
         @screens = {}
         @interactive_sessions = {}
         @interactive_screens = {}
+        @pending_interactive_opens = {}
         @mutex = Mutex.new
       end
 
-      def open_workspace(agent:, state: nil, rows: TerminalSession::DEFAULT_ROWS, columns: TerminalSession::DEFAULT_COLUMNS)
+      # Starts a workspace transition without making the TUI input/render thread wait for a
+      # harness handoff. Native Pi focus may need to abort an active turn and wait for Pi's RPC
+      # response, so that work belongs on a controller-owned thread.
+      def open_workspace_async(agent:, state: nil, rows: TerminalSession::DEFAULT_ROWS, columns: TerminalSession::DEFAULT_COLUMNS, &callback)
+        key = agent_key(agent)
+        operation = { "cancelled" => false }
+        @mutex.synchronize { @pending_interactive_opens[key] = operation }
+        Thread.new do
+          result = open_workspace(
+            agent: agent,
+            state: state,
+            rows: rows,
+            columns: columns,
+            cancellation: -> { @mutex.synchronize { operation.fetch("cancelled") } }
+          )
+          callback.call(result) if callback
+        ensure
+          @mutex.synchronize do
+            @pending_interactive_opens.delete(key) if @pending_interactive_opens[key].equal?(operation)
+          end
+        end
+        {
+          "status" => "pending",
+          "message" => "Preparing focused workspace for #{agent.fetch("id", "worker")}…",
+          "pending" => true
+        }
+      end
+
+      def cancel_workspace_open(agent:)
+        key = agent_key(agent)
+        pending = @mutex.synchronize { @pending_interactive_opens[key] }
+        return { "status" => "closed", "message" => "No workspace opening was pending." } unless pending
+
+        @mutex.synchronize { pending["cancelled"] = true }
+        { "status" => "cancelled", "message" => "Cancelled focused workspace opening." }
+      end
+
+      def open_workspace(agent:, state: nil, rows: TerminalSession::DEFAULT_ROWS, columns: TerminalSession::DEFAULT_COLUMNS, cancellation: nil)
         resolution = PathResolver.resolve(agent)
         path = resolution.fetch("path", nil)
         return rejected(resolution.fetch("message", "Selected worker has no assigned workspace.")) unless path
@@ -34,16 +72,30 @@ module Meringue
           return { "status" => "opened", "message" => "Focused #{agent.fetch("id", "worker")} in #{path}." }
         end
 
+        return cancelled_workspace if cancellation_requested?(cancellation)
+
         transition = focus_session_service.begin_agent_interactive_focus(agent.fetch("id"))
         return transition unless transition.fetch("status", nil) == "accepted"
+        if cancellation_requested?(cancellation)
+          focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          return cancelled_workspace
+        end
 
         command = transition.dig("result", "interactive_argv")
         unless command.is_a?(Array) && command.any?
           rollback = focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
           return rollback if rollback && rollback.fetch("status", nil) != "accepted"
 
-          return failed("The Pi interactive handoff did not return a launch command.")
+          return failed("The native interactive handoff did not return a launch command.")
         end
+        # Harnesses may resolve their executable using provider-specific install
+        # knowledge (for example a package-manager bin directory that is absent
+        # from a GUI-launched app's PATH). Keep the argv contract for older
+        # integrations, but replace only the executable when the backend supplies
+        # that authoritative path. [workspace] shell_command remains exclusively
+        # the worktree-terminal override.
+        executable = transition.dig("result", "interactive_executable")
+        command = [executable.to_s, *command.drop(1)] if executable && !executable.to_s.empty?
 
         session = interactive_session_factory.call(command: command, env: transition.dig("result", "interactive_env"))
         started = nil
@@ -53,6 +105,11 @@ module Meringue
           started = failed("Could not claim native Pi focus: #{e.message}")
         end
         result = session.start(workspace_path: path, rows: rows, columns: columns, on_started: start_callback)
+        if cancellation_requested?(cancellation)
+          session.close
+          focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          return cancelled_workspace
+        end
         unless result.fetch("status", nil).to_s == "active"
           session.close
           rollback = focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
@@ -72,6 +129,11 @@ module Meringue
         @mutex.synchronize do
           @interactive_sessions[key] = { "agent" => agent.dup, "session" => session }
           @interactive_screens[key] = TerminalScreen.new(rows: rows, columns: columns)
+        end
+        if cancellation_requested?(cancellation)
+          close_interactive(agent)
+          focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
+          return cancelled_workspace
         end
         started ||= focus_session_service.mark_agent_interactive_focus_started(agent.fetch("id"), pid: result.fetch("pid", nil))
         unless started.fetch("status", nil) == "accepted"
@@ -160,6 +222,8 @@ module Meringue
         entry = interactive_entry(agent)
         agent_id = agent.is_a?(Hash) ? agent.fetch("id") : agent.to_s
         unless entry
+          return cancel_workspace_open(agent: agent) if pending_interactive_open?(agent)
+
           # The PTY is removed before dashboard reattachment. If that reattachment failed, a later
           # close/return action must still be able to retry the durable `resume_failed` handoff.
           resume = focus_session_service&.end_agent_interactive_focus(agent_id)
@@ -224,8 +288,12 @@ module Meringue
       end
 
       def close
-        interactive_agents = @mutex.synchronize { @interactive_sessions.values.map { |entry| entry.fetch("agent") } }
-        interactive_agents.each { |agent| close_workspace(agent: agent) }
+        pending = @mutex.synchronize do
+          @pending_interactive_opens.each_value { |operation| operation["cancelled"] = true }
+          @pending_interactive_opens.clear
+          @interactive_sessions.values.map { |entry| entry.fetch("agent") }
+        end
+        pending.each { |agent| close_workspace(agent: agent) }
         @mutex.synchronize do
           @screens.clear
           @interactive_screens.clear
@@ -241,6 +309,18 @@ module Meringue
 
       def interactive_entry(agent)
         @mutex.synchronize { @interactive_sessions[agent_key(agent)] }
+      end
+
+      def pending_interactive_open?(agent)
+        @mutex.synchronize { @pending_interactive_opens.key?(agent_key(agent)) }
+      end
+
+      def cancellation_requested?(cancellation)
+        cancellation && cancellation.call
+      end
+
+      def cancelled_workspace
+        { "status" => "cancelled", "message" => "Focused workspace opening was cancelled." }
       end
 
       def interactive_screen(agent, rows: TerminalScreen::DEFAULT_ROWS, columns: TerminalScreen::DEFAULT_COLUMNS)

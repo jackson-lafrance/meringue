@@ -1227,6 +1227,7 @@ module Meringue
             "Prepared worker #{current.fetch("id")} for native interactive focus.",
             {
               "interactive_argv" => prepared.fetch("interactive_argv"),
+              "interactive_executable" => prepared.fetch("interactive_executable", nil),
               "interactive_env" => prepared.fetch("interactive_env", nil),
               "handoff" => handoff,
               "session_ref" => prepared.fetch("session_ref")
