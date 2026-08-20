@@ -16,7 +16,7 @@ class WorkspaceControllerTest < Minitest::Test
     end
 
     def start(workspace_path:, rows:, columns:, on_started: nil)
-      { "status" => "failed", "message" => "native Pi could not launch" }
+      { "status" => "failed", "message" => "Agent session could not launch" }
     end
 
     def close
@@ -276,7 +276,7 @@ class WorkspaceControllerTest < Minitest::Test
       result = controller.open_workspace(agent: agent)
 
       assert_equal "failed", result.fetch("status")
-      assert_equal "native Pi could not launch", result.fetch("message")
+      assert_equal "Agent session could not launch", result.fetch("message")
       assert_equal 1, launch.closes
       assert_empty focus.started
       assert_equal [agent.fetch("id")], focus.ended
@@ -416,10 +416,10 @@ class WorkspaceControllerTest < Minitest::Test
 
       assert_equal({ "status" => "written", "bytes" => 3 }, controller.handle_terminal_key(key: "ls\r", agent: agent))
       assert_equal({ "status" => "written", "bytes" => 4 }, controller.handle_terminal_key(key: { "type" => "paste", "text" => "a\r\nb" }, agent: agent))
-      assert_equal({ "status" => "ignored" }, controller.handle_terminal_key(key: { "type" => "mouse", "kind" => "wheel_up" }, agent: agent))
+      assert_equal({ "status" => "written", "bytes" => 10 }, controller.handle_terminal_key(key: { "type" => "mouse", "kind" => "wheel_up" }, agent: agent))
       assert_equal({ "status" => "ignored" }, controller.handle_terminal_key(key: { "type" => "paste", "text" => "" }, agent: agent))
 
-      assert_equal ["ls\r", "a\n\nb"], @sessions.first.writes
+      assert_equal ["ls\r", "a\n\nb", "\e[<64;1;1M"], @sessions.first.writes
     ensure
       controller&.close
     end

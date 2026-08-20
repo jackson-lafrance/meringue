@@ -8,7 +8,8 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
 
   class InteractiveHarnessClient < RecordingHarnessClient
     attr_reader :prepared, :resumed, :reclaimed
-    attr_accessor :replacement_session, :prepare_error, :resume_error, :resume_streaming, :native_completed
+    attr_accessor :replacement_session, :prepare_error, :resume_error, :resume_streaming, :native_completed,
+                  :reported_turn_outcome
 
     def initialize
       super(provider: "pi")
@@ -43,7 +44,7 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
           "exact_stream_transfer" => !was_streaming,
           "interruption_method" => was_streaming ? "rpc_abort" : nil,
           "prompt" => was_streaming ? "continue the interrupted assignment" : nil,
-          "turn_checkpoint" => was_streaming ? { "state" => "incomplete", "stop_reason" => "toolUse" } : nil,
+          "turn_checkpoint" => was_streaming ? (reported_turn_outcome || { "state" => "incomplete", "stop_reason" => "toolUse" }) : nil,
           "captured_event_count" => 3
         }.compact
       }
@@ -52,6 +53,10 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     def reclaim_interactive_session(_session_ref, pid:)
       @reclaimed << pid
       true
+    end
+
+    def turn_outcome(_session_ref)
+      reported_turn_outcome
     end
 
     def resume_dashboard_session(session_ref, handoff: nil)
@@ -154,6 +159,139 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     end
     recovered = engine.begin_agent_interactive_focus(worker_id)
     assert_equal "accepted", recovered.fetch("status")
+  end
+
+  def test_restart_recovers_an_interrupted_focus_before_polling_the_old_session
+    client = InteractiveHarnessClient.new
+    client.streaming = true
+    first_engine = build_engine(harness_client: client)
+    context = project_with_issue(first_engine)
+    worker_id = spawn_worker(
+      first_engine,
+      context.fetch("issue_id"),
+      prompt: "Keep the unfinished assignment alive across a dashboard crash."
+    ).fetch("target_id")
+
+    interrupted_checkpoint = {
+      "state" => "completed",
+      "stop_reason" => "abort",
+      "last_assistant_text" => "I was still inspecting the unfinished tool call."
+    }
+    client.reported_turn_outcome = interrupted_checkpoint
+    client.last_assistant_text = interrupted_checkpoint.fetch("last_assistant_text")
+    first_engine.begin_agent_interactive_focus(worker_id)
+    first_engine.mark_agent_interactive_focus_started(worker_id, pid: 52_424)
+    patch_agent!(worker_id) do |record|
+      record.fetch("harness_metadata").fetch("interactive_handoff").merge!(
+        "owner_instance_id" => "crashed-dashboard",
+        "owner_instance_pid" => 999_999,
+        "interactive_pid" => 999_998
+      )
+    end
+
+    restarted_engine = build_engine(harness_client: client)
+    result = restarted_engine.reconcile_sessions
+
+    recovered = agent(restarted_engine, worker_id)
+    assert_equal "working", recovered.fetch("status"), "restart must resume the unfinished turn"
+    refute_equal "completed", recovered.fetch("status"), "the aborted checkpoint is not a final result"
+    refute recovered.fetch("harness_metadata").key?("interactive_handoff")
+    assert_equal "dashboard_continuation_started", recovered.dig("harness_metadata", "last_interactive_handoff", "outcome")
+    assert_equal "working", issue(restarted_engine, context.fetch("issue_id")).fetch("status")
+    assert_equal 1, result.dig("result", "interactive_focus_results").length
+    assert_equal 1, client.resumed.length
+    assert_equal ["continue the interrupted assignment"], client.prompts.map { |entry| entry.fetch("prompt") }
+  end
+
+  def test_restart_recovers_a_crash_during_focus_preparation_as_unfinished_work
+    client = InteractiveHarnessClient.new
+    client.streaming = true
+    first_engine = build_engine(harness_client: client)
+    context = project_with_issue(first_engine)
+    worker_id = spawn_worker(first_engine, context.fetch("issue_id")).fetch("target_id")
+    first_engine.begin_agent_interactive_focus(worker_id)
+    patch_agent!(worker_id) do |record|
+      marker = record.fetch("harness_metadata").fetch("interactive_handoff")
+      marker.delete("handoff")
+      marker.merge!(
+        "state" => "preparing",
+        "managed_turn_was_streaming" => true,
+        "owner_instance_id" => "crashed-dashboard",
+        "owner_instance_pid" => 999_999
+      )
+    end
+
+    restarted_engine = build_engine(harness_client: client)
+    restarted_engine.reconcile_sessions
+
+    recovered = agent(restarted_engine, worker_id)
+    assert_equal "working", recovered.fetch("status")
+    refute recovered.fetch("harness_metadata").key?("interactive_handoff")
+    assert_equal 1, client.resumed.length
+    assert_equal 1, client.prompts.length
+    assert_includes client.prompts.first.fetch("prompt"), "Continue this Meringue worker session"
+  end
+
+  def test_restart_retries_a_focus_return_that_crashed_while_resuming
+    client = InteractiveHarnessClient.new
+    client.streaming = true
+    first_engine = build_engine(harness_client: client)
+    context = project_with_issue(first_engine)
+    worker_id = spawn_worker(first_engine, context.fetch("issue_id")).fetch("target_id")
+    first_engine.begin_agent_interactive_focus(worker_id)
+    first_engine.mark_agent_interactive_focus_started(worker_id, pid: 52_424)
+    patch_agent!(worker_id) do |record|
+      record.fetch("harness_metadata").fetch("interactive_handoff").merge!(
+        "state" => "resuming",
+        "owner_instance_id" => "crashed-dashboard",
+        "owner_instance_pid" => 999_999,
+        "interactive_pid" => 999_998
+      )
+    end
+
+    restarted_engine = build_engine(harness_client: client)
+    restarted_engine.reconcile_sessions
+
+    recovered = agent(restarted_engine, worker_id)
+    assert_equal "working", recovered.fetch("status")
+    refute recovered.fetch("harness_metadata").key?("interactive_handoff")
+    assert_equal 1, client.resumed.length
+    assert_equal ["continue the interrupted assignment"], client.prompts.map { |entry| entry.fetch("prompt") }
+  end
+
+  def test_failed_startup_focus_return_stays_resumable_and_is_not_polled_as_complete
+    client = InteractiveHarnessClient.new
+    client.streaming = true
+    first_engine = build_engine(harness_client: client)
+    context = project_with_issue(first_engine)
+    worker_id = spawn_worker(first_engine, context.fetch("issue_id")).fetch("target_id")
+    checkpoint = {
+      "state" => "completed",
+      "stop_reason" => "abort",
+      "last_assistant_text" => "This interrupted checkpoint is not the final answer."
+    }
+    client.reported_turn_outcome = checkpoint
+    client.last_assistant_text = checkpoint.fetch("last_assistant_text")
+    first_engine.begin_agent_interactive_focus(worker_id)
+    first_engine.mark_agent_interactive_focus_started(worker_id, pid: 52_424)
+    patch_agent!(worker_id) do |record|
+      record.fetch("harness_metadata").fetch("interactive_handoff").merge!(
+        "owner_instance_id" => "crashed-dashboard",
+        "owner_instance_pid" => 999_999,
+        "interactive_pid" => 999_998
+      )
+    end
+    client.resume_error = IOError.new("attach failed during restart")
+
+    restarted_engine = build_engine(harness_client: client)
+    result = restarted_engine.reconcile_sessions
+
+    preserved = agent(restarted_engine, worker_id)
+    assert_equal "working", preserved.fetch("status")
+    refute_equal "completed", preserved.fetch("status")
+    assert_equal "resume_failed", preserved.dig("harness_metadata", "interactive_handoff", "state")
+    assert_empty result.dig("result", "poll_results"), "failed focus return must remain outside ordinary settlement polling"
+    assert_empty client.prompts
   end
 
   def test_dashboard_return_does_not_continue_again_after_native_focus_finished

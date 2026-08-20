@@ -28,22 +28,14 @@ module Meringue
           view = if workspace.fetch("view", "agent") == "terminal"
                    "worktree terminal"
                  elsif workspace.fetch("opening", false)
-                   "Pi focus preparing"
+                   "Agent session preparing"
                  elsif workspace.fetch("interactive", false)
-                   "Pi interactive"
+                   "Agent session"
                  else
                    "focused worker"
                  end
           id = agent&.fetch("id", nil) || workspace.fetch("agent_id", "worker")
-          title = "#{view} · #{id}"
-          return title unless workspace.fetch("embedded", false)
-
-          close_command = Array(workspace.fetch("leader_commands", [])).find do |command|
-            command.is_a?(Hash) && command.fetch("action", nil).to_s == "workspace_close"
-          end
-          close_key = close_command&.fetch("key", nil).to_s
-          leader = workspace.fetch("leader_label", "Ctrl-Space").to_s
-          close_key.empty? ? title : "#{title} · #{leader} #{close_key} returns"
+          "#{view} · #{id}"
         end
 
         # The focused pane title takes the worker's identity color, the same one
@@ -60,6 +52,64 @@ module Meringue
         # Scrolling must not re-wrap and re-sort the whole transcript on every
         # step. Composed lines are cached per view until the content signature
         # changes, so a scroll only changes which cached rows are drawn.
+        # The embedded workspace shares the dashboard's top border with its
+        # controls. Returning hit regions alongside the segments keeps drawing
+        # and mouse handling on exactly the same geometry.
+        def top_status_layout(state, width:)
+          workspace = workspace_state(state)
+          available = [width.to_i, 0].max
+          command_records = %w[workspace_switch_view workspace_open_editor workspace_close].filter_map do |action|
+            command = Array(workspace.fetch("leader_commands", [])).find do |candidate|
+              candidate.is_a?(Hash) && candidate.fetch("action", nil).to_s == action
+            end
+            next unless command
+
+            label = { "workspace_switch_view" => "Terminal", "workspace_open_editor" => "Editor", "workspace_close" => "Dashboard" }.fetch(action)
+            { "action" => action, "key" => command.fetch("key", "").to_s, "label" => label }
+          end
+          leader = workspace.fetch("leader_label", "Ctrl-Space").to_s
+          pending_style = workspace.fetch("leader_pending", false) ? Style::SELECTION : Style::ACCENT_BOLD
+
+          full_title = title(state)
+          compact_title = full_title.split(" · ", 2).first
+          candidates = [
+            [full_title, false],
+            [full_title, true],
+            [compact_title, true],
+            ["", true]
+          ]
+          chosen_title, compact = candidates.find do |candidate_title, candidate_compact|
+            button_texts = command_records.map do |record|
+              key = record.fetch("key")
+              candidate_compact ? "[#{key}]" : "[#{key} #{record.fetch("label")}]"
+            end
+            text = [candidate_title, leader, *button_texts].reject(&:empty?).join("  ")
+            text.length <= available
+          end || candidates.last
+
+          prefix = chosen_title.empty? ? "" : "#{chosen_title}  "
+          segments = []
+          segments << [chosen_title, title_style(state)] unless chosen_title.empty?
+          segments << ["  ", Style::DIM] unless chosen_title.empty?
+          controls = []
+          cursor = prefix.length
+          segments << [leader, pending_style]
+          cursor += leader.length
+          command_records.each do |record|
+            key = record.fetch("key")
+            text = compact ? "[#{key}]" : "[#{key} #{record.fetch("label")}]"
+            separator = "  "
+            segments << [separator, Style::DIM]
+            cursor += separator.length
+            start = cursor
+            segments << [text, Style::ACCENT_BOLD]
+            cursor += text.length
+            controls << { action: record.fetch("action"), start: start, finish: cursor }
+          end
+
+          { segments: segments, controls: controls.select { |record| record.fetch(:finish) <= available } }
+        end
+
         def content_lines(state, width: nil)
           workspace = workspace_state(state)
           view = workspace.fetch("view", "agent")
