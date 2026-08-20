@@ -211,7 +211,7 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   def test_missing_arguments_for_strict_commands_return_invalid_slash_command
-    ["/theme", "/theme a b", "/harness", "/model", "/model a b",
+    ["/theme", "/theme a b", "/harness", "/model a b",
      "/thinking", "/thinking high extra", "/thinking reviewer high", "/thinking head high extra",
      "/model head anthropic/x extra", "/model reviewer anthropic/x",
      "/model P1 extra", "/thinking P1 extra", "/project", "/project list /tmp", "/issue", "/issue delete P1",
@@ -659,15 +659,23 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   # `/models` no longer dumps the catalog into the log: browsing it is the TUI
-  # model picker, so the bare command is a local TUI command like /jump. An
-  # explicit `refresh` word is still the kernel path, which is what the picker's
-  # refresh key submits and what a head proposes for "what models can I use".
-  def test_models_opens_the_local_picker_while_refresh_stays_a_kernel_command
+  # model picker, so the bare command is a local TUI command like /jump. Bare
+  # `/model` expands to that plural command, while any argument preserves the
+  # singular command's existing setting behavior. An explicit `refresh` word on
+  # the plural command remains the kernel path used by the picker's refresh key.
+  def test_bare_model_matches_models_while_argument_taking_model_behavior_is_preserved
     picker = parse_slash("/models")
+    singular_picker = parse_slash("/model")
+    assert_equal picker, singular_picker
     assert_equal "InvalidSlashCommand", picker.fetch("type")
     assert_includes picker.dig("payload", "message"), "local TUI command"
     assert_includes picker.dig("payload", "message"), "model picker"
     assert_equal "InvalidSlashCommand", parse_slash("/models claude").fetch("type")
+
+    assert_equal ["SetDefaultSessionModel", { "model" => "openai/gpt-5.6-sol" }],
+                 parsed_command("/model openai/gpt-5.6-sol")
+    assert_equal ["SetDefaultSessionModel", { "role" => "head", "model" => "anthropic/claude-opus-5" }],
+                 parsed_command("/model head anthropic/claude-opus-5")
 
     assert_equal ["GetModelCatalog", { "refresh" => true }], parsed_command("/models refresh")
     assert_equal ["GetModelCatalog", { "refresh" => true, "harness" => "pi" }], parsed_command("/models pi refresh")
@@ -676,6 +684,12 @@ class InputSlashCommandParserTest < Minitest::Test
     records = suggestion_records("/models ", sample_state_with_model_catalog)
     assert_equal %w[pi claude antigravity], records.map { |record| record.fetch("usage") }
     assert_includes records.first.fetch("description"), "List the models Pi reports"
+  end
+
+  def test_all_eligible_bare_singular_commands_match_their_plural_forms
+    { "/model" => "/models", "/goal" => "/goals" }.each do |singular, plural|
+      assert_equal parse_slash(plural), parse_slash(singular), "expected #{singular} to match #{plural}"
+    end
   end
 
   def test_argument_suggestions_use_state_records

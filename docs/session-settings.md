@@ -10,6 +10,7 @@ First-run Setup (`/setup`, and automatically on a first interactive launch) uses
 
 ```text
 /models [harness] [refresh]
+/model
 ```
 
 Examples:
@@ -21,7 +22,7 @@ Examples:
 /models pi refresh
 ```
 
-`/models` is a **local TUI command** that opens the model picker: a searchable, keyboard-navigable list of the models the selected harness itself reports, showing each model's provider/id reference, display name, and supported thinking levels. With no argument it shows the active harness; an explicit `pi`, `claude`, or `antigravity` scopes the picker (and its refresh) to that harness instead.
+`/models` is a **local TUI command** that opens the model picker: a searchable, keyboard-navigable list of the models the selected harness itself reports, showing each model's provider/id reference, display name, and supported thinking levels. Bare `/model` is an alias for that same argumentless picker command; `/model <provider>/<model-id>` and its role-specific forms retain their setting behavior. With no argument `/models` shows the active harness; an explicit `pi`, `claude`, or `antigravity` scopes the picker (and its refresh) to that harness instead.
 
 It replaced the old behavior, where `/models` printed the entire catalog into the visible log. A harness that reports 120 models produced 120 log lines nobody could act on, truncated with a hint that pointed at a different command.
 
