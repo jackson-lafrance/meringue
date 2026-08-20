@@ -78,7 +78,9 @@ class TuiMouseWordSelectionTest < Minitest::Test
     lines = @layout.logs_text_lines(state, width: WIDTH, height: HEIGHT)
     first_line = lines.index { |line| line.include?("alpha") }
     last_line = lines.index { |line| line.include?("omega") }
-    separator = ((last_line + 1)...lines.length).find { |line_index| lines.fetch(line_index).strip.empty? }
+    separator = ((last_line + 1)...lines.length).find do |line_index|
+      copied_log_lines([lines.fetch(line_index)]).empty?
+    end
 
     refute_nil first_line
     refute_nil last_line
@@ -86,7 +88,7 @@ class TuiMouseWordSelectionTest < Minitest::Test
     assert_operator last_line, :>, first_line, "the selected paragraph must span soft-wrapped rows"
 
     position = logs_click_position(state, last_line, lines.fetch(last_line).index("omega") + 1)
-    expected_text = lines[first_line...separator].join("\n")
+    expected_text = copied_log_lines(lines[first_line...separator])
 
     with_stub_clipboard do
       triple_click(state, position)
@@ -100,8 +102,31 @@ class TuiMouseWordSelectionTest < Minitest::Test
       assert_equal expected, @app.send(:logs_selection)
       assert_equal expected_text, @app.send(:selection_text, state, "")
       assert_equal expected_text, copied_text
+      refute_includes copied_text, "▌"
       refute_includes copied_text, "second paragraph"
       assert_equal "copied #{last_line - first_line + 1} lines", @app.send(:selection_status_text)
+    end
+  end
+
+  def test_keyboard_caret_copy_omits_the_agent_gutter_too
+    state = composed_state(
+      empty_state,
+      chat: {
+        "messages" => [{
+          "role" => "agent",
+          "source_id" => "P1-I18-W1",
+          "text" => "Copy `this command`.",
+          "timestamp" => "2026-07-11T00:00:00Z"
+        }]
+      }
+    )
+
+    with_stub_clipboard do
+      assert @app.send(:activate_logs_cursor, state)
+      @app.send(:handle_key, "\u0003", "", 0, -1, nil, state)
+
+      assert_equal "Copy `this command`.", copied_text
+      refute_includes copied_text, "▌"
     end
   end
 
@@ -123,7 +148,7 @@ class TuiMouseWordSelectionTest < Minitest::Test
       send_mouse(motion_event(finish_position), state)
       send_mouse(release_event(finish_position), state)
 
-      expected_text = lines[first_line..second_line].join("\n")
+      expected_text = copied_log_lines(lines[first_line..second_line])
       selection = @app.send(:logs_selection)
 
       assert_equal Selection.point(first_line, 0), selection.fetch("start")
@@ -373,7 +398,17 @@ class TuiMouseWordSelectionTest < Minitest::Test
 
   def paragraph_logs_state
     message = "alpha #{"filler " * 20}omega\n\nsecond paragraph must stay outside the first selection"
-    composed_state(empty_state.merge("logs" => [log_record("L1", "message" => message)]))
+    composed_state(
+      empty_state,
+      chat: {
+        "messages" => [{
+          "role" => "agent",
+          "source_id" => "P1-I18-W1",
+          "text" => message,
+          "timestamp" => "2026-07-11T00:00:00Z"
+        }]
+      }
+    )
   end
 
   def tree_click_state
@@ -386,6 +421,10 @@ class TuiMouseWordSelectionTest < Minitest::Test
       "logs" => entries
     )
     composed_state(state)
+  end
+
+  def copied_log_lines(lines)
+    Array(lines).map { |line| line.delete_prefix("▌ ").delete_prefix("  ") }.join("\n")
   end
 
   # First on-screen content line matching +pattern+, with a column inside the

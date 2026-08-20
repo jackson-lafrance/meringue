@@ -1292,9 +1292,12 @@ module Meringue
         end
 
         def gutter_segment(entry)
-          return [PLAIN_GUTTER, Style::DIM] unless entry.fetch("role", nil) == "agent"
-
-          [AGENT_GUTTER, agent_body_style(entry)]
+          gutter = if entry.fetch("role", nil) == "agent"
+                     [AGENT_GUTTER, agent_body_style(entry)]
+                   else
+                     [PLAIN_GUTTER, Style::DIM]
+                   end
+          Selection.display_only_segment(gutter)
         end
 
         def participant_segments(entry, style)
@@ -1560,6 +1563,7 @@ module Meringue
         end
 
         def wrapped_text_lines(text, width: nil, gutter: [PLAIN_GUTTER, Style::DIM], style: Style::TEXT)
+          gutter = Selection.display_only_segment(gutter)
           content_width = width ? [width.to_i - 2, 1].max : nil
           text.to_s.split("\n", -1).flat_map do |line|
             wrap_text_line(line, content_width)
