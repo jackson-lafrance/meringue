@@ -42,6 +42,7 @@ module Meringue
       goal_id GoalID goalId
       head_id HeadID headId _head_id
       parent_issue_id ParentIssueID parentIssueId
+      target_issue_id TargetIssueID targetIssueId
       follow_up_of_agent_id FollowUpOfAgentID followUpOfAgentID followUpOfAgentId
       replace_agent_id ReplaceAgentID replaceAgentID replaceAgentId
       after_agent_id AfterAgentID afterAgentId after_agent AfterAgent afterAgent

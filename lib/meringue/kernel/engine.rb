@@ -193,6 +193,10 @@ module Meringue
         "answer_question" => "AnswerQuestion",
         "dismiss_question" => "DismissQuestion",
         "modify_issue" => "ModifyIssue",
+        "move_worker" => "MoveWorker",
+        "move" => "MoveWorker",
+        "reparent_agent" => "MoveWorker",
+        "reparent" => "MoveWorker",
         "prompt_agent" => "PromptAgent",
         "pause_worker" => "PauseWorker",
         "resume_worker" => "ResumeWorker",
@@ -239,6 +243,7 @@ module Meringue
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
+        ["/move <agent_id> <issue_id>", "Move an existing worker to a different issue without restarting its harness session. The worker keeps its session, worktree, and branch; only its AgentTree assignment changes."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."],
         ["/worker resume <agent_id>", "Resume a paused worker session."],
@@ -278,7 +283,7 @@ module Meringue
       HEAD_PROPOSABLE_COMMANDS = %w[
         ListAll GetState GetInfo Help ListQuestions
         GetSessionDefaults GetModelCatalog SetDefaultSessionModel SetDefaultSessionThinkingLevel
-        AddProject ModifyProject CreateIssue ModifyIssue SpawnWorker PromptAgent SpawnHead NoOp
+        AddProject ModifyProject CreateIssue ModifyIssue MoveWorker SpawnWorker PromptAgent SpawnHead NoOp
         CreateGoal ModifyGoal StopGoal ListGoals
         AskQuestion AnswerQuestion DismissQuestion
         PauseWorker ResumeWorker
@@ -1637,6 +1642,8 @@ module Meringue
           create_issue(command_id, command_type, payload)
         when "ModifyIssue"
           modify_issue(command_id, command_type, payload)
+        when "MoveWorker"
+          move_worker(command_id, command_type, payload)
         when "SpawnWorker"
           spawn_worker(command_id, command_type, payload)
         when "PromptAgent"
@@ -7865,6 +7872,236 @@ module Meringue
 
         "Issue #{issue_id} no longer exists: it was removed #{issue_removal_phrase(removal)}."
       end
+
+      # MoveWorker reparents an existing worker to another issue in the same project without
+      # disturbing its harness session, workspace, worktree, or branch. The worker id is renumbered
+      # to the composite key of its new issue (P1-I1-W1 -> P1-I7-W2), and every reference that
+      # named it is re-pointed in the same pass. Cross-project moves are refused: preserving a
+      # session in its original repository while assigning it to another project would route later
+      # prompts into the wrong workspace. A worker with background provisioning in flight is also
+      # refused because that executor owns its current id until the session has started.
+      def move_worker(command_id, command_type, payload)
+        agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
+        target_issue_id = value_at(payload, "target_issue_id", "TargetIssueID", "targetIssueId", "issue_id", "IssueID", "issueId")
+        errors = []
+
+        errors << "agent_id is required" if blank?(agent_id)
+        errors << "target_issue_id is required" if blank?(target_issue_id)
+        return move_worker_rejection(command_id, command_type, payload, "Worker was not moved.", errors) unless errors.empty?
+
+        state = normalized_state
+        agent = find_agent(state, agent_id)
+        if agent.nil?
+          removal = removed_agent_record(state, agent_id)
+          message = removal ? "Agent #{agent_id} no longer exists: it was removed #{issue_removal_phrase(removal)}." : "Agent #{agent_id} does not exist."
+          return move_worker_rejection(command_id, command_type, payload, message, ["agent_not_found"])
+        end
+        if agent.fetch("type", nil) == "head"
+          return move_worker_rejection(
+            command_id,
+            command_type,
+            payload,
+            "Agent #{agent.fetch("id")} is a head, not a worker. Heads handle one message and are killed afterwards, so they cannot be reparented.",
+            ["agent_is_not_worker"]
+          )
+        end
+
+        target_issue = find_issue(state, target_issue_id)
+        if target_issue.nil?
+          removal = removed_issue_record(state, target_issue_id)
+          message = removal ? "Issue #{target_issue_id} no longer exists: it was removed #{issue_removal_phrase(removal)}." : "Issue #{target_issue_id} does not exist."
+          return move_worker_rejection(command_id, command_type, payload, message, ["target_issue_not_found"])
+        end
+        target_project = find_project(state, target_issue.fetch("project_id"))
+        if target_project.nil?
+          return move_worker_rejection(
+            command_id,
+            command_type,
+            payload,
+            "Target issue #{target_issue.fetch("id")} belongs to project #{target_issue.fetch("project_id")}, which no longer exists.",
+            ["target_project_not_found"]
+          )
+        end
+
+        old_issue_id = present_string(agent.fetch("issue_id", nil))
+        old_project_id = present_string(agent.fetch("project_id", nil))
+        unless old_project_id && find_project(state, old_project_id)
+          return move_worker_rejection(
+            command_id,
+            command_type,
+            payload,
+            "Worker #{agent.fetch("id")} does not belong to an existing source project, so its workspace ownership cannot be moved safely.",
+            ["source_project_not_found"]
+          )
+        end
+        unless Ids.same?(old_project_id, target_project.fetch("id"))
+          return move_worker_rejection(
+            command_id,
+            command_type,
+            payload,
+            "Worker #{agent.fetch("id")} cannot move across projects without changing repositories. Spawn a worker on #{target_issue.fetch("id")} so it receives that project's workspace.",
+            ["cross_project_move_unsupported"]
+          )
+        end
+        if old_issue_id && Ids.same?(old_issue_id, target_issue.fetch("id"))
+          return move_worker_rejection(
+            command_id,
+            command_type,
+            payload,
+            "Worker #{agent.fetch("id")} is already on issue #{target_issue.fetch("id")}; nothing to move.",
+            ["already_on_target_issue"]
+          )
+        end
+        provisioning_state = (agent.fetch("harness_metadata", {}) || {}).fetch("provisioning_state", nil).to_s
+        if %w[provisioning_queued allocating_workspace starting_harness retry_pending].include?(provisioning_state) &&
+           !agent_has_session_reference?(agent)
+          return move_worker_rejection(
+            command_id,
+            command_type,
+            payload,
+            "Worker #{agent.fetch("id")} is still provisioning. Move it after its harness session has started.",
+            ["worker_provisioning_in_progress"]
+          )
+        end
+
+        old_agent_id = agent.fetch("id")
+        new_issue_id = target_issue.fetch("id")
+        new_project_id = target_issue.fetch("project_id")
+        # Mint the new composite worker id before mutating issue_id so the new issue's high-water
+        # mark counter does not count the moved worker itself.
+        new_agent_id = next_worker_id!(state, new_issue_id)
+
+        now = timestamp
+        # Re-point every structured reference and prose id that names the old worker id. This is
+        # the same whole-document walk `/recount` uses, narrowed to a single id substitution so
+        # nothing else is cleared: a slot is rewritten only when its value is exactly the old
+        # worker id, and every other reference (issue, project, parent, unrelated agents) is left
+        # byte-for-byte intact. Opaque correlation ids and verbatim harness evidence (session id,
+        # pid, cwd, branch) are skipped by the walker, which is what keeps the session alive.
+        repoint_agent_references!(state, old_agent_id, new_agent_id)
+
+        moved = find_agent(state, new_agent_id)
+        moved["issue_id"] = new_issue_id
+        moved["project_id"] = new_project_id
+        moved["updated_at"] = now
+        # Preserve the lineage the worker brought with it (follow_up_of_agent_id, replaces_agent_id,
+        # replaced_by_agent_id, after_agent_id). They still resolve to the same predecessor or
+        # successor records, and the re-point pass already updated successors that point back at
+        # this worker. Handover context for dependents is refreshed below.
+
+        # A dependent queued behind the moved worker records the predecessor's issue in its
+        # deferred_spawn block for display and recount validation. The flat after_agent_id and
+        # deferred_spawn.after_agent_id were re-pointed to the new worker id by the walk; update
+        # the recorded predecessor issue so the chain still agrees after the move.
+        refresh_deferred_predecessor_issue!(state, new_agent_id, new_issue_id)
+
+        # Rebuild issue agent_ids from the workers' issue_id field so the old issue drops the
+        # moved worker and the new issue gains it, regardless of what the re-point pass renamed.
+        State::Recounter.rebuild_issue_agent_ids!(state)
+        # The old issue's worker counter is a high-water mark; clamp it to the remaining workers.
+        decrement_worker_counter!(state, old_issue_id) if old_issue_id
+
+        # Moving a live worker changes both issue roll-ups. In particular, an emptied source issue
+        # must not remain stuck in `working`, and a previously settled destination becomes active.
+        refresh_issue_status_after_worker_move!(state, find_issue(state, old_issue_id), now)
+        refresh_issue_status_after_worker_move!(state, target_issue, now)
+        update_project_status_from_issues!(state, target_project, now)
+
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: new_agent_id,
+          level: "info",
+          message: "Moved worker #{old_agent_id} to #{new_agent_id} on issue #{new_issue_id} without restarting its harness session.",
+          details: {
+            "old_agent_id" => old_agent_id,
+            "new_agent_id" => new_agent_id,
+            "old_issue_id" => old_issue_id,
+            "new_issue_id" => new_issue_id,
+            "old_project_id" => old_project_id,
+            "new_project_id" => new_project_id,
+            "cross_project" => false,
+            "harness_session_preserved" => true
+          }.compact
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, new_agent_id, "Moved worker #{old_agent_id} to #{new_agent_id} on issue #{new_issue_id}.", moved, log_ids)
+      end
+
+      def refresh_issue_status_after_worker_move!(state, issue, now)
+        return unless issue
+
+        workers = state.fetch("agents").select do |candidate|
+          candidate.fetch("type", nil) == "worker" && candidate.fetch("issue_id", nil) == issue.fetch("id") &&
+            candidate.fetch("status", nil) != "killed"
+        end
+        if workers.empty?
+          issue["status"] = issue_has_active_goal?(state, issue.fetch("id")) ? "working" : "idle"
+          issue["updated_at"] = now
+        else
+          update_issue_status_from_workers!(state, issue, now)
+        end
+      end
+
+      def move_worker_rejection(command_id, command_type, payload, message, errors)
+        rejected_result(
+          command_id,
+          command_type,
+          with_dropped_intent(message, "type" => "MoveWorker", "payload" => payload),
+          errors
+        )
+      end
+
+      # Whole-document re-point of one agent id to another, leaving every other reference intact.
+      # A slot is rewritten only when its value is exactly the old worker id; everything else that
+      # the `/recount` walk would clear (because it covers the whole id space) is preserved here,
+      # because a reparent moves exactly one record. Opaque correlation ids and verbatim harness
+      # evidence are skipped by the shared walker, which is what keeps the harness session alive.
+      def repoint_agent_references!(state, old_agent_id, new_agent_id)
+        return if blank?(old_agent_id) || blank?(new_agent_id) || old_agent_id == new_agent_id
+
+        State::Recounter.walk_references!(state) do |value, _path, reference, _mode|
+          if reference
+            value == old_agent_id ? new_agent_id : value
+          else
+            repoint_embedded_agent_id(value, old_agent_id, new_agent_id)
+          end
+        end
+      end
+
+      def repoint_embedded_agent_id(text, old_agent_id, new_agent_id)
+        return text unless text.is_a?(String) && text.include?(old_agent_id)
+        return text unless text.match?(State::Recounter::EMBEDDED_ID_PATTERN)
+
+        text.gsub(State::Recounter::EMBEDDED_ID_PATTERN) do |token|
+          token == old_agent_id ? new_agent_id : token
+        end
+      end
+
+      # Dependents queued behind the moved worker carry the predecessor's issue id in their
+      # deferred_spawn block. The re-point walk updated their after_agent_id to the new worker id
+      # but left the recorded predecessor issue alone (it is an issue id, not the agent id), so
+      # refresh it to the moved worker's new issue so the chain stays coherent for `/recount` and
+      # for the handover prompt the dependent eventually receives.
+      def refresh_deferred_predecessor_issue!(state, predecessor_agent_id, new_issue_id)
+        state.fetch("agents").each do |candidate|
+          next unless candidate.is_a?(Hash) && candidate.fetch("type", nil) == "worker"
+
+          flat_after = present_string(candidate.fetch("after_agent_id", nil))
+          deferred = deferred_spawn_metadata(candidate)
+          deferred_after = present_string(deferred.fetch("after_agent_id", nil))
+          next unless Ids.same?(flat_after || deferred_after, predecessor_agent_id)
+
+          next unless deferred.is_a?(Hash) && !deferred.empty?
+          metadata = candidate.fetch("harness_metadata", {}) || {}
+          candidate["harness_metadata"] = metadata.merge(
+            "deferred_spawn" => deferred.merge("after_agent_issue_id" => new_issue_id)
+          )
+        end
+      end
+
 
       # `/prompt <id>` continues a worker session. When the id is an active head, it starts a
       # replacement head with the original request and compact routing context in hand. A stopped
@@ -19193,9 +19430,18 @@ module Meringue
 
         case command_type
         when "ModifyIssue" then modify_issue_dropped_intent(payload)
+        when "MoveWorker" then move_worker_dropped_intent(payload)
         when "SpawnWorker" then worker_dropped_intent(payload)
         when "PromptAgent" then prompt_dropped_intent(payload)
         end
+      end
+
+      def move_worker_dropped_intent(payload)
+        agent_id = present_string(value_at(payload, "agent_id", "AgentID", "agentId"))
+        target_issue_id = present_string(value_at(payload, "target_issue_id", "TargetIssueID", "targetIssueId", "issue_id", "IssueID", "issueId"))
+        return "worker move" unless agent_id || target_issue_id
+
+        "move of #{agent_id || "a worker"} to #{target_issue_id || "another issue"}"
       end
 
       def modify_issue_dropped_intent(payload)
