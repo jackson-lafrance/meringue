@@ -7,8 +7,8 @@ module Meringue
     module Panes
       class ChatPane
         VISIBLE_SUGGESTION_LIMIT = 3
-        # The model picker is a list the user browses rather than a hint over the
-        # composer, so it gets a taller window than the slash-command popup while
+        # Choice pickers are lists the user browses rather than hints over the
+        # composer, so they get a taller window than slash suggestions while
         # still sharing the same slot, border, and keys.
         MODEL_PICKER_VISIBLE_LIMIT = 10
         HEAD_ICON = "◆"
@@ -368,19 +368,42 @@ module Meringue
           return [] if segments.empty? && defaults.empty?
 
           unless defaults.empty?
-            head_model = defaults.dig("roles", "head", "model") || defaults["model"] || "mixed"
-            worker_model = defaults.dig("roles", "worker", "model") || defaults["model"] || "mixed"
-            head_thinking = defaults.dig("roles", "head", "thinking_level") || defaults["thinking_level"] || "mixed"
-            worker_thinking = defaults.dig("roles", "worker", "thinking_level") || defaults["thinking_level"] || "mixed"
+            role_values = normalized_pi_role_defaults(defaults)
             segments << [" · ", Style::DIM] unless segments.empty?
-            segments.concat(compact_model_status_segments(
-              head_model: head_model,
-              worker_model: worker_model,
-              head_thinking: head_thinking,
-              worker_thinking: worker_thinking
-            ))
+            segments.concat(compact_model_status_segments(**role_values))
           end
           segments
+        end
+
+        # Config and old state files can represent the same effective settings in
+        # two ways: a shared top-level value, or one value under each role. Read
+        # both forms once and resolve empty strings as absent before deciding how
+        # to render. Otherwise a save that moves from a shared value to role
+        # overrides can make the right-aligned footer alternate between a compact
+        # shared label and a misleading "mixed" placeholder across frames.
+        def normalized_pi_role_defaults(defaults)
+          shared_model = present_status_value(defaults["model"])
+          shared_thinking = present_status_value(defaults["thinking_level"])
+          roles = defaults["roles"].is_a?(Hash) ? defaults["roles"] : {}
+          values = {}
+          %w[head worker].each do |role|
+            role_defaults = roles[role]
+            role_defaults = {} unless role_defaults.is_a?(Hash)
+            values[role] = {
+              model: present_status_value(role_defaults["model"]) || shared_model || "unavailable",
+              thinking: present_status_value(role_defaults["thinking_level"]) || shared_thinking || "unavailable"
+            }
+          end
+          {
+            head_model: values.fetch("head").fetch(:model),
+            worker_model: values.fetch("worker").fetch(:model),
+            head_thinking: values.fetch("head").fetch(:thinking),
+            worker_thinking: values.fetch("worker").fetch(:thinking)
+          }
+        end
+
+        def present_status_value(value)
+          value.to_s.strip unless value.to_s.strip.empty?
         end
 
         # Keep the footer short when the two roles share values, while making
@@ -430,8 +453,8 @@ module Meringue
           slash_suggestion_records(state).any?
         end
 
-        # The popup slot between the logs pane and the composer. The model picker,
-        # the open-PR picker, and the slash-command list are all transient lists
+        # The popup slot between the logs pane and the composer. Model, thinking,
+        # theme, harness, open-PR, and slash-command lists are all transient lists
         # over the composer, so they share one geometry, one border, and one
         # keyboard shape instead of introducing another overlay mechanism. A picker
         # wins while it is up.
@@ -453,7 +476,19 @@ module Meringue
         end
 
         def popup_pane_title(state)
-          return "models (#{ModelPicker.harness_for(state, model_picker_state(state).fetch("harness", nil))})" if model_picker?(state)
+          if model_picker?(state)
+            label = if model_picker_thinking?(state)
+                      "thinking"
+                    elsif model_picker_theme?(state)
+                      "theme"
+                    elsif model_picker_harness_picker?(state)
+                      "harness"
+                    else
+                      "models (#{model_picker_harness(state)})"
+                    end
+            tabs = model_picker_role_tabs?(state) ? " · #{model_picker_tabs(state)}" : ""
+            return "#{label}#{tabs}"
+          end
 
           delivery_pr_picker?(state) ? "open pull requests" : "slash commands"
         end
@@ -492,12 +527,79 @@ module Meringue
           model_picker_state(state).fetch("query", "").to_s
         end
 
+        def model_picker_role(state)
+          role = model_picker_state(state).fetch("role", "head").to_s.downcase
+          %w[head worker].include?(role) ? role : "head"
+        end
+
+        def model_picker_kind(state)
+          kind = model_picker_state(state).fetch("kind", "model").to_s
+          %w[model thinking theme harness].include?(kind) ? kind : "model"
+        end
+
+        def model_picker_thinking?(state)
+          model_picker_kind(state) == "thinking"
+        end
+
+        def model_picker_theme?(state)
+          model_picker_kind(state) == "theme"
+        end
+
+        def model_picker_harness_picker?(state)
+          model_picker_kind(state) == "harness"
+        end
+
+        def model_picker_role_tabs?(state)
+          !model_picker_theme?(state)
+        end
+
+        def model_picker_tabs(state)
+          role = model_picker_role(state)
+          role == "head" ? "[Head]  Worker" : "Head  [Worker]"
+        end
+
         def model_picker_harness(state)
           ModelPicker.harness_for(state, model_picker_state(state).fetch("harness", nil))
         end
 
         def model_picker_entries(state)
-          ModelPicker.entries(state, harness: model_picker_harness(state), query: model_picker_query(state))
+          if model_picker_thinking?(state)
+            ModelPicker.thinking_entries(state, role: model_picker_role(state), query: model_picker_query(state))
+          elsif model_picker_theme?(state)
+            query = model_picker_query(state).downcase
+            Style.colorschemes.filter_map.with_index do |theme, index|
+              next unless query.empty? || theme.downcase.include?(query)
+
+              {
+                "reference" => theme,
+                "name" => theme,
+                "current" => theme == Style.current_colorscheme,
+                "description" => theme == Style.current_colorscheme ? "current theme" : "future dashboard theme",
+                "index" => index
+              }
+            end
+          elsif model_picker_harness_picker?(state)
+            query = model_picker_query(state).downcase
+            Harness::Registry.provider_choices.filter_map.with_index do |choice, index|
+              provider = choice.fetch("provider")
+              label = choice.fetch("label")
+              next unless query.empty? || provider.downcase.include?(query) || label.downcase.include?(query)
+
+              {
+                "reference" => provider,
+                "name" => label,
+                "description" => choice.fetch("description", "future #{model_picker_role(state)} harness"),
+                "index" => index
+              }
+            end
+          else
+            ModelPicker.entries(
+              state,
+              harness: model_picker_harness(state),
+              query: model_picker_query(state),
+              role: model_picker_role(state)
+            )
+          end
         end
 
         # Clamped against the list that exists this frame, so a refresh that
@@ -523,14 +625,29 @@ module Meringue
         def model_picker_lines(state)
           entries = model_picker_entries(state)
           if entries.empty?
-            message = ModelPicker.empty_message(state, harness: model_picker_harness(state), query: model_picker_query(state))
+            message = if model_picker_thinking?(state)
+                        "No thinking level matches “#{model_picker_query(state)}”."
+                      elsif model_picker_theme?(state)
+                        "No theme matches “#{model_picker_query(state)}”."
+                      elsif model_picker_harness_picker?(state)
+                        "No harness matches “#{model_picker_query(state)}”."
+                      else
+                        ModelPicker.empty_message(state, harness: model_picker_harness(state), query: model_picker_query(state))
+                      end
             return [[[message, Style::MUTED]]]
           end
 
           selected_index = model_picker_index(state)
           window_start = model_picker_window_start(state)
           entries.drop(window_start).first(MODEL_PICKER_VISIBLE_LIMIT).map.with_index do |entry, offset|
-            model_picker_line(entry, selected: window_start + offset == selected_index)
+            selected = window_start + offset == selected_index
+            if model_picker_thinking?(state)
+              thinking_picker_line(entry, selected: selected)
+            elsif model_picker_theme?(state) || model_picker_harness_picker?(state)
+              choice_picker_line(entry, selected: selected)
+            else
+              model_picker_line(entry, selected: selected)
+            end
           end
         end
 
@@ -550,6 +667,29 @@ module Meringue
 
         # Caption under the box: where the window sits, what the query is, and the
         # keys. The picker is modal and met rarely, so it always states its keys.
+        def thinking_picker_line(entry, selected:)
+          marker = selected ? "›" : " "
+          details = entry.fetch("description", "").to_s
+          [
+            ["#{marker} ", selected ? Style::ACCENT_BOLD : Style::DIM],
+            [entry.fetch("level"), selected ? Style::ACCENT_BOLD : Style::TEXT],
+            details.empty? ? nil : ["  #{details}", Style::MUTED]
+          ].compact
+        end
+
+        def choice_picker_line(entry, selected:)
+          marker = selected ? "›" : " "
+          details = []
+          details << "current" if entry.fetch("current", false)
+          details << entry.fetch("name", "") unless entry.fetch("name", "").to_s.empty?
+          details << entry.fetch("description", "") unless entry.fetch("description", "").to_s.empty?
+          [
+            ["#{marker} ", selected ? Style::ACCENT_BOLD : Style::DIM],
+            [entry.fetch("reference"), selected ? Style::ACCENT_BOLD : Style::TEXT],
+            details.empty? ? nil : ["  #{details.join(" · ")}", Style::MUTED]
+          ].compact
+        end
+
         def model_picker_footer_line(state)
           total = model_picker_entries(state).length
           segments = []
@@ -558,17 +698,38 @@ module Meringue
           end
           query = model_picker_query(state)
           segments << ["  ·  filter: #{query}", Style::TEXT] unless query.empty?
-          segments << ["#{segments.empty? ? "" : "  ·  "}type to filter · ↑↓ move · Enter sets the default · Ctrl-R refreshes · Esc closes", Style::DIM]
+          action = if model_picker_theme?(state)
+                     "Enter applies the theme"
+                   elsif model_picker_harness_picker?(state)
+                     "Enter applies the harness"
+                   else
+                     "Enter sets the default"
+                   end
+          tabs = model_picker_role_tabs?(state) ? " · ←→ switch role" : ""
+          refresh = model_picker_theme?(state) || model_picker_harness_picker?(state) ? "" : " · Ctrl-R refreshes"
+          segments << ["#{segments.empty? ? "" : "  ·  "}type to filter · ↑↓ move#{tabs} · #{action}#{refresh} · Esc closes", Style::DIM]
           segments
         end
 
         def model_picker_count_label(state, total)
+          kind_label = if model_picker_thinking?(state)
+                         "thinking level"
+                       elsif model_picker_theme?(state)
+                         "theme"
+                       elsif model_picker_harness_picker?(state)
+                         "harness"
+                       else
+                         "model"
+                       end
+          noun = total == 1 ? kind_label : "#{kind_label}s"
           label = if total > MODEL_PICKER_VISIBLE_LIMIT
                     window_start = model_picker_window_start(state)
-                    "#{window_start + 1}–#{[window_start + MODEL_PICKER_VISIBLE_LIMIT, total].min} of #{total} models"
+                    "#{window_start + 1}–#{[window_start + MODEL_PICKER_VISIBLE_LIMIT, total].min} of #{total} #{noun}"
                   else
-                    "#{total} model#{total == 1 ? "" : "s"}"
+                    "#{total} #{noun}"
                   end
+          return label unless model_picker_kind(state) == "model"
+
           state_label = ModelPicker.state_label(state, harness: model_picker_harness(state))
           state_label ? "#{label} (#{state_label})" : label
         end

@@ -300,14 +300,16 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
     assert_empty @opener.opened
   end
 
-  def test_slash_prs_preserves_the_existing_empty_picker_feedback
+  def test_slash_prs_keeps_an_empty_picker_feedback_in_the_popup
     state = empty_state.merge("issues" => [issue_record("P1-I1", "delivery_pull_request" => pull_request("70", "state" => "merged"))])
 
     result = @app.send(:handle_key, "\r", "/prs", 4, -1, nil, composed_state(state, chat: { "input_buffer" => "/prs" }))
+    picker = compose_app_state(@app, state)
 
     assert_equal ["", 0, -1], result
-    refute @pane.delivery_pr_picker?(compose_app_state(@app, state))
-    assert_includes @app.instance_variable_get(:@messages).map { |message| message.fetch("text") }.join("\n"), "No delivery pull requests are open"
+    assert @pane.delivery_pr_picker?(picker)
+    assert_equal ["No open pull requests are tracked yet."], plain_lines(@pane.popup_lines(picker))
+    assert_empty @app.instance_variable_get(:@messages)
   end
 
   # The list box holds PRs only; the count and the keys are a caption under it.
@@ -396,13 +398,15 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
     refute @pane.delivery_pr_picker?(compose_app_state(@app, @state))
   end
 
-  def test_ctrl_b_with_nothing_open_reports_it_instead_of_an_empty_picker
+  def test_ctrl_b_with_nothing_open_keeps_the_empty_picker_in_the_popup
     state = empty_state.merge("issues" => [issue_record("P1-I1", "delivery_pull_request" => pull_request("70", "state" => "merged"))])
     @app.send(:handle_key, "\u0002", "", 0, -1, nil, composed_state(state))
+    picker = compose_app_state(@app, state)
 
-    refute @pane.delivery_pr_picker?(compose_app_state(@app, state))
+    assert @pane.delivery_pr_picker?(picker)
+    assert_equal ["No open pull requests are tracked yet."], plain_lines(@pane.popup_lines(picker))
+    assert_empty @app.instance_variable_get(:@messages)
     assert_empty @opener.opened
-    assert_includes @app.instance_variable_get(:@messages).map { |message| message.fetch("text") }.join("\n"), "No delivery pull requests are open"
   end
 
   def test_a_selected_worker_keeps_ctrl_b_pointed_at_its_own_pull_request

@@ -143,13 +143,15 @@ module Meringue
         # PR to open. It is transient UI, so it is never persisted.
         @delivery_pr_picker_active = false
         @delivery_pr_picker_index = 0
-        # Model picker: the interactive replacement for `/models` dumping the
-        # whole harness catalog into the log. Transient UI, never persisted, and
-        # it writes nothing itself: a selection is applied as `/model <ref>`.
+        # Shared choice picker: models/thinking/themes/harnesses use the same
+        # transient popup state as the model picker, never persist UI state, and
+        # write nothing themselves; selections submit normal slash commands.
         @model_picker_active = false
         @model_picker_index = 0
         @model_picker_query = +""
         @model_picker_harness = nil
+        @model_picker_role = "head"
+        @model_picker_kind = "model"
         # Full-screen schema-backed Settings. The draft is purely in memory until
         # one SaveConfiguration command succeeds.
         @settings_active = false
@@ -2492,6 +2494,9 @@ module Meringue
         return handle_local_jump_command(text, state) if jump_command?(text)
         return handle_local_pull_requests_command(state) if pull_requests_picker_command?(text)
         return handle_local_models_command(text, state) if models_picker_command?(text)
+        return handle_local_thinking_command(text, state) if thinking_picker_command?(text)
+        return handle_local_theme_command(text, state) if theme_picker_command?(text)
+        return handle_local_harness_command(text, state) if harness_picker_command?(text)
         return handle_local_open_session_command(text, state) if open_session_command?(text)
         return handle_local_setup_command(state) if setup_command?(text)
         return handle_local_keybind_command if keybind_command?(text)
@@ -2545,7 +2550,7 @@ module Meringue
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode. In the AgentTree, #{keys_for("rename_selected")} starts a quick rename for the selected project or issue by pre-filling `/project rename` or `/issue rename`; type its new name in the composer and press Enter.
           Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
           Pull-request picker: /prs opens every tracked PR that is still open, regardless of the AgentTree selection; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} opens the highlighted PR, and #{keys_for("cancel_navigation")} closes. #{keys_for("open_delivery_pr")} keeps its selection-aware behavior: it opens the selected issue's PR, or this picker when chat is unscoped.
-          Model picker: /models or bare /model opens a searchable list of the models the harness reports (/models claude scopes it to another harness); type to filter, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} applies the model as the future-session default (same as /model <reference>), #{keys_for("refresh_model_catalog")} re-fetches the catalog, #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker.
+          Settings pickers: bare /model or /models opens models, bare /thinking opens thinking levels, bare /theme opens themes, and bare /harness opens harnesses. They are bordered popovers; #{keys_for("cursor_left")}/#{keys_for("cursor_right")} switches role tabs where shown, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} moves, #{keys_for("submit")} applies, #{keys_for("refresh_model_catalog")} refreshes the model catalog, and #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker. /prs opens the pull-request popover.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace or a selected head's saved harness session; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
           Head/session debugging: select a head and press #{keys_for("open_agent_workspace")}, or use /open-session <agent_id>, to open its saved harness session externally without turning it into a chat target.
           Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
@@ -2646,16 +2651,59 @@ module Meringue
         tokens = text.to_s.strip.split(/\s+/)
         arguments = tokens.drop(1).map { |token| token.to_s.downcase }
         command = tokens.first.to_s.downcase.delete_prefix("/")
-        command = Input::SlashCommandParser.expand_bare_singular_alias(command, arguments.join(" "))
-        return false unless command == "models"
+        role_only_model_command = command == "model" && arguments.length == 1 && %w[head worker].include?(arguments.first)
+        command = Input::SlashCommandParser.expand_bare_singular_alias(command, arguments.join(" ")) unless role_only_model_command
+        return false unless command == "models" || role_only_model_command
         return false if arguments.any? { |token| Input::SlashCommandParser::MODEL_CATALOG_REFRESH_WORDS.include?(token) }
+        return false if arguments.length > 1
 
-        arguments.length <= 1
+        # `/models head` and `/models worker` select the initial tab; any other
+        # single argument keeps the existing harness-scoping behavior.
+        true
+      end
+
+      def thinking_picker_command?(text)
+        tokens = text.to_s.strip.split(/\s+/)
+        return false unless tokens.first.to_s.downcase == "/thinking"
+
+        arguments = tokens.drop(1).map { |token| token.to_s.downcase }
+        arguments.empty? || (arguments.length == 1 && %w[head worker].include?(arguments.first))
+      end
+
+      def theme_picker_command?(text)
+        text.to_s.strip.downcase == "/theme"
+      end
+
+      def harness_picker_command?(text)
+        tokens = text.to_s.strip.split(/\s+/)
+        return false unless tokens.first.to_s.downcase == "/harness"
+
+        arguments = tokens.drop(1).map { |token| token.to_s.downcase }
+        arguments.empty? || (arguments.length == 1 && %w[head worker].include?(arguments.first))
       end
 
       def handle_local_models_command(text, state)
-        harness = text.to_s.strip.split(/\s+/)[1]
-        open_model_picker(state, harness: harness)
+        arguments = text.to_s.strip.split(/\s+/).drop(1)
+        role = arguments.first if %w[head worker].include?(arguments.first.to_s.downcase)
+        harness = role ? nil : arguments.first
+        open_model_picker(state, harness: harness, role: role)
+        true
+      end
+
+      def handle_local_thinking_command(text, state)
+        role = text.to_s.strip.split(/\s+/)[1]
+        open_thinking_picker(state, role: role)
+        true
+      end
+
+      def handle_local_theme_command(_text, state)
+        open_theme_picker(state)
+        true
+      end
+
+      def handle_local_harness_command(text, state)
+        role = text.to_s.strip.split(/\s+/)[1]
+        open_harness_picker(state, role: role)
         true
       end
 
@@ -2713,7 +2761,14 @@ module Meringue
       end
 
       def local_navigation_command_without_id?(input_buffer)
-        ["/jump", "/prs", "/model", "/models", "/setup", "/config", "/open-session"].include?(input_buffer.to_s.strip.downcase)
+        text = input_buffer.to_s.strip.downcase
+        return true if ["/jump", "/prs", "/setup", "/config", "/open-session"].include?(text)
+        return true if models_picker_command?(text)
+        return true if thinking_picker_command?(text)
+        return true if theme_picker_command?(text)
+        return true if harness_picker_command?(text)
+
+        false
       end
 
       def enter_agent_tree_navigation(state)
@@ -3755,19 +3810,56 @@ module Meringue
           "active" => true,
           "index" => @model_picker_index,
           "query" => @model_picker_query.to_s,
-          "harness" => @model_picker_harness
+          "harness" => @model_picker_harness,
+          "role" => @model_picker_role,
+          "kind" => @model_picker_kind
         }.compact
       end
 
-      # The picker always opens, even when the harness could not give us a
-      # catalog: an explicit "why the list is missing" line is the useful answer,
-      # and a blank popup is not. It reads the kernel-cached snapshot, so opening
-      # it never starts a harness process.
-      def open_model_picker(state, harness: nil)
+      # Model and choice pickers always open, even when their source cannot give
+      # us a catalog/list: an explicit explanation inside the popup is the useful
+      # answer, and a chat line or blank popup is not. The model path reads the
+      # kernel-cached snapshot, so opening it never starts a harness process.
+      def open_model_picker(state, harness: nil, role: nil)
         @model_picker_active = true
         @model_picker_index = 0
         @model_picker_query = +""
         @model_picker_harness = harness.to_s.strip.empty? ? nil : harness.to_s.strip
+        @model_picker_role = %w[head worker].include?(role.to_s.downcase) ? role.to_s.downcase : "head"
+        @model_picker_kind = "model"
+        close_delivery_pr_picker
+        true
+      end
+
+      def open_thinking_picker(state, role: nil)
+        @model_picker_active = true
+        @model_picker_index = 0
+        @model_picker_query = +""
+        @model_picker_harness = nil
+        @model_picker_role = %w[head worker].include?(role.to_s.downcase) ? role.to_s.downcase : "head"
+        @model_picker_kind = "thinking"
+        close_delivery_pr_picker
+        true
+      end
+
+      def open_theme_picker(state)
+        @model_picker_active = true
+        @model_picker_index = 0
+        @model_picker_query = +""
+        @model_picker_harness = nil
+        @model_picker_role = "head"
+        @model_picker_kind = "theme"
+        close_delivery_pr_picker
+        true
+      end
+
+      def open_harness_picker(state, role: nil)
+        @model_picker_active = true
+        @model_picker_index = 0
+        @model_picker_query = +""
+        @model_picker_harness = nil
+        @model_picker_role = %w[head worker].include?(role.to_s.downcase) ? role.to_s.downcase : "head"
+        @model_picker_kind = "harness"
         close_delivery_pr_picker
         true
       end
@@ -3777,10 +3869,48 @@ module Meringue
         @model_picker_query = +""
         @model_picker_index = 0
         @model_picker_harness = nil
+        @model_picker_role = "head"
+        @model_picker_kind = "model"
       end
 
       def model_picker_entries(state)
-        ModelPicker.entries(state, harness: @model_picker_harness, query: @model_picker_query)
+        case @model_picker_kind
+        when "thinking"
+          ModelPicker.thinking_entries(state, role: @model_picker_role, query: @model_picker_query)
+        when "theme"
+          Style.colorschemes.filter_map.with_index do |theme, index|
+            next unless @model_picker_query.to_s.empty? || theme.downcase.include?(@model_picker_query.to_s.downcase)
+
+            {
+              "reference" => theme,
+              "name" => theme,
+              "current" => theme == Style.current_colorscheme,
+              "description" => theme == Style.current_colorscheme ? "current theme" : "future dashboard theme",
+              "index" => index
+            }
+          end
+        when "harness"
+          query = @model_picker_query.to_s.downcase
+          Harness::Registry.provider_choices.filter_map.with_index do |choice, index|
+            provider = choice.fetch("provider")
+            label = choice.fetch("label")
+            next unless query.empty? || provider.downcase.include?(query) || label.downcase.include?(query)
+
+            {
+              "reference" => provider,
+              "name" => label,
+              "description" => choice.fetch("description", "future #{(@model_picker_role || "head")} harness"),
+              "index" => index
+            }
+          end
+        else
+          ModelPicker.entries(
+            state,
+            harness: @model_picker_harness,
+            query: @model_picker_query,
+            role: @model_picker_role
+          )
+        end
       end
 
       # A modal list that owns typing while it is up: printable keys filter it,
@@ -3792,6 +3922,14 @@ module Meringue
         entries = model_picker_entries(state)
         return handle_model_picker_mouse(key, unchanged, on_submit, state, entries) if mouse_event?(key)
 
+        if keybinding?("cursor_left", key)
+          switch_model_picker_role(-1)
+          return unchanged
+        end
+        if keybinding?("cursor_right", key)
+          switch_model_picker_role(1)
+          return unchanged
+        end
         if keybinding?("suggestion_previous", key)
           move_model_picker(-1, entries.length)
           return unchanged
@@ -3801,7 +3939,9 @@ module Meringue
           return unchanged
         end
         if keybinding?("refresh_model_catalog", key)
-          refresh_model_catalog(on_submit, state)
+          if @model_picker_kind == "model" || @model_picker_kind == "thinking"
+            refresh_model_catalog(on_submit, state)
+          end
           return unchanged
         end
         if keybinding?("submit", key)
@@ -3857,6 +3997,14 @@ module Meringue
         @model_picker_index = (@model_picker_index.to_i + step) % count
       end
 
+      def switch_model_picker_role(step)
+        roles = %w[head worker]
+        index = roles.index(@model_picker_role) || 0
+        @model_picker_role = roles[(index + step.to_i) % roles.length]
+        @model_picker_index = 0
+        @model_picker_query = +""
+      end
+
       def selected_model_picker_entry(entries)
         return nil if entries.empty?
 
@@ -3868,14 +4016,25 @@ module Meringue
       # log line. The picker never writes session defaults itself.
       def apply_model_picker_entry(entry, on_submit, state)
         unless entry
-          # Expected unavailability (no catalog, or a query that matched nothing),
-          # so it stays a transient hint rather than a durable log line.
-          append_jump_response(ModelPicker.empty_message(state, harness: @model_picker_harness, query: @model_picker_query))
+          # Expected unavailability (no catalog, or a query that matched nothing)
+          # is already rendered inside the popup. Do not duplicate it in chat.
           return false
         end
 
+        kind = @model_picker_kind
+        role = @model_picker_role
         close_model_picker
-        submit_prompt("/model #{entry.fetch("reference")}", on_submit, state)
+        command = case kind
+                  when "thinking"
+                    "/thinking #{role} #{entry.fetch("level")}"
+                  when "theme"
+                    "/theme #{entry.fetch("reference")}"
+                  when "harness"
+                    "/harness #{role} #{entry.fetch("reference")}"
+                  else
+                    "/model #{role} #{entry.fetch("reference")}"
+                  end
+        submit_prompt(command, on_submit, state)
         true
       end
 
@@ -3895,15 +4054,14 @@ module Meringue
         end
 
         entries = OpenPullRequests.entries(state)
-        if entries.empty?
-          # Expected unavailability, so it stays a transient hint rather than a
-          # durable log line or an empty popup.
-          append_jump_response(OpenPullRequests.tracked?(state) ? "No delivery pull requests are open right now." : "No delivery pull requests are tracked yet.")
-          return false
-        end
-
+        # Keep the empty explanation in the same bordered popup as a populated
+        # picker. Previously `/prs`/Ctrl-B appended this expected state to chat,
+        # which made the picker contract depend on whether a PR happened to be
+        # available at that instant.
         @delivery_pr_picker_active = true
-        @delivery_pr_picker_index = @delivery_pr_picker_index.to_i.clamp(0, entries.length - 1)
+        @delivery_pr_picker_index = @delivery_pr_picker_index.to_i.clamp(0, [entries.length - 1, 0].max)
+        return true if entries.empty?
+
         true
       end
 

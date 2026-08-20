@@ -12,7 +12,7 @@ module Meringue
       COMMAND_SPECS = [
         ["/help", "Show slash command help."],
         ["/quit", "Quit the interactive TUI."],
-        ["/theme <name>", "Set and persist the TUI theme."],
+        ["/theme <name>", "With no arguments, open the theme picker; otherwise set and persist the TUI theme."],
         ["/project add <path> [name]", "Register a project directory."],
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
@@ -24,9 +24,9 @@ module Meringue
         ["/prompt <agent_id> \"<message>\"", "Continue a worker session or take over a still-routing head."],
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
-        ["/harness [head|worker] <pi|claude|antigravity>", "Select role-aware harness defaults for future agents; omit the role to update both."],
+        ["/harness [head|worker] <pi|claude|antigravity>", "With no arguments, open the harness picker; otherwise select role-aware harness defaults for future agents; omit the role to update both."],
         ["/model [head|worker] <provider>/<model-id>", "With no arguments, open the model picker; otherwise persist the model for future Pi sessions. Omit the role to update both future heads and workers. Existing sessions are unchanged. The model id may itself contain / and :."],
-        ["/thinking [head|worker] <level>", "Persist a Pi thinking default. Omit the role to update both future heads and workers; existing sessions are unchanged."],
+        ["/thinking [head|worker] <level>", "With no arguments, open the Head/Worker thinking picker; otherwise persist a Pi thinking default. Omit the role to update both future heads and workers; existing sessions are unchanged."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
         ["/goal create [issue_id] \"<prompt>\" --metric \"<command>\" --target <number> [flags]", "Start a goal loop: name an issue, or give only a prompt and Meringue creates the issue for it. It iterates until the metric hits its target or a budget guard trips."],
         ["/goal create [issue_id] \"<prompt>\" --reviewer [--max-iterations <n>]", "Start a reviewer-judged goal loop for work with no number: it iterates until a reviewer approves the work or the iteration budget runs out."],
@@ -422,9 +422,17 @@ module Meringue
       def self.model_entry_matches?(entry, query)
         return true if query.empty?
 
+        normalized_query = model_search_text(query)
         [entry.fetch("reference"), entry.fetch("id"), entry["name"]].compact.any? do |value|
-          value.to_s.downcase.include?(query)
+          model_search_text(value).include?(normalized_query)
         end
+      end
+
+      # Keep model references faithful in the UI while making autocomplete
+      # forgiving about punctuation users commonly omit while typing. In
+      # particular, `gpt5` matches both `gpt-5.6-luna` and `gpt-5.5`.
+      def self.model_search_text(value)
+        value.to_s.downcase.delete("-")
       end
 
       def self.model_suggestion_description(entry, context, configured_default:, catalog:)
@@ -547,7 +555,8 @@ module Meringue
       def self.current_default_thinking_level(state, harness, role = nil)
         defaults = state.dig("metadata", "pi_session_defaults") || {}
         level = if %w[head worker].include?(role.to_s)
-                  defaults.dig("roles", role.to_s, "thinking_level")
+                  role_level = defaults.dig("roles", role.to_s, "thinking_level").to_s.strip
+                  role_level.empty? ? defaults["thinking_level"] : role_level
                 else
                   defaults["thinking_level"]
                 end
@@ -562,7 +571,8 @@ module Meringue
       def self.current_default_model(state, harness, role = nil)
         defaults = state.dig("metadata", "pi_session_defaults") || {}
         model = if %w[head worker].include?(role.to_s)
-                  defaults.dig("roles", role.to_s, "model") || defaults["model"]
+                  role_model = defaults.dig("roles", role.to_s, "model").to_s.strip
+                  role_model.empty? ? defaults["model"] : role_model
                 else
                   defaults["model"]
                 end
@@ -578,7 +588,8 @@ module Meringue
       def self.thinking_level_model_reference(state, harness, role = nil)
         defaults = state.dig("metadata", "pi_session_defaults") || {}
         reference = if %w[head worker].include?(role.to_s)
-                      defaults.dig("roles", role.to_s, "model") || defaults["model"]
+                      role_reference = defaults.dig("roles", role.to_s, "model").to_s.strip
+                      role_reference.empty? ? defaults["model"] : role_reference
                     else
                       defaults["model"]
                     end

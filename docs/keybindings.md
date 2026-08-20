@@ -291,12 +291,13 @@ failure recovery, first-run versus rerun behavior, and the completion marker.
 
 ## Model picker
 
-Open it with `/models` (optionally `/models claude` to scope it to another harness). It is a modal list in the same popup slot as the slash-command suggestions, but it is browsed rather than glanced at, so it shows up to ten rows and captions them with `1–10 of 122 models  ·  type to filter · ↑↓ move · Enter sets the default · Ctrl-R refreshes · Esc closes`.
+Open it with `/models` (optionally `/models claude` to scope it to another harness). It is a modal list in the same popup slot as the slash-command suggestions, but it is browsed rather than glanced at, so it shows up to ten rows and captions them with `1–10 of 122 models  ·  type to filter · ←→ switch role · ↑↓ move · Enter sets the default · Ctrl-R refreshes · Esc closes`. Bare `/model` opens the same picker; bare `/thinking`, `/theme`, and `/harness` open their corresponding choice popovers in the same slot.
 
 - Any printable character: filter the list. Space separated tokens all have to match, so `openai high` narrows by provider and thinking level at once.
 - `Backspace`: delete one character of the filter. `Ctrl-W`: clear the filter.
+- `←` / `→`: switch between the clearly labelled Head and Worker tabs.
 - `↑` / `↓`: move the highlight; it wraps. The mouse wheel scrolls it and clicking a row picks that row.
-- `Enter`: apply the highlighted model as the future-session default. This is exactly `/model <provider>/<model-id>`, so the kernel validates, journals, and logs it the same way.
+- `Enter`: apply the highlighted model or thinking level for the active role. This submits the normal role-specific `/model` or `/thinking` command, so the kernel validates, journals, and logs it the same way.
 - `Ctrl-R`: re-fetch the catalog through the kernel (`/models refresh`) without closing the picker.
 - `Esc`, a click outside the list, or any unhandled control key: close it without changing anything.
 - The list is never blank: an unavailable catalog, an unsupported harness, a snapshot that has never been fetched, and a filter that matched nothing each render their own explanation and say what to do next.

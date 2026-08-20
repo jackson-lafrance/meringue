@@ -978,10 +978,11 @@ module Meringue
         }
       end
 
-      # One popup slot above the composer, shared by the slash-command list, the
-      # open-PR picker, and the model picker (see ChatPane#popup?), so all three
-      # are bounded the same way. Only the number of visible rows differs: the
-      # model picker is browsed, so it is allowed to be taller. First-run setup is
+      # One popup slot above the composer, shared by slash suggestions and every
+      # interactive choice picker (models, thinking, themes, harnesses, and open
+      # PRs; see ChatPane#popup?), so all of them stay on-screen instead of
+      # duplicating feedback in chat. Only the number of visible rows differs:
+      # browsed pickers are allowed to be taller. First-run setup is
       # not in this slot; it takes over the screen.
       #
       # The caption under the box gets its own reserved row, so the box keeps every
@@ -1061,18 +1062,32 @@ module Meringue
 
       def draw_hint_line(canvas, x, y, width, line, right_line = [])
         right_width = segment_text_width(right_line)
+        return canvas.write_segments(x, y, line, max_width: width, default_style: Style::MUTED) unless right_width.positive?
+
+        # Keep the right-hand status as the right-hand status even when a
+        # role-split model summary is wider than the terminal. The old fallback
+        # drew the left hint instead, making model/status text disappear or jump
+        # sides as the effective string crossed the available width.
+        visible_right_width = [right_width, width].min
         left_width = hint_left_width(width, right_line)
-        if right_width.positive? && right_width < width
+        if right_width < width
           canvas.write_segments(x, y, line, max_width: left_width, default_style: Style::MUTED)
-          canvas.write_segments(x + width - right_width, y, right_line, max_width: right_width, default_style: Style::MUTED)
-        else
-          canvas.write_segments(x, y, line, max_width: width, default_style: Style::MUTED)
         end
+        canvas.write_segments(
+          x + width - visible_right_width,
+          y,
+          right_line,
+          max_width: visible_right_width,
+          default_style: Style::MUTED
+        )
       end
 
       def hint_left_width(width, right_line)
         right_width = segment_text_width(right_line)
-        right_width.positive? && right_width < width ? [width - right_width - 2, 0].max : width
+        return width unless right_width.positive?
+
+        visible_right_width = [right_width, width].min
+        [width - visible_right_width - 2, 0].max
       end
 
       def write_centered_segments(canvas, x, y, width, segments)

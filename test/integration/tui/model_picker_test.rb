@@ -40,7 +40,7 @@ class TuiModelPickerTest < Minitest::Test
     picker = open_picker
 
     assert @pane.model_picker?(picker)
-    assert_equal "models (pi)", @pane.popup_pane_title(picker)
+    assert_equal "models (pi) · [Head]  Worker", @pane.popup_pane_title(picker)
     # Nothing was sent to the kernel: opening the picker only reads state.
     assert_empty @submitted
 
@@ -65,7 +65,7 @@ class TuiModelPickerTest < Minitest::Test
     singular_picker = open_picker("/model")
 
     assert @pane.model_picker?(singular_picker)
-    assert_equal "models (pi)", @pane.popup_pane_title(singular_picker)
+    assert_equal "models (pi) · [Head]  Worker", @pane.popup_pane_title(singular_picker)
     assert_equal plural_rows, plain_lines(@pane.popup_lines(singular_picker))
     assert_empty @submitted
   end
@@ -126,7 +126,7 @@ class TuiModelPickerTest < Minitest::Test
     assert_equal 1, @pane.model_picker_index(moved)
 
     send_key("\r")
-    assert_equal ["/model anthropic/claude-opus-5"], wait_for_submissions(1)
+    assert_equal ["/model head anthropic/claude-opus-5"], wait_for_submissions(1)
     refute @pane.model_picker?(compose)
   end
 
@@ -157,7 +157,81 @@ class TuiModelPickerTest < Minitest::Test
     assert_equal [reference], picker_references
 
     send_key("\r")
-    assert_equal ["/model #{reference}"], wait_for_submissions(1)
+    assert_equal ["/model head #{reference}"], wait_for_submissions(1)
+  end
+
+  def test_model_search_accepts_queries_without_hyphens
+    @state = state_with_catalog(
+      default_model: "openai/gpt-5.6-luna",
+      catalogs: {
+        "pi" => catalog_snapshot(
+          "pi",
+          models: [
+            { "provider" => "openai", "id" => "gpt-5.6-luna" },
+            { "provider" => "openai", "id" => "gpt-5.5" },
+            { "provider" => "anthropic", "id" => "claude-opus-5" }
+          ]
+        )
+      }
+    )
+
+    open_picker
+    "gpt5".each_char { |character| send_key(character) }
+
+    assert_equal %w[openai/gpt-5.6-luna openai/gpt-5.5], picker_references
+  end
+
+  def test_left_and_right_arrows_switch_the_model_picker_role_tab
+    open_picker
+    send_key("\e[C")
+
+    assert_equal "models (pi) · Head  [Worker]", @pane.popup_pane_title(compose)
+    assert_includes plain_line(@pane.popup_footer_line(compose)), "switch role"
+
+    send_key("\r")
+    assert_equal ["/model worker openai/gpt-5.6-sol"], wait_for_submissions(1)
+  end
+
+  def test_thinking_opens_the_role_picker_and_applies_the_selected_role
+    picker = open_picker("/thinking")
+
+    assert_equal "thinking · [Head]  Worker", @pane.popup_pane_title(picker)
+    assert_includes plain_lines(@pane.popup_lines(picker)).first, "high"
+
+    send_key("\e[C")
+    assert_equal "thinking · Head  [Worker]", @pane.popup_pane_title(compose)
+    send_key("\r")
+
+    assert_equal ["/thinking worker high"], wait_for_submissions(1)
+    refute @pane.model_picker?(compose)
+  end
+
+  def test_theme_opens_in_the_shared_popup_and_applies_without_chat_feedback
+    picker = open_picker("/theme")
+
+    assert_equal "theme", @pane.popup_pane_title(picker)
+    assert @pane.popup_lines(picker).any? { |line| plain_line(line).include?(Meringue::TUI::Style.current_colorscheme) }
+    assert_empty @submitted
+
+    "rose".each_char { |character| send_key(character) }
+    assert_equal ["rose-pine"], @app.send(:model_picker_entries, compose).map { |entry| entry.fetch("reference") }
+    send_key("\r")
+
+    assert_equal ["/theme rose-pine"], wait_for_submissions(1)
+    refute @pane.model_picker?(compose)
+  end
+
+  def test_harness_opens_in_the_shared_role_popup
+    picker = open_picker("/harness")
+
+    assert_equal "harness · [Head]  Worker", @pane.popup_pane_title(picker)
+    assert_includes plain_lines(@pane.popup_lines(picker)).join(" "), "pi"
+
+    send_key("\e[C")
+    assert_equal "harness · Head  [Worker]", @pane.popup_pane_title(compose)
+    send_key("\r")
+
+    assert_equal ["/harness worker pi"], wait_for_submissions(1)
   end
 
   def test_the_highlight_wraps_so_the_last_model_is_one_key_away
@@ -195,7 +269,7 @@ class TuiModelPickerTest < Minitest::Test
     )
     picker = open_picker("/models claude")
 
-    assert_equal "models (claude)", @pane.popup_pane_title(picker)
+    assert_equal "models (claude) · [Head]  Worker", @pane.popup_pane_title(picker)
     assert_equal ["anthropic/claude-sonnet-9"], picker_references
 
     send_key(CTRL_R)
@@ -224,7 +298,7 @@ class TuiModelPickerTest < Minitest::Test
     # Enter cannot silently do nothing: there is no row to apply.
     send_key("\r")
     assert_empty @submitted
-    assert_includes messages_text, "pi model catalog unavailable"
+    assert_empty messages_text
   end
 
   def test_an_unsupported_harness_says_it_has_no_catalog_at_all
@@ -236,7 +310,7 @@ class TuiModelPickerTest < Minitest::Test
     row = plain_lines(@pane.popup_lines(state)).fetch(0)
 
     assert_includes row, "does not expose a model catalog"
-    assert_equal "models (antigravity)", @pane.popup_pane_title(state)
+    assert_equal "models (antigravity) · [Head]  Worker", @pane.popup_pane_title(state)
   end
 
   # A stale list is still the harness's own answer, so it stays listed in full and
@@ -273,7 +347,7 @@ class TuiModelPickerTest < Minitest::Test
     picker = open_picker
     send_key(press_event(screen_position_for_row(picker, 2)))
 
-    assert_equal ["/model openai/gpt-5.6-mini"], wait_for_submissions(1)
+    assert_equal ["/model head openai/gpt-5.6-mini"], wait_for_submissions(1)
     refute @pane.model_picker?(compose)
 
     open_picker

@@ -25,6 +25,27 @@ class TuiLayoutTest < Minitest::Test
     assert_includes frame, "─ chat ─"
   end
 
+  def test_long_role_status_stays_in_the_status_slot_instead_of_flickering_into_chat_hints
+    state = composed_state(
+      empty_state.merge(
+        "metadata" => {
+          "active_harness" => "pi",
+          "pi_session_defaults" => {
+            "roles" => {
+              "head" => { "model" => "openai/gpt-5.6-luna", "thinking_level" => "low" },
+              "worker" => { "model" => "anthropic/claude-opus-5", "thinking_level" => "max" }
+            }
+          }
+        }
+      )
+    )
+
+    bottom = @layout.render(state, width: 100, height: 32).split("\n", -1).last
+
+    assert_includes bottom, "harness: Pi"
+    refute_includes bottom, "Ctrl-C"
+  end
+
   def test_frame_is_exactly_the_requested_rectangle_at_many_sizes
     [[64, 18], [80, 24], [100, 32], [120, 40], [200, 60], [300, 20]].each do |width, height|
       lines = @layout.render(@state, width: width, height: height).split("\n", -1)
