@@ -255,8 +255,8 @@ module Meringue
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/harness [head|worker] <pi|claude|antigravity>", "Select role-aware harness defaults for future agents; omit the role to update both."],
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
-        ["/model <provider>/<model-id>", "With no arguments, open the same TUI picker as /models; otherwise persist the model used for all future Pi heads and workers. Existing sessions are unchanged. The model id may itself contain / and :."],
-        ["/thinking <level>", "Persist the thinking level used for all future Pi heads and workers: off, minimal, low, medium, high, xhigh, or max."],
+        ["/model <provider>/<model-id>", "With no arguments, open the same TUI picker as /models; otherwise persist the model used for all future heads and workers. Existing sessions are unchanged. The model id may itself contain / and :."],
+        ["/thinking <level>", "Persist the thinking level used for all future heads and workers: off, minimal, low, medium, high, xhigh, or max."],
         ["/goal create [issue_id] \"<prompt>\" --metric \"<command>\" --target <number> [--project <project_id>] [--comparator gte|lte|gt|lt|eq] [--max-iterations <n>] [--guardrail \"<command>\"] [--parse last_number|first_number|exit_status] [--pattern \"<regex>\"] [--title \"<title>\"] [--fresh-attempt] [--paused]", "Start a goal loop: the kernel keeps producing attempts until the metric hits its target or a budget/no-progress guard trips. Name an issue to attach the loop to it, or give only a quoted prompt and Meringue creates the issue itself."],
         ["/goal create [issue_id] \"<prompt>\" --reviewer [--project <project_id>] [--max-iterations <n>] [--guardrail \"<command>\"] [--title \"<title>\"] [--fresh-attempt] [--paused]", "Start a reviewer-judged goal loop for work with no number: each attempt is reviewed against the success criteria, and the loop stops when the reviewer approves or the iteration budget runs out."],
         ["/goal status [goal_id]", "Show goal loops, their iteration accounting, and why a stopped goal stopped."],
@@ -569,7 +569,7 @@ module Meringue
       HEAD_RESULT_REPAIR_MAX_ATTEMPTS = 1
       HEAD_RECONCILE_RECOVERY_MAX_ATTEMPTS = 1
       WORKER_RECONCILE_RESUME_MAX_ATTEMPTS = 3
-      # A shared Meringue process exit can strand every Pi RPC child at once. Each recovery attempt
+      # A shared Meringue process exit can strand every managed harness child at once. Each recovery attempt
       # is claimed durably before attach/prompt I/O, and the same bound as ordinary session repair
       # prevents a broken transcript from creating an unbounded restart loop.
       WORKER_SUPERVISOR_RECOVERY_MAX_ATTEMPTS = WORKER_RECONCILE_RESUME_MAX_ATTEMPTS
@@ -946,7 +946,7 @@ module Meringue
           return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
           return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"]) if agent.fetch("status", nil) == "killed"
           return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["missing_harness_session"]) unless agent_has_session_reference?(agent)
-          return rejected_result(command_id, command_type, "Agent #{agent_id} is owned by its Agent session; return to the dashboard before pausing it.", ["interactive_focus_active"]) if interactive_focus_active?(agent)
+          return rejected_result(command_id, command_type, "Agent #{agent_id} is owned by its Agent session; return to the dashboard before pausing it.", ["interactive_focus_active"]) if agent_focus_ownership_active?(agent)
 
           metadata = agent.fetch("harness_metadata", {}) || {}
           if agent.fetch("status", nil) == "paused" && !metadata.fetch("pause_request", nil).is_a?(Hash)
@@ -1074,7 +1074,7 @@ module Meringue
           return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
           return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"]) if agent.fetch("status", nil) == "killed"
           return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["missing_harness_session"]) unless agent_has_session_reference?(agent)
-          return rejected_result(command_id, command_type, "Agent #{agent_id} is owned by its Agent session; return to the dashboard before resuming it.", ["interactive_focus_active"]) if interactive_focus_active?(agent)
+          return rejected_result(command_id, command_type, "Agent #{agent_id} is owned by its Agent session; return to the dashboard before resuming it.", ["interactive_focus_active"]) if agent_focus_ownership_active?(agent)
 
           metadata = agent.fetch("harness_metadata", {}) || {}
           request = metadata.fetch("resume_request", nil)
@@ -1385,6 +1385,140 @@ module Meringue
         )
       end
 
+      # How this agent's backend can be focused, so callers stay harness-agnostic:
+      #
+      #   "live_terminal" - the session already runs in an interactive process Meringue owns, and
+      #                     focusing it is a pure attach.
+      #   "handoff"       - the backend must settle and release its managed transport first.
+      #   "none"          - the backend has no focusable session.
+      def agent_focus_mode(agent_id)
+        agent = synchronized_state { find_agent(normalized_state, agent_id.to_s) }
+        return "none" unless agent
+
+        client = begin
+          harness_client_for_agent(agent)
+        rescue StandardError
+          nil
+        end
+        return "none" unless client
+        return "live_terminal" if client.respond_to?(:live_terminal_supported?) && client.live_terminal_supported?
+        return "handoff" if client.respond_to?(:interactive_session_supported?) && client.interactive_session_supported?
+
+        "none"
+      end
+
+      # Attaches a viewer to the session's own running interactive process.
+      #
+      # Nothing about the session changes: no turn is aborted, no transport is quiesced, and no
+      # process is started in place of another. That is the entire difference from the handoff path
+      # below, and it is why leaving focus costs nothing and can never strand a worker.
+      #
+      # A durable marker still records that a human owns the prompt box, because dashboard-issued
+      # prompts must not be typed into a box someone is already typing into.
+      def attach_agent_live_terminal(agent_id, rows: nil, columns: nil)
+        agent = synchronized_state do
+          state = normalized_state
+          candidate = find_agent(state, agent_id.to_s)
+          return rejected_result(nil, "AttachLiveTerminal", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless candidate
+          return rejected_result(nil, "AttachLiveTerminal", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless candidate.fetch("type", nil) == "worker"
+          if interactive_focus_active?(candidate)
+            return rejected_result(nil, "AttachLiveTerminal", "Worker #{agent_id} is already in a focus transition.", ["interactive_focus_active"])
+          end
+
+          marker = live_focus_marker(candidate)
+          if marker && live_focus_owner_alive?(marker)
+            return rejected_result(nil, "AttachLiveTerminal", "Worker #{agent_id} is already focused by a live session.", ["live_focus_active"])
+          end
+
+          deep_copy(candidate)
+        end
+        return agent if kernel_command_result?(agent)
+
+        client = harness_client_for_agent(agent)
+        unless client.respond_to?(:live_terminal_supported?) && client.live_terminal_supported?
+          return rejected_result(nil, "AttachLiveTerminal", "This agent's backend does not provide a live session to attach to.", ["live_terminal_unsupported"])
+        end
+
+        terminal = client.live_terminal(agent_session_ref(agent))
+        terminal.resize(rows: rows, columns: columns) if rows && columns
+
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, agent.fetch("id"))
+          return rejected_result(nil, "AttachLiveTerminal", "Agent #{agent.fetch("id")} disappeared while attaching.", ["agent_not_found"]) unless current
+
+          now = timestamp
+          metadata = current.fetch("harness_metadata", {}) || {}
+          current["harness_metadata"] = metadata.merge(
+            "live_focus" => instance_ownership_metadata.merge(
+              "state" => "attached",
+              "attached_at" => now,
+              "pid" => terminal.respond_to?(:pid) ? terminal.pid : nil
+            ).compact
+          )
+          current["updated_at"] = now
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: current.fetch("id"),
+            level: "info",
+            message: "Focused worker #{current.fetch("id")}'s live agent session without interrupting it.",
+            details: { "agent_id" => current.fetch("id"), "routing_action" => "live_focus_attach" }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(
+            nil,
+            "AttachLiveTerminal",
+            current.fetch("id"),
+            "Attached to the live agent session for #{current.fetch("id")}.",
+            { "terminal" => terminal },
+            log_ids
+          )
+        end
+      rescue StandardError => e
+        error = error_payload(e)
+        failed_result(
+          nil,
+          "AttachLiveTerminal",
+          "Could not attach to the live agent session for #{agent_id}: #{error.fetch("message")}",
+          [error.fetch("class"), error.fetch("message")]
+        )
+      end
+
+      # Releases the viewer's claim. The session keeps running exactly as it was, so this can never
+      # fail in a way that leaves a worker without a supervisor.
+      def detach_agent_live_terminal(agent_id)
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, agent_id.to_s)
+          return { "status" => "accepted", "message" => "No live agent session was focused." } unless current
+
+          metadata = current.fetch("harness_metadata", {}) || {}
+          marker = metadata.fetch("live_focus", nil)
+          return accepted_result(nil, "DetachLiveTerminal", current.fetch("id"), "No live agent session was focused.", nil, []) unless marker.is_a?(Hash)
+
+          now = timestamp
+          metadata = metadata.dup
+          metadata.delete("live_focus")
+          current["harness_metadata"] = metadata.merge(
+            "last_live_focus" => marker.merge("state" => "detached", "detached_at" => now)
+          )
+          current["updated_at"] = now
+          log_ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: current.fetch("id"),
+            level: "info",
+            message: "Returned worker #{current.fetch("id")} to the dashboard; its agent session kept running throughout.",
+            details: { "agent_id" => current.fetch("id"), "routing_action" => "live_focus_detach" }
+          )
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(nil, "DetachLiveTerminal", current.fetch("id"), "Returned #{current.fetch("id")} to the dashboard.", nil, log_ids)
+        end
+      end
+
       # The Agent session is a kernel-owned transport transition, not a TUI-side attach. The managed
       # RPC writer is quiesced before the workspace controller launches the interactive PTY, and a
       # durable marker makes reconciliation stand down while that PTY owns the session file.
@@ -1577,7 +1711,7 @@ module Meringue
       end
 
       # Called only after the interactive PTY has exited. Reattaching before that point would create
-      # two Pi writers against one JSONL session and is explicitly rejected by the lifecycle seam.
+      # two writers against one session transcript and is explicitly rejected by the lifecycle seam.
       def end_agent_interactive_focus(agent_id)
         handoff_marker = nil
         agent = synchronized_state do
@@ -2850,7 +2984,7 @@ module Meringue
         accepted_result(command_id, command_type, nil, "Loaded Meringue state.", store.load, [])
       end
 
-      # Reports the model/thinking pair future Pi heads and workers will use.
+      # Reports the model/thinking pair future heads and workers will use.
       # There is no slash command for it any more: the dashboard status line
       # already shows the compact model/thinking summary and `/config` prints
       # the same values, so the typed `/defaults` was redundant surface. The
@@ -2859,8 +2993,8 @@ module Meringue
       # the log with the clamp caveat attached.
       def get_session_defaults(command_id, command_type)
         state = normalized_state
-        defaults = configured_pi_session_defaults
-        message = pi_session_defaults_message(defaults)
+        defaults = configured_session_defaults
+        message = session_defaults_message(defaults)
         log_ids = append_log(
           state,
           source_type: "kernel",
@@ -2871,7 +3005,7 @@ module Meringue
         )
         touch_state!(state)
         store.save(state)
-        accepted_result(command_id, command_type, "pi", message, defaults.merge("config_path" => config_path), log_ids)
+        accepted_result(command_id, command_type, defaults.fetch("harness", nil), message, defaults.merge("config_path" => config_path), log_ids)
       end
 
       # Lists the models the selected harness itself reports. The catalog is
@@ -2966,6 +3100,23 @@ module Meringue
         Meringue::Harness::ModelCatalog.retained(previous: previous, failure: catalog).to_h
       end
 
+      # Which harness's model list a default should be checked against. Normally the configured
+      # one; before a harness is chosen, the only list Meringue actually holds is still the right
+      # thing to check against, and saying so is more useful than silently skipping the check.
+      def catalog_harness_for(defaults)
+        harness = defaults.is_a?(Hash) ? defaults.fetch("harness", nil) : nil
+        harness ||= default_session_harness
+        harness || sole_persisted_catalog_harness
+      end
+
+      def sole_persisted_catalog_harness
+        names = synchronized_state do
+          catalogs = normalized_state.dig("metadata", "harness_model_catalogs")
+          catalogs.is_a?(Hash) ? catalogs.keys : []
+        end
+        names.length == 1 ? names.first : nil
+      end
+
       def persisted_model_catalog(public_name)
         synchronized_state do
           catalog = normalized_state.dig("metadata", "harness_model_catalogs", public_name)
@@ -3058,7 +3209,7 @@ module Meringue
           return rejected_result(
             command_id,
             command_type,
-            "Default Pi model was not changed: role must be head or worker.",
+            "Default model was not changed: role must be head or worker.",
             ["role must be one of: head, worker"]
           )
         end
@@ -3069,12 +3220,12 @@ module Meringue
           return rejected_result(
             command_id,
             command_type,
-            invalid_model_reference_message("Default Pi model", reason),
+            invalid_model_reference_message("Default model", reason),
             ["model must be a provider/model id: #{reason}"]
           )
         end
 
-        update_pi_session_defaults(
+        update_agent_session_defaults(
           command_id,
           command_type,
           model: Meringue::Harness::ModelReference.normalize(model_reference),
@@ -3091,7 +3242,7 @@ module Meringue
           return rejected_result(
             command_id,
             command_type,
-            "Default Pi thinking level was not changed: role must be head or worker.",
+            "Default reasoning level was not changed: role must be head or worker.",
             ["role must be one of: head, worker"]
           )
         end
@@ -3101,12 +3252,12 @@ module Meringue
           return rejected_result(
             command_id,
             command_type,
-            invalid_thinking_level_message("Default Pi thinking level", requested),
+            invalid_thinking_level_message("Default reasoning level", requested),
             ["thinking level must be one of: #{Meringue::Harness::PiClient::THINKING_LEVELS.join(", ")}"]
           )
         end
 
-        update_pi_session_defaults(
+        update_agent_session_defaults(
           command_id,
           command_type,
           thinking_level: level,
@@ -3115,27 +3266,32 @@ module Meringue
         )
       end
 
-      def update_pi_session_defaults(command_id, command_type, model: nil, model_role: nil, thinking_level: nil, thinking_role: nil, changed_field:)
-        previous = configured_pi_session_defaults
+      def update_agent_session_defaults(command_id, command_type, model: nil, model_role: nil, thinking_level: nil, thinking_role: nil, changed_field:)
+        previous = configured_session_defaults
+        # Whoever reports the defaults also says which harness they belong to. Re-deriving it from
+        # config here would disagree with an injected provider.
+        harness = previous.fetch("harness", nil) || default_session_harness
         defaults = if @session_defaults_updater
                      keywords = { model: model, thinking_level: thinking_level }
                      keywords[:model_role] = model_role unless model_role.nil?
                      keywords[:thinking_role] = thinking_role unless thinking_role.nil?
-                     @session_defaults_updater.call("pi", **keywords)
+                     @session_defaults_updater.call(harness, **keywords)
                    else
-                     saved = Config.save_pi_session_defaults!(
+                     saved = Config.save_agent_session_defaults!(
                        model: model,
                        model_role: model_role,
                        thinking_level: thinking_level,
                        thinking_role: thinking_role,
+                       provider: harness,
                        path: config_path
                      )
-                     Meringue::Harness::Registry.new(config: saved).session_defaults(provider: "pi")
+                     Meringue::Harness::Registry.new(config: saved).session_defaults(provider: harness)
                    end
         defaults = Config.deep_stringify(defaults)
+        harness = defaults.fetch("harness", nil) || harness
         state = normalized_state
-        state.fetch("metadata")["pi_session_defaults"] = deep_copy(defaults)
-        unchanged_ids = existing_pi_session_ids(state)
+        state.fetch("metadata")["agent_session_defaults"] = deep_copy(defaults)
+        unchanged_ids = existing_agent_session_ids(state, harness)
         active_role = model_role || thinking_role
         value = if changed_field == "model"
                   if model_role
@@ -3149,12 +3305,12 @@ module Meringue
                   defaults.fetch("thinking_level", thinking_level)
                 end
         label = changed_field == "model" ? "model" : "thinking level"
-        audience = active_role ? "future Pi #{active_role}s" : "all future Pi heads and workers"
+        audience = active_role ? "future #{active_role}s" : "all future heads and workers"
         scope = active_role ? "future_pi_#{active_role}_sessions" : "future_pi_sessions"
         clamp_note = clamped_default_thinking_note(defaults, changed_field, role: active_role)
         unverified_note = unverified_default_model_note(defaults, changed_field, role: model_role)
-        message = "Set the default Pi #{label} to #{value} for #{audience}. " \
-                  "Existing Pi sessions were not changed#{unchanged_ids.empty? ? "." : ": #{unchanged_ids.join(", ")}."}" \
+        message = "Set the default #{label} to #{value} for #{audience}. " \
+                  "Existing sessions were not changed#{unchanged_ids.empty? ? "." : ": #{unchanged_ids.join(", ")}."}" \
                   "#{unverified_note ? " #{unverified_note}" : ""}" \
                   "#{clamp_note ? " #{clamp_note}" : ""}"
         log_ids = append_log(
@@ -3166,7 +3322,7 @@ module Meringue
           details: {
             "changed_field" => changed_field,
             "previous_defaults" => previous,
-            "pi_session_defaults" => defaults,
+            "agent_session_defaults" => defaults,
             "scope" => scope,
             "existing_session_ids_unchanged" => unchanged_ids,
             "config_path" => config_path
@@ -3177,7 +3333,7 @@ module Meringue
         accepted_result(
           command_id,
           command_type,
-          "pi",
+          harness,
           message,
           defaults.merge(
             "scope" => scope,
@@ -3187,26 +3343,38 @@ module Meringue
           log_ids
         )
       rescue Config::ParseError => e
-        rejected_result(command_id, command_type, "Default Pi session settings were not changed because config could not be read.", [e.message])
+        rejected_result(command_id, command_type, "Default agent session settings were not changed because config could not be read.", [e.message])
       end
 
-      def configured_pi_session_defaults
+      # The model and reasoning defaults future sessions will use, read for whichever harness is
+      # currently selected rather than for one particular backend.
+      def configured_session_defaults
+        harness = default_session_harness
         defaults = if @session_defaults_provider
-                     @session_defaults_provider.call("pi")
+                     @session_defaults_provider.call(harness)
                    else
                      config = Config.load(path: config_path)
-                     Meringue::Harness::Registry.new(config: config).session_defaults(provider: "pi")
+                     Meringue::Harness::Registry.new(config: config).session_defaults(provider: harness)
                    end
         Config.deep_stringify(defaults)
-      rescue Config::ParseError
-        fallback_pi_session_defaults
+      rescue Config::ParseError, ArgumentError
+        fallback_session_defaults
       end
 
-      def fallback_pi_session_defaults
-        model = Meringue::Harness::Registry::DEFAULT_PI_MODEL
-        thinking = Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL
+      # The harness whose defaults `/model` and `/thinking` are talking about. Workers are what a
+      # user is normally changing, so the worker harness is the one reported.
+      def default_session_harness
+        Meringue::Harness::Registry.new(config: Config.load(path: config_path)).worker_provider
+      rescue StandardError
+        nil
+      end
+
+      def fallback_session_defaults
+        model = Meringue::Harness::Registry::DEFAULT_MODEL
+        thinking = Meringue::Harness::Registry::DEFAULT_THINKING_LEVEL
+        harness = default_session_harness
         {
-          "harness" => "pi",
+          "harness" => harness,
           "model" => model,
           "thinking_level" => thinking,
           "consistency" => "consistent",
@@ -3214,13 +3382,13 @@ module Meringue
             "head" => { "model" => model, "thinking_level" => thinking },
             "worker" => { "model" => model, "thinking_level" => thinking }
           },
-          "scope" => "future_pi_sessions"
-        }
+          "scope" => harness ? "future_#{harness}_sessions" : "future_sessions"
+        }.compact
       end
 
-      def existing_pi_session_ids(state)
+      def existing_agent_session_ids(state, harness)
         state.fetch("agents", []).select do |agent|
-          agent.fetch("harness", nil).to_s == "pi" && agent_has_session_reference?(agent)
+          agent.fetch("harness", nil).to_s == harness.to_s && agent_has_session_reference?(agent)
         end.map { |agent| agent.fetch("id", nil) }.compact
       end
 
@@ -3245,18 +3413,22 @@ module Meringue
         level = level.to_s.strip.downcase
         return nil if reference.empty? || level.empty?
 
-        snapshot = persisted_model_catalog(Meringue::Harness::Registry.public_provider_name("pi"))
+        harness = catalog_harness_for(defaults)
+        return nil unless harness
+
+        snapshot = persisted_model_catalog(Meringue::Harness::Registry.public_provider_name(harness))
         return nil unless snapshot
 
-        supported = Meringue::Harness::ModelCatalog.coerce(snapshot, harness: "pi").thinking_levels_for(reference)
+        supported = Meringue::Harness::ModelCatalog.coerce(snapshot, harness: harness).thinking_levels_for(reference)
         supported = Array(supported).map { |value| value.to_s.downcase }
         return nil if supported.empty? || supported.include?(level)
 
         clamped = Meringue::Harness::PiClient.clamp_thinking_level(level, supported)
-        "Pi's catalog does not list #{level} for #{reference}, so future Pi sessions run #{clamped} instead."
+        label = Meringue::Harness::Registry.provider_label(harness)
+        "#{label}'s catalog does not list #{level} for #{reference}, so future sessions run #{clamped} instead."
       end
 
-      # `/model` used to reject with a bare "Default Pi model was not changed.",
+      # `/model` used to reject with a bare "Default model was not changed.",
       # so the reason lived only in the `errors` details and the user could not
       # tell a typo from an unknown id from an over-strict rule. This mirrors
       # `invalid_thinking_level_message`: the visible line names the reason and
@@ -3281,16 +3453,20 @@ module Meringue
         reference = reference.to_s.strip
         return nil if reference.empty?
 
-        snapshot = persisted_model_catalog(Meringue::Harness::Registry.public_provider_name("pi"))
-        catalog = Meringue::Harness::ModelCatalog.coerce(snapshot, harness: "pi")
+        harness = catalog_harness_for(defaults)
+        return nil unless harness
+
+        snapshot = persisted_model_catalog(Meringue::Harness::Registry.public_provider_name(harness))
+        catalog = Meringue::Harness::ModelCatalog.coerce(snapshot, harness: harness)
+        label = Meringue::Harness::Registry.provider_label(harness)
         unless catalog.usable?
-          return "Meringue has no confirmed Pi model list right now, so #{reference} is unverified; " \
-                 "run /models refresh to check it. Pi validates it when the next Pi session starts."
+          return "Meringue has no confirmed #{label} model list right now, so #{reference} is unverified; " \
+                 "run /models refresh to check it. #{label} validates it when the next session starts."
         end
         return nil if catalog.entry_for(reference)
 
-        "Pi's model list (confirmed #{catalog.fetched_at}) does not include #{reference}, so the id is unverified; " \
-          "run /models refresh if it should be there. Pi validates it when the next Pi session starts."
+        "#{label}'s model list (confirmed #{catalog.fetched_at}) does not include #{reference}, so the id is unverified; " \
+          "run /models refresh if it should be there. #{label} validates it when the next session starts."
       end
 
       # A bare "was not changed" left the user guessing which words are legal, so
@@ -3298,9 +3474,9 @@ module Meringue
       # for a truncated level such as "xhi". The valid set is the one the kernel
       # validates against, which is deliberately independent of the model catalog.
       def invalid_thinking_level_message(subject, requested)
-        levels = Meringue::Harness::PiClient::THINKING_LEVELS
+        levels = Meringue::Harness::ModelCatalog::THINKING_LEVELS
         typed = requested.to_s.strip
-        reason = typed.empty? ? "a level is required" : "#{typed.inspect} is not a Pi thinking level"
+        reason = typed.empty? ? "a level is required" : "#{typed.inspect} is not a supported reasoning level"
         near_miss = closest_thinking_levels(typed)
         did_you_mean = near_miss.empty? ? nil : "Did you mean #{near_miss.join(" or ")}?"
         [
@@ -3322,16 +3498,16 @@ module Meringue
         matches.length > 2 ? [] : matches
       end
 
-      def pi_session_defaults_message(defaults)
-        head_model = defaults.dig("roles", "head", "model") || Meringue::Harness::Registry::DEFAULT_PI_MODEL
-        worker_model = defaults.dig("roles", "worker", "model") || Meringue::Harness::Registry::DEFAULT_PI_MODEL
-        head_thinking = defaults.dig("roles", "head", "thinking_level") || Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL
-        worker_thinking = defaults.dig("roles", "worker", "thinking_level") || Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL
+      def session_defaults_message(defaults)
+        head_model = defaults.dig("roles", "head", "model") || Meringue::Harness::Registry::DEFAULT_MODEL
+        worker_model = defaults.dig("roles", "worker", "model") || Meringue::Harness::Registry::DEFAULT_MODEL
+        head_thinking = defaults.dig("roles", "head", "thinking_level") || Meringue::Harness::Registry::DEFAULT_THINKING_LEVEL
+        worker_thinking = defaults.dig("roles", "worker", "thinking_level") || Meringue::Harness::Registry::DEFAULT_THINKING_LEVEL
         clamp_note = clamped_default_thinking_note(defaults, "thinking_level")
         summary = if head_model == worker_model && head_thinking == worker_thinking
-                    "Future Pi heads and workers use #{head_model} with thinking #{head_thinking}."
+                    "Future heads and workers use #{head_model} with thinking #{head_thinking}."
                   else
-                    "Future Pi heads use #{head_model} with thinking #{head_thinking}; workers use #{worker_model} with thinking #{worker_thinking}."
+                    "Future heads use #{head_model} with thinking #{head_thinking}; workers use #{worker_model} with thinking #{worker_thinking}."
                   end
         [
           summary,
@@ -3426,7 +3602,7 @@ module Meringue
           return [nil, rejected_result(
             command_id,
             command_type,
-            "#{harness} session settings are not supported yet; model and thinking controls are currently Pi-only.",
+            "#{harness} session settings are not supported yet; model and reasoning controls need a harness that exposes them.",
             ["unsupported_harness"]
           )]
         end
@@ -3576,7 +3752,7 @@ module Meringue
           metadata["active_harness"] = metadata.fetch("active_worker_harness")
           metadata["active_harness_label"] = metadata.fetch("active_worker_harness_label")
           metadata["harness_generation"] = metadata.fetch("harness_generation", 0).to_i + 1
-          metadata["pi_session_defaults"] = configured_pi_session_defaults
+          metadata["agent_session_defaults"] = configured_session_defaults
           metadata["settings_schema_version"] = Config::Schema::VERSION
           metadata["config_fingerprint"] = transaction.fetch("fingerprint")
 
@@ -8373,7 +8549,7 @@ module Meringue
             ["agent_prune_in_progress"]
           )
         end
-        if interactive_focus_active?(agent)
+        if agent_focus_ownership_active?(agent)
           return rejected_result(
             command_id,
             command_type,
@@ -16860,7 +17036,7 @@ module Meringue
         state["metadata"]["active_harness"] = public_worker
         state["metadata"]["active_harness_label"] = state["metadata"]["active_worker_harness_label"]
         state["metadata"]["harness_generation"] ||= 0
-        state["metadata"]["pi_session_defaults"] = configured_pi_session_defaults
+        state["metadata"]["agent_session_defaults"] = configured_session_defaults
         # Harness model catalogs are fetched in the background, so state only
         # guarantees the container exists; an empty map means "not fetched yet".
         state["metadata"]["harness_model_catalogs"] = {} unless state["metadata"]["harness_model_catalogs"].is_a?(Hash)
@@ -17489,6 +17665,32 @@ module Meringue
         interactive_handoff_marker?(agent)
       end
 
+      # Either kind of focus means a person owns this session's prompt box right now. A
+      # dashboard-issued prompt would be typed into the same box they are typing into, so it is
+      # refused with an explanation rather than interleaved.
+      def agent_focus_ownership_active?(agent)
+        interactive_focus_active?(agent) || live_focus_attached?(agent)
+      end
+
+      def live_focus_marker(agent)
+        return nil unless agent.is_a?(Hash)
+
+        marker = (agent.fetch("harness_metadata", {}) || {}).fetch("live_focus", nil)
+        marker.is_a?(Hash) && marker.fetch("state", nil).to_s == "attached" ? marker : nil
+      end
+
+      # A live focus claim only holds while the instance that made it is still running. A crashed
+      # dashboard must not leave a worker permanently unpromptable, and unlike a handoff there is
+      # nothing to repair: the agent process is owned by its client, not by the claim.
+      def live_focus_attached?(agent)
+        marker = live_focus_marker(agent)
+        !marker.nil? && live_focus_owner_alive?(marker)
+      end
+
+      def live_focus_owner_alive?(marker)
+        interactive_focus_owner_alive?(marker)
+      end
+
       def interactive_focus_owner_alive?(marker)
         owner_id = marker.fetch("owner_instance_id", nil)
         owner_pid = marker.fetch("owner_instance_pid", nil).to_i
@@ -17554,7 +17756,10 @@ module Meringue
           )
         end
         events = client.respond_to?(:read_events) ? client.read_events(state_ref) : []
-        settled = completed_session?(state_ref)
+        # A worker whose live session a person is currently driving keeps reporting progress, but
+        # its record is not retired underneath them. The turn they just watched finish is the end
+        # of *their* exchange, not the end of the worker's assignment.
+        settled = completed_session?(state_ref) && !live_focus_attached?(agent)
         assistant_text = settled ? safe_last_assistant_text(client, state_ref) : nil
         # A settled session is only a completion when nothing says its turn died.
         settle_failure = if settled && agent.fetch("type", nil) == "worker"

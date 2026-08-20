@@ -46,10 +46,16 @@ module Meringue
       ).fetch("config")
     end
 
-    # Persists Pi spawn defaults through the same schema transaction used by
-    # Settings. Shared commands patch both role rows; role serialization then
-    # writes one compatibility fallback plus only differing overrides.
-    def self.save_pi_session_defaults!(model: nil, model_role: nil, thinking_level: nil, thinking_role: nil, path: DEFAULT_PATH)
+    # Persists the model and reasoning defaults future sessions spawn with, through the same schema
+    # transaction Settings uses. They are harness-neutral: they follow whichever backend is
+    # selected instead of being tied to one. Shared commands patch both role rows; role
+    # serialization then writes one compatibility fallback plus only differing overrides.
+    #
+    # `provider` is accepted so a caller can say which backend it was looking at, but it does not
+    # change where the values are written; a backend-specific override belongs in that backend's
+    # own config section.
+    def self.save_agent_session_defaults!(model: nil, model_role: nil, thinking_level: nil, thinking_role: nil, provider: nil, path: DEFAULT_PATH)
+      _ = provider
       changes = {}
       unless model.nil?
         role = model_role.to_s.strip.downcase

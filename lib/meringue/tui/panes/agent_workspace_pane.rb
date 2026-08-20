@@ -319,12 +319,12 @@ module Meringue
           model = settings.dig("model", "reference")
           thinking = settings.fetch("thinking_level", nil)
           availability = settings.fetch("availability", nil)
-          if model.to_s.empty?
-            model = availability == "unsupported" || agent.fetch("harness", nil).to_s != "pi" ? "unavailable" : "unknown"
-          end
-          if thinking.to_s.empty?
-            thinking = availability == "unsupported" || agent.fetch("harness", nil).to_s != "pi" ? "unavailable" : "unknown"
-          end
+          # "unknown" means the harness can report these and Meringue has not read them yet;
+          # "unavailable" means this backend does not expose them at all. Saying which is which
+          # keeps a missing value from reading like a bug.
+          reportable = availability.to_s != "unsupported" && !availability.to_s.empty?
+          model = reportable ? "unknown" : "unavailable" if model.to_s.empty?
+          thinking = reportable ? "unknown" : "unavailable" if thinking.to_s.empty?
 
           [
             ["session settings · ", Style::DIM],

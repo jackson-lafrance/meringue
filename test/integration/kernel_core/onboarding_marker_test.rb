@@ -90,8 +90,8 @@ class KernelCoreOnboardingMarkerTest < Minitest::Test
     metadata = persisted_state.fetch("metadata")
     assert_equal "claude", metadata.fetch("active_head_harness")
     assert_equal "pi", metadata.fetch("active_worker_harness")
-    assert_equal "openai/gpt-5.6-sol", metadata.dig("pi_session_defaults", "roles", "head", "model")
-    assert_equal "anthropic/claude-opus-5", metadata.dig("pi_session_defaults", "roles", "worker", "model")
+    assert_equal "openai/gpt-5.6-sol", metadata.dig("agent_session_defaults", "roles", "head", "model")
+    assert_equal "anthropic/claude-opus-5", metadata.dig("agent_session_defaults", "roles", "worker", "model")
   end
 
   def test_settings_skip_records_explicit_experiment_default_without_role_changes
@@ -106,8 +106,8 @@ class KernelCoreOnboardingMarkerTest < Minitest::Test
     assert_accepted(result)
     assert_equal "skipped", saved_config.onboarding_outcome
     assert_equal false, saved_config.value("experiments", "github_support")
-    assert_equal Meringue::Harness::Registry::DEFAULT_PI_MODEL, saved_config.setting("agent.head_model", env: {})
-    assert_equal Meringue::Harness::Registry::DEFAULT_PI_MODEL, saved_config.setting("agent.worker_model", env: {})
+    assert_equal Meringue::Harness::Registry::DEFAULT_MODEL, saved_config.setting("agent.head_model", env: {})
+    assert_equal Meringue::Harness::Registry::DEFAULT_MODEL, saved_config.setting("agent.worker_model", env: {})
   end
 
   def test_save_configuration_rejects_an_unknown_setup_outcome_without_writing

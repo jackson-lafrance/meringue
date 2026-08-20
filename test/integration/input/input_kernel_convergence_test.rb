@@ -174,7 +174,7 @@ class InputKernelConvergenceTest < Minitest::Test
       assert_equal [%w[GetSessionDefaults accepted]], sandbox.command_result_pairs(head_driven)
       assert_includes(
         sandbox.command_results(head_driven).first.fetch("message"),
-        "Future Pi heads and workers use"
+        "Future heads and workers use"
       )
     end
   end

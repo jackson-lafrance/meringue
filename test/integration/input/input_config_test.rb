@@ -145,10 +145,12 @@ class InputConfigTest < Minitest::Test
   def test_harness_provider_precedence_default_then_config_then_cli_then_env
     Dir.mktmpdir("meringue-config-test") do |dir|
       with_env("MERINGUE_HARNESS" => nil, "MERINGUE_HEAD_HARNESS" => nil, "MERINGUE_WORKER_HARNESS" => nil) do
+        # With no config and no environment there is no harness to fall back to; Meringue says so
+        # rather than choosing one on the user's behalf.
         empty = Meringue::Config.load(path: File.join(dir, "absent.toml"))
         default_registry = Meringue::Harness::Registry.new(config: empty)
-        assert_equal "pi", default_registry.head_provider
-        assert_equal "pi", default_registry.worker_provider
+        assert_raises(Meringue::Harness::Registry::MissingProviderError) { default_registry.head_provider }
+        assert_raises(Meringue::Harness::Registry::MissingProviderError) { default_registry.worker_provider }
 
         config = Meringue::Config.load(path: write_config(File.join(dir, "config.toml"), FULL_CONFIG))
         config_registry = Meringue::Harness::Registry.new(config: config)
@@ -194,8 +196,8 @@ class InputConfigTest < Minitest::Test
     assert_equal "claude", Meringue::Harness::Registry.normalize_provider("Claude-Code")
     assert_equal "claude", Meringue::Harness::Registry.normalize_provider("cc")
     assert_equal "antigravity", Meringue::Harness::Registry.normalize_provider("agy")
-    assert_equal "pi", Meringue::Harness::Registry.normalize_provider("")
-    assert_equal "pi", Meringue::Harness::Registry.normalize_provider(nil)
+    assert_equal "", Meringue::Harness::Registry.normalize_provider("")
+    assert_equal "", Meringue::Harness::Registry.normalize_provider(nil)
   end
 
   def test_saving_a_theme_writes_colorscheme_and_drops_the_legacy_alias
@@ -228,7 +230,7 @@ class InputConfigTest < Minitest::Test
     Dir.mktmpdir("meringue-config-test") do |dir|
       path = write_config(File.join(dir, "config.toml"), FULL_CONFIG)
 
-      saved = Meringue::Config.save_pi_session_defaults!(
+      saved = Meringue::Config.save_agent_session_defaults!(
         model: "openai/gpt-5.6-sol",
         thinking_level: "xhigh",
         path: path
@@ -247,15 +249,15 @@ class InputConfigTest < Minitest::Test
   def test_saving_role_specific_thinking_defaults_preserves_shared_compatibility_and_shared_save_resets_overrides
     Dir.mktmpdir("meringue-config-test") do |dir|
       path = File.join(dir, "config.toml")
-      Meringue::Config.save_pi_session_defaults!(thinking_level: "medium", path: path)
-      Meringue::Config.save_pi_session_defaults!(thinking_level: "low", thinking_role: "head", path: path)
-      split = Meringue::Config.save_pi_session_defaults!(thinking_level: "xhigh", thinking_role: "worker", path: path)
+      Meringue::Config.save_agent_session_defaults!(thinking_level: "medium", path: path)
+      Meringue::Config.save_agent_session_defaults!(thinking_level: "low", thinking_role: "head", path: path)
+      split = Meringue::Config.save_agent_session_defaults!(thinking_level: "xhigh", thinking_role: "worker", path: path)
 
       assert_equal "medium", split.value("harness", "pi", "thinking_level")
       assert_equal "low", split.value("harness", "pi", "head_thinking_level")
       assert_equal "xhigh", split.value("harness", "pi", "worker_thinking_level")
 
-      shared = Meringue::Config.save_pi_session_defaults!(thinking_level: "high", path: path)
+      shared = Meringue::Config.save_agent_session_defaults!(thinking_level: "high", path: path)
       assert_equal "high", shared.value("harness", "pi", "thinking_level")
       assert_nil shared.value("harness", "pi", "head_thinking_level")
       assert_nil shared.value("harness", "pi", "worker_thinking_level")
@@ -265,15 +267,15 @@ class InputConfigTest < Minitest::Test
   def test_saving_role_specific_model_defaults_preserves_shared_compatibility_and_shared_save_resets_overrides
     Dir.mktmpdir("meringue-config-test") do |dir|
       path = File.join(dir, "config.toml")
-      Meringue::Config.save_pi_session_defaults!(model: "anthropic/claude-opus-5", path: path)
-      Meringue::Config.save_pi_session_defaults!(model: "openai/gpt-5.6-sol", model_role: "head", path: path)
-      split = Meringue::Config.save_pi_session_defaults!(model: "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", model_role: "worker", path: path)
+      Meringue::Config.save_agent_session_defaults!(model: "anthropic/claude-opus-5", path: path)
+      Meringue::Config.save_agent_session_defaults!(model: "openai/gpt-5.6-sol", model_role: "head", path: path)
+      split = Meringue::Config.save_agent_session_defaults!(model: "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", model_role: "worker", path: path)
 
       assert_equal "anthropic/claude-opus-5", split.value("harness", "pi", "model")
       assert_equal "openai/gpt-5.6-sol", split.value("harness", "pi", "head_model")
       assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", split.value("harness", "pi", "worker_model")
 
-      shared = Meringue::Config.save_pi_session_defaults!(model: "openai/gpt-5.6-sol", path: path)
+      shared = Meringue::Config.save_agent_session_defaults!(model: "openai/gpt-5.6-sol", path: path)
       assert_equal "openai/gpt-5.6-sol", shared.value("harness", "pi", "model")
       assert_nil shared.value("harness", "pi", "head_model")
       assert_nil shared.value("harness", "pi", "worker_model")
@@ -312,9 +314,9 @@ class InputConfigTest < Minitest::Test
   def test_saving_one_pi_session_default_preserves_the_other
     Dir.mktmpdir("meringue-config-test") do |dir|
       path = File.join(dir, "config.toml")
-      Meringue::Config.save_pi_session_defaults!(model: "openai/gpt-5.6-sol", thinking_level: "high", path: path)
+      Meringue::Config.save_agent_session_defaults!(model: "openai/gpt-5.6-sol", thinking_level: "high", path: path)
 
-      saved = Meringue::Config.save_pi_session_defaults!(thinking_level: "xhigh", path: path)
+      saved = Meringue::Config.save_agent_session_defaults!(thinking_level: "xhigh", path: path)
 
       assert_equal "openai/gpt-5.6-sol", saved.value("harness", "pi", "model")
       assert_equal "xhigh", saved.value("harness", "pi", "thinking_level")

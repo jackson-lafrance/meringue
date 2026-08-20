@@ -358,15 +358,19 @@ module Meringue
 
       def add_role_defaults(settings)
         settings.concat([
-          definition("agent.head_harness", %w[harness head_provider], "Agent defaults", "enum", "pi", fallback_paths: [%w[harness provider]], options: PROVIDERS, editor: "selector", apply_mode: "live", label: "Head harness", description: "Harness used for future routing heads.", override_env: %w[MERINGUE_HEAD_HARNESS MERINGUE_HARNESS], env_overrides: true),
-          definition("agent.head_model", %w[harness pi head_model], "Agent defaults", "model_reference", "anthropic/claude-opus-5", fallback_paths: [%w[harness pi model]], editor: "model", apply_mode: "live", label: "Head model", description: "Pi model for future heads; exact provider/model references remain allowed when the catalog is unavailable."),
-          definition("agent.head_thinking", %w[harness pi head_thinking_level], "Agent defaults", "thinking_level", "max", fallback_paths: [%w[harness pi thinking_level]], options: THINKING_LEVELS, editor: "selector", apply_mode: "live", label: "Head thinking", description: "Pi thinking level for future heads."),
-          definition("agent.worker_harness", %w[harness worker_provider], "Agent defaults", "enum", "pi", fallback_paths: [%w[harness provider]], options: PROVIDERS, editor: "selector", apply_mode: "live", label: "Worker harness", description: "Harness used for future workers.", override_env: %w[MERINGUE_WORKER_HARNESS MERINGUE_HARNESS], env_overrides: true),
-          definition("agent.worker_model", %w[harness pi worker_model], "Agent defaults", "model_reference", "anthropic/claude-opus-5", fallback_paths: [%w[harness pi model]], editor: "model", apply_mode: "live", label: "Worker model", description: "Pi model for future workers; existing sessions are unchanged."),
-          definition("agent.worker_thinking", %w[harness pi worker_thinking_level], "Agent defaults", "thinking_level", "max", fallback_paths: [%w[harness pi thinking_level]], options: THINKING_LEVELS, editor: "selector", apply_mode: "live", label: "Worker thinking", description: "Pi thinking level for future workers."),
-          definition("agent.shared_harness_compatibility", %w[harness provider], "Agent defaults", "read_only", "pi", visibility: "internal", apply_mode: "none", label: "Shared harness compatibility", description: "Backward-compatible shared harness fallback."),
-          definition("agent.shared_model_compatibility", %w[harness pi model], "Agent defaults", "read_only", "anthropic/claude-opus-5", visibility: "internal", apply_mode: "none", label: "Shared model compatibility", description: "Backward-compatible shared Pi model fallback."),
-          definition("agent.shared_thinking_compatibility", %w[harness pi thinking_level], "Agent defaults", "read_only", "max", visibility: "internal", apply_mode: "none", label: "Shared thinking compatibility", description: "Backward-compatible shared Pi thinking fallback.")
+          definition("agent.head_harness", %w[harness head_provider], "Agent defaults", "enum", nil, fallback_paths: [%w[harness provider]], options: PROVIDERS, editor: "selector", apply_mode: "live", label: "Head harness", description: "Agent harness used for future routing heads.", override_env: %w[MERINGUE_HEAD_HARNESS MERINGUE_HARNESS], env_overrides: true),
+          # Model and reasoning defaults follow whichever harness is selected rather than living
+          # under one backend's section. The legacy [harness.pi] paths stay readable as fallbacks so
+          # an existing configuration keeps working, and a value set under a specific backend still
+          # wins for that backend.
+          definition("agent.head_model", %w[harness head_model], "Agent defaults", "model_reference", "anthropic/claude-opus-5", fallback_paths: [%w[harness model], %w[harness pi head_model], %w[harness pi model]], editor: "model", apply_mode: "live", label: "Head model", description: "Model for future heads; exact provider/model references remain allowed when the catalog is unavailable."),
+          definition("agent.head_thinking", %w[harness head_thinking_level], "Agent defaults", "thinking_level", "max", fallback_paths: [%w[harness thinking_level], %w[harness pi head_thinking_level], %w[harness pi thinking_level]], options: THINKING_LEVELS, editor: "selector", apply_mode: "live", label: "Head reasoning", description: "Reasoning level for future heads."),
+          definition("agent.worker_harness", %w[harness worker_provider], "Agent defaults", "enum", nil, fallback_paths: [%w[harness provider]], options: PROVIDERS, editor: "selector", apply_mode: "live", label: "Worker harness", description: "Agent harness used for future workers.", override_env: %w[MERINGUE_WORKER_HARNESS MERINGUE_HARNESS], env_overrides: true),
+          definition("agent.worker_model", %w[harness worker_model], "Agent defaults", "model_reference", "anthropic/claude-opus-5", fallback_paths: [%w[harness model], %w[harness pi worker_model], %w[harness pi model]], editor: "model", apply_mode: "live", label: "Worker model", description: "Model for future workers; existing sessions are unchanged."),
+          definition("agent.worker_thinking", %w[harness worker_thinking_level], "Agent defaults", "thinking_level", "max", fallback_paths: [%w[harness thinking_level], %w[harness pi worker_thinking_level], %w[harness pi thinking_level]], options: THINKING_LEVELS, editor: "selector", apply_mode: "live", label: "Worker reasoning", description: "Reasoning level for future workers."),
+          definition("agent.shared_harness_compatibility", %w[harness provider], "Agent defaults", "read_only", nil, visibility: "internal", apply_mode: "none", label: "Shared harness compatibility", description: "Backward-compatible shared harness fallback."),
+          definition("agent.shared_model_compatibility", %w[harness model], "Agent defaults", "read_only", "anthropic/claude-opus-5", visibility: "internal", apply_mode: "none", label: "Shared model compatibility", description: "Backward-compatible shared model fallback."),
+          definition("agent.shared_thinking_compatibility", %w[harness thinking_level], "Agent defaults", "read_only", "max", visibility: "internal", apply_mode: "none", label: "Shared reasoning compatibility", description: "Backward-compatible shared reasoning fallback.")
         ])
       end
 
@@ -414,10 +418,10 @@ module Meringue
             definition("harnesses.#{provider}.head_extra_args", ["harness", provider, "head_extra_args"], "Harnesses", "string_list", defaults.dig(provider, "head_extra_args"), editor: "list", label: "#{label} head arguments", description: "Arguments added to head launches.", advanced: true),
             definition("harnesses.#{provider}.worker_extra_args", ["harness", provider, "worker_extra_args"], "Harnesses", "string_list", defaults.dig(provider, "worker_extra_args"), editor: "list", label: "#{label} worker arguments", description: "Arguments added to worker launches.", advanced: true),
             definition("harnesses.#{provider}.head_session_name_prefix", ["harness", provider, "head_session_name_prefix"], "Harnesses", "string", "Meringue Head", editor: "text", label: "#{label} head session prefix", description: "Prefix for provider-side head session names.", advanced: true),
-            definition("harnesses.#{provider}.head_timeout", ["harness", provider, "head_timeout"], "Harnesses", "duration", 120, editor: "integer", label: "#{label} head timeout", description: "Seconds allowed for non-Pi head result capture.", minimum: 1, maximum: 86_400, advanced: true)
+            definition("harnesses.#{provider}.head_timeout", ["harness", provider, "head_timeout"], "Harnesses", "duration", 120, editor: "integer", label: "#{label} head timeout", description: "Seconds allowed for capturing a head result from this harness.", minimum: 1, maximum: 86_400, advanced: true)
           ])
         end
-        settings << definition("harnesses.pi.session_dir", %w[harness pi session_dir], "Harnesses", "path", ->(_config, env) { File.expand_path(env.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions")) }, editor: "text", label: "Pi session directory", description: "Directory containing Pi session files.", override_env: %w[MERINGUE_PI_SESSION_DIR], advanced: true)
+        settings << definition("harnesses.pi.session_dir", %w[harness pi session_dir], "Harnesses", "path", ->(_config, env) { File.expand_path(env.fetch("MERINGUE_AGENT_SESSION_DIR", env.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))) }, editor: "text", label: "Pi session directory", description: "Directory containing Pi session files.", override_env: %w[MERINGUE_AGENT_SESSION_DIR MERINGUE_PI_SESSION_DIR], advanced: true)
         settings << definition("harnesses.claude.use_json_schema", %w[harness claude use_json_schema], "Harnesses", "boolean", true, editor: "checkbox", label: "Claude JSON schema", description: "Ask Claude Code to constrain head output to the HeadResult schema.", advanced: true)
       end
 
@@ -440,7 +444,7 @@ module Meringue
       end
 
       def add_safety(settings)
-        settings << definition("safety.worker_blacklist", %w[commands worker_blacklist], "Safety", "blacklist_glob_list", [], editor: "list", label: "Worker command blacklist", description: "Full-command glob patterns rejected before isolated Pi worker bash calls.")
+        settings << definition("safety.worker_blacklist", %w[commands worker_blacklist], "Safety", "blacklist_glob_list", [], editor: "list", label: "Worker command blacklist", description: "Full-command glob patterns rejected before an isolated worker bash call.")
         settings << definition("safety.predecessor_failure", %w[conflicts predecessor_failure], "Safety", "enum", "cancel", options: %w[cancel run], editor: "selector", label: "Predecessor failure", description: "Cancel dependent workers when their predecessor fails, or run them anyway.")
       end
 

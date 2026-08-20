@@ -62,7 +62,7 @@ module Meringue
       class InvalidThinkingLevelError < Error; end
       class SessionSettingsBusyError < Error; end
 
-      THINKING_LEVELS = %w[off minimal low medium high xhigh max].freeze
+      THINKING_LEVELS = ModelCatalog::THINKING_LEVELS
       # Pi only offers these two levels when a model explicitly maps them.
       EXPLICIT_THINKING_LEVELS = %w[xhigh max].freeze
       MODEL_CATALOG_SOURCE = "pi_rpc_get_available_models"

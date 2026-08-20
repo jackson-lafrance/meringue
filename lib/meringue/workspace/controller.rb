@@ -113,15 +113,77 @@ module Meringue
         { "status" => "cancelled", "message" => "Cancelled focused workspace opening." }
       end
 
+      # How the selected worker's backend can be focused. The pane asks this instead of checking
+      # which harness the worker runs on, so a new backend needs no UI change.
+      def focus_mode(agent:)
+        return "none" unless focus_session_service && agent.is_a?(Hash)
+        # A focus service that predates the capability question can still hand off, which is the
+        # only thing it ever could do. Treating it as "no focus" would silently disable the
+        # feature instead of surfacing the mismatch.
+        return "handoff" unless focus_session_service.respond_to?(:agent_focus_mode)
+
+        focus_session_service.agent_focus_mode(agent.fetch("id", nil)).to_s
+      rescue StandardError
+        "none"
+      end
+
       def open_workspace(agent:, state: nil, rows: TerminalSession::DEFAULT_ROWS, columns: TerminalSession::DEFAULT_COLUMNS, cancellation: nil)
         resolution = PathResolver.resolve(agent)
         path = resolution.fetch("path", nil)
         return rejected(resolution.fetch("message", "Selected worker has no assigned workspace.")) unless path
+        return { "status" => "opened", "message" => "Focused #{agent.fetch("id", "worker")} in #{path}." } unless focus_session_service
 
-        unless focus_session_service && agent.fetch("harness", nil).to_s == "pi"
-          return { "status" => "opened", "message" => "Focused #{agent.fetch("id", "worker")} in #{path}." }
+        case focus_mode(agent: agent)
+        when "live_terminal"
+          open_live_terminal(agent: agent, path: path, rows: rows, columns: columns, cancellation: cancellation)
+        when "handoff"
+          open_handoff_workspace(agent: agent, path: path, rows: rows, columns: columns, cancellation: cancellation)
+        else
+          { "status" => "opened", "message" => "Focused #{agent.fetch("id", "worker")} in #{path}." }
+        end
+      end
+
+      # Attaching to a session that is already running interactively. There is no transport to
+      # settle and no process to launch, so there is also nothing to roll back: if the attach is
+      # cancelled or refused, the worker is left exactly as it was, still working.
+      def open_live_terminal(agent:, path:, rows:, columns:, cancellation: nil)
+        return cancelled_workspace if cancellation_requested?(cancellation)
+
+        attach = focus_session_service.attach_agent_live_terminal(agent.fetch("id"), rows: rows, columns: columns)
+        return attach unless attach.fetch("status", nil) == "accepted"
+
+        terminal = attach.dig("result", "terminal")
+        unless terminal
+          detach_live_terminal(agent.fetch("id"))
+          return failed("The agent backend reported a live session but did not return a terminal to attach to.")
         end
 
+        if cancellation_requested?(cancellation)
+          detach_live_terminal(agent.fetch("id"))
+          return cancelled_workspace
+        end
+
+        key = agent_key(agent)
+        @mutex.synchronize do
+          @interactive_sessions[key] = { "agent" => agent.dup, "session" => terminal, "mode" => "live_terminal" }
+        end
+        {
+          "status" => "active",
+          "interactive" => true,
+          "pid" => terminal.respond_to?(:pid) ? terminal.pid : nil,
+          "workspace_path" => path,
+          "message" => "Opened the live agent session for #{agent.fetch("id", "worker")} in #{path}."
+        }.compact
+      rescue StandardError => e
+        begin
+          detach_live_terminal(agent.fetch("id"))
+        rescue StandardError
+          nil
+        end
+        failed("Could not attach to the live agent session: #{e.message}")
+      end
+
+      def open_handoff_workspace(agent:, path:, rows:, columns:, cancellation: nil)
         return cancelled_workspace if cancellation_requested?(cancellation)
 
         transition = focus_session_service.begin_agent_interactive_focus(agent.fetch("id"))
@@ -177,7 +239,7 @@ module Meringue
 
         key = agent_key(agent)
         @mutex.synchronize do
-          @interactive_sessions[key] = { "agent" => agent.dup, "session" => session }
+          @interactive_sessions[key] = { "agent" => agent.dup, "session" => session, "mode" => "handoff" }
           @interactive_screens[key] = TerminalScreen.new(rows: rows, columns: columns)
         end
         if cancellation_requested?(cancellation)
@@ -238,9 +300,22 @@ module Meringue
         entry.fetch("session").write(bytes)
       end
 
+      # Releasing a viewer claim is only meaningful for a service that hands them out.
+      def detach_live_terminal(agent_id)
+        return nil unless focus_session_service.respond_to?(:detach_agent_live_terminal)
+
+        result = focus_session_service.detach_agent_live_terminal(agent_id)
+        result if result.is_a?(Hash) && result.fetch("status", nil) == "accepted"
+      end
+
+      def live_terminal_entry?(entry)
+        entry.is_a?(Hash) && entry.fetch("mode", nil) == "live_terminal"
+      end
+
       def agent_snapshot(agent:, state: nil, rows: TerminalSession::DEFAULT_ROWS, columns: TerminalSession::DEFAULT_COLUMNS)
         entry = interactive_entry(agent)
         return { "interactive" => false } unless entry
+        return live_terminal_snapshot(entry, rows: rows, columns: columns) if live_terminal_entry?(entry)
 
         session = entry.fetch("session")
         screen = interactive_screen(agent, rows: rows, columns: columns)
@@ -259,11 +334,38 @@ module Meringue
         }.compact
       end
 
+      # The backend keeps this session's screen current whether or not anyone is watching, so
+      # attaching renders the agent's real current state immediately rather than an empty pane that
+      # fills in as new output happens to arrive.
+      def live_terminal_snapshot(entry, rows:, columns:)
+        snapshot = entry.fetch("session").snapshot(rows: rows, columns: columns)
+        {
+          "interactive" => true,
+          "lines" => snapshot.fetch("lines", []),
+          "styled_lines" => snapshot.fetch("styled_lines", nil),
+          "cursor" => snapshot.fetch("cursor", nil),
+          "status" => snapshot.fetch("state", nil),
+          "pid" => snapshot.fetch("pid", nil),
+          "workspace_path" => snapshot.fetch("workspace_path", nil),
+          "revision" => snapshot.fetch("revision", nil),
+          "notice" => live_terminal_notice(snapshot)
+        }.compact
+      end
+
+      def live_terminal_notice(snapshot)
+        return nil if snapshot.fetch("alive", false)
+
+        "The agent session process has exited. Returning to the dashboard will attempt to resume it."
+      end
+
       def resize_agent(agent:, rows:, columns:)
         entry = interactive_entry(agent)
         return failed("Agent session is not running for this worker.") unless entry
 
         result = entry.fetch("session").resize(rows: rows, columns: columns)
+        # A live session owns its own screen, so there is no controller-side screen to keep in step.
+        return result if live_terminal_entry?(entry)
+
         interactive_screen(agent, rows: rows, columns: columns).resize(rows: rows, columns: columns) unless failed_result?(result)
         result
       end
@@ -271,11 +373,15 @@ module Meringue
       def close_workspace(agent:)
         entry = interactive_entry(agent)
         agent_id = agent.is_a?(Hash) ? agent.fetch("id") : agent.to_s
+        live = live_terminal_entry?(entry)
         unless entry
           return cancel_workspace_open(agent: agent) if pending_interactive_open?(agent)
 
           # The PTY is removed before dashboard reattachment. If that reattachment failed, a later
           # close/return action must still be able to retry the durable `resume_failed` handoff.
+          detached = detach_live_terminal(agent_id)
+          return detached if detached && detached.fetch("target_id", nil)
+
           resume = focus_session_service&.end_agent_interactive_focus(agent_id)
           return resume unless resume.nil? || resume.fetch("status", nil) == "accepted"
 
@@ -283,6 +389,13 @@ module Meringue
         end
 
         result = close_interactive(agent)
+        # Returning from a live session only releases the viewer's claim. There is no transport to
+        # restart, which is why this path cannot leave a worker stranded the way a handoff can.
+        if live
+          detach_live_terminal(agent_id)
+          return result
+        end
+
         resume = focus_session_service&.end_agent_interactive_focus(agent_id)
         return result unless resume
         return resume unless resume.fetch("status", nil) == "accepted"
@@ -403,6 +516,12 @@ module Meringue
         return { "status" => "closed", "message" => "Agent session was already stopped." } unless entry
 
         @mutex.synchronize { @interactive_screens.delete(key) }
+        # A live session is the worker itself, not a viewer-owned process. Leaving focus drops the
+        # view and nothing else: no interrupt, no signal, no close. The worker keeps working.
+        if live_terminal_entry?(entry)
+          return { "status" => "closed", "message" => "Detached from the live agent session; it is still running." }
+        end
+
         session = entry.fetch("session")
         # Escape is Pi's interrupt key for both active turns and autocompaction. Ctrl-C only clears
         # its editor, so using it here leaves compaction running until the later process signals.

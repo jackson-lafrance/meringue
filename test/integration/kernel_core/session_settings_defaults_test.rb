@@ -112,7 +112,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
       call["model_role"] = model_role if model_role
       call["thinking_role"] = thinking_role if thinking_role
       @calls << call
-      Meringue::Config.save_pi_session_defaults!(
+      Meringue::Config.save_agent_session_defaults!(
         model: model,
         model_role: model_role,
         thinking_level: thinking_level,
@@ -176,7 +176,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     second = persisted_agents.find { |agent| agent.fetch("id") == "P1-I1-W2" }
     assert_equal "openai/gpt-5.6-sol", second.dig("session_settings", "model", "reference")
     assert_equal "xhigh", second.dig("session_settings", "thinking_level")
-    assert_includes log_messages.last(4).join("\n"), "Existing Pi sessions were not changed"
+    assert_includes log_messages.last(4).join("\n"), "Existing sessions were not changed"
   end
 
   def test_role_specific_commands_persist_independent_defaults_and_scope_their_results
@@ -220,8 +220,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal "future_pi_worker_sessions", worker_result.dig("result", "scope")
     assert_equal "openai/gpt-5.6-sol", worker_result.dig("result", "roles", "head", "model")
     assert_equal "anthropic/claude-opus-5", worker_result.dig("result", "roles", "worker", "model")
-    assert_match(/for future Pi heads\./, head_result.fetch("message"))
-    assert_match(/for future Pi workers\./, worker_result.fetch("message"))
+    assert_match(/for future heads\./, head_result.fetch("message"))
+    assert_match(/for future workers\./, worker_result.fetch("message"))
 
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
     assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "head_model")
@@ -239,7 +239,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", result.dig("result", "model")
     assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", result.dig("result", "roles", "head", "model")
     assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", result.dig("result", "roles", "worker", "model")
-    assert_match(/for all future Pi heads and workers\./, result.fetch("message"))
+    assert_match(/for all future heads and workers\./, result.fetch("message"))
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
     assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", config.value("harness", "pi", "model")
     assert_nil config.value("harness", "pi", "head_model")
@@ -257,7 +257,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     result = apply_command("SetDefaultSessionModel", "role" => "head", "model" => "not-a-model")
 
     assert_equal "rejected", result.fetch("status")
-    assert_match(/Default Pi model was not changed/, result.fetch("message"))
+    assert_match(/Default model was not changed/, result.fetch("message"))
   end
 
   def test_spawn_worker_partial_override_uses_other_default_and_does_not_change_future_defaults
@@ -392,7 +392,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
 
       assert_accepted(result)
       assert_equal reference, result.dig("result", "model")
-      assert_includes result.fetch("message"), "Set the default Pi model to #{reference}"
+      assert_includes result.fetch("message"), "Set the default model to #{reference}"
 
       config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
       assert_equal reference, config.value("harness", "pi", "model")
@@ -433,14 +433,14 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     # The example proves multi-segment ids are legal, which is what the reporter
     # could not tell from the old message.
     assert_includes bare.fetch("message"), MULTI_SEGMENT_MODEL
-    refute_equal "Default Pi model was not changed.", bare.fetch("message")
+    refute_equal "Default model was not changed.", bare.fetch("message")
     # The visible log line carries the same explanation, not just the details.
     visible = log_entry(bare.fetch("log_entry_ids").first).fetch("message")
     assert_includes visible, "has no provider prefix"
-    refute_equal "Rejected SetDefaultSessionModel: Default Pi model was not changed.", visible
+    refute_equal "Rejected SetDefaultSessionModel: Default model was not changed.", visible
 
     missing = apply_command("SetDefaultSessionModel", {})
-    assert_includes missing.fetch("message"), "Default Pi model was not changed: a model id is required."
+    assert_includes missing.fetch("message"), "Default model was not changed: a model id is required."
 
     spaced = apply_command("SetDefaultSessionModel", "model" => "openai/gpt 5.6")
     assert_includes spaced.fetch("message"), "contains whitespace, so it is not a single model id"
@@ -504,14 +504,14 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     truncated = apply_command("SetDefaultSessionThinkingLevel", "level" => "xhi")
 
     assert_rejected(truncated, "thinking level must be one of")
-    assert_includes truncated.fetch("message"), "\"xhi\" is not a Pi thinking level"
+    assert_includes truncated.fetch("message"), "\"xhi\" is not a supported reasoning level"
     assert_includes truncated.fetch("message"), "Did you mean xhigh?"
     assert_includes truncated.fetch("message"), "Valid levels: off, minimal, low, medium, high, xhigh, max."
     # The visible log line carries the same explanation, not just the details blob.
     assert_includes log_entry(truncated.fetch("log_entry_ids").first).fetch("message"), "Valid levels:"
 
     nonsense = apply_command("SetDefaultSessionThinkingLevel", "level" => "ten")
-    assert_includes nonsense.fetch("message"), "\"ten\" is not a Pi thinking level"
+    assert_includes nonsense.fetch("message"), "\"ten\" is not a supported reasoning level"
     refute_includes nonsense.fetch("message"), "Did you mean"
     assert_includes nonsense.fetch("message"), "Valid levels: off, minimal, low, medium, high, xhigh, max."
 
@@ -555,9 +555,9 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
 
     result = engine.apply("type" => "SetDefaultSessionThinkingLevel", "payload" => { "level" => "max" })
 
-    assert_equal "accepted", result.fetch("status")
+    assert_equal "accepted", result.fetch("status"), result.fetch("errors", []).inspect
     assert_equal "max", result.dig("result", "thinking_level")
-    assert_includes result.fetch("message"), "Set the default Pi thinking level to max"
+    assert_includes result.fetch("message"), "Set the default thinking level to max"
     assert_includes result.fetch("message"), "Pi's catalog does not list max for #{proxy}"
     assert_includes result.fetch("message"), "run xhigh instead"
 

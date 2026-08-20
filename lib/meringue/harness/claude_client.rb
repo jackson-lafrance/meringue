@@ -4,6 +4,15 @@ require "json"
 
 module Meringue
   module Harness
+    # Claude Code driven one invocation per turn through `--print`.
+    #
+    # This is **not** how Meringue runs Claude Code any more: the registry builds
+    # `ClaudeInteractiveClient`, which keeps one interactive session alive so the same process can
+    # be both driven and watched. See `docs/interactive-harness-backends.md`.
+    #
+    # It is kept because it is the worked example of a `ProcessClient` — the per-invocation shape
+    # Antigravity still uses — and the suite exercises that shared base class through it. Nothing in
+    # production constructs it.
     class ClaudeClient < ProcessClient
       DEFAULT_COMMAND = "claude"
 
@@ -98,7 +107,7 @@ module Meringue
       end
 
       def claude_project_dir_name(cwd)
-        File.expand_path(cwd.to_s).tr("/", "-").delete(".")
+        ClaudeWorkspaceTrust.canonical_path(cwd).gsub(/[^a-zA-Z0-9]/, "-")
       end
     end
 

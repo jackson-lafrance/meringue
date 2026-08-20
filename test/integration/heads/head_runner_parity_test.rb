@@ -38,18 +38,19 @@ class HeadRunnerParityTest < Minitest::Test
     [
       Meringue::Heads::Runner,
       Meringue::Heads::FakeRunner,
-      Meringue::Heads::HarnessRunner,
-      Meringue::Heads::PiRunner
+      Meringue::Heads::AgentRunner
     ].each do |runner_class|
       assert_equal expected, runner_class.instance_method(:run).parameters, runner_class.name
     end
   end
 
+  # One runner drives every backend. What differs between harnesses lives in the client behind it,
+  # so there is deliberately no per-provider runner subclass to keep in step.
   def test_runner_class_hierarchy
     assert_operator Meringue::Heads::FakeRunner, :<, Meringue::Heads::Runner
-    assert_operator Meringue::Heads::HarnessRunner, :<, Meringue::Heads::Runner
-    assert_operator Meringue::Heads::PiRunner, :<, Meringue::Heads::HarnessRunner
-    assert_equal Meringue::Heads::InvalidHeadResultError, Meringue::Heads::PiRunner::InvalidHeadResultError
+    assert_operator Meringue::Heads::AgentRunner, :<, Meringue::Heads::Runner
+    refute Meringue::Heads.const_defined?(:PiRunner), "backends must not need their own head runner"
+    refute Meringue::Heads.const_defined?(:HarnessRunner), "the runner is named for what it drives, not for the layer"
   end
 
   def test_fake_runner_returns_a_valid_head_result_envelope
@@ -246,7 +247,7 @@ class HeadRunnerParityTest < Minitest::Test
     raw = JSON.generate(head_result(commands: [kernel_command("AnswerQuestion", "question_id" => "Q4", "answer" => "keep it")]))
     client = HeadResultHarnessClient.new(raw_output: raw)
     project_path = head_temp_root
-    runner = Meringue::Heads::HarnessRunner.new(harness_client: client, cwd: project_path, timeout: 5)
+    runner = Meringue::Heads::AgentRunner.new(harness_client: client, cwd: project_path, timeout: 5)
 
     result = runner.run(user_message: "keep the existing branch", snapshot: head_snapshot, question_id: "Q4")
 
@@ -262,7 +263,7 @@ class HeadRunnerParityTest < Minitest::Test
 
   def test_harness_runner_prompt_contains_the_context_json_and_system_prompt_has_the_reference
     client = HeadResultHarnessClient.new(raw_output: JSON.generate(head_result))
-    runner = Meringue::Heads::HarnessRunner.new(harness_client: client, cwd: head_temp_root)
+    runner = Meringue::Heads::AgentRunner.new(harness_client: client, cwd: head_temp_root)
 
     runner.run(user_message: "keep the existing branch", snapshot: head_snapshot, question_id: "Q4")
 
@@ -290,7 +291,7 @@ class HeadRunnerParityTest < Minitest::Test
 
   def test_harness_runner_session_lifecycle_methods_are_separately_usable
     client = HeadResultHarnessClient.new(raw_output: "```json\n#{JSON.generate(head_result)}\n```")
-    runner = Meringue::Heads::HarnessRunner.new(harness_client: client, cwd: head_temp_root)
+    runner = Meringue::Heads::AgentRunner.new(harness_client: client, cwd: head_temp_root)
 
     session_ref = runner.spawn_head_session(user_message: "route this", snapshot: head_snapshot)
     assert_equal "fake-head-session", session_ref.fetch("session_id")
@@ -307,7 +308,7 @@ class HeadRunnerParityTest < Minitest::Test
 
   def test_harness_runner_polls_get_state_when_the_client_has_no_settle_helpers
     client = PollingHarnessClient.new(raw_output: JSON.generate(head_result(title: "Polled")))
-    runner = Meringue::Heads::HarnessRunner.new(harness_client: client, cwd: head_temp_root, timeout: 5)
+    runner = Meringue::Heads::AgentRunner.new(harness_client: client, cwd: head_temp_root, timeout: 5)
 
     refute client.respond_to?(:wait_for_settled)
     refute client.respond_to?(:last_assistant_text)
@@ -316,7 +317,7 @@ class HeadRunnerParityTest < Minitest::Test
 
   def test_harness_runner_raises_invalid_head_result_for_unparseable_output
     client = HeadResultHarnessClient.new(raw_output: "I could not decide, sorry.")
-    runner = Meringue::Heads::HarnessRunner.new(harness_client: client, cwd: head_temp_root)
+    runner = Meringue::Heads::AgentRunner.new(harness_client: client, cwd: head_temp_root)
 
     error = assert_raises(Meringue::Heads::InvalidHeadResultError) do
       runner.run(user_message: "route this", snapshot: head_snapshot)
@@ -328,17 +329,17 @@ class HeadRunnerParityTest < Minitest::Test
   end
 
   def test_harness_runner_parse_helper_accepts_fenced_output
-    runner = Meringue::Heads::HarnessRunner.new(harness_client: HeadResultHarnessClient.new(raw_output: ""), cwd: head_temp_root)
+    runner = Meringue::Heads::AgentRunner.new(harness_client: HeadResultHarnessClient.new(raw_output: ""), cwd: head_temp_root)
 
     parsed = runner.parse_head_result_text("prose\n```json\n#{JSON.generate(head_result)}\n```")
 
     assert_equal "Routed the request", parsed.fetch("title")
   end
 
-  def test_pi_runner_defaults_to_the_pi_event_timeout
-    runner = Meringue::Heads::PiRunner.new(harness_client: HeadResultHarnessClient.new(raw_output: JSON.generate(head_result)), cwd: head_temp_root)
+  def test_agent_runner_defaults_to_the_shared_event_timeout
+    runner = Meringue::Heads::AgentRunner.new(harness_client: HeadResultHarnessClient.new(raw_output: JSON.generate(head_result)), cwd: head_temp_root)
 
-    assert_equal Meringue::Harness::PiClient::DEFAULT_EVENT_TIMEOUT, runner.timeout
+    assert_equal Meringue::Heads::AgentRunner::DEFAULT_TIMEOUT, runner.timeout
     assert_equal "Meringue Head", runner.session_name_prefix
     assert_equal "Routed the request", runner.run(user_message: "route this", snapshot: head_snapshot).fetch("title")
   end
@@ -354,7 +355,7 @@ class HeadRunnerParityTest < Minitest::Test
       )
     )
     client = HeadResultHarnessClient.new(raw_output: raw)
-    runner = Meringue::Heads::HarnessRunner.new(harness_client: client, cwd: env.project_path, timeout: 5)
+    runner = Meringue::Heads::AgentRunner.new(harness_client: client, cwd: env.project_path, timeout: 5)
     engine = rebuilt_engine(env, runner)
 
     payload = Meringue::Heads::PromptLoop.new(engine: engine).call("register this project and open an issue")

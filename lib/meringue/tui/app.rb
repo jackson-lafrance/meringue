@@ -2336,6 +2336,19 @@ module Meringue
         [rows, columns]
       end
 
+      # Backends answer for themselves whether a worker can be focused in place, and how. A
+      # controller without the capability keeps the previous behaviour of no embedded session.
+      def agent_workspace_focus_mode(agent)
+        return "none" unless workspace_controller.respond_to?(:open_workspace)
+        # A controller that predates the capability question can only ever have handed off, so
+        # that is what it is treated as rather than losing the embedded view entirely.
+        return "handoff" unless workspace_controller.respond_to?(:focus_mode)
+
+        workspace_controller.focus_mode(agent: agent).to_s
+      rescue StandardError
+        "none"
+      end
+
       def resize_agent_workspace_terminal(agent, state)
         return unless workspace_controller&.respond_to?(:resize_terminal)
 
@@ -2643,14 +2656,21 @@ module Meringue
       # supported effective settings rather than dumping arbitrary TOML, which
       # keeps the overview useful and avoids accidentally echoing secrets.
       def configuration_help_text
-        pi_defaults = Harness::Registry.new(config: config).session_defaults(provider: "pi")
-        pi_head_model = pi_defaults.dig("roles", "head", "model") || "mixed by role"
-        pi_worker_model = pi_defaults.dig("roles", "worker", "model") || "mixed by role"
-        pi_head_thinking = pi_defaults.dig("roles", "head", "thinking_level")
-        pi_worker_thinking = pi_defaults.dig("roles", "worker", "thinking_level")
-        provider = ENV["MERINGUE_HARNESS"] || config.value("harness", "provider") || Harness::Registry::DEFAULT_PROVIDER
-        head_provider = ENV["MERINGUE_HEAD_HARNESS"] || config.value("harness", "head_provider") || provider
-        worker_provider = ENV["MERINGUE_WORKER_HARNESS"] || config.value("harness", "worker_provider") || provider
+        registry = Harness::Registry.new(config: config)
+        # A harness that exposes no model or reasoning defaults simply has none to report, which is
+        # different from having them and failing to read them.
+        session_defaults = begin
+          registry.session_defaults
+        rescue StandardError
+          {}
+        end
+        head_model = session_defaults.dig("roles", "head", "model") || "mixed by role"
+        worker_model = session_defaults.dig("roles", "worker", "model") || "mixed by role"
+        head_thinking = session_defaults.dig("roles", "head", "thinking_level")
+        worker_thinking = session_defaults.dig("roles", "worker", "thinking_level")
+        provider = ENV["MERINGUE_HARNESS"] || config.value("harness", "provider")
+        head_provider = ENV["MERINGUE_HEAD_HARNESS"] || config.value("harness", "head_provider") || provider || "not set"
+        worker_provider = ENV["MERINGUE_WORKER_HARNESS"] || config.value("harness", "worker_provider") || provider || "not set"
         colorscheme = config.value("tui", "colorscheme") || config.value("tui", "color_scheme") || TUI::Style::DEFAULT_COLORSCHEME
         shell = config.value("workspace", "shell_command") || ENV["MERINGUE_SHELL"] || ENV["SHELL"] || "/bin/sh"
         editor = config.value("workspace", "editor_command") || ENV["MERINGUE_EDITOR"] || ENV["VISUAL"] || ENV["EDITOR"] || "code"
@@ -2664,10 +2684,10 @@ module Meringue
           "  head harness: #{head_provider}",
           "  worker harness: #{worker_provider}",
           "  TUI colorscheme: #{colorscheme}",
-          "  Pi head model: #{pi_head_model}",
-          "  Pi worker model: #{pi_worker_model}",
-          "  Pi head thinking: #{pi_head_thinking}",
-          "  Pi worker thinking: #{pi_worker_thinking}",
+          "  head model: #{head_model}",
+          "  worker model: #{worker_model}",
+          "  head reasoning: #{head_thinking}",
+          "  worker reasoning: #{worker_thinking}",
           "  conflict policy (predecessor failure): #{config.conflict_predecessor_failure}",
           "  worker command blacklist: #{worker_blacklist.empty? ? "(disabled)" : format_config_value(worker_blacklist)}",
           "  workspace shell: #{format_config_value(shell)}",
@@ -2942,7 +2962,10 @@ module Meringue
           return true
         end
 
-        native_focus = agent.fetch("harness", nil).to_s == "pi" && workspace_controller&.respond_to?(:open_workspace)
+        # Whether this worker's backend has a session to embed is the backend's answer, not a
+        # harness name the UI keeps a list of.
+        focus_mode = agent_workspace_focus_mode(agent)
+        native_focus = focus_mode != "none" && workspace_controller&.respond_to?(:open_workspace)
         restored_view = if native_focus
                           "agent"
                         elsif @agent_workspace_agent_id.to_s == agent.fetch("id").to_s
@@ -2986,7 +3009,7 @@ module Meringue
         if workspace_controller&.respond_to?(:open_workspace)
           rows, columns = agent_workspace_terminal_dimensions(state, embedded: native_focus)
           workspace_result = begin
-            if workspace_controller.respond_to?(:open_workspace_async) && agent.fetch("harness", nil).to_s == "pi"
+            if workspace_controller.respond_to?(:open_workspace_async) && focus_mode != "none"
               @agent_workspace_open_pending = true
               @chat_mutex.synchronize { @agent_workspace_open_result = nil }
               workspace_controller.open_workspace_async(
@@ -3700,8 +3723,16 @@ module Meringue
         end
       end
 
+      # The model list a settings row should offer belongs to the harness that row is about, so a
+      # user editing the worker model is never shown another backend's catalog.
+      def settings_model_harness
+        Harness::Registry.new(config: config).worker_provider
+      rescue StandardError
+        nil
+      end
+
       def cycle_settings_model(row, delta, state)
-        options = ModelPicker.entries(state, harness: "pi", query: "").map { |entry| entry.fetch("reference") }
+        options = ModelPicker.entries(state, harness: settings_model_harness, query: "").map { |entry| entry.fetch("reference") }
         current = @settings_draft.value(row.fetch("id")).to_s
         options.unshift(current) unless options.include?(current)
         return if options.empty?

@@ -97,8 +97,8 @@ class TuiTransactionalSetupTest < Minitest::Test
     send_key(DOWN)
     send_key(ENTER)
     head_harness = @app.instance_variable_get(:@settings_draft).value("agent.head_harness")
-    refute_equal "pi", head_harness
-    assert_equal "pi", @app.instance_variable_get(:@settings_draft).value("agent.worker_harness")
+    assert_includes Meringue::Harness::Registry.supported_provider_names, head_harness
+    assert_nil @app.instance_variable_get(:@settings_draft).value("agent.worker_harness")
 
     send_key(TAB) # Worker defaults
     send_key(TAB) # Experiments

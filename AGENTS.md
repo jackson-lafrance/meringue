@@ -15,7 +15,7 @@ But where they lack is the ability to work on multiple things in parallel, witho
 ## Solution
 we aim to solve this problem
 
-This is why Meringue sits on top of your favourite coding harness (meringue on pi, get it) and provides you an interface to work with
+This is why Meringue sits on top of your favourite coding harness (the name started as meringue on pi) and provides you an interface to work with
     Multiple agents at once
     On different areas in your codebase
     And receive structured output and monitoring of each issue/agents work
@@ -41,8 +41,8 @@ Along with this, as your agents complete issues, their output gets captured and 
 We will be using ruby for the development of this app
 Terminal rendering with screen blitting of our three main sections
 
-The MVP backend harness is Pi because that is what we know and can move fastest with.
-Pi-specific code should still be isolated behind a harness interface so the future product can support cc, codex,
+Meringue is harness-agnostic and assumes no backend: nothing runs until a harness is named.
+Harness-specific code stays isolated behind a harness interface so the product can support cc, codex,
 antigravity, cursor, and other coding harnesses without rewriting the kernel or TUI.
 We will store Meringue state in a simple JSON file using harness session ids to reconnect, resume, or explain sessions on reload of the tool.
 We should focus on keeping this project extensible and self-modifying for a users specific needs
@@ -63,7 +63,7 @@ Suite conventions:
 - Run everything with `rake test`. Run one file with `ruby -Ilib -Itest test/<path>_test.rb`, and one test with `ruby -Ilib -Itest test/<path>_test.rb --name test_<name>`.
 - Layout: integration tests live under `test/integration/<area>/` (for example `test/integration/kernel/`, `test/integration/heads/`), end-to-end flows live under `test/e2e/`, shared helpers live under `test/support/`.
 - Every test file is named `*_test.rb`, starts with `require "test_helper"` (never `require_relative`), and defines a uniquely named `Minitest::Test` subclass so parallel work merges without class collisions.
-- Tests must be hermetic and fast: no network access, no real Pi/Claude/harness processes, no reliance on a developer's machine state. Write only inside `Dir.mktmpdir`, and never read or write `~/.meringue`. Use `Meringue::Harness::FakeClient` and `Meringue::Heads::FakeRunner` instead of real harnesses.
+- Tests must be hermetic and fast: no network access, no real harness processes, no reliance on a developer's machine state. Write only inside `Dir.mktmpdir`, and never read or write `~/.meringue`. Use `Meringue::Harness::FakeClient` and `Meringue::Heads::FakeRunner` instead of real harnesses.
 - Never commit a failing or skipped test. If a test uncovers a real bug that is out of scope, assert the current actual behavior, note the bug explicitly in the test and in the PR description, and file the follow-up.
 - Tests are development-only and are not packaged in the gem.
 
@@ -118,7 +118,7 @@ Review the changes against AGENTS.md and any relevant implementation plan.
 Focus on:
 - Did this stay within the requested MVP slice?
 - Did all file changes happen on a fresh task branch/worktree rather than a shared base checkout?
-- Did this avoid implementing real Pi behavior unless explicitly requested?
+- Did this avoid implementing real harness behavior unless explicitly requested?
 - Is harness-specific behavior isolated behind the harness layer?
 - Is the kernel still the only layer that mutates Meringue orchestration state?
 - Are TUI, input routing, state, kernel, heads, and harness responsibilities separated?
@@ -134,7 +134,7 @@ Agents should include the outcome of this review in their final response, especi
 ## Terminology
 AgentTree means the UI hierarchy of projects, issues, heads, and workers.
 Workspace means the filesystem directory where a worker harness session runs. To support multiple workers/subagents editing safely at the same time, prefer a dedicated git worktree per worker when the managed project is a git repository, except that a worker continuing a settled predecessor's line of work on the same issue shares that predecessor's worktree and branch. An explicitly `shared_read_only` investigation/informational worker may instead use a validated existing non-bare main checkout concurrently with other readers; this is a persisted SpawnWorker contract, never inferred from prompt wording. A workspace may fall back to the project root or a dedicated directory only when worktrees are unavailable or explicitly disabled.
-Harness means the underlying coding agent backend. Pi is the only required harness for the MVP, but the core architecture should not hard-code Pi outside the harness integration layer.
+Harness means the underlying coding agent backend. Several are supported and none is assumed; the core architecture must not name a specific backend outside the harness integration layer.
 Do not use WorkTree to mean AgentTree.
 
 ## Statuses
@@ -244,7 +244,7 @@ A queued worker may wait on two kinds of condition, and both live on the worker 
 
 A completion-triggered head may wait on that same bounded predicate by putting `after_command` and its existing options inside the `completion_head` object. The worker completes, but its continuation remains queued on the completed worker record until the condition passes; no head or checker worker is spawned early. Queued workers and completion continuations share one kernel wait-gate evaluator and its timeout/cadence policies, while their existing owner-specific resolvers remain the only places that start workers or heads. This wait, including the eventual exactly-once continuation claim, must survive restarts.
 
-Do not introduce a parallel conversation-history model merely to route follow-ups. Pi or another harness owns detailed session history; Meringue should expose compact, generic routing metadata and lifecycle logs.
+Do not introduce a parallel conversation-history model merely to route follow-ups. The harness owns detailed session history; Meringue should expose compact, generic routing metadata and lifecycle logs.
 
 ### Head project discovery
 Project discovery is a head responsibility, not a kernel responsibility.
@@ -309,7 +309,7 @@ Destructive commands are guarded by the kernel, not by prompt guidance alone:
 - A head may never kill itself, and a head-proposed `ClearState` ends the batch because it removes the head record and command journal.
 
 ## Workers
-Workers are real harness sessions. For the MVP, that means real Pi sessions.
+Workers are real harness sessions on whichever backend is configured.
 They run in a specific workspace decided by the kernel from the head agent's proposed issue/project context.
 The preferred worker workspace is a dedicated git worktree so multiple workers/subagents can edit concurrently without trampling the same checkout.
 Workers do not directly interface with the user, so normal implementation and delivery privileges are pre-approved by the assigned issue: when requested they should edit files, use a separate branch/worktree, commit, push, and open or update a PR without asking for additional permission. For an implementation-and-delivery request, that delivery is the finish line: verify the requested change as reasonably possible, push it, open or update the pull request, then stop and report the delivery status and link. Workers must not watch CI, review bots, pull-request checks, or reviews, run poll/sleep loops after pushing, or wait for post-delivery feedback. They may perform CI remediation, respond to review, or take another post-delivery action when the user specifically requested it, but must not infer ongoing monitoring or additional follow-up. They should still inspect git status and repository instructions before editing, avoid overwriting unrelated active work, and report true blockers such as missing credentials/auth, remote setup problems, branch/worktree collisions, unrelated uncommitted work that would be overwritten, or unsafe/destructive operations. They should exhaust safe documented setup, dependency repair, available environment/tooling, bounded retry, and narrower verification paths before treating an environment problem as terminal; if full verification remains unavailable, they should still deliver with exact limitations unless repository guidance explicitly forbids it. A checkout ownership mismatch is different: stop writing immediately and report it so the kernel can reallocate, never create a nested replacement worktree.
@@ -317,7 +317,7 @@ Workers do not directly interface with the user, so normal implementation and de
 Meringue must never be the author of a git commit. Workers may commit assigned work, but only with the user's configured repository identity (`user.name`/`user.email`); they must never configure or pass a Meringue identity, including `Meringue Worker`, `meringue@example.com`, or `agent@meringue.local`. If no non-Meringue identity is available, workers must leave the work uncommitted and report that identity configuration is a blocker. Meringue's harness layer preserves a valid repository identity for worker child processes and makes an unavailable identity fail closed rather than falling back to Meringue. See `docs/commit-authorship.md` for the implementation, verification, and history audit.
 
 Not every worker issue requires a PR; for investigation-only or informational assigned work that does not require repository changes, workers may return findings or an answer without opening a PR unless the issue explicitly requests one. Heads should set `SpawnWorker.workspace_mode` to `shared_read_only` only when the new worker needs no file, Git, dependency, shell-command, or remote mutation. The harness must enforce a read-only tool set and the worker receives a separate non-mutating system prompt. If the task may implement, test with artifact-writing commands, deliver, or otherwise mutate anything, omit the field so the worker receives the default isolated editable workspace. A read-only session stays read-only on later prompts; spawn an isolated follow-up when work changes to implementation.
-All delivery-facing names and text must describe only the human product task. Branches, worktrees, commit subjects/bodies/trailers, tags, pull request titles/bodies, release notes, and similar artifacts must never contain Meringue branding or a `meringue/` prefix; project/issue/worker/head ids (including variants such as `P5-I2-W3`, `p5_i2_w3`, or `P5/I2/W3`); agent, Pi, harness, or session identities; AI confidence scores; AI-authorship trailers; or statements about which agents worked on the change. Derive names from the product task, sanitize unsafe supplied/generated values, and use only a short opaque suffix when uniqueness is required. Before delivery, inspect commit metadata and the rendered PR title/body and remove prohibited text. See `docs/delivery-artifact-privacy.md`.
+All delivery-facing names and text must describe only the human product task. Branches, worktrees, commit subjects/bodies/trailers, tags, pull request titles/bodies, release notes, and similar artifacts must never contain Meringue branding or a `meringue/` prefix; project/issue/worker/head ids (including variants such as `P5-I2-W3`, `p5_i2_w3`, or `P5/I2/W3`); agent, harness, or session identities; AI confidence scores; AI-authorship trailers; or statements about which agents worked on the change. Derive names from the product task, sanitize unsafe supplied/generated values, and use only a short opaque suffix when uniqueness is required. Before delivery, inspect commit metadata and the rendered PR title/body and remove prohibited text. See `docs/delivery-artifact-privacy.md`.
 
 They are attached to one specific issue, but multiple agents can be attached to one issue.
 They may follow up, but should not be used many times.
@@ -424,7 +424,7 @@ The logs pane should show:
 - kernel commands accepted/rejected by validation
 - issues created, modified, completed, blocked, or killed
 - workers spawned, prompted, completed, blocked, errored, or killed
-- important harness events such as Pi RPC `agent_start`, `agent_end`, tool execution start/end, and process exits
+- important harness events such as turn start/end, tool execution start/end, and process exits
 - clarifying questions created and answered
 
 Long-running workers should keep the main log oriented with concise, agent-authored findings, decisions, and implementation milestones. While a worker session is streaming, the kernel derives those mid-work lines from the session events reconciliation has *already* drained, attributed to that worker and its issue. `session_progress(events)` is a pure transform of that array rather than a second read, because some transports share one drain cursor and a second read would steal events from settle classification. Raw tool activity never becomes a progress line: tool names and call counts cannot truthfully explain semantic progress. If a harness has no complete assistant-authored update, it returns nothing and the worker stays quiet. Authored updates are heavily floored (at most once every two minutes per worker, consecutive duplicates dropped, each line truncated to a headline) so they can never bury kernel and user lines in the bounded log window. See `docs/agent-output.md`.
@@ -433,7 +433,7 @@ Do not persist every streamed token from the harness as a log entry.
 Streaming output can be rendered live in the TUI, while durable logs should store important lifecycle events,
 final summaries, errors, and kernel state changes. Expected TUI unavailability (for example repeatedly clicking a pending head that has no focused worker workspace yet) must not append durable or visible chat/log messages; use a silent no-op or transient UI affordance, while preserving real operation failures.
 
-Logs come from the Ruby kernel, harness process events, and worker final messages. For the MVP, harness process events are Pi RPC events.
+Logs come from the Ruby kernel, harness session events, and worker final messages. Each harness client translates its own events into that neutral shape.
 
 # KERNEL
 The kernel is the only part of Meringue that mutates orchestration state.
@@ -496,7 +496,7 @@ Worker isolation is a kernel-owned responsibility.
 
 The kernel should allocate worker workspaces before spawning harness sessions, then pass the resolved workspace path to the harness client as `cwd`. A bare repository is a valid worktree source but is never a valid worker `cwd`; Meringue must create an editable non-bare worktree from it.
 `SpawnWorker.workspace_mode` is explicit and persisted as `isolated` (default) or `shared_read_only`. For `shared_read_only`, the kernel uses only a clean, readable, registered, unlocked, non-bare checkout on `main` or `master`, and only when the selected harness advertises enforcement. Registered bare roots may select an existing linked main checkout but never the bare root itself. When a bare root has no suitable linked checkout, the workspace manager creates a deterministic manager-owned main/master checkout under its workspace root, with durable ownership and cross-process provisioning locks, and retains it as a reusable cache. Concurrent shared readers are allowed. The kernel revalidates immediately before launch; unsafe, dirty, moved, or failed caches are refused, and only provably incomplete owned cache creation may be recovered destructively. When no suitable checkout can be created or validated, it safely falls back to ordinary isolated allocation and persists `effective_workspace_mode: isolated` plus a fallback reason. Shared checkouts are never removed during worker cleanup.
-For git-backed projects, the preferred allocation strategy is one git worktree per worker using a Meringue-owned, human-facing branch name derived from the issue/task title, such as `meringue/fix-signup-validation-a1b2c3d4`. Do not expose Meringue agent ids, worker ids, Pi ids, or subagent implementation details in workspace branch names. Candidate path/branch ownership must be durably reserved under a per-candidate cross-process lock before Git or filesystem mutation. Before harness launch the kernel must revalidate directory editability, non-bare status, Git registration/branch/lock state, durable owner identity, and live-worker occupancy; an unusable or colliding managed candidate is excluded and safely reallocated rather than shared.
+For git-backed projects, the preferred allocation strategy is one git worktree per worker using a Meringue-owned, human-facing branch name derived from the issue/task title, such as `meringue/fix-signup-validation-a1b2c3d4`. Do not expose Meringue agent ids, worker ids, harness session ids, or subagent implementation details in workspace branch names. Candidate path/branch ownership must be durably reserved under a per-candidate cross-process lock before Git or filesystem mutation. Before harness launch the kernel must revalidate directory editability, non-bare status, Git registration/branch/lock state, durable owner identity, and live-worker occupancy; an unusable or colliding managed candidate is excluded and safely reallocated rather than shared.
 Sequential steps of one issue are the exception: a worker that continues a predecessor's line of work (queued behind it, its follow-up, its replacement, or the kernel's restart of an unreplayable session) keeps working in that predecessor's worktree and branch rather than provisioning a second checkout on a suffixed branch. Two live harness sessions must never share one worktree, so the kernel refuses to share and provisions a fresh worktree whenever the predecessor is not settled, the checkout is missing/unregistered/locked/moved to another branch, or its pull request already merged; every refusal is logged with its reason. Uncommitted work is not a refusal reason, because inheriting it is the point.
 Workspace metadata should be persisted on the agent record so sessions can be reconciled, resumed, killed, or cleaned up later.
 When pruning an issue or worker record, the kernel must ask the workspace manager to remove its associated Meringue-managed git worktree first. Cleanup must verify the configured workspace root, repository registration, persisted branch/path ownership, the main checkout, and other worker references. It must never force dirty or locked worktrees: preserve the failed worktree and branch, log the structured failure, and still allow eligible terminal state records to be pruned. Missing/already-removed worktrees are idempotent successes, and cleanup retains the delivery branch.
@@ -537,9 +537,9 @@ operator opts out with `[workspace] default_bare_checkout_mode = "full"`, and an
 profile (sparse or full-checkout) always overrides the synthetic default.
 
 ## Harness integration
-Meringue must be designed as harness-independent orchestration software, even though the MVP only needs Pi.
+Meringue must be designed as harness-independent orchestration software.
 
-All harness-specific behavior belongs behind a harness client/process manager. The TUI and kernel should depend on generic harness operations, not Pi-specific commands.
+All harness-specific behavior belongs behind a harness client/process manager. The TUI and kernel should depend on generic harness operations, never on one backend's commands.
 
 The harness client should expose operations shaped like:
 - `spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, workspace_mode:)`
@@ -560,10 +560,10 @@ Model catalogs are asked of the harness, never hand-maintained in Meringue. `ava
 
 A model reference is `<provider>/<model-id>` split on the **first** slash, exactly as the harness resolves it, so a model id may itself contain `/` and `:` (`fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`). That grammar lives in one place (`Meringue::Harness::ModelReference`) and is a shape check only: the catalog labels an unlisted id as unverified and never makes it unsettable, and every rejection names its reason in the user-visible line.
 
-Future Pi defaults and existing Pi session settings are separate scopes. `/model <provider>/<model-id>` keeps the shared model default for all future roles, while `/model head <provider>/<model-id>` and `/model worker <provider>/<model-id>` persist role-specific model defaults; `/thinking <level>` keeps the shared default for all future roles, while `/thinking head <level>` and `/thinking worker <level>` persist role-specific thinking defaults; none mutate existing sessions. Existing sessions have no settings command: their effective values are recorded on the agent record as `session_settings` when the kernel spawns, prompts, or reconciles a session, and are surfaced by the focused workspace line, raw state, and `GetInfo`. A focused workspace advertises `/open-session` for opening its selected harness UI, with the old argumentless `/session` spelling also retained only as an alias. Default persistence belongs in Meringue config and runtime spawn reconfiguration belongs behind the harness registry/client boundary.
+Future session defaults and existing session settings are separate scopes. `/model <provider>/<model-id>` keeps the shared model default for all future roles, while `/model head <provider>/<model-id>` and `/model worker <provider>/<model-id>` persist role-specific model defaults; `/thinking <level>` keeps the shared default for all future roles, while `/thinking head <level>` and `/thinking worker <level>` persist role-specific reasoning defaults; none mutate existing sessions. Existing sessions have no settings command: their effective values are recorded on the agent record as `session_settings` when the kernel spawns, prompts, or reconciles a session, and are surfaced by the focused workspace line, raw state, and `GetInfo`. A focused workspace advertises `/open-session` for opening its selected harness UI, with the old argumentless `/session` spelling also retained only as an alias. Default persistence belongs in Meringue config and runtime spawn reconfiguration belongs behind the harness registry/client boundary.
 
 The generic session reference should track:
-- `harness`, such as `pi`
+- `harness`, such as `claude` or `pi`
 - `pid`
 - `cwd`
 - `session_id`
@@ -572,8 +572,8 @@ The generic session reference should track:
 - `last_event_at`
 - `session_settings`: harness-neutral effective model/thinking values when the provider can report them
 
-### Pi harness rules for MVP
-Use real Pi sessions only.
+### Pi harness client rules
+These describe the Pi backend specifically. They are one client's implementation rules, not Meringue's architecture.
 
 Long-lived workers should use:
 
@@ -635,10 +635,10 @@ Fields should include:
 - `workspace_mode`: requested `isolated` or `shared_read_only` contract
 - `effective_workspace_mode`: actual launch mode after safe fallback
 - `workspace_mode_fallback_reason`: why a shared request used isolation, when applicable
-- `harness`: `pi` for the MVP
+- `harness`: the configured backend, such as `claude` or `pi`
 - `pid`
-- `harness_session_id`: Pi `sessionId` for the MVP
-- `harness_session_file`: Pi `sessionFile` for the MVP
+- `harness_session_id`: the harness's own session id
+- `harness_session_file`: the harness's own session transcript path
 - `session_settings`: harness-neutral effective model/thinking values, or explicit unknown/unavailable metadata
 - `harness_metadata`: optional harness-specific details
 - `follow_up_of_agent_id`: optional prior worker on the same issue
@@ -697,7 +697,7 @@ Returns detailed information about a project, issue, agent, or question. Use it 
 For agents, include harness metadata, recent logs, status, session file, and recent assistant/user messages when available.
 
 ### `SpawnHead(UserMessage, QuestionID?) -> Agent`
-Spawns a fresh stateless head harness session for one user message. For the MVP, this is a Pi-backed session.
+Spawns a fresh stateless head harness session for one user message on the configured head harness.
 
 The head receives a kernel snapshot, current AgentTree, active workers, active heads,
 unresolved questions, and the user message.
@@ -731,7 +731,7 @@ This supports title/description edits, reparenting, and status changes such as `
 Reparents an existing worker onto a different issue in the same project without killing, restarting, or re-provisioning its harness session, worktree, or branch. The kernel renumbers the worker id to the composite key of its new issue and re-points every reference that named the moved worker (deferred-chain `after_agent_id`, `follow_up`/`replace` lineage, issue `agent_ids`, `deferred_spawn` handover context, shared-workspace relationships, and ids quoted in prose) in the same pass. The harness session id, session file, pid, workspace, branch, and external workspace-owner identity are left intact, so an in-flight (streaming) worker can be reparented mid-turn without interrupting the turn. Cross-project moves are rejected because retaining the original repository would route later prompts into the wrong workspace; spawn a worker on the destination issue instead. A worker is also not movable while background workspace provisioning owns its current id. The target issue and source project must exist, and a worker already on the target issue is rejected as a no-op. Heads may not be reparented.
 
 ### `SpawnWorker(IssueID, Prompt, WorkspacePath?, WorkspaceMode?, Model?, ThinkingLevel?) -> Agent`
-Spawns a real worker harness session for an issue. For the MVP, this is a Pi worker session.
+Spawns a real worker harness session for an issue on the configured worker harness.
 
 Workers are usually one-to-one with issues.
 If `WorkspacePath` is omitted, the kernel should allocate a worker-specific workspace through the workspace manager.
@@ -752,7 +752,7 @@ Sends a prompt to an existing harness session.
 - `follow_up`: queue until the worker finishes current work
 
 If a harness session is streaming, the kernel should use the harness client's queued prompt behavior.
-For Pi, use RPC `steer`, `follow_up`, or `prompt` with `streamingBehavior` instead of blindly sending a normal prompt.
+Each client delivers the requested mode through its harness's own mechanism (Pi: RPC `steer`/`follow_up`/`prompt` with `streamingBehavior`; an interactive backend: its interrupt key plus the prompt box) rather than blindly sending a normal prompt.
 
 ### `AskQuestion(HeadID, Question, Context?) -> Question`
 Stores a clarifying question from a head agent.
