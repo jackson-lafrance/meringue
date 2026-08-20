@@ -8,6 +8,7 @@ require "pathname"
 
 require_relative "../delivery_artifact_policy"
 require_relative "profile"
+require_relative "worktree_provider"
 
 module Meringue
   module Workspace
@@ -256,12 +257,16 @@ module Meringue
           checkout_stall_timeout: section.fetch("worktree_stall_timeout", DEFAULT_CHECKOUT_STALL_TIMEOUT),
           checkout_timeout: section.fetch("worktree_checkout_timeout", DEFAULT_CHECKOUT_TIMEOUT),
           bare_sparse_object_threshold: section.fetch("bare_sparse_object_threshold", DEFAULT_BARE_SPARSE_OBJECT_THRESHOLD),
-          default_bare_checkout_mode: section.fetch("default_bare_checkout_mode", DEFAULT_BARE_CHECKOUT_MODE)
+          default_bare_checkout_mode: section.fetch("default_bare_checkout_mode", DEFAULT_BARE_CHECKOUT_MODE),
+          worktree_provider: section.fetch("worktree_provider", WorktreeProvider::DEFAULT_KIND),
+          worktree_provider_fallback: section.fetch("worktree_provider_fallback", WorktreeProvider::DEFAULT_FALLBACK),
+          worktree_provider_command: section.fetch("worktree_provider_command", nil)
         )
       end
 
       attr_reader :root_path, :command_timeout, :checkout_stall_timeout, :checkout_timeout, :cleanup_timeout,
-                  :progress_interval, :bare_sparse_object_threshold, :default_bare_checkout_mode
+                  :progress_interval, :bare_sparse_object_threshold, :default_bare_checkout_mode,
+                  :worktree_provider, :worktree_provider_fallback
 
       def initialize(root_path: DEFAULT_ROOT, command_timeout: DEFAULT_COMMAND_TIMEOUT,
                      checkout_stall_timeout: DEFAULT_CHECKOUT_STALL_TIMEOUT,
@@ -269,7 +274,10 @@ module Meringue
                      cleanup_timeout: DEFAULT_CLEANUP_TIMEOUT,
                      progress_interval: PROGRESS_REPORT_INTERVAL,
                      bare_sparse_object_threshold: DEFAULT_BARE_SPARSE_OBJECT_THRESHOLD,
-                     default_bare_checkout_mode: DEFAULT_BARE_CHECKOUT_MODE)
+                     default_bare_checkout_mode: DEFAULT_BARE_CHECKOUT_MODE,
+                     worktree_provider: WorktreeProvider::DEFAULT_KIND,
+                     worktree_provider_fallback: WorktreeProvider::DEFAULT_FALLBACK,
+                     worktree_provider_command: nil)
         @root_path = File.expand_path(root_path)
         @command_timeout = positive_float(command_timeout, DEFAULT_COMMAND_TIMEOUT)
         @checkout_stall_timeout = positive_float(checkout_stall_timeout, DEFAULT_CHECKOUT_STALL_TIMEOUT)
@@ -281,6 +289,9 @@ module Meringue
         @progress_interval = positive_float(progress_interval, PROGRESS_REPORT_INTERVAL)
         @bare_sparse_object_threshold = positive_integer(bare_sparse_object_threshold, DEFAULT_BARE_SPARSE_OBJECT_THRESHOLD)
         @default_bare_checkout_mode = normalize_bare_checkout_mode(default_bare_checkout_mode)
+        @worktree_provider = WorktreeProvider.build(kind: worktree_provider, command: worktree_provider_command)
+        @worktree_provider_fallback = WorktreeProvider.normalize_fallback(worktree_provider_fallback)
+        @worktree_provider_command = WorktreeProvider.command_argv(worktree_provider_command)
         # The large-bare determination reads pack idx footers once per bare source and is reused
         # across plan/allocate calls, so a busy provisioning loop never re-runs count-objects.
         @large_bare_source_cache = {}
@@ -315,6 +326,8 @@ module Meringue
           "workspace_path" => workspace_path,
           "workspace_branch" => branch,
           "workspace_owner_id" => agent_id.to_s,
+          "requested_worktree_provider" => worktree_provider.kind,
+          "worktree_provider" => worktree_provider.kind,
           "created" => false
         }
         attach_profile_metadata(plan, profile)
@@ -429,6 +442,8 @@ module Meringue
           stderr_bytes: last_failure && last_failure["stderr_bytes"],
           diagnostics_truncated: last_failure && last_failure["diagnostics_truncated"],
           exit_status: last_failure && last_failure["exit_status"],
+          timed_out: last_failure && last_failure["timed_out"],
+          timeout_seconds: last_failure && last_failure["timeout_seconds"],
           failure_kind: (last_failure && last_failure["failure_kind"]) || "worktree_unavailable",
           recovery: (last_failure && last_failure["recovery"]) || RECOVERY_NONE,
           cleanup: last_failure && last_failure["cleanup"]
@@ -625,14 +640,19 @@ module Meringue
         worktree_root = workspace["worktree_root_path"] || workspace["workspace_root_path"] || workspace.dig("plan", "worktree_root_path") || workspace["workspace_path"]
         return false unless git_root && worktree_root && Dir.exist?(worktree_root.to_s)
         owner_id = workspace["workspace_owner_id"] || workspace.dig("plan", "workspace_owner_id")
-        return false unless workspace_owned_by?(worktree_root, agent_id: owner_id, git_root: git_root,
-                                                branch: workspace["workspace_branch"] || workspace.dig("plan", "workspace_branch"))
+        branch = workspace["workspace_branch"] || workspace.dig("plan", "workspace_branch")
+        return false unless workspace_owned_by?(worktree_root, agent_id: owner_id, git_root: git_root, branch: branch)
+
+        provider = provider_for_workspace(workspace)
+        if provider.external?
+          released = release_external_workspace(workspace, provider: provider, preserve_branch: !delete_branch)
+          return released.fetch("success", false)
+        end
 
         result = run_command("git", "-C", git_root.to_s, "worktree", "remove", "--force", worktree_root.to_s,
                              timeout: cleanup_timeout, deadline: false)
         return false unless result.fetch("status").success?
 
-        branch = workspace["workspace_branch"] || workspace.dig("plan", "workspace_branch")
         # Even an explicit delete keeps a branch that carries commits: releasing a workspace must
         # never be the reason a delivered commit stops being reachable. Keep its ownership record
         # with it; a later retry by the same worker may safely check that branch back out, while a
@@ -668,11 +688,14 @@ module Meringue
 
         worktree_root = canonical_path(worktree_root)
         return reuse_outcome(false, "worktree_missing") unless Dir.exist?(worktree_root)
-        return reuse_outcome(false, "outside_managed_workspace_root") unless owned_workspace_path?(worktree_root)
         return reuse_outcome(false, "branch_not_delivery_managed") unless DeliveryArtifactPolicy.managed_branch?(branch)
         return reuse_outcome(false, "git_root_missing") if git_root.to_s.strip.empty? || !Dir.exist?(git_root.to_s)
+        git_root = canonical_path(git_root)
+        unless managed_owned_workspace_path?(worktree_root, git_root: git_root, branch: branch)
+          return reuse_outcome(false, "outside_managed_workspace_root")
+        end
 
-        listed = run_command("git", "-C", canonical_path(git_root), "worktree", "list", "--porcelain")
+        listed = run_command("git", "-C", git_root, "worktree", "list", "--porcelain")
         unless listed.fetch("status").success?
           return reuse_outcome(
             false,
@@ -726,9 +749,6 @@ module Meringue
           "worktree_root_path" => worktree_root,
           "workspace_branch" => workspace["workspace_branch"] || plan["workspace_branch"]
         }.compact
-        unless owned_workspace_path?(worktree_root)
-          return cleanup_outcome("skipped", "outside_managed_workspace_root", success: true, **base)
-        end
         if Array(protected_paths).compact.any? { |path| paths_overlap?(worktree_root, canonical_path(path)) }
           return cleanup_outcome("failed", "workspace_owned_by_another_worker", success: false, **base)
         end
@@ -745,6 +765,26 @@ module Meringue
 
         git_root = canonical_path(git_root)
         base["git_root"] = git_root
+        owner_id = workspace["workspace_owner_id"] || plan["workspace_owner_id"]
+        unless managed_owned_workspace_path?(worktree_root, git_root: git_root, branch: branch, agent_id: owner_id)
+          provider = provider_for_workspace(workspace)
+          provider_identifier = workspace["worktree_provider_identifier"] || plan["worktree_provider_identifier"]
+          released_record = if provider.external? && provider_identifier
+                              worktree_records(git_root).find do |candidate|
+                                same_path?(candidate.fetch("worktree", ""), worktree_root)
+                              end
+                            end
+          if released_record && released_record.fetch("branch", nil) != "refs/heads/#{branch}"
+            return cleanup_outcome(
+              "already_removed",
+              "provider_workspace_already_released",
+              success: true,
+              "worktree_provider" => provider.kind,
+              **base
+            )
+          end
+          return cleanup_outcome("skipped", "outside_managed_workspace_root", success: true, **base)
+        end
         if paths_overlap?(worktree_root, git_root)
           return cleanup_outcome("failed", "main_checkout_protected", success: false, **base)
         end
@@ -773,6 +813,18 @@ module Meringue
           return cleanup_outcome("already_removed", "worktree_already_removed", success: true, **base)
         end
         unless record.fetch("branch", nil) == "refs/heads/#{branch}"
+          provider = provider_for_workspace(workspace)
+          if provider.external?
+            owner_id = workspace["workspace_owner_id"] || plan["workspace_owner_id"]
+            release_workspace_owner(worktree_root, agent_id: owner_id, git_root: git_root, branch: branch) if owner_id
+            return cleanup_outcome(
+              "already_removed",
+              "provider_workspace_already_released",
+              success: true,
+              "worktree_provider" => provider.kind,
+              **base
+            )
+          end
           return cleanup_outcome("failed", "worktree_branch_mismatch", success: false, **base)
         end
         if record.key?("locked")
@@ -793,6 +845,32 @@ module Meringue
           unless dirty.fetch("stdout").to_s.empty?
             return cleanup_outcome("failed", "worktree_dirty", success: false, **base)
           end
+        end
+
+        provider = provider_for_workspace(workspace)
+        if provider.external?
+          released = release_external_workspace(workspace, provider: provider, preserve_branch: true, deadline: deadline)
+          if released.fetch("success", false)
+            return cleanup_outcome(
+              "removed",
+              released.fetch("reason", "provider_workspace_released"),
+              success: true,
+              attempted: true,
+              "worktree_provider" => provider.kind,
+              "worktree_retained" => released.fetch("worktree_retained", false),
+              "branch_restored" => released.fetch("branch_restored", false),
+              **base
+            )
+          end
+          return cleanup_outcome(
+            "failed",
+            released.fetch("reason", "external_provider_release_failed"),
+            success: false,
+            attempted: released.fetch("attempted", false),
+            error: released.fetch("error", nil),
+            "worktree_provider" => provider.kind,
+            **base
+          )
         end
 
         removed = run_command("git", "-C", git_root, "worktree", "remove", worktree_root, timeout: cleanup_timeout, deadline: deadline)
@@ -1252,6 +1330,35 @@ module Meringue
 
       def allocate_reserved_candidate_worktree(plan:, git_root:, base_ref:, relative_project_path:, branch:, worktree_root:,
                                                progress: nil, attempt_started: nil, profile: nil)
+        selected_provider = worktree_provider
+        if selected_provider.external?
+          incompatibility = external_provider_profile_incompatibility(profile)
+          if incompatibility
+            return external_provider_unavailable_outcome(selected_provider, incompatibility) unless native_provider_fallback?
+
+            plan = worktree_provider_fallback_plan(plan, selected_provider, incompatibility)
+          else
+            external = allocate_external_candidate_worktree(
+              provider: selected_provider,
+              plan: plan,
+              git_root: git_root,
+              base_ref: base_ref,
+              relative_project_path: relative_project_path,
+              branch: branch,
+              reservation_root: worktree_root,
+              progress: progress,
+              attempt_started: attempt_started,
+              profile: synthetic_bare_profile?(profile) ? nil : profile
+            )
+            return external unless external.fetch("fallback_to_native", false)
+
+            reason = external.fetch("fallback_reason", "external_provider_unavailable")
+            return external_provider_unavailable_outcome(selected_provider, reason) unless native_provider_fallback?
+
+            plan = worktree_provider_fallback_plan(plan, selected_provider, reason)
+          end
+        end
+
         candidate_plan = plan.merge("workspace_branch" => branch, "workspace_path" => worktree_root)
         attach_profile_metadata(candidate_plan, profile)
         workspace_path = relative_project_path == "." ? worktree_root : File.join(worktree_root, relative_project_path)
@@ -1448,6 +1555,567 @@ module Meringue
         { "workspace" => record }
       end
 
+      # Command providers select their own destination. Meringue reserves the
+      # deterministic branch/name first, asks the provider to provision it,
+      # then discovers the resulting path from Git's registry and transfers the
+      # durable ownership record to that exact path. Git remains authoritative
+      # for every launch and cleanup safety check.
+      def allocate_external_candidate_worktree(provider:, plan:, git_root:, base_ref:, relative_project_path:, branch:,
+                                                reservation_root:, progress:, attempt_started:, profile:)
+        control = external_provider_control_directory(plan.fetch("project_root"))
+        unless control.fetch("path", nil)
+          return {
+            "fallback_to_native" => true,
+            "fallback_reason" => control.fetch("reason", "provider_control_directory_unavailable")
+          }
+        end
+        unless provider.configured?
+          return {
+            "fallback_to_native" => true,
+            "fallback_reason" => "workspace.worktree_provider_command is not configured"
+          }
+        end
+
+        provider_cwd = control.fetch("path")
+        provider_name = File.basename(reservation_root)
+        existing = worktree_records_for_branch(git_root, branch)
+        if existing.one?
+          adopted = adopt_external_worktree(
+            provider: provider,
+            plan: plan,
+            git_root: git_root,
+            base_ref: base_ref,
+            relative_project_path: relative_project_path,
+            branch: branch,
+            record: existing.first,
+            provider_name: provider_name,
+            provider_cwd: provider_cwd,
+            reservation_root: reservation_root
+          )
+          return { "workspace" => adopted } if adopted
+
+          return {
+            "retry" => true,
+            "errors" => ["worker branch #{branch} is checked out in a worktree not owned by this worker"],
+            "failure_kind" => "branch_collision",
+            "recovery" => RECOVERY_NONE
+          }
+        elsif existing.length > 1
+          return {
+            "retry" => false,
+            "errors" => ["configured worktree provider cannot provision #{branch}: Git reports it in multiple worktrees"],
+            "failure_kind" => "ambiguous_provider_worktree",
+            "recovery" => RECOVERY_NONE
+          }
+        end
+
+        branch_preexisting = branch_exists?(git_root, branch)
+        remove_orphaned_owned_branch(git_root, branch) if branch_preexisting
+        created_branch = !branch_exists?(git_root, branch)
+        if created_branch
+          branch_result = run_command("git", "-C", git_root, "branch", branch, base_ref)
+          unless branch_result.fetch("status").success?
+            output = present_output(branch_result.fetch("stderr")) || present_output(branch_result.fetch("stdout"))
+            return {
+              "retry" => false,
+              "errors" => ["could not prepare branch #{branch} for the configured worktree provider: " \
+                           "#{failure_summary(output) || "git exited #{branch_result.fetch("status").exitstatus}"}"],
+              "failure_kind" => "provider_branch_setup_failed",
+              "recovery" => RECOVERY_NONE
+            }
+          end
+        end
+
+        attempt_started&.call("created_branch" => created_branch)
+        argv = provider.provision_argv(
+          name: provider_name,
+          branch: branch,
+          base_ref: base_ref,
+          git_root: git_root,
+          project_root: plan.fetch("project_root")
+        )
+        begin
+          result = run_command(
+            *argv,
+            chdir: provider_cwd,
+            timeout: checkout_timeout,
+            stall_timeout: checkout_stall_timeout,
+            output_limit: DIAGNOSTIC_OUTPUT_LIMIT_BYTES,
+            progress: progress
+          )
+        rescue Errno::ENOENT => e
+          release_owned_branch(git_root, branch) if created_branch && !native_provider_fallback?
+          return {
+            "fallback_to_native" => true,
+            "fallback_reason" => "configured worktree provider command is unavailable (#{e.message})"
+          }
+        end
+        unless result.fetch("status").success?
+          return failed_external_provision(
+            provider: provider,
+            plan: plan,
+            git_root: git_root,
+            base_ref: base_ref,
+            relative_project_path: relative_project_path,
+            branch: branch,
+            provider_name: provider_name,
+            provider_cwd: provider_cwd,
+            reservation_root: reservation_root,
+            created_branch: created_branch,
+            stdout: result.fetch("stdout"),
+            stderr: result.fetch("stderr"),
+            status: result.fetch("status"),
+            diagnostics: result.fetch("diagnostics", {})
+          )
+        end
+
+        begin
+          provider_response = provider.parse_response(result.fetch("stdout"), action: "provision")
+        rescue WorktreeProvider::InvalidResponse => e
+          return failed_external_provision(
+            provider: provider,
+            plan: plan,
+            git_root: git_root,
+            base_ref: base_ref,
+            relative_project_path: relative_project_path,
+            branch: branch,
+            provider_name: provider_name,
+            provider_cwd: provider_cwd,
+            reservation_root: reservation_root,
+            created_branch: created_branch,
+            stdout: result.fetch("stdout"),
+            stderr: "provider returned an invalid success response: #{e.message}",
+            status: FailureStatus.new(1),
+            diagnostics: result.fetch("diagnostics", {})
+          )
+        end
+
+        records = worktree_records_for_branch(git_root, branch)
+        unless records.one?
+          return failed_external_provision(
+            provider: provider,
+            plan: plan,
+            git_root: git_root,
+            base_ref: base_ref,
+            relative_project_path: relative_project_path,
+            branch: branch,
+            provider_name: provider_name,
+            provider_cwd: provider_cwd,
+            reservation_root: reservation_root,
+            created_branch: created_branch,
+            stdout: result.fetch("stdout"),
+            stderr: "provider exited successfully, but Git registered #{records.length} worktrees for #{branch}",
+            status: FailureStatus.new(1),
+            diagnostics: result.fetch("diagnostics", {})
+          )
+        end
+
+        workspace = external_workspace_record(
+          provider: provider,
+          provider_response: provider_response,
+          plan: plan,
+          git_root: git_root,
+          base_ref: base_ref,
+          relative_project_path: relative_project_path,
+          branch: branch,
+          record: records.first,
+          provider_name: provider_name,
+          provider_cwd: provider_cwd,
+          stdout: result.fetch("stdout"),
+          stderr: result.fetch("stderr")
+        )
+        unless workspace && transfer_external_workspace_owner(plan, workspace, reservation_root: reservation_root)
+          return {
+            "retry" => false,
+            "errors" => ["configured worktree provider created a worktree, but Meringue could not claim its exact path safely"],
+            "failure_kind" => "provider_workspace_ownership_collision",
+            "recovery" => RECOVERY_RESUME
+          }
+        end
+
+        if profile&.validation?
+          validation = run_profile_validation(
+            worktree_root: workspace.fetch("worktree_root_path"),
+            workspace_path: workspace.fetch("workspace_path"),
+            profile: profile
+          )
+          workspace["profile_validation"] = validation
+          unless validation.fetch("success", false)
+            cleanup = release_external_workspace(workspace, provider: provider, preserve_branch: !created_branch)
+            return {
+              "retry" => false,
+              "errors" => validation.fetch("errors"),
+              "stdout" => validation["stdout"],
+              "stderr" => validation["stderr"],
+              "exit_status" => validation["exit_status"],
+              "failure_kind" => "validation_failed",
+              "recovery" => RECOVERY_RESUME,
+              "cleanup" => cleanup
+            }
+          end
+        end
+
+        { "workspace" => workspace }
+      rescue CommandTimeout => e
+        failed_external_provision(
+          provider: provider,
+          plan: plan,
+          git_root: git_root,
+          base_ref: base_ref,
+          relative_project_path: relative_project_path,
+          branch: branch,
+          provider_name: provider_name,
+          provider_cwd: provider_cwd,
+          reservation_root: reservation_root,
+          created_branch: defined?(created_branch) && created_branch,
+          stdout: e.stdout,
+          stderr: e.stderr,
+          status: FailureStatus.new(124),
+          diagnostics: e.diagnostics || {},
+          timeout: e
+        )
+      rescue StandardError => e
+        {
+          "retry" => false,
+          "errors" => ["configured worktree provider failed: #{e.message}"],
+          "failure_kind" => "external_provider_error",
+          "recovery" => RECOVERY_RESUME
+        }
+      end
+
+      FailureStatus = Struct.new(:exitstatus) do
+        def success? = false
+      end
+
+      def failed_external_provision(provider:, plan:, git_root:, base_ref:, relative_project_path:, branch:, provider_name:,
+                                    provider_cwd:, reservation_root:, created_branch:, stdout:, stderr:, status:,
+                                    diagnostics:, timeout: nil)
+        matching = worktree_records_for_branch(git_root, branch)
+        cleanup = nil
+        if matching.one?
+          workspace = external_workspace_record(
+            provider: provider,
+            provider_response: {},
+            plan: plan,
+            git_root: git_root,
+            base_ref: base_ref,
+            relative_project_path: relative_project_path,
+            branch: branch,
+            record: matching.first,
+            provider_name: provider_name,
+            provider_cwd: provider_cwd,
+            stdout: stdout,
+            stderr: stderr
+          )
+          if workspace && transfer_external_workspace_owner(plan, workspace, reservation_root: reservation_root)
+            cleanup = release_external_workspace(workspace, provider: provider, preserve_branch: !created_branch)
+          end
+        elsif created_branch
+          cleanup = {
+            "attempted" => true,
+            "branch_result" => release_owned_branch(git_root, branch),
+            "worktree_removed" => true
+          }
+        end
+
+        output = present_output(stderr) || present_output(stdout)
+        disk_exhausted = diagnostics.fetch("disk_exhausted", false) || disk_exhaustion_output?(output)
+        error = if disk_exhausted
+                  "configured worktree provider failed: disk is full (no space left on device); " \
+                    "free disk space, then prompt this worker to retry provisioning"
+                elsif timeout
+                  timeout.describe("configured worktree provider")
+                else
+                  "configured worktree provider failed: #{failure_summary(output) || "exit #{status.exitstatus}"}"
+                end
+        {
+          "retry" => false,
+          "errors" => [error],
+          "stdout" => stdout,
+          "stderr" => stderr,
+          "stdout_bytes" => diagnostics["stdout_bytes"],
+          "stderr_bytes" => diagnostics["stderr_bytes"],
+          "diagnostics_truncated" => diagnostics["truncated"],
+          "exit_status" => status.exitstatus,
+          "timed_out" => !timeout.nil?,
+          "timeout_seconds" => timeout&.timeout,
+          "failure_kind" => disk_exhausted ? "disk_exhausted" : (timeout ? (timeout.stalled? ? "command_stalled" : "command_timed_out") : "external_provider_error"),
+          "recovery" => disk_exhausted || timeout ? RECOVERY_RESUME : RECOVERY_NONE,
+          "cleanup" => cleanup
+        }.compact
+      end
+
+      def external_workspace_record(provider:, provider_response:, plan:, git_root:, base_ref:, relative_project_path:,
+                                    branch:, record:, provider_name:, provider_cwd:, stdout: nil, stderr: nil,
+                                    adopted: false)
+        return nil if record.key?("bare") || record.key?("locked") || record.key?("prunable")
+
+        worktree_root = canonical_path(record.fetch("worktree", ""))
+        return nil unless Dir.exist?(worktree_root)
+
+        workspace_path = relative_project_path == "." ? worktree_root : File.join(worktree_root, relative_project_path)
+        return nil unless Dir.exist?(workspace_path)
+
+        identifier = present_output(provider_response["identifier"]) || provider_name
+        candidate = plan.merge(
+          "workspace_path" => workspace_path,
+          "workspace_root_path" => worktree_root,
+          "worktree_root_path" => worktree_root,
+          "workspace_branch" => branch,
+          "git_root" => git_root,
+          "base_ref" => base_ref,
+          "project_relative_path" => relative_project_path,
+          "requested_worktree_provider" => worktree_provider.kind,
+          "worktree_provider" => provider.kind,
+          "worktree_provider_identifier" => identifier,
+          "worktree_provider_cwd" => provider_cwd,
+          "created" => true,
+          "adopted" => adopted,
+          "errors" => [],
+          "stdout" => present_output(stdout),
+          "stderr" => present_output(stderr)
+        ).compact
+        candidate.delete("workspace_profile") if synthetic_profile_record?(candidate["workspace_profile"])
+        candidate
+      end
+
+      def adopt_external_worktree(provider:, plan:, git_root:, base_ref:, relative_project_path:, branch:, record:,
+                                  provider_name:, provider_cwd:, reservation_root:)
+        root = canonical_path(record.fetch("worktree", ""))
+        expected = workspace_owner(plan, git_root: git_root, branch: branch, worktree_root: root)
+        current = read_workspace_owner(root)
+        identifier = nil
+        if current
+          return nil unless ownership_matches?(current, expected)
+
+          identifier = current["provider_identifier"]
+        else
+          reservation = read_workspace_owner(reservation_root)
+          expected_reservation = workspace_owner(
+            plan,
+            git_root: git_root,
+            branch: branch,
+            worktree_root: reservation_root
+          )
+          return nil unless reservation && ownership_matches?(reservation, expected_reservation)
+        end
+
+        workspace = external_workspace_record(
+          provider: provider,
+          provider_response: { "identifier" => identifier },
+          plan: plan,
+          git_root: git_root,
+          base_ref: base_ref,
+          relative_project_path: relative_project_path,
+          branch: branch,
+          record: record,
+          provider_name: provider_name,
+          provider_cwd: provider_cwd,
+          adopted: true
+        )
+        return workspace if current
+        return workspace if workspace && transfer_external_workspace_owner(plan, workspace, reservation_root: reservation_root)
+
+        nil
+      end
+
+      def transfer_external_workspace_owner(plan, workspace, reservation_root:)
+        actual_root = workspace.fetch("worktree_root_path")
+        owner = workspace_owner(
+          plan,
+          git_root: workspace.fetch("git_root"),
+          branch: workspace.fetch("workspace_branch"),
+          worktree_root: actual_root
+        ).merge(
+          "provider" => workspace.fetch("worktree_provider"),
+          "provider_identifier" => workspace.fetch("worktree_provider_identifier")
+        )
+        current = read_workspace_owner(actual_root)
+        return false if current && !ownership_matches?(current, owner)
+
+        write_workspace_owner(owner) unless current
+        unless same_path?(reservation_root, actual_root)
+          release_workspace_owner(
+            reservation_root,
+            agent_id: plan.fetch("workspace_owner_id"),
+            git_root: workspace.fetch("git_root"),
+            branch: workspace.fetch("workspace_branch")
+          )
+        end
+        true
+      rescue StandardError
+        false
+      end
+
+      def external_provider_control_directory(project_root)
+        project_path = canonical_path(project_root)
+        return { "path" => project_path } if Dir.exist?(project_path)
+
+        { "reason" => "configured provider needs an existing project directory" }
+      end
+
+      def worktree_records_for_branch(git_root, branch)
+        worktree_records(git_root).select { |record| record["branch"] == "refs/heads/#{branch}" }
+      end
+
+      def external_provider_profile_incompatibility(profile)
+        return nil unless profile.is_a?(Meringue::Workspace::Profile)
+        return nil if synthetic_bare_profile?(profile)
+        return "custom workspace path templates require native Git provisioning" if profile.custom_path_template?
+        return "project-declared sparse patterns require native Git provisioning" if profile.sparse?
+
+        nil
+      end
+
+      def synthetic_bare_profile?(profile)
+        profile.is_a?(Meringue::Workspace::Profile) && profile.name == BARE_DEFAULT_PROFILE_NAME
+      end
+
+      def synthetic_profile_record?(record)
+        record.is_a?(Hash) && record["name"] == BARE_DEFAULT_PROFILE_NAME
+      end
+
+      def native_provider_fallback?
+        worktree_provider_fallback == WorktreeProvider::NATIVE_GIT
+      end
+
+      def worktree_provider_fallback_plan(plan, provider, reason)
+        plan.merge(
+          "requested_worktree_provider" => provider.kind,
+          "worktree_provider" => WorktreeProvider::NATIVE_GIT,
+          "worktree_provider_fallback_reason" => reason
+        )
+      end
+
+      def external_provider_unavailable_outcome(provider, reason)
+        {
+          "retry" => false,
+          "errors" => ["#{provider.display_name} is unavailable: #{reason}. " \
+                       "Set workspace.worktree_provider_fallback = \"native_git\" to allow a safe native fallback."],
+          "failure_kind" => "external_provider_unavailable",
+          "recovery" => RECOVERY_NONE
+        }
+      end
+
+      def provider_for_workspace(workspace)
+        plan = workspace.is_a?(Hash) && workspace["plan"].is_a?(Hash) ? workspace.fetch("plan") : workspace
+        kind = plan.is_a?(Hash) ? plan.fetch("worktree_provider", WorktreeProvider::NATIVE_GIT) : WorktreeProvider::NATIVE_GIT
+        WorktreeProvider.new(kind: kind, command: @worktree_provider_command)
+      end
+
+      def release_external_workspace(workspace, provider:, preserve_branch:, deadline: nil)
+        plan = workspace["plan"].is_a?(Hash) ? workspace.fetch("plan") : workspace
+        git_root = canonical_path(workspace["git_root"] || plan["git_root"] || workspace["project_root"] || plan["project_root"])
+        project_root = workspace["project_root"] || plan["project_root"] || git_root
+        worktree_root = canonical_path(workspace["worktree_root_path"] || workspace["workspace_root_path"] ||
+                                       plan["worktree_root_path"] || plan["workspace_root_path"] || workspace["workspace_path"])
+        branch = workspace["workspace_branch"] || plan["workspace_branch"]
+        identifier = workspace["worktree_provider_identifier"] || plan["worktree_provider_identifier"] || File.basename(worktree_root)
+        provider_cwd = workspace["worktree_provider_cwd"] || plan["worktree_provider_cwd"]
+        provider_cwd = project_root unless provider_cwd && Dir.exist?(provider_cwd)
+        head = run_command("git", "-C", git_root, "rev-parse", "--verify", "refs/heads/#{branch}", deadline: deadline)
+        branch_head = head.fetch("status").success? ? head.fetch("stdout").to_s.strip : nil
+
+        result = run_command(
+          *provider.release_argv(
+            identifier: identifier,
+            worktree_path: worktree_root,
+            branch: branch,
+            git_root: git_root,
+            project_root: project_root
+          ),
+          chdir: provider_cwd,
+          timeout: cleanup_timeout,
+          deadline: deadline,
+          output_limit: DIAGNOSTIC_OUTPUT_LIMIT_BYTES
+        )
+        unless result.fetch("status").success?
+          output = present_output(result.fetch("stderr")) || present_output(result.fetch("stdout"))
+          return {
+            "success" => false,
+            "attempted" => true,
+            "reason" => "external_provider_release_failed",
+            "error" => failure_summary(output) || "configured provider exited #{result.fetch("status").exitstatus}"
+          }
+        end
+
+        begin
+          response = provider.parse_response(result.fetch("stdout"), action: "release")
+        rescue WorktreeProvider::InvalidResponse => e
+          return {
+            "success" => false,
+            "attempted" => true,
+            "reason" => "external_provider_invalid_release_response",
+            "error" => e.message
+          }
+        end
+
+        registration = worktree_records(git_root).find { |record| same_path?(record.fetch("worktree", ""), worktree_root) }
+        released = if response.fetch("worktree_retained")
+                     registration && registration.fetch("branch", nil) != "refs/heads/#{branch}"
+                   else
+                     registration.nil?
+                   end
+        unless released
+          return {
+            "success" => false,
+            "attempted" => true,
+            "reason" => "external_provider_did_not_release_worktree",
+            "error" => "provider-reported release did not match Git registration"
+          }
+        end
+
+        branch_restore = nil
+        if preserve_branch && branch_head && !branch_exists?(git_root, branch)
+          branch_restore = run_command(
+            "git", "-C", git_root, "update-ref", "refs/heads/#{branch}", branch_head,
+            timeout: command_timeout,
+            deadline: deadline
+          )
+          unless branch_restore.fetch("status").success?
+            return {
+              "success" => false,
+              "attempted" => true,
+              "released" => true,
+              "reason" => "branch_restore_failed",
+              "error" => present_output(branch_restore.fetch("stderr")) || present_output(branch_restore.fetch("stdout"))
+            }
+          end
+        end
+
+        owner_id = workspace["workspace_owner_id"] || plan["workspace_owner_id"]
+        release_workspace_owner(worktree_root, agent_id: owner_id, git_root: git_root, branch: branch) if owner_id
+        {
+          "success" => true,
+          "attempted" => true,
+          "released" => true,
+          "reason" => "provider_workspace_released",
+          "worktree_retained" => response.fetch("worktree_retained"),
+          "branch_restored" => !!branch_restore
+        }
+      rescue Errno::ENOENT => e
+        {
+          "success" => false,
+          "attempted" => false,
+          "reason" => "external_provider_command_unavailable",
+          "error" => "configured worktree provider command is unavailable (#{e.message})"
+        }
+      rescue CommandTimeout => e
+        {
+          "success" => false,
+          "attempted" => true,
+          "reason" => "external_provider_cleanup_timed_out",
+          "error" => e.describe("configured worktree provider")
+        }
+      rescue StandardError => e
+        {
+          "success" => false,
+          "attempted" => false,
+          "reason" => "external_provider_cleanup_error",
+          "error" => e.message
+        }
+      end
+
       def workspace_owner(plan, git_root:, branch:, worktree_root:)
         {
           "schema_version" => OWNERSHIP_SCHEMA_VERSION,
@@ -1502,8 +2170,12 @@ module Meringue
           # The forced-collision case (a different worker on the same candidate) keeps its
           # ownership record, so it is still refused here; the kernel's launch gate still
           # re-checks for live occupants before any session starts in the adopted tree.
-          if (foreign_path || foreign_registration || foreign_branch) &&
-             !reusable_existing_checkout?(owner.fetch("git_root"), owner.fetch("worktree_root"), owner.fetch("branch"))
+          reusable = reusable_existing_checkout?(
+            owner.fetch("git_root"), owner.fetch("worktree_root"), owner.fetch("branch")
+          ) || reusable_external_owned_branch?(
+            owner.fetch("git_root"), owner.fetch("branch"), owner.fetch("agent_id")
+          )
+          if (foreign_path || foreign_registration || foreign_branch) && !reusable
             return {
               "acquired" => false,
               "outcome" => ownership_collision_outcome(owner, nil),
@@ -1842,6 +2514,18 @@ module Meringue
       # and not bare or prunable. Anything else (a foreign squatter directory, a worktree that
       # moved to another branch, a half-finished locked checkout, a bare repository) stays a
       # collision so the allocator falls back to a uniquified candidate as before.
+      def reusable_external_owned_branch?(git_root, branch, agent_id)
+        return false unless worktree_provider.external?
+
+        records = worktree_records_for_branch(git_root, branch)
+        return false unless records.one?
+
+        root = records.first.fetch("worktree", "")
+        workspace_owned_by?(root, agent_id: agent_id, git_root: git_root, branch: branch)
+      rescue StandardError
+        false
+      end
+
       def reusable_existing_checkout?(git_root, worktree_root, branch)
         return false unless owned_workspace_path?(worktree_root)
         return false unless DeliveryArtifactPolicy.managed_branch?(branch)
@@ -1881,6 +2565,22 @@ module Meringue
         expanded = canonical_path(path)
         managed_root = canonical_path(root_path)
         expanded.start_with?("#{managed_root}#{File::SEPARATOR}")
+      end
+
+      # A command provider owns its destination layout, which may live outside
+      # +root_path+. Such a path is managed only when the allocator's durable
+      # ownership record matches that exact Git root, branch, and path.
+      def managed_owned_workspace_path?(path, git_root:, branch:, agent_id: nil)
+        return true if owned_workspace_path?(path)
+        return false if git_root.to_s.strip.empty? || branch.to_s.strip.empty?
+
+        owner = read_workspace_owner(path)
+        return false unless owner
+        return false if agent_id && owner.fetch("agent_id", nil) != agent_id.to_s
+
+        owner.fetch("branch", nil) == branch.to_s &&
+          same_path?(owner.fetch("git_root", ""), git_root) &&
+          same_path?(owner.fetch("worktree_root", ""), path)
       end
 
       # Names the command a CommandTimeout came from, such as "git worktree add" or "git rev-parse".

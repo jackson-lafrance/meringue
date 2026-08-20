@@ -501,6 +501,18 @@ Workspace metadata should be persisted on the agent record so sessions can be re
 When pruning an issue or worker record, the kernel must ask the workspace manager to remove its associated Meringue-managed git worktree first. Cleanup must verify the configured workspace root, repository registration, persisted branch/path ownership, the main checkout, and other worker references. It must never force dirty or locked worktrees: preserve the failed worktree and branch, log the structured failure, and still allow eligible terminal state records to be pruned. Missing/already-removed worktrees are idempotent successes, and cleanup retains the delivery branch.
 When pruning an issue or worker record, the kernel must ask the workspace manager to remove its associated Meringue-managed git worktree first. Cleanup must verify the configured workspace root, repository registration, persisted branch/path ownership, the main checkout, and other worker references. A shared worktree is removed only once no retained worker still needs it; the record of a settled sharer is pruned immediately, and the directory goes with the last sharer. It must never force dirty or locked worktrees: retain the state bundle, log the structured failure, and allow a later prune to retry. Missing/already-removed worktrees are idempotent successes, and cleanup retains the delivery branch.
 The TUI, heads, and harness clients should not directly create, prune, or mutate worktrees.
+Native `git worktree` management is the default. An operator may instead configure one private
+command-provider adapter through the workspace manager. The provider chooses/provisions or releases
+the checkout, but Git registration remains authoritative and Meringue still owns branch/name
+reservation, durable path ownership, pre-launch validation, reuse/liveness exclusion, clean
+non-forced cleanup, branch preservation, and pruning. Provider commands are argv-only, never shell
+strings, and stdout follows a small JSON lifecycle protocol while human diagnostics use stderr. A
+fallback to native Git is allowed only when configured and known safe before provider mutation (for
+example a missing executable or an unsupported sparse profile); an ambiguous provider failure must
+be reconciled rather than followed by a second checkout. The selected/effective provider and opaque
+provider identifier must persist on the workspace plan so restart, continuation, release, and prune
+use the same contract. Release responses declare whether a reusable worktree remains registered;
+Meringue verifies that postcondition and restores the delivery branch if the provider drops its ref.
 A project may declare a generic, project-native sparse provisioning profile at
 `.meringue/workspace-profile.toml` so the workspace manager checks out only a repository-approved
 working set instead of the full tree: `git worktree add --no-checkout`, per-worktree
