@@ -8,7 +8,24 @@ The goal is simple: keep the developer in one place while many agents work in pa
 
 > **Current distribution:** Meringue is not yet published to RubyGems or GitHub Releases. The supported installation is a source checkout.
 
-### 1. Install and launch Meringue
+### 1. Check the prerequisites
+
+You need:
+
+- Git;
+- Ruby 3.1 or newer;
+- Bundler (included with most Ruby installations);
+- for real agent work, a supported harness CLI installed and authenticated. Meringue supports Claude Code (`claude`), Pi (`pi`), and Antigravity (`agy`), and does not assume one: pick a harness during first-run setup, in `/config`, or with `[harness] provider`. A harness is not needed for demo mode.
+
+Confirm the required development tools are available:
+
+```bash
+git --version
+ruby --version     # must report 3.1 or newer
+bundle --version
+```
+
+### 2. Install and launch Meringue
 
 ```bash
 git clone https://github.com/jackson-lafrance/meringue.git
@@ -43,6 +60,24 @@ Modern coding harnesses are excellent at giving one agent a focused environment 
 
 Meringue keeps that parallel work in one place. The developer can keep typing, monitor structured progress, jump into a specific worker only when needed, and stay oriented around the product goals instead of terminal bookkeeping.
 
+## Why open source and harness agnostic
+
+Meringue is meant to be infrastructure that developers can adapt, inspect, and extend. Coding-agent harnesses will keep changing, and different teams will prefer different backends. Meringue should make those choices pluggable rather than forcing a single blessed agent runtime.
+
+Meringue is harness-agnostic: there is no default backend, and harness-specific behavior stays behind provider clients so the kernel and TUI depend only on generic operations — spawning a session, prompting a session, reading events, aborting work, and attaching to a session.
+
+Backends come in two shapes:
+
+- **Interactive** (Claude Code). Meringue starts the agent CLI once, in its own native interactive mode inside a PTY that Meringue owns for the life of the session. It types prompts in and reads the agent's own durable JSONL transcript back out for every state decision. Because that one process serves both the autonomous worker and the focused viewer, opening focus is an attach: no turn is interrupted, no process is replaced, and returning to the dashboard costs nothing.
+- **Managed transport** (Pi). Meringue drives a long-lived RPC transport. Focusing a worker hands the session over to a native interactive process and back again, which means an active turn must be settled first.
+
+Supported provider names in the current config surface include:
+
+- `pi`
+- `claude` / `claude_code` / `claude-code` / `cc`
+- `antigravity`
+
+That provider list should grow over time without changing the core product model.
 ## Product value
 
 Meringue provides an orchestrator for multi-agent development:
@@ -78,7 +113,7 @@ lib/meringue/cli.rb                # command parsing and runtime setup
 lib/meringue/app.rb                # TUI application lifecycle
 lib/meringue/kernel/               # command validation and state mutation
 lib/meringue/heads/                # head-agent context, runners, and parsing
-lib/meringue/harness/              # Pi and other harness integrations
+lib/meringue/harness/              # harness integrations and the shared transports
 lib/meringue/tui/                  # terminal rendering, panes, navigation, styles
 lib/meringue/state/                # JSON persistence models and store
 lib/meringue/goals/                # goal-loop record, decisions, judge, and metric probe
@@ -118,7 +153,7 @@ bundle exec meringue --help
 Choose a harness at runtime:
 
 ```bash
-bundle exec meringue tui --harness pi
+bundle exec meringue tui --harness claude
 bundle exec meringue tui --harness claude
 bundle exec meringue tui --head-harness antigravity --worker-harness claude
 ```
@@ -243,7 +278,7 @@ The header owns the agent id and title; the body does not repeat an `<id> output
 
 ANSI sequences, control characters, common pasted terminal boxes, duplicate transcript headers, excess whitespace, and duplicate PR URLs are removed at render time without changing the original text stored in state. Styles are emitted as Canvas metadata rather than accepted from agent text. Agent colors come from the active colorscheme's deterministic identity palette, so `/theme <name>` restyles Markdown markers, gutters, and headers together. Set `NO_COLOR=1` to disable color; icons, ids, status text, gutters, Markdown block markers, and visible link targets keep the output usable.
 
-See [`docs/agent-output.md`](docs/agent-output.md) for the Pi RPC-to-TUI rendering path, Markdown behavior, safety constraints, and before/after examples.
+See [`docs/agent-output.md`](docs/agent-output.md) for the harness-to-TUI rendering path, Markdown behavior, safety constraints, and before/after examples.
 
 ## Configuration and state
 
@@ -258,7 +293,11 @@ The config supports TUI colorschemes, animations, every TUI keybinding, separate
 
 The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state. Durable logs retain the newest 500 entries so lifecycle history cannot grow without bound. Independent events remain chronological, while explicitly identified evolving statuses—currently per-worker workspace-provisioning elapsed time and checkout percentage—replace only their own preceding entry so the dashboard shows one latest value. See [`docs/log-retention.md`](docs/log-retention.md) for replacement/retention semantics and the measured rationale, and [`docs/scalability.md`](docs/scalability.md) for the hermetic process-level responsiveness sweep.
 
-The dashboard chat remains the primary workflow: describe new goals naturally and let head agents route the work. Double-click an issue to open its delivery PR when one is tracked; when one worker needs sustained direction, iterative plan discussion, research, investigation, or closer transparency, press `a` or double-click that worker to open its optional focused workspace. With a head row selected, the same `a` key instead opens that head's persisted harness session externally for debugging and leaves the dashboard in place; unavailable history is reported as a short-lived notice. Native Pi focus continues that worker's existing context inside the logs pane while the AgentTree and external dashboard chat stay visible, live, and independently focusable. Entering native focus settles an active managed turn before transferring sole session ownership; if focus closes before a newer final result, dashboard ownership and the prior logs view are restored and the saved assignment continues automatically rather than being marked as a worker error. The same provider environment and `PATH` used to launch Pi RPC are preserved for native focus, including package-manager/version-manager installations; `docs/config.md` covers explicit command and `PATH` configuration for restricted GUI/service environments. Focused commands use a configurable leader so Pi and shell/editor bindings remain available: by default press `Ctrl-Space`, then `t` to switch views, `f` to cycle transcript filters, `a` to open the worker's saved Pi session with the existing external launcher, `b` to launch the editor, `p` to open the verified delivery PR, or `q` to close focus and restore normal dashboard logs without stopping the worker or terminal. See `docs/keybindings.md` for the full interaction model.
+The dashboard chat remains the primary workflow: describe new goals naturally and let head agents route the work. Double-click an issue to open its delivery PR when one is tracked; when one worker needs sustained direction, iterative plan discussion, research, investigation, or closer transparency, press `a` or double-click that worker to open its optional focused workspace. With a head row selected, the same `a` key instead opens that head's persisted harness session externally for debugging and leaves the dashboard in place; unavailable history is reported as a short-lived notice.
+
+Focus continues that worker's existing context inside the logs pane while the AgentTree and external dashboard chat stay visible, live, and independently focusable. What focusing costs depends on the backend. On an interactive backend the worker's session is already a live process Meringue owns, so focusing attaches to it: a turn that is mid-flight keeps running, and leaving focus releases the view and nothing else. On a managed-transport backend, focusing must first settle an active turn before transferring sole session ownership; if focus closes before a newer final result, dashboard ownership and the prior logs view are restored and the saved assignment continues automatically rather than being marked as a worker error. The provider environment and `PATH` used to launch the harness are preserved either way, including package-manager and version-manager installations; `docs/config.md` covers explicit command and `PATH` configuration for restricted GUI/service environments.
+
+Focused commands use a configurable leader so the agent's own key bindings and shell/editor bindings remain available: by default press `Ctrl-Space`, then `t` to switch views, `f` to cycle transcript filters, `a` to open the worker's saved session with the external launcher, `b` to launch the editor, `p` to open the verified delivery PR, or `q` to close focus and restore normal dashboard logs without stopping the worker or terminal. See `docs/keybindings.md` for the full interaction model.
 
 ## Current architecture in one flow
 
@@ -274,7 +313,7 @@ User prompt
 
 Heads handle messages by answering directly when supplied context is sufficient, creating/reusing issues, prompting workers, running kernel-owned lookups/maintenance, or asking questions. They never perform substantive investigation themselves: if an explanation requires inspecting or synthesizing records, logs, prompts, dependencies, files, or external facts, an informational worker produces it. Every natural-language message still gets a fresh stateless head. Each head owns one tracked harness session for as long as it is alive, so its session id, session file, and pid are visible in state and reconcilable exactly like a worker's; the kernel closes that session and marks it terminal when the head's result is applied, when it errors, or when it is killed. Its routing context is assembled from existing issues, recent lifecycle logs, and generic harness/session metadata rather than a second conversation-state model.
 
-For a follow-up, the head chooses among continuing a settled session (`normal`), correcting active work (`steer`), queuing a next step (`follow_up`), spawning a related worker on the same issue, or replacing an unhealthy/stale worker. Pi's persisted session retains the detailed conversation context. AgentTree worker rows label successors with `after W…` or `replaces W…`, while lifecycle logs state the full relationship. Workers carry out assigned implementation, investigation, or informational work, and only need PRs when the assigned delivery calls for repository changes. The kernel owns orchestration state. Harness-specific behavior stays behind the harness client layer.
+For a follow-up, the head chooses among continuing a settled session (`normal`), correcting active work (`steer`), queuing a next step (`follow_up`), spawning a related worker on the same issue, or replacing an unhealthy/stale worker. The harness's persisted session retains the detailed conversation context. AgentTree worker rows label successors with `after W…` or `replaces W…`, while lifecycle logs state the full relationship. Workers carry out assigned implementation, investigation, or informational work, and only need PRs when the assigned delivery calls for repository changes. The kernel owns orchestration state. Harness-specific behavior stays behind the harness client layer.
 
 ## Contributing notes for agents
 

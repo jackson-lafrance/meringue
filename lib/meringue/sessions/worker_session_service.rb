@@ -21,6 +21,22 @@ module Meringue
         raise Error, "Unable to open agent #{agent_id}: #{e.message}"
       end
 
+      # How this agent's backend can be focused. Callers branch on the capability rather than on
+      # the harness name, so adding a backend never means editing the UI.
+      def agent_focus_mode(agent_id)
+        engine.agent_focus_mode(agent_id)
+      end
+
+      # Attaches to a session that is already running interactively. Unlike the handoff below, this
+      # neither interrupts the agent nor replaces its process.
+      def attach_agent_live_terminal(agent_id, rows: nil, columns: nil)
+        engine.attach_agent_live_terminal(agent_id, rows: rows, columns: columns)
+      end
+
+      def detach_agent_live_terminal(agent_id)
+        engine.detach_agent_live_terminal(agent_id)
+      end
+
       # Focus uses the same application service as transcript views, but remains a
       # process transition owned by the kernel rather than by a pane renderer.
       def begin_agent_interactive_focus(agent_id)

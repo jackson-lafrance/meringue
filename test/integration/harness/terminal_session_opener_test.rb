@@ -33,7 +33,7 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
   end
 
   def opener(alacritty: @alacritty, commands: {})
-    Opener.new(pi_session_dir: @session_dir, alacritty_command: alacritty, commands: commands)
+    Opener.new(session_dir: @session_dir, alacritty_command: alacritty, commands: commands)
   end
 
   def agent(overrides = {})

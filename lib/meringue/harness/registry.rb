@@ -7,8 +7,30 @@ require "shellwords"
 module Meringue
   module Harness
     class Registry
-      DEFAULT_PROVIDER = "pi"
+      # Raised when nothing says which agent harness to run. Meringue supports several and does not
+      # guess: silently defaulting would start a different backend than the user believes they
+      # configured, which is worse than saying so.
+      class MissingProviderError < ArgumentError; end
+
+      # Deliberately absent. Meringue is harness-agnostic, so there is no backend it falls back to.
+      DEFAULT_PROVIDER = nil
       PROVIDERS = %w[pi claude antigravity].freeze
+      # How each backend spells a model and a reasoning level on its own command line, and whether
+      # it wants a bare model id or a qualified `provider/model` reference. This is the whole of
+      # what the registry needs to know about a provider's session defaults; there is no branch on
+      # provider name anywhere below.
+      # Config keys under a provider's section that carry its model and reasoning defaults.
+      SESSION_DEFAULT_KEYS = %w[
+        model head_model worker_model
+        thinking_level head_thinking_level worker_thinking_level
+      ].freeze
+      PROVIDER_SESSION_FLAGS = {
+        "pi" => { "model" => "--model", "thinking_level" => "--thinking", "qualified_model" => true },
+        # Claude Code is single-vendor, so it rejects a provider-qualified reference, and it calls
+        # the reasoning level "effort".
+        "claude" => { "model" => "--model", "thinking_level" => "--effort", "qualified_model" => false },
+        "antigravity" => {}
+      }.freeze
       PROVIDER_LABELS = {
         "pi" => "Pi",
         "claude" => "Claude Code",
@@ -50,17 +72,21 @@ module Meringue
         "antigravity cli" => "antigravity",
         "agy" => "antigravity"
       }.freeze
-      DEFAULT_PI_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
+      # Where a harness that stores its own session files keeps them. The directory name is Pi's
+      # because the files in it are Pi's; the environment variable is neutral because any backend
+      # with the same need reads it.
+      DEFAULT_AGENT_SESSION_DIR = File.expand_path(
+        ENV.fetch("MERINGUE_AGENT_SESSION_DIR", ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
+      )
       COMMAND_BLACKLIST_ENV = "MERINGUE_WORKER_COMMAND_BLACKLIST"
       COMMAND_BLACKLIST_EXTENSION = Meringue.root_path("lib", "meringue", "harness", "extensions", "command_blacklist.js")
-      # Canonical "provider/model" reference so Pi never has to disambiguate the
-      # bare model id across providers that all expose Claude Opus 5.
-      DEFAULT_PI_MODEL = "anthropic/claude-opus-5"
-      # Highest thinking level Pi exposes; Claude Opus 5 only supports xhigh/max.
-      DEFAULT_PI_THINKING_LEVEL = "max"
+      # Stored as a qualified "provider/model" reference because a multi-vendor harness has to
+      # disambiguate a bare id across providers that all expose the same model. A single-vendor
+      # harness is handed the bare id instead (see PROVIDER_SESSION_FLAGS).
+      DEFAULT_MODEL = "anthropic/claude-opus-5"
+      # The highest reasoning level; Claude Opus 5 supports only xhigh and max.
+      DEFAULT_THINKING_LEVEL = "max"
       DEFAULT_PI_HEAD_EXTRA_ARGS = [
-        "--model", DEFAULT_PI_MODEL,
-        "--thinking", DEFAULT_PI_THINKING_LEVEL,
         "--tools", "read,bash,grep,find,ls",
         "--no-extensions",
         "--no-skills",
@@ -69,8 +95,6 @@ module Meringue
         "--no-approve"
       ].freeze
       DEFAULT_PI_WORKER_EXTRA_ARGS = [
-        "--model", DEFAULT_PI_MODEL,
-        "--thinking", DEFAULT_PI_THINKING_LEVEL,
         "--tools", "read,bash,grep,find,ls,edit,write",
         "--no-extensions",
         "--no-skills",
@@ -78,26 +102,41 @@ module Meringue
         "--no-context-files",
         "--no-approve"
       ].freeze
+      # Model and reasoning defaults are config values rather than argv, so the registry renders them
+      # in each backend's own spelling instead of every backend hard-coding one harness's flags.
       DEFAULT_PROVIDER_CONFIG = {
         "pi" => {
           "command" => "pi",
-          "session_dir" => DEFAULT_PI_SESSION_DIR,
+          "session_dir" => DEFAULT_AGENT_SESSION_DIR,
+          "model" => DEFAULT_MODEL,
+          "thinking_level" => DEFAULT_THINKING_LEVEL,
           "head_extra_args" => DEFAULT_PI_HEAD_EXTRA_ARGS,
           "worker_extra_args" => DEFAULT_PI_WORKER_EXTRA_ARGS
         },
         "claude" => {
           "command" => "claude",
+          "model" => DEFAULT_MODEL,
+          "thinking_level" => DEFAULT_THINKING_LEVEL,
+          # A head only reads: it inspects the project to decide what to route, and it must not be
+          # able to change it. The tool allowlist is what enforces that, so no write tool is
+          # reachable regardless of permission mode. Slash commands are disabled so a project's own
+          # commands cannot redirect an orchestration decision.
+          #
+          # Permission prompts are bypassed rather than using plan mode. A head runs unattended, and
+          # plan mode ends by asking a human to approve leaving it — a question nobody is there to
+          # answer, which would hang the head until its timeout instead of returning a routing
+          # decision.
           "head_extra_args" => [
-            "--effort", "high",
-            "--tools", "Read,Glob,Grep,Bash",
-            "--permission-mode", "plan",
+            "--tools", "Read,Glob,Grep",
+            "--permission-mode", "bypassPermissions",
             "--disable-slash-commands"
           ],
+          # A worker runs unattended in its own worktree, so a permission prompt has nobody to
+          # answer it and would stall the worker indefinitely. Bypassing prompts is what makes
+          # autonomous work possible; the isolation that makes it safe is the worktree.
           "worker_extra_args" => [
-            "--effort", "high",
-            "--permission-mode", "acceptEdits"
-          ],
-          "use_json_schema" => true
+            "--permission-mode", "bypassPermissions"
+          ]
         },
         "antigravity" => {
           "command" => "agy",
@@ -116,13 +155,19 @@ module Meringue
 
       def self.normalize_provider(provider)
         normalized = provider.to_s.strip.downcase.gsub(/\s+/, " ")
-        normalized = DEFAULT_PROVIDER if normalized.empty?
+        return "" if normalized.empty?
+
         PROVIDER_ALIASES.fetch(normalized, normalized)
       end
 
       def self.normalize_provider!(provider)
         normalized = normalize_provider(provider)
         return normalized if PROVIDERS.include?(normalized)
+        if normalized.empty?
+          raise MissingProviderError,
+                "No agent harness is configured. Set one with /config (Agent defaults), the [harness] provider setting, " \
+                "or MERINGUE_HARNESS. Available harnesses: #{supported_provider_names.join(", ")}."
+        end
 
         raise ArgumentError, "Unsupported harness provider #{provider.inspect}. Supported providers: #{supported_provider_names.join(", ")}"
       end
@@ -156,6 +201,12 @@ module Meringue
         initial.match?(/[a-z0-9]/) ? initial : UNKNOWN_PROVIDER_GLYPH
       end
 
+      # Whether a backend accepts a model and a reasoning level at all, so callers can offer those
+      # controls only where they do something.
+      def self.session_defaults_supported_for?(provider)
+        !PROVIDER_SESSION_FLAGS.fetch(normalize_provider(provider), {}).empty?
+      end
+
       def self.ascii_glyphs?
         !ENV.fetch("MERINGUE_ASCII_GLYPHS", "").to_s.strip.empty?
       end
@@ -183,9 +234,17 @@ module Meringue
         self.class.normalize_provider!(
           env_provider_for(kind) ||
             config.value("harness", "#{kind}_provider") ||
-            config.value("harness", "provider") ||
-            DEFAULT_PROVIDER
+            config.value("harness", "provider")
         )
+      end
+
+      # Whether a harness has been chosen at all, for callers that want to offer the choice rather
+      # than surface an error.
+      def provider_configured?(kind = "worker")
+        provider_for(kind)
+        true
+      rescue MissingProviderError
+        false
       end
 
       def head_provider
@@ -205,19 +264,24 @@ module Meringue
         client = client_for(provider: provider, kind: "head")
         session_name_prefix = provider_option(provider, "head_session_name_prefix") || "Meringue Head"
 
-        case provider
-        when "pi"
-          Heads::PiRunner.new(harness_client: client, cwd: cwd, session_name_prefix: session_name_prefix)
-        when "claude", "antigravity"
-          Heads::HarnessRunner.new(
-            harness_client: client,
-            cwd: cwd,
-            session_name_prefix: session_name_prefix,
-            timeout: numeric_provider_option(provider, "head_timeout") || ProcessClient::DEFAULT_EVENT_TIMEOUT
-          )
-        else
-          raise ArgumentError, "Unsupported head harness provider: #{provider.inspect}"
-        end
+        Heads::AgentRunner.new(
+          harness_client: client,
+          cwd: cwd,
+          session_name_prefix: session_name_prefix,
+          timeout: numeric_provider_option(provider, "head_timeout") || default_head_timeout(provider)
+        )
+      end
+
+      # A head's turn budget depends on how its backend runs, not on which vendor it is: an
+      # interactive session boots a full agent CLI before it can answer, where a one-shot print
+      # invocation starts answering immediately.
+      def default_head_timeout(provider)
+        client = client_for(provider: provider, kind: "head")
+        return InteractiveClient::DEFAULT_READY_TIMEOUT * 3 if client.is_a?(InteractiveClient)
+
+        ProcessClient::DEFAULT_EVENT_TIMEOUT
+      rescue StandardError
+        ProcessClient::DEFAULT_EVENT_TIMEOUT
       end
 
       def worker_client
@@ -241,7 +305,7 @@ module Meringue
       def terminal_session_opener
         TerminalSessionOpener.new(
           commands: PROVIDERS.each_with_object({}) { |provider, result| result[provider] = provider_command(provider) },
-          pi_session_dir: provider_config("pi").fetch("session_dir", DEFAULT_PI_SESSION_DIR),
+          session_dir: provider_config("pi").fetch("session_dir", DEFAULT_AGENT_SESSION_DIR),
           alacritty_command: config.value("terminal", "alacritty_command") || ENV["MERINGUE_ALACRITTY_COMMAND"]
         )
       end
@@ -274,30 +338,67 @@ module Meringue
         end
       end
 
-      # Effective defaults used when the registry next starts a Pi head or
-      # worker. Role details stay visible when dedicated model/thinking defaults
-      # or older explicit argv values differ.
-      def session_defaults(provider: "pi")
-        provider = normalize_provider!(provider)
-        raise ArgumentError, "Session defaults are currently Pi-only." unless provider == "pi"
+      # Effective model and reasoning defaults the registry will use the next time it starts a head
+      # or a worker on this backend. Role details stay visible when dedicated per-role defaults or
+      # older explicit argv values differ.
+      def session_defaults(provider: nil)
+        provider = resolved_session_defaults_provider(provider)
+        # Model and reasoning defaults are harness-neutral, so they can be read and set before a
+        # harness has been chosen. Only the rendering into argv needs to know which backend it is
+        # for, and that happens when a session actually starts.
+        return harness_neutral_session_defaults unless provider
+        raise ArgumentError, "#{self.class.provider_label(provider)} does not expose model or reasoning defaults." unless session_defaults_supported?(provider)
 
+        flags = PROVIDER_SESSION_FLAGS.fetch(provider, {})
         provider_settings = provider_config(provider)
         roles = %w[head worker].to_h do |kind|
           args = extra_args_for(provider, provider_settings, kind)
           [kind, {
-            "model" => command_option(args, "--model") || DEFAULT_PI_MODEL,
-            "thinking_level" => command_option(args, "--thinking") || DEFAULT_PI_THINKING_LEVEL
+            "model" => command_option(args, flags["model"]),
+            "thinking_level" => command_option(args, flags["thinking_level"])
+          }.compact]
+        end
+        shared_model = roles.values.map { |role| role["model"] }.uniq
+        shared_thinking = roles.values.map { |role| role["thinking_level"] }.uniq
+        model_agrees = shared_model.length == 1
+        thinking_agrees = shared_thinking.length == 1
+        {
+          "harness" => self.class.public_provider_name(provider),
+          "model" => model_agrees ? shared_model.first : nil,
+          "thinking_level" => thinking_agrees ? shared_thinking.first : nil,
+          "consistency" => model_agrees && thinking_agrees ? "consistent" : "mixed",
+          "roles" => roles,
+          "scope" => "future_#{self.class.public_provider_name(provider)}_sessions"
+        }
+      end
+
+      def session_defaults_supported?(provider)
+        self.class.session_defaults_supported_for?(normalize_provider!(provider))
+      end
+
+      def resolved_session_defaults_provider(provider)
+        normalize_provider!(provider || worker_provider)
+      rescue MissingProviderError
+        nil
+      end
+
+      def harness_neutral_session_defaults
+        configured = neutral_session_defaults
+        roles = %w[head worker].to_h do |kind|
+          [kind, {
+            "model" => configured["#{kind}_model"] || configured["model"] || DEFAULT_MODEL,
+            "thinking_level" => configured["#{kind}_thinking_level"] || configured["thinking_level"] || DEFAULT_THINKING_LEVEL
           }]
         end
         shared_model = roles.values.map { |role| role.fetch("model") }.uniq
         shared_thinking = roles.values.map { |role| role.fetch("thinking_level") }.uniq
         {
-          "harness" => "pi",
-          "model" => shared_model.one? ? shared_model.first : nil,
-          "thinking_level" => shared_thinking.one? ? shared_thinking.first : nil,
-          "consistency" => shared_model.one? && shared_thinking.one? ? "consistent" : "mixed",
+          "harness" => nil,
+          "model" => shared_model.length == 1 ? shared_model.first : nil,
+          "thinking_level" => shared_thinking.length == 1 ? shared_thinking.first : nil,
+          "consistency" => shared_model.length == 1 && shared_thinking.length == 1 ? "consistent" : "mixed",
           "roles" => roles,
-          "scope" => "future_pi_sessions"
+          "scope" => "future_sessions"
         }
       end
 
@@ -324,33 +425,33 @@ module Meringue
             data.fetch("harness").delete(key)
           end
         end
-        data.fetch("harness")["pi"] = {} unless data.fetch("harness")["pi"].is_a?(Hash)
-        updated_pi = updated_config.section("harness", "pi")
-        %w[model head_model worker_model thinking_level head_thinking_level worker_thinking_level].each do |key|
-          if updated_pi.key?(key)
-            data.fetch("harness").fetch("pi")[key] = Config.deep_copy(updated_pi[key])
-          else
-            data.fetch("harness").fetch("pi").delete(key)
+        PROVIDERS.each do |provider|
+          data.fetch("harness")[provider] = {} unless data.fetch("harness")[provider].is_a?(Hash)
+          updated_provider = updated_config.section("harness", provider)
+          SESSION_DEFAULT_KEYS.each do |key|
+            if updated_provider.key?(key)
+              data.fetch("harness").fetch(provider)[key] = Config.deep_copy(updated_provider[key])
+            else
+              data.fetch("harness").fetch(provider).delete(key)
+            end
           end
         end
         @config = Config.new(data, path: updated_config.path, loaded: updated_config.loaded?, file_data: updated_config.to_file_h)
-        provider_settings = provider_config("pi")
-        @clients.each do |(provider, kind), client|
-          next unless provider == "pi" && client.respond_to?(:configure_spawn_arguments)
-
-          client.configure_spawn_arguments(extra_args_for("pi", provider_settings, kind))
-        end
+        PROVIDERS.each { |provider| reconfigure_cached_clients!(provider) }
         self
       end
 
       # Saves the selected values and reconfigures cached Pi clients in place.
       # Existing RPC processes keep their current effective settings; only a
       # later new-session spawn applies the replacement model/thinking argv.
-      def update_session_defaults!(provider: "pi", model: nil, model_role: nil, thinking_level: nil, thinking_role: nil)
-        provider = normalize_provider!(provider)
-        raise ArgumentError, "Session defaults are currently Pi-only." unless provider == "pi"
+      def update_session_defaults!(provider: nil, model: nil, model_role: nil, thinking_level: nil, thinking_role: nil)
+        provider = resolved_session_defaults_provider(provider)
+        if provider && !session_defaults_supported?(provider)
+          raise ArgumentError, "#{self.class.provider_label(provider)} does not expose model or reasoning defaults."
+        end
 
-        saved = Config.save_pi_session_defaults!(
+        saved = Config.save_agent_session_defaults!(
+          provider: provider,
           model: model,
           model_role: model_role,
           thinking_level: thinking_level,
@@ -358,13 +459,19 @@ module Meringue
           path: config.path
         )
         @config = saved
-        provider_settings = provider_config("pi")
-        @clients.each do |(cached_provider, kind), client|
-          next unless cached_provider == "pi" && client.respond_to?(:configure_spawn_arguments)
+        reconfigure_cached_clients!(provider) if provider
+        session_defaults(provider: provider)
+      end
 
-          client.configure_spawn_arguments(extra_args_for("pi", provider_settings, kind))
+      # Cached clients keep serving their existing sessions; only their next spawn picks up the
+      # replacement arguments, which is why this reconfigures rather than rebuilds.
+      def reconfigure_cached_clients!(provider)
+        provider_settings = provider_config(provider)
+        @clients.each do |(cached_provider, kind), client|
+          next unless cached_provider == provider && client.respond_to?(:configure_spawn_arguments)
+
+          client.configure_spawn_arguments(extra_args_for(provider, provider_settings, kind))
         end
-        session_defaults(provider: "pi")
       end
 
       private
@@ -392,16 +499,11 @@ module Meringue
 
         case provider
         when "pi"
-          session_dir = File.expand_path(provider_config.fetch("session_dir", DEFAULT_PI_SESSION_DIR).to_s)
+          session_dir = File.expand_path(provider_config.fetch("session_dir", DEFAULT_AGENT_SESSION_DIR).to_s)
           FileUtils.mkdir_p(session_dir)
           PiClient.new(command: command, session_dir: session_dir, env: env, extra_args: extra_args)
         when "claude"
-          ClaudeCodeClient.new(
-            command: command,
-            env: env,
-            extra_args: extra_args,
-            use_json_schema: boolean_option(provider_config, "use_json_schema", true)
-          )
+          ClaudeInteractiveClient.new(command: command, env: env, extra_args: extra_args)
         when "antigravity"
           AntigravityClient.new(command: command, env: env, extra_args: extra_args)
         else
@@ -409,29 +511,59 @@ module Meringue
         end
       end
 
+      # Layered most-general to most-specific:
+      #
+      #   1. the backend's shipped defaults;
+      #   2. Meringue's harness-neutral model and reasoning defaults, which follow whichever
+      #      backend is selected rather than being tied to one of them;
+      #   3. anything set for this backend specifically, which is the only place a value that only
+      #      makes sense for one harness belongs.
       def provider_config(provider)
         provider = normalize_provider!(provider)
         defaults = DEFAULT_PROVIDER_CONFIG.fetch(provider, {})
+        merged = Config.deep_merge(defaults, neutral_session_defaults)
         legacy_configured = config.section("harness", provider)
         public_configured = config.section("harness", self.class.public_provider_name(provider))
-        Config.deep_merge(Config.deep_merge(defaults, legacy_configured), public_configured)
+        Config.deep_merge(Config.deep_merge(merged, legacy_configured), public_configured)
       end
 
-      def extra_args_for(provider, provider_config, kind)
-        args = Array(provider_config["extra_args"]) + Array(provider_config["#{kind}_extra_args"])
-        return args unless provider == "pi"
+      def neutral_session_defaults
+        harness = config.section("harness")
+        return {} unless harness.is_a?(Hash)
 
-        args = args.dup
-        model = provider_config["#{kind}_model"].to_s.strip
-        model = provider_config["model"].to_s.strip if model.empty?
-        thinking_level = provider_config["#{kind}_thinking_level"].to_s.strip
-        thinking_level = provider_config["thinking_level"].to_s.strip if thinking_level.empty?
-        args.concat(["--model", model]) unless model.empty?
-        args.concat(["--thinking", thinking_level]) unless thinking_level.empty?
-        if kind == "worker" && !@command_blacklist.empty?
+        SESSION_DEFAULT_KEYS.each_with_object({}) do |key, result|
+          value = harness[key]
+          result[key] = value unless value.nil? || value.to_s.strip.empty?
+        end
+      end
+
+      # Role arguments plus the configured model and reasoning level, rendered in whatever spelling
+      # this backend uses. A backend that exposes neither simply gets its role arguments.
+      def extra_args_for(provider, provider_config, kind)
+        args = (Array(provider_config["extra_args"]) + Array(provider_config["#{kind}_extra_args"])).dup
+        flags = PROVIDER_SESSION_FLAGS.fetch(provider, {})
+
+        model = role_setting(provider_config, kind, "model")
+        unless model.empty? || flags["model"].nil?
+          args.concat([flags.fetch("model"), flags.fetch("qualified_model", true) ? model : ModelReference.bare_id(model)])
+        end
+
+        thinking_level = role_setting(provider_config, kind, "thinking_level")
+        args.concat([flags.fetch("thinking_level"), thinking_level]) unless thinking_level.empty? || flags["thinking_level"].nil?
+
+        if kind == "worker" && !@command_blacklist.empty? && provider == "pi"
           args.concat(["--extension", COMMAND_BLACKLIST_EXTENSION])
         end
         args
+      end
+
+      # A role-specific value wins over the shared one, so "workers use a bigger model than heads"
+      # is expressible without repeating everything else.
+      def role_setting(provider_config, kind, key)
+        role_key = key == "model" ? "#{kind}_model" : "#{kind}_#{key}"
+        value = provider_config[role_key].to_s.strip
+        value = provider_config[key].to_s.strip if value.empty?
+        value
       end
 
       def command_option(args, option)

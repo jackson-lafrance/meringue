@@ -5,7 +5,7 @@ require "timeout"
 
 module Meringue
   module Heads
-    class HarnessRunner < Runner
+    class AgentRunner < Runner
       DEFAULT_TIMEOUT = 120
 
       attr_reader :harness_client, :cwd, :session_name_prefix, :timeout

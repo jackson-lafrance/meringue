@@ -10,12 +10,16 @@ module Meringue
     # use, plus explicit metadata for the cases where no catalog exists.
     #
     # Meringue never hand-maintains a model list: a provider client asks its
-    # harness (Pi RPC `get_available_models` today) and normalizes the answer
+    # harness and normalizes the answer
     # into these entries. Providers that cannot answer yet return an
     # `unsupported` catalog, and a failed fetch returns an `unavailable`
     # catalog, so the UI can say why the list is missing instead of silently
     # offering a couple of remembered values.
     class ModelCatalog
+      # The reasoning-effort ladder Meringue speaks, ordered weakest to strongest. It lives here
+      # rather than inside one backend because it is the vocabulary every harness is translated
+      # into: each client renders it in whatever flag its own CLI uses.
+      THINKING_LEVELS = %w[off minimal low medium high xhigh max].freeze
       AVAILABLE = "available"
       # A previously confirmed list whose latest refresh failed. The models are
       # still the harness's own answer, just older than we would like, so they

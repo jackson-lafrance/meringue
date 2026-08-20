@@ -418,7 +418,7 @@ module Meringue
       # so an explicit id remains one keystroke away, and labels them unverified.
       def self.fallback_model_entries(preferred, harness)
         references = preferred.dup
-        references << Meringue::Harness::Registry::DEFAULT_PI_MODEL if harness == "pi"
+        references << Meringue::Harness::Registry::DEFAULT_MODEL if Meringue::Harness::Registry.session_defaults_supported_for?(harness)
         references.uniq.filter_map { |reference| Meringue::Harness::ModelCatalog.normalize_entry("reference" => reference) }
       end
 
@@ -564,7 +564,7 @@ module Meringue
                   defaults["thinking_level"]
                 end
         level = level.to_s.strip.downcase
-        level = Meringue::Harness::Registry::DEFAULT_PI_THINKING_LEVEL if level.empty? && harness == "pi" && role.nil?
+        level = Meringue::Harness::Registry::DEFAULT_THINKING_LEVEL if level.empty? && role.nil? && Meringue::Harness::Registry.session_defaults_supported_for?(harness)
         level
       end
 
@@ -580,7 +580,7 @@ module Meringue
                   defaults["model"]
                 end
         model = model.to_s.strip
-        model = Meringue::Harness::Registry::DEFAULT_PI_MODEL if model.empty? && harness == "pi" && role.nil?
+        model = Meringue::Harness::Registry::DEFAULT_MODEL if model.empty? && role.nil? && Meringue::Harness::Registry.session_defaults_supported_for?(harness)
         model
       end
 
@@ -597,7 +597,7 @@ module Meringue
                       defaults["model"]
                     end
         reference = reference.to_s.strip
-        reference = Meringue::Harness::Registry::DEFAULT_PI_MODEL if reference.empty? && harness == "pi"
+        reference = Meringue::Harness::Registry::DEFAULT_MODEL if reference.empty? && Meringue::Harness::Registry.session_defaults_supported_for?(harness)
         reference
       end
 

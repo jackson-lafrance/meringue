@@ -64,9 +64,10 @@ module Meringue
       def role_summary(selected, role)
         harness = selected.fetch("agent.#{role}_harness")
         parts = ["#{harness} harness"]
-        if Harness::Registry.public_provider_name(harness) == "pi"
+        # Model and reasoning are only worth reporting for a backend that actually accepts them.
+        if Harness::Registry.session_defaults_supported_for?(harness)
           parts << selected.fetch("agent.#{role}_model")
-          parts << "thinking #{selected.fetch("agent.#{role}_thinking")}"
+          parts << "reasoning #{selected.fetch("agent.#{role}_thinking")}"
         end
         parts.join(" · ")
       end

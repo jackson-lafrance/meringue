@@ -12,17 +12,19 @@ module Meringue
         "antigravity" => "agy"
       }.freeze
       DEFAULT_ALACRITTY_COMMAND = "alacritty"
-      DEFAULT_PI_SESSION_DIR = File.expand_path(ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
+      DEFAULT_SESSION_DIR = File.expand_path(
+        ENV.fetch("MERINGUE_AGENT_SESSION_DIR", ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
+      )
       MACOS_ALACRITTY_PATHS = [
         "/Applications/Alacritty.app/Contents/MacOS/alacritty",
         File.expand_path("~/Applications/Alacritty.app/Contents/MacOS/alacritty")
       ].freeze
 
-      def initialize(pi_command: nil, pi_session_dir: DEFAULT_PI_SESSION_DIR, alacritty_command: ENV["MERINGUE_ALACRITTY_COMMAND"], commands: {})
+      def initialize(pi_command: nil, session_dir: DEFAULT_SESSION_DIR, alacritty_command: ENV["MERINGUE_ALACRITTY_COMMAND"], commands: {})
         configured_commands = DEFAULT_COMMANDS.merge(stringify_keys(commands || {}))
         configured_commands["pi"] = pi_command if present?(pi_command)
         @commands = configured_commands
-        @pi_session_dir = pi_session_dir
+        @session_dir = session_dir
         @custom_alacritty_command = present?(alacritty_command)
         @alacritty_command = @custom_alacritty_command ? alacritty_command : DEFAULT_ALACRITTY_COMMAND
       end
@@ -44,7 +46,7 @@ module Meringue
 
       private
 
-      attr_reader :commands, :pi_session_dir, :alacritty_command
+      attr_reader :commands, :session_dir, :alacritty_command
 
       def custom_alacritty_command?
         @custom_alacritty_command
@@ -82,7 +84,7 @@ module Meringue
         return { "error" => "#{error} #{preserved_record_note}" } if error
 
         argv = command_parts("pi")
-        argv += ["--session-dir", pi_session_dir] if present?(pi_session_dir)
+        argv += ["--session-dir", session_dir] if present?(session_dir)
         { "argv" => argv + ["--session", session_file] }
       end
 
@@ -120,7 +122,7 @@ module Meringue
         end
 
         message = "Agent session history for #{agent_id(agent)} is unavailable because no saved session file matches #{session_id.inspect}"
-        message += present?(pi_session_dir) ? " in #{File.expand_path(pi_session_dir)}." : "."
+        message += present?(session_dir) ? " in #{File.expand_path(session_dir)}." : "."
         message += " #{discovery_error}" if discovery_error
         [nil, message]
       end
@@ -131,9 +133,9 @@ module Meringue
       end
 
       def discover_pi_session_file(session_id)
-        return [nil, nil] unless present?(session_id) && present?(pi_session_dir)
+        return [nil, nil] unless present?(session_id) && present?(session_dir)
 
-        directory = File.expand_path(pi_session_dir)
+        directory = File.expand_path(session_dir)
         return [nil, "The configured agent session directory is missing."] unless Dir.exist?(directory)
 
         candidates = Dir.children(directory).select do |name|

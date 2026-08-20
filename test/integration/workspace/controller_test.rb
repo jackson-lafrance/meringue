@@ -51,6 +51,83 @@ class WorkspaceControllerTest < Minitest::Test
     end
   end
 
+  # A backend whose session is already an interactive process Meringue owns. Focusing it must be a
+  # pure attach: nothing is prepared, nothing is handed over, and nothing is stopped on the way out.
+  class LiveFocusDouble
+    attr_reader :attached, :detached, :terminal
+
+    def initialize(terminal)
+      @terminal = terminal
+      @attached = []
+      @detached = []
+    end
+
+    def agent_focus_mode(_agent_id)
+      "live_terminal"
+    end
+
+    def attach_agent_live_terminal(agent_id, rows: nil, columns: nil)
+      @attached << [agent_id, rows, columns]
+      { "status" => "accepted", "target_id" => agent_id, "result" => { "terminal" => terminal }, "message" => "attached" }
+    end
+
+    def detach_agent_live_terminal(agent_id)
+      @detached << agent_id
+      { "status" => "accepted", "target_id" => agent_id, "message" => "detached" }
+    end
+
+    # Present so the controller can never reach for the handoff path by accident.
+    def begin_agent_interactive_focus(agent_id)
+      raise "a live session must never be handed off (#{agent_id})"
+    end
+
+    def end_agent_interactive_focus(agent_id)
+      raise "a live session must never be resumed through the handoff path (#{agent_id})"
+    end
+  end
+
+  class FakeLiveTerminal
+    attr_reader :writes, :resizes, :closed
+
+    def initialize(pid: 4242)
+      @pid = pid
+      @writes = []
+      @resizes = []
+      @closed = false
+    end
+
+    def pid = @pid
+    def alive? = !@closed
+
+    def write(bytes)
+      @writes << bytes
+      { "status" => "written", "bytes" => bytes.bytesize }
+    end
+
+    def resize(rows:, columns:)
+      @resizes << [rows, columns]
+      { "status" => "resized", "rows" => rows, "columns" => columns }
+    end
+
+    def snapshot(rows: nil, columns: nil)
+      @resizes << [rows, columns] if rows && columns
+      {
+        "lines" => ["agent working", "❯ "],
+        "styled_lines" => nil,
+        "cursor" => { "row" => 1, "column" => 2 },
+        "revision" => 7,
+        "pid" => @pid,
+        "alive" => alive?,
+        "state" => alive? ? "running" : "exited",
+        "workspace_path" => "/tmp/worktree"
+      }
+    end
+
+    def close
+      @closed = true
+    end
+  end
+
   class CompactingFocusDouble < InteractiveFocusDouble
     attr_reader :resume_started
 
@@ -75,6 +152,92 @@ class WorkspaceControllerTest < Minitest::Test
   def setup
     @sessions = []
     @editor = WorkspaceSupport::FakeEditorLauncher.new
+  end
+
+  def test_focusing_a_live_session_attaches_to_it_instead_of_handing_it_over
+    with_workspace_tmpdir do |tmp|
+      workspace = File.join(tmp, "worktree")
+      FileUtils.mkdir_p(workspace)
+      terminal = FakeLiveTerminal.new
+      focus = LiveFocusDouble.new(terminal)
+      controller = build_controller(focus_session_service: focus)
+      agent = worker_agent(workspace_path: workspace, **{ "harness" => "claude" })
+
+      opened = controller.open_workspace(agent: agent, rows: 12, columns: 40)
+
+      assert_equal "active", opened.fetch("status")
+      assert opened.fetch("interactive")
+      assert_equal terminal.pid, opened.fetch("pid")
+      assert_equal [["P1-I1-W1", 12, 40]], focus.attached
+      assert controller.agent_interactive?(agent: agent)
+      # The double raises if either handoff method is reached, so getting here is the assertion
+      # that no turn was settled and no process was replaced.
+    ensure
+      controller&.close
+    end
+  end
+
+  def test_a_live_session_renders_the_agents_own_screen_and_forwards_keys
+    with_workspace_tmpdir do |tmp|
+      workspace = File.join(tmp, "worktree")
+      FileUtils.mkdir_p(workspace)
+      terminal = FakeLiveTerminal.new
+      controller = build_controller(focus_session_service: LiveFocusDouble.new(terminal))
+      agent = worker_agent(workspace_path: workspace, **{ "harness" => "claude" })
+      controller.open_workspace(agent: agent, rows: 12, columns: 40)
+
+      snapshot = controller.agent_snapshot(agent: agent, rows: 12, columns: 40)
+      assert snapshot.fetch("interactive")
+      assert_includes snapshot.fetch("lines"), "agent working"
+      assert_equal terminal.pid, snapshot.fetch("pid")
+      assert_equal 7, snapshot.fetch("revision")
+
+      controller.handle_agent_key(key: "x", agent: agent)
+      controller.handle_agent_key(key: { "type" => "paste", "text" => "hello" }, agent: agent)
+      assert_equal ["x", "hello"], terminal.writes
+
+      controller.resize_agent(agent: agent, rows: 30, columns: 100)
+      assert_includes terminal.resizes, [30, 100]
+    ensure
+      controller&.close
+    end
+  end
+
+  def test_leaving_a_live_session_releases_the_view_and_leaves_the_worker_running
+    with_workspace_tmpdir do |tmp|
+      workspace = File.join(tmp, "worktree")
+      FileUtils.mkdir_p(workspace)
+      terminal = FakeLiveTerminal.new
+      focus = LiveFocusDouble.new(terminal)
+      controller = build_controller(focus_session_service: focus)
+      agent = worker_agent(workspace_path: workspace, **{ "harness" => "claude" })
+      controller.open_workspace(agent: agent, rows: 12, columns: 40)
+
+      closed = controller.close_workspace(agent: agent)
+
+      assert_equal "closed", closed.fetch("status")
+      assert_equal ["P1-I1-W1"], focus.detached
+      refute controller.agent_interactive?(agent: agent)
+      assert terminal.alive?, "returning to the dashboard must not stop the worker's session"
+      assert_empty terminal.writes, "leaving focus must not send an interrupt to a running agent"
+    ensure
+      controller&.close
+    end
+  end
+
+  def test_shutdown_does_not_stop_a_live_session
+    with_workspace_tmpdir do |tmp|
+      workspace = File.join(tmp, "worktree")
+      FileUtils.mkdir_p(workspace)
+      terminal = FakeLiveTerminal.new
+      controller = build_controller(focus_session_service: LiveFocusDouble.new(terminal))
+      agent = worker_agent(workspace_path: workspace, **{ "harness" => "claude" })
+      controller.open_workspace(agent: agent, rows: 12, columns: 40)
+
+      controller.close
+
+      assert terminal.alive?, "the session belongs to the kernel, not to the workspace view"
+    end
   end
 
   def test_open_workspace_reports_the_focused_directory
@@ -564,7 +727,7 @@ class WorkspaceControllerTest < Minitest::Test
 
   private
 
-  def build_controller(output: "")
+  def build_controller(output: "", focus_session_service: nil)
     Meringue::Workspace::Controller.new(
       terminal_manager: Meringue::Workspace::TerminalManager.new(
         session_factory: lambda {
@@ -573,7 +736,8 @@ class WorkspaceControllerTest < Minitest::Test
           session
         }
       ),
-      editor_launcher: @editor
+      editor_launcher: @editor,
+      focus_session_service: focus_session_service
     )
   end
 end

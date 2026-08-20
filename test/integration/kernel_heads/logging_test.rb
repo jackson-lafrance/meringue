@@ -155,7 +155,7 @@ class KernelHeadsLoggingTest < KernelHeadsTestCase
            "a non-head kernel action must keep the ordinary Meringue-only attribution"
 
     apply_command("GetSessionDefaults")
-    standalone_after_head = log_with_message("Future Pi heads and workers use")
+    standalone_after_head = log_with_message("Future heads and workers use")
     refute standalone_after_head.fetch("details").key?("command_author_type")
     refute standalone_after_head.fetch("details").key?("command_author_id"),
            "head command authorship must not leak into later kernel commands on the same thread"

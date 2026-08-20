@@ -58,8 +58,8 @@ class KernelHeadsUserKernelCommandsTest < KernelHeadsTestCase
 
     assert_equal "GetSessionDefaults", result.fetch("command_type")
     assert_equal "accepted", result.fetch("status")
-    assert_equal "future_pi_sessions", result.dig("result", "scope")
-    assert_includes result.fetch("message"), "Future Pi heads and workers use"
+    assert_equal "future_sessions", result.dig("result", "scope")
+    assert_includes result.fetch("message"), "Future heads and workers use"
     assert_includes log_messages, result.fetch("message")
   end
 

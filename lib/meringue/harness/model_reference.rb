@@ -99,6 +99,18 @@ module Meringue
         split(value).first
       end
 
+      # The value to hand a harness whose own `--model` flag takes a bare model id rather than a
+      # `provider/model` reference. Meringue stores the qualified reference because it has to
+      # disambiguate across providers that all expose the same model; a single-vendor harness has
+      # nothing to disambiguate and rejects the prefix.
+      def bare_id(value)
+        text = normalize(value)
+        return text unless text.include?("/")
+        return text unless valid?(text)
+
+        id_of(text)
+      end
+
       def id_of(value)
         split(value).last
       end

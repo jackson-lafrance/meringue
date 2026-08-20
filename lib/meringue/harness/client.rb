@@ -185,6 +185,26 @@ module Meringue
         raise NotImplementedError, "harness clients must implement #attach_session"
       end
 
+      # A backend that already runs its session in an interactive process Meringue owns can hand
+      # out a live view of it instead of being handed off to a separate one.
+      #
+      # This is the difference between focusing a worker and interrupting it. `live_terminal`
+      # returns a handle onto the session that is *already* running, so opening the focused viewer
+      # aborts no turn, replaces no process, and leaves nothing to roll back if the user switches
+      # away again. Clients that cannot do this fall back to `prepare_interactive_session` below,
+      # which necessarily stops the managed turn first.
+      #
+      # The handle carries input and screen only: `write`, `snapshot(rows:, columns:)`, `resize`,
+      # and `alive?`. Session ownership stays with the kernel, so a UI holding one can type and
+      # watch but cannot detach, signal, or kill the session.
+      def live_terminal_supported?
+        false
+      end
+
+      def live_terminal(_session_ref)
+        raise NotImplementedError, "harness clients must implement #live_terminal"
+      end
+
       # Native interactive mode is an optional harness capability. A capable client must settle an
       # active managed turn through its supported cancellation boundary, preserve a continuation
       # obligation when that turn has no final result, quiesce its managed transport, and only then

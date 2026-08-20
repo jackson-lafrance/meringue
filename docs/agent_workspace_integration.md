@@ -75,7 +75,7 @@ The focused workspace is split so each layer has one job:
 - the agent record stores both the requested `workspace_mode` and `effective_workspace_mode`; a safe fallback also stores `workspace_mode_fallback_reason`;
 - the workspace manager accepts only an existing readable, registered, unlocked, non-bare checkout on `main` or `master`. For a bare registered root it searches existing linked worktrees and never uses the bare repository as `cwd`;
 - concurrent readers may use the same checkout. It is not a Meringue-owned workspace and prune/cleanup never removes it;
-- Pi enforces the mode with `--tools read,grep,find,ls` on initial spawn, RPC resume, and Agent session. Prompt guidance is defense in depth, not the enforcement boundary;
+- The harness enforces the mode with its own tool allowlist (Pi: `--tools read,grep,find,ls`) on initial spawn, RPC resume, and Agent session. Prompt guidance is defense in depth, not the enforcement boundary;
 - if checkout validation or harness enforcement is unavailable, the kernel provisions the usual isolated workspace before launch.
 
 A queued worker retains the request through activation and reconciliation. A read-only follow-up does not inherit a predecessor's editable worktree, while a later implementation follow-up must be a newly spawned isolated worker.
@@ -105,9 +105,26 @@ The lease is also durable supervision evidence. Pi RPC processes are direct chil
 
 The kernel remains the only mutator of orchestration state; the client only reports the resulting session ref and supervision evidence.
 
-## Agent session handoff
+## Focusing a worker
 
-Pi does not expose an embeddable `InteractiveMode` renderer or an atomic live-token transfer. Meringue therefore uses a **coordinated process handoff**, not a claim that streaming bytes move between runtimes:
+There are two ways to focus a worker, and which one applies is the backend's answer, not a harness name the UI keeps a list of. `Harness::Client#live_terminal_supported?` decides; `Workspace::Controller#focus_mode` asks the kernel, which asks the client.
+
+### Live attach (interactive backends)
+
+A backend whose session already runs in an interactive process Meringue owns — Claude Code today — is focused by attaching to that process. Nothing is prepared and nothing is transferred:
+
+1. The kernel records a durable `live_focus` marker naming the owning dashboard instance, so a person owning the prompt box is visible to every other writer.
+2. `live_terminal` returns a handle onto the running process. It carries input and screen only (`write`, `snapshot`, `resize`, `alive?`), so the pane can type and watch but cannot detach, signal, or kill the session; ownership stays with the kernel.
+3. The backend keeps that session's screen rendered whether or not anyone is watching, so the pane shows the agent's real current state on the first frame rather than filling in as new output arrives.
+4. Dashboard-issued prompts are refused with an explanation while the marker is live, because they would be typed into the same box the user is typing into.
+5. Reconciliation keeps polling — there is no second writer to stand down for — but does not *settle* a focused worker. The turn the user just watched finish is the end of their exchange, not the end of the worker's assignment.
+6. Leaving focus clears the marker and nothing else. No interrupt is sent, no process is stopped, and application shutdown does not touch the session either. Because nothing was taken away, nothing can fail to be given back.
+
+A turn that is running when focus opens keeps running, and the same process serves the whole session from spawn to completion. See [`interactive-harness-backends.md`](interactive-harness-backends.md).
+
+### Coordinated handoff (managed-transport backends)
+
+Pi does not expose an embeddable `InteractiveMode` renderer or an atomic live-token transfer. Focusing a Pi worker therefore uses a **coordinated process handoff**, not a claim that streaming bytes move between runtimes:
 
 1. The kernel durably claims the worker's `interactive_handoff` before process I/O. The claim includes the worker/issue ids, issue title and description, original assignment, workspace path/branch, session identity, and owner process identity. A repeated request—whether from the same dashboard or a second instance—is rejected while this claim is live, so cancellation and ownership transfer happen exactly once.
 2. `PiClient` refreshes authoritative RPC state and snapshots retained events, session-file context, and the latest turn outcome. If a prompt or tool call is active, it uses Pi's supported `abort` RPC and observes the turn settled before stopping the managed process. A timeout or refusal leaves that writer in place and fails the handoff instead of killing an unknown in-flight operation.
@@ -121,7 +138,7 @@ If Meringue crashes during handoff, after Agent session starts, or while focus i
 
 This preserves the single-writer invariant and protects strict settle classification: a genuine provider/transport failure or abandoned tool call still errors, while a focus-induced interruption stays under the handoff marker until it has a newer final result or an active automatic continuation. Pi still has no public live provider-request checkpoint, so the transition uses its supported abort boundary and may require the continuation to inspect work already written before repeating a tool.
 
-The former external session opener remains available only when Agent session is not active. It is never used as a second writer against a focused worker. Non-Pi providers continue to use the existing read-only session view because they do not expose the native handoff capability.
+The former external session opener remains available only when a handoff session is not active. It is never used as a second writer against a focused worker. A backend that offers neither a live terminal nor a handoff keeps the read-only session view.
 
 ## Manual integration verification
 

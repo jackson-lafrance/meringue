@@ -125,16 +125,47 @@ Use `/keybind` in the TUI to show the active keybindings after config has been l
 
 ## Supported defaults and conflict policy
 
-The config file is intentionally small and only the settings described here are read by Meringue. Omitted values use built-in defaults. Future Pi session defaults live under `[harness.pi]`:
+The config file is intentionally small and only the settings described here are read by Meringue. Omitted values use built-in defaults.
+
+### Choosing a harness
+
+Meringue has no default backend. Nothing runs until a harness is named, and a launch without one reports which harnesses are available rather than picking one:
+
+```toml
+[harness]
+provider = "claude"            # applies to both roles
+# head_provider = "claude"     # optional role override
+# worker_provider = "pi"
+```
+
+`MERINGUE_HARNESS` overrides both roles; `MERINGUE_HEAD_HARNESS` and `MERINGUE_WORKER_HARNESS` override one. First-run setup and `/config` both write these.
+
+### Model and reasoning defaults
+
+These are harness-neutral: they follow whichever backend is selected rather than belonging to one of them. Each backend renders them in its own vocabulary — Pi receives `--model` and `--thinking`, Claude Code receives `--model` and `--effort` — and a backend that accepts neither simply ignores them.
+
+```toml
+[harness]
+model = "anthropic/claude-opus-5"        # shared fallback for either omitted role
+# head_model = "openai/gpt-5.6-sol"      # optional role override
+# worker_model = "anthropic/claude-opus-5"
+thinking_level = "max"                   # shared fallback for either omitted role
+# head_thinking_level = "low"            # optional role override
+# worker_thinking_level = "max"
+```
+
+The model is stored as a qualified `provider/model-id` reference because a multi-vendor harness has to disambiguate a bare id. A single-vendor harness such as Claude Code is handed the bare id instead, so one stored value works for both.
+
+A value set under a specific backend still wins for that backend, which is where a model that only exists on one harness belongs:
 
 ```toml
 [harness.pi]
-model = "anthropic/claude-opus-5"        # shared fallback for either omitted role
-# head_model = "openai/gpt-5.6-sol"     # optional role override
-# worker_model = "anthropic/claude-opus-5"
-thinking_level = "max"        # shared fallback for either omitted role
-# head_thinking_level = "low"  # optional role override
-# worker_thinking_level = "max"
+model = "openai-codex/gpt-5.6-sol"       # used only when the harness is Pi
+```
+
+The older `[harness.pi] model` / `thinking_level` keys are still read as fallbacks, so an existing configuration keeps working without being rewritten.
+
+```toml
 
 [conflicts]
 # A worker queued after a predecessor is cancelled when that predecessor fails.
@@ -146,8 +177,8 @@ predecessor_failure = "cancel"
 
 ## Worker command blacklists
 
-Meringue can reject selected Pi worker `bash` tool calls before Pi starts the
-command. Configure full-command glob patterns under `[commands]`:
+Meringue can reject selected worker `bash` tool calls before the harness starts the
+command. This is enforced by a Pi extension, so it requires the worker harness to be Pi. Configure full-command glob patterns under `[commands]`:
 
 ```toml
 [commands]
@@ -563,9 +594,9 @@ head_extra_args = []
 worker_extra_args = []
 ```
 
-Pi heads and workers default to `anthropic/claude-opus-5` at Pi's maximum thinking level (`--thinking max`). Use `/model head <provider>/<model-id>` and `/model worker <provider>/<model-id>`, or set `head_model` and `worker_model`, for distinct role model defaults; use `/thinking head <level>` and `/thinking worker <level>`, or set `head_thinking_level` and `worker_thinking_level`, for distinct role thinking defaults. The existing `/model <provider>/<model-id>` command and `model` key, and `/thinking <level>` command and `thinking_level` key, remain the shared form; those commands also clear role overrides. A role key wins over the shared key, and either scalar wins over a `--model`/`--thinking` flag in that role's argument array. A configured role array still replaces that role's default array entirely, so include every other flag you need.
+Heads and workers default to `anthropic/claude-opus-5` at the maximum reasoning level. Use `/model head <provider>/<model-id>` and `/model worker <provider>/<model-id>`, or set `head_model` and `worker_model`, for distinct role model defaults; use `/thinking head <level>` and `/thinking worker <level>`, or set `head_thinking_level` and `worker_thinking_level`, for distinct role reasoning defaults. The existing `/model <provider>/<model-id>` command and `model` key, and `/thinking <level>` command and `thinking_level` key, remain the shared form; those commands also clear role overrides. A role key wins over the shared key, and either scalar wins over a `--model`/`--thinking` flag in that role's argument array. A configured role array still replaces that role's default array entirely, so include every other flag you need.
 
-A provider `command` may be a bare executable such as `pi`, an absolute path, or a command with arguments. Meringue uses the provider's effective environment—the environment that launched Meringue plus any configured `env` overrides—for RPC sessions, catalog probes, and native focus. Native focus resolves the executable against that same effective `PATH` before transferring session ownership, rather than trying to find `pi` again in a reduced PTY environment. This keeps focus working when Pi is installed by a version manager or package manager in a non-system directory. For services or GUI launchers whose startup environment has no usable shell `PATH`, configure an absolute path (for example, `command = "/opt/homebrew/bin/pi"`) or add the installation directory explicitly:
+A provider `command` may be a bare executable such as `pi`, an absolute path, or a command with arguments. Meringue uses the provider's effective environment—the environment that launched Meringue plus any configured `env` overrides—for harness sessions, catalog probes, and focus. Native focus resolves the executable against that same effective `PATH` before transferring session ownership, rather than trying to find `pi` again in a reduced PTY environment. This keeps focus working when Pi is installed by a version manager or package manager in a non-system directory. For services or GUI launchers whose startup environment has no usable shell `PATH`, configure an absolute path (for example, `command = "/opt/homebrew/bin/pi"`) or add the installation directory explicitly:
 
 ```toml
 [harness.pi.env]
@@ -589,6 +620,6 @@ That probe reuses the configured provider `command`, `env`, `extra_args`, and ro
 
 Catalogs are cached in Meringue state under `metadata.harness_model_catalogs.<harness>` and refreshed in the background by reconciliation (about every 10 minutes, retried after about 1 minute when a fetch failed). `/models refresh` (or `Ctrl-R` inside the model picker) forces an immediate re-fetch after you log into a provider, install an extension, or edit `~/.pi/agent/models.json`.
 
-Claude Code runs through `claude --print --output-format stream-json --verbose`; Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace. Live steer/follow-up prompting is currently Pi-only.
+Claude Code runs in its own interactive mode inside a PTY Meringue owns for the life of the session; see [`interactive-harness-backends.md`](interactive-harness-backends.md). Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace, so it has no live session to steer.
 
 Do not store API keys or secrets in the config file. Prefer each provider CLI's normal auth flow or environment setup.

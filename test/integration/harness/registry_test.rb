@@ -27,8 +27,9 @@ class HarnessRegistryTest < HarnessIntegrationTest
 
   def test_normalize_provider_accepts_documented_aliases
     assert_equal "pi", Registry.normalize_provider("pi")
-    assert_equal "pi", Registry.normalize_provider("")
-    assert_equal "pi", Registry.normalize_provider(nil)
+    # A blank value means "not configured", not "the usual one".
+    assert_equal "", Registry.normalize_provider("")
+    assert_equal "", Registry.normalize_provider(nil)
     assert_equal "pi", Registry.normalize_provider("  PI ")
     assert_equal "claude", Registry.normalize_provider("Claude Code")
     assert_equal "claude", Registry.normalize_provider("claude-code")
@@ -85,9 +86,9 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_equal "c", Registry.provider_glyph("codex")
     assert_equal "?", Registry.provider_glyph("!!")
 
-    # Unlike normalize_provider, a blank harness is not the default provider:
-    # "nothing recorded" must not render as Pi.
-    assert_equal "pi", Registry.normalize_provider("")
+    # A blank harness means nothing was recorded, and renders as unknown rather than as any
+    # particular backend.
+    assert_equal "", Registry.normalize_provider("")
     assert_equal "?", Registry.provider_glyph("")
     assert_equal "?", Registry.provider_glyph(nil)
     assert_equal "?", Registry.provider_glyph("   ")
@@ -113,13 +114,19 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_equal "π", Registry.provider_glyph("pi")
   end
 
-  def test_default_provider_is_pi
+  # Meringue supports several backends and picks none of them on its own: silently defaulting
+  # would start a different harness than the user believes they configured.
+  def test_no_harness_is_assumed_when_none_is_configured
     subject = registry
 
-    assert_equal "pi", Registry::DEFAULT_PROVIDER
-    assert_equal "pi", subject.head_provider
-    assert_equal "pi", subject.worker_provider
-    assert_equal "pi", subject.provider_for("anything-else")
+    assert_nil Registry::DEFAULT_PROVIDER
+    refute subject.provider_configured?
+
+    error = assert_raises(Registry::MissingProviderError) { subject.worker_provider }
+    assert_includes error.message, "No agent harness is configured"
+    Registry.supported_provider_names.each { |name| assert_includes error.message, name }
+
+    assert_raises(Registry::MissingProviderError) { subject.head_provider }
   end
 
   def test_configured_providers_resolve_per_kind_with_a_shared_fallback
@@ -153,7 +160,8 @@ class HarnessRegistryTest < HarnessIntegrationTest
   end
 
   def test_client_for_builds_and_memoizes_one_client_per_provider_and_kind
-    subject = registry
+    # worker_client resolves the configured harness, so this registry names one.
+    subject = registry("harness" => { "provider" => "pi" })
 
     worker = subject.client_for(provider: "pi", kind: "worker")
     head = subject.client_for(provider: "pi", kind: "head")
@@ -172,12 +180,12 @@ class HarnessRegistryTest < HarnessIntegrationTest
     worker = subject.client_for(provider: "pi", kind: "worker")
     head = subject.client_for(provider: "pi", kind: "head")
 
-    assert_equal Registry::DEFAULT_PI_WORKER_EXTRA_ARGS, worker.extra_args
-    assert_equal Registry::DEFAULT_PI_HEAD_EXTRA_ARGS, head.extra_args
+    assert_equal Registry::DEFAULT_PI_WORKER_EXTRA_ARGS, worker.extra_args.first(Registry::DEFAULT_PI_WORKER_EXTRA_ARGS.length)
+    assert_equal Registry::DEFAULT_PI_HEAD_EXTRA_ARGS, head.extra_args.first(Registry::DEFAULT_PI_HEAD_EXTRA_ARGS.length)
     assert_includes worker.extra_args.each_cons(2).to_a, ["--tools", "read,bash,grep,find,ls,edit,write"]
     assert_includes head.extra_args.each_cons(2).to_a, ["--tools", "read,bash,grep,find,ls"]
-    assert_includes worker.extra_args.each_cons(2).to_a, ["--model", Registry::DEFAULT_PI_MODEL]
-    assert_includes worker.extra_args.each_cons(2).to_a, ["--thinking", Registry::DEFAULT_PI_THINKING_LEVEL]
+    assert_includes worker.extra_args.each_cons(2).to_a, ["--model", Registry::DEFAULT_MODEL]
+    assert_includes worker.extra_args.each_cons(2).to_a, ["--thinking", Registry::DEFAULT_THINKING_LEVEL]
     assert_equal ["pi"], worker.command
   end
 
@@ -233,9 +241,9 @@ class HarnessRegistryTest < HarnessIntegrationTest
     defaults = subject.update_session_defaults!(provider: "pi", thinking_level: "low", thinking_role: "head")
 
     assert_equal "low", defaults.dig("roles", "head", "thinking_level")
-    assert_equal Registry::DEFAULT_PI_THINKING_LEVEL, defaults.dig("roles", "worker", "thinking_level")
+    assert_equal Registry::DEFAULT_THINKING_LEVEL, defaults.dig("roles", "worker", "thinking_level")
     assert_equal "low", head.extra_args.last
-    assert_includes worker.extra_args.each_cons(2).to_a, ["--thinking", Registry::DEFAULT_PI_THINKING_LEVEL]
+    assert_includes worker.extra_args.each_cons(2).to_a, ["--thinking", Registry::DEFAULT_THINKING_LEVEL]
     saved = Meringue::Config.load(path: subject.config.path)
     assert_equal "low", saved.value("harness", "pi", "head_thinking_level")
     assert_nil saved.value("harness", "pi", "worker_thinking_level")
@@ -271,9 +279,9 @@ class HarnessRegistryTest < HarnessIntegrationTest
     defaults = subject.update_session_defaults!(provider: "pi", model: "openai/gpt-5.6-sol", model_role: "head")
 
     assert_equal "openai/gpt-5.6-sol", defaults.dig("roles", "head", "model")
-    assert_equal Registry::DEFAULT_PI_MODEL, defaults.dig("roles", "worker", "model")
+    assert_equal Registry::DEFAULT_MODEL, defaults.dig("roles", "worker", "model")
     assert_equal "openai/gpt-5.6-sol", head.extra_args.each_cons(2).select { |flag, _v| flag == "--model" }.last[1]
-    assert_equal Registry::DEFAULT_PI_MODEL, worker.extra_args.each_cons(2).select { |flag, _v| flag == "--model" }.last[1]
+    assert_equal Registry::DEFAULT_MODEL, worker.extra_args.each_cons(2).select { |flag, _v| flag == "--model" }.last[1]
     saved = Meringue::Config.load(path: subject.config.path)
     assert_equal "openai/gpt-5.6-sol", saved.value("harness", "pi", "head_model")
     assert_nil saved.value("harness", "pi", "worker_model")
@@ -312,11 +320,22 @@ class HarnessRegistryTest < HarnessIntegrationTest
 
     defaults = subject.session_defaults(provider: "pi")
 
-    assert_nil defaults.fetch("model")
-    assert_nil defaults.fetch("thinking_level")
-    assert_equal "mixed", defaults.fetch("consistency")
-    assert_equal "anthropic/head", defaults.dig("roles", "head", "model")
-    assert_equal "openai/worker", defaults.dig("roles", "worker", "model")
+    # Both roles resolve to the shipped scalar default, which is what each role's argv ends with,
+    # so the pair agrees again even though the role arrays differ.
+    assert_equal Registry::DEFAULT_MODEL, defaults.fetch("model")
+    assert_equal Registry::DEFAULT_THINKING_LEVEL, defaults.fetch("thinking_level")
+    assert_equal "consistent", defaults.fetch("consistency")
+
+    split = registry(
+      "harness" => {
+        "pi" => { "head_model" => "anthropic/head", "worker_model" => "openai/worker" }
+      }
+    ).session_defaults(provider: "pi")
+
+    assert_nil split.fetch("model")
+    assert_equal "mixed", split.fetch("consistency")
+    assert_equal "anthropic/head", split.dig("roles", "head", "model")
+    assert_equal "openai/worker", split.dig("roles", "worker", "model")
   end
 
   def test_worker_command_blacklist_adds_the_enforcement_extension_and_owned_environment
@@ -360,7 +379,7 @@ class HarnessRegistryTest < HarnessIntegrationTest
   def test_client_for_builds_claude_and_antigravity_clients
     subject = registry(
       "harness" => {
-        "claude" => { "command" => "claude --beta", "env" => { "CLAUDE_TOKEN" => "x" }, "use_json_schema" => "false" },
+        "claude" => { "command" => "claude --beta", "env" => { "CLAUDE_TOKEN" => "x" } },
         "antigravity" => { "command" => ["agy", "--flag"], "extra_args" => ["--shared"] }
       }
     )
@@ -368,10 +387,10 @@ class HarnessRegistryTest < HarnessIntegrationTest
     claude = subject.client_for(provider: "claude-code", kind: "head")
     antigravity = subject.client_for(provider: "agy", kind: "worker")
 
-    assert_kind_of Meringue::Harness::ClaudeCodeClient, claude
+    assert_kind_of Meringue::Harness::ClaudeInteractiveClient, claude
     assert_equal ["claude", "--beta"], claude.command
     assert_equal({ "CLAUDE_TOKEN" => "x" }, claude.env)
-    assert_equal false, claude.use_json_schema
+    assert claude.live_terminal_supported?, "Claude Code is driven through its own interactive session"
     assert_kind_of Meringue::Harness::AntigravityClient, antigravity
     assert_equal ["agy", "--flag"], antigravity.command
     assert_equal ["--shared"], antigravity.extra_args
@@ -388,24 +407,36 @@ class HarnessRegistryTest < HarnessIntegrationTest
     pi_head = subject.client_for_agent("harness" => "pi", "type" => "head")
     defaulted = subject.client_for_agent("id" => "P1-I1-W1")
 
-    assert_kind_of Meringue::Harness::ClaudeCodeClient, claude_worker
+    assert_kind_of Meringue::Harness::ClaudeInteractiveClient, claude_worker
     assert_kind_of Meringue::Harness::PiClient, pi_head
     assert_same subject.worker_client, defaulted
   end
 
-  def test_head_runner_selection_per_provider
+  def test_head_runner_is_the_same_runner_for_every_backend
+    subject = registry("harness" => { "provider" => "pi" })
+
+    runners = {
+      "pi" => subject.head_runner_for(provider: "pi", cwd: tmpdir),
+      "claude" => subject.head_runner_for(provider: "claude", cwd: tmpdir),
+      "antigravity" => subject.head_runner_for(provider: "antigravity", cwd: tmpdir)
+    }
+
+    runners.each_value { |runner| assert_kind_of Meringue::Heads::AgentRunner, runner }
+    assert_kind_of Meringue::Harness::PiClient, runners.fetch("pi").harness_client
+    assert_kind_of Meringue::Harness::ClaudeInteractiveClient, runners.fetch("claude").harness_client
+    assert_kind_of Meringue::Heads::AgentRunner, subject.head_runner(cwd: tmpdir)
+    assert_raises(ArgumentError) { subject.head_runner_for(provider: "codex", cwd: tmpdir) }
+  end
+
+  # An interactive backend boots a whole agent CLI before it can answer, so it is allowed longer
+  # than a backend that starts answering immediately.
+  def test_head_timeout_follows_how_the_backend_runs
     subject = registry
 
-    pi_runner = subject.head_runner_for(provider: "pi", cwd: tmpdir)
-    claude_runner = subject.head_runner_for(provider: "claude", cwd: tmpdir)
-    agy_runner = subject.head_runner_for(provider: "antigravity", cwd: tmpdir)
+    interactive = subject.head_runner_for(provider: "claude", cwd: tmpdir)
+    managed = subject.head_runner_for(provider: "pi", cwd: tmpdir)
 
-    assert_kind_of Meringue::Heads::PiRunner, pi_runner
-    assert_kind_of Meringue::Heads::HarnessRunner, claude_runner
-    refute_kind_of Meringue::Heads::PiRunner, claude_runner
-    assert_kind_of Meringue::Heads::HarnessRunner, agy_runner
-    assert_kind_of Meringue::Heads::PiRunner, subject.head_runner(cwd: tmpdir)
-    assert_raises(ArgumentError) { subject.head_runner_for(provider: "codex", cwd: tmpdir) }
+    assert_operator interactive.timeout, :>, managed.timeout
   end
 
   def test_head_runner_honours_configured_session_name_prefix_and_timeout
@@ -437,7 +468,7 @@ class HarnessRegistryTest < HarnessIntegrationTest
 
     assert_kind_of Meringue::Harness::TerminalSessionOpener, opener
     assert_equal "pi-dev", opener.send(:command_parts, "pi").first
-    assert_equal File.expand_path(@session_dir), File.expand_path(opener.send(:pi_session_dir))
+    assert_equal File.expand_path(@session_dir), File.expand_path(opener.send(:session_dir))
   end
 
   def test_public_provider_names_are_used_for_configuration_sections
