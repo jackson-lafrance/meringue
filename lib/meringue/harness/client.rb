@@ -188,7 +188,10 @@ module Meringue
       # Native interactive mode is an optional harness capability. A capable client must settle an
       # active managed turn through its supported cancellation boundary, preserve a continuation
       # obligation when that turn has no final result, quiesce its managed transport, and only then
-      # return argv for the persisted session. It must never leave two session writers alive.
+      # return argv for the persisted session. It must never leave two session writers alive. The
+      # preparation result may also include `interactive_executable`, an absolute path resolved
+      # with provider-specific installation knowledge. This is important for app/GUI launches whose
+      # PATH cannot see a package-manager bin directory even though the harness can supply it.
       def interactive_session_supported?
         false
       end

@@ -35,7 +35,7 @@ module Meringue
         width = bounded_width(width)
         height = bounded_height(height)
         canvas = Canvas.new(width: width, height: height)
-        return render_agent_workspace(canvas, state, width, height, color: color) if agent_workspace_active?(state)
+        return render_agent_workspace(canvas, state, width, height, color: color) if fullscreen_agent_workspace?(state)
 
         metrics = layout_metrics(width, height, state)
         agent_tree_lines = agent_tree_pane.lines(state, width: metrics.fetch(:sidebar_width) - 4)
@@ -53,22 +53,38 @@ module Meringue
           overflow: :agent_tree,
           scroll_offset: agent_tree_offset
         )
-        draw_pane(
-          canvas,
-          metrics.fetch(:main_x),
-          metrics.fetch(:top_y),
-          metrics.fetch(:main_width),
-          metrics.fetch(:logs_height),
-          logs_pane_title(state, width: metrics.fetch(:main_width) - 4),
-          chat_pane.log_lines(state, width: metrics.fetch(:main_width) - 4),
-          active: scroll_pane_active?(state, "logs"),
-          overflow: :tail,
-          scroll_offset: pane_scroll_offset(state, "logs"),
-          selection: pane_selection(state, "logs"),
-          # A filtered logs pane carries the identity color of the node it is
-          # filtered to.
-          title_style: logs_pane_title_style(state)
-        )
+        if embedded_agent_workspace?(state)
+          draw_pane(
+            canvas,
+            metrics.fetch(:main_x),
+            metrics.fetch(:top_y),
+            metrics.fetch(:main_width),
+            metrics.fetch(:logs_height),
+            agent_workspace_pane.title(state),
+            agent_workspace_pane.content_lines(state, width: metrics.fetch(:main_width) - 4),
+            active: scroll_pane_active?(state, "logs"),
+            overflow: :terminal,
+            scroll_offset: 0,
+            title_style: agent_workspace_title_style(state)
+          )
+        else
+          draw_pane(
+            canvas,
+            metrics.fetch(:main_x),
+            metrics.fetch(:top_y),
+            metrics.fetch(:main_width),
+            metrics.fetch(:logs_height),
+            logs_pane_title(state, width: metrics.fetch(:main_width) - 4),
+            chat_pane.log_lines(state, width: metrics.fetch(:main_width) - 4),
+            active: scroll_pane_active?(state, "logs"),
+            overflow: :tail,
+            scroll_offset: pane_scroll_offset(state, "logs"),
+            selection: pane_selection(state, "logs"),
+            # A filtered logs pane carries the identity color of the node it is
+            # filtered to.
+            title_style: logs_pane_title_style(state)
+          )
+        end
         if metrics.fetch(:suggestion_height).positive?
           draw_pane(
             canvas,
@@ -124,7 +140,7 @@ module Meringue
 
       def pane_at(state, width:, height:, x:, y:)
         return "settings" if settings_active?(state)
-        return "agent_workspace" if agent_workspace_active?(state)
+        return "agent_workspace" if fullscreen_agent_workspace?(state)
 
         metrics = layout_metrics([width.to_i, MIN_WIDTH].max, [height.to_i, MIN_HEIGHT].max, state)
         focusable_pane_bounds(metrics).find do |_pane, bounds|
@@ -138,7 +154,7 @@ module Meringue
       # retain their existing mouse behavior. A scoped issue shows its own PR
       # instead, and zero/untracked PRs have no picker to open.
       def open_pull_requests_summary_hit?(state, width:, height:, x:, y:)
-        return false if settings_active?(state) || agent_workspace_active?(state)
+        return false if settings_active?(state) || fullscreen_agent_workspace?(state)
         return false unless Settings.github_enabled?(state)
         return false unless DeliveryPullRequest.scoped_id(state).empty?
         return false unless OpenPullRequests.count(state).positive?
@@ -340,7 +356,7 @@ module Meringue
       end
 
       def agent_tree_item_at(state, width:, height:, x:, y:)
-        return nil if settings_active?(state) || agent_workspace_active?(state)
+        return nil if settings_active?(state) || fullscreen_agent_workspace?(state)
 
         metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
         return nil unless point_in_bounds?(x.to_i, y.to_i, pane_bounds(metrics, :sidebar_x, :top_y, :sidebar_width, :top_height))
@@ -427,6 +443,17 @@ module Meringue
       # Largest useful scroll offset for the focused workspace pane, using the
       # same geometry the renderer uses. Callers clamp with this so scrolling
       # past the end cannot build up a dead offset.
+      # Native focus uses the dashboard's logs rectangle rather than the former
+      # full-screen workspace rectangle. The PTY receives exactly the drawable
+      # content size so Pi reflows and handles terminal resize events correctly.
+      def embedded_agent_workspace_dimensions(state, width:, height:)
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        {
+          "rows" => [metrics.fetch(:logs_height) - 2, 1].max,
+          "columns" => [metrics.fetch(:main_width) - 4, 1].max
+        }
+      end
+
       def agent_workspace_scroll_max(state, width:, height:)
         width = [width.to_i, MIN_WIDTH].max
         height = [height.to_i, MIN_HEIGHT].max
@@ -446,16 +473,16 @@ module Meringue
       end
 
       def scroll_limits(state, width:, height:)
-        return { "agent_tree" => 0, "logs" => 0, "chat" => 0 } if settings_active?(state) || agent_workspace_active?(state)
+        return { "agent_tree" => 0, "logs" => 0, "chat" => 0 } if settings_active?(state) || fullscreen_agent_workspace?(state)
 
         width = [width.to_i, MIN_WIDTH].max
         height = [height.to_i, MIN_HEIGHT].max
         metrics = layout_metrics(width, height, state)
         agent_tree_lines = agent_tree_pane.lines(state, width: metrics.fetch(:sidebar_width) - 4)
-        log_lines = chat_pane.log_lines(state, width: metrics.fetch(:main_width) - 4)
+        log_lines = embedded_agent_workspace?(state) ? [] : chat_pane.log_lines(state, width: metrics.fetch(:main_width) - 4)
         {
           "agent_tree" => scroll_max(agent_tree_lines.length, metrics.fetch(:top_height) - 2),
-          "logs" => tail_scroll_max(log_lines.length, metrics.fetch(:logs_height) - 2),
+          "logs" => embedded_agent_workspace?(state) ? 0 : tail_scroll_max(log_lines.length, metrics.fetch(:logs_height) - 2),
           "chat" => 0
         }
       end
@@ -469,6 +496,15 @@ module Meringue
 
         workspace = state.fetch("_agent_workspace", {}) || {}
         !!workspace.fetch("active", false)
+      end
+
+      def embedded_agent_workspace?(state)
+        workspace = state.fetch("_agent_workspace", {}) || {}
+        agent_workspace_active?(state) && !!workspace.fetch("embedded", false)
+      end
+
+      def fullscreen_agent_workspace?(state)
+        agent_workspace_active?(state) && !embedded_agent_workspace?(state)
       end
 
       def render_setup(canvas, state, width, height, color:)
@@ -703,7 +739,7 @@ module Meringue
       # Shared AgentTree geometry so hit-testing, scrolling, reveal, and the
       # overflow indicator all wrap the same content at the same width.
       def agent_tree_content_dimensions(state, width:, height:)
-        return nil if settings_active?(state) || agent_workspace_active?(state)
+        return nil if settings_active?(state) || fullscreen_agent_workspace?(state)
 
         metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
         content_width = metrics.fetch(:sidebar_width) - 4
@@ -733,6 +769,8 @@ module Meringue
       # Shared logs geometry so hit-testing, keyboard selection, and scrolling
       # all wrap the same content at the same width.
       def logs_content_dimensions(state, width:, height:)
+        return nil if embedded_agent_workspace?(state)
+
         metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
         content_width = metrics.fetch(:main_width) - 4
         content_height = metrics.fetch(:logs_height) - 2

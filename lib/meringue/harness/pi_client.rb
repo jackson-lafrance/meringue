@@ -793,6 +793,11 @@ module Meringue
         # Resolve environment/commit-identity policy before changing RPC ownership. If validation
         # fails, the original managed turn remains untouched and available to the rollback path.
         interactive_env = process_environment(current_ref.fetch("cwd", Dir.pwd))
+        interactive_executable = resolve_interactive_executable(
+          interactive_argv,
+          cwd: current_ref.fetch("cwd", Dir.pwd),
+          environment: interactive_env
+        )
         settled_ref = settle_interactive_rpc_turn(rpc_ref) if was_streaming
         if settled_ref
           rpc_ref = preserve_session_identity(settled_ref, rpc_ref)
@@ -822,6 +827,7 @@ module Meringue
         {
           "session_ref" => detached_ref,
           "interactive_argv" => interactive_argv,
+          "interactive_executable" => interactive_executable,
           "interactive_env" => interactive_env,
           "handoff" => interactive_handoff_metadata(
             was_streaming: was_streaming,
@@ -1565,6 +1571,27 @@ module Meringue
         argv
       end
 
+      def resolve_interactive_executable(argv, cwd:, environment:)
+        name = Array(argv).first.to_s
+        path = environment.fetch("PATH", ENV.fetch("PATH", "")).to_s
+        resolved = if name.include?(File::SEPARATOR)
+                     candidate = File.expand_path(name, cwd.to_s)
+                     candidate if File.file?(candidate) && File.executable?(candidate)
+                   else
+                     path.split(File::PATH_SEPARATOR).each_with_object(nil) do |directory, _unused|
+                       directory = "." if directory.empty?
+                       candidate = File.expand_path(File.join(directory, name), cwd.to_s)
+                       break candidate if File.file?(candidate) && File.executable?(candidate)
+                     end
+                   end
+        return resolved if resolved
+
+        raise Error,
+              "The configured Pi command #{name.inspect} could not be resolved for native interactive focus " \
+              "with PATH=#{path.inspect}. Configure [harness.pi] command with an executable path or make it " \
+              "available in [harness.pi.env] PATH, then restart Meringue."
+      end
+
       def interactive_handoff_metadata(was_streaming:, events:, prompt:, latest_user_intent:, session_summary:, interrupted_turn_outcome:, turn_checkpoint:, replacement:)
         progress = PiSessionView.progress_items(events)
         {
@@ -1695,7 +1722,13 @@ module Meringue
 
       def process_environment(cwd)
         configured = ENV.to_h.merge(env)
-        env.merge(Git::CommitIdentity.environment(cwd: cwd, base_environment: configured))
+        environment = env.merge(Git::CommitIdentity.environment(cwd: cwd, base_environment: configured))
+        # Open3 inherits unspecified variables, but the native PTY performs its
+        # own executable discovery before spawning. Preserve the effective PATH
+        # explicitly so that a provider installed outside a restricted launcher
+        # environment is still resolved by the handoff.
+        environment["PATH"] ||= configured.fetch("PATH", "")
+        environment
       end
 
       def set_session_name(process, session_name)
