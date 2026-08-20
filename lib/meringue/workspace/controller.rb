@@ -23,11 +23,12 @@ module Meringue
         @interactive_sessions = {}
         @interactive_screens = {}
         @pending_interactive_opens = {}
+        @pending_interactive_closes = {}
         @mutex = Mutex.new
       end
 
       # Starts a workspace transition without making the TUI input/render thread wait for a
-      # harness handoff. Native Pi focus may need to abort an active turn and wait for Pi's RPC
+      # harness handoff. An Agent session may need to abort an active turn and wait for Pi's RPC
       # response, so that work belongs on a controller-owned thread.
       def open_workspace_async(agent:, state: nil, rows: TerminalSession::DEFAULT_ROWS, columns: TerminalSession::DEFAULT_COLUMNS, &callback)
         key = agent_key(agent)
@@ -52,6 +53,55 @@ module Meringue
           "message" => "Preparing focused workspace for #{agent.fetch("id", "worker")}…",
           "pending" => true
         }
+      end
+
+      # Returning ownership can wait for native Pi to abort compaction, stop its PTY, and start the
+      # dashboard RPC transport. Keep that bounded work off the TUI input/render thread while the
+      # durable kernel handoff marker continues enforcing one writer.
+      def close_workspace_async(agent:, &callback)
+        key = agent_key(agent)
+        operation = nil
+        start_operation = false
+        @mutex.synchronize do
+          operation = @pending_interactive_closes[key]
+          if operation
+            operation.fetch("callbacks") << callback if callback
+          else
+            operation = { "callbacks" => callback ? [callback] : [], "thread" => nil }
+            @pending_interactive_closes[key] = operation
+            start_operation = true
+          end
+        end
+        return pending_workspace_close(agent) unless start_operation
+
+        @mutex.synchronize do
+          # Creating and registering the thread under the same lock means shutdown can never see a
+          # close reservation without the thread it must join. The thread blocks on this mutex when
+          # it first looks up the interactive entry, so it cannot finish before registration.
+          thread = Thread.new do
+            Thread.current.name = "meringue-interactive-focus-close" if Thread.current.respond_to?(:name=)
+            result = begin
+              close_workspace(agent: agent)
+            rescue StandardError => e
+              failed("Could not close native Pi focus: #{e.message}")
+            end
+            callbacks = @mutex.synchronize do
+              @pending_interactive_closes.delete(key) if @pending_interactive_closes[key].equal?(operation)
+              operation.fetch("callbacks").dup
+            end
+            callbacks.each do |registered|
+              registered.call(result)
+            rescue StandardError
+              nil
+            end
+          end
+          operation["thread"] = thread
+        end
+        pending_workspace_close(agent)
+      end
+
+      def interactive_close_pending?(agent:)
+        @mutex.synchronize { @pending_interactive_closes.key?(agent_key(agent)) }
       end
 
       def cancel_workspace_open(agent:)
@@ -86,7 +136,7 @@ module Meringue
           rollback = focus_session_service.end_agent_interactive_focus(agent.fetch("id"))
           return rollback if rollback && rollback.fetch("status", nil) != "accepted"
 
-          return failed("The native interactive handoff did not return a launch command.")
+          return failed("The Agent session handoff did not return a launch command.")
         end
         # Harnesses may resolve their executable using provider-specific install
         # knowledge (for example a package-manager bin directory that is absent
@@ -102,7 +152,7 @@ module Meringue
         start_callback = lambda do |pid|
           started = focus_session_service.mark_agent_interactive_focus_started(agent.fetch("id"), pid: pid)
         rescue StandardError => e
-          started = failed("Could not claim native Pi focus: #{e.message}")
+          started = failed("Could not claim the Agent session: #{e.message}")
         end
         result = session.start(workspace_path: path, rows: rows, columns: columns, on_started: start_callback)
         if cancellation_requested?(cancellation)
@@ -143,7 +193,7 @@ module Meringue
 
           return started
         end
-        result.merge("interactive" => true, "message" => "Opened native Pi focus for #{agent.fetch("id", "worker")} in #{path}.")
+        result.merge("interactive" => true, "message" => "Opened Agent session for #{agent.fetch("id", "worker")} in #{path}.")
       rescue StandardError => e
         begin
           session.close if defined?(session) && session
@@ -153,7 +203,7 @@ module Meringue
         rollback = focus_session_service&.end_agent_interactive_focus(agent.fetch("id")) if defined?(agent) && agent
         return rollback if rollback && rollback.fetch("status", nil) != "accepted"
 
-        failed("Could not open native Pi focus: #{e.message}")
+        failed("Could not open Agent session: #{e.message}")
       end
 
       def open_terminal(agent:, state: nil, rows: TerminalSession::DEFAULT_ROWS, columns: TerminalSession::DEFAULT_COLUMNS)
@@ -179,7 +229,7 @@ module Meringue
 
       def handle_agent_key(key:, agent:, state: nil)
         entry = interactive_entry(agent)
-        return failed("Native Pi focus is not running for this worker.") unless entry
+        return failed("Agent session is not running for this worker.") unless entry
         return { "status" => "ignored" } unless entry.fetch("session").alive?
 
         bytes = terminal_key_bytes(key)
@@ -211,7 +261,7 @@ module Meringue
 
       def resize_agent(agent:, rows:, columns:)
         entry = interactive_entry(agent)
-        return failed("Native Pi focus is not running for this worker.") unless entry
+        return failed("Agent session is not running for this worker.") unless entry
 
         result = entry.fetch("session").resize(rows: rows, columns: columns)
         interactive_screen(agent, rows: rows, columns: columns).resize(rows: rows, columns: columns) unless failed_result?(result)
@@ -229,7 +279,7 @@ module Meringue
           resume = focus_session_service&.end_agent_interactive_focus(agent_id)
           return resume unless resume.nil? || resume.fetch("status", nil) == "accepted"
 
-          return { "status" => "closed", "message" => resume ? "Resumed the dashboard session." : "No native Pi focus was running." }
+          return { "status" => "closed", "message" => resume ? "Resumed the dashboard session." : "No Agent session was running." }
         end
 
         result = close_interactive(agent)
@@ -237,7 +287,7 @@ module Meringue
         return result unless resume
         return resume unless resume.fetch("status", nil) == "accepted"
 
-        result.merge("message" => "Closed native Pi focus and resumed the dashboard session.")
+        result.merge("message" => "Closed Agent session and resumed the dashboard session.")
       end
 
       def agent_interactive?(agent:)
@@ -288,16 +338,23 @@ module Meringue
       end
 
       def close
-        pending = @mutex.synchronize do
+        close_threads = @mutex.synchronize do
           @pending_interactive_opens.each_value { |operation| operation["cancelled"] = true }
           @pending_interactive_opens.clear
+          @pending_interactive_closes.values.map { |operation| operation.fetch("thread") }
+        end
+        # A pending return already owns closure for its worker. Join it before enumerating active
+        # entries so shutdown cannot race a second PTY close or dashboard reattachment against it.
+        close_threads.each { |thread| thread.join unless thread == Thread.current }
+        active_agents = @mutex.synchronize do
           @interactive_sessions.values.map { |entry| entry.fetch("agent") }
         end
-        pending.each { |agent| close_workspace(agent: agent) }
+        active_agents.each { |agent| close_workspace(agent: agent) }
         @mutex.synchronize do
           @screens.clear
           @interactive_screens.clear
           @interactive_sessions.clear
+          @pending_interactive_closes.clear
         end
         terminal_manager.close_all
       end
@@ -323,6 +380,14 @@ module Meringue
         { "status" => "cancelled", "message" => "Focused workspace opening was cancelled." }
       end
 
+      def pending_workspace_close(agent)
+        {
+          "status" => "pending",
+          "message" => "Returning #{agent_key(agent)} to dashboard ownership…",
+          "pending" => true
+        }
+      end
+
       def interactive_screen(agent, rows: TerminalScreen::DEFAULT_ROWS, columns: TerminalScreen::DEFAULT_COLUMNS)
         key = agent_key(agent)
         @mutex.synchronize do
@@ -335,14 +400,14 @@ module Meringue
       def close_interactive(agent)
         key = agent_key(agent)
         entry = @mutex.synchronize { @interactive_sessions.delete(key) }
-        return { "status" => "closed", "message" => "Native Pi focus was already stopped." } unless entry
+        return { "status" => "closed", "message" => "Agent session was already stopped." } unless entry
 
         @mutex.synchronize { @interactive_screens.delete(key) }
         session = entry.fetch("session")
-        # Leaving focus is a handoff too: ask Pi to abort its current interactive turn before
-        # terminating the PTY so the persisted session is settled before RPC reattaches.
+        # Escape is Pi's interrupt key for both active turns and autocompaction. Ctrl-C only clears
+        # its editor, so using it here leaves compaction running until the later process signals.
         begin
-          session.write("\u0003") if session.alive?
+          session.write("\e") if session.alive?
         rescue StandardError
           nil
         end
@@ -351,7 +416,7 @@ module Meringue
 
       def interactive_notice(status)
         return nil if status.fetch("alive", false)
-        return "Pi interactive session exited. Returning to the dashboard will attempt session recovery." if status.fetch("state", nil) == "exited"
+        return "Agent session exited. Returning to the dashboard will attempt session recovery." if status.fetch("state", nil) == "exited"
 
         nil
       end
@@ -381,10 +446,28 @@ module Meringue
       def terminal_key_bytes(key)
         if key.is_a?(Hash)
           return key.fetch("text", "").to_s.tr("\r", "\n") if key.fetch("type", nil) == "paste"
+          return mouse_event_bytes(key) if key.fetch("type", nil) == "mouse"
 
           return nil
         end
         key.is_a?(String) ? key : nil
+      end
+
+      # The dashboard parser already normalizes mouse input. Re-encode it as
+      # SGR mouse input in the embedded PTY's local coordinate system.
+      def mouse_event_bytes(event)
+        kind = event.fetch("kind", nil).to_s
+        return nil unless %w[wheel_up wheel_down].include?(kind)
+
+        button = 64 + (kind == "wheel_down" ? 1 : 0)
+        button += 4 if event.fetch("shift", false)
+        button += 8 if event.fetch("alt", false)
+        button += 16 if event.fetch("ctrl", false)
+        count = [event.fetch("count", 1).to_i, 1].max
+        x = [event.fetch("x", 1).to_i, 1].max
+        y = [event.fetch("y", 1).to_i, 1].max
+        sequence = "\e[<#{button};#{x};#{y}M"
+        sequence * count
       end
 
       def failed_result?(result)

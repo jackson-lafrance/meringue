@@ -153,6 +153,26 @@ class HarnessPiClientTurnOutcomeTest < HarnessIntegrationTest
     assert_equal "pending_tool_call", outcome.fetch("kind")
   end
 
+  def test_an_aborted_assistant_checkpoint_is_not_a_final_result
+    path = pi_session_file(
+      tmpdir,
+      extra_lines: [assistant_line(
+        stop_reason: "aborted",
+        text: "I was still working when focus changed.",
+        id: "m11",
+        parent_id: "m10"
+      )]
+    )
+    ref = pi_session_ref(session_file: path)
+    outcome = client.turn_outcome(ref)
+
+    assert_equal "incomplete", outcome.fetch("state")
+    assert_equal "interrupted_turn", outcome.fetch("kind")
+    assert_equal "aborted", outcome.fetch("stop_reason")
+    refute outcome.key?("last_assistant_text")
+    assert_raises(PiClient::ProcessExitedError) { client.get_state(ref) }
+  end
+
   # A recovered session ends with a real answer, so the earlier failure must not
   # keep the worker errored forever.
   def test_a_recovered_turn_after_a_failure_reports_the_recovered_completion
