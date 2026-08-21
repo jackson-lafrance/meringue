@@ -31,6 +31,8 @@ class InputCLITest < Minitest::Test
       assert_includes out, "meringue tui --state PATH"
       assert_includes out, "meringue tui --config PATH"
       assert_includes out, "meringue reset-state"
+      assert_includes out, "meringue workers export"
+      assert_includes out, "meringue workers import"
       assert_includes out, "meringue --version"
       assert_includes out, Meringue::Config::DEFAULT_PATH
       assert_includes out, "Supported harness providers"
@@ -48,6 +50,32 @@ class InputCLITest < Minitest::Test
     refute_includes out, "/answer"
     refute_includes out, "/questions"
     refute_includes out, "/dismiss"
+  end
+
+  def test_workers_export_cli_writes_a_portable_bundle
+    Dir.mktmpdir("meringue-cli-worker-export") do |dir|
+      state_path = File.join(dir, "state.json")
+      bundle_path = File.join(dir, "workers.json")
+      state = Meringue::State::Models.empty_state
+      state["projects"] << { "id" => "P1", "name" => "Demo", "root_path" => File.join(dir, "source") }
+      state["issues"] << { "id" => "P1-I1", "project_id" => "P1", "title" => "Retry me", "description" => "Do it", "agent_ids" => [] }
+      state["agents"] << {
+        "id" => "P1-I1-W1", "type" => "worker", "status" => "errored", "project_id" => "P1", "issue_id" => "P1-I1",
+        "harness" => "pi", "pid" => 99, "harness_session_id" => "machine-only", "workspace_path" => "/machine/work",
+        "harness_metadata" => { "spawn_prompt" => "Retry the task." }
+      }
+      Meringue::State::Store.new(path: state_path).save(state)
+
+      result = run_cli(["workers", "export", bundle_path, "--state", state_path])
+
+      assert_equal 0, result.fetch("status")
+      assert_includes result.fetch("out"), "Exported 1 worker"
+      bundle = JSON.parse(File.read(bundle_path))
+      serialized = JSON.generate(bundle)
+      refute_includes serialized, "machine-only"
+      refute_includes serialized, "/machine/work"
+      assert_equal "P1-I1-W1", bundle.dig("workers", 0, "source_worker_id")
+    end
   end
 
   def test_unknown_command_prints_help_and_fails

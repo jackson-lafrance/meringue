@@ -200,6 +200,8 @@ module Meringue
         "prompt_agent" => "PromptAgent",
         "pause_worker" => "PauseWorker",
         "resume_worker" => "ResumeWorker",
+        "export_workers" => "ExportWorkers",
+        "import_workers" => "ImportWorkers",
         "retry" => "RetryHead",
         "retry_head" => "RetryHead",
         "noop" => "NoOp",
@@ -247,6 +249,8 @@ module Meringue
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."],
         ["/worker resume <agent_id>", "Resume a paused worker session."],
+        ["/worker export <bundle_path> [agent_id...]", "Export current workers for a fresh retry on another computer."],
+        ["/worker import <bundle_path> --project <path>", "Import workers as fresh sessions in a destination project."],
         ["/prompt <agent_id> \"<message>\"", "Continue a worker session or take over a still-routing head."],
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/harness [head|worker] <pi|claude|antigravity>", "Select role-aware harness defaults for future agents; omit the role to update both."],
@@ -286,7 +290,7 @@ module Meringue
         AddProject ModifyProject CreateIssue ModifyIssue MoveWorker SpawnWorker PromptAgent SpawnHead NoOp
         CreateGoal ModifyGoal StopGoal ListGoals
         AskQuestion AnswerQuestion DismissQuestion
-        PauseWorker ResumeWorker
+        PauseWorker ResumeWorker ExportWorkers ImportWorkers
         Kill Prune Recount ClearState SetTheme SetHarness ReconcileSessions
       ].freeze
       HEAD_BLOCKED_COMMANDS = %w[ApplyHeadResult InvalidSlashCommand RetryHead SaveConfiguration].freeze
@@ -794,6 +798,138 @@ module Meringue
           error = error_payload(e)
           failed_result(nil, "CancelAgentTurn", "Could not cancel agent #{agent_id}: #{error.fetch("message")}", [error.fetch("class"), error.fetch("message")])
         end
+      end
+
+      # Export only portable worker context. The bundle writer deliberately runs outside the state
+      # lock: it reads one normalized snapshot and performs file I/O without blocking commands from
+      # another Meringue instance.
+      def export_workers(command_id, command_type, payload)
+        path = value_at(payload, "path", "Path", "bundle_path", "bundlePath")
+        return rejected_result(command_id, command_type, "Workers were not exported.", ["path is required"]) if blank?(path)
+
+        bundle = Workers::Bundle.export(
+          store.load,
+          worker_ids: value_at(payload, "worker_ids", "agent_ids", "agents") || []
+        )
+        destination = Workers::Bundle.write(path, bundle)
+        accepted_result(
+          command_id,
+          command_type,
+          nil,
+          "Exported #{bundle.fetch("workers").length} worker(s) to #{destination}. Harness sessions were not included; import will start fresh sessions.",
+          { "path" => destination, "bundle_id" => bundle.fetch("bundle_id"), "worker_ids" => bundle.fetch("workers").map { |worker| worker.fetch("source_worker_id") } },
+          []
+        )
+      rescue ArgumentError => e
+        rejected_result(command_id, command_type, "Workers were not exported: #{e.message}", ["worker_export_invalid"])
+      rescue StandardError => e
+        failed_result(command_id, command_type, "Workers were not exported: #{sanitized_error_message(e)}", [e.class.name, sanitized_error_message(e)])
+      end
+
+      # Import is intentionally a fresh SpawnWorker flow. A portable bundle has no usable harness
+      # session reference, so the destination path is required and the normal workspace manager
+      # chooses a local checkout/branch. Reading a bundle path happens before the state mutation;
+      # callers may also pass an already parsed bundle (the CLI uses that form).
+      def import_workers(command_id, command_type, payload)
+        bundle = value_at(payload, "bundle", "Bundle")
+        bundle = Workers::Bundle.read(value_at(payload, "path", "Path", "bundle_path", "bundlePath")) unless bundle.is_a?(Hash)
+        Workers::Bundle.validate!(bundle)
+        project_path = value_at(payload, "project_path", "projectPath", "destination_project_path")
+        return rejected_result(command_id, command_type, "Workers were not imported.", ["project_path is required"]) if blank?(project_path)
+
+        expanded_project_path = File.expand_path(project_path.to_s)
+        return rejected_result(command_id, command_type, "Workers were not imported.", ["project_path must be an existing directory"]) unless Dir.exist?(expanded_project_path)
+
+        imported = []
+        skipped = []
+        log_ids = []
+        project_id = nil
+        issue_ids = {}
+        synchronized_state do
+          state = normalized_state
+          project = import_project!(state, bundle, expanded_project_path, payload)
+          project_id = project.fetch("id")
+          bundle.fetch("workers").each do |entry|
+            source_issue_id = entry.dig("issue", "source_id").to_s
+            issue = issue_ids[source_issue_id] ||= import_issue!(state, project, bundle, entry)
+            log_ids.concat(Array(issue.delete("_import_log_ids")))
+          end
+          touch_state!(state)
+          store.save(state)
+        end
+
+        bundle.fetch("workers").each_with_index do |entry, index|
+          source_worker_id = entry.fetch("source_worker_id")
+          existing = imported_worker_for_bundle(bundle, source_worker_id)
+          if existing
+            skipped << { "source_worker_id" => source_worker_id, "target_worker_id" => existing.fetch("id"), "reason" => "already_imported" }
+            next
+          end
+
+          issue = synchronized_state do
+            state = normalized_state
+            source_issue_id = entry.dig("issue", "source_id").to_s
+            issue_ids[source_issue_id] || find_import_issue(state, project_id, bundle, source_issue_id)
+          end
+          unless issue
+            skipped << { "source_worker_id" => source_worker_id, "reason" => "issue_unavailable" }
+            next
+          end
+
+          settings = entry["session_settings"].is_a?(Hash) ? entry.fetch("session_settings") : {}
+          spawn_payload = {
+            "issue_id" => issue.fetch("id"),
+            "prompt" => Workers::Bundle.retry_prompt(entry, destination_project_path: expanded_project_path),
+            "title" => entry["title"],
+            "model" => settings["model"],
+            "thinking_level" => settings["thinking_level"],
+            "_portable_import" => {
+              "bundle_id" => bundle.fetch("bundle_id", "unknown"),
+              "source_worker_id" => source_worker_id,
+              "source_status" => entry["source_status"],
+              "session_resume_available" => false,
+              "session_resume_reason" => Workers::Bundle::PORTABLE_SESSION_REASON
+            }
+          }.compact
+          # The bundle/worker key is the exactly-once identity, not the outer ImportWorkers
+          # command id: two dashboards importing the same file must converge on one reservation.
+          result = spawn_worker(
+            "portable-import:#{bundle.fetch("bundle_id", "unknown")}:#{index + 1}",
+            "SpawnWorker",
+            spawn_payload
+          )
+          if result.fetch("status", nil) == "accepted"
+            target_id = result.fetch("target_id")
+            mark_imported_worker!(target_id, spawn_payload.fetch("_portable_import"), log_ids)
+            imported << { "source_worker_id" => source_worker_id, "target_worker_id" => target_id, "status" => "fresh_session" }
+          else
+            skipped << { "source_worker_id" => source_worker_id, "reason" => "spawn_failed", "message" => result.fetch("message", "unknown error") }
+          end
+        end
+
+        message = if imported.empty?
+                    "No workers were imported. #{skipped.length} worker(s) were skipped."
+                  else
+                    "Imported #{imported.length} worker(s) into #{project_id} as fresh sessions; source harness sessions cannot be resumed directly on this computer."
+                  end
+        accepted_result(
+          command_id,
+          command_type,
+          imported.first && imported.first.fetch("target_worker_id"),
+          message,
+          {
+            "bundle_id" => bundle.fetch("bundle_id", nil),
+            "project_id" => project_id,
+            "imported" => imported,
+            "skipped" => skipped,
+            "session_resume" => { "available" => false, "reason" => Workers::Bundle::PORTABLE_SESSION_REASON }
+          }.compact,
+          log_ids
+        )
+      rescue ArgumentError => e
+        rejected_result(command_id, command_type, "Workers were not imported: #{e.message}", ["worker_import_invalid"])
+      rescue StandardError => e
+        failed_result(command_id, command_type, "Workers were not imported: #{sanitized_error_message(e)}", [e.class.name, sanitized_error_message(e)])
       end
 
       # Pause is a user-directed lifecycle transition, not a kill. The pause request is checkpointed
@@ -1553,6 +1689,10 @@ module Meringue
           reconcile_sessions(command_id: command_id, command_type: command_type)
         elsif %w[PauseWorker ResumeWorker].include?(command_type)
           command_type == "PauseWorker" ? pause_worker(command_id, command_type, payload) : resume_worker(command_id, command_type, payload)
+        elsif command_type == "ExportWorkers"
+          export_workers(command_id, command_type, payload)
+        elsif command_type == "ImportWorkers"
+          @worker_spawn_mutex.synchronize { import_workers(command_id, command_type, payload) }
         elsif command_type == "Prune"
           @prune_mutex.synchronize { prune(command_id, command_type, payload) }
         elsif command_type == "SaveConfiguration"
@@ -1636,6 +1776,10 @@ module Meringue
           pause_worker(command_id, command_type, payload)
         when "ResumeWorker"
           resume_worker(command_id, command_type, payload)
+        when "ExportWorkers"
+          export_workers(command_id, command_type, payload)
+        when "ImportWorkers"
+          import_workers(command_id, command_type, payload)
         when "NoOp"
           no_op(command_id, command_type, payload)
         when "CreateGoal"
@@ -10388,6 +10532,8 @@ module Meringue
         # Set by the kernel when it corrected a head's predicted issue id; kept on the worker and
         # in its spawn log so a corrected route is visible instead of silent.
         rerouted_from_issue_id = present_string(value_at(payload, "_rerouted_from_issue_id", "rerouted_from_issue_id"))
+        portable_import = value_at(payload, "_portable_import", "portable_import")
+        portable_import = portable_import.is_a?(Hash) ? deep_copy(portable_import) : nil
         # Set by the kernel when it restarts a worker whose session can no longer be replayed. The
         # successor takes over the dead worker's existing worktree and branch instead of allocating
         # a new one, because that is where the unfinished work already lives.
@@ -10717,6 +10863,7 @@ module Meringue
               session_settings_override: session_settings_override,
               workspace_reuse_request: reuse_request,
               workspace_mode: workspace_mode,
+              portable_import: portable_import,
               now: now,
               harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
             )
@@ -13193,7 +13340,7 @@ module Meringue
       def build_worker_reservation(agent_id:, issue:, project:, workspace:, provider:, command_id:, prompt:, title:,
                                    requested_workspace_path:, follow_up_of_agent_id:, replace_agent_id:, now:, harness_generation:,
                                    after_agent_id: nil, completion_continuation: nil, workspace_reuse_request: nil,
-                                   session_settings_override: {}, workspace_mode: WORKSPACE_MODE_ISOLATED)
+                                   session_settings_override: {}, workspace_mode: WORKSPACE_MODE_ISOLATED, portable_import: nil)
         plan = workspace.fetch("plan", nil) || workspace
         {
           "id" => agent_id,
@@ -13228,6 +13375,7 @@ module Meringue
             "completion_continuation" => completion_continuation_record(completion_continuation, now: now, spawn_command_id: command_id),
             "provisioning_state" => "allocating_workspace",
             "workspace_reuse_request" => workspace_reuse_request,
+            "portable_import" => portable_import,
             "workspace_plan" => plan,
             "harness_generation" => harness_generation,
             **instance_ownership_metadata,
@@ -16485,6 +16633,135 @@ module Meringue
 
       def async_heads?
         @async_heads
+      end
+
+      def import_project!(state, bundle, project_path, payload)
+        expanded = File.expand_path(project_path.to_s)
+        existing = state.fetch("projects").find do |project|
+          project.is_a?(Hash) && project["root_path"] && File.expand_path(project["root_path"].to_s) == expanded
+        end
+        return existing if existing
+
+        first_project = bundle.fetch("workers").first.fetch("project", {})
+        now = timestamp
+        project = {
+          "id" => next_project_id!(state),
+          "name" => project_display_name(value_at(payload, "project_name", "projectName")) ||
+                    project_display_name(first_project["name"]) || default_project_name(expanded),
+          "root_path" => expanded,
+          "status" => "working",
+          "portable_import" => {
+            "bundle_id" => bundle.fetch("bundle_id", nil),
+            "source_project_id" => first_project["source_id"]
+          }.compact,
+          "created_at" => now,
+          "updated_at" => now
+        }
+        state.fetch("projects") << project
+        append_log(
+          state,
+          source_type: "kernel",
+          source_id: project.fetch("id"),
+          level: "info",
+          message: "Created destination project #{project.fetch("id")} for imported workers: #{project.fetch("name")}",
+          details: { "portable_bundle_id" => bundle.fetch("bundle_id", nil) }.compact
+        )
+        project
+      end
+
+      def import_issue!(state, project, bundle, entry)
+        source_issue = entry.fetch("issue")
+        source_issue_id = source_issue.fetch("source_id", "")
+        existing = find_import_issue(state, project.fetch("id"), bundle, source_issue_id)
+        return existing if existing
+
+        now = timestamp
+        issue = {
+          "id" => next_issue_id!(state, project.fetch("id")),
+          "project_id" => project.fetch("id"),
+          "title" => source_issue.fetch("title", "Imported worker task").to_s.strip,
+          "description" => source_issue.fetch("description", "").to_s,
+          "status" => "queued",
+          "agent_ids" => [],
+          "portable_import" => {
+            "bundle_id" => bundle.fetch("bundle_id", nil),
+            "source_issue_id" => source_issue_id
+          }.compact,
+          "created_at" => now,
+          "updated_at" => now
+        }
+        delivery = entry.fetch("delivery", {}) || {}
+        State::Models.attach_pull_requests_to_issue!(
+          issue,
+          delivery_pull_requests: Array(delivery["pull_requests"]),
+          candidate_urls: Array(delivery["candidate_urls"]),
+          reported_urls: Array(delivery["reported_urls"])
+        )
+        state.fetch("issues") << issue
+        project["updated_at"] = now
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: issue.fetch("id"),
+          level: "info",
+          message: "Created destination issue #{issue.fetch("id")} from imported worker context: #{issue.fetch("title")}",
+          details: {
+            "project_id" => project.fetch("id"),
+            "source_issue_id" => source_issue_id,
+            "portable_bundle_id" => bundle.fetch("bundle_id", nil)
+          }.compact
+        )
+        issue["_import_log_ids"] = log_ids
+        issue
+      end
+
+      def find_import_issue(state, project_id, bundle, source_issue_id)
+        state.fetch("issues").find do |issue|
+          marker = issue.is_a?(Hash) ? issue["portable_import"] : nil
+          marker.is_a?(Hash) && marker["bundle_id"].to_s == bundle.fetch("bundle_id", "").to_s &&
+            marker["source_issue_id"].to_s == source_issue_id.to_s && issue["project_id"].to_s == project_id.to_s
+        end
+      end
+
+      def imported_worker_for_bundle(bundle, source_worker_id)
+        synchronized_state do
+          state = normalized_state
+          state.fetch("agents").find do |agent|
+            next false unless agent.is_a?(Hash) && agent["type"].to_s == "worker"
+
+            marker = (agent["harness_metadata"].is_a?(Hash) && agent["harness_metadata"]["portable_import"])
+            marker.is_a?(Hash) && marker["bundle_id"].to_s == bundle.fetch("bundle_id", "").to_s &&
+              marker["source_worker_id"].to_s == source_worker_id.to_s
+          end
+        end
+      end
+
+      def mark_imported_worker!(worker_id, marker, log_ids)
+        synchronized_state do
+          state = normalized_state
+          worker = find_agent(state, worker_id)
+          return unless worker
+
+          now = timestamp
+          metadata = worker.fetch("harness_metadata", {}) || {}
+          worker["harness_metadata"] = metadata.merge("portable_import" => marker).compact
+          worker["updated_at"] = now
+          log_ids.concat(append_log(
+            state,
+            source_type: "worker",
+            source_id: worker.fetch("id"),
+            level: "warning",
+            message: "Worker #{worker.fetch("id")} imported as a fresh session; the source harness session cannot be resumed directly.",
+            details: {
+              "portable_bundle_id" => marker.fetch("bundle_id", nil),
+              "source_worker_id" => marker.fetch("source_worker_id", nil),
+              "session_resume_available" => false,
+              "session_resume_reason" => marker.fetch("session_resume_reason", Workers::Bundle::PORTABLE_SESSION_REASON)
+            }.compact
+          ))
+          touch_state!(state, now)
+          store.save(state)
+        end
       end
 
       def synchronized_state(&block)
