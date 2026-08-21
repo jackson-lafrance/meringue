@@ -187,29 +187,51 @@ module Meringue
 
       def canonicalize_role_defaults!(data, changed_ids)
         groups = [
-          ["agent.head_harness", "agent.worker_harness", %w[harness provider], %w[harness head_provider], %w[harness worker_provider]],
-          ["agent.head_model", "agent.worker_model", %w[harness pi model], %w[harness pi head_model], %w[harness pi worker_model]],
-          ["agent.head_thinking", "agent.worker_thinking", %w[harness pi thinking_level], %w[harness pi head_thinking_level], %w[harness pi worker_thinking_level]]
+          ["agent.head_harness", "agent.worker_harness", [%w[harness provider]], [%w[harness head_provider]], [%w[harness worker_provider]]],
+          # The neutral paths are authoritative now. The Pi paths remain mirrored for installations
+          # that still read the legacy layout, but stale neutral values must not mask a repaired
+          # role value during a harness migration.
+          ["agent.head_model", "agent.worker_model", [%w[harness model], %w[harness pi model]], [%w[harness head_model], %w[harness pi head_model]], [%w[harness worker_model], %w[harness pi worker_model]]],
+          ["agent.head_thinking", "agent.worker_thinking", [%w[harness thinking_level], %w[harness pi thinking_level]], [%w[harness head_thinking_level], %w[harness pi head_thinking_level]], [%w[harness worker_thinking_level], %w[harness pi worker_thinking_level]]]
         ]
-        groups.each do |head_id, worker_id, shared_path, head_path, worker_path|
+        groups.each do |head_id, worker_id, shared_paths, head_paths, worker_paths|
           next if (changed_ids & [head_id, worker_id]).empty?
 
           draft = Config.new(data, path: path, loaded: true, file_data: data)
           head_value = Schema.fetch(head_id).effective_value(draft, env: {})
           worker_value = Schema.fetch(worker_id).effective_value(draft, env: {})
           if head_value == worker_value
-            set_path!(data, shared_path, head_value)
-            delete_path!(data, head_path)
-            delete_path!(data, worker_path)
+            set_all_paths!(data, shared_paths, head_value)
+            delete_all_paths!(data, head_paths)
+            delete_all_paths!(data, worker_paths)
             next
           end
 
-          shared = value_at(data, shared_path)
-          shared = worker_value if shared.nil? || shared.to_s.empty?
-          set_path!(data, shared_path, shared)
-          head_value == shared ? delete_path!(data, head_path) : set_path!(data, head_path, head_value)
-          worker_value == shared ? delete_path!(data, worker_path) : set_path!(data, worker_path, worker_value)
+          shared = first_path_value(data, shared_paths)
+          shared = worker_value if shared.nil? || shared.to_s.empty? || !valid_role_default_value?(head_id, shared)
+          set_all_paths!(data, shared_paths, shared)
+          head_value == shared ? delete_all_paths!(data, head_paths) : set_all_paths!(data, head_paths, head_value)
+          worker_value == shared ? delete_all_paths!(data, worker_paths) : set_all_paths!(data, worker_paths, worker_value)
         end
+      end
+
+      def first_path_value(data, paths)
+        Array(paths).map { |path| value_at(data, path) }.find { |value| !value.nil? && !value.to_s.empty? }
+      end
+
+      def set_all_paths!(data, paths, value)
+        Array(paths).each { |path| set_path!(data, path, value) }
+      end
+
+      def delete_all_paths!(data, paths)
+        Array(paths).each { |path| delete_path!(data, path) }
+      end
+
+      def valid_role_default_value?(setting_id, value)
+        Schema.fetch(setting_id).validate_value(value, config: nil)
+        true
+      rescue ArgumentError, TypeError
+        false
       end
 
       def validate_cross_fields!(data, changed_ids:)

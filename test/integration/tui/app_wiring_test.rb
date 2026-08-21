@@ -363,8 +363,8 @@ class TuiAppWiringTest < Minitest::Test
 
     assert_includes overview, "file: /tmp/meringue-test-config.toml (loaded)"
     assert_includes overview, "harness: claude"
-    assert_includes overview, "head model: claude-opus-5"
-    assert_includes overview, "worker model: claude-opus-5"
+    assert_includes overview, "head model: anthropic/claude-opus-5"
+    assert_includes overview, "worker model: anthropic/claude-opus-5"
     assert_includes overview, "head reasoning: max"
     assert_includes overview, "worker reasoning: max"
     assert_includes overview, "conflict policy (predecessor failure): run"

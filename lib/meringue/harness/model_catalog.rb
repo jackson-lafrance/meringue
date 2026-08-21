@@ -28,6 +28,11 @@ module Meringue
       UNAVAILABLE = "unavailable"
       UNSUPPORTED = "unsupported"
       EMPTY_CATALOG_REASON = "empty_catalog"
+      # A provider can accidentally print an unbounded registry (or a proxy can return a very large
+      # payload). State metadata is long-lived, so catalog snapshots have an explicit memory and
+      # persistence bound rather than trusting provider output size.
+      MAX_MODELS = 2_000
+      MAX_REFERENCE_BYTES = 4_096
 
       ENTRY_KEYS = %w[reference provider id name thinking_levels reasoning context_window max_tokens].freeze
 
@@ -142,7 +147,9 @@ module Meringue
         end
 
         def normalize_entries(models)
-          Array(models).filter_map { |model| normalize_entry(model) }.uniq { |entry| entry.fetch("reference") }
+          Array(models).filter_map { |model| normalize_entry(model) }
+            .uniq { |entry| entry.fetch("reference") }
+            .first(MAX_MODELS)
         end
 
         def normalize_entry(model)
@@ -151,6 +158,7 @@ module Meringue
           model = stringify(model)
           provider, id = provider_and_id(model)
           return nil if provider.empty? || id.empty?
+          return nil if "#{provider}/#{id}".bytesize > MAX_REFERENCE_BYTES
 
           {
             "reference" => "#{provider}/#{id}",

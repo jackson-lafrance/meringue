@@ -548,6 +548,8 @@ Supported provider names in this slice:
 - `claude` for Claude Code (aliases: `claude_code`, `claude-code`, `cc`)
 - `antigravity`
 
+The `split_defaults` experiment is enabled by default and makes head/worker harness, model, and thinking settings independent. Disable it only for a compatibility migration: role-specific values remain stored, but the shared values are used for both roles. Harness selection re-resolves incompatible future thinking values for each affected role in the same config transaction; it never rewrites an existing session.
+
 CLI flags override `config.toml`:
 
 ```bash
@@ -594,7 +596,7 @@ head_extra_args = []
 worker_extra_args = []
 ```
 
-Heads and workers default to `anthropic/claude-opus-5` at the maximum reasoning level. Use `/model head <provider>/<model-id>` and `/model worker <provider>/<model-id>`, or set `head_model` and `worker_model`, for distinct role model defaults; use `/thinking head <level>` and `/thinking worker <level>`, or set `head_thinking_level` and `worker_thinking_level`, for distinct role reasoning defaults. The existing `/model <provider>/<model-id>` command and `model` key, and `/thinking <level>` command and `thinking_level` key, remain the shared form; those commands also clear role overrides. A role key wins over the shared key, and either scalar wins over a `--model`/`--thinking` flag in that role's argument array. A configured role array still replaces that role's default array entirely, so include every other flag you need.
+Heads and workers default to `anthropic/claude-opus-5` at the maximum reasoning level. Use `/model head <provider>/<model-id>` and `/model worker <provider>/<model-id>`, or set `head_model` and `worker_model`, for distinct role model defaults; use `/thinking head <level>` and `/thinking worker <level>`, or set `head_thinking_level` and `worker_thinking_level`, for distinct role reasoning defaults. The existing `/model <provider>/<model-id>` command and `model` key, and `/thinking <level>` command and `thinking_level` key, remain the shared form; those commands also clear role overrides. A role key wins over the shared key, and either scalar wins over a `--model`/`--thinking` flag in that role's argument array. A configured role array still replaces that role's default array entirely, so include every other flag you need. Claude Code receives a bare model id and `--effort`; Meringue still reports the stored qualified reference so status and `/config` remain portable across harnesses. Values that are valid references but absent from a catalog remain allowed and are labelled unverified.
 
 A provider `command` may be a bare executable such as `pi`, an absolute path, or a command with arguments. Meringue uses the provider's effective environment—the environment that launched Meringue plus any configured `env` overrides—for harness sessions, catalog probes, and focus. Native focus resolves the executable against that same effective `PATH` before transferring session ownership, rather than trying to find `pi` again in a reduced PTY environment. This keeps focus working when Pi is installed by a version manager or package manager in a non-system directory. For services or GUI launchers whose startup environment has no usable shell `PATH`, configure an absolute path (for example, `command = "/opt/homebrew/bin/pi"`) or add the installation directory explicitly:
 
@@ -613,13 +615,13 @@ A model reference is `<provider>/<model-id>`, split on the first slash, so the m
 
 The `/models` model picker, and the completion list behind `/model`, come from the harness itself rather than a list maintained in Meringue. For Pi, Meringue starts a short-lived ephemeral RPC probe (`pi --mode rpc --no-session`) and reads `get_available_models`.
 
-That probe reuses the configured provider `command`, `env`, `extra_args`, and role `*_extra_args`, minus `--model`/`--thinking`, because provider availability depends on those flags. Two consequences matter when configuring Pi:
+That probe reuses the configured provider `command`, `env`, `extra_args`, and role `*_extra_args`, minus `--model`/`--thinking`, because provider availability depends on those flags. Claude Code uses an ephemeral `claude --print --output-format json "/model"` command instead, strips `--model`/`--effort`, and parses Claude Code's own aliases and effort levels. Picker and setup rendering use only the persisted snapshot and never make a network request. Two consequences matter when configuring Pi:
 
 - If `worker_extra_args` contains `--no-extensions` and your models come from a Pi extension, the catalog is legitimately empty, and Meringue reports `unavailable` with Pi's own answer instead of inventing entries. Keep the `--extension <path>` flag that registers your provider in the same array (as in the example above) so probes and real sessions agree.
 - Model/thinking defaults are dropped from the probe on purpose: an unavailable saved default must not stop Pi from reporting which models exist.
 
 Catalogs are cached in Meringue state under `metadata.harness_model_catalogs.<harness>` and refreshed in the background by reconciliation (about every 10 minutes, retried after about 1 minute when a fetch failed). `/models refresh` (or `Ctrl-R` inside the model picker) forces an immediate re-fetch after you log into a provider, install an extension, or edit `~/.pi/agent/models.json`.
 
-Claude Code runs in its own interactive mode inside a PTY Meringue owns for the life of the session; see [`interactive-harness-backends.md`](interactive-harness-backends.md). Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace, so it has no live session to steer.
+Claude Code runs in its own interactive mode inside a PTY Meringue owns for the life of the session; see [`interactive-harness-backends.md`](interactive-harness-backends.md). Its catalog is `available` only when Claude Code returns a non-empty authoritative answer; missing CLI, auth/exit failure, or an empty/malformed response is `unavailable`, and a failed refresh after a confirmed answer is `stale` with the last confirmed models retained. Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace, so it has no live session to steer and currently reports an explicit `unsupported` catalog.
 
 Do not store API keys or secrets in the config file. Prefer each provider CLI's normal auth flow or environment setup.

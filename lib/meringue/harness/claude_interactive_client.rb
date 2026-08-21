@@ -33,6 +33,20 @@ module Meringue
 
       attr_reader :claude_home
 
+      def model_catalog_supported?
+        true
+      end
+
+      def available_models(cwd: nil)
+        ClaudeModelCatalog.fetch(
+          command: command,
+          env: env,
+          cwd: cwd,
+          extra_args: extra_args,
+          timeout: ClaudeModelCatalog::DEFAULT_TIMEOUT
+        )
+      end
+
       def initialize(command: DEFAULT_COMMAND, env: {}, extra_args: [],
                      claude_home: ENV.fetch("CLAUDE_CONFIG_DIR", DEFAULT_CLAUDE_HOME), **kwargs)
         super(

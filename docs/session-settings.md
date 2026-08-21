@@ -1,6 +1,6 @@
-# Pi model and thinking settings
+# Harness model and thinking settings
 
-Meringue exposes future Pi defaults for how every new head and worker is started. Existing sessions retain their effective settings.
+Meringue exposes future harness, model, and thinking defaults for every new head and worker. Each role may use a different active harness; existing sessions retain their effective settings.
 
 First-run Setup (`/setup`, and automatically on a first interactive launch) uses the shared Settings overlay to review separate head and worker harness/model/thinking defaults, theme, and experiments. All choices remain in one draft until Finish atomically saves them with the onboarding marker. It reads the cached catalog only and never blocks on a fetch; see [`onboarding.md`](onboarding.md).
 
@@ -42,7 +42,7 @@ Selecting a row is applied through the normal slash path, so the picker itself w
 
 A trailing `refresh` word keeps `/models` on the kernel path instead of opening the picker: it forces a re-fetch and reports the snapshot's state (harness, availability, model count, confirmed timestamp, note) in the log. That is also what the picker's `Ctrl-R` submits and what a head proposes for "what models can I use", so `GetModelCatalog` remains the only way the catalog is read.
 
-### Future Pi defaults
+### Future session defaults
 
 The bare `/thinking` command opens a matching Head/Worker thinking-level picker. It uses the same `←`/`→` role tabs, `↑`/`↓` navigation, filtering, and `Enter` apply behavior as the model picker; `/thinking <level>` and `/thinking head|worker <level>` remain the direct command forms. Bare `/theme` and `/harness` use the same bordered popup for their choices, while `/config` and `/setup` remain full-screen transactional editors.
 
@@ -69,15 +69,15 @@ Examples:
 
 There is no command that only prints the defaults. The dashboard status line keeps a compact role-aware harness/model/thinking summary, `/config` displays each role in the full-screen Agent defaults category, and `/config --text` prints diagnostics. A head can still answer "which model and thinking levels will future agents use" by proposing `GetSessionDefaults`.
 
-`/model` and `/thinking` save values under `[harness.pi]` in Meringue's configured TOML file (normally `~/.meringue/config.toml`). The one-argument `/model <provider>/<model-id>` and `/thinking <level>` forms keep their historical behavior: they update both roles and clear role-specific overrides. The `head` and `worker` forms update only that role, including sessions spawned later in the currently running Meringue process.
+`/model` and `/thinking` save harness-neutral values in Meringue's configured TOML file (normally `~/.meringue/config.toml`), while mirroring the legacy `[harness.pi]` layout for migration compatibility. The one-argument `/model <provider>/<model-id>` and `/thinking <level>` forms keep their historical behavior: they update both roles and clear role-specific overrides. The `head` and `worker` forms update only that role, including sessions spawned later in the currently running Meringue process. The `split_defaults` experiment controls whether role-specific overrides are active; it is enabled by default and is listed in `/config` under Experiments.
 
-A default change does **not** mutate, reconnect, restart, or terminate an existing Pi session. It also strips spawn-only model/thinking defaults when later resuming an existing session, so a resumable session keeps its persisted effective pair. The result and durable kernel log explicitly list existing Pi agent ids left unchanged.
+A default change does **not** mutate, reconnect, restart, or terminate an existing harness session. It also strips spawn-only model/thinking defaults when later resuming an existing session, so a resumable session keeps its persisted effective pair. The result and durable kernel log explicitly list existing agent ids left unchanged.
 
-Model defaults must be an exact `<provider>/<model-id>` reference. Thinking defaults must be one of Pi's known levels. A provider extension can add models dynamically, so Meringue validates the model reference *shape* when saving it; the harness performs availability validation when the future session starts. Validation is deliberately independent of the catalog: a valid explicit id is still accepted when the catalog is stale, empty, or unavailable, and an id the catalog does not list is saved and labelled unverified rather than refused.
+Model defaults must be an exact `<provider>/<model-id>` reference. Thinking defaults use Meringue's shared ladder, then the active harness translates that value into its own vocabulary. When a harness switch makes a persisted future thinking value incompatible (for example `off` on Claude Code), the switch transaction re-resolves the affected shared or role-specific value before it reports success. A provider extension can add models dynamically, so Meringue validates the model reference *shape* when saving it; the harness performs availability validation when the future session starts. Validation is deliberately independent of the catalog: a valid explicit id is still accepted when the catalog is stale, empty, or unavailable, and an id the catalog does not list is saved and labelled unverified rather than refused.
 
 ### Per-worker overrides
 
-A head may put optional `model` and `thinking_level` fields on a `SpawnWorker` payload. They use the same model-reference grammar and thinking-level ladder documented below, but their scope is only the new worker session: they do not update `[harness.pi]`, another worker, a head session, or an existing session. The Pi client removes the configured `--model`/`--thinking` spawn arguments and substitutes only the supplied values for that process.
+A head may put optional `model` and `thinking_level` fields on a `SpawnWorker` payload. They use the same model-reference grammar and thinking-level ladder documented below, but their scope is only the new worker session: they do not update future defaults, another worker, a head session, or an existing session. The selected harness removes configured spawn-only model/thinking arguments and substitutes only the supplied values for that process.
 
 Omission is meaningful. An omitted field remains late-bound to the configured future-session default when the worker actually starts. This applies to queued workers too, so a worker queued without overrides uses the defaults in force at activation rather than freezing a copy when it was queued. Explicit overrides are persisted as reservation intent and survive deferred activation and provisioning recovery. Before activation a queued worker has no effective `session_settings`; after launch the harness-reported effective pair is stored on the worker record and shown through the existing focused-workspace and `GetInfo` surfaces.
 
@@ -196,7 +196,7 @@ When logs are filtered to one worker, the logs border adds that worker's lifecyc
 
 For a resumable process whose RPC transport is unavailable, Pi's persisted JSONL session is authoritative. Meringue walks the current branch and reads `model_change` and `thinking_level_change` entries. An assistant message's provider/model is only a fallback for older session files. If Pi persisted no thinking level, Meringue reports `unknown` rather than guessing.
 
-Codex, Claude Code, and other harnesses can implement the same generic client operations later. They currently return an explicit unsupported result; Meringue does not infer their session settings from command-line arguments.
+Claude Code and other harnesses can implement the same generic live-session operations later. Meringue does not infer existing-session settings from command-line arguments; a provider either reports its effective pair or the agent record says that it is unavailable.
 
 ## Authoritative model catalog discovery
 
@@ -231,28 +231,34 @@ Discovery is harness-neutral. A harness client answers `available_models`, and M
 - `available`: the harness answered with at least one model.
 - `stale`: a previously confirmed list whose newest refresh failed. The models are kept, `fetched_at` still marks when the harness confirmed them, and `last_attempt_at`/`last_error`/`note` describe the failed attempt.
 - `unavailable`: the harness answered with an empty list (`reason: "empty_catalog"`) or could not be reached (`reason: "fetch_failed"`) and there is no earlier list to keep, with `note` carrying the harness's own explanation.
-- `unsupported`: the harness has no catalog API yet (Claude Code and Antigravity today), or this Meringue instance was built without a catalog source.
+- `unsupported`: the harness has no catalog API yet (currently Antigravity), or this Meringue instance was built without a catalog source.
 
 A failed or empty refresh never shrinks a working list. Without that rule one harness hiccup (a restart, a provider auth blip, a sleeping laptop) would replace a full catalog with an empty one, and the selector would silently fall back to the two or three references Meringue remembers from config and existing sessions — which looks exactly like discovery never worked.
 
 ### How Pi answers
 
-Pi exposes its catalog per process, not per session, so Meringue starts a short-lived ephemeral probe (`pi --mode rpc --no-session`), sends RPC `get_available_models`, and terminates it. The probe never touches a worker's RPC transport, writes no session file, and reuses the configured Pi `command`, `env`, and role args minus `--model`/`--thinking`. See [`config.md`](config.md#model-catalogs-and-provider-resource-flags) for why those resource flags matter.
+Pi exposes its catalog per process, not per session, so Meringue starts a short-lived ephemeral probe (`pi --mode rpc --no-session`), sends RPC `get_available_models`, and terminates it. The probe never touches a worker's RPC transport, writes no session file, and reuses the configured Pi `command`, `env`, and role args minus `--model`/`--thinking`. Claude Code uses the same discovery boundary with its own `/model` print command and drops saved `--model`/`--effort` values; no network call is added to picker or setup rendering. See [`config.md`](config.md#model-catalogs-and-provider-resource-flags) for why those resource flags matter.
 
 Each model's thinking levels are derived with Pi's own rule (`getSupportedThinkingLevels`): a model without reasoning support reports `["off"]`, a level mapped to `null` is excluded, and `xhigh`/`max` appear only when the model explicitly maps them. Meringue keeps no hand-maintained model or level table.
 
-That list is the model's own declaration, so treat it as description, not permission. A proxy or extension provider can wrap Claude Opus 5 and omit `max` from its `thinkingLevelMap`; Pi then clamps `max` to the closest level it does map instead of failing. Meringue mirrors that clamp (`Meringue::Harness::PiClient.clamp_thinking_level`) to explain what a future session will run, and never uses it to filter the `/thinking` list.
+That list is the model's own declaration, so treat it as description, not permission. A proxy or extension provider can wrap Claude Opus 5 and omit `max` from its `thinkingLevelMap`; Pi then clamps `max` to the closest level it does map instead of failing. Meringue mirrors that clamp (`Meringue::Harness::PiClient.clamp_thinking_level`) to explain what a future Pi session will run, and never uses it to filter the `/thinking` list.
+
+### How Claude Code answers
+
+Claude Code's authoritative source is a short-lived `claude --print --output-format json "/model"` invocation with session persistence and saved spawn-only model/effort arguments disabled. Meringue parses the aliases and effort vocabulary Claude Code reports, stores them as `anthropic/<id>` references, and does not start or modify a managed interactive session. A missing CLI, failed auth, non-zero exit, empty response, or malformed response is `unavailable`; after a confirmed list, a failed refresh is `stale` and retains that list with the failure note. A valid exact model reference remains settable when it is not in the cached list, and is labelled unverified rather than rejected.
+
+Antigravity currently reports `unsupported` because it has no authoritative catalog adapter.
 
 ### Caching and refresh
 
 The kernel owns catalog state. Snapshots live in `metadata.harness_model_catalogs.<harness>`, so completion reads a plain hash and never starts a harness process while the user types.
 
 - Session reconciliation refreshes the active harness's snapshot when it is older than 10 minutes, and retries a failed or stale snapshot after 1 minute.
-- Cadence is measured from the last fetch *attempt* (`last_attempt_at`), not from `fetched_at`, so a retained list is retried on the failure cadence instead of being re-probed on every 2-second pass because its confirmed timestamp is old.
+- Cadence is measured from the last fetch *attempt* (`last_attempt_at`), not from `fetched_at`, so a retained list is retried on the failure cadence instead of being re-probed on every 2-second pass because its confirmed timestamp is old. Snapshots cap the normalized catalog at 2,000 entries and reject oversized references, so provider output cannot grow state without bound.
 - Refresh is silent: an expected "not fetched yet" state produces no durable log entries.
 - `/models refresh` forces an immediate re-fetch and reports `availability`, the model count, the confirmed timestamp, and the last failed attempt when there is one. `/models` alone opens the picker over the cached snapshot without starting a harness process; `Ctrl-R` in the picker submits the same refresh command.
 - The picker never renders an empty box. An unavailable catalog, an unsupported harness, a snapshot Meringue has never fetched, and a filter that matched nothing are four different sentences, each naming what to do next (`Ctrl-R`, or an exact `provider/model` id with `/model`).
-- Setup exposes each exact model value through the shared editor. `←` / `→` cycles the cached Pi catalog when one exists; a missing catalog never blocks setup because the current exact reference remains editable and validatable.
+- Setup exposes each exact model value through the shared editor. `←` / `→` cycles the cached catalog for the selected role's harness when one exists; a missing catalog never blocks setup because the current exact reference remains editable and validatable.
 
 ### What completion shows
 

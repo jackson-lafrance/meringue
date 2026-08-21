@@ -3289,8 +3289,15 @@ module Meringue
       def update_agent_session_defaults(command_id, command_type, model: nil, model_role: nil, thinking_level: nil, thinking_role: nil, changed_field:)
         previous = configured_session_defaults
         # Whoever reports the defaults also says which harness they belong to. Re-deriving it from
-        # config here would disagree with an injected provider.
-        harness = previous.fetch("harness", nil) || default_session_harness
+        # config here would disagree with an injected provider. A role-specific update targets that
+        # role's harness when head and worker are split; a shared update retains the worker-side
+        # compatibility convention.
+        update_role = model_role || thinking_role
+        harness = if update_role
+                    default_session_harness(role: update_role)
+                  else
+                    previous.fetch("harness", nil) || default_session_harness
+                  end
         defaults = if @session_defaults_updater
                      keywords = { model: model, thinking_level: thinking_level }
                      keywords[:model_role] = model_role unless model_role.nil?
@@ -3326,7 +3333,13 @@ module Meringue
                 end
         label = changed_field == "model" ? "model" : "thinking level"
         audience = active_role ? "future #{active_role}s" : "all future heads and workers"
-        scope = active_role ? "future_pi_#{active_role}_sessions" : "future_pi_sessions"
+        scope_harness = active_role ? (default_session_harness(role: active_role) || harness) : harness
+        scope = if scope_harness.to_s.empty? || scope_harness.to_s == "mixed"
+                  active_role ? "future_#{active_role}_sessions" : "future_sessions"
+                else
+                  suffix = active_role ? "#{scope_harness}_#{active_role}_sessions" : "#{scope_harness}_sessions"
+                  "future_#{suffix}"
+                end
         clamp_note = clamped_default_thinking_note(defaults, changed_field, role: active_role)
         unverified_note = unverified_default_model_note(defaults, changed_field, role: model_role)
         message = "Set the default #{label} to #{value} for #{audience}. " \
@@ -3366,25 +3379,52 @@ module Meringue
         rejected_result(command_id, command_type, "Default agent session settings were not changed because config could not be read.", [e.message])
       end
 
-      # The model and reasoning defaults future sessions will use, read for whichever harness is
-      # currently selected rather than for one particular backend.
+      # The model and reasoning defaults future sessions will use, read for the active harness of
+      # each role. This prevents `/config` and the status line from showing worker settings for a
+      # head that is configured to use a different harness.
       def configured_session_defaults
-        harness = default_session_harness
-        defaults = if @session_defaults_provider
-                     @session_defaults_provider.call(harness)
-                   else
-                     config = Config.load(path: config_path)
-                     Meringue::Harness::Registry.new(config: config).session_defaults(provider: harness)
-                   end
-        Config.deep_stringify(defaults)
+        if @session_defaults_provider
+          head_harness = default_session_harness(role: "head")
+          worker_harness = default_session_harness(role: "worker")
+          if head_harness.to_s != worker_harness.to_s && !head_harness.to_s.empty? && !worker_harness.to_s.empty?
+            head = Config.deep_stringify(@session_defaults_provider.call(head_harness))
+            worker = Config.deep_stringify(@session_defaults_provider.call(worker_harness))
+            return merge_active_role_defaults(head, worker, head_harness: head_harness, worker_harness: worker_harness)
+          end
+
+          return Config.deep_stringify(@session_defaults_provider.call(worker_harness))
+        end
+
+        config = Config.load(path: config_path)
+        Config.deep_stringify(Meringue::Harness::Registry.new(config: config).session_defaults)
       rescue Config::ParseError, ArgumentError
         fallback_session_defaults
       end
 
+      def merge_active_role_defaults(head, worker, head_harness:, worker_harness:)
+        roles = {
+          "head" => head.dig("roles", "head") || head,
+          "worker" => worker.dig("roles", "worker") || worker
+        }
+        models = roles.values.map { |role| role["model"] }.uniq
+        thinking = roles.values.map { |role| role["thinking_level"] }.uniq
+        {
+          "harness" => "mixed",
+          "model" => models.length == 1 ? models.first : nil,
+          "thinking_level" => thinking.length == 1 ? thinking.first : nil,
+          "consistency" => models.length == 1 && thinking.length == 1 ? "consistent" : "mixed",
+          "roles" => roles,
+          "scope" => "future_sessions",
+          "role_harnesses" => { "head" => head_harness, "worker" => worker_harness }
+        }
+      end
+
       # The harness whose defaults `/model` and `/thinking` are talking about. Workers are what a
-      # user is normally changing, so the worker harness is the one reported.
-      def default_session_harness
-        Meringue::Harness::Registry.new(config: Config.load(path: config_path)).worker_provider
+      # user is normally changing, so the worker harness is the one reported unless a role is
+      # explicitly requested.
+      def default_session_harness(role: "worker")
+        registry = Meringue::Harness::Registry.new(config: Config.load(path: config_path))
+        role.to_s == "head" ? registry.head_provider : registry.worker_provider
       rescue StandardError
         nil
       end
@@ -4010,7 +4050,16 @@ module Meringue
 
         head_provider = role == "worker" ? initial.fetch("head") : provider
         worker_provider = role == "head" ? initial.fetch("worker") : provider
-        saved = Config.save_harness_defaults!(head_provider: head_provider, worker_provider: worker_provider, path: config_path)
+        session_default_changes = harness_switch_session_default_changes(
+          head_provider: head_provider,
+          worker_provider: worker_provider
+        )
+        saved = Config.save_harness_defaults!(
+          head_provider: head_provider,
+          worker_provider: worker_provider,
+          session_default_changes: session_default_changes,
+          path: config_path
+        )
         @config = config_with_runtime_overrides(saved)
         role_ids = role.empty? ? %w[agent.head_harness agent.worker_harness] : ["agent.#{role}_harness"]
         apply_runtime_config_update(@config, role_ids)
@@ -4030,6 +4079,9 @@ module Meringue
           metadata["active_worker_harness_label"] = Meringue::Harness::Registry.provider_label(runtime_worker_provider)
           metadata["active_harness"] = public_worker
           metadata["active_harness_label"] = metadata.fetch("active_worker_harness_label")
+          # Keep status and `/config` on the same effective role-aware defaults immediately after
+          # a harness switch; reconciliation should not be the first place this becomes visible.
+          metadata["agent_session_defaults"] = configured_session_defaults
           metadata["harness_selected_at"] = now
           changed = previous != provider
           metadata["harness_generation"] = metadata.fetch("harness_generation", 0).to_i + (changed ? 1 : 0)
@@ -4042,6 +4094,55 @@ module Meringue
         end
       rescue Config::ParseError, Config::ValidationError, Config::LockError => e
         synchronized_state { rejected_result(command_id, command_type, "Harness was not changed: #{e.message}", [e.message]) }
+      end
+
+      # A harness owns the valid thinking vocabulary, while model references remain deliberately
+      # catalog-independent (a cached catalog may be stale and exact provider references are a
+      # supported escape hatch). Re-save the effective future role values alongside a harness
+      # change so an old `off`/`ultra` value cannot survive in config and poison the next spawn.
+      # Existing agent records are never touched: their session settings are already effective.
+      def harness_switch_session_default_changes(head_provider:, worker_provider:)
+        current = Config.load(path: config_path)
+        data = current.to_h
+        data["harness"] = {} unless data["harness"].is_a?(Hash)
+        data["harness"]["head_provider"] = head_provider
+        data["harness"]["worker_provider"] = worker_provider
+        candidate = Config.new(data, path: current.path, loaded: current.loaded?, file_data: current.to_file_h)
+        registry = Meringue::Harness::Registry.new(config: candidate)
+        providers = { "head" => head_provider.to_s, "worker" => worker_provider.to_s }
+
+        values = providers.each_with_object({}) do |(role, provider), changes|
+          defaults = begin
+            registry.session_defaults(provider: provider)
+          rescue ArgumentError, Meringue::Harness::MissingProviderError
+            # Antigravity has no model/thinking argv contract. Preserve its neutral values rather
+            # than trying the same unsupported provider lookup a second time.
+            nil
+          end
+          role_defaults = defaults&.fetch("roles", {})&.fetch(role, {}) || {}
+          configured_model = candidate.setting("agent.#{role}_model", env: {})
+          configured_thinking = candidate.setting("agent.#{role}_thinking", env: {})
+          configured_model_source = Meringue::Config::Schema.fetch("agent.#{role}_model").source(candidate, env: {})
+          configured_thinking_source = Meringue::Config::Schema.fetch("agent.#{role}_thinking").source(candidate, env: {})
+          model = if configured_model_source == "file" && Meringue::Harness::ModelReference.valid?(configured_model)
+                    configured_model
+                  else
+                    role_defaults.fetch("model", configured_model)
+                  end
+          thinking = if configured_thinking_source == "file" && Meringue::Harness::Registry.thinking_levels_for(provider).include?(configured_thinking.to_s)
+                       configured_thinking
+                     else
+                       role_defaults.fetch("thinking_level", configured_thinking)
+                     end
+          model = Meringue::Harness::Registry::DEFAULT_MODEL unless Meringue::Harness::ModelReference.valid?(model)
+          thinking = Meringue::Harness::Registry::DEFAULT_THINKING_LEVEL unless Meringue::Harness::Registry.thinking_levels_for(provider).include?(thinking.to_s)
+          changes["agent.#{role}_model"] = model
+          changes["agent.#{role}_thinking"] = thinking
+          changes
+        end
+        values
+      rescue Config::ParseError
+        {}
       end
 
       def prompt_agent(command_id, command_type, payload)
