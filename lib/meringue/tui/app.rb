@@ -4138,6 +4138,7 @@ module Meringue
         @model_picker_role = %w[head worker].include?(role.to_s.downcase) ? role.to_s.downcase : "head"
         @model_picker_kind = "model"
         close_delivery_pr_picker
+        close_question_picker
         true
       end
 
@@ -4150,6 +4151,7 @@ module Meringue
         @model_picker_role = %w[head worker].include?(role.to_s.downcase) ? role.to_s.downcase : "head"
         @model_picker_kind = "thinking"
         close_delivery_pr_picker
+        close_question_picker
         true
       end
 
@@ -4163,6 +4165,7 @@ module Meringue
         @model_picker_role = "head"
         @model_picker_kind = "theme"
         close_delivery_pr_picker
+        close_question_picker
         true
       end
 
@@ -4481,10 +4484,9 @@ module Meringue
       end
 
       def apply_question_picker_entry(entry, unchanged)
-        unless entry
-          append_jump_response("No open questions.")
-          return unchanged
-        end
+        # The empty-list explanation is already rendered inside the popup. Keep
+        # Enter inert there rather than duplicating expected unavailability in chat.
+        return unchanged unless entry
 
         close_question_picker
         command = "/answer #{entry.fetch("id")} "

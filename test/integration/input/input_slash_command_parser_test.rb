@@ -432,6 +432,16 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_includes help_entry.fetch(1), "TUI local"
   end
 
+  def test_questions_is_discovered_as_a_picker_in_parser_and_kernel_help
+    parser_entry = Meringue::Input::SlashCommandParser::COMMAND_SPECS.find { |usage, _description| usage == "/questions" }
+    help_entry = Meringue::Kernel::Engine::HELP_COMMANDS.find { |usage, _description| usage == "/questions" }
+
+    refute_nil parser_entry
+    assert_includes parser_entry.fetch(1), "picker"
+    refute_nil help_entry
+    assert_includes help_entry.fetch(1), "picker"
+  end
+
   def test_answer_and_dismiss_suggestions_only_offer_open_questions
     records = Meringue::Input::SlashCommandParser.command_suggestion_records(
       "/answer ",
