@@ -167,6 +167,31 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     assert_includes render, "Choose Model"
   end
 
+  def test_setup_model_picker_follows_the_selected_worker_harness
+    @state["metadata"] = {
+      "active_harness" => "pi",
+      "harness_model_catalogs" => {
+        "pi" => Meringue::Harness::ModelCatalog.available(
+          harness: "pi",
+          models: [{ "provider" => "openai", "id" => "gpt-5.6-sol" }]
+        ).to_h,
+        "claude" => Meringue::Harness::ModelCatalog.available(
+          harness: "claude",
+          models: [{ "provider" => "anthropic", "id" => "claude-sonnet-9" }]
+        ).to_h
+      }
+    }
+    open_setup
+    @app.instance_variable_get(:@settings_draft).set("agent.worker_harness", "claude")
+    @app.send(:focus_setup_setting, "agent.model")
+    send_key(ENTER)
+
+    picker = snapshot.fetch("picker")
+    assert_equal "agent.model", picker.fetch("id")
+    assert_equal ["anthropic/claude-opus-5", "anthropic/claude-sonnet-9"], picker.fetch("options").map { |option| option.fetch("reference") }
+    refute_includes picker.fetch("options").map { |option| option.fetch("reference") }, "openai/gpt-5.6-sol"
+  end
+
   def test_setup_picker_filters_with_typing_backspace_and_escape
     @state["metadata"] = {
       "active_harness" => "pi",
