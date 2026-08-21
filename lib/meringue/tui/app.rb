@@ -183,6 +183,13 @@ module Meringue
         @settings_mode = "settings"
         @settings_setup_auto = false
         @settings_setup_outcome = nil
+        # Status-bar composition is a separate in-memory draft. Preview changes
+        # never touch the config until the single SaveConfiguration transaction
+        # succeeds, so Esc and failed saves are deterministic.
+        @status_bar_composer_active = false
+        @status_bar_composer_draft = nil
+        @status_bar_composer_saving = false
+        @status_bar_composer_drag = nil
         # First-run setup is a curated mode of the same transactional Settings
         # draft and full-screen pane. It is disabled for `meringue demo`, where no
         # kernel exists to save the draft or completion marker.
@@ -395,6 +402,7 @@ module Meringue
         # restores any theme preview. No setup marker is written on process exit.
         close_settings(discard: true) if @settings_active
         close_model_picker
+        close_status_bar_composer if @status_bar_composer_active
         persist_agent_workspace if @agent_workspace_active
         if @agent_workspace_active
           close_agent_workspace(async_interactive: false)
@@ -479,6 +487,10 @@ module Meringue
         # keys regardless of configured dashboard bindings.
         if @settings_active
           return handle_settings_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
+
+        if @status_bar_composer_active
+          return handle_status_bar_composer_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
         end
 
         if @question_picker_active
@@ -2640,6 +2652,7 @@ module Meringue
         return handle_local_config_command(text, state) if config_command?(text)
         return handle_local_reload_command if reload_command?(text)
         return handle_local_update_command if update_command?(text)
+        return handle_local_status_bar_command(state) if status_bar_command?(text)
         return handle_local_quit_command if quit_command?(text)
 
         false
@@ -2666,6 +2679,11 @@ module Meringue
         else
           open_settings(state)
         end
+        true
+      end
+
+      def handle_local_status_bar_command(state)
+        open_status_bar_composer(state)
         true
       end
 
@@ -2772,6 +2790,7 @@ module Meringue
           Pull-request picker: /prs opens every tracked PR that is still open, regardless of the AgentTree selection; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} opens the highlighted PR, and #{keys_for("cancel_navigation")} closes. #{keys_for("open_delivery_pr")} keeps its selection-aware behavior: it opens the selected issue's PR, or this picker when chat is unscoped.
           Settings pickers: bare /model or /models opens models, bare /thinking opens thinking levels, bare /theme or /themes opens themes, and bare /harness opens harnesses. They are bordered popovers; #{keys_for("cursor_left")}/#{keys_for("cursor_right")} switches role tabs where shown, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} moves, #{keys_for("submit")} applies, #{keys_for("refresh_model_catalog")} refreshes the model catalog, and #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker. /prs opens the pull-request popover.
           Question picker: /questions opens existing open questions with local 1-based display numbers; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} inserts /answer <question_id> into chat, and #{keys_for("cancel_navigation")} closes.
+          Status-bar composer: /status-bar opens the live bottom, agent-information, and focused-worker layout editor; Tab/Shift-Tab changes bars, Up/Down selects, Left/Right reorders, Home/End moves to an edge, R resets, Enter/Ctrl-S saves, Esc cancels, and mouse drag reorders items.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace or a selected head's saved harness session; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
           Head/session debugging: select a head and press #{keys_for("open_agent_workspace")}, or use /open-session <agent_id>, to open its saved harness session externally without turning it into a chat target.
           Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
@@ -3001,13 +3020,17 @@ module Meringue
         text.to_s.strip == "/update"
       end
 
+      def status_bar_command?(text)
+        ["/status-bar", "/statusbar", "/layout"].include?(text.to_s.strip.downcase)
+      end
+
       def quit_command?(text)
         text == "/quit"
       end
 
       def local_navigation_command_without_id?(input_buffer)
         text = input_buffer.to_s.strip.downcase
-        return true if ["/jump", "/prs", "/questions", "/theme", "/themes", "/setup", "/config", "/open-session"].include?(text)
+        return true if ["/jump", "/prs", "/questions", "/theme", "/themes", "/setup", "/config", "/status-bar", "/statusbar", "/layout", "/open-session"].include?(text)
         return true if models_picker_command?(text)
         return true if thinking_picker_command?(text)
         return true if theme_picker_command?(text)
@@ -3356,6 +3379,152 @@ module Meringue
         return nil unless @question_picker_active
 
         { "active" => true, "index" => @question_picker_index }
+      end
+
+      # --- status-bar composer ---------------------------------------------
+
+      def open_status_bar_composer(_state)
+        @status_bar_composer_draft = StatusBarComposer::Draft.new(config)
+        @status_bar_composer_active = true
+        @status_bar_composer_saving = false
+        @status_bar_composer_drag = nil
+        close_delivery_pr_picker
+        close_model_picker
+        @force_full_redraw = true
+        true
+      rescue StandardError => e
+        append_jump_response("Could not open Status bar composer: #{e.message}")
+        false
+      end
+
+      def close_status_bar_composer
+        @status_bar_composer_active = false
+        @status_bar_composer_draft = nil
+        @status_bar_composer_saving = false
+        @status_bar_composer_drag = nil
+        @force_full_redraw = true
+        true
+      end
+
+      def status_bar_composer_snapshot
+        return nil unless @status_bar_composer_active && @status_bar_composer_draft
+
+        @status_bar_composer_draft.saving_snapshot(saving: @status_bar_composer_saving)
+      end
+
+      def handle_status_bar_composer_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
+        return unchanged unless @status_bar_composer_draft
+
+        if mouse_event?(key)
+          return unchanged if @status_bar_composer_saving
+
+          return handle_status_bar_composer_mouse(key, unchanged, on_submit, state)
+        end
+        return unchanged if @status_bar_composer_saving
+
+        if hard_escape_key?(key)
+          close_status_bar_composer
+        elsif hard_save_key?(key) || ENTER_KEYS.include?(key)
+          save_status_bar_composer(on_submit, state)
+        elsif TAB_KEYS.include?(key) || FOCUS_FORWARD_KEYS.include?(key)
+          @status_bar_composer_draft.cycle_bar(1)
+        elsif SHIFT_TAB_KEYS.include?(key) || FOCUS_BACK_KEYS.include?(key)
+          @status_bar_composer_draft.cycle_bar(-1)
+        elsif UP_KEYS.include?(key)
+          @status_bar_composer_draft.select_item(@status_bar_composer_draft.item_index - 1)
+        elsif DOWN_KEYS.include?(key)
+          @status_bar_composer_draft.select_item(@status_bar_composer_draft.item_index + 1)
+        elsif LEFT_KEYS.include?(key)
+          @status_bar_composer_draft.move_selected(-1)
+        elsif RIGHT_KEYS.include?(key) || key == " "
+          @status_bar_composer_draft.move_selected(1)
+        elsif HOME_KEYS.include?(key)
+          @status_bar_composer_draft.move_item(@status_bar_composer_draft.item_index, 0)
+        elsif END_KEYS.include?(key)
+          @status_bar_composer_draft.move_item(@status_bar_composer_draft.item_index, @status_bar_composer_draft.items.length - 1)
+        elsif key.to_s.downcase == "r"
+          @status_bar_composer_draft.reset!
+        end
+        unchanged
+      rescue StandardError => e
+        @status_bar_composer_draft.apply_save_failure("Status bar input failed: #{e.message}")
+        unchanged
+      end
+
+      def handle_status_bar_composer_mouse(key, unchanged, on_submit, state)
+        if mouse_wheel_up?(key) || mouse_wheel_down?(key)
+          hit = layout.status_bar_composer_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+          if hit.is_a?(Array) && hit.first == :item
+            @status_bar_composer_draft.select_item(@status_bar_composer_draft.item_index + (mouse_wheel_up?(key) ? -1 : 1))
+          elsif hit.is_a?(Array) && hit.first == :bar
+            @status_bar_composer_draft.select_bar(@status_bar_composer_draft.bar_index + (mouse_wheel_up?(key) ? -1 : 1))
+          end
+          return unchanged
+        end
+
+        if mouse_button_press?(key)
+          hit = layout.status_bar_composer_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+          case hit
+          when :save then save_status_bar_composer(on_submit, state)
+          when :cancel then close_status_bar_composer
+          when :reset then @status_bar_composer_draft.reset!
+          when Array
+            kind, index = hit
+            if kind == :bar
+              @status_bar_composer_draft.select_bar(index)
+              @status_bar_composer_drag = nil
+            elsif kind == :item
+              @status_bar_composer_draft.select_item(index)
+              @status_bar_composer_drag = { bar: @status_bar_composer_draft.bar, index: index }
+            end
+          end
+          return unchanged
+        end
+
+        if mouse_drag?(key) && @status_bar_composer_drag
+          hit = layout.status_bar_composer_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+          if hit.is_a?(Array) && hit.first == :item
+            @status_bar_composer_draft.move_item(@status_bar_composer_drag.fetch(:index), hit.fetch(1))
+            @status_bar_composer_drag[:index] = hit.fetch(1)
+          end
+          return unchanged
+        end
+
+        if mouse_button_release?(key)
+          @status_bar_composer_drag = nil
+          return unchanged
+        end
+
+        unchanged
+      end
+
+      def save_status_bar_composer(on_submit, state)
+        return false if @status_bar_composer_saving
+        unless @status_bar_composer_draft.validate
+          return false
+        end
+
+        changes = @status_bar_composer_draft.changes
+        if changes.empty?
+          close_status_bar_composer
+          return true
+        end
+
+        unless on_submit
+          @status_bar_composer_draft.apply_save_failure("Configuration save is unavailable in this TUI session.")
+          return false
+        end
+
+        payload = {
+          "base_fingerprint" => @status_bar_composer_draft.baseline_fingerprint,
+          "changes" => changes
+        }
+        encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
+        @status_bar_composer_saving = true
+        @status_bar_composer_draft.clear_save_failure
+        submit_prompt("/config save #{encoded}", on_submit, state)
+        true
       end
 
       # --- full-screen settings --------------------------------------------
@@ -5134,7 +5303,10 @@ module Meringue
             end
           rescue StandardError => e
             restore_pending_theme_picker if slash_command && text.start_with?("/theme ")
-            if slash_command && text.start_with?("/config save ") && @settings_active && @settings_draft
+            if slash_command && text.start_with?("/config save ") && @status_bar_composer_active && @status_bar_composer_draft
+              @status_bar_composer_saving = false
+              @status_bar_composer_draft.apply_save_failure("Configuration save failed: #{e.class}: #{e.message}")
+            elsif slash_command && text.start_with?("/config save ") && @settings_active && @settings_draft
               @settings_saving = false
               @settings_draft.apply_save_failure("Configuration save failed: #{e.class}: #{e.message}")
             elsif assistant_message_id
@@ -5279,12 +5451,21 @@ module Meringue
         if result.fetch("status", nil) == "accepted"
           outcome = result.dig("result", "onboarding_outcome") || @settings_setup_outcome
           setup_was_active = @settings_active && setup_mode?
+          composer_was_active = @status_bar_composer_active
           @config = config.reload_file
           @keybindings = Keybindings.from_config(@config.section("tui", "keybindings"))
           close_settings(discard: outcome == "skipped") if @settings_active
+          close_status_bar_composer if composer_was_active
           if setup_was_active && outcome
             append_jump_response(outcome == "skipped" ? Onboarding.skip_card : Onboarding.completion_card(@config))
           end
+        elsif @status_bar_composer_active && @status_bar_composer_draft
+          @status_bar_composer_saving = false
+          details = result.fetch("result", {}) || {}
+          @status_bar_composer_draft.apply_save_failure(
+            result.fetch("message", "Configuration was not saved."),
+            details.fetch("field_errors", {})
+          )
         elsif @settings_active && @settings_draft
           @settings_saving = false
           details = result.fetch("result", {}) || {}
@@ -5294,7 +5475,10 @@ module Meringue
           )
         end
       rescue StandardError => e
-        if @settings_active && @settings_draft
+        if @status_bar_composer_active && @status_bar_composer_draft
+          @status_bar_composer_saving = false
+          @status_bar_composer_draft.apply_save_failure("Configuration result could not be applied: #{e.message}")
+        elsif @settings_active && @settings_draft
           @settings_saving = false
           @settings_draft.apply_save_failure("Configuration result could not be applied: #{e.message}")
         end
@@ -5486,6 +5670,8 @@ module Meringue
         composed_state = state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
           Settings::STATE_KEY => settings_snapshot,
+          StatusBarComposer::STATE_KEY => status_bar_composer_snapshot,
+          "_status_bar_layout" => StatusBarLayout.from_config(config),
           "_capabilities" => { "github_support" => github_support_enabled?(state) },
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
           LogScope::STATE_KEY => LogScope.snapshot(state, @log_scope_id),
