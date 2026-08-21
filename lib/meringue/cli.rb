@@ -30,6 +30,8 @@ module Meringue
         0
       when "reset-state"
         reset_state
+      when "workers", "worker"
+        run_workers
       when "head-loop"
         run_head_loop
       when "fake-head-loop"
@@ -44,6 +46,89 @@ module Meringue
     private
 
     attr_reader :argv, :input, :out, :err
+
+    def run_workers
+      action = argv.shift.to_s.downcase
+      case action
+      when "export"
+        run_worker_export
+      when "import"
+        run_worker_import
+      else
+        err.puts "Usage: meringue workers export <bundle_path> [worker_id...]"
+        err.puts "       meringue workers import <bundle_path> --project <path> [--state PATH] [--config PATH]"
+        1
+      end
+    rescue ArgumentError => e
+      err.puts e.message
+      1
+    end
+
+    def run_worker_export
+      options = { state_path: State::Store.default_path }
+      parser = OptionParser.new do |option_parser|
+        option_parser.on("--state PATH", "Read Meringue state from PATH.") { |path| options[:state_path] = path }
+      end
+      parser.parse!(argv)
+      bundle_path = argv.shift
+      raise ArgumentError, "Usage: meringue workers export <bundle_path> [worker_id...]" if bundle_path.to_s.strip.empty?
+
+      bundle = Workers::Bundle.export(state_store(path: options.fetch(:state_path)).load, worker_ids: argv)
+      destination = Workers::Bundle.write(bundle_path, bundle)
+      out.puts "Exported #{bundle.fetch("workers").length} worker(s) to #{destination}."
+      out.puts "Harness sessions were not included; import starts fresh sessions on the destination computer."
+      0
+    rescue OptionParser::ParseError => e
+      err.puts e.message
+      1
+    end
+
+    def run_worker_import
+      options = {
+        state_path: State::Store.default_path,
+        config_path: Config::DEFAULT_PATH,
+        harness: nil,
+        project_path: nil
+      }
+      parser = OptionParser.new do |option_parser|
+        option_parser.on("--state PATH", "Read Meringue state from PATH.") { |path| options[:state_path] = path }
+        option_parser.on("--config PATH", "Read Meringue harness config TOML from PATH.") { |path| options[:config_path] = path }
+        option_parser.on("--harness NAME", "Use this worker harness provider.") { |name| options[:harness] = name }
+        option_parser.on("--project PATH", "Destination project directory (required).") { |path| options[:project_path] = path }
+      end
+      parser.parse!(argv)
+      bundle_path = argv.shift
+      raise ArgumentError, "Usage: meringue workers import <bundle_path> --project <path>" if bundle_path.to_s.strip.empty? || argv.any?
+      raise ArgumentError, "--project PATH is required when importing workers." if options[:project_path].to_s.strip.empty?
+
+      runtime_options = {
+        state_path: options.fetch(:state_path),
+        config_path: options.fetch(:config_path),
+        harness: options[:harness],
+        head_harness: nil,
+        worker_harness: options[:harness]
+      }
+      config = runtime_config(runtime_options)
+      return 1 unless config
+
+      registry = Harness::Registry.new(config: config)
+      store = state_store(path: options.fetch(:state_path))
+      engine = tui_engine(store, registry, config: config, config_path: options.fetch(:config_path))
+      bundle = Workers::Bundle.read(bundle_path)
+      result = engine.apply(
+        "type" => "ImportWorkers",
+        "payload" => {
+          "bundle" => bundle,
+          "project_path" => options.fetch(:project_path)
+        }
+      )
+      engine.wait_for_worker_provisioning if result.fetch("status", nil) == "accepted"
+      out.puts result.fetch("message", "Worker import finished.")
+      result.fetch("status", nil) == "accepted" ? 0 : 1
+    rescue OptionParser::ParseError => e
+      err.puts e.message
+      1
+    end
 
     def run_tui(default_state_path:, enable_agents:)
       options = parse_runtime_options(default_state_path: default_state_path)
@@ -256,6 +341,8 @@ module Meringue
           meringue demo                          # display the fake demo state fixture without agent prompting
           meringue demo-state                    # print the fake demo state fixture
           meringue reset-state                   # reset ~/.meringue/state.json to an empty Meringue state
+          meringue workers export <PATH> [IDS]   # export current workers without machine-specific sessions or paths
+          meringue workers import <PATH> --project <PATH> # import workers as fresh destination sessions
           meringue head-loop [--harness NAME]    # run the manual configured head -> kernel -> worker loop
           meringue fake-head-loop                # run the manual fake head -> kernel -> worker loop
           meringue --version                     # print the app version

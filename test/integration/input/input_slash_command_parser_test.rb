@@ -39,6 +39,8 @@ class InputSlashCommandParserTest < Minitest::Test
       "/kill P1-I1" => ["Kill", { "target_id" => "P1-I1" }],
       "/worker pause P1-I1-W1" => ["PauseWorker", { "agent_id" => "P1-I1-W1" }],
       "/worker resume P1-I1-W1" => ["ResumeWorker", { "agent_id" => "P1-I1-W1" }],
+      "/worker export /tmp/workers.json P1-I1-W1" => ["ExportWorkers", { "path" => "/tmp/workers.json", "worker_ids" => ["P1-I1-W1"] }],
+      "/worker import /tmp/workers.json --project /tmp/project" => ["ImportWorkers", { "path" => "/tmp/workers.json", "project_path" => "/tmp/project" }],
       "/dismiss Q1" => ["DismissQuestion", { "question_id" => "Q1" }],
       "/setup complete" => ["CompleteOnboarding", { "outcome" => "completed" }],
       "/setup skip" => ["CompleteOnboarding", { "outcome" => "skipped" }]
@@ -170,6 +172,11 @@ class InputSlashCommandParserTest < Minitest::Test
     retry_command = parse_slash("/retry H7")
     assert_equal "RetryHead", retry_command.fetch("type")
     assert_equal({ "head_id" => "H7" }, retry_command.fetch("payload"))
+
+    export_command = parse_slash("/worker export /tmp/workers.json P1-I1-W1")
+    assert_equal "ExportWorkers", export_command.fetch("type")
+    import_command = parse_slash("/worker import /tmp/workers.json --project /tmp/project")
+    assert_equal "ImportWorkers", import_command.fetch("type")
   end
 
   def test_answer_command_produces_answer_question_with_quoted_answer

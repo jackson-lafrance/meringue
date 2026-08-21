@@ -93,6 +93,7 @@ docs/onboarding.md                 # first-run setup flow, keys, and completion 
 docs/kernel-command-application.md # exactly-once command application invariants
 docs/goal_loops.md                 # goal loops: metric, judge, budgets, and interruption
 docs/worker-pause-resume.md         # user-directed worker pause and resume semantics
+docs/worker-transfer.md             # portable worker export/import and fresh-session retry
 docs/scalability.md                # hermetic process-level responsiveness sweep
 docs/testing.md                    # test-suite guide and coverage boundaries
 fixtures/config.example.toml       # example local config
@@ -129,6 +130,15 @@ bundle exec meringue tui --state /tmp/meringue-state.json
 bundle exec meringue tui --config ./fixtures/config.example.toml
 ```
 
+Export and import workers without opening the TUI:
+
+```bash
+bundle exec meringue workers export ./workers.json
+bundle exec meringue workers import ./workers.json --project /path/to/the/checkout
+```
+
+See [`docs/worker-transfer.md`](docs/worker-transfer.md) for the portable format and its session limitations.
+
 From the checkout, the checked-in `bin/meringue` entrypoint accepts the same commands when you need to bypass Bundler's executable lookup.
 
 Useful slash commands inside the TUI include:
@@ -141,6 +151,8 @@ Useful slash commands inside the TUI include:
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
 - `/worker pause <agent_id>` — stop the current worker turn without killing its resumable session.
 - `/worker resume <agent_id>` — continue a paused worker from the same session and workspace.
+- `/worker export <bundle_path> [agent_id...]` — export current worker context for retry on another computer; paths, session handles, and credentials are not copied.
+- `/worker import <bundle_path> --project <path>` — recreate the project/issue context and start fresh destination sessions; source harness sessions cannot be resumed directly.
 - `/prompt <agent_id> "<message>"` — follow up with an existing worker, or take over a still-routing head; use `/retry <head_id>` for a stopped head.
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
 - `/prs` — with **Settings → Experiments → GitHub support** enabled, open the picker for every tracked pull request that is still open. Use `↑`/`↓` to move, `Enter` to open, and `Esc` to close.
