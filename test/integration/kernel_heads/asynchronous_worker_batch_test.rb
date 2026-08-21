@@ -102,4 +102,59 @@ class KernelHeadsAsynchronousWorkerBatchTest < KernelHeadsTestCase
     manager&.release
     async_engine&.wait_for_worker_provisioning(timeout: 5)
   end
+
+  def test_head_issue_and_async_worker_show_only_canonical_visible_lifecycle_messages
+    manager = BlockingWorkspaceManager.new
+    async_engine = Meringue::Kernel::Engine.new(
+      store: Meringue::State::Store.new(path: @state_path),
+      harness_client: @harness_client,
+      head_runner: @head_runner,
+      workspace_manager: manager,
+      cwd: @project_path,
+      forge_client: KernelHeadsSupport::StubForgeClient.new,
+      config_path: @config_path,
+      async_worker_provisioning: true
+    )
+    project_id = add_project!(target_engine: async_engine)
+    head_id = spawn_head!("Create and start the logging regression task", target_engine: async_engine)
+
+    result = apply_head_result(
+      head_id,
+      head_result(commands: [
+        create_issue_command(project_id: project_id, title: "Logging regression", command_id: "issue"),
+        spawn_worker_command(
+          issue_id: nil,
+          title: "Logging regression",
+          command_id: "worker",
+          extra: { "issue_from_command" => "issue" }
+        )
+      ]),
+      cleanup_head: false,
+      target_engine: async_engine
+    )
+
+    assert_equal [["CreateIssue", "accepted"], ["SpawnWorker", "accepted"]], command_statuses(result)
+    assert manager.wait_for_allocations(1), "the worker reservation should reach provisioning"
+
+    journal = find_agent_record(head_id, current_state: async_engine.list_all).dig(
+      "harness_metadata", "head_result_command_journal"
+    )
+    worker_entry = journal.find { |entry| entry.fetch("command_id") == "worker" }
+    assert_equal "accepted", worker_entry.fetch("status")
+    assert_match(/\AReserved worker P1-I1-W1;/, worker_entry.fetch("message"))
+    assert_empty worker_entry.fetch("log_entry_ids"), "the reservation stays journaled without becoming a visible log"
+
+    manager.release
+    assert async_engine.wait_for_worker_provisioning(timeout: 5)
+
+    messages = async_engine.list_all.fetch("logs").map { |entry| entry.fetch("message") }
+    refute messages.any? { |message| message.start_with?("Command output: SpawnWorker: accepted — Reserved worker") }
+    assert_equal [
+      "Created issue P1-I1: Logging regression",
+      "Spawned worker P1-I1-W1 for P1-I1."
+    ], messages.select { |message| message.start_with?("Created issue P1-I1:", "Spawned worker P1-I1-W1") }
+  ensure
+    manager&.release
+    async_engine&.wait_for_worker_provisioning(timeout: 5)
+  end
 end

@@ -2735,7 +2735,7 @@ module Meringue
 
       def kernel_command_output_lines(command_results)
         Array(command_results).flat_map do |result|
-          next [] if command_result_already_logged?(result)
+          next [] if command_result_output_suppressed?(result)
 
           status = result.fetch("status", "unknown")
           command_type = result.fetch("command_type", "command")
@@ -2750,14 +2750,30 @@ module Meringue
         end.reject { |line| line.to_s.strip.empty? }
       end
 
-      def command_result_already_logged?(result)
-        Array(result.fetch("log_entry_ids", [])).any?
+      def command_result_output_suppressed?(result)
+        return true if Array(result.fetch("log_entry_ids", [])).any?
+
+        # Async SpawnWorker returns after the durable reservation, before workspace and harness
+        # provisioning can emit the canonical "Spawned worker ..." lifecycle event. The accepted
+        # reservation message remains in the command journal, but is deliberately not user-visible;
+        # otherwise a head batch shows an intermediate "Reserved worker ..." line followed by the
+        # useful spawn line. Rejections and failures never match this predicate.
+        return false unless result.is_a?(Hash)
+        return false unless result.fetch("command_type", nil).to_s == "SpawnWorker"
+        return false unless result.fetch("status", nil).to_s == "accepted"
+
+        worker = result.fetch("result", nil)
+        worker.is_a?(Hash) &&
+          worker.fetch("type", nil).to_s == "worker" &&
+          worker_provisioning_in_progress?(worker) &&
+          !agent_has_session_reference?(worker)
       end
 
       # One command result renders as one visible log entry: its summary line and any
       # continuation detail lines are joined with newlines so they share a single header
       # (and one attribution) instead of producing a separate log row per line. Commands
-      # that already logged their own outcome are skipped, matching `kernel_command_output_lines`.
+      # with their own outcome, or an intentionally silent async reservation, are skipped,
+      # matching `kernel_command_output_lines`.
       def command_output_bodies(command_results)
         Array(command_results).filter_map do |result|
           next nil unless result.is_a?(Hash)
