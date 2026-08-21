@@ -56,6 +56,9 @@ module Meringue
         # controls. Returning hit regions alongside the segments keeps drawing
         # and mouse handling on exactly the same geometry.
         def top_status_layout(state, width:)
+          layout_data = StatusBarLayout.custom_for_state(state, "agent_information")
+          return customized_top_status_layout(state, width: width, layout: StatusBarLayout.new(layout_data)) if layout_data
+
           workspace = workspace_state(state)
           available = [width.to_i, 0].max
           command_records = %w[workspace_switch_view workspace_open_editor workspace_close].filter_map do |action|
@@ -223,6 +226,38 @@ module Meringue
         end
 
         private
+
+        def customized_top_status_layout(state, width:, layout:)
+          default_state = state.dup
+          default_state.delete(StatusBarLayout::STATE_KEY)
+          base = top_status_layout(default_state, width: width)
+          first_control = base.fetch(:controls).first&.fetch(:start, nil)
+          identity = []
+          controls = []
+          cursor = 0
+          base.fetch(:segments).each do |segment|
+            text = segment.fetch(0, "").to_s
+            target = first_control && cursor >= first_control ? controls : identity
+            target << segment
+            cursor += text.length
+          end
+          segments = layout.compose("agent_information", { "identity" => identity, "controls" => controls }, separator: "  ")
+          plain = segments.map { |segment| segment.fetch(0, "").to_s }.join
+          control_texts = base.fetch(:controls).map do |record|
+            base_plain = base.fetch(:segments).map { |segment| segment.fetch(0, "").to_s }.join
+            base_plain[record.fetch(:start), record.fetch(:finish) - record.fetch(:start)].to_s
+          end
+          found_from = 0
+          mapped_controls = base.fetch(:controls).each_with_index.filter_map do |record, index|
+            text = control_texts.fetch(index, "")
+            start = plain.index(text, found_from)
+            next unless start
+
+            found_from = start + text.length
+            { action: record.fetch(:action), start: start, finish: start + text.length }
+          end
+          { segments: segments, controls: mapped_controls }
+        end
 
         def leader_command_key(workspace, action)
           command = Array(workspace.fetch("leader_commands", [])).find do |candidate|
