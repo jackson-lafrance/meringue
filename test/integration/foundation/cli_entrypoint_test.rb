@@ -32,6 +32,59 @@ class FoundationCliEntrypointTest < Minitest::Test
     end
   end
 
+  def test_cli_reloads_through_the_lifecycle_manager_after_the_tui_returns
+    FoundationSupport.with_tmpdir do |dir|
+      lifecycle = Object.new
+      lifecycle.define_singleton_method(:reload) do
+        @reload_called = true
+        { "status" => "reloaded" }
+      end
+      lifecycle.define_singleton_method(:reload_called?) { @reload_called == true }
+
+      tui = Object.new
+      tui.define_singleton_method(:run) { |**_options| :reload }
+
+      with_replaced_new(Meringue::Lifecycle::Manager, lifecycle) do
+        with_replaced_new(Meringue::TUI::App, tui) do
+          status, stdout, stderr = FoundationSupport.run_cli(
+            "tui",
+            "--state", File.join(dir, "state.json"),
+            "--config", File.join(dir, "config.toml")
+          )
+
+          assert_equal 0, status
+          assert_empty stdout
+          assert_empty stderr
+        end
+      end
+
+      assert lifecycle.reload_called?, "the CLI should delegate the TUI reload sentinel"
+    end
+  end
+
+  def test_cli_reports_a_failed_reload
+    FoundationSupport.with_tmpdir do |dir|
+      lifecycle = Object.new
+      lifecycle.define_singleton_method(:reload) { { "status" => "failed", "message" => "reload unavailable" } }
+      tui = Object.new
+      tui.define_singleton_method(:run) { |**_options| :reload }
+
+      with_replaced_new(Meringue::Lifecycle::Manager, lifecycle) do
+        with_replaced_new(Meringue::TUI::App, tui) do
+          status, stdout, stderr = FoundationSupport.run_cli(
+            "tui",
+            "--state", File.join(dir, "state.json"),
+            "--config", File.join(dir, "config.toml")
+          )
+
+          assert_equal 1, status
+          assert_empty stdout
+          assert_includes stderr, "reload unavailable"
+        end
+      end
+    end
+  end
+
   def test_unknown_command_reports_on_stderr_and_fails
     status, stdout, stderr = FoundationSupport.run_cli("definitely-not-a-command")
 
@@ -79,5 +132,16 @@ class FoundationCliEntrypointTest < Minitest::Test
       assert_equal 0, status
       assert_equal before, Dir.glob(File.join(dir, "**", "*"))
     end
+  end
+
+  private
+
+  def with_replaced_new(klass, replacement)
+    singleton = class << klass; self; end
+    original = klass.method(:new)
+    singleton.define_method(:new) { |*_args, **_keywords| replacement }
+    yield
+  ensure
+    singleton.define_method(:new, original) if singleton && original
   end
 end

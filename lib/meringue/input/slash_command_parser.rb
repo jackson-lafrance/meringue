@@ -14,7 +14,7 @@ module Meringue
         ["/quit", "Quit the interactive TUI."],
         ["/reload", "Restart Meringue with the current installed source and configuration."],
         ["/update", "Update the installed Meringue source, install missing dependencies, and reload."],
-        ["/theme <name>", "With no arguments, open the theme picker; otherwise set and persist the TUI theme."]
+        ["/theme <name>", "With no arguments, open the theme picker; otherwise set and persist the TUI theme."],
         ["/project add <path> [name]", "Register a project directory."],
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],

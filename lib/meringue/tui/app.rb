@@ -2697,19 +2697,20 @@ module Meringue
         end
 
         append_jump_response("Updating Meringue…")
-        thread = Thread.new do
-          begin
-            result = lifecycle.update
-            if lifecycle_update_succeeded?(result)
-              request_reload
-            else
-              append_jump_response(result_message(result, "Meringue update failed."))
+        @lifecycle_mutex.synchronize do
+          @lifecycle_update_thread = Thread.new do
+            begin
+              result = lifecycle.update
+              if lifecycle_update_succeeded?(result)
+                request_reload
+              else
+                append_jump_response(result_message(result, "Meringue update failed."))
+              end
+            rescue StandardError => e
+              append_jump_response("Meringue update failed: #{e.message}")
             end
-          rescue StandardError => e
-            append_jump_response("Meringue update failed: #{e.message}")
           end
         end
-        @lifecycle_mutex.synchronize { @lifecycle_update_thread = thread }
         true
       end
 

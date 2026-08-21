@@ -44,6 +44,18 @@ class FoundationLifecycleTest < Minitest::Test
     end
   end
 
+  def test_command_runner_bounds_captured_output_while_draining_the_child
+    runner = Meringue::Lifecycle::CommandRunner.new(timeout: 5, output_limit: 32)
+    result = runner.call(
+      [RbConfig.ruby, "-e", "STDOUT.write('x' * 100_000); STDERR.write('y' * 100_000)"],
+      chdir: Dir.pwd
+    )
+
+    assert result.fetch("status").success?
+    assert_equal 32, result.fetch("stdout").bytesize
+    assert_equal 32, result.fetch("stderr").bytesize
+  end
+
   def test_update_refuses_a_dirty_checkout_before_pulling
     with_checkout do |root|
       runner = RecordingRunner.new([{ "stdout" => " M lib/meringue.rb\n", "status" => 0 }])
@@ -130,6 +142,7 @@ class FoundationLifecycleTest < Minitest::Test
       calls = []
       manager = Meringue::Lifecycle::Manager.new(
         root: root,
+        working_directory: root,
         command: [RbConfig.ruby, "/tmp/bin/meringue", "tui", "--state", "/tmp/state.json"],
         execer: lambda do |command, chdir:|
           calls << { "command" => command, "chdir" => chdir }
@@ -141,6 +154,26 @@ class FoundationLifecycleTest < Minitest::Test
       assert_equal "failed", result.fetch("status"), "a test execer returns instead of replacing the process"
       assert_equal [RbConfig.ruby, "/tmp/bin/meringue", "tui", "--state", "/tmp/state.json"], calls.first.fetch("command")
       assert_equal root, calls.first.fetch("chdir")
+    end
+  end
+
+  def test_reload_preserves_the_original_working_directory
+    Dir.mktmpdir("meringue-lifecycle-test") do |root|
+      Dir.mktmpdir("meringue-launch-test") do |working_directory|
+        calls = []
+        manager = Meringue::Lifecycle::Manager.new(
+          root: root,
+          working_directory: working_directory,
+          command: [RbConfig.ruby, "/tmp/bin/meringue"],
+          execer: lambda do |command, chdir:|
+            calls << { "command" => command, "chdir" => chdir }
+          end
+        )
+
+        manager.reload
+
+        assert_equal working_directory, calls.first.fetch("chdir")
+      end
     end
   end
 
@@ -176,6 +209,48 @@ class FoundationLifecycleTest < Minitest::Test
     lifecycle.updates.pop
     app.instance_variable_get(:@lifecycle_update_thread)&.join
     assert app.send(:reload_requested?)
+  end
+
+  def test_update_failure_is_reported_without_requesting_a_reload
+    lifecycle = RecordingLifecycle.new("status" => "failed", "message" => "The checkout is dirty.")
+    app = Meringue::TUI::App.new(
+      terminal: TUISupport::FakeTerminal.new,
+      out: StringIO.new,
+      lifecycle: lifecycle
+    )
+    state = Meringue::State::Models.empty_state
+
+    app.send(:handle_key, "\r", "/update", "/update".length, -1, nil, state)
+    lifecycle.updates.pop
+    app.instance_variable_get(:@lifecycle_update_thread)&.join
+
+    refute app.send(:reload_requested?)
+    assert_includes app.send(:chat_snapshot, "").fetch("messages").last.fetch("text"), "The checkout is dirty."
+  end
+
+  def test_second_update_is_rejected_while_the_first_is_running
+    started = Queue.new
+    release = Queue.new
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:update) do
+      started << true
+      release.pop
+      { "status" => "updated" }
+    end
+    app = Meringue::TUI::App.new(
+      terminal: TUISupport::FakeTerminal.new,
+      out: StringIO.new,
+      lifecycle: lifecycle
+    )
+    state = Meringue::State::Models.empty_state
+
+    app.send(:handle_key, "\r", "/update", "/update".length, -1, nil, state)
+    started.pop
+    app.send(:handle_key, "\r", "/update", "/update".length, -1, nil, state)
+
+    assert_includes app.send(:chat_snapshot, "").fetch("messages").last.fetch("text"), "already running"
+    release << true
+    app.instance_variable_get(:@lifecycle_update_thread)&.join
   end
 
   private

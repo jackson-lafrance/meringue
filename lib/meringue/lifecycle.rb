@@ -3,6 +3,8 @@
 require "open3"
 require "rbconfig"
 
+require_relative "subprocess_environment"
+
 module Meringue
   # Process lifecycle operations for the interactive dashboard. Updating the
   # source checkout is intentionally outside the kernel: it changes the
@@ -10,26 +12,38 @@ module Meringue
   module Lifecycle
     class CommandRunner
       DEFAULT_TIMEOUT_SECONDS = 120.0
+      OUTPUT_LIMIT_BYTES = 64 * 1024
+      READ_CHUNK_BYTES = 16 * 1024
       TERMINATION_GRACE_SECONDS = 0.1
 
-      def initialize(timeout: DEFAULT_TIMEOUT_SECONDS)
+      def initialize(timeout: DEFAULT_TIMEOUT_SECONDS, output_limit: OUTPUT_LIMIT_BYTES)
         @timeout = Float(timeout)
+        @output_limit = Integer(output_limit)
+        raise ArgumentError, "Lifecycle command timeout must be positive and finite." unless @timeout.positive? && @timeout.finite?
+        raise ArgumentError, "Lifecycle command output limit must be positive." unless @output_limit.positive?
       end
 
       def call(command, chdir:)
         stdin = stdout = stderr = wait_thread = nil
         stdout_reader = stderr_reader = nil
-        stdin, stdout, stderr, wait_thread = Open3.popen3(*Array(command), chdir: chdir, pgroup: true)
+        stdin, stdout, stderr, wait_thread = Open3.popen3(
+          SubprocessEnvironment.clean,
+          *Array(command),
+          chdir: chdir,
+          pgroup: true
+        )
         stdin.close
-        stdout_reader = Thread.new { stdout.read }
-        stderr_reader = Thread.new { stderr.read }
+        stdout_reader = Thread.new { read_output(stdout) }
+        stderr_reader = Thread.new { read_output(stderr) }
 
+        timed_out = false
         unless wait_thread.join(@timeout)
+          timed_out = true
           terminate(wait_thread)
-          return result(stdout_reader, stderr_reader, nil, timed_out: true)
         end
 
-        result(stdout_reader, stderr_reader, wait_thread.value)
+        drain_readers([stdout_reader, stderr_reader], [stdout, stderr])
+        result(stdout_reader, stderr_reader, wait_thread.value, timed_out: timed_out)
       rescue Errno::ENOENT => e
         {
           "stdout" => "",
@@ -60,6 +74,31 @@ module Meringue
         }
       end
 
+      def read_output(stream)
+        captured = +""
+        loop do
+          chunk = stream.readpartial(READ_CHUNK_BYTES)
+          remaining = @output_limit - captured.bytesize
+          captured << chunk.byteslice(0, remaining) if remaining.positive?
+        end
+      rescue EOFError, IOError
+        captured
+      end
+
+      def drain_readers(readers, streams)
+        readers.each { |reader| reader.join(TERMINATION_GRACE_SECONDS) }
+        return unless readers.any?(&:alive?)
+
+        streams.each { |stream| stream.close unless stream.closed? }
+        readers.each { |reader| reader.join(TERMINATION_GRACE_SECONDS) }
+        readers.each do |reader|
+          next unless reader.alive?
+
+          reader.kill
+          reader.join
+        end
+      end
+
       def terminate(wait_thread)
         signal("TERM", wait_thread.pid)
         return if wait_thread.join(TERMINATION_GRACE_SECONDS)
@@ -85,12 +124,16 @@ module Meringue
       attr_reader :root, :command
 
       def initialize(root: Meringue.root_path, arguments: [], command: nil,
-                     runner: nil, execer: nil, timeout: DEFAULT_TIMEOUT_SECONDS)
+                     runner: nil, execer: nil, timeout: DEFAULT_TIMEOUT_SECONDS,
+                     working_directory: Dir.pwd)
         @root = File.expand_path(root.to_s)
+        @working_directory = File.expand_path(working_directory.to_s)
         @command = Array(command || self.class.default_command(arguments)).map(&:to_s).freeze
-        @runner = runner || CommandRunner.new(timeout: timeout)
+        @timeout = Float(timeout)
+        raise ArgumentError, "Lifecycle command timeout must be positive and finite." unless @timeout.positive? && @timeout.finite?
+
+        @runner = runner || CommandRunner.new(timeout: @timeout)
         @execer = execer || lambda { |argv, chdir:| Process.exec(*argv, chdir: chdir) }
-        @timeout = timeout
       end
 
       # Replace this process after the caller has finished its normal shutdown
@@ -99,7 +142,7 @@ module Meringue
       def reload
         return failure("Meringue cannot reload because its launch command is unavailable.") if command.empty?
 
-        @execer.call(command, chdir: root)
+        @execer.call(command, chdir: @working_directory)
         failure("Meringue reload did not replace the current process.")
       rescue StandardError => e
         failure("Could not reload Meringue: #{e.message}")
