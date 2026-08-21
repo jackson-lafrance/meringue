@@ -631,17 +631,28 @@ module Meringue
         view.fetch(:lines).each_with_index do |line, index|
           draw_line(canvas, view.fetch(:content_x), view.fetch(:content_y) + index, content_width, line)
         end
-        counter = view.fetch(:counter).to_s
-        unless counter.empty?
-          write_centered_segments(canvas, card.fetch(:x) + 2, card.fetch(:y) + card.fetch(:height) - 2, content_width, [[counter, Style::DIM]])
-        end
-
         footer_y = geometry.fetch(:footer_y)
         footer = settings_pane.setup_footer_segments(state, width: width)
         actions = !view.fetch(:modal, false) ? settings_pane.action_segments(state) : []
         action_width = segment_text_width(actions)
-        canvas.write_segments(1, footer_y, footer, max_width: [width - action_width - 3, 1].max, default_style: Style::DIM)
-        canvas.write_segments([width - action_width - 1, 0].max, footer_y, actions, max_width: action_width)
+        action_x = if actions.empty?
+                     card.fetch(:x) + card.fetch(:width) - 2
+                   else
+                     card.fetch(:x) + card.fetch(:width) - action_width - 2
+                   end
+        counter = view.fetch(:counter).to_s
+        unless counter.empty?
+          canvas.write_segments(
+            card.fetch(:x) + 2,
+            geometry.fetch(:action_y),
+            [[counter, Style::DIM]],
+            max_width: [action_x - card.fetch(:x) - 3, 1].max
+          )
+        end
+        unless actions.empty?
+          canvas.write_segments([action_x, card.fetch(:x) + 1].max, geometry.fetch(:action_y), actions, max_width: action_width)
+        end
+        canvas.write_segments(1, footer_y, footer, max_width: [width - 2, 1].max, default_style: Style::DIM)
         canvas.render(color: color)
       end
 

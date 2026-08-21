@@ -1641,21 +1641,25 @@ kernel/harness validation: a non-Pi or non-resumable target is rejected rather t
   `/config` displays each role in the full-screen Agent defaults category (`/config --text` prints diagnostics), so the typed `/defaults` was removed. Propose it when the
   user asks about the defaults in natural language.
 - `GetModelCatalog` backs `/models refresh [harness]` with `{ "harness": "pi", "refresh": true }` (the `harness` key stays optional). It is read-only: it asks the harness which models exist, reuses the cached snapshot unless `refresh` is set, and reports an explicit unavailable/unsupported state instead of guessing when the harness cannot answer. Its output is a status (harness, availability, model count, timestamps, note) plus a few example references, not a listing: browsing the catalog is the TUI model picker that bare `/models` opens, which reads the same persisted snapshot. A head proposing this command for "what models can I use" therefore gets a short, scannable answer instead of a hundred log lines.
-- `SetDefaultSessionModel` backs the backward-compatible shared `/model <provider>/<model-id>` with
-  `{ "model": "provider/model-id" }`. It also backs `/model head <provider>/<model-id>` and
-  `/model worker <provider>/<model-id>` with `{ "role": "head", "model": "provider/model-id" }`
-  or the corresponding worker payload. Omitting `role` updates both future roles and clears
-  role-specific overrides; a role payload updates only that role. A reference is split on the
+- `SetDefaultSessionModel` backs the shared `/model <provider>/<model-id>` with
+  `{ "model": "provider/model-id" }` while the `split_agent_defaults` experiment is disabled (the
+  default). It backs `/model head <provider>/<model-id>` and `/model worker <provider>/<model-id>`
+  with `{ "role": "head", "model": "provider/model-id" }` or the corresponding worker payload
+  only when that experiment is enabled. The kernel rejects a role payload in shared mode and an
+  unscoped payload in split mode. In shared mode the value updates both future roles and clears
+  role-specific overrides; in split mode a role payload updates only that role. A reference is split on the
   **first** slash, so the model id may itself contain `/` and `:`
   (`fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast` is one valid reference, not a
   malformed one). Only shapes that cannot be a reference are rejected: an empty value, whitespace,
   no slash at all, an empty provider or model id, a leading `-`, or a `.`/`..` provider. Validation
   never consults the model catalog: an id the catalog does not list is still saved, and the accepted
   message labels it unverified. Every rejection names its reason in the visible message.
-- `SetDefaultSessionThinkingLevel` backs the backward-compatible shared `/thinking <level>` with
-  `{ "level": "high" }`. It also backs `/thinking head <level>` and `/thinking worker <level>` with
-  `{ "role": "head", "level": "low" }` or the corresponding worker payload. Omitting `role` updates
-  both future roles and clears role-specific overrides; a role payload updates only that role.
+- `SetDefaultSessionThinkingLevel` backs the shared `/thinking <level>` with `{ "level": "high" }`
+  while the `split_agent_defaults` experiment is disabled. It backs `/thinking head <level>` and
+  `/thinking worker <level>` with `{ "role": "head", "level": "low" }` or the corresponding
+  worker payload only when that experiment is enabled. The kernel rejects forms that do not match
+  the active mode. Shared mode updates both future roles and clears role-specific overrides; split
+  mode updates only the requested role.
 
 There is no command for reading one existing session's effective settings. `/session-settings` and its
 `GetSessionSettings` kernel command were removed; propose `GetInfo` with the agent id instead, whose

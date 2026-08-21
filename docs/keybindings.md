@@ -273,18 +273,18 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 The first interactive launch opens Setup as a curated mode of the full-screen
 Settings overlay, and `/setup` reopens it any time.
 
-- `↑` / `↓`: move through controls; moving past the last control focuses the Navigate footer.
-- `←` / `→`: change a focused boolean toggle or move focus. Right Arrow never advances a setup step.
+- `↑` / `↓`: move through controls; moving past the last control focuses the Back/Next buttons inside the card.
+- `←` / `→`: change a focused boolean toggle, move focus, or switch between Back and Next. They never advance a setup step.
 - `Enter`: begin, toggle a checkbox, open a picker for theme/models and other list-backed values, or activate the focused footer action.
-- `Delete` / `Backspace`: go back one setup step.
-- `Tab` / `Shift-Tab`: next/back through Welcome, Theme, Head defaults, Worker defaults, and Experiments.
+- `Delete` / `Backspace`: go back one setup step; Backspace edits an open picker filter.
+- `Tab` / `Shift-Tab`: next/back through Welcome, Theme, Agent defaults, and Meringue Xtras.
 - `Ctrl-S`: activate the current setup navigation action (including Complete on Experiments).
 - First-run `Esc`: open a skip confirmation. Confirming discards the draft and saves only the skipped marker plus explicit experiment defaults.
 - Manual `/setup` `Esc`: cancel a clean draft, or open the ordinary discard confirmation for a dirty draft. It never changes the existing marker.
 
 Setup owns the whole screen and the mouse. Left-click selects a visible row,
-toggles a checkbox, chooses a picker entry, or presses the displayed Next, Back,
-or Complete navigation control. The wheel moves the visible list. Empty space,
+toggles a checkbox, chooses a picker entry, or presses the displayed Back, Next,
+or Complete navigation control. Picker text filters the visible choices and Escape closes a picker. The wheel moves the visible list. Empty space,
 chrome, right-click, release, and drag reports are inert and never reach the
 dashboard underneath.
 

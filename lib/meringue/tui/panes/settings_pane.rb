@@ -16,15 +16,13 @@ module Meringue
         SETUP_HEADINGS = {
           "Welcome" => "Welcome to Meringue",
           "Theme" => "Make the workspace yours",
-          "Head defaults" => "Choose how heads think",
-          "Worker defaults" => "Choose how workers work",
-          "Experiments" => "Opt into what is useful"
+          "Agent defaults" => "Set your agent defaults",
+          "Experiments" => "Meringue Xtras"
         }.freeze
         SETUP_INTROS = {
           "Welcome" => "Set up the defaults for your future sessions.",
           "Theme" => "Pick a comfortable look. Your preview stays local until you finish.",
-          "Head defaults" => "Heads route your requests. These defaults apply only to future heads.",
-          "Worker defaults" => "Workers do the work. Keep their future defaults independent from heads.",
+          "Agent defaults" => "Choose the harnesses, model, and thinking level for future sessions.",
           "Experiments" => "Optional capabilities start off until you choose them."
         }.freeze
 
@@ -125,6 +123,7 @@ module Meringue
             footer_y: height.to_i - 1,
             body_y: card.fetch(:y),
             body_height: card.fetch(:height),
+            action_y: card.fetch(:y) + card.fetch(:height) - 2,
             card: card,
             detail: card
           }
@@ -145,9 +144,10 @@ module Meringue
           selected = snap.fetch("row_index", 0).to_i.clamp(0, [rows.length - 1, 0].max)
           preamble = setup_preamble(snap, rows[selected], width: content_width)
           content_y = card.fetch(:y) + 6
-          footer_y = card.fetch(:y) + card.fetch(:height) - 1
+          action_y = geometry.fetch(:action_y)
+          content_limit = [action_y - content_y, 0].max
           row_y = content_y + preamble.length
-          capacity = [footer_y - row_y, 1].max
+          capacity = [action_y - row_y, 1].max
           start = window_start(rows.length, selected, capacity)
           visible = rows.drop(start).first(capacity)
           lines = preamble + visible.map.with_index do |row, offset|
@@ -165,7 +165,7 @@ module Meringue
             content_x: card.fetch(:x) + 2,
             content_y: content_y,
             content_width: content_width,
-            lines: lines.first(card_content_height),
+            lines: lines.first(content_limit),
             row_y: row_y,
             window_start: start,
             visible_count: visible.length,
@@ -194,11 +194,10 @@ module Meringue
             return [["Enter choose", Style::ACCENT_BOLD], [" · Esc close", Style::MUTED]]
           end
 
-          next_label = snap.fetch("setup_last_step", false) ? "Complete" : "Next"
           hint = if width.to_i < Settings::COMPACT_WIDTH
                    "Navigate"
                  else
-                   "Navigate: Enter #{next_label} · Delete/Backspace Back · Tab next"
+                   "Navigate: Enter or Arrow keys toggle · Tab advances · Backspace returns"
                  end
           [[hint, Style::DIM]]
         end
@@ -317,8 +316,10 @@ module Meringue
           save_style = snap.fetch("saving", false) ? Style::DIM : Style::ACCENT_BOLD
           if snap.fetch("mode", "settings") == "setup"
             next_label = snap.fetch("setup_last_step", false) ? FINISH_LABEL : NEXT_LABEL
-            next_style = snap.fetch("footer_focus", false) ? Style::ACCENT_BOLD : Style::MUTED
-            return [[next_label, save_style == Style::DIM ? Style::DIM : next_style], [" ", Style::DIM], [BACK_LABEL, Style::MUTED]]
+            focused_button = snap.fetch("footer_button", "next")
+            next_style = snap.fetch("footer_focus", false) && focused_button == "next" ? Style::ACCENT_BOLD : Style::MUTED
+            back_style = snap.fetch("footer_focus", false) && focused_button == "back" ? Style::ACCENT_BOLD : Style::MUTED
+            return [[BACK_LABEL, save_style == Style::DIM ? Style::DIM : back_style], [" ", Style::DIM], [next_label, save_style == Style::DIM ? Style::DIM : next_style]]
           end
           [[primary_label(snap), save_style], [" ", Style::DIM], [CANCEL_LABEL, Style::MUTED]]
         end
@@ -368,15 +369,16 @@ module Meringue
           end
           return :inert if snap.fetch("discard_confirm", false) || snap.fetch("editor", nil).is_a?(Hash)
 
-          if y.to_i == geometry.fetch(:footer_y)
+          if y.to_i == geometry.fetch(:action_y)
             actions = action_segments(state)
             action_width = actions.sum { |text, _style| text.to_s.length }
-            start = width.to_i - action_width - 1
-            next_label = actions.first&.first.to_s
-            back = actions.last&.first.to_s
-            return :next if x.to_i >= start && x.to_i < start + next_label.length
-            back_start = start + next_label.length + 1
-            return :back if x.to_i >= back_start && x.to_i < back_start + back.length
+            card = geometry.fetch(:card)
+            start = card.fetch(:x) + card.fetch(:width) - action_width - 2
+            back = actions.first&.first.to_s
+            next_label = actions.last&.first.to_s
+            return :back if x.to_i >= start && x.to_i < start + back.length
+            next_start = start + back.length + 1
+            return :next if x.to_i >= next_start && x.to_i < next_start + next_label.length
             return :inert
           end
 
@@ -563,10 +565,11 @@ module Meringue
           capacity = [[height.to_i - 3, 1].max, 1].max
           start = window_start(options.length, selected, capacity)
           visible = options.drop(start).first(capacity)
+          query = picker.fetch("query", "").to_s
           lines = [
             [["Choose #{row.fetch("label", "value")}", Style::PANEL_TITLE]],
-            [["↑↓ move", Style::MUTED], [" · Enter choose", Style::ACCENT_BOLD], [" · Esc close", Style::MUTED]],
-            [["", Style::DIM]]
+            [["↑↓ move", Style::MUTED], [" · type to filter", Style::ACCENT_BOLD], [" · Enter choose", Style::ACCENT_BOLD], [" · Esc close", Style::MUTED]],
+            [[query.empty? ? "" : "filter: #{query}", Style::DIM]]
           ]
           visible.each_with_index do |option, offset|
             index = start + offset
@@ -575,7 +578,7 @@ module Meringue
             marker = index == selected ? "› " : "  "
             lines << [["#{marker}#{label}", index == selected ? Style::AGENT_TREE_SELECTED : Style::TEXT], ["  #{reference}", Style::DIM]]
           end
-          lines = [[["No choices are available yet.", Style::MUTED]]] if options.empty?
+          lines = [[[(query.empty? ? "No choices are available yet." : "No choices match “#{query}”."), Style::MUTED]]] if options.empty?
           {
             lines: lines.first([height.to_i, 1].max),
             window_start: start,

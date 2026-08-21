@@ -12,12 +12,16 @@ module Meringue
       # command and carries only the selected node id for the kernel to resolve
       # against its current state. Slash commands keep their explicit clutch-path
       # semantics and intentionally ignore dashboard selection.
-      def route(input, selected_target: nil)
+      def route(input, selected_target: nil, state: nil)
         text = input.to_s
         stripped = text.strip
 
         if stripped.start_with?("/")
-          command = slash_command_parser.parse(stripped)
+          command = if state.nil?
+                      slash_command_parser.parse(stripped)
+                    else
+                      slash_command_parser.parse(stripped, state: state)
+                    end
           return {
             "kind" => "slash_command",
             "input" => stripped,

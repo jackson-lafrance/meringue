@@ -169,8 +169,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal ["P1-I1-W1"], model_result.dig("result", "existing_session_ids_unchanged")
     assert_equal first_before, persisted_agents.fetch(0).fetch("session_settings")
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
-    assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "model")
-    assert_equal "xhigh", config.value("harness", "pi", "thinking_level")
+    assert_equal "openai/gpt-5.6-sol", config.value("harness", "model")
+    assert_equal "xhigh", config.value("harness", "thinking_level")
 
     spawn_worker!("P1-I1", workspace_path: make_project_dir("worker-two"))
     second = persisted_agents.find { |agent| agent.fetch("id") == "P1-I1-W2" }
@@ -180,6 +180,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
   end
 
   def test_role_specific_commands_persist_independent_defaults_and_scope_their_results
+    enable_split_defaults!
     head_result = apply_command("SetDefaultSessionThinkingLevel", "role" => "head", "level" => "low")
     worker_result = apply_command("SetDefaultSessionThinkingLevel", "role" => "worker", "level" => "xhigh")
 
@@ -191,14 +192,17 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal "xhigh", worker_result.dig("result", "roles", "worker", "thinking_level")
 
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
-    assert_equal "low", config.value("harness", "pi", "head_thinking_level")
-    assert_equal "xhigh", config.value("harness", "pi", "worker_thinking_level")
+    assert_equal "low", config.value("harness", "head_thinking_level")
+    assert_equal "xhigh", config.value("harness", "worker_thinking_level")
   end
 
   def test_shared_thinking_command_resets_role_specific_overrides
+    enable_split_defaults!
     apply_command("SetDefaultSessionThinkingLevel", "role" => "head", "level" => "low")
     apply_command("SetDefaultSessionThinkingLevel", "role" => "worker", "level" => "xhigh")
 
+    assert_rejected(apply_command("SetDefaultSessionThinkingLevel", "level" => "high"), "role is required")
+    disable_split_defaults!
     result = apply_command("SetDefaultSessionThinkingLevel", "level" => "high")
 
     assert_accepted(result)
@@ -206,11 +210,12 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal "high", result.dig("result", "roles", "head", "thinking_level")
     assert_equal "high", result.dig("result", "roles", "worker", "thinking_level")
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
-    assert_nil config.value("harness", "pi", "head_thinking_level")
-    assert_nil config.value("harness", "pi", "worker_thinking_level")
+    assert_nil config.value("harness", "head_thinking_level")
+    assert_nil config.value("harness", "worker_thinking_level")
   end
 
   def test_role_specific_model_commands_persist_independent_defaults_and_scope_their_results
+    enable_split_defaults!
     head_result = apply_command("SetDefaultSessionModel", "role" => "head", "model" => "openai/gpt-5.6-sol")
     worker_result = apply_command("SetDefaultSessionModel", "role" => "worker", "model" => "anthropic/claude-opus-5")
 
@@ -224,15 +229,18 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_match(/for future workers\./, worker_result.fetch("message"))
 
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
-    assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "head_model")
-    assert_equal "anthropic/claude-opus-5", config.value("harness", "pi", "model")
-    assert_nil config.value("harness", "pi", "worker_model"), "the worker inherits the shared compatibility fallback"
+    assert_equal "openai/gpt-5.6-sol", config.value("harness", "head_model")
+    assert_equal "anthropic/claude-opus-5", config.value("harness", "model")
+    assert_nil config.value("harness", "worker_model"), "the worker inherits the shared compatibility fallback"
   end
 
   def test_shared_model_command_resets_role_specific_overrides
+    enable_split_defaults!
     apply_command("SetDefaultSessionModel", "role" => "head", "model" => "openai/gpt-5.6-sol")
     apply_command("SetDefaultSessionModel", "role" => "worker", "model" => "anthropic/claude-opus-5")
 
+    assert_rejected(apply_command("SetDefaultSessionModel", "model" => "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"), "role is required")
+    disable_split_defaults!
     result = apply_command("SetDefaultSessionModel", "model" => "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast")
 
     assert_accepted(result)
@@ -241,9 +249,9 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", result.dig("result", "roles", "worker", "model")
     assert_match(/for all future heads and workers\./, result.fetch("message"))
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
-    assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", config.value("harness", "pi", "model")
-    assert_nil config.value("harness", "pi", "head_model")
-    assert_nil config.value("harness", "pi", "worker_model")
+    assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", config.value("harness", "model")
+    assert_nil config.value("harness", "head_model")
+    assert_nil config.value("harness", "worker_model")
   end
 
   def test_role_specific_model_command_rejects_an_invalid_role
@@ -254,6 +262,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
   end
 
   def test_role_specific_model_command_rejects_an_invalid_model_reference
+    enable_split_defaults!
     result = apply_command("SetDefaultSessionModel", "role" => "head", "model" => "not-a-model")
 
     assert_equal "rejected", result.fetch("status")
@@ -395,7 +404,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
       assert_includes result.fetch("message"), "Set the default model to #{reference}"
 
       config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
-      assert_equal reference, config.value("harness", "pi", "model")
+      assert_equal reference, config.value("harness", "model")
     end
 
     # The value round-trips into a session spawned after the change.
@@ -587,5 +596,26 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal "anthropic/claude-opus-5", result.dig("result", "roles", "worker", "model")
     assert_includes result.fetch("message"), "Existing sessions keep their own effective settings"
     assert_equal "info", log_entry(result.fetch("log_entry_ids").first).fetch("level")
+  end
+
+  private
+
+  def enable_split_defaults!
+    set_split_defaults!(true)
+  end
+
+  def disable_split_defaults!
+    set_split_defaults!(false)
+  end
+
+  def set_split_defaults!(enabled)
+    config_path = File.join(tmp_root, "config.toml")
+    store = Meringue::Config::Store.new(path: config_path)
+    result = apply_command(
+      "SaveConfiguration",
+      "base_fingerprint" => store.fingerprint,
+      "changes" => { "experiments.split_agent_defaults" => enabled }
+    )
+    assert_accepted(result)
   end
 end
