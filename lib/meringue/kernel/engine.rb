@@ -270,6 +270,7 @@ module Meringue
         ["/setup", "TUI local: reopen Setup for theme, separate head/worker defaults, and experiments."],
         ["/keybind", "TUI local: show all keybindings."],
         ["/config", "TUI local: open full-screen Settings; /config --text prints diagnostics."],
+        ["/status-bar", "TUI local: compose and save the bottom, agent-information, and focused-worker status bars."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],

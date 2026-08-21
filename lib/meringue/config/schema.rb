@@ -377,6 +377,23 @@ module Meringue
       def add_appearance(settings)
         settings << definition("appearance.theme", %w[tui colorscheme], "Appearance", "enum", "meringue", aliases: [%w[tui color_scheme]], options: ->(_config) { defined?(Meringue::TUI::Style) ? Meringue::TUI::Style.colorschemes : %w[meringue rose-pine tokyonight gruvbox catppuccin kanagawa] }, editor: "selector", apply_mode: "live", label: "Theme", description: "Dashboard colorscheme. Highlighting previews the theme; only Save persists it.")
         settings << definition("appearance.animations", %w[tui animations], "Appearance", "boolean", true, editor: "checkbox", apply_mode: "live", label: "Animations", description: "Use motion where the terminal can render it safely.", override_env: %w[MERINGUE_NO_ANIMATION], env_overrides: true, env_value: ->(_key, _value, _env) { false })
+        settings << definition(
+          "appearance.status_bar_layout",
+          %w[tui status_bar_layout],
+          "Appearance",
+          "status_bar_layout",
+          "",
+          aliases: [%w[tui status_bars], %w[tui status_bar]],
+          editor: "status_bar",
+          apply_mode: "live",
+          label: "Status bar layout",
+          description: "Optional JSON layout for the bottom, agent-information, and focused-worker status bars. Use /status-bar to edit it.",
+          advanced: true,
+          normalize: ->(value) { value.nil? ? "" : value.to_s },
+          validate: ->(value, _config) {
+            value.to_s.empty? || !defined?(Meringue::TUI::StatusBarLayout) || Meringue::TUI::StatusBarLayout.valid_serialized?(value)
+          }
+        )
       end
 
       def add_experiments(settings)
