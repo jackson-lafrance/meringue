@@ -187,20 +187,37 @@ module Meringue
 
       def canonicalize_role_defaults!(data, changed_ids)
         groups = [
-          ["agent.head_harness", "agent.worker_harness", %w[harness provider], %w[harness head_provider], %w[harness worker_provider]],
-          ["agent.head_model", "agent.worker_model", %w[harness pi model], %w[harness pi head_model], %w[harness pi worker_model]],
-          ["agent.head_thinking", "agent.worker_thinking", %w[harness pi thinking_level], %w[harness pi head_thinking_level], %w[harness pi worker_thinking_level]]
+          ["agent.head_harness", "agent.worker_harness", nil, %w[harness provider], %w[harness head_provider], %w[harness worker_provider], [], [], []],
+          ["agent.head_model", "agent.worker_model", "agent.model", %w[harness model], %w[harness head_model], %w[harness worker_model], %w[harness pi model], %w[harness pi head_model], %w[harness pi worker_model]],
+          ["agent.head_thinking", "agent.worker_thinking", "agent.thinking", %w[harness thinking_level], %w[harness head_thinking_level], %w[harness worker_thinking_level], %w[harness pi thinking_level], %w[harness pi head_thinking_level], %w[harness pi worker_thinking_level]]
         ]
-        groups.each do |head_id, worker_id, shared_path, head_path, worker_path|
-          next if (changed_ids & [head_id, worker_id]).empty?
+        split_enabled = value_at(data, %w[experiments split_agent_defaults]) == true
+        groups.each do |head_id, worker_id, shared_id, shared_path, head_path, worker_path, legacy_shared_path, legacy_head_path, legacy_worker_path|
+          relevant = [head_id, worker_id, shared_id].compact
+          relevant << "experiments.split_agent_defaults" if shared_id
+          next if (changed_ids & relevant).empty?
 
           draft = Config.new(data, path: path, loaded: true, file_data: data)
+          if shared_id && (
+            changed_ids.include?(shared_id) ||
+            (!split_enabled && (changed_ids & [head_id, worker_id]).any?) ||
+            (changed_ids.include?("experiments.split_agent_defaults") && !split_enabled)
+          )
+            shared = Schema.fetch(shared_id).effective_value(draft, env: {})
+            set_path!(data, shared_path, shared)
+            delete_path!(data, head_path)
+            delete_path!(data, worker_path)
+            [legacy_shared_path, legacy_head_path, legacy_worker_path].each { |legacy_path| delete_path!(data, legacy_path) }
+            next
+          end
+
           head_value = Schema.fetch(head_id).effective_value(draft, env: {})
           worker_value = Schema.fetch(worker_id).effective_value(draft, env: {})
           if head_value == worker_value
             set_path!(data, shared_path, head_value)
             delete_path!(data, head_path)
             delete_path!(data, worker_path)
+            [legacy_shared_path, legacy_head_path, legacy_worker_path].each { |legacy_path| delete_path!(data, legacy_path) }
             next
           end
 
@@ -209,6 +226,7 @@ module Meringue
           set_path!(data, shared_path, shared)
           head_value == shared ? delete_path!(data, head_path) : set_path!(data, head_path, head_value)
           worker_value == shared ? delete_path!(data, worker_path) : set_path!(data, worker_path, worker_value)
+          [legacy_shared_path, legacy_head_path, legacy_worker_path].each { |legacy_path| delete_path!(data, legacy_path) }
         end
       end
 

@@ -10,7 +10,7 @@ One schema (`Meringue::Config::Schema`) owns the supported paths, compatibility 
 
 Categories:
 
-1. **Agent defaults** — separate future head/worker harness, Pi model, and Pi thinking defaults.
+1. **Agent defaults** — future head/worker harnesses plus shared model and thinking defaults; role-specific model/thinking rows appear when **Split head and worker defaults** is enabled.
 2. **Appearance** — theme and animation.
 3. **Experiments** — registry-backed opt-in product capabilities.
 4. **Harnesses** — provider commands, environment, arguments, Pi session directory, head names/timeouts, and Claude schema mode.
@@ -68,19 +68,23 @@ A successful command mirrors role-aware harness and Pi defaults into state, appl
 Role serialization preserves old readers:
 
 - equal head/worker values become one shared key with role overrides removed;
-- different values retain/write a shared compatibility fallback and only role values that differ from it;
+- shared mode writes one `model`/`thinking_level` value used by both roles;
+- split mode retains/writes a shared compatibility fallback and only role values that differ from it;
 - old shared model, thinking, harness, argv, colorscheme, and workspace-keybinding aliases remain readable.
 
 ## Experiments registry
 
 `Meringue::Experiments::Registry` is the only experiment list. Definitions carry an ID, config path, label, description/risk note, default, dependencies/conflicts, and live/restart mode. Both `/config` and first-run Setup derive their checkboxes from it.
 
-The capability audit found only one capability that currently warrants an experiment:
+The current opt-in experiments are:
 
 ```toml
 [experiments]
 github_support = false
+split_agent_defaults = false
 ```
+
+`split_agent_defaults` makes model and thinking defaults role-specific and requires role-scoped `/model` and `/thinking` commands. When it is off, one shared selection applies to both roles and role-specific forms are hidden or rejected.
 
 Goal loops, non-Pi providers, focused workspaces, read-only workers, command blacklists, presentation preferences, and terminal launchers already have explicit activation or are core safety/preferences; adding a second opt-in gate would make them less clear.
 
@@ -112,7 +116,7 @@ The config carries `[settings].schema_version`. Migration runs before `State::St
 
 ## Setup uses the same overlay
 
-First-run Setup is a curated `Settings::Draft` mode, not a second persistence implementation. It presents a centered, welcoming Welcome → Theme → Head defaults → Worker defaults → Experiments card with one dynamic step indicator, contextual Enter/picker controls, and a restrained optional welcome animation. Experiments ends the flow with Complete. It reuses the schema, editors, validation, theme preview, hit testing, and persistence result handling without inheriting the dense advanced-settings presentation.
+First-run Setup is a curated `Settings::Draft` mode, not a second persistence implementation. It presents a centered, welcoming Welcome → Theme → Agent defaults → Meringue Xtras card with one dynamic step indicator, contextual Enter/picker controls, and a restrained optional welcome animation. Back and Next are inside the bordered card and become keyboard-focusable after the final option; typing filters setup pickers, Backspace edits their filters, and Escape closes them. Meringue Xtras ends the flow with Complete. It reuses the schema, editors, validation, theme preview, hit testing, and persistence result handling without inheriting the dense advanced-settings presentation.
 
 Complete sends the changed settings, explicit absent experiment defaults, and the completed onboarding outcome through one `SaveConfiguration` transaction. Automatic first-run skip saves only the skipped marker and explicit experiment defaults; manual `/setup` cancel writes nothing and preserves the existing marker. `/setup complete|skip` remain compatibility commands, and onboarding version 1 remains valid for existing users.
 
