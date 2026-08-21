@@ -217,6 +217,19 @@ class InputSlashCommandParserTest < Minitest::Test
     )
   end
 
+  def test_bare_theme_aliases_are_local_picker_commands_outside_the_tui
+    ["/theme", "/themes"].each do |input|
+      parsed = parse_slash(input)
+
+      assert_equal "InvalidSlashCommand", parsed.fetch("type"), "expected #{input.inspect} to stay TUI-local"
+      assert_includes parsed.fetch("payload").fetch("message"), "theme picker"
+    end
+
+    invalid = parse_slash("/themes catppuccin")
+    assert_equal "InvalidSlashCommand", invalid.fetch("type")
+    assert_equal "Usage: /themes", invalid.fetch("payload").fetch("message")
+  end
+
   def test_missing_arguments_for_strict_commands_return_invalid_slash_command
     ["/theme", "/theme a b", "/harness", "/model a b",
      "/thinking", "/thinking high extra", "/thinking reviewer high", "/thinking head high extra",
@@ -325,7 +338,7 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   def test_local_tui_commands_are_reported_as_not_kernel_commands
-    %w[/quit /reload /update /jump /prs /keybind /config /setup /open-session].each do |input|
+    %w[/quit /reload /update /jump /prs /keybind /config /setup /open-session /theme /themes].each do |input|
       parsed = parse_slash(input)
       assert_equal "InvalidSlashCommand", parsed.fetch("type")
       assert_match(/local TUI command/, parsed.fetch("payload").fetch("message"))

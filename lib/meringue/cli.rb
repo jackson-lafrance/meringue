@@ -380,7 +380,8 @@ module Meringue
           /quit                     # quit the TUI
           /reload                   # restart Meringue with the current source and configuration
           /update                   # update the source, install dependencies as needed, and reload
-          /theme <name>             # set and persist the TUI theme
+          /theme [name]             # open the theme picker, or set and persist a named TUI theme
+          /themes                   # open the interactive theme picker
           /harness [head|worker] <pi|claude|antigravity> # select role-aware harness defaults
           /models [harness]         # open the searchable model picker; bare /model is an alias
           /keybind                  # show all TUI keybindings
