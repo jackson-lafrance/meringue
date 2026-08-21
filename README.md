@@ -106,7 +106,7 @@ test/support/                      # shared test helpers and fakes
 
 The [quick start](#quick-start) covers the normal interactive launch and the harness-free demo. `bundle exec meringue tui` is an explicit equivalent of `bundle exec meringue`.
 
-The first interactive launch opens Setup as the same polished full-screen overlay used by `/config`. Review separate head and worker harness/model/thinking defaults, preview a theme, and opt into experiments such as GitHub support, then confirm the complete draft on one Review screen. Back never loses edits and nothing is written until Finish atomically saves the settings and `[onboarding]` marker together. Automatic first-run `Esc` confirms a safe skip; `Esc` on a manual `/setup` rerun cancels without changing the marker. The overlay remains recoverable through resize, validation, and persistence failures. See [`docs/onboarding.md`](docs/onboarding.md).
+The first interactive launch opens Setup as the same polished full-screen overlay used by `/config`. Choose a theme, review separate head and worker harness/model/thinking defaults, and opt into experiments such as GitHub support. Experiments is the final step; its Complete action atomically saves the settings and `[onboarding]` marker together. Back never loses edits. Automatic first-run `Esc` confirms a safe skip; `Esc` on a manual `/setup` rerun cancels without changing the marker. The overlay remains recoverable through resize, validation, and persistence failures. See [`docs/onboarding.md`](docs/onboarding.md).
 
 Print the CLI help:
 
