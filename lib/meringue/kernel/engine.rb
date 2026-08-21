@@ -1332,18 +1332,8 @@ module Meringue
             )
           )
           current["updated_at"] = now
-          log_ids = append_log(
-            state,
-            source_type: "kernel",
-            source_id: current.fetch("id"),
-            level: handoff.fetch("exact_stream_transfer", true) ? "info" : "warning",
-            message: if handoff.fetch("was_streaming", false)
-                       "Safely settled worker #{current.fetch("id")}'s active managed turn and transferred sole session ownership to the Agent session."
-                     else
-                       "Prepared worker #{current.fetch("id")} for an Agent session; the managed session is quiesced."
-                     end,
-            details: handoff.merge("agent_id" => current.fetch("id"), "routing_action" => "interactive_focus")
-          )
+          # Native focus itself makes this successful ownership transition visible. Keep the
+          # durable handoff state and command result, but do not add a routine lifecycle log row.
           touch_state!(state, now)
           store.save(state)
           accepted_result(
@@ -1358,7 +1348,7 @@ module Meringue
               "handoff" => handoff,
               "session_ref" => prepared.fetch("session_ref")
             },
-            log_ids
+            []
           )
         end
       rescue StandardError => e
@@ -1514,17 +1504,11 @@ module Meringue
             refresh_worker_parent_statuses!(state, current, now)
           end
           current["updated_at"] = now
-          log_ids = append_log(
-            state,
-            source_type: "kernel",
-            source_id: current.fetch("id"),
-            level: "info",
-            message: "Resumed dashboard-managed session for worker #{current.fetch("id")} after the Agent session.",
-            details: { "agent_id" => current.fetch("id"), "routing_action" => "interactive_focus_return" }
-          )
+          # Returning to the dashboard is already visible when native focus closes. Persist the
+          # resumed owner without adding another routine lifecycle row to the user-visible log.
           touch_state!(state, now)
           store.save(state)
-          accepted_result(nil, "EndInteractiveFocus", current.fetch("id"), "Resumed worker #{current.fetch("id")} in the dashboard.", current, log_ids)
+          accepted_result(nil, "EndInteractiveFocus", current.fetch("id"), "Resumed worker #{current.fetch("id")} in the dashboard.", current, [])
         end
       rescue StandardError => e
         synchronized_state do

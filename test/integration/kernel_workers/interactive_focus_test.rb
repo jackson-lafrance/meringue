@@ -161,6 +161,30 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_equal "accepted", recovered.fetch("status")
   end
 
+  def test_successful_focus_entry_and_exit_do_not_append_user_visible_handoff_logs
+    client = InteractiveHarnessClient.new
+    engine = build_engine(harness_client: client)
+    context = project_with_issue(engine)
+
+    [false, true].each do |streaming|
+      client.streaming = streaming
+      worker_id = spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
+      log_ids_before_focus = state(engine).fetch("logs").map { |entry| entry.fetch("id") }
+
+      prepared = engine.begin_agent_interactive_focus(worker_id)
+      assert_equal "accepted", prepared.fetch("status")
+      assert_empty prepared.fetch("log_entry_ids"), "successful focus entry should not add a lifecycle log"
+
+      started = engine.mark_agent_interactive_focus_started(worker_id, pid: 52_424)
+      assert_equal "accepted", started.fetch("status")
+      resumed = engine.end_agent_interactive_focus(worker_id)
+      assert_equal "accepted", resumed.fetch("status")
+      assert_empty resumed.fetch("log_entry_ids"), "successful focus exit should not add a lifecycle log"
+      assert_equal log_ids_before_focus, state(engine).fetch("logs").map { |entry| entry.fetch("id") },
+                   "#{streaming ? "active" : "settled"} session ownership changes should stay out of the user-visible log"
+    end
+  end
+
   def test_restart_recovers_an_interrupted_focus_before_polling_the_old_session
     client = InteractiveHarnessClient.new
     client.streaming = true
@@ -328,6 +352,10 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_equal "interactive_focus_active", second.fetch("errors").first
     assert_equal 1, client.prepared.length
     assert_equal 1, client.aborts.length
+    warning = state(second_engine).fetch("logs").last
+    assert_equal "warning", warning.fetch("level")
+    assert_equal "BeginInteractiveFocus", warning.dig("details", "command_type")
+    assert_includes warning.fetch("message"), "already has an interactive focus transition in progress"
   end
 
   def test_completed_non_streaming_worker_without_a_process_can_open_native_focus
@@ -421,6 +449,11 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     failure = recovered.dig("harness_metadata", "last_interactive_handoff")
     assert_equal "prepare_failed", failure.fetch("outcome")
     assert_equal "Keep this assignment.", failure.dig("context", "assignment")
+    failure_log = state(engine).fetch("logs").last
+    assert_equal [failure_log.fetch("id")], result.fetch("log_entry_ids")
+    assert_equal "error", failure_log.fetch("level")
+    assert_equal "BeginInteractiveFocus", failure_log.dig("details", "command_type")
+    assert_includes failure_log.fetch("message"), "handoff preparation failed"
   end
 
   def test_prepare_and_rollback_failure_does_not_leave_a_false_interactive_owner
@@ -456,6 +489,11 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_equal "failed", failed.fetch("status")
     assert_equal "resume_failed", agent(engine, worker_id).dig("harness_metadata", "interactive_handoff", "state")
     assert_equal 1, client.resumed.length
+    failure_log = state(engine).fetch("logs").last
+    assert_equal [failure_log.fetch("id")], failed.fetch("log_entry_ids")
+    assert_equal "error", failure_log.fetch("level")
+    assert_equal "EndInteractiveFocus", failure_log.dig("details", "command_type")
+    assert_includes failure_log.fetch("message"), "cannot restart RPC"
 
     client.resume_error = nil
     recovered = engine.end_agent_interactive_focus(worker_id)
