@@ -243,6 +243,33 @@ module Meringue
         Selection.point(row.fetch(:line_index), column)
       end
 
+      # A logs drag remains pane-scoped even after the pointer leaves the pane.
+      # Reaching either visible text edge arms autoscroll in that direction; App
+      # owns the repeated timer ticks and asks for fresh content coordinates
+      # after each offset change.
+      def logs_drag_scroll_direction(state, width:, height:, y:)
+        view = logs_text_view(state, width: width, height: height)
+        rows = view ? view.fetch(:rows) : []
+        return nil if rows.empty?
+
+        return :up if y.to_i <= rows.first.fetch(:y)
+        return :down if y.to_i >= rows.last.fetch(:y)
+
+        nil
+      end
+
+      # Vertical cursor movement follows the same wrapping width used to draw the
+      # dashboard composer instead of treating only hard newlines as rows.
+      def composer_vertical_cursor(state, width:, height:, input_buffer:, input_cursor:, direction:)
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        chat_pane.composer_vertical_cursor(
+          input_buffer,
+          input_cursor,
+          direction: direction,
+          width: metrics.fetch(:composer_content_width)
+        )
+      end
+
       # Worker authored the actionable cell under this logs-pane coordinate.
       # ChatPane owns the per-entry row metadata; Layout only resolves viewport
       # geometry and never guesses an id from displayed prose.

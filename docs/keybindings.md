@@ -174,7 +174,7 @@ Selection is rendered by Meringue itself, so it works without holding `Shift` an
 
 - Double-click a word in the logs pane: select and highlight that word, and copy it to the system clipboard. The bottom hint line echoes what was copied, for example `⧉ copied "P1-I18-W2"`.
 - Triple-click a logs paragraph: select and highlight the complete paragraph under the pointer, including every soft-wrapped row but not an adjacent paragraph or log entry, and copy it to the system clipboard.
-- Drag with the left mouse button in the logs pane: select log text. The highlight uses the active colorscheme's `SELECTION` style and follows the content while you scroll. Releasing the button copies the highlighted text.
+- Drag with the left mouse button in the logs pane: select log text. The highlight uses the active colorscheme's `SELECTION` style and follows the content while you scroll. Holding the pointer against or beyond the top/bottom text edge automatically scrolls in that direction and keeps extending the active selection. Releasing the button copies the highlighted text.
 - Double-click, then drag without releasing: extend the selection by whole words in either direction, including onto other (soft-wrapped) rows. Triple-click, then drag extends by complete paragraphs.
 - Double-click a word in the chat composer: select that word. Drag from a double-click to extend by word there too. The composer stays copy-on-demand (`Ctrl-C` / `Ctrl-X`), so selecting text you are about to retype never overwrites your clipboard.
 - Drag with the left mouse button in the chat composer: select input text. Clicking without dragging just moves the cursor.
@@ -249,7 +249,8 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 
 - `Enter`: send the prompt as typed, or apply the slash suggestion once one is selected. When the composer is tinted, the message is routed by a fresh head with the titled target as `routing_context.selected_target`; see [AgentTree selection, log filtering, and chat routing](#agenttree-selection-log-filtering-and-chat-routing).
 - `Shift-Enter`: insert a newline.
-- Arrow keys: move the cursor.
+- `Left` / `Right`: move the cursor by character.
+- `Up` / `Down`: move through both hard-newline and soft-wrapped composer rows while preserving the visual column. At the first or last row, they browse sent-input history; moving forward past the newest entry restores the unsent draft. An open slash-suggestion list keeps precedence and uses these keys to move its highlight.
 - `Home` / `Ctrl-A`: move to the start of the current line.
 - `End` / `Ctrl-E`: move to the end of the current line.
 - `Alt-Left` / `Ctrl-Left`: move left by word.
