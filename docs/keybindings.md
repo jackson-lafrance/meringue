@@ -348,6 +348,17 @@ Ctrl-C clear/quit · Tab focus · / commands
 
 Key letters and labels come from the active bindings, so custom bindings render accurately. The `F` entry always shows the active transcript filter, which resets scroll to the newest matching entry, persists across restart for the selected worker, and resets to `all` when another worker is selected.
 
+### Status-bar composer
+
+`/status-bar` opens a full-screen layout editor for the dashboard bottom bar,
+the focused worker's agent-information bar, and its focused-worker bar. The
+preview is local until saved: `Tab`/`Shift-Tab` changes bars, `Up`/`Down`
+selects items, `Left`/`Right` reorders them, `Home`/`End` moves an item to an
+edge, `R` restores defaults, `Enter`/`Ctrl-S` saves, and `Esc` cancels. Items
+can also be dragged with the mouse. Invalid or old layout configuration falls
+back to the normal renderer. See [`status_bar_layouts.md`](status_bar_layouts.md)
+for persistence and recovery details.
+
 ### Workspace slash commands
 
 The transcript-focused worker composer accepts slash commands scoped to the selected worker. Native Pi does not show that composer: type into the embedded Pi pane for Pi's own commands, or move focus to the still-visible dashboard chat to route external work. In the transcript composer, typing `/` opens a `workspace commands` list above the composer; `Tab` completes, `Up`/`Down` select, and `Enter` applies a highlighted suggestion or runs the typed command. Anything that does not start with `/` is still a direct follow-up prompt.
