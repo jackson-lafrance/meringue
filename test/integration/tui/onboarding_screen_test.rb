@@ -72,7 +72,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     snap = snapshot
     assert_equal "Experiments", snap.fetch("category")
     assert snap.fetch("setup_last_step")
-    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, snap.fetch("rows").map { |row| row.fetch("id") }
+    assert_equal Meringue::Experiments::Registry.setting_ids, snap.fetch("rows").map { |row| row.fetch("id") }
     assert_includes render, "[ Complete ]"
   end
 
@@ -81,7 +81,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     send_key(ENTER)
     3.times { send_key(TAB) }
     assert_equal "Experiments", snapshot.fetch("category")
-    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, snapshot.fetch("rows").map { |row| row.fetch("id") }
+    assert_equal Meringue::Experiments::Registry.setting_ids, snapshot.fetch("rows").map { |row| row.fetch("id") }
 
     geometry = @layout.send(:settings_pane).geometry(compose, width: WIDTH, height: HEIGHT)
     card = geometry.fetch(:card)

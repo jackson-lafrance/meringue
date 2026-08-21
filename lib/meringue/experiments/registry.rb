@@ -14,6 +14,7 @@ module Meringue
       :conflicts,
       :migration,
       :availability_probe,
+      :actions,
       keyword_init: true
     ) do
       def initialize(**values)
@@ -22,7 +23,12 @@ module Meringue
         self.config_path = Array(config_path).map(&:to_s).freeze
         self.dependencies = Array(dependencies).map(&:to_s).freeze
         self.conflicts = Array(conflicts).map(&:to_s).freeze
+        self.actions = Array(actions).map { |action| action.to_h.transform_keys(&:to_s).freeze }.freeze
         freeze
+      end
+
+      def action_setting_ids
+        actions.map { |action| "experiments.#{action.fetch("id")}" }
       end
 
       def apply_mode
@@ -51,6 +57,13 @@ module Meringue
           dependencies: [],
           conflicts: [],
           migration: "enable_for_existing_installations",
+          actions: [
+            {
+              "id" => "github_support_test_access",
+              "label" => "Test GitHub access",
+              "description" => "Check GitHub authentication and read access to this repository without changing GitHub."
+            }
+          ],
           availability_probe: nil
         )
       ].freeze
@@ -67,6 +80,14 @@ module Meringue
 
       def ids
         all.map(&:id)
+      end
+
+      def setting_ids
+        all.flat_map { |definition| ["experiments.#{definition.id}", *definition.action_setting_ids] }
+      end
+
+      def action(id)
+        all.flat_map(&:actions).find { |candidate| "experiments.#{candidate.fetch("id")}" == id.to_s }
       end
     end
   end

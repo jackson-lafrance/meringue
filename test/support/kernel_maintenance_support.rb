@@ -19,13 +19,15 @@ module KernelMaintenanceSupport
   # test configured, and records every lookup so tests can assert which URLs the
   # kernel actually checked.
   class StubForgeClient
-    attr_reader :status_calls, :branch_calls
+    attr_reader :status_calls, :branch_calls, :access_calls
 
-    def initialize(statuses: {}, branch_urls: {})
+    def initialize(statuses: {}, branch_urls: {}, access_results: {})
       @statuses = statuses
       @branch_urls = branch_urls
+      @access_results = access_results
       @status_calls = []
       @branch_calls = []
+      @access_calls = []
     end
 
     def pull_request_status(url)
@@ -44,6 +46,17 @@ module KernelMaintenanceSupport
     def pull_request_urls_for_branch(repository:, branch:)
       @branch_calls << { "repository" => repository.to_s, "branch" => branch.to_s }
       Array(@branch_urls.fetch([repository.to_s, branch.to_s], []))
+    end
+
+    def test_access(repository:, timeout: nil)
+      @access_calls << { "repository" => repository.to_s, "timeout" => timeout }
+      @access_results.fetch(repository.to_s) do
+        {
+          "outcome" => "success",
+          "message" => "GitHub access is ready; read access to #{repository} is confirmed.",
+          "repository" => repository.to_s
+        }
+      end
     end
   end
 

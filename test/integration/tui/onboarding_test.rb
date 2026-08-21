@@ -103,7 +103,7 @@ class TuiTransactionalSetupTest < Minitest::Test
     send_key(TAB) # Worker defaults
     send_key(TAB) # Experiments
     assert_equal "Experiments", setup_snapshot.fetch("category")
-    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, setup_rows.map { |row| row.fetch("id") }
+    assert_equal Meringue::Experiments::Registry.setting_ids, setup_rows.map { |row| row.fetch("id") }
     send_key(ENTER) # checkbox-style controls use Enter
     assert @app.instance_variable_get(:@settings_draft).value("experiments.github_support")
 
