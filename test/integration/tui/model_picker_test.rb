@@ -21,6 +21,7 @@ class TuiModelPickerTest < Minitest::Test
   CTRL_R = "\u0012"
 
   def setup
+    @original_theme = Meringue::TUI::Style.current_colorscheme
     @submitted = []
     @layout = Meringue::TUI::Layout.new
     @app = Meringue::TUI::App.new(
@@ -34,6 +35,7 @@ class TuiModelPickerTest < Minitest::Test
 
   def teardown
     wait_for_submissions(@submitted.length)
+    Meringue::TUI::Style.configure!(@original_theme)
   end
 
   def test_slash_models_opens_the_picker_instead_of_listing_the_catalog
@@ -206,19 +208,34 @@ class TuiModelPickerTest < Minitest::Test
     refute @pane.model_picker?(compose)
   end
 
-  def test_theme_opens_in_the_shared_popup_and_applies_without_chat_feedback
-    picker = open_picker("/theme")
+  def test_theme_alias_previews_and_escape_restores_without_chat_feedback
+    Meringue::TUI::Style.configure!("meringue")
+    picker = open_picker("/themes")
 
     assert_equal "theme", @pane.popup_pane_title(picker)
-    assert @pane.popup_lines(picker).any? { |line| plain_line(line).include?(Meringue::TUI::Style.current_colorscheme) }
+    assert_equal "meringue", Meringue::TUI::Style.current_colorscheme
     assert_empty @submitted
 
-    "rose".each_char { |character| send_key(character) }
-    assert_equal ["rose-pine"], @app.send(:model_picker_entries, compose).map { |entry| entry.fetch("reference") }
+    send_key("\e[B")
+    selected = @app.send(:model_picker_entries, compose).fetch(@app.instance_variable_get(:@model_picker_index)).fetch("reference")
+    assert_equal selected, Meringue::TUI::Style.current_colorscheme
+
+    send_key("\e")
+    refute @pane.model_picker?(compose)
+    assert_equal "meringue", Meringue::TUI::Style.current_colorscheme
+    assert_empty @submitted
+  end
+
+  def test_theme_selection_persists_through_the_normal_set_theme_command
+    Meringue::TUI::Style.configure!("meringue")
+    open_picker("/theme")
+    send_key("\e[B")
+    selected = Meringue::TUI::Style.current_colorscheme
     send_key("\r")
 
-    assert_equal ["/theme rose-pine"], wait_for_submissions(1)
+    assert_equal ["/theme #{selected}"], wait_for_submissions(1)
     refute @pane.model_picker?(compose)
+    assert_equal selected, Meringue::TUI::Style.current_colorscheme
   end
 
   def test_harness_opens_in_the_shared_role_popup
@@ -438,7 +455,16 @@ class TuiModelPickerTest < Minitest::Test
   def prompt_handler
     @prompt_handler ||= lambda do |text, **_options|
       @submitted << text
-      { "event" => "slash_command_applied", "command_results" => [] }
+      results = if text.start_with?("/theme ")
+                   [{
+                     "command_type" => "SetTheme",
+                     "status" => "accepted",
+                     "result" => { "theme" => text.split(" ", 2).last }
+                   }]
+                 else
+                   []
+                 end
+      { "event" => "slash_command_applied", "command_results" => results }
     end
   end
 
