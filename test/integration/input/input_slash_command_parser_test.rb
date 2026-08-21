@@ -519,6 +519,23 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_equal ["openai/gpt-5.6-sol"], suggestion_records("/model GPT-5.6", state).map { |record| record.fetch("usage") }
   end
 
+  def test_model_suggestions_ignore_omitted_hyphens_in_queries
+    state = sample_state_with_model_catalog(
+      catalogs: {
+        "pi" => model_catalog_snapshot(
+          models: [
+            { "provider" => "openai", "id" => "gpt-5.6-luna", "name" => "GPT-5.6 Luna" },
+            { "provider" => "openai", "id" => "gpt-5.5", "name" => "GPT-5.5" },
+            { "provider" => "anthropic", "id" => "claude-opus-5" }
+          ]
+        )
+      }
+    )
+
+    assert_equal %w[openai/gpt-5.5 openai/gpt-5.6-luna],
+                 suggestion_records("/model gpt5", state).map { |record| record.fetch("usage") }
+  end
+
   def test_model_suggestions_follow_the_active_harness
     state = sample_state_with_model_catalog(
       harness: "claude",

@@ -14,8 +14,9 @@ module Meringue
     # - which models that harness reported (kernel-cached snapshot), and
     # - what to say instead of an empty list when the harness could not answer.
     #
-    # Selecting a row is applied by the TUI as `/model <provider/model>`, so the
-    # picker adds no second way to write session defaults: the kernel's
+    # Selecting a row is applied by the TUI as a role-scoped `/model` or
+    # `/thinking` command, so the picker adds no second way to write session
+    # defaults: the kernel's
     # `SetDefaultSessionModel` stays the only writer.
     module ModelPicker
       module_function
@@ -55,12 +56,12 @@ module Meringue
       #
       # A stale list (latest refresh failed) is still the harness's own answer, so
       # it is offered in full and labelled instead of being hidden.
-      def entries(state, harness: nil, query: nil)
+      def entries(state, harness: nil, query: nil, role: nil)
         harness = harness_for(state, harness)
         snapshot = catalog(state, harness)
         return [] unless snapshot.usable?
 
-        default_reference = default_model_reference(state)
+        default_reference = default_model_reference(state, role: role)
         rows = snapshot.models.map { |model| entry_for(model, default_reference) }
         current, rest = rows.partition { |row| row.fetch("current") }
         ordered = current + rest.sort_by { |row| [row.fetch("provider"), row.fetch("id")] }
@@ -74,12 +75,51 @@ module Meringue
         rows[index.to_i.clamp(0, rows.length - 1)]
       end
 
-      def count(state, harness: nil, query: nil)
-        entries(state, harness: harness, query: query).length
+      def count(state, harness: nil, query: nil, role: nil)
+        entries(state, harness: harness, query: query, role: role).length
       end
 
-      def default_model_reference(state)
-        (state || {}).dig("metadata", "pi_session_defaults", "model").to_s
+      # The thinking picker uses the same catalog-aware descriptions as inline
+      # `/thinking` completion, but owns its modal list and role tab. Keeping the
+      # source in SlashCommandParser means the picker and command completion agree
+      # on accepted levels and current-default labeling.
+      def thinking_entries(state, role:, query: nil)
+        role_name = role.to_s.strip.downcase
+        return [] unless %w[head worker].include?(role_name)
+
+        input = "/thinking #{role_name} #{query}"
+        Meringue::Input::SlashCommandParser.command_suggestion_records(input, limit: nil, state: state).filter_map.with_index do |record, index|
+          next unless record.fetch("kind", nil) == "thinking_levels"
+
+          level = record.fetch("usage")
+          {
+            "reference" => level,
+            "level" => level,
+            "name" => record.fetch("description", ""),
+            "description" => record.fetch("description", ""),
+            "current" => record.fetch("current", false),
+            "index" => index
+          }
+        end
+      end
+
+      def default_model_reference(state, role: nil)
+        defaults = (state || {}).dig("metadata", "pi_session_defaults") || {}
+        role_name = role.to_s.strip.downcase
+        reference = if %w[head worker].include?(role_name)
+                      role_reference = defaults.dig("roles", role_name, "model").to_s.strip
+                      role_reference.empty? ? defaults["model"] : role_reference
+                    else
+                      defaults["model"]
+                    end
+        reference.to_s
+      end
+
+      # Model ids commonly omit punctuation while they are being typed. Keep the
+      # displayed/catalog reference intact, but make a query such as `gpt5`
+      # equivalent to `gpt-5` for autocomplete and picker filtering.
+      def model_search_text(value)
+        value.to_s.downcase.delete("-")
       end
 
       # What the picker says when it has no rows. Never nil while the list is
@@ -148,16 +188,16 @@ module Meringue
       # Space separated tokens all have to match somewhere in the row, so
       # "openai high" narrows without forcing the user to remember id order.
       def filter(rows, query)
-        tokens = query.to_s.downcase.split(/\s+/).reject(&:empty?)
+        tokens = query.to_s.split(/\s+/).reject(&:empty?).map { |token| model_search_text(token) }
         return rows if tokens.empty?
 
         rows.select do |row|
-          haystack = [
+          haystack = model_search_text([
             row.fetch("reference"),
             row.fetch("name"),
             row.fetch("provider"),
             row.fetch("thinking_levels").join(" ")
-          ].join(" ").downcase
+          ].join(" "))
           tokens.all? { |token| haystack.include?(token) }
         end
       end
