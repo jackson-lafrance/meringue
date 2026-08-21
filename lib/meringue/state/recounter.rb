@@ -64,7 +64,7 @@ module Meringue
       # exact string that something outside Meringue owns, so these subtrees are skipped entirely
       # and nothing inside them is rewritten, marked, or audited.
       VERBATIM_KEYS = %w[
-        branch command cwd harness_model_catalogs path pi_session_defaults pi_state
+        branch command cwd harness_model_catalogs path pi_session_defaults pi_state portable_import
         stderr stderr_tail stdout url
       ].freeze
       VERBATIM_KEY_SUFFIXES = %w[
