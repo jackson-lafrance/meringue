@@ -8,7 +8,7 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
-Run `/config` for the full-screen schema-driven editor covering every supported setting. `/config --text` retains the read-only diagnostic listing. Existing `/theme`, `/model <provider>/<model-id>` and `/thinking <level>` commands use shared defaults by default; enabling `split_agent_defaults` adds the role-scoped `/model head|worker` and `/thinking head|worker` forms. `/harness [head|worker] <provider>`, and setup compatibility commands use the same validated atomic persistence layer. First-run Setup is a curated mode of this same overlay. See [`settings.md`](settings.md) for interaction, responsive layouts, transactional save/cancel behavior, and provenance.
+Run `/config` for the full-screen schema-driven editor covering every supported setting. `/config --text` retains the read-only diagnostic listing. Bare `/theme` (or `/themes`) opens a preview picker; `/theme <name>`, `/model <provider>/<model-id>` and `/thinking <level>` use shared defaults by default. Enabling `split_agent_defaults` adds the role-scoped `/model head|worker` and `/thinking head|worker` forms. `/harness [head|worker] <provider>`, and setup compatibility commands use the same validated atomic persistence layer. First-run Setup is a curated mode of this same overlay. See [`settings.md`](settings.md) for interaction, responsive layouts, transactional save/cancel behavior, and provenance.
 
 ## Settings schema and experiments
 
