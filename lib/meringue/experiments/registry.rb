@@ -52,6 +52,19 @@ module Meringue
           conflicts: [],
           migration: "enable_for_existing_installations",
           availability_probe: nil
+        ),
+        Definition.new(
+          id: "split_agent_defaults",
+          config_path: %w[experiments split_agent_defaults],
+          label: "Split head and worker defaults",
+          description: "Choose different model and thinking defaults for heads and workers.",
+          default: false,
+          restart_required: false,
+          risk: "Enables role-scoped /model and /thinking commands instead of one shared default.",
+          dependencies: [],
+          conflicts: [],
+          migration: nil,
+          availability_probe: nil
         )
       ].freeze
 

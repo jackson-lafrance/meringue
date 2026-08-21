@@ -14,10 +14,10 @@ module Meringue
     # - which models that harness reported (kernel-cached snapshot), and
     # - what to say instead of an empty list when the harness could not answer.
     #
-    # Selecting a row is applied by the TUI as a role-scoped `/model` or
+    # Selecting a row is applied by the TUI as the active mode's `/model` or
     # `/thinking` command, so the picker adds no second way to write session
-    # defaults: the kernel's
-    # `SetDefaultSessionModel` stays the only writer.
+    # defaults: the kernel's `SetDefaultSessionModel` and
+    # `SetDefaultSessionThinkingLevel` remain the only writers.
     module ModelPicker
       module_function
 
@@ -85,9 +85,13 @@ module Meringue
       # on accepted levels and current-default labeling.
       def thinking_entries(state, role:, query: nil)
         role_name = role.to_s.strip.downcase
-        return [] unless %w[head worker].include?(role_name)
+        return [] if !role_name.empty? && !%w[head worker].include?(role_name)
 
-        input = "/thinking #{role_name} #{query}"
+        input = if role_name.empty?
+                  "/thinking #{query}"
+                else
+                  "/thinking #{role_name} #{query}"
+                end
         Meringue::Input::SlashCommandParser.command_suggestion_records(input, limit: nil, state: state).filter_map.with_index do |record, index|
           next unless record.fetch("kind", nil) == "thinking_levels"
 

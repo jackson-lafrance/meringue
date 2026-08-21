@@ -76,9 +76,11 @@ module Meringue
         { "prefix" => "/prompt", "source" => "prompt_targets", "append_space" => true },
         { "prefix" => "/retry", "source" => "retry_heads", "append_space" => false },
         { "prefix" => "/open-session", "source" => "agents", "append_space" => false },
+        { "prefix" => "/model", "source" => "role_choices", "append_space" => true, "role_command" => "model", "split_only" => true },
         { "prefix" => "/model head", "source" => "session_models", "append_space" => false, "model_role" => "head" },
         { "prefix" => "/model worker", "source" => "session_models", "append_space" => false, "model_role" => "worker" },
         { "prefix" => "/model", "source" => "session_models", "append_space" => false },
+        { "prefix" => "/thinking", "source" => "role_choices", "append_space" => true, "role_command" => "thinking", "split_only" => true },
         { "prefix" => "/thinking head", "source" => "thinking_levels", "append_space" => false, "thinking_role" => "head" },
         { "prefix" => "/thinking worker", "source" => "thinking_levels", "append_space" => false, "thinking_role" => "worker" },
         { "prefix" => "/thinking", "source" => "thinking_levels", "append_space" => false },
@@ -165,6 +167,35 @@ module Meringue
         BARE_SINGULAR_ALIASES.fetch(command, command)
       end
 
+      def self.split_agent_defaults_enabled?(state)
+        return nil unless state.is_a?(Hash)
+
+        capabilities = state.fetch("_capabilities", nil)
+        return nil unless capabilities.is_a?(Hash) && capabilities.key?("split_agent_defaults")
+
+        capabilities.fetch("split_agent_defaults") == true
+      end
+
+      def self.command_specs(state)
+        split_defaults = split_agent_defaults_enabled?(state)
+        return COMMAND_SPECS if split_defaults.nil?
+
+        COMMAND_SPECS.map do |usage, description|
+          case usage
+          when "/model [head|worker] <provider>/<model-id>"
+            split_defaults ?
+              ["/model <head|worker> <provider>/<model-id>", "Set a model for one future role; choose head or worker explicitly."] :
+              ["/model <provider>/<model-id>", "Set the shared model for future heads and workers."]
+          when "/thinking [head|worker] <level>"
+            split_defaults ?
+              ["/thinking <head|worker> <level>", "Set a thinking level for one future role; choose head or worker explicitly."] :
+              ["/thinking <level>", "Set the shared thinking level for future heads and workers."]
+          else
+            [usage, description]
+          end
+        end
+      end
+
       def self.command_suggestions(input = nil, limit: nil, state: nil)
         command_suggestion_records(input, limit: limit, state: state).map do |record|
           [record.fetch("usage"), record.fetch("description")]
@@ -176,7 +207,7 @@ module Meringue
         return argument_records.first(limit || argument_records.length) if argument_records
 
         query = normalized_query(input)
-        records = COMMAND_SPECS.each_with_index.map do |(usage, description), index|
+        records = command_specs(state).each_with_index.map do |(usage, description), index|
           completion = completion_prefix_for(usage)
           requires_arguments = completion != usage
           {
@@ -219,22 +250,33 @@ module Meringue
       def self.argument_suggestion_records(input, state)
         return nil unless normalized_query(input)
 
-        context = argument_suggestion_context(input)
+        context = argument_suggestion_context(input, state: state)
         return nil unless context
 
         records_for_context(context, state)
       end
 
-      def self.argument_suggestion_context(input)
+      def self.argument_suggestion_context(input, state: nil)
         raw = input.to_s.lstrip
         raw_downcase = raw.downcase
+        split_defaults = split_agent_defaults_enabled?(state)
+        contexts = ARGUMENT_SUGGESTION_CONTEXTS.reject do |context|
+          prefix = context.fetch("prefix")
+          role_context = ["/model head", "/model worker", "/thinking head", "/thinking worker"].include?(prefix)
+          shared_context = ["/model", "/thinking"].include?(prefix) && !context.fetch("split_only", false)
+          role_choice = context.fetch("source") == "role_choices"
+          (role_context && split_defaults == false) || (shared_context && split_defaults == true) || (role_choice && split_defaults != true)
+        end
 
-        ARGUMENT_SUGGESTION_CONTEXTS.each do |context|
+        contexts.each do |context|
           prefix = context.fetch("prefix")
           next unless raw_downcase.start_with?("#{prefix} ")
 
           argument_text = raw[prefix.length + 1..] || ""
           tokens = argument_text.empty? ? [""] : argument_text.split(/\s+/, -1)
+          if context.fetch("source") == "role_choices" && !%w[head worker].any? { |role| role.start_with?(tokens.last.to_s.downcase) }
+            next
+          end
           position = context.fetch("position", 1).to_i
           next unless tokens.length == position
 
@@ -252,6 +294,7 @@ module Meringue
       def self.records_for_context(context, state)
         state = {} unless state.is_a?(Hash)
         return harness_provider_suggestion_records(context) if context.fetch("source") == "harness_providers"
+        return role_choice_suggestion_records(context) if context.fetch("source") == "role_choices"
         return goal_create_suggestion_records(context, state) if context.fetch("source") == "goal_create_targets"
         return session_value_suggestion_records(context, state) if %w[session_models thinking_levels].include?(context.fetch("source"))
 
@@ -286,6 +329,25 @@ module Meringue
                 end
 
         id_suggestion_records(items, context)
+      end
+
+      def self.role_choice_suggestion_records(context)
+        roles = %w[head worker]
+        query = context.fetch("query", "").to_s.downcase
+        command = context.fetch("role_command")
+        roles.filter_map.with_index do |role, index|
+          next unless query.empty? || role.start_with?(query)
+
+          {
+            "usage" => role,
+            "description" => "Choose #{role} to set its future #{command} default.",
+            "completion" => "#{context.fetch("completion_prefix")} #{role}",
+            "requires_arguments" => true,
+            "append_space" => true,
+            "index" => index,
+            "kind" => "role_choice"
+          }
+        end
       end
 
       # `/goal create` takes an issue id *or* a quoted prompt, so its completion offers the issues
@@ -719,7 +781,7 @@ module Meringue
         end
       end
 
-      def parse(input)
+      def parse(input, state: nil)
         stripped = input.to_s.strip
         return nil unless stripped.start_with?("/")
 
@@ -740,9 +802,9 @@ module Meringue
         when "models"
           parse_models(arguments)
         when "model"
-          parse_model(arguments)
+          parse_model(arguments, split_agent_defaults: self.class.split_agent_defaults_enabled?(state))
         when "thinking"
-          parse_thinking(arguments)
+          parse_thinking(arguments, split_agent_defaults: self.class.split_agent_defaults_enabled?(state))
         when "project"
           parse_project(arguments)
         when "issue"
@@ -880,8 +942,14 @@ module Meringue
       # `/model head <provider>/<model-id>` updates only future heads. A shared
       # `/model <provider>/<model-id>` updates both roles and clears role
       # overrides, mirroring `/thinking`.
-      def parse_model(arguments)
+      def parse_model(arguments, split_agent_defaults: nil)
         tokens = split_arguments(arguments)
+        if split_agent_defaults == true && tokens.length == 1
+          return invalid("Usage: /model [head|worker] <provider>/<model-id>")
+        end
+        if split_agent_defaults == false && tokens.length == 2 && %w[head worker].include?(tokens[0].to_s.downcase)
+          return invalid("Role-scoped model defaults are disabled. Use /model <provider>/<model-id> for the shared default.")
+        end
         if tokens.length == 2 && %w[head worker].include?(tokens[0].to_s.downcase)
           return kernel_command("SetDefaultSessionModel", "role" => tokens[0].downcase, "model" => tokens[1])
         end
@@ -892,8 +960,14 @@ module Meringue
         kernel_command("SetDefaultSessionModel", "model" => tokens[0])
       end
 
-      def parse_thinking(arguments)
+      def parse_thinking(arguments, split_agent_defaults: nil)
         tokens = split_arguments(arguments)
+        if split_agent_defaults == true && tokens.length == 1
+          return invalid("Usage: /thinking [head|worker] <level>")
+        end
+        if split_agent_defaults == false && tokens.length == 2 && %w[head worker].include?(tokens[0].to_s.downcase)
+          return invalid("Role-scoped thinking defaults are disabled. Use /thinking <level> for the shared default.")
+        end
         if tokens.length == 1
           return kernel_command("SetDefaultSessionThinkingLevel", "level" => tokens[0])
         end

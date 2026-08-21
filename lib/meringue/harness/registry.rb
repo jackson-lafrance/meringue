@@ -408,7 +408,9 @@ module Meringue
       # sessions. Pi clients receive only replacement spawn defaults.
       def reload_config!(updated_config, changed_ids: [])
         live_role_ids = %w[
+          experiments.split_agent_defaults
           agent.head_harness agent.worker_harness
+          agent.model agent.thinking
           agent.head_model agent.worker_model
           agent.head_thinking agent.worker_thinking
         ]
@@ -418,13 +420,15 @@ module Meringue
         data = config.to_h
         data["harness"] = {} unless data["harness"].is_a?(Hash)
         updated_harness = updated_config.section("harness")
-        %w[provider head_provider worker_provider].each do |key|
+        (%w[provider head_provider worker_provider] + SESSION_DEFAULT_KEYS).each do |key|
           if updated_harness.key?(key)
             data.fetch("harness")[key] = Config.deep_copy(updated_harness[key])
           else
             data.fetch("harness").delete(key)
           end
         end
+        experiments = updated_config.section("experiments")
+        data["experiments"] = Config.deep_copy(experiments) if experiments.is_a?(Hash)
         PROVIDERS.each do |provider|
           data.fetch("harness")[provider] = {} unless data.fetch("harness")[provider].is_a?(Hash)
           updated_provider = updated_config.section("harness", provider)
@@ -456,7 +460,8 @@ module Meringue
           model_role: model_role,
           thinking_level: thinking_level,
           thinking_role: thinking_role,
-          path: config.path
+          path: config.path,
+          split_agent_defaults: split_agent_defaults_enabled?
         )
         @config = saved
         reconfigure_cached_clients!(provider) if provider
@@ -521,10 +526,17 @@ module Meringue
       def provider_config(provider)
         provider = normalize_provider!(provider)
         defaults = DEFAULT_PROVIDER_CONFIG.fetch(provider, {})
-        merged = Config.deep_merge(defaults, neutral_session_defaults)
         legacy_configured = config.section("harness", provider)
         public_configured = config.section("harness", self.class.public_provider_name(provider))
-        Config.deep_merge(Config.deep_merge(merged, legacy_configured), public_configured)
+        configured = Config.deep_merge(Config.deep_merge(defaults, legacy_configured), public_configured)
+        if provider == "pi"
+          compatibility = {
+            "model" => config.setting("agent.model", env: {}),
+            "thinking_level" => config.setting("agent.thinking", env: {})
+          }.reject { |_key, value| value.nil? || value.to_s.strip.empty? }
+          configured = Config.deep_merge(configured, compatibility)
+        end
+        Config.deep_merge(configured, neutral_session_defaults)
       end
 
       def neutral_session_defaults
@@ -532,6 +544,8 @@ module Meringue
         return {} unless harness.is_a?(Hash)
 
         SESSION_DEFAULT_KEYS.each_with_object({}) do |key, result|
+          next if !split_agent_defaults_enabled? && key.to_s.match?(/\A(?:head|worker)_(?:model|thinking_level)\z/)
+
           value = harness[key]
           result[key] = value unless value.nil? || value.to_s.strip.empty?
         end
@@ -561,9 +575,15 @@ module Meringue
       # is expressible without repeating everything else.
       def role_setting(provider_config, kind, key)
         role_key = key == "model" ? "#{kind}_model" : "#{kind}_#{key}"
-        value = provider_config[role_key].to_s.strip
+        value = split_agent_defaults_enabled? ? provider_config[role_key].to_s.strip : ""
         value = provider_config[key].to_s.strip if value.empty?
         value
+      end
+
+      def split_agent_defaults_enabled?
+        config.experiment_enabled?("split_agent_defaults")
+      rescue KeyError
+        false
       end
 
       def command_option(args, option)

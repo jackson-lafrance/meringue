@@ -8,7 +8,7 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
-Run `/config` for the full-screen schema-driven editor covering every supported setting. `/config --text` retains the read-only diagnostic listing. Existing `/theme`, `/model [head|worker] <provider>/<model-id>`, `/thinking [head|worker] <level>`, `/harness [head|worker] <provider>`, and setup compatibility commands use the same validated atomic persistence layer. First-run Setup is a curated mode of this same overlay. See [`settings.md`](settings.md) for interaction, responsive layouts, transactional save/cancel behavior, and provenance.
+Run `/config` for the full-screen schema-driven editor covering every supported setting. `/config --text` retains the read-only diagnostic listing. Existing `/theme`, `/model <provider>/<model-id>` and `/thinking <level>` commands use shared defaults by default; enabling `split_agent_defaults` adds the role-scoped `/model head|worker` and `/thinking head|worker` forms. `/harness [head|worker] <provider>`, and setup compatibility commands use the same validated atomic persistence layer. First-run Setup is a curated mode of this same overlay. See [`settings.md`](settings.md) for interaction, responsive layouts, transactional save/cancel behavior, and provenance.
 
 ## Settings schema and experiments
 
@@ -20,6 +20,7 @@ schema_version = 1
 
 [experiments]
 github_support = false
+split_agent_defaults = false
 ```
 
 New installations default GitHub support off. Existing installations with a pre-upgrade state file or onboarding marker migrate it on so upgrading does not silently remove PR behavior; an explicit value always wins. Disabling it performs no built-in `gh` subprocess/network lookup, hides GitHub-specific TUI commands and status, and preserves historical PR records. See [`settings.md`](settings.md#github-support).
@@ -27,7 +28,7 @@ New installations default GitHub support off. Existing installations with a pre-
 ## First-run setup marker
 
 The first interactive launch opens the shared Settings overlay for a theme,
-separate head/worker defaults, and experiment checkboxes. Finishing or confirming
+head/worker harnesses, shared model/thinking defaults, and experiment checkboxes. Finishing or confirming
 a first-run skip records one marker here:
 
 ```toml
@@ -568,17 +569,19 @@ MERINGUE_HEAD_HARNESS=antigravity MERINGUE_WORKER_HARNESS=claude bin/meringue tu
 Each provider can set its executable command and role-specific extra args.
 
 ```toml
-[harness.pi]
-command = "pi"
-session_dir = "~/.meringue/pi-sessions"
-# Shared model and thinking fallbacks (backward-compatible):
+[harness]
+# Shared model and thinking defaults (used by both roles unless splitting is enabled):
 model = "anthropic/claude-opus-5"
 thinking_level = "max"
-# Optional role-specific overrides:
+# Optional role-specific overrides when split_agent_defaults is enabled:
 # head_model = "openai/gpt-5.6-sol"
 # worker_model = "anthropic/claude-opus-5"
 # head_thinking_level = "low"
 # worker_thinking_level = "max"
+
+[harness.pi]
+command = "pi"
+session_dir = "~/.meringue/pi-sessions"
 head_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls"]
 worker_extra_args = ["--model", "anthropic/claude-opus-5", "--thinking", "max", "--tools", "read,bash,grep,find,ls,edit,write"]
 
@@ -594,7 +597,7 @@ head_extra_args = []
 worker_extra_args = []
 ```
 
-Heads and workers default to `anthropic/claude-opus-5` at the maximum reasoning level. Use `/model head <provider>/<model-id>` and `/model worker <provider>/<model-id>`, or set `head_model` and `worker_model`, for distinct role model defaults; use `/thinking head <level>` and `/thinking worker <level>`, or set `head_thinking_level` and `worker_thinking_level`, for distinct role reasoning defaults. The existing `/model <provider>/<model-id>` command and `model` key, and `/thinking <level>` command and `thinking_level` key, remain the shared form; those commands also clear role overrides. A role key wins over the shared key, and either scalar wins over a `--model`/`--thinking` flag in that role's argument array. A configured role array still replaces that role's default array entirely, so include every other flag you need.
+Heads and workers default to `anthropic/claude-opus-5` at the maximum reasoning level. The default configuration uses the shared `model` and `thinking_level` keys under `[harness]`; `/model <provider>/<model-id>` and `/thinking <level>` update both roles. Enable the opt-in `split_agent_defaults` experiment to use `/model head|worker <provider>/<model-id>` and `/thinking head|worker <level>`, or the corresponding `head_model`, `worker_model`, `head_thinking_level`, and `worker_thinking_level` keys, for distinct role defaults. While splitting is disabled, role-specific commands and keys are rejected or hidden; switching it off clears role overrides. When enabled, a role key wins over the shared key, and either scalar wins over a `--model`/`--thinking` flag in that role's argument array. A configured role array still replaces that role's default array entirely, so include every other flag you need.
 
 A provider `command` may be a bare executable such as `pi`, an absolute path, or a command with arguments. Meringue uses the provider's effective environment—the environment that launched Meringue plus any configured `env` overrides—for harness sessions, catalog probes, and focus. Native focus resolves the executable against that same effective `PATH` before transferring session ownership, rather than trying to find `pi` again in a reduced PTY environment. This keeps focus working when Pi is installed by a version manager or package manager in a non-system directory. For services or GUI launchers whose startup environment has no usable shell `PATH`, configure an absolute path (for example, `command = "/opt/homebrew/bin/pi"`) or add the installation directory explicitly:
 
@@ -607,7 +610,7 @@ A configured `PATH` replaces, rather than appends to, the inherited value, so in
 
 A model reference is `<provider>/<model-id>`, split on the first slash, so the model id may itself contain `/` and `:` (`model = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"` is valid). See [`session-settings.md`](session-settings.md#the-accepted-model-reference-grammar) for the exact grammar and for what is still rejected.
 
-`/config` and the dashboard status line show each future Pi role's model and thinking level (the shared model when both roles agree, split by role when they differ). `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. An existing session's own effective pair has no slash command either: it is recorded on the agent record and shown in the focused worker workspace and raw `/state`. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
+`/config` and the dashboard status line show each future Pi role's model and thinking level (the shared model when split defaults are disabled, split by role when the experiment is enabled). `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. An existing session's own effective pair has no slash command either: it is recorded on the agent record and shown in the focused worker workspace and raw `/state`. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
 
 ### Model catalogs and provider resource flags
 

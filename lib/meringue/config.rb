@@ -52,24 +52,39 @@ module Meringue
     # serialization then writes one compatibility fallback plus only differing overrides.
     #
     # `provider` is accepted so a caller can say which backend it was looking at, but it does not
-    # change where the values are written; a backend-specific override belongs in that backend's
-    # own config section.
-    def self.save_agent_session_defaults!(model: nil, model_role: nil, thinking_level: nil, thinking_role: nil, provider: nil, path: DEFAULT_PATH)
+    # change where the values are written. Shared values use the canonical shared model/thinking
+    # keys; role-specific values are available only when the split-agent-defaults experiment is enabled.
+    def self.save_agent_session_defaults!(model: nil, model_role: nil, thinking_level: nil, thinking_role: nil, provider: nil, path: DEFAULT_PATH, split_agent_defaults: nil)
       _ = provider
+      expanded_path = File.expand_path(path.to_s)
+      current = load(path: expanded_path)
+      split_defaults = split_agent_defaults.nil? ? current.experiment_enabled?("split_agent_defaults") : split_agent_defaults == true
       changes = {}
+      if split_agent_defaults == true && !current.path_present?("experiments", "split_agent_defaults")
+        changes["experiments.split_agent_defaults"] = true
+      end
       unless model.nil?
         role = model_role.to_s.strip.downcase
         raise ArgumentError, "model_role must be head or worker" unless role.empty? || %w[head worker].include?(role)
-        targets = role.empty? ? %w[head worker] : [role]
-        targets.each { |target| changes["agent.#{target}_model"] = model.to_s }
+        if split_defaults
+          targets = role.empty? ? %w[head worker] : [role]
+          targets.each { |target| changes["agent.#{target}_model"] = model.to_s }
+        else
+          raise ArgumentError, "model_role is unavailable while split head and worker defaults are disabled" unless role.empty?
+          changes["agent.model"] = model.to_s
+        end
       end
       unless thinking_level.nil?
         role = thinking_role.to_s.strip.downcase
         raise ArgumentError, "thinking_role must be head or worker" unless role.empty? || %w[head worker].include?(role)
-        targets = role.empty? ? %w[head worker] : [role]
-        targets.each { |target| changes["agent.#{target}_thinking"] = thinking_level.to_s }
+        if split_defaults
+          targets = role.empty? ? %w[head worker] : [role]
+          targets.each { |target| changes["agent.#{target}_thinking"] = thinking_level.to_s }
+        else
+          raise ArgumentError, "thinking_role is unavailable while split head and worker defaults are disabled" unless role.empty?
+          changes["agent.thinking"] = thinking_level.to_s
+        end
       end
-      expanded_path = File.expand_path(path.to_s)
       store = Store.new(path: expanded_path)
       store.save(base_fingerprint: store.fingerprint, changes: changes).fetch("config")
     end

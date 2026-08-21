@@ -63,6 +63,7 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       store.save(
         base_fingerprint: store.fingerprint,
         changes: {
+          "experiments.split_agent_defaults" => true,
           "agent.head_model" => "openai/gpt-5.6-sol",
           "agent.worker_model" => "anthropic/claude-opus-5"
         }
@@ -71,9 +72,11 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       config = Meringue::Config.load(path: config_path)
       assert_equal "keep me", config.value("custom")
       assert_equal true, config.value("plugin", "future", "enabled")
-      assert_equal "anthropic/claude-opus-5", config.value("harness", "pi", "model")
-      assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "head_model")
-      assert_nil config.value("harness", "pi", "worker_model")
+      assert_equal "anthropic/claude-opus-5", config.value("harness", "model")
+      assert_nil config.value("harness", "pi", "model")
+      assert_equal true, config.value("experiments", "split_agent_defaults")
+      assert_equal "openai/gpt-5.6-sol", config.value("harness", "head_model")
+      assert_nil config.value("harness", "worker_model")
     end
   end
 
@@ -94,9 +97,68 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       assert_equal "claude", config.value("harness", "provider")
       assert_nil config.value("harness", "head_provider")
       assert_nil config.value("harness", "worker_provider")
-      assert_equal "high", config.value("harness", "pi", "thinking_level")
-      assert_nil config.value("harness", "pi", "head_thinking_level")
-      assert_nil config.value("harness", "pi", "worker_thinking_level")
+      assert_equal "high", config.value("harness", "thinking_level")
+      assert_nil config.value("harness", "head_thinking_level")
+      assert_nil config.value("harness", "worker_thinking_level")
+    end
+  end
+
+  def test_shared_session_defaults_persist_for_heads_and_workers
+    with_paths do |config_path, _state_path|
+      Meringue::Config.save_agent_session_defaults!(
+        model: "openai/gpt-5.6-sol",
+        thinking_level: "high",
+        path: config_path
+      )
+
+      config = Meringue::Config.load(path: config_path)
+      registry = Meringue::Harness::Registry.new(config: config)
+      defaults = registry.session_defaults(provider: "pi")
+      assert_equal "openai/gpt-5.6-sol", config.value("harness", "model")
+      assert_equal "high", config.value("harness", "thinking_level")
+      assert_equal "openai/gpt-5.6-sol", defaults.dig("roles", "head", "model")
+      assert_equal "openai/gpt-5.6-sol", defaults.dig("roles", "worker", "model")
+      assert_equal "high", defaults.dig("roles", "head", "thinking_level")
+      assert_equal "high", defaults.dig("roles", "worker", "thinking_level")
+      assert_equal "consistent", defaults.fetch("consistency")
+    end
+  end
+
+  def test_split_agent_defaults_persist_role_values_and_collapse_when_disabled
+    with_paths do |config_path, _state_path|
+      store = Meringue::Config::Store.new(path: config_path)
+      store.save(base_fingerprint: store.fingerprint, changes: { "experiments.split_agent_defaults" => true })
+      Meringue::Config.save_agent_session_defaults!(
+        model: "openai/head-model",
+        model_role: "head",
+        thinking_level: "low",
+        thinking_role: "head",
+        path: config_path
+      )
+      Meringue::Config.save_agent_session_defaults!(
+        model: "anthropic/worker-model",
+        model_role: "worker",
+        thinking_level: "max",
+        thinking_role: "worker",
+        path: config_path
+      )
+
+      config = Meringue::Config.load(path: config_path)
+      defaults = Meringue::Harness::Registry.new(config: config).session_defaults(provider: "pi")
+      assert_equal "openai/head-model", defaults.dig("roles", "head", "model")
+      assert_equal "anthropic/worker-model", defaults.dig("roles", "worker", "model")
+      assert_equal "low", defaults.dig("roles", "head", "thinking_level")
+      assert_equal "max", defaults.dig("roles", "worker", "thinking_level")
+      assert_equal "mixed", defaults.fetch("consistency")
+
+      store.save(base_fingerprint: store.fingerprint, changes: { "experiments.split_agent_defaults" => false })
+      config = Meringue::Config.load(path: config_path)
+      defaults = Meringue::Harness::Registry.new(config: config).session_defaults(provider: "pi")
+      assert_equal false, config.value("experiments", "split_agent_defaults")
+      assert_equal defaults.dig("roles", "head", "model"), defaults.dig("roles", "worker", "model")
+      assert_equal defaults.dig("roles", "head", "thinking_level"), defaults.dig("roles", "worker", "thinking_level")
+      assert_nil config.value("harness", "head_model")
+      assert_nil config.value("harness", "worker_model")
     end
   end
 
@@ -169,8 +231,8 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       transaction = store.save(
         base_fingerprint: store.fingerprint,
         changes: {
-          "agent.head_model" => "openai/gpt-5.6-sol",
-          "agent.worker_model" => "anthropic/claude-opus-5",
+          "agent.model" => "openai/gpt-5.6-sol",
+          "agent.thinking" => "high",
           "experiments.github_support" => true
         },
         onboarding_outcome: "completed",
@@ -181,8 +243,10 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       assert_equal "completed", transaction.fetch("onboarding_outcome")
       assert_equal Meringue::Config::ONBOARDING_VERSION, config.onboarding_version
       assert_equal "2026-08-16T12:00:00Z", config.value("onboarding", "completed_at")
+      assert_equal "openai/gpt-5.6-sol", config.setting("agent.model", env: {})
       assert_equal "openai/gpt-5.6-sol", config.setting("agent.head_model", env: {})
-      assert_equal "anthropic/claude-opus-5", config.setting("agent.worker_model", env: {})
+      assert_equal "openai/gpt-5.6-sol", config.setting("agent.worker_model", env: {})
+      assert_equal "high", config.setting("agent.thinking", env: {})
       assert_equal true, config.value("experiments", "github_support")
     end
   end

@@ -70,6 +70,18 @@ class TuiModelPickerTest < Minitest::Test
     assert_empty @submitted
   end
 
+  def test_shared_model_picker_hides_role_tabs_and_submits_unscoped_command
+    @state = state_with_catalog(split_agent_defaults: false)
+    picker = open_picker
+
+    assert_equal "models (pi)", @pane.popup_pane_title(picker)
+    refute_includes plain_line(@pane.popup_footer_line(picker)), "switch role"
+    send_key("\e[B")
+    send_key("\r")
+
+    assert_equal ["/model anthropic/claude-opus-5"], wait_for_submissions(1)
+  end
+
   def test_slash_model_with_arguments_keeps_its_setting_behavior
     command = "/model openai/gpt-5.6-mini"
     send_key("\r", input_buffer: command)
@@ -392,10 +404,11 @@ class TuiModelPickerTest < Minitest::Test
 
   private
 
-  def state_with_catalog(catalogs: nil, active_harness: "pi", default_model: "openai/gpt-5.6-sol")
+  def state_with_catalog(catalogs: nil, active_harness: "pi", default_model: "openai/gpt-5.6-sol", split_agent_defaults: true)
     empty_state.merge(
       "metadata" => {
         "active_harness" => active_harness,
+        "split_agent_defaults" => split_agent_defaults,
         "pi_session_defaults" => { "model" => default_model, "thinking_level" => "high" },
         "harness_model_catalogs" => catalogs || { "pi" => catalog_snapshot("pi") }
       }

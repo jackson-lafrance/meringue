@@ -567,7 +567,10 @@ module Meringue
         end
 
         def model_picker_role_tabs?(state)
-          !model_picker_theme?(state)
+          return false if model_picker_theme?(state)
+          return true unless %w[model thinking].include?(model_picker_kind(state))
+
+          Settings.split_agent_defaults?(state)
         end
 
         def model_picker_tabs(state)
@@ -580,8 +583,11 @@ module Meringue
         end
 
         def model_picker_entries(state)
+          role = if model_picker_role_tabs?(state) || model_picker_kind(state) == "harness"
+                   model_picker_role(state)
+                 end
           if model_picker_thinking?(state)
-            ModelPicker.thinking_entries(state, role: model_picker_role(state), query: model_picker_query(state))
+            ModelPicker.thinking_entries(state, role: role, query: model_picker_query(state))
           elsif model_picker_theme?(state)
             query = model_picker_query(state).downcase
             Style.colorschemes.filter_map.with_index do |theme, index|
@@ -614,7 +620,7 @@ module Meringue
               state,
               harness: model_picker_harness(state),
               query: model_picker_query(state),
-              role: model_picker_role(state)
+              role: role
             )
           end
         end

@@ -490,6 +490,48 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_includes workers.first.fetch("description"), "current default"
   end
 
+  def test_split_agent_defaults_gate_parser_and_autocomplete_forms
+    parser = Meringue::Input::SlashCommandParser.new
+    shared_state = { "_capabilities" => { "split_agent_defaults" => false } }
+    split_state = { "_capabilities" => { "split_agent_defaults" => true } }
+
+    assert_equal "InvalidSlashCommand", parser.parse("/model head openai/gpt-5", state: shared_state).to_h.fetch("type")
+    shared_model = parser.parse("/model openai/gpt-5", state: shared_state).to_h
+    assert_equal "SetDefaultSessionModel", shared_model.fetch("type")
+    assert_equal({ "model" => "openai/gpt-5" }, shared_model.fetch("payload"))
+    assert_equal "InvalidSlashCommand", parser.parse("/model openai/gpt-5", state: split_state).to_h.fetch("type")
+    split_model = parser.parse("/model head openai/gpt-5", state: split_state).to_h
+    assert_equal "SetDefaultSessionModel", split_model.fetch("type")
+    assert_equal({ "role" => "head", "model" => "openai/gpt-5" }, split_model.fetch("payload"))
+
+    shared_usages = Meringue::Input::SlashCommandParser.command_suggestions("/model", state: shared_state, limit: nil).map(&:first)
+    split_usages = Meringue::Input::SlashCommandParser.command_suggestions("/model", state: split_state, limit: nil).map(&:first)
+    assert_includes shared_usages, "/model <provider>/<model-id>"
+    refute_includes shared_usages, "/model <head|worker> <provider>/<model-id>"
+    assert_includes split_usages, "/model <head|worker> <provider>/<model-id>"
+    refute_includes split_usages, "/model <provider>/<model-id>"
+    assert_equal ["head"], suggestion_records("/model h", split_state).map { |record| record.fetch("usage") }
+    refute_includes suggestion_records("/model h", shared_state).map { |record| record.fetch("kind") }, "role_choice"
+  end
+
+  def test_split_agent_defaults_gate_thinking_parser_and_autocomplete_forms
+    parser = Meringue::Input::SlashCommandParser.new
+    shared_state = { "_capabilities" => { "split_agent_defaults" => false } }
+    split_state = { "_capabilities" => { "split_agent_defaults" => true } }
+
+    assert_equal "InvalidSlashCommand", parser.parse("/thinking worker high", state: shared_state).to_h.fetch("type")
+    assert_equal "InvalidSlashCommand", parser.parse("/thinking high", state: split_state).to_h.fetch("type")
+    assert_equal "SetDefaultSessionThinkingLevel", parser.parse("/thinking high", state: shared_state).to_h.fetch("type")
+    assert_equal "SetDefaultSessionThinkingLevel", parser.parse("/thinking worker high", state: split_state).to_h.fetch("type")
+
+    shared_usages = Meringue::Input::SlashCommandParser.command_suggestions("/thinking", state: shared_state, limit: nil).map(&:first)
+    split_usages = Meringue::Input::SlashCommandParser.command_suggestions("/thinking", state: split_state, limit: nil).map(&:first)
+    assert_includes shared_usages, "/thinking <level>"
+    assert_includes split_usages, "/thinking <head|worker> <level>"
+    assert_equal ["worker"], suggestion_records("/thinking w", split_state).map { |record| record.fetch("usage") }
+    refute_includes suggestion_records("/thinking w", shared_state).map { |record| record.fetch("kind") }, "role_choice"
+  end
+
   # The selector must offer every model the harness reports, not only the values
   # Meringue happened to observe on existing sessions.
   def test_model_suggestions_offer_the_whole_harness_catalog

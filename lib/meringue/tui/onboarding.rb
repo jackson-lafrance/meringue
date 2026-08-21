@@ -34,9 +34,11 @@ module Meringue
         Config::Schema.effective_values(config).slice(
           "appearance.theme",
           "agent.head_harness",
+          "agent.worker_harness",
+          "agent.model",
+          "agent.thinking",
           "agent.head_model",
           "agent.head_thinking",
-          "agent.worker_harness",
           "agent.worker_model",
           "agent.worker_thinking",
           *Experiments::Registry.ids.map { |id| "experiments.#{id}" }
@@ -66,8 +68,11 @@ module Meringue
         parts = ["#{harness} harness"]
         # Model and reasoning are only worth reporting for a backend that actually accepts them.
         if Harness::Registry.session_defaults_supported_for?(harness)
-          parts << selected.fetch("agent.#{role}_model")
-          parts << "reasoning #{selected.fetch("agent.#{role}_thinking")}"
+          split = selected.fetch("experiments.split_agent_defaults", false) == true
+          model = split ? selected.fetch("agent.#{role}_model") : selected.fetch("agent.model")
+          thinking = split ? selected.fetch("agent.#{role}_thinking") : selected.fetch("agent.thinking")
+          parts << model
+          parts << "reasoning #{thinking}"
         end
         parts.join(" · ")
       end
