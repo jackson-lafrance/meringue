@@ -502,6 +502,46 @@ class TuiLayoutTest < Minitest::Test
     end
   end
 
+  def test_focused_claude_styled_output_keeps_a_stable_viewport_at_representative_sizes
+    state = composed_state(
+      empty_state.merge("agents" => [agent_record("P1-I1-W1", "harness" => "claude")]),
+      workspace: {
+        "active" => true,
+        "embedded" => true,
+        "interactive" => true,
+        "agent_id" => "P1-I1-W1",
+        "view" => "agent",
+        "leader_label" => "Ctrl-Space",
+        "leader_commands" => [
+          { "action" => "workspace_switch_view", "key" => "T", "label" => "switch view" },
+          { "action" => "workspace_close", "key" => "Q", "label" => "return" }
+        ],
+        "agent_session" => {
+          "lines" => ["Claude is streaming", "❯ "],
+          "styled_lines" => [
+            [["Claude", "\e[1;33m"], [" is streaming", nil]],
+            [["❯", "\e[1;36m"], [" ", nil]]
+          ],
+          "cursor" => [1, 2],
+          "revision" => 1,
+          "status" => "streaming"
+        }
+      }
+    )
+
+    [[64, 18], [100, 32], [160, 40]].each do |width, height|
+      frame = @layout.render(state, width: width, height: height, color: true)
+      visible_lines = frame.split("\n", -1).map do |line|
+        line.gsub(Meringue::TUI::Terminal::ANSI_CSI_SEQUENCE, "")
+      end
+
+      assert_equal height, visible_lines.length, "row count at #{width}x#{height}"
+      assert_equal [width], visible_lines.map(&:length).uniq, "visible width at #{width}x#{height}"
+      assert_includes visible_lines.join("\n"), "Claude is streaming"
+      assert_includes frame, "▏", "cursor should remain visible at #{width}x#{height}"
+    end
+  end
+
   def test_focused_workspace_uses_open_session_to_avoid_colliding_with_settings_inspection
     advertised = Meringue::TUI::WorkspaceCommands::COMMAND_SPECS.map(&:first)
 
