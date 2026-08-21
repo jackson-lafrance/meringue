@@ -164,7 +164,10 @@ module Meringue
           # First-run setup saves its Settings draft through the kernel, so it is
           # only offered when there is a kernel behind the UI. `meringue demo`
           # has none and must never open it.
-          onboarding_enabled: enable_agents
+          onboarding_enabled: enable_agents,
+          # A registry-backed check lets the TUI force setup open and gate chat
+          # when no role harness is configured yet, instead of exiting at startup.
+          harness_configured_check: -> { registry.provider_configured?("worker") || registry.provider_configured?("head") }
         ),
         prompt_handler: prompt_loop,
         reconciler: engine ? -> { engine.reconcile_sessions } : nil
@@ -258,16 +261,21 @@ module Meringue
     end
 
     def tui_engine(store, registry, config: nil, config_path: Config::DEFAULT_PATH)
+      # The engine may be built before any harness is chosen. Pass nil clients
+      # and defaults then; the provider lambdas resolve a real backend lazily
+      # once setup persists a harness and reconciliation reads it from state.
+      worker_configured = registry.provider_configured?("worker")
+      head_configured = registry.provider_configured?("head")
       Kernel::Engine.new(
         store: store,
-        harness_client: registry.worker_client,
-        head_runner: registry.head_runner(cwd: Dir.pwd),
+        harness_client: worker_configured ? registry.worker_client : nil,
+        head_runner: head_configured ? registry.head_runner(cwd: Dir.pwd) : nil,
         harness_client_resolver: ->(agent) { registry.client_for_agent(agent) },
         harness_client_provider: ->(provider) { registry.worker_client_for(provider: provider) },
         head_runner_provider: ->(provider) { registry.head_runner_for(provider: provider, cwd: Dir.pwd) },
-        default_harness_provider: registry.worker_provider,
-        default_head_harness_provider: registry.head_provider,
-        default_worker_harness_provider: registry.worker_provider,
+        default_harness_provider: worker_configured ? registry.worker_provider : nil,
+        default_head_harness_provider: head_configured ? registry.head_provider : nil,
+        default_worker_harness_provider: worker_configured ? registry.worker_provider : nil,
         session_defaults_provider: ->(provider) { registry.session_defaults(provider: provider) },
         session_defaults_updater: lambda do |provider, model: nil, model_role: nil, thinking_level: nil, thinking_role: nil|
           registry.update_session_defaults!(
