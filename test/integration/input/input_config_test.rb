@@ -236,13 +236,13 @@ class InputConfigTest < Minitest::Test
         path: path
       )
 
-      assert_equal "openai/gpt-5.6-sol", saved.value("harness", "pi", "model")
-      assert_equal "xhigh", saved.value("harness", "pi", "thinking_level")
+      assert_equal "openai/gpt-5.6-sol", saved.value("harness", "model")
+      assert_equal "xhigh", saved.value("harness", "thinking_level")
       assert_equal ["--model", "anthropic/claude-opus-5"], saved.value("harness", "pi", "head_extra_args")
       assert_equal "gruvbox", saved.value("tui", "colorscheme")
       reloaded = Meringue::Config.load(path: path)
-      assert_equal "openai/gpt-5.6-sol", reloaded.value("harness", "pi", "model")
-      assert_equal "xhigh", reloaded.value("harness", "pi", "thinking_level")
+      assert_equal "openai/gpt-5.6-sol", reloaded.value("harness", "model")
+      assert_equal "xhigh", reloaded.value("harness", "thinking_level")
     end
   end
 
@@ -250,17 +250,19 @@ class InputConfigTest < Minitest::Test
     Dir.mktmpdir("meringue-config-test") do |dir|
       path = File.join(dir, "config.toml")
       Meringue::Config.save_agent_session_defaults!(thinking_level: "medium", path: path)
+      enable_split_defaults(path)
       Meringue::Config.save_agent_session_defaults!(thinking_level: "low", thinking_role: "head", path: path)
       split = Meringue::Config.save_agent_session_defaults!(thinking_level: "xhigh", thinking_role: "worker", path: path)
 
-      assert_equal "medium", split.value("harness", "pi", "thinking_level")
-      assert_equal "low", split.value("harness", "pi", "head_thinking_level")
-      assert_equal "xhigh", split.value("harness", "pi", "worker_thinking_level")
+      assert_equal "medium", split.value("harness", "thinking_level")
+      assert_equal "low", split.value("harness", "head_thinking_level")
+      assert_equal "xhigh", split.value("harness", "worker_thinking_level")
 
+      disable_split_defaults(path)
       shared = Meringue::Config.save_agent_session_defaults!(thinking_level: "high", path: path)
-      assert_equal "high", shared.value("harness", "pi", "thinking_level")
-      assert_nil shared.value("harness", "pi", "head_thinking_level")
-      assert_nil shared.value("harness", "pi", "worker_thinking_level")
+      assert_equal "high", shared.value("harness", "thinking_level")
+      assert_nil shared.value("harness", "head_thinking_level")
+      assert_nil shared.value("harness", "worker_thinking_level")
     end
   end
 
@@ -268,17 +270,19 @@ class InputConfigTest < Minitest::Test
     Dir.mktmpdir("meringue-config-test") do |dir|
       path = File.join(dir, "config.toml")
       Meringue::Config.save_agent_session_defaults!(model: "anthropic/claude-opus-5", path: path)
+      enable_split_defaults(path)
       Meringue::Config.save_agent_session_defaults!(model: "openai/gpt-5.6-sol", model_role: "head", path: path)
       split = Meringue::Config.save_agent_session_defaults!(model: "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", model_role: "worker", path: path)
 
-      assert_equal "anthropic/claude-opus-5", split.value("harness", "pi", "model")
-      assert_equal "openai/gpt-5.6-sol", split.value("harness", "pi", "head_model")
-      assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", split.value("harness", "pi", "worker_model")
+      assert_equal "anthropic/claude-opus-5", split.value("harness", "model")
+      assert_equal "openai/gpt-5.6-sol", split.value("harness", "head_model")
+      assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", split.value("harness", "worker_model")
 
+      disable_split_defaults(path)
       shared = Meringue::Config.save_agent_session_defaults!(model: "openai/gpt-5.6-sol", path: path)
-      assert_equal "openai/gpt-5.6-sol", shared.value("harness", "pi", "model")
-      assert_nil shared.value("harness", "pi", "head_model")
-      assert_nil shared.value("harness", "pi", "worker_model")
+      assert_equal "openai/gpt-5.6-sol", shared.value("harness", "model")
+      assert_nil shared.value("harness", "head_model")
+      assert_nil shared.value("harness", "worker_model")
     end
   end
 
@@ -318,8 +322,8 @@ class InputConfigTest < Minitest::Test
 
       saved = Meringue::Config.save_agent_session_defaults!(thinking_level: "xhigh", path: path)
 
-      assert_equal "openai/gpt-5.6-sol", saved.value("harness", "pi", "model")
-      assert_equal "xhigh", saved.value("harness", "pi", "thinking_level")
+      assert_equal "openai/gpt-5.6-sol", saved.value("harness", "model")
+      assert_equal "xhigh", saved.value("harness", "thinking_level")
     end
   end
 
@@ -335,6 +339,16 @@ class InputConfigTest < Minitest::Test
     assert_equal "cancel", config.conflict_predecessor_failure
     assert_equal [], config.value("commands", "worker_blacklist")
     assert_includes Meringue::TUI::Style.colorschemes, config.value("tui", "colorscheme")
+  end
+
+  def enable_split_defaults(path)
+    store = Meringue::Config::Store.new(path: path)
+    store.save(base_fingerprint: store.fingerprint, changes: { "experiments.split_agent_defaults" => true })
+  end
+
+  def disable_split_defaults(path)
+    store = Meringue::Config::Store.new(path: path)
+    store.save(base_fingerprint: store.fingerprint, changes: { "experiments.split_agent_defaults" => false })
   end
 
   def test_round_trip_write_and_read_preserves_scalar_types

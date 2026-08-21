@@ -40,10 +40,10 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     open_setup
 
     {
-      [100, 32] => ["Setup", "Welcome to Meringue", "Step 1 of 5", "Navigate: Enter Next", "[ Begin Setup ]", "[ Next ]", "[ Back ]"],
-      [79, 24] => ["Setup", "Welcome to Meringue", "Step 1 of 5", "Navigate: Enter Next", "[ Begin Setup ]"],
-      [46, 18] => ["Setup", "Welcome to Meringue", "Step 1 of 5", "Navigate: Enter Next"],
-      [32, 10] => ["Setup", "Welcome", "Step 1 of 5", "Navigate"],
+      [100, 32] => ["Setup", "Welcome to Meringue", "Step 1 of 4", "Navigate: Enter or Arrow keys toggle", "[ Begin Setup ]", "[ Next ]", "[ Back ]"],
+      [79, 24] => ["Setup", "Welcome to Meringue", "Step 1 of 4", "Navigate: Enter or Arrow keys toggle", "[ Begin Setup ]"],
+      [46, 18] => ["Setup", "Welcome to Meringue", "Step 1 of 4", "Navigate: Enter or Arrow keys toggle"],
+      [32, 10] => ["Setup", "Welcome", "Step 1 of 4", "Navigate"],
       [31, 9] => ["Terminal too small for Setup", "Esc cancel"]
     }.each do |(width, height), expected|
       frame = render(width: width, height: height)
@@ -60,9 +60,9 @@ class TuiSetupOverlayScreenTest < Minitest::Test
   def test_wide_step_indicator_has_no_duplicate_listing_and_experiments_is_final
     open_setup
     frame = render
-    assert_includes frame, "Step 1 of 5"
+    assert_includes frame, "Step 1 of 4"
     assert_includes frame, "Welcome to Meringue"
-    refute_includes frame, "Step 1 of 5 · Welcome"
+    refute_includes frame, "Step 1 of 4 · Welcome"
     refute_includes frame, "1●"
     refute_includes frame, "Review"
     refute_includes frame, "Continue"
@@ -110,8 +110,10 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     footer_y = geometry.fetch(:footer_y)
     actions = @layout.send(:settings_pane).action_segments(snap)
     action_width = actions.sum { |text, _style| text.length }
-    send_mouse("x" => WIDTH - action_width, "y" => footer_y)
-    assert_equal "Head defaults", snapshot.fetch("category")
+    action_start = card.fetch(:x) + card.fetch(:width) - action_width - 2
+    next_start = action_start + actions.first.fetch(0).length + 1
+    send_mouse("x" => next_start + 1, "y" => geometry.fetch(:action_y))
+    assert_equal "Agent defaults", snapshot.fetch("category")
     assert_empty drain_submitted
   end
 
@@ -127,7 +129,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     2.times { send_key("\e[B") } # focus the navigation footer
     assert snapshot.fetch("footer_focus")
     send_key(ENTER)
-    assert_equal "Head defaults", snapshot.fetch("category")
+    assert_equal "Agent defaults", snapshot.fetch("category")
     assert_empty drain_submitted
   end
 
@@ -137,7 +139,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     assert_equal "Welcome", snapshot.fetch("category")
     send_key(ENTER)
     send_key(TAB)
-    assert_equal "Head defaults", snapshot.fetch("category")
+    assert_equal "Agent defaults", snapshot.fetch("category")
     send_key(BACKSPACE)
     assert_equal "Theme", snapshot.fetch("category")
     send_key(DELETE)
@@ -159,10 +161,97 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     assert_equal true, snapshot.fetch("rows").fetch(snapshot.fetch("row_index")).fetch("value")
 
     send_key(TAB)
-    send_key(DOWN) # Head model
+    2.times { send_key(DOWN) } # shared model
     send_key(ENTER)
-    assert_equal "agent.head_model", snapshot.fetch("picker").fetch("id")
-    assert_includes render, "Choose Head model"
+    assert_equal "agent.model", snapshot.fetch("picker").fetch("id")
+    assert_includes render, "Choose Model"
+  end
+
+  def test_setup_model_picker_follows_the_selected_worker_harness
+    @state["metadata"] = {
+      "active_harness" => "pi",
+      "harness_model_catalogs" => {
+        "pi" => Meringue::Harness::ModelCatalog.available(
+          harness: "pi",
+          models: [{ "provider" => "openai", "id" => "gpt-5.6-sol" }]
+        ).to_h,
+        "claude" => Meringue::Harness::ModelCatalog.available(
+          harness: "claude",
+          models: [{ "provider" => "anthropic", "id" => "claude-sonnet-9" }]
+        ).to_h
+      }
+    }
+    open_setup
+    @app.instance_variable_get(:@settings_draft).set("agent.worker_harness", "claude")
+    @app.send(:focus_setup_setting, "agent.model")
+    send_key(ENTER)
+
+    picker = snapshot.fetch("picker")
+    assert_equal "agent.model", picker.fetch("id")
+    assert_equal ["anthropic/claude-opus-5", "anthropic/claude-sonnet-9"], picker.fetch("options").map { |option| option.fetch("reference") }
+    refute_includes picker.fetch("options").map { |option| option.fetch("reference") }, "openai/gpt-5.6-sol"
+  end
+
+  def test_setup_picker_filters_with_typing_backspace_and_escape
+    @state["metadata"] = {
+      "active_harness" => "pi",
+      "harness_model_catalogs" => {
+        "pi" => Meringue::Harness::ModelCatalog.available(
+          harness: "pi",
+          models: [
+            { "provider" => "openai", "id" => "gpt-5.6-sol", "name" => "GPT Sol" },
+            { "provider" => "anthropic", "id" => "claude-opus-5", "name" => "Claude Opus" }
+          ]
+        ).to_h
+      }
+    }
+    open_setup
+    send_key(ENTER) # Theme
+    send_key(TAB) # Agent defaults
+    2.times { send_key(DOWN) } # shared model
+    send_key(ENTER)
+
+    assert_equal "agent.model", snapshot.fetch("picker").fetch("id")
+    original_count = snapshot.fetch("picker").fetch("options").length
+    "opus".each_char { |character| send_key(character) }
+    picker = snapshot.fetch("picker")
+    assert_equal "opus", picker.fetch("query")
+    assert_operator picker.fetch("options").length, :<, original_count
+    assert picker.fetch("options").all? { |option| option.fetch("reference").downcase.include?("opus") }
+
+    send_key(BACKSPACE)
+    assert_equal "opu", snapshot.fetch("picker").fetch("query")
+    send_key(ESC)
+    assert_nil snapshot["picker"]
+    assert_equal "Agent defaults", snapshot.fetch("category")
+
+    send_key(DOWN)
+    send_key(ENTER)
+    assert_equal "agent.thinking", snapshot.fetch("picker").fetch("id")
+    "xhigh".each_char { |character| send_key(character) }
+    assert_equal ["xhigh"], snapshot.fetch("picker").fetch("options")
+    send_key(BACKSPACE)
+    refute_empty snapshot.fetch("picker").fetch("query")
+    send_key(ESC)
+    assert_nil snapshot["picker"]
+  end
+
+  def test_down_from_the_last_setup_option_focuses_buttons_and_arrows_switch_them
+    open_setup
+    send_key(ENTER) # Theme
+    send_key(TAB) # Agent defaults
+    rows = snapshot.fetch("rows")
+    (rows.length - 1).times { send_key(DOWN) }
+    send_key(DOWN)
+
+    assert snapshot.fetch("footer_focus")
+    assert_equal "next", snapshot.fetch("footer_button")
+    send_key(LEFT)
+    assert_equal "back", snapshot.fetch("footer_button")
+    send_key(RIGHT)
+    assert_equal "next", snapshot.fetch("footer_button")
+    send_key(ENTER)
+    assert_equal "Experiments", snapshot.fetch("category")
   end
 
   def test_setup_animation_and_ascii_fallbacks_are_restrained_and_accessible
@@ -173,7 +262,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
       frame = render
       refute_includes frame, "✦"
       refute_includes frame, "●"
-      assert_includes frame, "Step 1 of 5"
+      assert_includes frame, "Step 1 of 4"
     end
 
     @app.instance_variable_get(:@settings_draft).set("appearance.animations", false)

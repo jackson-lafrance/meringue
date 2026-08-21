@@ -11,6 +11,7 @@ module Meringue
         # composer, so they get a taller window than slash suggestions while
         # still sharing the same slot, border, and keys.
         MODEL_PICKER_VISIBLE_LIMIT = 10
+        QUESTION_PICKER_VISIBLE_LIMIT = 10
         HEAD_ICON = "◆"
         WORKER_ICON = "✦"
         RESULT_ICON = "✓"
@@ -470,8 +471,9 @@ module Meringue
           slash_suggestion_records(state).any?
         end
 
-        # The popup slot between the logs pane and the composer. Model, thinking,
-        # theme, harness, open-PR, and slash-command lists are all transient lists
+        # The popup slot between the logs pane and the composer. Question, model,
+        # thinking, theme, harness, open-PR, and slash-command lists are all
+        # transient lists
         # over the composer, so they share one geometry, one border, and one
         # keyboard shape instead of introducing another overlay mechanism. A picker
         # wins while it is up.
@@ -479,13 +481,16 @@ module Meringue
         # First-run setup is a full-screen Settings mode rather than a popup in
         # this composer slot.
         def popup?(state)
-          model_picker?(state) || delivery_pr_picker?(state) || slash_suggestions?(state)
+          question_picker?(state) || model_picker?(state) || delivery_pr_picker?(state) || slash_suggestions?(state)
         end
 
         # How many entry rows the popup shows at once, and therefore how tall the
         # layout should let the box grow.
         def popup_visible_limit(state)
-          model_picker?(state) ? MODEL_PICKER_VISIBLE_LIMIT : VISIBLE_SUGGESTION_LIMIT
+          return QUESTION_PICKER_VISIBLE_LIMIT if question_picker?(state)
+          return MODEL_PICKER_VISIBLE_LIMIT if model_picker?(state)
+
+          VISIBLE_SUGGESTION_LIMIT
         end
 
         def popup_max_box_height(state)
@@ -493,6 +498,8 @@ module Meringue
         end
 
         def popup_pane_title(state)
+          return "open questions" if question_picker?(state)
+
           if model_picker?(state)
             label = if model_picker_thinking?(state)
                       "thinking"
@@ -515,6 +522,7 @@ module Meringue
         # 27 commands" inside the border reads like a 16th command and costs the
         # list a visible row. The layout draws #popup_footer_line under the box.
         def popup_lines(state)
+          return question_picker_lines(state) if question_picker?(state)
           return model_picker_lines(state) if model_picker?(state)
 
           delivery_pr_picker?(state) ? delivery_pr_picker_lines(state) : slash_suggestion_lines(state)
@@ -524,9 +532,73 @@ module Meringue
         # the full list, and the keys that move it. Empty when there is nothing to
         # say, in which case the layout reserves no row for it.
         def popup_footer_line(state)
+          return question_picker_footer_line(state) if question_picker?(state)
           return model_picker_footer_line(state) if model_picker?(state)
 
           delivery_pr_picker?(state) ? delivery_pr_picker_footer_line(state) : slash_suggestion_footer_line(state)
+        end
+
+        def question_picker?(state)
+          question_picker_state(state).fetch("active", false) == true
+        end
+
+        def question_picker_state(state)
+          value = chat_state(state).fetch("question_picker", nil)
+          value.is_a?(Hash) ? value : {}
+        end
+
+        def question_picker_entries(state)
+          QuestionPicker.entries(state)
+        end
+
+        def question_picker_index(state)
+          entries = question_picker_entries(state)
+          return NO_SLASH_SELECTION if entries.empty?
+
+          question_picker_state(state).fetch("index", 0).to_i.clamp(0, entries.length - 1)
+        end
+
+        def question_picker_window_start(state)
+          slash_suggestion_window_start(
+            question_picker_entries(state).length,
+            question_picker_index(state),
+            limit: QUESTION_PICKER_VISIBLE_LIMIT
+          )
+        end
+
+        def question_picker_lines(state)
+          entries = question_picker_entries(state)
+          return [[["No open questions.", Style::MUTED]]] if entries.empty?
+
+          selected_index = question_picker_index(state)
+          window_start = question_picker_window_start(state)
+          entries.drop(window_start).first(QUESTION_PICKER_VISIBLE_LIMIT).map.with_index do |entry, offset|
+            question_picker_line(entry, selected: window_start + offset == selected_index)
+          end
+        end
+
+        def question_picker_line(entry, selected:)
+          marker = selected ? "›" : " "
+          style = selected ? Style::ACCENT_BOLD : Style::TEXT
+          [
+            ["#{marker} ", selected ? Style::ACCENT_BOLD : Style::DIM],
+            ["#{entry.fetch("display_number")}. ", style],
+            [entry.fetch("id"), selected ? Style::ACCENT_BOLD : Style::MUTED],
+            ["  #{entry.fetch("question", "")}", style]
+          ]
+        end
+
+        def question_picker_footer_line(state)
+          total = question_picker_entries(state).length
+          return [["Esc closes", Style::DIM]] if total.zero?
+
+          count = if total > QUESTION_PICKER_VISIBLE_LIMIT
+                    window_start = question_picker_window_start(state)
+                    "#{window_start + 1}–#{[window_start + QUESTION_PICKER_VISIBLE_LIMIT, total].min} of #{total} open questions"
+                  else
+                    "#{total} open question#{total == 1 ? "" : "s"}"
+                  end
+          [[count, Style::MUTED], ["  ·  ↑↓ move · Enter inserts /answer · Esc closes", Style::DIM]]
         end
 
         # The `/models` picker: one searchable list of the models the harness
@@ -567,7 +639,10 @@ module Meringue
         end
 
         def model_picker_role_tabs?(state)
-          !model_picker_theme?(state)
+          return false if model_picker_theme?(state)
+          return true unless %w[model thinking].include?(model_picker_kind(state))
+
+          Settings.split_agent_defaults?(state)
         end
 
         def model_picker_tabs(state)
@@ -580,8 +655,11 @@ module Meringue
         end
 
         def model_picker_entries(state)
+          role = if model_picker_role_tabs?(state) || model_picker_kind(state) == "harness"
+                   model_picker_role(state)
+                 end
           if model_picker_thinking?(state)
-            ModelPicker.thinking_entries(state, role: model_picker_role(state), query: model_picker_query(state))
+            ModelPicker.thinking_entries(state, role: role, query: model_picker_query(state))
           elsif model_picker_theme?(state)
             query = model_picker_query(state).downcase
             Style.colorschemes.filter_map.with_index do |theme, index|
@@ -614,7 +692,7 @@ module Meringue
               state,
               harness: model_picker_harness(state),
               query: model_picker_query(state),
-              role: model_picker_role(state)
+              role: role
             )
           end
         end

@@ -217,6 +217,19 @@ class InputSlashCommandParserTest < Minitest::Test
     )
   end
 
+  def test_bare_theme_aliases_are_local_picker_commands_outside_the_tui
+    ["/theme", "/themes"].each do |input|
+      parsed = parse_slash(input)
+
+      assert_equal "InvalidSlashCommand", parsed.fetch("type"), "expected #{input.inspect} to stay TUI-local"
+      assert_includes parsed.fetch("payload").fetch("message"), "theme picker"
+    end
+
+    invalid = parse_slash("/themes catppuccin")
+    assert_equal "InvalidSlashCommand", invalid.fetch("type")
+    assert_equal "Usage: /themes", invalid.fetch("payload").fetch("message")
+  end
+
   def test_missing_arguments_for_strict_commands_return_invalid_slash_command
     ["/theme", "/theme a b", "/harness", "/model a b",
      "/thinking", "/thinking high extra", "/thinking reviewer high", "/thinking head high extra",
@@ -325,7 +338,7 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   def test_local_tui_commands_are_reported_as_not_kernel_commands
-    %w[/quit /jump /prs /keybind /config /setup /open-session].each do |input|
+    %w[/quit /jump /prs /keybind /config /setup /open-session /theme /themes].each do |input|
       parsed = parse_slash(input)
       assert_equal "InvalidSlashCommand", parsed.fetch("type")
       assert_match(/local TUI command/, parsed.fetch("payload").fetch("message"))
@@ -419,6 +432,16 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_includes help_entry.fetch(1), "TUI local"
   end
 
+  def test_questions_is_discovered_as_a_picker_in_parser_and_kernel_help
+    parser_entry = Meringue::Input::SlashCommandParser::COMMAND_SPECS.find { |usage, _description| usage == "/questions" }
+    help_entry = Meringue::Kernel::Engine::HELP_COMMANDS.find { |usage, _description| usage == "/questions" }
+
+    refute_nil parser_entry
+    assert_includes parser_entry.fetch(1), "picker"
+    refute_nil help_entry
+    assert_includes help_entry.fetch(1), "picker"
+  end
+
   def test_answer_and_dismiss_suggestions_only_offer_open_questions
     records = Meringue::Input::SlashCommandParser.command_suggestion_records(
       "/answer ",
@@ -488,6 +511,48 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_includes heads.first.fetch("description"), "current default"
     assert_equal "/model worker anthropic-flex/claude-opus-5", workers.first.fetch("completion")
     assert_includes workers.first.fetch("description"), "current default"
+  end
+
+  def test_split_agent_defaults_gate_parser_and_autocomplete_forms
+    parser = Meringue::Input::SlashCommandParser.new
+    shared_state = { "_capabilities" => { "split_agent_defaults" => false } }
+    split_state = { "_capabilities" => { "split_agent_defaults" => true } }
+
+    assert_equal "InvalidSlashCommand", parser.parse("/model head openai/gpt-5", state: shared_state).to_h.fetch("type")
+    shared_model = parser.parse("/model openai/gpt-5", state: shared_state).to_h
+    assert_equal "SetDefaultSessionModel", shared_model.fetch("type")
+    assert_equal({ "model" => "openai/gpt-5" }, shared_model.fetch("payload"))
+    assert_equal "InvalidSlashCommand", parser.parse("/model openai/gpt-5", state: split_state).to_h.fetch("type")
+    split_model = parser.parse("/model head openai/gpt-5", state: split_state).to_h
+    assert_equal "SetDefaultSessionModel", split_model.fetch("type")
+    assert_equal({ "role" => "head", "model" => "openai/gpt-5" }, split_model.fetch("payload"))
+
+    shared_usages = Meringue::Input::SlashCommandParser.command_suggestions("/model", state: shared_state, limit: nil).map(&:first)
+    split_usages = Meringue::Input::SlashCommandParser.command_suggestions("/model", state: split_state, limit: nil).map(&:first)
+    assert_includes shared_usages, "/model <provider>/<model-id>"
+    refute_includes shared_usages, "/model <head|worker> <provider>/<model-id>"
+    assert_includes split_usages, "/model <head|worker> <provider>/<model-id>"
+    refute_includes split_usages, "/model <provider>/<model-id>"
+    assert_equal ["head"], suggestion_records("/model h", split_state).map { |record| record.fetch("usage") }
+    refute_includes suggestion_records("/model h", shared_state).map { |record| record.fetch("kind") }, "role_choice"
+  end
+
+  def test_split_agent_defaults_gate_thinking_parser_and_autocomplete_forms
+    parser = Meringue::Input::SlashCommandParser.new
+    shared_state = { "_capabilities" => { "split_agent_defaults" => false } }
+    split_state = { "_capabilities" => { "split_agent_defaults" => true } }
+
+    assert_equal "InvalidSlashCommand", parser.parse("/thinking worker high", state: shared_state).to_h.fetch("type")
+    assert_equal "InvalidSlashCommand", parser.parse("/thinking high", state: split_state).to_h.fetch("type")
+    assert_equal "SetDefaultSessionThinkingLevel", parser.parse("/thinking high", state: shared_state).to_h.fetch("type")
+    assert_equal "SetDefaultSessionThinkingLevel", parser.parse("/thinking worker high", state: split_state).to_h.fetch("type")
+
+    shared_usages = Meringue::Input::SlashCommandParser.command_suggestions("/thinking", state: shared_state, limit: nil).map(&:first)
+    split_usages = Meringue::Input::SlashCommandParser.command_suggestions("/thinking", state: split_state, limit: nil).map(&:first)
+    assert_includes shared_usages, "/thinking <level>"
+    assert_includes split_usages, "/thinking <head|worker> <level>"
+    assert_equal ["worker"], suggestion_records("/thinking w", split_state).map { |record| record.fetch("usage") }
+    refute_includes suggestion_records("/thinking w", shared_state).map { |record| record.fetch("kind") }, "role_choice"
   end
 
   # The selector must offer every model the harness reports, not only the values

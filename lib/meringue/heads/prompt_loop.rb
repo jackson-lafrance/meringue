@@ -46,10 +46,18 @@ module Meringue
       end
 
       def route_submission(text, selected_target: nil, submission_id: nil, &on_event)
+        split_defaults = if engine.respond_to?(:config)
+                           engine.config.experiment_enabled?("split_agent_defaults")
+                         end
+        parser_state = if split_defaults.nil?
+                         nil
+                       else
+                         { "_capabilities" => { "split_agent_defaults" => split_defaults } }
+                       end
         route = if selected_target
-                  router.route(text, selected_target: selected_target)
+                  router.route(text, selected_target: selected_target, state: parser_state)
                 else
-                  router.route(text)
+                  router.route(text, state: parser_state)
                 end
         route = correlate_submission(route, submission_id)
         return handle_slash_command(route, on_event: on_event) if route.fetch("kind", nil) == "slash_command"

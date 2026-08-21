@@ -91,8 +91,8 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert_equal "[settings]\nschema_version = 1\n", File.read(@config_path)
     assert_empty submitted
 
-    send_key(TAB) # Head defaults
-    assert_equal "Head defaults", setup_snapshot.fetch("category")
+    send_key(TAB) # Agent defaults
+    assert_equal "Agent defaults", setup_snapshot.fetch("category")
     send_key(ENTER) # head harness opens its picker
     send_key(DOWN)
     send_key(ENTER)
@@ -100,7 +100,6 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert_includes Meringue::Harness::Registry.supported_provider_names, head_harness
     assert_nil @app.instance_variable_get(:@settings_draft).value("agent.worker_harness")
 
-    send_key(TAB) # Worker defaults
     send_key(TAB) # Experiments
     assert_equal "Experiments", setup_snapshot.fetch("category")
     assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, setup_rows.map { |row| row.fetch("id") }
@@ -179,7 +178,7 @@ class TuiTransactionalSetupTest < Minitest::Test
     send_key(ENTER)
     command = wait_for_command
     assert_equal "skipped", command.payload.fetch("onboarding_outcome")
-    assert_equal({ "experiments.github_support" => false }, command.payload.fetch("changes"))
+    assert_equal({ "experiments.github_support" => false, "experiments.split_agent_defaults" => false }, command.payload.fetch("changes"))
     refute command.payload.fetch("changes").key?("appearance.theme")
   end
 

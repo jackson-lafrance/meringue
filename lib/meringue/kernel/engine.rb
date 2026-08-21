@@ -240,7 +240,8 @@ module Meringue
 
       HELP_COMMANDS = [
         ["/help", "Show slash command help."],
-        ["/theme <name>", "Set and persist the TUI theme. Available: catppuccin, gruvbox, kanagawa, meringue, rose-pine, tokyonight."],
+        ["/theme [name]", "Open the theme picker, or set and persist a named TUI theme. Available: catppuccin, gruvbox, kanagawa, meringue, rose-pine, tokyonight."],
+        ["/themes", "TUI local: open the interactive theme picker."],
         ["/project add <path> [name]", "Register a project directory."],
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
@@ -267,12 +268,12 @@ module Meringue
         ["/jump [agent_id]", "TUI local: open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/prs", "TUI local: open the picker for every tracked pull request that is still open."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
-        ["/setup", "TUI local: reopen Setup for theme, separate head/worker defaults, and experiments."],
+        ["/setup", "TUI local: reopen Setup for theme, shared model/thinking defaults, and Meringue Xtras."],
         ["/keybind", "TUI local: show all keybindings."],
         ["/config", "TUI local: open full-screen Settings; /config --text prints diagnostics."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
-        ["/questions", "List questions and their statuses."],
+        ["/questions", "Open the picker for existing open questions."],
         ["/answer <question_id> \"<answer>\"", "Answer an open question; the kernel records the answer and routes the work it unblocks."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
         ["/prune", "Remove resolved and errored records plus their safely cleanable managed worktrees."],
@@ -3234,6 +3235,21 @@ module Meringue
           )
         end
         role = nil if role.empty?
+        if split_agent_defaults_enabled? && role.nil?
+          return rejected_result(
+            command_id,
+            command_type,
+            "Default model was not changed: split head and worker defaults require a head or worker role.",
+            ["role is required when split head and worker defaults are enabled"]
+          )
+        elsif !split_agent_defaults_enabled? && role
+          return rejected_result(
+            command_id,
+            command_type,
+            "Default model was not changed: split head and worker defaults are disabled; omit the role to set the shared default.",
+            ["role-specific defaults are disabled"]
+          )
+        end
         model_reference = value_at(payload, "model", "model_reference", "Model", "ModelReference")
         reason = Meringue::Harness::ModelReference.rejection_reason(model_reference)
         if reason
@@ -3267,6 +3283,21 @@ module Meringue
           )
         end
         role = nil if role.empty?
+        if split_agent_defaults_enabled? && role.nil?
+          return rejected_result(
+            command_id,
+            command_type,
+            "Default reasoning level was not changed: split head and worker defaults require a head or worker role.",
+            ["role is required when split head and worker defaults are enabled"]
+          )
+        elsif !split_agent_defaults_enabled? && role
+          return rejected_result(
+            command_id,
+            command_type,
+            "Default reasoning level was not changed: split head and worker defaults are disabled; omit the role to set the shared default.",
+            ["role-specific defaults are disabled"]
+          )
+        end
         level = requested.to_s.strip.downcase
         unless Meringue::Harness::PiClient::THINKING_LEVELS.include?(level)
           return rejected_result(
@@ -3384,9 +3415,20 @@ module Meringue
       # The harness whose defaults `/model` and `/thinking` are talking about. Workers are what a
       # user is normally changing, so the worker harness is the one reported.
       def default_session_harness
-        Meringue::Harness::Registry.new(config: Config.load(path: config_path)).worker_provider
+        configured = Meringue::Harness::Registry.new(config: Config.load(path: config_path)).worker_provider
+        return configured unless configured.to_s.empty?
+
+        default = @default_worker_harness_provider
+        Meringue::Harness::Registry::PROVIDERS.include?(default.to_s) ? default : nil
       rescue StandardError
-        nil
+        default = @default_worker_harness_provider
+        Meringue::Harness::Registry::PROVIDERS.include?(default.to_s) ? default : nil
+      end
+
+      def split_agent_defaults_enabled?
+        config.experiment_enabled?("split_agent_defaults")
+      rescue KeyError
+        false
       end
 
       def fallback_session_defaults
@@ -3773,6 +3815,7 @@ module Meringue
           metadata["active_harness_label"] = metadata.fetch("active_worker_harness_label")
           metadata["harness_generation"] = metadata.fetch("harness_generation", 0).to_i + 1
           metadata["agent_session_defaults"] = configured_session_defaults
+          metadata["split_agent_defaults"] = @config.experiment_enabled?("split_agent_defaults")
           metadata["settings_schema_version"] = Config::Schema::VERSION
           metadata["config_fingerprint"] = transaction.fetch("fingerprint")
 
@@ -3814,6 +3857,7 @@ module Meringue
             "fingerprint" => transaction.fetch("fingerprint"),
             "theme" => theme,
             "github_support" => github_support_enabled?(state.first),
+            "split_agent_defaults" => @config.experiment_enabled?("split_agent_defaults"),
             "saved_but_overridden" => overridden_settings,
             "onboarding_outcome" => transaction["onboarding_outcome"],
             "onboarding_version" => transaction["onboarding_version"]

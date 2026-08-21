@@ -16,11 +16,10 @@ module Meringue
       # and pane used by /config. Experiment ids are always derived from the
       # registry so setup cannot drift from the complete Settings surface.
       module SetupFlow
-        STEPS = ["Welcome", "Theme", "Head defaults", "Worker defaults", "Experiments"].freeze
+        STEPS = ["Welcome", "Theme", "Agent defaults", "Experiments"].freeze
         FIXED_SETTING_IDS = {
           "Theme" => %w[appearance.theme appearance.animations].freeze,
-          "Head defaults" => %w[agent.head_harness agent.head_model agent.head_thinking].freeze,
-          "Worker defaults" => %w[agent.worker_harness agent.worker_model agent.worker_thinking].freeze
+          "Agent defaults" => %w[agent.head_harness agent.worker_harness agent.model agent.thinking].freeze
         }.freeze
 
         module_function
@@ -29,15 +28,20 @@ module Meringue
           STEPS
         end
 
-        def setting_ids(step)
+        def setting_ids(step, split_agent_defaults: false)
           return Experiments::Registry.ids.map { |id| "experiments.#{id}" } if step.to_s == "Experiments"
+          if step.to_s == "Agent defaults" && split_agent_defaults == true
+            return %w[agent.head_harness agent.worker_harness agent.head_model agent.head_thinking agent.worker_model agent.worker_thinking]
+          end
 
           FIXED_SETTING_IDS.fetch(step.to_s, [])
         end
 
         def step_for_setting(id)
           candidate = id.to_s
-          steps.find { |step| setting_ids(step).include?(candidate) }
+          steps.find do |step|
+            setting_ids(step).include?(candidate) || setting_ids(step, split_agent_defaults: true).include?(candidate)
+          end
         end
 
         def experiment_defaults(draft, explicit_only: false)
@@ -78,7 +82,9 @@ module Meringue
 
         def definitions_for(category, include_advanced: true)
           definitions.select do |definition|
-            definition.category == category.to_s && (include_advanced || !definition.advanced)
+            definition.category == category.to_s &&
+              (include_advanced || !definition.advanced) &&
+              visible_for_default_scope?(definition.id)
           end
         end
 
@@ -218,6 +224,20 @@ module Meringue
 
         private
 
+        ROLE_DEFAULT_IDS = %w[
+          agent.head_model agent.head_thinking agent.worker_model agent.worker_thinking
+        ].freeze
+        SHARED_DEFAULT_IDS = %w[agent.model agent.thinking].freeze
+
+        def visible_for_default_scope?(id)
+          split = values.fetch("experiments.split_agent_defaults", config.experiment_enabled?("split_agent_defaults")) == true
+          return !SHARED_DEFAULT_IDS.include?(id.to_s) if split
+
+          !ROLE_DEFAULT_IDS.include?(id.to_s)
+        rescue KeyError
+          true
+        end
+
         def truthy?(value)
           value == true || value.to_s.strip.downcase == "true"
         end
@@ -283,6 +303,11 @@ module Meringue
       def github_enabled?(state)
         capabilities = (state || {}).fetch("_capabilities", {}) || {}
         capabilities.fetch("github_support", true) != false
+      end
+
+      def split_agent_defaults?(state)
+        capabilities = (state || {}).fetch("_capabilities", {}) || {}
+        capabilities.is_a?(Hash) && capabilities.fetch("split_agent_defaults", false) == true
       end
     end
   end
