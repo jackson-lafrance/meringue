@@ -17,7 +17,9 @@ module Meringue
       # deferred write is actually flushed to the state file.
       WORKSPACE_PERSIST_INTERVAL = 1.0
       MOUSE_SCROLL_STEP = 3
+      DRAG_AUTOSCROLL_STEP = 1
       PAGE_SCROLL_STEP = 8
+      CHAT_INPUT_HISTORY_LIMIT = 100
       DOUBLE_CLICK_INTERVAL_SECONDS = 0.5
       # A double-click has to land on the same row, but a one column wobble
       # between the two presses is normal on a trackpad and still counts.
@@ -131,6 +133,12 @@ module Meringue
         @messages = []
         @next_message_id = 0
         @pending_count = 0
+        # Sent dashboard prompts are browsed at the top/bottom edge of the
+        # composer. The draft is restored after moving forward past the newest
+        # history entry, matching ordinary shell/editor input behavior.
+        @chat_input_history = []
+        @chat_history_index = nil
+        @chat_history_draft = nil
         @agent_tree_navigation_active = false
         @quit_requested = false
         @agent_tree_navigation_mode = :agent
@@ -214,6 +222,8 @@ module Meringue
         @logs_cursor_active = false
         @logs_cursor_column = 0
         @selection_dragging = false
+        @logs_drag_autoscroll_direction = nil
+        @logs_drag_pointer = nil
         # Mouse selection granularity: "character" for a plain drag, "word"
         # after a double-click, and "paragraph" after a logs triple-click. The
         # matching anchor keeps a continued drag on the same granularity.
@@ -349,6 +359,8 @@ module Meringue
 
       def reset_failed_input_gesture
         @selection_dragging = false
+        @logs_drag_autoscroll_direction = nil
+        @logs_drag_pointer = nil
         @logs_worker_click_candidate = nil
         @last_worker_click = nil
         @last_text_click = nil
@@ -425,7 +437,10 @@ module Meringue
 
       def handle_chat_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state, legacy_slash_navigation: false)
         input_cursor = clamp_cursor(input_buffer, input_cursor)
-        return [input_buffer, input_cursor, slash_suggestion_index] unless key
+        unless key
+          continue_logs_drag_autoscroll(state)
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
 
         if @agent_workspace_active && !embedded_agent_workspace?
           return handle_agent_workspace_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
@@ -460,6 +475,7 @@ module Meringue
         return embedded_result if embedded_result
 
         if paste_key?(key)
+          reset_chat_history_navigation
           buffer, cursor = replace_chat_selection(input_buffer, input_cursor)
           return insert_pasted_text(buffer, cursor, paste_text(key)) + [NO_SLASH_SELECTION]
         end
@@ -468,15 +484,20 @@ module Meringue
         return mouse_result if mouse_result
 
         selection_command_result = handle_selection_command_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
-        return selection_command_result if selection_command_result
+        if selection_command_result
+          reset_chat_history_navigation if selection_command_result.first != input_buffer
+          return selection_command_result
+        end
 
         if plain_text_paste_key?(key)
+          reset_chat_history_navigation
           buffer, cursor = replace_chat_selection(input_buffer, input_cursor)
           return insert_pasted_text(buffer, cursor, key) + [NO_SLASH_SELECTION]
         end
 
         if legacy_slash_navigation && slash_suggestion_navigation_key?(key) && slash_suggestions_active?(input_buffer)
           buffer, index = handle_legacy_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
+          reset_chat_history_navigation if buffer != input_buffer
           return [buffer, buffer.chars.length, index]
         end
 
@@ -504,11 +525,12 @@ module Meringue
         logs_selection_result = handle_logs_selection_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return logs_selection_result if logs_selection_result
 
-        selection_movement_result = handle_selection_movement_key(key, input_buffer, input_cursor, slash_suggestion_index)
+        selection_movement_result = handle_selection_movement_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return selection_movement_result if selection_movement_result
 
         if slash_suggestion_navigation_key?(key) && slash_suggestions_active?(input_buffer)
           buffer, index = handle_slash_suggestion_navigation(key, input_buffer, slash_suggestion_index, state)
+          reset_chat_history_navigation if buffer != input_buffer
           return [buffer, buffer.chars.length, index]
         end
 
@@ -522,56 +544,77 @@ module Meringue
         return focused_action_result if focused_action_result
 
         if keybinding?("newline", key)
+          reset_chat_history_navigation
           return insert_text(input_buffer, input_cursor, "\n") + [NO_SLASH_SELECTION]
         end
 
         if keybinding?("submit", key)
           clear_selection
-          return [+"", 0, NO_SLASH_SELECTION] if local_navigation_command_without_id?(input_buffer) && handle_local_navigation_command(input_buffer, state)
+          if local_navigation_command_without_id?(input_buffer) && handle_local_navigation_command(input_buffer, state)
+            reset_chat_history_navigation
+            return [+"", 0, NO_SLASH_SELECTION]
+          end
 
           completion = safe_slash_completion(input_buffer, slash_suggestion_index, state)
-          return [completion, completion.chars.length, NO_SLASH_SELECTION] if completion
+          if completion
+            reset_chat_history_navigation
+            return [completion, completion.chars.length, NO_SLASH_SELECTION]
+          end
 
-          return [+"", 0, NO_SLASH_SELECTION] if handle_local_navigation_command(input_buffer, state)
+          if handle_local_navigation_command(input_buffer, state)
+            reset_chat_history_navigation
+            return [+"", 0, NO_SLASH_SELECTION]
+          end
 
-          submit_prompt(input_buffer, on_submit, state)
+          reset_chat_history_navigation
+          submit_prompt(input_buffer, on_submit, state, remember_input: true)
           return [+"", 0, NO_SLASH_SELECTION]
         end
 
         if ctrl_c_key?(key)
           clear_selection
+          reset_chat_history_navigation
           @chat_pastes.clear!
           return [+"", 0, NO_SLASH_SELECTION]
         end
 
         if selection_edit_key?(key) && chat_selection_range
+          reset_chat_history_navigation
           return delete_chat_selection(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
         end
 
         if keybinding?("delete_backward", key)
+          reset_chat_history_navigation
           return delete_backward(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
         end
 
         if keybinding?("delete_forward", key)
+          reset_chat_history_navigation
           return delete_forward(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
         end
 
         if keybinding?("delete_word_backward", key)
+          reset_chat_history_navigation
           return delete_backward_word(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
         end
 
         if keybinding?("delete_word_forward", key)
+          reset_chat_history_navigation
           return delete_forward_word(input_buffer, input_cursor) + [NO_SLASH_SELECTION]
         end
 
-        new_cursor = cursor_after_navigation(key, input_buffer, input_cursor)
+        new_cursor = cursor_after_navigation(key, input_buffer, input_cursor, state: state, visual_rows: true)
         if new_cursor != input_cursor
           clear_chat_selection
           return [input_buffer, new_cursor, slash_suggestion_index]
         end
 
+        history_result = handle_chat_history_navigation(key, input_buffer, input_cursor, slash_suggestion_index)
+        return history_result if history_result
+
         return [input_buffer, input_cursor, slash_suggestion_index] unless printable_key?(key)
 
+        reset_chat_history_navigation
         @focused_pane = "chat"
         # Typing dismisses a logs highlight and replaces a composer selection,
         # matching normal text-input behavior.
@@ -835,15 +878,28 @@ module Meringue
       end
 
       # Drag reports are clamped inside the pane the press started in, so a
-      # selection can never grow into the agent tree or the composer.
+      # selection can never grow into the agent tree or the composer. At a logs
+      # edge, the latest pointer position remains armed between mouse reports so
+      # refresh ticks keep scrolling and extending while the button stays held.
       def handle_mouse_drag_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         return [input_buffer, input_cursor, slash_suggestion_index] unless @selection_dragging
 
         @logs_worker_click_candidate = nil if @selection_pane == "logs"
         case @selection_pane
         when "logs"
-          position = logs_text_position(key, state)
-          extend_logs_selection(state, position) if position
+          @logs_drag_pointer = key
+          @logs_drag_autoscroll_direction = layout.logs_drag_scroll_direction(
+            state,
+            width: render_width,
+            height: render_height,
+            y: mouse_y(key)
+          )
+          if @logs_drag_autoscroll_direction
+            continue_logs_drag_autoscroll(state)
+          else
+            position = logs_text_position(key, state)
+            extend_logs_selection(state, position) if position
+          end
           [input_buffer, input_cursor, slash_suggestion_index]
         when "chat"
           cursor = composer_text_index(key, state)
@@ -855,6 +911,22 @@ module Meringue
         end
       end
 
+      def continue_logs_drag_autoscroll(state)
+        return false unless @selection_dragging && @selection_pane == "logs"
+        return false unless @logs_drag_autoscroll_direction && @logs_drag_pointer
+
+        scroll_pane(
+          "logs",
+          @logs_drag_autoscroll_direction,
+          steps: DRAG_AUTOSCROLL_STEP,
+          state: state
+        )
+        scrolled_state = state.merge("_scroll" => scroll_snapshot)
+        position = logs_text_position(@logs_drag_pointer, scrolled_state)
+        extend_logs_selection(scrolled_state, position) if position
+        true
+      end
+
       # Releasing the button finishes a mouse selection. A finished logs
       # highlight goes straight to the system clipboard, so a double-click is one
       # gesture end to end; Ctrl-C still copies later, and the composer stays
@@ -864,6 +936,8 @@ module Meringue
         worker_id = @logs_worker_click_candidate
         @logs_worker_click_candidate = nil
         @selection_dragging = false
+        @logs_drag_autoscroll_direction = nil
+        @logs_drag_pointer = nil
         if selection_active?
           copy_selection(state, input_buffer) if completed_drag && @selection_pane == "logs"
         elsif worker_id && logs_worker_at(key, state) == worker_id
@@ -981,6 +1055,8 @@ module Meringue
         position = logs_text_position(key, state)
         return clear_selection unless position
 
+        @logs_drag_autoscroll_direction = nil
+        @logs_drag_pointer = nil
         clear_chat_selection
         @selection_pane = "logs"
         @logs_cursor_active = false
@@ -1191,6 +1267,8 @@ module Meringue
         clear_chat_selection
         @selection_pane = nil
         @selection_dragging = false
+        @logs_drag_autoscroll_direction = nil
+        @logs_drag_pointer = nil
         nil
       end
 
@@ -1199,8 +1277,12 @@ module Meringue
         @logs_selection_focus = nil
         @logs_cursor_active = false
         @logs_cursor_column = 0
-        reset_mouse_selection_granularity if @selection_pane == "logs"
-        @selection_pane = nil if @selection_pane == "logs"
+        if @selection_pane == "logs"
+          @logs_drag_autoscroll_direction = nil
+          @logs_drag_pointer = nil
+          reset_mouse_selection_granularity
+          @selection_pane = nil
+        end
         nil
       end
 
@@ -1500,11 +1582,11 @@ module Meringue
         delete_chat_selection(input_buffer, input_cursor)
       end
 
-      def handle_selection_movement_key(key, input_buffer, input_cursor, slash_suggestion_index)
+      def handle_selection_movement_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         movement = SELECTION_MOVEMENTS.keys.find { |action| keybinding?(action, key) }
         return nil unless movement
 
-        cursor = selection_movement_cursor(SELECTION_MOVEMENTS.fetch(movement), input_buffer, input_cursor)
+        cursor = selection_movement_cursor(SELECTION_MOVEMENTS.fetch(movement), input_buffer, input_cursor, state: state)
         anchor = @selection_pane == "chat" && @chat_selection_anchor ? @chat_selection_anchor : clamp_cursor(input_buffer, input_cursor)
         clear_logs_selection
         update_chat_selection(anchor, cursor)
@@ -1512,15 +1594,15 @@ module Meringue
         [input_buffer, cursor, slash_suggestion_index]
       end
 
-      def selection_movement_cursor(movement, input_buffer, input_cursor)
+      def selection_movement_cursor(movement, input_buffer, input_cursor, state: nil)
         chars = input_buffer.chars
         cursor = clamp_cursor(input_buffer, input_cursor)
 
         moved = case movement
                 when :left then [cursor - 1, 0].max
                 when :right then [cursor + 1, chars.length].min
-                when :up then cursor_up(chars, cursor)
-                when :down then cursor_down(chars, cursor)
+                when :up then composer_vertical_cursor(state, input_buffer, cursor, :up)
+                when :down then composer_vertical_cursor(state, input_buffer, cursor, :down)
                 when :home then current_line_start(chars, cursor)
                 when :end then current_line_end(chars, cursor)
                 when :word_left then previous_word_boundary(chars, cursor)
@@ -2537,10 +2619,10 @@ module Meringue
           Focus: click a dashboard section to focus it; double-clicking the `N open PR` / `N open PRs` summary opens the global pull-request picker, double-clicking an issue opens its delivery PR (or shows a transient no-PR notice), double-clicking a worker with a workspace opens its focused workspace, and double-clicking a retryable head submits /retry for a fresh head. Unavailable rows stay quiet. #{keys_for("focus_next")} moves focus forward; #{keys_for("focus_previous")} moves focus backward; #{keys_for("scroll_up")}/#{keys_for("scroll_down")}, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")}, and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} scroll the focused pane; the mouse wheel scrolls whichever pane the pointer is over.
           AgentTree selection and chat target: single-click a project, issue, head, or worker row to select it and filter the logs pane to that node (a worker shows its own logs, an issue adds all of its workers and child issues, a project adds its whole subtree). Right-click an issue to open its associated delivery PR; workers do not duplicate that affordance, and an issue without one shows a transient notice. An issue also targets subsequent natural-language chat to that issue; a worker selection resolves chat to its owning issue. A fresh head still routes every message using that explicit target context. Head rows and projects remain log-only filters; retry a failed/blocked head explicitly with /retry H<n> or by double-clicking its "retry me" row. Use /open-session <agent_id> to open an underlying harness session for debugging, including a head session. The selection stays highlighted, is scrolled back into view when it changes, and keeps filtering while you work in the logs or chat pane; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} in jump mode retarget it. Double-click an issue to open its PR, or double-click a worker with an assigned workspace to open that worker's focused workspace. Click the highlighted row again, click empty space in the AgentTree, or press #{keys_for("cancel_navigation")} to clear it. Heads without an owning issue, projects, and workers without workspaces remain log-only filters for these mouse actions.
           Logs mouse target: click a worker id, worker title, or nonblank worker-authored body text to select that worker and filter its logs without changing logs focus or scroll position; removed workers and surrounding chrome are inert. Drag, double-click, and triple-click remain text-selection gestures and take precedence.
-          Selection: drag with the mouse in the logs pane or the composer to select text; double-click selects a word, and triple-click selects a complete logs paragraph; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
+          Selection: drag with the mouse in the logs pane or the composer to select text; holding a logs drag against or beyond the top/bottom text edge scrolls and extends it automatically; double-click selects a word, and triple-click selects a complete logs paragraph; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
           Logs selection (keyboard): focus the logs pane, then #{keys_for("logs_selection_mode")} toggles the selection cursor or any Shift+movement starts it. #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor, #{keys_for("cursor_word_left")}/#{keys_for("cursor_word_right")} move by word, #{keys_for("cursor_home")}/#{keys_for("cursor_end")} jump to the line edges, and #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} move by page. #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")}, #{keys_for("select_home")}/#{keys_for("select_end")}, #{keys_for("select_word_left")}/#{keys_for("select_word_right")}, and #{keys_for("select_page_up")}/#{keys_for("select_page_down")} extend the selection. #{keys_for("copy_selection")} copies the selection (or the cursor line when nothing is extended); #{keys_for("cancel_navigation")} exits.
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
-          Chat: #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
+          Chat: #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")} move by character; #{keys_for("cursor_up")}/#{keys_for("cursor_down")} move through hard and soft-wrapped rows, then browse sent-input history at the first/last row; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode. In the AgentTree, #{keys_for("rename_selected")} starts a quick rename for the selected project or issue by pre-filling `/project rename` or `/issue rename`; type its new name in the composer and press Enter.
           Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
@@ -4137,14 +4219,16 @@ module Meringue
         [buffer, cursor]
       end
 
-      def cursor_after_navigation(key, input_buffer, input_cursor)
+      def cursor_after_navigation(key, input_buffer, input_cursor, state: nil, visual_rows: false)
         cursor = clamp_cursor(input_buffer, input_cursor)
         chars = input_buffer.chars
 
         moved = if keybinding?("cursor_left", key) then [cursor - 1, 0].max
                 elsif keybinding?("cursor_right", key) then [cursor + 1, chars.length].min
-                elsif keybinding?("cursor_up", key) then cursor_up(chars, cursor)
-                elsif keybinding?("cursor_down", key) then cursor_down(chars, cursor)
+                elsif keybinding?("cursor_up", key)
+                  visual_rows ? composer_vertical_cursor(state, input_buffer, cursor, :up) : cursor_up(chars, cursor)
+                elsif keybinding?("cursor_down", key)
+                  visual_rows ? composer_vertical_cursor(state, input_buffer, cursor, :down) : cursor_down(chars, cursor)
                 elsif keybinding?("cursor_home", key) then current_line_start(chars, cursor)
                 elsif keybinding?("cursor_end", key) then current_line_end(chars, cursor)
                 elsif keybinding?("cursor_word_left", key) then previous_word_boundary(chars, cursor)
@@ -4155,6 +4239,67 @@ module Meringue
         # A paste marker is one unit: a step that would land inside it continues
         # to its far edge instead of parking the caret in the middle of a token.
         paste_registry.snap_cursor(input_buffer, cursor, moved)
+      end
+
+      def composer_vertical_cursor(state, input_buffer, input_cursor, direction)
+        return direction == :up ? cursor_up(input_buffer.chars, input_cursor) : cursor_down(input_buffer.chars, input_cursor) unless state
+
+        layout.composer_vertical_cursor(
+          state,
+          width: render_width,
+          height: render_height,
+          input_buffer: input_buffer,
+          input_cursor: input_cursor,
+          direction: direction
+        )
+      end
+
+      def handle_chat_history_navigation(key, input_buffer, input_cursor, slash_suggestion_index)
+        return nil unless @focused_pane == "chat"
+
+        direction = if keybinding?("cursor_up", key)
+                      :up
+                    elsif keybinding?("cursor_down", key)
+                      :down
+                    end
+        return nil unless direction
+        return nil if @chat_input_history.empty?
+        return nil if direction == :down && @chat_history_index.nil?
+
+        if direction == :up
+          if @chat_history_index.nil?
+            @chat_history_draft = @chat_pastes.expand(input_buffer)
+            @chat_history_index = @chat_input_history.length - 1
+          elsif @chat_history_index.positive?
+            @chat_history_index -= 1
+          end
+          text = @chat_input_history.fetch(@chat_history_index)
+        elsif @chat_history_index < @chat_input_history.length - 1
+          @chat_history_index += 1
+          text = @chat_input_history.fetch(@chat_history_index)
+        else
+          text = @chat_history_draft.to_s
+          reset_chat_history_navigation
+        end
+
+        @chat_pastes.clear!
+        buffer = @chat_pastes.collapse(text)
+        clear_chat_selection
+        [buffer, buffer.length, slash_suggestion_index]
+      end
+
+      def remember_chat_input(text)
+        value = text.to_s
+        return if value.empty?
+
+        @chat_input_history << value
+        @chat_input_history.shift while @chat_input_history.length > CHAT_INPUT_HISTORY_LIMIT
+        reset_chat_history_navigation
+      end
+
+      def reset_chat_history_navigation
+        @chat_history_index = nil
+        @chat_history_draft = nil
       end
 
       def clamp_cursor(input_buffer, input_cursor)
@@ -4270,7 +4415,7 @@ module Meringue
         key.is_a?(String) && key.bytes.all? { |byte| byte >= 32 && byte != 127 }
       end
 
-      def submit_prompt(input_buffer, on_submit, state)
+      def submit_prompt(input_buffer, on_submit, state, remember_input: false)
         # Collapsed pastes are re-expanded here and nowhere else: the composer,
         # the wrapper, and the slash completer only ever saw the markers, while
         # the kernel receives the message the user actually pasted.
@@ -4278,6 +4423,7 @@ module Meringue
         @chat_pastes.clear!
         return if text.empty?
 
+        remember_chat_input(text) if remember_input
         slash_command = text.start_with?("/")
         # Slash commands are explicit clutch-path instructions and never carry
         # dashboard routing context. LogScope.chat_target already normalizes an

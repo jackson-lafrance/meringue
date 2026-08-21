@@ -313,6 +313,23 @@ module Meringue
           input_row_spans(input_buffer, composer_available_width(input_buffer, width))
         end
 
+        # Moves through the rows the composer actually renders, including soft
+        # wraps. At the first/last row it deliberately returns the original
+        # cursor so App can hand that edge gesture to input-history navigation.
+        def composer_vertical_cursor(input_buffer, input_cursor, direction:, width: nil)
+          input = input_buffer.to_s
+          cursor = input_cursor.to_i.clamp(0, input.chars.length)
+          spans = input_row_spans(input, composer_available_width(input, width))
+          return cursor if spans.empty?
+
+          row, column = composer_cursor_location(spans, cursor)
+          target_row = direction.to_sym == :up ? row - 1 : row + 1
+          return cursor unless target_row.between?(0, spans.length - 1)
+
+          target = spans.fetch(target_row)
+          target.fetch(:start) + [column, target.fetch(:length)].min
+        end
+
         def composer_char_index_at(state, row:, column:, width: nil)
           chat = chat_state(state)
           input_buffer = chat.fetch("input_buffer", "").to_s

@@ -364,6 +364,50 @@ class TuiMouseWordSelectionTest < Minitest::Test
     end
   end
 
+  def test_dragging_against_the_top_edge_keeps_scrolling_and_extending_the_selection
+    state = logs_state
+    lines = @layout.logs_text_lines(state, width: WIDTH, height: HEIGHT)
+    visible = visible_text_line_indexes(state, lines)
+    anchor_line = visible.last
+    edge_line = visible.first
+    anchor = logs_click_position(state, anchor_line, [lines.fetch(anchor_line).length, 4].min)
+    top_edge = logs_click_position(state, edge_line, 0)
+
+    send_mouse(press_event(anchor), state)
+    send_mouse(motion_event(top_edge), state)
+
+    first_offset = @app.send(:scroll_snapshot).dig("offsets", "logs")
+    first_focus = @app.send(:logs_selection).fetch("start").fetch("line")
+    assert_equal 1, first_offset
+    assert_operator first_focus, :<, anchor_line
+    assert @app.instance_variable_get(:@selection_dragging), "edge scrolling must keep the drag active"
+
+    # No new mouse report arrived. A refresh tick must still advance the armed
+    # edge drag and resolve its focus against the newly scrolled viewport.
+    @app.send(:handle_key, nil, "", 0, -1, nil, state)
+
+    assert_equal first_offset + 1, @app.send(:scroll_snapshot).dig("offsets", "logs")
+    assert_operator @app.send(:logs_selection).fetch("start").fetch("line"), :<, first_focus
+  end
+
+  def test_dragging_beyond_the_bottom_edge_scrolls_toward_newer_logs
+    @app.instance_variable_get(:@scroll_offsets)["logs"] = 4
+    state = logs_state(scroll: { "active_pane" => "logs", "offsets" => { "logs" => 4 } })
+    lines = @layout.logs_text_lines(state, width: WIDTH, height: HEIGHT)
+    visible = visible_text_line_indexes(state, lines)
+    anchor_line = visible.first
+    anchor = logs_click_position(state, anchor_line, 0)
+    bottom = logs_click_position(state, visible.last, lines.fetch(visible.last).length)
+    beyond_bottom = bottom.merge("y" => HEIGHT + 10)
+
+    send_mouse(press_event(anchor), state)
+    send_mouse(motion_event(beyond_bottom), state)
+
+    assert_equal 3, @app.send(:scroll_snapshot).dig("offsets", "logs")
+    assert_operator @app.send(:logs_selection).fetch("end").fetch("line"), :>, anchor_line
+    assert @app.instance_variable_get(:@selection_dragging)
+  end
+
   def test_mouse_wheel_still_scrolls_the_hovered_logs_pane
     state = logs_state
     target = visible_word(state, WORKER_ID_PATTERN)
@@ -425,6 +469,13 @@ class TuiMouseWordSelectionTest < Minitest::Test
 
   def copied_log_lines(lines)
     Array(lines).map { |line| line.delete_prefix("▌ ").delete_prefix("  ") }.join("\n")
+  end
+
+  def visible_text_line_indexes(state, lines)
+    window = @layout.logs_visible_window(state, width: WIDTH, height: HEIGHT)
+    (window.fetch("start_index")...window.fetch("finish_index")).select do |line_index|
+      !lines.fetch(line_index).empty?
+    end
   end
 
   # First on-screen content line matching +pattern+, with a column inside the
