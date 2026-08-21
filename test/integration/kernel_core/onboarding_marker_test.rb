@@ -70,6 +70,7 @@ class KernelCoreOnboardingMarkerTest < Minitest::Test
       "changes" => {
         "agent.head_harness" => "claude",
         "agent.worker_harness" => "pi",
+        "experiments.split_agent_defaults" => true,
         "agent.head_model" => "openai/gpt-5.6-sol",
         "agent.worker_model" => "anthropic/claude-opus-5",
         "experiments.github_support" => true

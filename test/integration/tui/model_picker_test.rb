@@ -21,6 +21,7 @@ class TuiModelPickerTest < Minitest::Test
   CTRL_R = "\u0012"
 
   def setup
+    @original_theme = Meringue::TUI::Style.current_colorscheme
     @submitted = []
     @layout = Meringue::TUI::Layout.new
     @app = Meringue::TUI::App.new(
@@ -34,6 +35,7 @@ class TuiModelPickerTest < Minitest::Test
 
   def teardown
     wait_for_submissions(@submitted.length)
+    Meringue::TUI::Style.configure!(@original_theme)
   end
 
   def test_slash_models_opens_the_picker_instead_of_listing_the_catalog
@@ -68,6 +70,18 @@ class TuiModelPickerTest < Minitest::Test
     assert_equal "models (pi) · [Head]  Worker", @pane.popup_pane_title(singular_picker)
     assert_equal plural_rows, plain_lines(@pane.popup_lines(singular_picker))
     assert_empty @submitted
+  end
+
+  def test_shared_model_picker_hides_role_tabs_and_submits_unscoped_command
+    @state = state_with_catalog(split_agent_defaults: false)
+    picker = open_picker
+
+    assert_equal "models (pi)", @pane.popup_pane_title(picker)
+    refute_includes plain_line(@pane.popup_footer_line(picker)), "switch role"
+    send_key("\e[B")
+    send_key("\r")
+
+    assert_equal ["/model anthropic/claude-opus-5"], wait_for_submissions(1)
   end
 
   def test_slash_model_with_arguments_keeps_its_setting_behavior
@@ -206,19 +220,34 @@ class TuiModelPickerTest < Minitest::Test
     refute @pane.model_picker?(compose)
   end
 
-  def test_theme_opens_in_the_shared_popup_and_applies_without_chat_feedback
-    picker = open_picker("/theme")
+  def test_theme_alias_previews_and_escape_restores_without_chat_feedback
+    Meringue::TUI::Style.configure!("meringue")
+    picker = open_picker("/themes")
 
     assert_equal "theme", @pane.popup_pane_title(picker)
-    assert @pane.popup_lines(picker).any? { |line| plain_line(line).include?(Meringue::TUI::Style.current_colorscheme) }
+    assert_equal "meringue", Meringue::TUI::Style.current_colorscheme
     assert_empty @submitted
 
-    "rose".each_char { |character| send_key(character) }
-    assert_equal ["rose-pine"], @app.send(:model_picker_entries, compose).map { |entry| entry.fetch("reference") }
+    send_key("\e[B")
+    selected = @app.send(:model_picker_entries, compose).fetch(@app.instance_variable_get(:@model_picker_index)).fetch("reference")
+    assert_equal selected, Meringue::TUI::Style.current_colorscheme
+
+    send_key("\e")
+    refute @pane.model_picker?(compose)
+    assert_equal "meringue", Meringue::TUI::Style.current_colorscheme
+    assert_empty @submitted
+  end
+
+  def test_theme_selection_persists_through_the_normal_set_theme_command
+    Meringue::TUI::Style.configure!("meringue")
+    open_picker("/theme")
+    send_key("\e[B")
+    selected = Meringue::TUI::Style.current_colorscheme
     send_key("\r")
 
-    assert_equal ["/theme rose-pine"], wait_for_submissions(1)
+    assert_equal ["/theme #{selected}"], wait_for_submissions(1)
     refute @pane.model_picker?(compose)
+    assert_equal selected, Meringue::TUI::Style.current_colorscheme
   end
 
   def test_harness_opens_in_the_shared_role_popup
@@ -392,10 +421,11 @@ class TuiModelPickerTest < Minitest::Test
 
   private
 
-  def state_with_catalog(catalogs: nil, active_harness: "pi", default_model: "openai/gpt-5.6-sol")
+  def state_with_catalog(catalogs: nil, active_harness: "pi", default_model: "openai/gpt-5.6-sol", split_agent_defaults: true)
     empty_state.merge(
       "metadata" => {
         "active_harness" => active_harness,
+        "split_agent_defaults" => split_agent_defaults,
         "pi_session_defaults" => { "model" => default_model, "thinking_level" => "high" },
         "harness_model_catalogs" => catalogs || { "pi" => catalog_snapshot("pi") }
       }
@@ -438,7 +468,16 @@ class TuiModelPickerTest < Minitest::Test
   def prompt_handler
     @prompt_handler ||= lambda do |text, **_options|
       @submitted << text
-      { "event" => "slash_command_applied", "command_results" => [] }
+      results = if text.start_with?("/theme ")
+                   [{
+                     "command_type" => "SetTheme",
+                     "status" => "accepted",
+                     "result" => { "theme" => text.split(" ", 2).last }
+                   }]
+                 else
+                   []
+                 end
+      { "event" => "slash_command_applied", "command_results" => results }
     end
   end
 

@@ -2,7 +2,7 @@
 
 Meringue exposes future Pi defaults for how every new head and worker is started. Existing sessions retain their effective settings.
 
-First-run Setup (`/setup`, and automatically on a first interactive launch) uses the shared Settings overlay to review separate head and worker harness/model/thinking defaults, theme, and experiments. All choices remain in one draft until Finish atomically saves them with the onboarding marker. It reads the cached catalog only and never blocks on a fetch; see [`onboarding.md`](onboarding.md).
+First-run Setup (`/setup`, and automatically on a first interactive launch) uses the shared Settings overlay to review head/worker harnesses plus shared model and thinking defaults, theme, and experiments. The **Split head and worker defaults** experiment is opt-in; when enabled, model and thinking choices become role-specific. All choices remain in one draft until Finish atomically saves them with the onboarding marker. It reads the cached catalog only and never blocks on a fetch; see [`onboarding.md`](onboarding.md).
 
 ## Commands
 
@@ -22,7 +22,7 @@ Examples:
 /models pi refresh
 ```
 
-`/models` is a **local TUI command** that opens the model picker: a searchable, keyboard-navigable list of the models the selected harness itself reports, showing each model's provider/id reference, display name, and supported thinking levels. The picker has explicit Head and Worker tabs; `←`/`→` switches roles, and selecting a row applies only the active role. Bare `/model` is an alias for that same argumentless picker command; `/model <provider>/<model-id>` and its role-specific forms retain their setting behavior. With no argument `/models` shows the active harness; an explicit `pi`, `claude`, or `antigravity` scopes the picker (and its refresh) to that harness instead.
+`/models` is a **local TUI command** that opens the model picker: a searchable, keyboard-navigable list of the models the selected harness itself reports, showing each model's provider/id reference, display name, and supported thinking levels. With **Split head and worker defaults** enabled, the picker has Head and Worker tabs; `←`/`→` switches roles, and selecting a row applies only the active role. With the experiment disabled (the default), there are no role tabs and selecting a row sets the shared default for both roles. Bare `/model` is an alias for that same argumentless picker command. With no argument `/models` shows the active harness; an explicit `pi`, `claude`, or `antigravity` scopes the picker (and its refresh) to that harness instead.
 
 It replaced the old behavior, where `/models` printed the entire catalog into the visible log. A harness that reports 120 models produced 120 log lines nobody could act on, truncated with a hint that pointed at a different command.
 
@@ -32,9 +32,9 @@ Picker keys:
 | --- | --- |
 | any printable character | filter; space separated tokens all have to match (`openai high`) |
 | `Backspace` / `Ctrl-W` | delete one character of the filter / clear it |
-| `←` / `→` | switch between the Head and Worker tabs |
+| `←` / `→` | switch between Head and Worker tabs when split defaults are enabled |
 | `↑` / `↓` | move the highlight (it wraps) |
-| `Enter` | apply the highlighted model for the active role, exactly as `/model head|worker <provider>/<model-id>` |
+| `Enter` | apply the highlighted model for the active role, or the shared default when split defaults are disabled |
 | `Ctrl-R` | re-fetch the catalog (`GetModelCatalog` with `refresh`), keeping the picker open |
 | `Esc`, click away, or any unhandled control key | close the picker without changing anything |
 
@@ -44,13 +44,16 @@ A trailing `refresh` word keeps `/models` on the kernel path instead of opening 
 
 ### Future Pi defaults
 
-The bare `/thinking` command opens a matching Head/Worker thinking-level picker. It uses the same `←`/`→` role tabs, `↑`/`↓` navigation, filtering, and `Enter` apply behavior as the model picker; `/thinking <level>` and `/thinking head|worker <level>` remain the direct command forms. Bare `/theme` and `/harness` use the same bordered popup for their choices, while `/config` and `/setup` remain full-screen transactional editors.
+The bare `/thinking` command opens a thinking-level picker. It uses the same filtering, `↑`/`↓` navigation, and `Enter` apply behavior as the model picker; it shows `←`/`→` Head/Worker tabs only when split defaults are enabled. With split defaults disabled, `/thinking <level>` sets both roles and role-specific forms are rejected. With split defaults enabled, `/thinking head|worker <level>` is required and the unscoped form is rejected. Bare `/theme` and `/harness` use the same bordered popup, while `/config` and `/setup` remain full-screen transactional editors.
 
 ```text
+# Split head and worker defaults disabled (the default):
 /model <provider>/<model-id>
+/thinking <off|minimal|low|medium|high|xhigh|max>
+
+# Split head and worker defaults enabled:
 /model head <provider>/<model-id>
 /model worker <provider>/<model-id>
-/thinking <off|minimal|low|medium|high|xhigh|max>
 /thinking head <off|minimal|low|medium|high|xhigh|max>
 /thinking worker <off|minimal|low|medium|high|xhigh|max>
 ```
@@ -59,17 +62,19 @@ Examples:
 
 ```text
 /model openai/gpt-5.6-sol
-/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast
+/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast # both roles when split is off
+/thinking xhigh          # both roles when split is off
+
+# After enabling Split head and worker defaults:
 /model head openai/gpt-5.6-sol       # only future heads
 /model worker anthropic/claude-opus-5 # only future workers
-/thinking xhigh          # both roles (backward-compatible shared form)
 /thinking head low       # only future heads
 /thinking worker max     # only future workers
 ```
 
-There is no command that only prints the defaults. The dashboard status line keeps a compact role-aware harness/model/thinking summary, `/config` displays each role in the full-screen Agent defaults category, and `/config --text` prints diagnostics. A head can still answer "which model and thinking levels will future agents use" by proposing `GetSessionDefaults`.
+There is no command that only prints the defaults. The dashboard status line keeps a compact role-aware harness/model/thinking summary, `/config` displays the active model/thinking scope in the Agent defaults category, and `/config --text` prints diagnostics. A head can still answer "which model and thinking levels will future agents use" by proposing `GetSessionDefaults`.
 
-`/model` and `/thinking` save values under `[harness.pi]` in Meringue's configured TOML file (normally `~/.meringue/config.toml`). The one-argument `/model <provider>/<model-id>` and `/thinking <level>` forms keep their historical behavior: they update both roles and clear role-specific overrides. The `head` and `worker` forms update only that role, including sessions spawned later in the currently running Meringue process.
+When split defaults are disabled, `/model` and `/thinking` save shared values under `[harness]` in Meringue's configured TOML file (normally `~/.meringue/config.toml`); both roles resolve those values. When split defaults are enabled, role-specific forms save `head_model`/`worker_model` and `head_thinking_level`/`worker_thinking_level` under `[harness]` alongside a compatibility shared value. Switching the experiment off clears role-specific overrides so both roles use the shared selection. All changes apply to sessions spawned later in the currently running Meringue process; existing sessions are unchanged.
 
 A default change does **not** mutate, reconnect, restart, or terminate an existing Pi session. It also strips spawn-only model/thinking defaults when later resuming an existing session, so a resumable session keeps its persisted effective pair. The result and durable kernel log explicitly list existing Pi agent ids left unchanged.
 
@@ -77,7 +82,7 @@ Model defaults must be an exact `<provider>/<model-id>` reference. Thinking defa
 
 ### Per-worker overrides
 
-A head may put optional `model` and `thinking_level` fields on a `SpawnWorker` payload. They use the same model-reference grammar and thinking-level ladder documented below, but their scope is only the new worker session: they do not update `[harness.pi]`, another worker, a head session, or an existing session. The Pi client removes the configured `--model`/`--thinking` spawn arguments and substitutes only the supplied values for that process.
+A head may put optional `model` and `thinking_level` fields on a `SpawnWorker` payload. They use the same model-reference grammar and thinking-level ladder documented below, but their scope is only the new worker session: they do not update `[harness]`, another worker, a head session, or an existing session. The Pi client removes the configured `--model`/`--thinking` spawn arguments and substitutes only the supplied values for that process.
 
 Omission is meaningful. An omitted field remains late-bound to the configured future-session default when the worker actually starts. This applies to queued workers too, so a worker queued without overrides uses the defaults in force at activation rather than freezing a copy when it was queued. Explicit overrides are persisted as reservation intent and survive deferred activation and provisioning recovery. Before activation a queued worker has no effective `session_settings`; after launch the harness-reported effective pair is stored on the worker record and shown through the existing focused-workspace and `GetInfo` surfaces.
 

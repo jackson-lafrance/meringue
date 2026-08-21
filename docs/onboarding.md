@@ -6,13 +6,12 @@ Setup is not a chat prompt and does not maintain a second settings implementatio
 
 ## Steps
 
-The centered card shows one dynamic `Step N of 5` indicator:
+The centered card shows one dynamic `Step N of 4` indicator:
 
 1. **Welcome** — starts the flow.
 2. **Theme** — theme and animation preference. Theme changes preview immediately in memory.
-3. **Head defaults** — harness, Pi model, and Pi thinking level for future routing heads.
-4. **Worker defaults** — independently chosen harness, Pi model, and Pi thinking level for future workers.
-5. **Experiments** — checkboxes derived directly from `Experiments::Registry`. GitHub support is currently the only experiment.
+3. **Agent defaults** — harnesses plus shared model and thinking defaults for future heads and workers.
+4. **Meringue Xtras** — checkboxes derived directly from `Experiments::Registry`, including the opt-in split head/worker defaults experiment.
 
 Experiments is the final page and its navigation action is **Complete**. The flow derives navigation from the step list, so future setup sections can be appended without introducing a review-only special case.
 
@@ -20,18 +19,18 @@ The complete `/config` editor remains available for provider commands and enviro
 
 ## Interaction
 
-- `↑` / `↓`: move through the current card's controls; moving past the last control focuses the navigation footer.
-- `←` / `→`: change a focused boolean toggle or move focus; they never advance to another setup step.
-- `Enter`: begin, toggle a checkbox, open a picker for list-backed values such as theme and models, or activate **Next** when the navigation footer is focused.
-- `Delete` / `Backspace`: go back one setup step.
+- `↑` / `↓`: move through the current card's controls; moving past the last control focuses the navigation buttons inside the card.
+- `←` / `→`: change a focused boolean toggle, move focus, or switch between **Back** and **Next** when the buttons are focused; they never advance to another setup step.
+- `Enter`: begin, toggle a checkbox, open a picker for list-backed values such as theme and models, or activate the focused navigation button.
+- `Delete` / `Backspace`: go back one setup step (when a picker is open, Backspace edits its filter instead).
 - `Tab`: next setup step; `Shift-Tab` remains available as a backwards step shortcut.
 - `Esc`: first-run skip or manual cancel, as described below.
 - Left-click: select controls, choose picker entries, or click the displayed **Next**, **Back**, or **Complete** navigation controls.
 
-Every setup screen uses the same **Navigate** footer. It displays the current action (`Next` or `Complete`), Enter, and the Delete/Backspace Back action.
+Every setup screen uses the same **Navigate** footer: `Enter` or Arrow keys toggle, `Tab` advances, and `Backspace` returns. **Back** and **Next** remain inside the bordered content card so they can be reached by keyboard after the options.
 - Mouse wheel: move the current list. Empty space, chrome, right-click, releases, and drags are inert.
 
-Exact model references remain supported when the catalog is unavailable. Enter opens the cached Pi model picker without making a harness request; setup itself performs no model/network lookup.
+Exact model references remain supported when the catalog is unavailable. Enter opens the cached Pi model picker without making a harness request; setup itself performs no model/network lookup. Model and thinking pickers accept printable filter text, Backspace edits the filter, and Escape closes them.
 
 ## One draft, one write
 

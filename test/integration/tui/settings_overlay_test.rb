@@ -198,7 +198,9 @@ class TuiSettingsOverlayTest < Minitest::Test
     draft = @app.instance_variable_get(:@settings_draft)
     visible_ids = draft.categories.flat_map { |category| draft.definitions_for(category, include_advanced: true).map(&:id) }
 
-    assert_equal draft.definitions.map(&:id).sort, visible_ids.sort
+    hidden_role_defaults = %w[agent.head_model agent.head_thinking agent.worker_model agent.worker_thinking]
+    expected_ids = draft.definitions.map(&:id).reject { |id| hidden_role_defaults.include?(id) }
+    assert_equal expected_ids.sort, visible_ids.sort
     assert_equal visible_ids.length, visible_ids.uniq.length
 
     3.times { send_key(TAB) }
