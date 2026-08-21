@@ -48,6 +48,24 @@ class KernelWorkersSettleClassificationTest < Minitest::Test
     end
   end
 
+  # Interactive providers can return a settled state after their PTY has exited. The process exit
+  # marker is the only failure evidence when the transcript contains no final assistant response.
+  class ProcessGoneStateHarnessClient < RecordingHarnessClient
+    undef_method :turn_outcome if method_defined?(:turn_outcome)
+
+    def get_state(session_ref)
+      ref = super
+      ref.merge(
+        "pid" => nil,
+        "is_streaming" => false,
+        "metadata" => (ref.fetch("metadata", {}) || {}).merge(
+          "process_gone" => true,
+          "exit_status" => { "success" => false, "exit_code" => 42 }
+        )
+      )
+    end
+  end
+
   NETWORK_FAILURE = {
     "state" => "failed",
     "kind" => "network_failure",
@@ -272,6 +290,24 @@ class KernelWorkersSettleClassificationTest < Minitest::Test
     assert_equal "accepted", result.fetch("status")
     assert_equal "completed", agent(engine, worker_id).fetch("status")
     assert_equal "completed", issue(engine, context.fetch("issue_id")).fetch("status")
+  end
+
+  def test_a_gone_interactive_process_without_a_final_response_is_not_a_completion
+    client = ProcessGoneStateHarnessClient.new(provider: "pi")
+    engine, context, worker_id = build_worker(client)
+
+    result = apply!(engine, "ReconcileSessions", {})
+    worker = agent(engine, worker_id)
+    failure = worker.dig("harness_metadata", "settle_failure")
+
+    assert_equal "settle_failed", result.dig("result", "poll_results").first.fetch("state")
+    assert_equal "errored", worker.fetch("status")
+    assert_equal "harness_process_exited", failure.fetch("kind")
+    assert_equal "harness_process_exit", failure.fetch("source")
+    assert_equal 42, failure.dig("exit_status", "exit_code")
+    assert_match(/process exited before it produced a result/, failure.fetch("reason"))
+    assert_equal "errored", issue(engine, context.fetch("issue_id")).fetch("status")
+    refute_includes log_messages(engine), "Worker #{worker_id} completed."
   end
 
   def test_a_turn_outcome_on_the_session_ref_metadata_is_also_honoured

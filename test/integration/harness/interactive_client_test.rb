@@ -200,6 +200,20 @@ class InteractiveClientTest < InteractiveAgentTest
     assert_equal "answered: two", client.last_assistant_text(settled)
   end
 
+  def test_a_process_exit_without_an_answer_is_marked_as_gone_not_idle_history
+    client = build_interactive_client(agent_flags: ["--exit-before-answer"])
+    ref = client.spawn_session(kind: "worker", cwd: interactive_workspace, prompt: "crash during work", system_prompt: "", session_name: "W1")
+
+    gone = wait_until do
+      state = client.get_state(ref)
+      state if state.dig("metadata", "process_gone")
+    end
+
+    assert_equal false, gone.fetch("is_streaming")
+    assert_equal 42, gone.dig("metadata", "exit_status", "exit_code")
+    assert_nil client.last_assistant_text(gone), "a dead turn without an answer must not expose history as a result"
+  end
+
   private
 
   def process_alive?(pid)
