@@ -9,7 +9,12 @@ class TuiSetupOverlayScreenTest < Minitest::Test
 
   ENTER = "\r"
   ESC = "\e"
+  RIGHT = "\e[C"
   TAB = "\t"
+  DOWN = "\e[B"
+  LEFT = "\e[D"
+  BACKSPACE = "\u007f"
+  DELETE = "\e[3~"
   WIDTH = 100
   HEIGHT = 32
 
@@ -35,10 +40,10 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     open_setup
 
     {
-      [100, 32] => ["setup · 1/6", "Welcome to Meringue", "Step 1 of 6", "Enter begin", "[ Begin ]"],
-      [79, 24] => ["setup · 1/6", "Welcome to Meringue", "Step 1 of 6", "Enter begin"],
-      [46, 18] => ["setup · 1/6", "Welcome to Meringue", "Esc skip for now"],
-      [32, 10] => ["setup · 1/6", "Welcome", "Esc skip"],
+      [100, 32] => ["Setup", "Welcome to Meringue", "Step 1 of 5", "Navigate: Enter Next", "[ Begin Setup ]", "[ Next ]", "[ Back ]"],
+      [79, 24] => ["Setup", "Welcome to Meringue", "Step 1 of 5", "Navigate: Enter Next", "[ Begin Setup ]"],
+      [46, 18] => ["Setup", "Welcome to Meringue", "Step 1 of 5", "Navigate: Enter Next"],
+      [32, 10] => ["Setup", "Welcome", "Step 1 of 5", "Navigate"],
       [31, 9] => ["Terminal too small for Setup", "Esc cancel"]
     }.each do |(width, height), expected|
       frame = render(width: width, height: height)
@@ -52,24 +57,23 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     refute_includes render, "agent tree"
   end
 
-  def test_wide_step_rail_and_review_are_compact_but_complete
+  def test_wide_step_indicator_has_no_duplicate_listing_and_experiments_is_final
     open_setup
     frame = render
-    assert_includes frame, "Step 1 of 6"
+    assert_includes frame, "Step 1 of 5"
     assert_includes frame, "Welcome to Meringue"
-    refute_includes frame, "setup steps"
+    refute_includes frame, "Step 1 of 5 · Welcome"
+    refute_includes frame, "1●"
+    refute_includes frame, "Review"
+    refute_includes frame, "Continue"
 
     send_key(ENTER)
-    4.times { send_key(TAB) }
+    3.times { send_key(TAB) }
     snap = snapshot
-    assert_equal "Review", snap.fetch("category")
-    ids = snap.fetch("rows").map { |row| row.fetch("id") }
-    expected = Meringue::TUI::Settings::SetupFlow.steps.flat_map do |step|
-      Meringue::TUI::Settings::SetupFlow.setting_ids(step).map { |id| "_setup_review:#{id}" }
-    end
-    assert_equal expected + ["_setup_finish"], ids
-    assert_includes render, "[ Finish ]"
-    assert_includes render, "Head harness"
+    assert_equal "Experiments", snap.fetch("category")
+    assert snap.fetch("setup_last_step")
+    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, snap.fetch("rows").map { |row| row.fetch("id") }
+    assert_includes render, "[ Complete ]"
   end
 
   def test_experiment_checkboxes_are_registry_derived_and_mouse_toggleable
@@ -77,7 +81,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     send_key(ENTER)
     3.times { send_key(TAB) }
     assert_equal "Experiments", snapshot.fetch("category")
-    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" } + ["_setup_next"], snapshot.fetch("rows").map { |row| row.fetch("id") }
+    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, snapshot.fetch("rows").map { |row| row.fetch("id") }
 
     geometry = @layout.send(:settings_pane).geometry(compose, width: WIDTH, height: HEIGHT)
     card = geometry.fetch(:card)
@@ -111,17 +115,54 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     assert_empty drain_submitted
   end
 
-  def test_setup_arrow_navigation_and_explicit_next_action
+  def test_setup_arrow_navigation_never_advances_and_footer_enter_navigates
     open_setup
+    send_key(RIGHT)
+    assert_equal "Welcome", snapshot.fetch("category")
     send_key(ENTER) # Theme
     assert_equal "Theme", snapshot.fetch("category")
-    send_key("\e[C")
-    assert snapshot.fetch("dirty")
-    2.times { send_key("\e[B") }
-    assert_equal "_setup_next", snapshot.fetch("rows")[snapshot.fetch("row_index")].fetch("id")
+    send_key(RIGHT)
+    assert_equal "Theme", snapshot.fetch("category")
+    refute snapshot.fetch("dirty")
+    2.times { send_key("\e[B") } # focus the navigation footer
+    assert snapshot.fetch("footer_focus")
     send_key(ENTER)
     assert_equal "Head defaults", snapshot.fetch("category")
     assert_empty drain_submitted
+  end
+
+  def test_backspace_goes_back_and_right_arrow_cannot_advance_the_wizard
+    open_setup
+    send_key(RIGHT)
+    assert_equal "Welcome", snapshot.fetch("category")
+    send_key(ENTER)
+    send_key(TAB)
+    assert_equal "Head defaults", snapshot.fetch("category")
+    send_key(BACKSPACE)
+    assert_equal "Theme", snapshot.fetch("category")
+    send_key(DELETE)
+    assert_equal "Welcome", snapshot.fetch("category")
+  end
+
+  def test_focused_controls_use_contextual_hints_and_enter_opens_pickers
+    open_setup
+    send_key(ENTER)
+    assert_equal "Theme", snapshot.fetch("category")
+    assert_includes render, "Enter open picker"
+
+    send_key(DOWN)
+    assert_includes render, "Enter toggle"
+    send_key(LEFT)
+    assert_equal false, snapshot.fetch("rows").fetch(snapshot.fetch("row_index")).fetch("value")
+    assert_equal "Theme", snapshot.fetch("category")
+    send_key(ENTER)
+    assert_equal true, snapshot.fetch("rows").fetch(snapshot.fetch("row_index")).fetch("value")
+
+    send_key(TAB)
+    send_key(DOWN) # Head model
+    send_key(ENTER)
+    assert_equal "agent.head_model", snapshot.fetch("picker").fetch("id")
+    assert_includes render, "Choose Head model"
   end
 
   def test_setup_animation_and_ascii_fallbacks_are_restrained_and_accessible
@@ -132,7 +173,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
       frame = render
       refute_includes frame, "✦"
       refute_includes frame, "●"
-      assert_includes frame, "Step 1 of 6"
+      assert_includes frame, "Step 1 of 5"
     end
 
     @app.instance_variable_get(:@settings_draft).set("appearance.animations", false)

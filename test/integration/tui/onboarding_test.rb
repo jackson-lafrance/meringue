@@ -10,6 +10,7 @@ class TuiTransactionalSetupTest < Minitest::Test
   ENTER = "\r"
   ESC = "\e"
   RIGHT = "\e[C"
+  DOWN = "\e[B"
   TAB = "\t"
   SHIFT_TAB = "\e[Z"
   CTRL_S = "\u0013"
@@ -77,6 +78,13 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert_equal "Theme", setup_snapshot.fetch("category")
 
     send_key(RIGHT)
+    assert_equal "Theme", setup_snapshot.fetch("category")
+    refute setup_snapshot.fetch("dirty")
+    send_key("\e[A") # return focus to Theme
+    send_key(ENTER) # Theme opens its picker
+    assert setup_snapshot.fetch("picker")
+    send_key(DOWN)
+    send_key(ENTER)
     preview = Meringue::TUI::Style.current_colorscheme
     refute_equal @original_theme, preview
     assert_equal preview, @app.instance_variable_get(:@settings_draft).value("appearance.theme")
@@ -85,7 +93,9 @@ class TuiTransactionalSetupTest < Minitest::Test
 
     send_key(TAB) # Head defaults
     assert_equal "Head defaults", setup_snapshot.fetch("category")
-    send_key(RIGHT) # head harness only
+    send_key(ENTER) # head harness opens its picker
+    send_key(DOWN)
+    send_key(ENTER)
     head_harness = @app.instance_variable_get(:@settings_draft).value("agent.head_harness")
     refute_equal "pi", head_harness
     assert_equal "pi", @app.instance_variable_get(:@settings_draft).value("agent.worker_harness")
@@ -93,15 +103,14 @@ class TuiTransactionalSetupTest < Minitest::Test
     send_key(TAB) # Worker defaults
     send_key(TAB) # Experiments
     assert_equal "Experiments", setup_snapshot.fetch("category")
-    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" } + ["_setup_next"], setup_rows.map { |row| row.fetch("id") }
-    send_key(" ")
+    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, setup_rows.map { |row| row.fetch("id") }
+    send_key(ENTER) # checkbox-style controls use Enter
     assert @app.instance_variable_get(:@settings_draft).value("experiments.github_support")
 
-    send_key(CTRL_S) # review before confirmation
-    assert_equal "Review", setup_snapshot.fetch("category")
-    assert_equal "_setup_finish", @app.send(:selected_settings_row).fetch("id")
+    send_key(CTRL_S) # the final step completes directly
+    assert_equal "Experiments", setup_snapshot.fetch("category")
     assert_empty submitted
-    send_key(ENTER)
+    send_key(ENTER) unless @app.instance_variable_get(:@settings_saving)
 
     command = wait_for_command
     assert_equal "SaveConfiguration", command.type
@@ -117,7 +126,9 @@ class TuiTransactionalSetupTest < Minitest::Test
   def test_back_revisits_a_step_without_losing_edits_and_manual_cancel_discards_everything
     open_manual_setup
     send_key(ENTER)
-    send_key(RIGHT)
+    send_key(ENTER)
+    send_key(DOWN)
+    send_key(ENTER)
     preview = Meringue::TUI::Style.current_colorscheme
     send_key(TAB)
     send_key(SHIFT_TAB)
@@ -152,7 +163,9 @@ class TuiTransactionalSetupTest < Minitest::Test
   def test_first_run_escape_requires_confirmation_and_skip_excludes_draft_changes
     @app.send(:maybe_open_onboarding, -> { @state })
     send_key(ENTER)
-    send_key(RIGHT)
+    send_key(ENTER)
+    send_key(DOWN)
+    send_key(ENTER)
     refute_equal @original_theme, Meringue::TUI::Style.current_colorscheme
 
     send_key(ESC)
@@ -174,10 +187,9 @@ class TuiTransactionalSetupTest < Minitest::Test
     @handler = saving_handler
     open_manual_setup
     send_key(ENTER)
-    4.times { send_key(TAB) } # Review
-    assert_equal "Review", setup_snapshot.fetch("category")
-    @app.instance_variable_set(:@settings_row_index, setup_rows.length - 1)
-    send_key(ENTER)
+    3.times { send_key(TAB) } # Experiments is final
+    assert_equal "Experiments", setup_snapshot.fetch("category")
+    send_key(CTRL_S)
     wait_until { !@app.instance_variable_get(:@settings_active) }
 
     saved = Meringue::Config.load(path: @config_path)
@@ -203,9 +215,10 @@ class TuiTransactionalSetupTest < Minitest::Test
       }
     end
     open_manual_setup
-    send_key(CTRL_S)
-    assert_equal "Review", setup_snapshot.fetch("category")
     send_key(ENTER)
+    3.times { send_key(TAB) }
+    assert_equal "Experiments", setup_snapshot.fetch("category")
+    send_key(CTRL_S)
     wait_until { !@app.instance_variable_get(:@settings_saving) }
 
     assert @app.instance_variable_get(:@settings_active)
