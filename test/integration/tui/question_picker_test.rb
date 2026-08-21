@@ -101,6 +101,25 @@ class TuiQuestionPickerTest < Minitest::Test
     refute @pane.question_picker?(compose)
   end
 
+  def test_mouse_wheel_moves_the_highlight_without_submitting
+    @state = empty_state.merge(
+      "questions" => (1..12).map { |index| question("Q#{index + 10}", text: "Question #{index}") }
+    )
+    picker = open_picker
+    position = screen_position_for_row(picker, 0)
+
+    send_key({
+      "type" => "mouse",
+      "kind" => "wheel_down",
+      "pressed" => true,
+      "button" => 65,
+      "count" => 1
+    }.merge(position))
+
+    assert_equal 1, @pane.question_picker_index(compose)
+    assert_empty @submitted
+  end
+
   def test_an_empty_question_list_explains_itself_instead_of_listing_answered_questions
     @state = empty_state.merge("questions" => [question("Q20", status: "answered", text: "Already answered")])
     picker = open_picker

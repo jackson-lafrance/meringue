@@ -18,6 +18,7 @@ agent_select_next = ["j", "down", "right"]
 
 - `Ctrl-B`: open a delivery pull request. While an issue/worker is selected (or jump mode is on a row) it opens the owning issue's kernel-verified PR. With nothing selected it opens the **open pull requests** picker instead, because unscoped chat is not about one issue; `↑`/`↓` move, `Enter` opens the highlighted PR in the browser, and `Esc`, another `Ctrl-B`, a click outside the list, or any other key closes it. Clicking a row opens that row. If a PR is missing, malformed, or its status cannot be refreshed, Meringue reports that state without closing the dashboard or changing the selection. `/prs` opens this same all-open-PR picker directly, regardless of the current AgentTree selection.
 - `Ctrl-R`: while the `/models` **model picker** is open, re-fetch the harness model catalog (`refresh_model_catalog`). It has no effect anywhere else, so it stays available for normal typing.
+- `/questions`: open the open-question picker. It shows only open questions with local 1-based ordinals (separate from canonical IDs); `↑`/`↓` or the mouse wheel moves, clicking a row selects it, `Enter` inserts `/answer <question_id> ` into the composer, and `Esc` or a click outside closes it.
 - `Ctrl-D`: quit.
 - `Ctrl-C`: clear input; quit when input is empty.
 - `Esc`: cancel the innermost active thing — a text selection or the logs selection cursor first, then the AgentTree selection (which clears the logs filter) and jump mode.
@@ -266,7 +267,7 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 - `Enter`: insert the selected suggestion into the input. Press `Enter` again to run it.
 - `Tab`: complete the selected suggestion, or the first one when nothing is selected.
 - Commands that take a record id (`/kill`, `/prompt`, `/jump`, `/issue rename`, and friends) suggest matching ids **shortest first**: an id is offered before the ids nested under it. Typing `/kill p3` lists `P3`, then `P3-I10`, then `P3-I10-W1`, and typing `/kill i10` lists `P3-I10` above `P3-I10-W1`, so killing an issue never means arrowing past its own workers. Same depth sorts numerically (`P3-I2` before `P3-I10`), an exactly typed id stays on top, and with nothing typed after the command each list keeps its own order (`/prompt ` offers live workers before the failed heads it can retry).
-- The box shows a window of three entries and holds **commands only**. When the list is longer than the window, a dim caption renders on its own line *below* the box: `1–3 of 27 commands  ·  ↑↓ scroll · keep typing to filter`. It is a caption about the list, not a row in it, so the window never loses an entry to it; a list that fits the window has no caption at all. The same slot and the same caption placement are used by the `/prs` / unscoped-`Ctrl-B` open-PR picker (`2 open PRs  ·  ↑↓ move · Enter opens · Esc closes`) and by the `/models` model picker. The focused-workspace `workspace commands` list is unwindowed and has no caption.
+- The box shows a window of three entries and holds **commands only**. When the list is longer than the window, a dim caption renders on its own line *below* the box: `1–3 of 27 commands  ·  ↑↓ scroll · keep typing to filter`. It is a caption about the list, not a row in it, so the window never loses an entry to it; a list that fits the window has no caption at all. The same slot and the same caption placement are used by the `/questions` picker, the `/prs` / unscoped-`Ctrl-B` open-PR picker (`2 open PRs  ·  ↑↓ move · Enter opens · Esc closes`), and by the `/models` model picker. The focused-workspace `workspace commands` list is unwindowed and has no caption.
 
 ## First-run setup
 
@@ -290,6 +291,16 @@ dashboard underneath.
 
 See [`onboarding.md`](onboarding.md) for transactional persistence, resize and
 failure recovery, first-run versus rerun behavior, and the completion marker.
+
+## Open question picker
+
+Open it with `/questions`. The picker is a modal list in the shared popup slot above the composer and shows only questions whose status is `open`.
+
+- Each row has a local 1-based ordinal for the current visible list, followed by the durable question id and text. Ordinals are intentionally independent from IDs, so gaps in IDs after answering or dismissing questions do not affect display numbering.
+- `↑` / `↓`: move the highlight; it wraps. The mouse wheel moves it without submitting, and clicking a row selects it.
+- `Enter`: insert `/answer <question_id> ` for the highlighted row into the composer. Finish the answer and press `Enter` again to send the normal `/answer` command through the kernel.
+- `Esc`, a click outside the popup, or an unhandled control key: close it without submitting anything.
+- With no open questions, the popup says `No open questions.` and keeps `Enter` inert.
 
 ## Model picker
 
