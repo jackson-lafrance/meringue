@@ -199,6 +199,48 @@ class TuiChatPaneTest < Minitest::Test
     refute_includes text, "Pi defaults"
   end
 
+  def test_bottom_right_status_normalizes_role_defaults_without_flickering_placeholders
+    state = composed_state(
+      empty_state.merge(
+        "metadata" => {
+          "active_harness" => "pi",
+          "pi_session_defaults" => {
+            "roles" => {
+              "head" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "high" },
+              "worker" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "high" }
+            }
+          }
+        }
+      )
+    )
+
+    text = plain_line(@pane.bottom_right_status_line(state))
+    assert_equal "harness: Pi · model: openai/gpt-5.6-sol · thinking: high", text
+    refute_includes text, "mixed"
+    assert_equal text, plain_line(@pane.bottom_right_status_line(state))
+  end
+
+  def test_bottom_right_status_falls_back_to_shared_values_for_partial_role_updates
+    state = composed_state(
+      empty_state.merge(
+        "metadata" => {
+          "active_harness" => "pi",
+          "pi_session_defaults" => {
+            "model" => "openai/gpt-5.6-sol",
+            "thinking_level" => "high",
+            "roles" => {
+              "head" => { "model" => "openai/gpt-5.6-sol" },
+              "worker" => { "thinking_level" => "high" }
+            }
+          }
+        }
+      )
+    )
+
+    assert_equal "harness: Pi · model: openai/gpt-5.6-sol · thinking: high",
+                 plain_line(@pane.bottom_right_status_line(state))
+  end
+
   def test_bottom_right_status_shows_distinct_role_thinking_defaults
     state = composed_state(
       empty_state.merge(

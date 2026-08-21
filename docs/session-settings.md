@@ -22,7 +22,7 @@ Examples:
 /models pi refresh
 ```
 
-`/models` is a **local TUI command** that opens the model picker: a searchable, keyboard-navigable list of the models the selected harness itself reports, showing each model's provider/id reference, display name, and supported thinking levels. Bare `/model` is an alias for that same argumentless picker command; `/model <provider>/<model-id>` and its role-specific forms retain their setting behavior. With no argument `/models` shows the active harness; an explicit `pi`, `claude`, or `antigravity` scopes the picker (and its refresh) to that harness instead.
+`/models` is a **local TUI command** that opens the model picker: a searchable, keyboard-navigable list of the models the selected harness itself reports, showing each model's provider/id reference, display name, and supported thinking levels. The picker has explicit Head and Worker tabs; `←`/`→` switches roles, and selecting a row applies only the active role. Bare `/model` is an alias for that same argumentless picker command; `/model <provider>/<model-id>` and its role-specific forms retain their setting behavior. With no argument `/models` shows the active harness; an explicit `pi`, `claude`, or `antigravity` scopes the picker (and its refresh) to that harness instead.
 
 It replaced the old behavior, where `/models` printed the entire catalog into the visible log. A harness that reports 120 models produced 120 log lines nobody could act on, truncated with a hint that pointed at a different command.
 
@@ -32,8 +32,9 @@ Picker keys:
 | --- | --- |
 | any printable character | filter; space separated tokens all have to match (`openai high`) |
 | `Backspace` / `Ctrl-W` | delete one character of the filter / clear it |
+| `←` / `→` | switch between the Head and Worker tabs |
 | `↑` / `↓` | move the highlight (it wraps) |
-| `Enter` | apply the highlighted model, exactly as `/model <provider>/<model-id>` |
+| `Enter` | apply the highlighted model for the active role, exactly as `/model head|worker <provider>/<model-id>` |
 | `Ctrl-R` | re-fetch the catalog (`GetModelCatalog` with `refresh`), keeping the picker open |
 | `Esc`, click away, or any unhandled control key | close the picker without changing anything |
 
@@ -42,6 +43,8 @@ Selecting a row is applied through the normal slash path, so the picker itself w
 A trailing `refresh` word keeps `/models` on the kernel path instead of opening the picker: it forces a re-fetch and reports the snapshot's state (harness, availability, model count, confirmed timestamp, note) in the log. That is also what the picker's `Ctrl-R` submits and what a head proposes for "what models can I use", so `GetModelCatalog` remains the only way the catalog is read.
 
 ### Future Pi defaults
+
+The bare `/thinking` command opens a matching Head/Worker thinking-level picker. It uses the same `←`/`→` role tabs, `↑`/`↓` navigation, filtering, and `Enter` apply behavior as the model picker; `/thinking <level>` and `/thinking head|worker <level>` remain the direct command forms. Bare `/theme` and `/harness` use the same bordered popup for their choices, while `/config` and `/setup` remain full-screen transactional editors.
 
 ```text
 /model <provider>/<model-id>
