@@ -141,6 +141,25 @@ class WorkspaceTerminalScreenTest < Minitest::Test
     assert_equal ["green plain"], screen.lines
   end
 
+  def test_styled_trailing_spaces_remain_available_for_highlighted_pi_rows
+    screen = Meringue::Workspace::TerminalScreen.new(rows: 2, columns: 10)
+    highlight = "\e[48;5;24m"
+
+    screen.feed("#{highlight}selected  \e[0m")
+
+    assert_equal [[["selected  ", highlight]]], screen.styled_lines
+    assert_equal ["selected"], screen.lines
+  end
+
+  def test_a_highlighted_blank_row_is_not_dropped_from_the_viewport
+    screen = Meringue::Workspace::TerminalScreen.new(rows: 3, columns: 5)
+    highlight = "\e[48;5;24m"
+
+    screen.feed("#{highlight}     \e[0m\r\nnext")
+
+    assert_equal [[["     ", highlight]], [["next", nil]]], screen.styled_lines
+  end
+
   def test_styled_lines_can_be_rendered_repeatedly_without_mutating_the_screen
     screen = Meringue::Workspace::TerminalScreen.new(rows: 2, columns: 20)
     screen.feed("\e[1mbold\e[0m tail")

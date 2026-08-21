@@ -539,33 +539,40 @@ module Meringue
           if cursor.length >= 2
             row = cursor[0].to_i
             rendered_lines << [] while rendered_lines.length <= row
-            rendered_lines[row] = insert_terminal_cursor(rendered_lines[row], cursor[1].to_i)
+            rendered_lines[row] = insert_terminal_cursor(rendered_lines[row], cursor[1].to_i, width: width)
           end
           output.concat(rendered_lines)
           output.empty? ? [[["Terminal is starting…", Style::MUTED]]] : output
         end
 
-        def insert_terminal_cursor(segments, column)
-          remaining = [column, 0].max
-          output = []
-          inserted = false
-          Array(segments).each do |text, style|
-            value = text.to_s
-            if !inserted && remaining <= value.length
-              output << [value[0...remaining], style] if remaining.positive?
-              output << ["▏", Style::ACCENT_BOLD]
-              output << [value[remaining..].to_s, style] if remaining < value.length
-              inserted = true
+        # The cursor is a visual cell inside the PTY viewport, not extra content.
+        # Inserting a bar into a full-width row made Canvas clip the row's final
+        # character, and also cut a styled highlight one cell short. Replace the
+        # cursor cell (padding up to it when necessary) so every rendered row
+        # remains exactly the terminal content width.
+        def insert_terminal_cursor(segments, column, width: nil)
+          cells = Array(segments).flat_map do |text, style|
+            text.to_s.each_char.map { |character| [character, style] }
+          end
+          limit = width ? [width.to_i, 1].max : [cells.length, column.to_i + 1, 1].max
+          cells = cells.first(limit)
+          cursor_column = [column.to_i, 0].max.clamp(0, limit - 1)
+          if cells.length <= cursor_column
+            cells.concat(Array.new(cursor_column - cells.length) { [" ", Style::TEXT] })
+            cells << [" ", Style::TEXT]
+          end
+          cells[cursor_column] = ["▏", Style::ACCENT_BOLD]
+          cells_to_segments(cells)
+        end
+
+        def cells_to_segments(cells)
+          Array(cells).each_with_object([]) do |(character, style), segments|
+            if segments.last && segments.last.fetch(1) == style
+              segments.last[0] << character
             else
-              output << [value, style]
-              remaining -= value.length unless inserted
+              segments << [character.dup, style]
             end
           end
-          unless inserted
-            output << [" " * remaining, Style::TEXT] if remaining.positive?
-            output << ["▏", Style::ACCENT_BOLD]
-          end
-          output
         end
 
         def wrap_text(text, width)

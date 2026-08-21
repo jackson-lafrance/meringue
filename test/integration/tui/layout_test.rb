@@ -407,6 +407,101 @@ class TuiLayoutTest < Minitest::Test
     assert_includes @layout.render(refreshed, width: 100, height: 32), "H99"
   end
 
+  def test_embedded_pi_scroll_offset_selects_rows_without_changing_pane_geometry
+    width = 100
+    height = 32
+    rows = Meringue::TUI::Layout.new.embedded_agent_workspace_dimensions(
+      composed_state(empty_state, workspace: { "active" => true, "embedded" => true }),
+      width: width,
+      height: height
+    ).fetch("rows")
+    lines = Array.new(rows + 5) { |index| "Pi row #{index}" }
+    offset = 2
+    state = composed_state(
+      empty_state.merge("agents" => [agent_record("P1-I1-W1", "harness" => "pi")]),
+      workspace: {
+        "active" => true,
+        "embedded" => true,
+        "interactive" => true,
+        "agent_id" => "P1-I1-W1",
+        "view" => "agent",
+        "scroll_offset" => offset,
+        "agent_session" => {
+          "lines" => lines,
+          "styled_lines" => lines.map { |line| [[line, nil]] },
+          "cursor" => [0, 0],
+          "revision" => 1,
+          "status" => "running"
+        }
+      }
+    )
+
+    frame = @layout.render(state, width: width, height: height)
+    metrics = @layout.send(:layout_metrics, width, height, state)
+    content_row = TUISupport.strip_ansi(frame.split("\n", -1).fetch(metrics.fetch(:top_y) + 1))
+    content_width = metrics.fetch(:main_width) - 4
+    first_visible = lines.length - offset - rows
+
+    assert_equal lines.fetch(first_visible), content_row[metrics.fetch(:main_x) + 2, content_width].rstrip
+    assert_equal [lines.length - rows, 0].max, @layout.agent_workspace_scroll_max(state, width: width, height: height)
+    assert_equal [width], frame.split("\n", -1).map { |line| TUISupport.strip_ansi(line).length }.uniq
+  end
+
+  def test_native_pi_content_and_highlights_fit_the_viewport_at_terminal_sizes
+    highlight = "\e[48;5;24m"
+    [[64, 18], [80, 24], [100, 32], [120, 40], [200, 60], [300, 20]].each do |width, height|
+      state = composed_state(
+        empty_state.merge("agents" => [agent_record(
+          "P1-I1-W1",
+          "harness" => "pi",
+          "project_id" => "P1",
+          "issue_id" => "P1-I1"
+        )]),
+        scroll: { "active_pane" => "logs", "offsets" => {} },
+        workspace: {
+          "active" => true,
+          "embedded" => true,
+          "interactive" => true,
+          "agent_id" => "P1-I1-W1",
+          "view" => "agent",
+          "leader_label" => "Ctrl-Space",
+          "leader_commands" => [],
+          "agent_session" => {
+            "lines" => [],
+            "styled_lines" => [],
+            "cursor" => [0, 0],
+            "revision" => 1,
+            "status" => "running"
+          }
+        }
+      )
+      dimensions = @layout.embedded_agent_workspace_dimensions(state, width: width, height: height)
+      columns = dimensions.fetch("columns")
+      cursor_column = columns / 2
+      text = ("a" * (columns - 1)) + "Z"
+      state.fetch("_agent_workspace").fetch("agent_session").merge!(
+        "lines" => [text],
+        "styled_lines" => [[[text, highlight]]],
+        "cursor" => [0, cursor_column],
+        "revision" => 2
+      )
+
+      frame = @layout.render(state, width: width, height: height, color: true)
+      lines = frame.split("\n", -1)
+      metrics = @layout.send(:layout_metrics, width, height, state)
+      content_row = lines.fetch(metrics.fetch(:top_y) + 1)
+      content = TUISupport.strip_ansi(content_row)[metrics.fetch(:main_x) + 2, columns]
+      expected = text.dup
+      expected[cursor_column] = "▏"
+
+      assert_equal height, lines.length, "row count at #{width}x#{height}"
+      assert_equal [width], lines.map { |line| TUISupport.strip_ansi(line).length }.uniq, "frame stays rectangular at #{width}x#{height}"
+      assert_equal expected, content, "Pi's last content cell survives at #{width}x#{height}"
+      assert_includes content_row, highlight, "Pi highlight style survives at #{width}x#{height}"
+      assert_includes content_row, Meringue::TUI::Style::ACCENT_BOLD, "focused cursor style survives at #{width}x#{height}"
+    end
+  end
+
   def test_focused_workspace_uses_open_session_to_avoid_colliding_with_settings_inspection
     advertised = Meringue::TUI::WorkspaceCommands::COMMAND_SPECS.map(&:first)
 
