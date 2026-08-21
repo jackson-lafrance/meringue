@@ -119,7 +119,7 @@ module Meringue
       # agent_session_service may open the generic live worker-session view.
       # Returning from this TUI workspace closes only that read handle and never
       # calls an abort/kill worker lifecycle operation.
-      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, workspace_controller: nil, agent_session_service: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default, config: nil, onboarding_enabled: false)
+      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, workspace_controller: nil, agent_session_service: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default, config: nil, onboarding_enabled: false, harness_configured_check: nil)
         @layout = layout
         @out = out
         @terminal = terminal || Terminal.new(input: input, output: out)
@@ -178,6 +178,11 @@ module Meringue
         # draft and full-screen pane. It is disabled for `meringue demo`, where no
         # kernel exists to save the draft or completion marker.
         @onboarding_enabled = onboarding_enabled ? true : false
+        # Truthful only when at least one role harness is configured. The CLI
+        # supplies a registry-backed check so the app can open setup and gate
+        # chat when no backend is chosen yet; tests and demo default to "ready"
+        # so existing behavior is unchanged.
+        @harness_configured_check = harness_configured_check || -> { true }
         @workspace_draft = ""
         @workspace_agent_scroll_offset = 0
         @workspace_terminal_scroll_offset = 0
@@ -3945,10 +3950,18 @@ module Meringue
 
       def onboarding_autostart?
         return false unless @onboarding_enabled
+        # No harness means the app cannot route work yet, so force setup open
+        # even when a prior onboarding marker exists. Setup is the only path
+        # that persists a harness through the kernel.
+        return true unless harness_configured?
         return false if Onboarding.completed?(config)
 
         width, height = terminal.dimensions
         Onboarding.fits?(width: width, height: height)
+      end
+
+      def harness_configured?
+        @harness_configured_check.call ? true : false
       end
 
       # Compatibility seam for tests/extensions that opened the old controller
@@ -4681,6 +4694,15 @@ module Meringue
 
         remember_chat_input(text) if remember_input
         slash_command = text.start_with?("/")
+        # Without a harness the kernel cannot spawn a head, so a plain prompt
+        # would fail mid-routing. Slash commands (notably /setup and /config)
+        # still work so the user can pick a backend and continue.
+        unless slash_command
+          unless harness_configured?
+            append_jump_response("No agent harness is configured. Run /setup to choose one before sending prompts.")
+            return
+          end
+        end
         # Slash commands are explicit clutch-path instructions and never carry
         # dashboard routing context. LogScope.chat_target already normalizes an
         # absent, cleared, or unbound selection to nil, so both branches produce

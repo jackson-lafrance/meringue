@@ -3178,6 +3178,10 @@ module Meringue
         return { "changed" => false, "skipped" => "no_catalog_source" } unless @model_catalog_provider
 
         provider = synchronized_state { active_harness_provider(normalized_state) }
+        # No harness is configured yet (fresh state before setup). Skip rather
+        # than ask the registry for a catalog it cannot resolve, which would
+        # log a warning on every reconciliation tick.
+        return { "changed" => false, "skipped" => "no_harness_configured" } if provider.to_s.empty?
         public_name = Meringue::Harness::Registry.public_provider_name(provider)
         existing = persisted_model_catalog(public_name)
         if existing && !model_catalog_stale?(existing)
