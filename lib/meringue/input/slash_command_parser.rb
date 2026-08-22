@@ -21,6 +21,7 @@ module Meringue
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
         ["/move <agent_id> <issue_id>", "Move an existing worker to a different issue without restarting its harness session."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
+        ["/worker guide \"<additional system prompt>\"", "Persist the additional worker model-selection system prompt when its experiment is enabled."],
         ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."],
         ["/worker resume <agent_id>", "Resume a paused worker session."],
         ["/worker export <bundle_path> [agent_id...]", "Export current workers for a fresh retry on another computer."],
@@ -175,6 +176,9 @@ module Meringue
       end
 
       def self.command_suggestion_records(input = nil, limit: 3, state: nil)
+        inline_records = inline_suggestion_records(input, state)
+        return inline_records.first(limit || inline_records.length) if inline_records
+
         argument_records = argument_suggestion_records(input, state)
         return argument_records.first(limit || argument_records.length) if argument_records
 
@@ -217,6 +221,40 @@ module Meringue
 
       def self.completion_prefix_for(usage)
         usage.to_s.split.take_while { |token| token !~ /\A[<\[]/ }.join(" ")
+      end
+
+      # Inline model and thinking completions are deliberately separate from slash
+      # commands. They let a user express a worker preference in ordinary routing
+      # text without changing the worker defaults or bypassing head selection.
+      def self.inline_suggestion_active?(input)
+        input.to_s.match?(/(?:\A|\s)([@#])(?:\S*)\z/)
+      end
+
+      def self.inline_suggestion_records(input, state)
+        raw = input.to_s
+        match = raw.match(/(?:\A|\s)([@#])(\S*)\z/)
+        return nil unless match
+
+        trigger = match[1]
+        query = match[2].to_s
+        prefix = raw[0...match.begin(2)]
+        context = {
+          "source" => trigger == "@" ? "session_models" : "thinking_levels",
+          "model_role" => "worker",
+          "thinking_role" => "worker",
+          "query" => query,
+          "completion_prefix" => prefix
+        }
+        records = session_value_suggestion_records(context, state)
+        records.map do |record|
+          value = record.fetch("usage")
+          completion = record.fetch("kind", nil) == "session_models_unavailable" ? prefix : "#{prefix}#{value}"
+          record.merge(
+            "completion" => completion,
+            "inline_trigger" => trigger,
+            "append_space" => false
+          )
+        end
       end
 
       def self.argument_suggestion_records(input, state)
@@ -986,6 +1024,10 @@ module Meringue
             "issue_id" => tokens[1],
             "prompt" => tokens[2..]&.join(" ")
           )
+        when "guide"
+          return invalid("Usage: /worker guide \"<additional system prompt>\"") if tokens.length < 2
+
+          kernel_command("SetWorkerSelectionGuidance", "prompt" => tokens[1..].join(" "))
         when "pause", "resume"
           return invalid("Usage: /worker #{tokens.first.downcase} <agent_id>") unless tokens.length == 2
 
@@ -1003,7 +1045,7 @@ module Meringue
 
           kernel_command("ImportWorkers", "path" => tokens[1], "project_path" => tokens[3])
         else
-          invalid("Usage: /worker spawn <issue_id> \"<prompt>\" | /worker pause <agent_id> | /worker resume <agent_id> | /worker export <bundle_path> [agent_id...] | /worker import <bundle_path> --project <path>")
+          invalid("Usage: /worker spawn <issue_id> \"<prompt>\" | /worker guide \"<additional system prompt>\" | /worker pause <agent_id> | /worker resume <agent_id> | /worker export <bundle_path> [agent_id...] | /worker import <bundle_path> --project <path>")
         end
       end
 

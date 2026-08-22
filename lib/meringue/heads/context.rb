@@ -31,11 +31,13 @@ module Meringue
       ROUTING_TEXT_LIMIT = 2_000
 
       attr_reader :head_id, :user_message, :snapshot, :question_id, :selected_target,
-                  :takeover_context, :kernel_commands_path, :cwd, :state_path, :github_support
+                  :takeover_context, :kernel_commands_path, :cwd, :state_path, :github_support,
+                  :worker_spawning_guidance, :worker_spawning_guidance_prompt
 
       def initialize(head_id:, user_message:, snapshot:, question_id: nil, selected_target: nil,
                      takeover_context: nil, kernel_commands_path: DEFAULT_KERNEL_COMMANDS_PATH, cwd: Dir.pwd,
-                     state_path: State::Store.default_path, github_support: true)
+                     state_path: State::Store.default_path, github_support: true, worker_spawning_guidance: false,
+                     worker_spawning_guidance_prompt: nil)
         @head_id = head_id
         @user_message = user_message
         @snapshot = snapshot
@@ -46,6 +48,8 @@ module Meringue
         @cwd = File.expand_path(cwd)
         @state_path = File.expand_path(state_path)
         @github_support = github_support != false
+        @worker_spawning_guidance = worker_spawning_guidance == true
+        @worker_spawning_guidance_prompt = worker_spawning_guidance_prompt
       end
 
       def to_h
@@ -62,10 +66,18 @@ module Meringue
           "project_discovery" => project_discovery,
           "current_state_summary" => current_state_summary,
           "routing_context" => routing_context,
+          "additional_system_prompt" => guidance_text,
+          # Keep the experiment-named key for consumers of the original PR's
+          # context shape while the semantic name documents what is delivered.
+          "worker_spawning_guidance" => guidance_text,
           "kernel_command_reference" => reference_metadata.merge(
             "appended_to_system_prompt" => true
           )
         }
+        unless worker_spawning_guidance
+          prompt.delete("additional_system_prompt")
+          prompt.delete("worker_spawning_guidance")
+        end
         github_support ? prompt : without_github_guidance(prompt)
       end
 
@@ -84,6 +96,7 @@ module Meringue
           Resolve project identity from the current user request before considering recent activity, active issues, or worker sessions. An explicit project name, id, repository path, or clearly identified local repository is authoritative; never attach a request to an unrelated recent issue merely because it is active or recent. If the identified local repository is not registered, propose AddProject before creating or routing work. If multiple projects remain plausible, ask for clarification instead of guessing.
           When routing_context.selected_target is present, it is explicit UI routing context: keep this message on its resolved issue. An agent selection resolves to that agent's owning issue; use the selected agent as a session-context hint, but still choose the appropriate healthy worker and PromptAgent mode through kernel commands. Never bypass head routing or prompt an agent from another issue.
           When questions are open, check routing_context.open_questions and routing_context.answer_inference first. If this message clearly answers exactly one open question, propose AnswerQuestion for that question id and route the work it unblocks in the same result. If several open questions are plausible, or the message is plainly a new goal, leave every question open and route normally or ask one clarifying question.
+          #{guidance_text}
           When proposing AddProject, use the concise suggested product name from project_discovery when available. Preserve intentional capitalization exactly, and do not use a worktree suffix, repository path slug, or verbose product description as the name.
           Before creating a GitHub-backed Meringue issue, resolve the relevant GitHub issue or pull request's exact current title with the permitted read-only title lookup and use that title unchanged as the Meringue issue title. Never substitute a generic number-based title such as "Fix PR #123", "Rebase PR #123", or "GitHub issue #123". If the relevant GitHub target or its exact title cannot be resolved unambiguously, ask a clarifying question instead of creating the issue.
           Prefer a healthy existing worker session when its Pi or other harness history contains the context needed for the follow-up. Do not duplicate that harness history in Meringue state.
@@ -107,6 +120,12 @@ module Meringue
       end
 
       private
+
+      def guidance_text
+        return nil unless worker_spawning_guidance
+
+        Meringue::Experiments::WorkerSpawningGuidance.text(worker_spawning_guidance_prompt)
+      end
 
       def kernel_command_reference
         @kernel_command_reference ||= begin
@@ -183,6 +202,7 @@ module Meringue
           "worker_candidates" => routing_worker_candidates,
           "recent_activity" => recent_routing_activity,
           "decision_rules" => [
+            guidance_text,
             "When selected_target is present, route within its resolved issue. An agent selection identifies its owning issue and is a preferred session-context hint, not permission to bypass the head or force an unhealthy agent.",
             "Do not create or prompt work on another issue while selected_target is active. If the message explicitly conflicts with the selected issue, ask the user to clear/change the selection rather than silently ignoring it.",
             "Explicit project, issue, worker, or question ids in the user message take precedence when they are compatible with selected_target; otherwise surface the conflict instead of guessing.",
@@ -218,7 +238,7 @@ module Meringue
             "Insistence without a measurable finish line is still ordinary work. Route it to a worker (or ask one question about what done is measured by) instead of opening a goal loop; goal budgets are clamped, so a goal is not a way to give an ordinary task extra iterations. That applies only when the result cannot be judged either: if it can, use the reviewer judge.",
             "When this message answers an open question, pair AnswerQuestion with the routing command that acts on the answer in the same HeadResult. Closing a question without routing the unblocked work drops the user's request.",
             "An issue or agent id you read from the supplied state is a real target: propose the command for it normally. If the user prunes or kills that record while you are routing, the kernel skips that one command as a no-op (issue_removed_before_head_result_applied or agent_removed_before_head_result_applied), applies the rest of your batch, and does not count it against you. Never re-check state at the last moment, duplicate a command, or drop one because its target might be pruned."
-          ]
+          ].compact
         }
         target = selected_target_context
         context["selected_target"] = target if target

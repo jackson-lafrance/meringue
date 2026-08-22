@@ -392,6 +392,19 @@ module Meringue
             label: experiment.label,
             description: "#{experiment.description} #{experiment.risk}".strip
           )
+          if experiment.id == "worker_spawning_guidance"
+            settings << definition(
+              "experiments.worker_spawning_guidance_prompt",
+              %w[experiments worker_spawning_guidance_prompt],
+              "Experiments",
+              "string",
+              Meringue::Experiments::WorkerSpawningGuidance.default_text,
+              editor: "text",
+              apply_mode: "live",
+              label: "Worker model selection prompt",
+              description: "Additional system-prompt text supplied to heads when worker model selection guidance is enabled. Use @ for models and # for thinking levels."
+            )
+          end
           experiment.actions.each do |action|
             settings << definition(
               "experiments.#{action.fetch("id")}",
