@@ -90,14 +90,10 @@ class TuiAgentOutputTest < Minitest::Test
     refute AgentOutput.prose_continuation?("prose", "  indented continuation")
   end
 
-  # Recorded actual behavior, not desired behavior: invalid UTF-8 raises out of
-  # normalize because the rescue only covers ArgumentError and then calls rstrip
-  # on the same invalid bytes. See test/findings/tui.md.
-  def test_invalid_utf8_currently_raises_instead_of_being_replaced
+  def test_invalid_utf8_is_replaced_before_normalization
     invalid = "bad \xC3\x28 utf8".dup.force_encoding("UTF-8")
 
-    assert_raises(Encoding::CompatibilityError) { AgentOutput.normalize(invalid) }
-    # The Markdown renderer, by contrast, sanitizes the same bytes.
+    assert_equal "bad �( utf8", AgentOutput.normalize(invalid)
     assert_kind_of Array, Meringue::TUI::Markdown.sanitized_lines(invalid)
   end
 end

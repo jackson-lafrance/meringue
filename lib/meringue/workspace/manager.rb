@@ -2747,7 +2747,7 @@ module Meringue
             ceiling && (started + ceiling - now),
             stall_timeout && (monitor.last_at + stall_timeout - now)
           ].compact.min
-          return nil if wait_thread.join([nap, 0.01].max)
+          return nil if wait_thread.join([nap, 0.0].max)
 
           now = self.class.monotonic_now
           elapsed = now - started

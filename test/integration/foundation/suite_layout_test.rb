@@ -13,16 +13,29 @@ class FoundationSuiteLayoutTest < Minitest::Test
     )
 
     assert_equal 0, status
-    assert_equal "default,test", stdout.strip
+    tasks = stdout.strip.split(",")
+    %w[build default install package:verify release release:validate test].each do |task|
+      assert_includes tasks, task
+    end
   end
 
   def test_rakefile_wires_lib_and_test_onto_the_load_path
     rakefile = File.read(FoundationSupport.repo_path("Rakefile"))
 
+    assert_includes rakefile, 'require "bundler/gem_tasks"'
     assert_includes rakefile, "Rake::TestTask.new(:test)"
     assert_includes rakefile, 't.libs = ["lib", "test"]'
     assert_includes rakefile, 't.test_files = FileList["test/**/*_test.rb"]'
     assert_includes rakefile, "task default: :test"
+
+    status, stdout, = FoundationSupport.run_ruby(
+      "-e",
+      'require "rake"; load "Rakefile"; print Rake::Task["release:guard_clean"].prerequisites.join(",")'
+    )
+    assert_equal 0, status
+    prerequisites = stdout.split(",")
+    assert_includes prerequisites, "release:validate"
+    assert_includes prerequisites, "release:trusted_publishing_only"
   end
 
   def test_test_helper_exposes_the_library_and_minitest
@@ -74,18 +87,27 @@ class FoundationSuiteLayoutTest < Minitest::Test
     assert_equal Meringue::VERSION, spec.version.to_s
     assert_equal ["meringue"], spec.executables
     assert_equal ["lib"], spec.require_paths
+    assert_equal "https://rubygems.org", spec.metadata["allowed_push_host"]
+    assert_equal "true", spec.metadata["rubygems_mfa_required"]
+    assert_equal "https://github.com/jackson-lafrance/meringue/issues", spec.metadata["bug_tracker_uri"]
+    assert_equal "https://github.com/jackson-lafrance/meringue/blob/main/CHANGELOG.md", spec.metadata["changelog_uri"]
 
     %w[
-      AGENTS.md
+      CHANGELOG.md
       README.md
       bin/meringue
-      docs/testing.md
+      docs/head_agent_kernel_commands.md
+      fixtures/demo_state.json
       lib/meringue.rb
       lib/meringue/cli.rb
       lib/meringue/kernel/engine.rb
       lib/meringue/harness/extensions/command_blacklist.js
     ].each do |path|
       assert_includes spec.files, path
+    end
+
+    %w[AGENTS.md bin/meringue-record docs/testing.md fixtures/config.example.toml].each do |path|
+      refute_includes spec.files, path
     end
   end
 
