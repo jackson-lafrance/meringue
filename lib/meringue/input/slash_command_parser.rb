@@ -42,6 +42,7 @@ module Meringue
         ["/setup", "Reopen Setup for theme, separate head/worker defaults, and experiments."],
         ["/keybind", "Show all TUI keybindings."],
         ["/config", "Open full-screen Settings; /config --text prints read-only diagnostics."],
+        ["/github test", "Test read-only GitHub authentication and repository access."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
@@ -773,6 +774,8 @@ module Meringue
           invalid("/keybind is a local TUI command. Run it in the interactive TUI to show keybindings.", usage: "/keybind")
         when "config"
           parse_config(arguments)
+        when "github"
+          parse_github(arguments)
         when "tree"
           kernel_command("ListAll", "view" => "tree")
         when "state"
@@ -825,6 +828,13 @@ module Meringue
         kernel_command("SaveConfiguration", command_payload)
       rescue ArgumentError, JSON::ParserError
         invalid("Configuration save payload is invalid.")
+      end
+
+      def parse_github(arguments)
+        tokens = split_arguments(arguments)
+        return kernel_command("TestGitHubAccess") if tokens == ["test"]
+
+        invalid("Usage: /github test")
       end
 
       def parse_theme(arguments)

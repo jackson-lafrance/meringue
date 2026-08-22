@@ -88,6 +88,8 @@ Goal loops, non-Pi providers, focused workspaces, read-only workers, command bla
 
 When enabled, Meringue may use bounded read-only `gh` lookups for exact issue/PR titles, delivery verification, branch discovery, and PR status refresh. Request/worker PR links can be associated, PR state participates in prune/reuse safety, and PR markers, pickers, hints, and browser actions are available.
 
+The Experiments category also provides **Test GitHub access**. This non-persistent action resolves the current checkout's `origin` remote and checks the minimum supported workflow access: `gh auth status --hostname github.com`, followed by `gh repo view OWNER/REPO --json nameWithOwner`. Both commands are non-interactive, share a short timeout, and are read-only; no GitHub resource can be created, edited, closed, commented on, or merged. `/github test` runs the same kernel command. The UI identifies successful access, an unavailable CLI/service, missing authentication, denied repository access, a timeout, or a malformed/non-GitHub remote, and retrying the action does not change GitHub.
+
 When disabled:
 
 - built-in head context contains no `gh` discovery commands or exact-GitHub-title rules;

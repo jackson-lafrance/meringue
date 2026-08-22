@@ -220,6 +220,7 @@ module Meringue
         "theme" => "SetTheme",
         "set_theme" => "SetTheme",
         "save_configuration" => "SaveConfiguration",
+        "test_github_access" => "TestGitHubAccess",
         "get_state" => "GetState",
         "get_session_defaults" => "GetSessionDefaults",
         "get_model_catalog" => "GetModelCatalog",
@@ -270,6 +271,7 @@ module Meringue
         ["/setup", "TUI local: reopen Setup for theme, separate head/worker defaults, and experiments."],
         ["/keybind", "TUI local: show all keybindings."],
         ["/config", "TUI local: open full-screen Settings; /config --text prints diagnostics."],
+        ["/github test", "Test read-only GitHub authentication and repository access."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "List questions and their statuses."],
@@ -583,6 +585,9 @@ module Meringue
       # ticks instead of one long one. Leftover records stay due and are picked up next tick.
       DELIVERY_PULL_REQUEST_REFRESH_BATCH_LIMIT = 3
       DELIVERY_PULL_REQUEST_REFRESH_BUDGET_SECONDS = 5.0
+      # A user-requested access check is deliberately short and runs outside the state lock. The
+      # forge client shares the same deadline across auth and repository-read checks.
+      GITHUB_ACCESS_TEST_BUDGET_SECONDS = 5.0
       # `/prune` verifies PR state conservatively, but forge discovery/status commands are external
       # I/O. Bound the whole lookup phase so one unreachable forge cannot leave the command pending
       # indefinitely. URLs not resolved inside the budget become `unknown` and retain their issue.
@@ -1833,6 +1838,10 @@ module Meringue
           # The config lock must be acquired before the state lock. Validation and
           # atomic publication happen first; runtime/state mirrors follow.
           save_configuration(command_id, command_type, payload)
+        elsif command_type == "TestGitHubAccess"
+          # Authentication and repository checks are external I/O. Resolve the gate under the
+          # state lock, then run the bounded forge call without holding it.
+          test_github_access(command_id, command_type, payload)
         elsif command_type == "SetHarness"
           set_harness(command_id, command_type, payload)
         elsif command_type == "GetModelCatalog"
@@ -1888,6 +1897,8 @@ module Meringue
           complete_onboarding(command_id, command_type, payload)
         when "SaveConfiguration"
           save_configuration(command_id, command_type, payload)
+        when "TestGitHubAccess"
+          test_github_access(command_id, command_type, payload)
         when "SetTheme"
           set_theme(command_id, command_type, payload)
         when "SetHarness"
@@ -3696,6 +3707,108 @@ module Meringue
         errors = [message.to_s]
         errors << "Try #{usage}" if present_string(usage)
         rejected_result(command_id, command_type, message.to_s, errors)
+      end
+
+      def test_github_access(command_id, command_type, payload)
+        enabled = synchronized_state { github_support_enabled?(normalized_state) }
+        unless enabled
+          result = {
+            "outcome" => "unavailable",
+            "message" => "Enable GitHub support in Settings → Experiments before testing access."
+          }
+          return accepted_result(command_id, command_type, nil, result.fetch("message"), result, [])
+        end
+
+        repository, remote_error = github_access_repository(payload)
+        unless repository
+          result = {
+            "outcome" => "malformed_remote",
+            "message" => remote_error || "The current repository does not have a supported GitHub origin remote."
+          }
+          return record_github_access_result(command_id, command_type, result)
+        end
+
+        result = if forge_client.respond_to?(:test_access)
+                   invoke_forge_access_test(repository)
+                 else
+                   {
+                     "outcome" => "unavailable",
+                     "message" => "The configured GitHub client cannot run an access check.",
+                     "repository" => repository
+                   }
+                 end
+        record_github_access_result(command_id, command_type, result.merge("repository" => repository).compact)
+      rescue StandardError => e
+        record_github_access_result(
+          command_id,
+          command_type,
+          {
+            "outcome" => "unavailable",
+            "message" => "GitHub access test was unavailable: #{e.message}",
+            "repository" => repository
+          }.compact
+        )
+      end
+
+      def github_access_repository(payload)
+        requested = present_string(value_at(payload, "repository", "Repository"))
+        if requested
+          return [requested, "The requested GitHub repository is malformed."] unless requested.match?(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z})
+
+          return [requested, nil]
+        end
+
+        remote = present_string(value_at(payload, "remote", "Remote"))
+        if remote.nil?
+          stdout, _stderr, status = Open3.capture3("git", "-C", cwd, "remote", "get-url", "origin")
+          return [nil, "Could not read the current repository's origin remote."] unless status.success?
+
+          remote = present_string(stdout)
+        end
+        repository = Forge::GitHubClient.repository_from_remote(remote)
+        return [repository, nil] if repository
+
+        [nil, "The current origin remote is not a supported GitHub repository URL."]
+      rescue Errno::ENOENT
+        [nil, "Git is unavailable, so the current repository origin could not be checked."]
+      rescue StandardError => e
+        [nil, "The current repository origin could not be checked: #{e.message}"]
+      end
+
+      def invoke_forge_access_test(repository)
+        method = forge_client.method(:test_access)
+        if forge_method_accepts_timeout?(method)
+          method.call(repository: repository, timeout: GITHUB_ACCESS_TEST_BUDGET_SECONDS)
+        else
+          method.call(repository: repository)
+        end
+      end
+
+      def record_github_access_result(command_id, command_type, result)
+        normalized = result.is_a?(Hash) ? result.compact : {}
+        outcome = normalized.fetch("outcome", normalized.fetch("status", "unavailable")).to_s
+        normalized["outcome"] = outcome
+        message = normalized.fetch("message", "GitHub access test was unavailable.").to_s
+        log_ids = synchronized_state do
+          state = normalized_state
+          ids = append_log(
+            state,
+            source_type: "kernel",
+            source_id: nil,
+            level: %w[success].include?(outcome) ? "info" : "warning",
+            message: message,
+            details: {
+              "kind" => "github_access_test",
+              "outcome" => outcome,
+              "repository" => normalized["repository"],
+              "identity" => normalized["identity"]
+            }.compact
+          )
+          touch_state!(state)
+          store.save(state)
+          ids
+        end
+        accepted_result(command_id, command_type, normalized["repository"], message, normalized, log_ids)
       end
 
       def no_op(command_id, command_type, payload)

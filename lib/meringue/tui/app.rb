@@ -171,6 +171,7 @@ module Meringue
         @settings_keybinding_capture = nil
         @settings_discard_confirm = false
         @settings_saving = false
+        @github_access_test_result = nil
         @settings_mode = "settings"
         @settings_setup_auto = false
         @settings_setup_outcome = nil
@@ -3243,6 +3244,7 @@ module Meringue
         @settings_footer_focus = false
         @settings_discard_confirm = false
         @settings_saving = false
+        @github_access_test_result = nil
         close_delivery_pr_picker
         close_model_picker
         @force_full_redraw = true
@@ -3265,6 +3267,7 @@ module Meringue
         @settings_footer_focus = false
         @settings_discard_confirm = false
         @settings_saving = false
+        @github_access_test_result = nil
         @settings_setup_auto = false
         @settings_setup_outcome = nil
         @settings_mode = "settings"
@@ -3298,11 +3301,11 @@ module Meringue
 
       def settings_rows
         return [] unless @settings_draft
-        return setup_rows if setup_mode?
+        return setup_rows.map { |row| decorate_github_access_action_row(row) } if setup_mode?
 
         expanded = @settings_expanded_advanced.fetch(settings_category, false)
         definitions = @settings_draft.definitions_for(settings_category, include_advanced: expanded)
-        rows = definitions.map { |definition| @settings_draft.row(definition) }
+        rows = definitions.map { |definition| decorate_github_access_action_row(@settings_draft.row(definition)) }
         hidden = @settings_draft.definitions_for(settings_category, include_advanced: true).count(&:advanced)
         if !expanded && hidden.positive?
           rows << synthetic_settings_row(
@@ -3330,6 +3333,46 @@ module Meringue
             @settings_draft.row(definition) if definition
           end
         end
+      end
+
+      def decorate_github_access_action_row(row)
+        return row unless row.fetch("id", nil) == "experiments.github_support_test_access"
+
+        enabled = @settings_draft.value("experiments.github_support") == true
+        result = @github_access_test_result
+        display_value = if !enabled
+                          "Enable support"
+                        elsif result
+                          github_access_test_label(result.fetch("outcome", result.fetch("status", "unavailable")))
+                        else
+                          "Run test"
+                        end
+        description = if !enabled
+                        "Enable GitHub support above before running this read-only check."
+                      elsif result
+                        result.fetch("message", row.fetch("description", "")).to_s
+                      else
+                        row.fetch("description", "")
+                      end
+        row.merge(
+          "display_value" => display_value,
+          "description" => description,
+          "disabled" => !enabled
+        )
+      rescue KeyError
+        row
+      end
+
+      def github_access_test_label(outcome)
+        {
+          "testing" => "Testing…",
+          "success" => "Ready",
+          "unavailable" => "Unavailable",
+          "unauthenticated" => "Not authenticated",
+          "permission_denied" => "Permission denied",
+          "timeout" => "Timed out",
+          "malformed_remote" => "Malformed remote"
+        }.fetch(outcome.to_s, outcome.to_s.tr("_", " ").capitalize)
       end
 
       def synthetic_settings_row(id, label, description, display_value, dirty: false, source: "setup")
@@ -3764,6 +3807,9 @@ module Meringue
           move_settings_category(1)
           return true
         end
+        if id == "experiments.github_support_test_access"
+          return test_github_access_from_settings(state, on_submit)
+        end
         return false if row.fetch("read_only", false)
 
         case row.fetch("editor", nil)
@@ -3781,6 +3827,29 @@ module Meringue
           open_settings_editor(row)
         end
         true
+      end
+
+      def test_github_access_from_settings(state, on_submit)
+        unless @settings_draft.value("experiments.github_support") == true
+          @github_access_test_result = {
+            "outcome" => "unavailable",
+            "message" => "Enable GitHub support in Settings → Experiments before testing access."
+          }
+          return false
+        end
+
+        @github_access_test_result = {
+          "outcome" => "testing",
+          "message" => "Testing GitHub authentication and read access…"
+        }
+        submit_prompt("/github test", on_submit, state)
+        true
+      rescue StandardError => e
+        @github_access_test_result = {
+          "outcome" => "unavailable",
+          "message" => "GitHub access test could not start: #{e.message}"
+        }
+        false
       end
 
       def focus_setup_setting(id)
@@ -4871,7 +4940,24 @@ module Meringue
         clear_logs! if clear_state_accepted?(command_results)
         reload_recounted_presentation_state! if recount_accepted?(command_results)
         apply_theme_command_results(command_results)
+        apply_github_access_test_results(command_results)
         apply_configuration_command_results(command_results)
+      end
+
+      def apply_github_access_test_results(command_results)
+        result = Array(command_results).reverse.find { |candidate| candidate.fetch("command_type", nil) == "TestGitHubAccess" }
+        return unless result
+
+        payload = result.fetch("result", {}) || {}
+        @github_access_test_result = payload.merge(
+          "outcome" => payload.fetch("outcome", payload.fetch("status", result.fetch("status", "unavailable"))),
+          "message" => payload.fetch("message", result.fetch("message", "GitHub access test was unavailable."))
+        )
+      rescue StandardError => e
+        @github_access_test_result = {
+          "outcome" => "unavailable",
+          "message" => "GitHub access result could not be shown: #{e.message}"
+        }
       end
 
       def apply_configuration_command_results(command_results)

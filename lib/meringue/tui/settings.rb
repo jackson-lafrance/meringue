@@ -30,7 +30,7 @@ module Meringue
         end
 
         def setting_ids(step)
-          return Experiments::Registry.ids.map { |id| "experiments.#{id}" } if step.to_s == "Experiments"
+          return Experiments::Registry.setting_ids if step.to_s == "Experiments"
 
           FIXED_SETTING_IDS.fetch(step.to_s, [])
         end
@@ -83,7 +83,13 @@ module Meringue
         end
 
         def value(id)
-          Config.deep_copy(values.fetch(id.to_s))
+          key = id.to_s
+          return Config.deep_copy(values.fetch(key)) if values.key?(key)
+
+          definition = @definitions.find { |candidate| candidate.id == key }
+          return definition.default_value(config, env: @env) if definition&.type == "action"
+
+          raise KeyError, "Unknown setting #{id.inspect}"
         end
 
         def changed?(id)
