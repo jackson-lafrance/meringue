@@ -248,6 +248,7 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 
 ## Chat input
 
+- `Ctrl-Z`: undo the most recent composer edit while the chat input is focused.
 - `Enter`: send the prompt as typed, or apply the slash suggestion once one is selected. When the composer is tinted, the message is routed by a fresh head with the titled target as `routing_context.selected_target`; see [AgentTree selection, log filtering, and chat routing](#agenttree-selection-log-filtering-and-chat-routing).
 - `Shift-Enter`: insert a newline.
 - `Left` / `Right`: move the cursor by character.
