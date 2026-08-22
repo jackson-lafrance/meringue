@@ -374,6 +374,8 @@ module Meringue
           /models [harness]         # open the searchable model picker; bare /model is an alias
           /keybind                  # show all TUI keybindings
           /config                   # open full-screen Settings (/config --text prints diagnostics)
+          /setup                    # review setup defaults, status-bar layout, and experiments
+          /status-bar               # open the status-bar layout composer
           /jump [agent_id]          # open a focused workspace; omit id to navigate the AgentTree
           /recount                  # compact AgentTree numbering after records are removed
           Ctrl-B                    # open the selected issue's verified delivery PR; with nothing selected, pick from the open PRs

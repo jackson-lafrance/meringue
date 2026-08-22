@@ -281,10 +281,14 @@ module Meringue
       class Draft
         attr_reader :baseline_fingerprint, :errors, :global_error
 
-        def initialize(config)
+        def initialize(config, initial_value: nil)
           @config = config
           @baseline_fingerprint = config.fingerprint
-          @original = StatusBarLayout.from_config(config) || StatusBarLayout.new
+          @original = if initial_value.nil?
+                        StatusBarLayout.from_config(config) || StatusBarLayout.new
+                      else
+                        StatusBarLayout.new(initial_value)
+                      end
           @layout = StatusBarLayout.new(@original.to_h)
           @bar_index = 0
           @item_indices = StatusBarLayout::BAR_IDS.to_h { |bar| [bar, 0] }

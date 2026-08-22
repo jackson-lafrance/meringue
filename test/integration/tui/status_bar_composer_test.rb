@@ -119,6 +119,42 @@ class TuiStatusBarComposerTest < Minitest::Test
     assert @app.instance_variable_get(:@status_bar_composer_saving)
   end
 
+  def test_manual_and_first_run_setup_open_the_composer_and_keep_it_in_the_setup_transaction
+    @app.send(:open_settings, @state, mode: "setup")
+    open_setup_status_bar_composer(@app)
+    assert_includes @app.render(compose, width: 80, height: 20, color: false), "status bar composer"
+
+    send_key(RIGHT)
+    send_key(ENTER)
+
+    refute @app.instance_variable_get(:@status_bar_composer_active)
+    assert @app.instance_variable_get(:@settings_active)
+    value = @app.instance_variable_get(:@settings_draft).value("appearance.status_bar_layout")
+    assert_equal %w[status context], Meringue::TUI::StatusBarLayout.normalize(value).dig("bars", "bottom")
+    assert_equal 0, @submitted.size
+    refute File.exist?(@config_path)
+
+    send_key(TAB) # Meringue Xtras / final step
+    assert_equal "Experiments", @app.send(:settings_category)
+    send_key("\u0013") # Complete through the setup transaction
+    command = Meringue::Input::SlashCommandParser.new.parse(@submitted.pop)
+    assert_equal "completed", command.payload.fetch("onboarding_outcome")
+    saved_layout = command.payload.fetch("changes").fetch("appearance.status_bar_layout")
+    assert_equal %w[status context], Meringue::TUI::StatusBarLayout.normalize(saved_layout).dig("bars", "bottom")
+    refute File.exist?(@config_path)
+
+    first_run = Meringue::TUI::App.new(
+      config: @config,
+      layout: Meringue::TUI::Layout.new,
+      onboarding_enabled: true,
+      terminal: TUISupport::FakeTerminal.new(width: 80, height: 20)
+    )
+    assert first_run.send(:maybe_open_onboarding, -> { @state })
+    assert_includes first_run.send(:settings_categories), "Status bar"
+    open_setup_status_bar_composer(first_run)
+    assert first_run.instance_variable_get(:@status_bar_composer_active)
+  end
+
   def test_mouse_drag_reorders_an_item_and_resize_keeps_a_full_frame
     @app.send(:open_status_bar_composer, @state)
     snapshot = compose.fetch(Meringue::TUI::StatusBarComposer::STATE_KEY)
@@ -183,6 +219,13 @@ class TuiStatusBarComposerTest < Minitest::Test
   end
 
   private
+
+  def open_setup_status_bar_composer(app)
+    steps = app.send(:settings_categories)
+    app.instance_variable_set(:@settings_category_index, steps.index("Status bar"))
+    assert_equal "status_bar", app.send(:selected_settings_row).fetch("editor")
+    assert app.send(:activate_settings_row, @state, on_submit: @handler)
+  end
 
   def composed_state(state, extras = {})
     TUISupport.composed_state(state).merge(extras)

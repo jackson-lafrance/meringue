@@ -101,9 +101,10 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert_nil @app.instance_variable_get(:@settings_draft).value("agent.worker_harness")
 
     send_key(TAB) # Worker defaults
+    send_key(TAB) # Status bar
     send_key(TAB) # Experiments
     assert_equal "Experiments", setup_snapshot.fetch("category")
-    assert_equal Meringue::Experiments::Registry.setting_ids, setup_rows.map { |row| row.fetch("id") }
+    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, setup_rows.map { |row| row.fetch("id") }
     send_key(ENTER) # checkbox-style controls use Enter
     assert @app.instance_variable_get(:@settings_draft).value("experiments.github_support")
 
@@ -187,7 +188,7 @@ class TuiTransactionalSetupTest < Minitest::Test
     @handler = saving_handler
     open_manual_setup
     send_key(ENTER)
-    3.times { send_key(TAB) } # Experiments is final
+    4.times { send_key(TAB) } # Experiments is final
     assert_equal "Experiments", setup_snapshot.fetch("category")
     send_key(CTRL_S)
     wait_until { !@app.instance_variable_get(:@settings_active) }
@@ -216,7 +217,7 @@ class TuiTransactionalSetupTest < Minitest::Test
     end
     open_manual_setup
     send_key(ENTER)
-    3.times { send_key(TAB) }
+    4.times { send_key(TAB) }
     assert_equal "Experiments", setup_snapshot.fetch("category")
     send_key(CTRL_S)
     wait_until { !@app.instance_variable_get(:@settings_saving) }

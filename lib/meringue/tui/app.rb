@@ -181,6 +181,7 @@ module Meringue
         @settings_saving = false
         @github_access_test_result = nil
         @settings_mode = "settings"
+        @settings_footer_button = "next"
         @settings_setup_auto = false
         @settings_setup_outcome = nil
         # Status-bar composition is a separate in-memory draft. Preview changes
@@ -190,6 +191,7 @@ module Meringue
         @status_bar_composer_draft = nil
         @status_bar_composer_saving = false
         @status_bar_composer_drag = nil
+        @status_bar_composer_return_to_settings = false
         # First-run setup is a curated mode of the same transactional Settings
         # draft and full-screen pane. It is disabled for `meringue demo`, where no
         # kernel exists to save the draft or completion marker.
@@ -473,14 +475,14 @@ module Meringue
 
         @chat_pastes.sync!(input_buffer)
 
-        # Settings owns the complete screen and keeps Esc/Ctrl-S as hard recovery
-        # keys regardless of configured dashboard bindings.
-        if @settings_active
-          return handle_settings_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
-        end
-
+        # Settings and its nested status-bar composer own the complete screen and
+        # keep Esc/Ctrl-S as hard recovery keys regardless of dashboard bindings.
         if @status_bar_composer_active
           return handle_status_bar_composer_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
+
+        if @settings_active
+          return handle_settings_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
         end
 
         if @question_picker_active
@@ -3282,13 +3284,18 @@ module Meringue
 
       # --- status-bar composer ---------------------------------------------
 
-      def open_status_bar_composer(_state)
-        @status_bar_composer_draft = StatusBarComposer::Draft.new(config)
+      def open_status_bar_composer(_state, return_to_settings: false)
+        initial_value = if return_to_settings && @settings_draft
+                          @settings_draft.value("appearance.status_bar_layout")
+                        end
+        @status_bar_composer_draft = StatusBarComposer::Draft.new(config, initial_value: initial_value)
         @status_bar_composer_active = true
         @status_bar_composer_saving = false
         @status_bar_composer_drag = nil
+        @status_bar_composer_return_to_settings = return_to_settings == true
         close_delivery_pr_picker
         close_model_picker
+        close_question_picker
         @force_full_redraw = true
         true
       rescue StandardError => e
@@ -3301,6 +3308,7 @@ module Meringue
         @status_bar_composer_draft = nil
         @status_bar_composer_saving = false
         @status_bar_composer_drag = nil
+        @status_bar_composer_return_to_settings = false
         @force_full_redraw = true
         true
       end
@@ -3404,6 +3412,14 @@ module Meringue
           return false
         end
 
+        if @status_bar_composer_return_to_settings && @settings_draft
+          layout = @status_bar_composer_draft.layout
+          value = layout.configured? ? layout.serialized : ""
+          @settings_draft.set("appearance.status_bar_layout", value)
+          close_status_bar_composer
+          return true
+        end
+
         changes = @status_bar_composer_draft.changes
         if changes.empty?
           close_status_bar_composer
@@ -3454,6 +3470,7 @@ module Meringue
         @settings_picker = nil
         @settings_keybinding_capture = nil
         @settings_footer_focus = false
+        @settings_footer_button = "next"
         @settings_discard_confirm = false
         @settings_saving = false
         @github_access_test_result = nil
@@ -3478,6 +3495,7 @@ module Meringue
         @settings_picker = nil
         @settings_keybinding_capture = nil
         @settings_footer_focus = false
+        @settings_footer_button = "next"
         @settings_discard_confirm = false
         @settings_saving = false
         @github_access_test_result = nil
@@ -3515,12 +3533,20 @@ module Meringue
 
       def settings_rows
         return [] unless @settings_draft
-        return setup_rows.map { |row| decorate_github_access_action_row(row) } if setup_mode?
+        if setup_mode?
+          return setup_rows.filter_map do |row|
+            decorate_github_access_action_row(row) if settings_row_visible?(row)
+          end
+        end
 
         expanded = @settings_expanded_advanced.fetch(settings_category, false)
         definitions = @settings_draft.definitions_for(settings_category, include_advanced: expanded)
-        rows = definitions.map { |definition| decorate_github_access_action_row(@settings_draft.row(definition)) }
-        hidden = @settings_draft.definitions_for(settings_category, include_advanced: true).count(&:advanced)
+        rows = definitions.filter_map do |definition|
+          row = @settings_draft.row(definition)
+          decorate_github_access_action_row(row) if settings_row_visible?(row)
+        end
+        all_definitions = @settings_draft.definitions_for(settings_category, include_advanced: true)
+        hidden = all_definitions.count { |definition| definition.advanced && settings_row_visible?(@settings_draft.row(definition)) }
         if !expanded && hidden.positive?
           rows << synthetic_settings_row(
             "_show_advanced",
@@ -3547,6 +3573,14 @@ module Meringue
             @settings_draft.row(definition) if definition
           end
         end
+      end
+
+      def settings_row_visible?(row)
+        return true unless row.fetch("id", nil) == "experiments.github_support_test_access"
+
+        @settings_draft.value("experiments.github_support") == true
+      rescue KeyError
+        false
       end
 
       def decorate_github_access_action_row(row)
@@ -3612,7 +3646,9 @@ module Meringue
             count = category == settings_category ? rows.length : 0
             [category, { "visible" => count, "total" => count, "hidden_advanced" => 0 }]
           else
-            definitions = @settings_draft.definitions_for(category, include_advanced: true)
+            definitions = @settings_draft.definitions_for(category, include_advanced: true).select do |definition|
+              settings_row_visible?(@settings_draft.row(definition))
+            end
             advanced = definitions.count(&:advanced)
             hidden = @settings_expanded_advanced.fetch(category, false) ? 0 : advanced
             visible = definitions.length - hidden
@@ -3624,7 +3660,11 @@ module Meringue
       def settings_picker_snapshot
         return nil unless @settings_picker
 
+        options = settings_picker_options
+        @settings_picker["index"] = @settings_picker.fetch("index", 0).to_i.clamp(0, [options.length - 1, 0].max)
         @settings_picker.merge(
+          "options" => options,
+          "query" => @settings_picker.fetch("query", "").to_s,
           "row" => @settings_picker.fetch("row", {}).merge(
             "error" => (@settings_draft ? @settings_draft.errors[@settings_picker.fetch("id")] : nil)
           ).compact
@@ -3667,6 +3707,7 @@ module Meringue
           "keybinding_capture" => capture,
           "picker" => settings_picker_snapshot,
           "footer_focus" => @settings_footer_focus,
+          "footer_button" => @settings_footer_button,
           "setup_last_step" => setup_mode? && @settings_category_index.to_i == settings_categories.length - 1,
           "discard_confirm" => @settings_discard_confirm.is_a?(String),
           "confirmation" => (@settings_discard_confirm if @settings_discard_confirm.is_a?(String)),
@@ -3736,9 +3777,11 @@ module Meringue
         elsif HOME_KEYS.include?(key)
           @settings_row_index = 0
           @settings_footer_focus = false
+          @settings_footer_button = "next"
         elsif END_KEYS.include?(key)
           @settings_row_index = [rows.length - 1, 0].max
           @settings_footer_focus = false
+          @settings_footer_button = "next"
         elsif LEFT_KEYS.include?(key)
           cycle_or_move_settings(-1, state)
         elsif RIGHT_KEYS.include?(key)
@@ -3747,7 +3790,7 @@ module Meringue
           activate_settings_row(state, toggle_only: true, on_submit: on_submit) unless setup_mode?
         elsif ENTER_KEYS.include?(key)
           if setup_mode? && @settings_footer_focus
-            setup_next_or_finish(on_submit, state)
+            activate_setup_footer(on_submit, state)
           else
             activate_settings_row(state, on_submit: on_submit)
           end
@@ -3880,7 +3923,7 @@ module Meringue
         when Array
           kind, index = hit
           if kind == :picker
-            option = Array(@settings_picker&.fetch("options", []))[index.to_i]
+            option = settings_picker_options[index.to_i]
             if option
               id = @settings_picker.fetch("id")
               value = option.is_a?(Hash) ? option.fetch("reference") : option
@@ -3891,9 +3934,12 @@ module Meringue
           elsif kind == :category
             @settings_category_index = index.to_i.clamp(0, [settings_categories.length - 1, 0].max)
             @settings_row_index = 0
+            @settings_footer_focus = false
+            @settings_footer_button = "next"
           elsif %i[row toggle].include?(kind)
             @settings_row_index = index.to_i.clamp(0, [settings_rows.length - 1, 0].max)
             @settings_footer_focus = false
+            @settings_footer_button = "next"
             activate_settings_row(state, toggle_only: kind == :toggle, on_submit: on_submit)
           end
         end
@@ -3919,6 +3965,7 @@ module Meringue
                                    end
         @settings_row_index = 0
         @settings_footer_focus = false
+        @settings_footer_button = "next"
       end
 
       def move_settings_row(delta)
@@ -3931,12 +3978,14 @@ module Meringue
               return
             elsif @settings_row_index.to_i >= count - 1
               @settings_footer_focus = true
+              @settings_footer_button = "next"
             else
               @settings_row_index += 1
             end
           elsif delta.to_i.negative?
             if @settings_footer_focus
               @settings_footer_focus = false
+              @settings_footer_button = "next"
               @settings_row_index = [count - 1, 0].max
             else
               @settings_row_index = [@settings_row_index.to_i - 1, 0].max
@@ -3958,7 +4007,10 @@ module Meringue
       end
 
       def cycle_or_move_settings(delta, state)
-        return if setup_mode? && @settings_footer_focus
+        if setup_mode? && @settings_footer_focus
+          @settings_footer_button = @settings_footer_button == "next" ? "back" : "next"
+          return
+        end
 
         row = selected_settings_row
         return move_settings_row(delta) if setup_mode? && !row
@@ -4043,6 +4095,9 @@ module Meringue
         case row.fetch("editor", nil)
         when "checkbox"
           @settings_draft.toggle(id)
+        when "status_bar"
+          return false if toggle_only
+          open_status_bar_composer(state, return_to_settings: true)
         when "keybinding"
           return false if toggle_only
           open_settings_keybinding_capture(row)
@@ -4106,7 +4161,9 @@ module Meringue
         @settings_picker = {
           "id" => id,
           "row" => row,
+          "all_options" => options,
           "options" => options,
+          "query" => "",
           "index" => [options.index { |option| option.is_a?(Hash) ? option.fetch("reference") == current : option == current } || 0, 0].max
         }
         true
@@ -4116,7 +4173,7 @@ module Meringue
         if mouse_event?(key)
           return handle_settings_mouse(key, unchanged, _on_submit, _state)
         end
-        options = Array(@settings_picker.fetch("options", []))
+        options = settings_picker_options
         if UP_KEYS.include?(key)
           @settings_picker["index"] = (@settings_picker.fetch("index", 0).to_i - 1) % [options.length, 1].max
         elsif DOWN_KEYS.include?(key)
@@ -4130,10 +4187,35 @@ module Meringue
             @settings_draft.preview_theme if id == "appearance.theme"
             @settings_picker = nil
           end
-        elsif hard_escape_key?(key) || BACKSPACE_KEYS.include?(key) || DELETE_KEYS.include?(key)
+        elsif keybinding?("delete_word_backward", key)
+          @settings_picker["query"] = ""
+          @settings_picker["index"] = 0
+        elsif keybinding?("delete_backward", key)
+          @settings_picker["query"] = @settings_picker.fetch("query", "").to_s.chars[0...-1].join
+          @settings_picker["index"] = 0
+        elsif printable_key?(key)
+          @settings_picker["query"] = "#{@settings_picker.fetch("query", "")}#{key}"
+          @settings_picker["index"] = 0
+        elsif key == "\e" || hard_escape_key?(key)
           @settings_picker = nil
         end
         unchanged
+      end
+
+      def settings_picker_options
+        return [] unless @settings_picker
+
+        tokens = @settings_picker.fetch("query", "").to_s.downcase.split(/\s+/).reject(&:empty?)
+        Array(@settings_picker.fetch("all_options", @settings_picker.fetch("options", []))).select do |option|
+          next true if tokens.empty?
+
+          haystack = if option.is_a?(Hash)
+                       [option.fetch("reference", ""), option.fetch("name", "")].join(" ")
+                     else
+                       option.to_s
+                     end.downcase
+          tokens.all? { |token| haystack.include?(token) }
+        end
       end
 
       def open_settings_keybinding_capture(row)
@@ -4172,6 +4254,14 @@ module Meringue
 
         @settings_discard_confirm = "discard"
         true
+      end
+
+      def activate_setup_footer(on_submit, state)
+        if @settings_footer_button == "back"
+          move_settings_category(-1)
+        else
+          setup_next_or_finish(on_submit, state)
+        end
       end
 
       def setup_next_or_finish(on_submit, state)
