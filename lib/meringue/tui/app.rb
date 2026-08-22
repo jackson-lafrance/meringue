@@ -963,16 +963,22 @@ module Meringue
       # the focused pane, which is the older behavior.
       def handle_mouse_wheel_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         if embedded_agent_workspace? && pane_at_mouse_position(key, state) == "logs"
-          event = layout.agent_workspace_mouse_event(
-            state,
-            width: render_width,
-            height: render_height,
-            x: mouse_x(key),
-            y: mouse_y(key),
-            event: key
-          )
-          forward_agent_workspace_interactive_key(event, state) if event && @agent_workspace_view != "terminal"
-          forward_agent_workspace_terminal_key(event, state) if event && @agent_workspace_view == "terminal"
+          if agent_workspace_scroll_max(state).positive?
+            scroll_agent_workspace(key, state)
+          else
+            # When the TUI has no retained rows of its own, let Pi keep its native
+            # mouse behavior (for example, its internal selection/list scrolling).
+            event = layout.agent_workspace_mouse_event(
+              state,
+              width: render_width,
+              height: render_height,
+              x: mouse_x(key),
+              y: mouse_y(key),
+              event: key
+            )
+            forward_agent_workspace_interactive_key(event, state) if event && @agent_workspace_view != "terminal"
+            forward_agent_workspace_terminal_key(event, state) if event && @agent_workspace_view == "terminal"
+          end
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
@@ -1949,6 +1955,11 @@ module Meringue
 
         if @agent_workspace_open_pending
           @agent_workspace_notice = "Focused session is still preparing. Chat and AgentTree controls remain available."
+          return [input_buffer, input_cursor, slash_suggestion_index]
+        end
+
+        if workspace_scroll_key?(remainder) && agent_workspace_scroll_max(state).positive?
+          scroll_agent_workspace(remainder, state)
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
@@ -5311,8 +5322,26 @@ module Meringue
           snapshot[terminal_view ? "terminal" : "agent_session"] = live
           revision = workspace_content_revision(snapshot, live)
           snapshot["content_revision"] = revision if revision
+          clamp_agent_workspace_scroll_snapshot!(state, snapshot)
         end
         snapshot
+      end
+
+      # Keep the durable workspace offset bounded against the same content and
+      # viewport that Layout will draw. This preserves a user's position across
+      # live updates while preventing a narrower resize from leaving a stale
+      # offset that jumps back into view when more output arrives.
+      def clamp_agent_workspace_scroll_snapshot!(state, snapshot)
+        composed = state.merge("_agent_workspace" => snapshot)
+        maximum = agent_workspace_scroll_max(composed)
+        variable = @agent_workspace_view == "terminal" ? :@workspace_terminal_scroll_offset : :@workspace_agent_scroll_offset
+        current = instance_variable_get(variable).to_i
+        maximum = maximum.to_i if maximum.respond_to?(:finite?) && maximum.finite?
+        offset = maximum.is_a?(Integer) ? current.clamp(0, maximum) : current
+        instance_variable_set(variable, offset)
+        snapshot["scroll_offset"] = offset
+      rescue StandardError
+        snapshot["scroll_offset"] = instance_variable_get(variable).to_i if variable
       end
 
       # Cheap signature of everything the focused workspace renders. Panes reuse

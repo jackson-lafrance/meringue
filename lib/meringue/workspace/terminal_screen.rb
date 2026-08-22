@@ -93,7 +93,7 @@ module Meringue
         visible_row_indexes.map do |row_index|
           chars = @cells[row_index]
           styles = @styles[row_index]
-          length = visible_line_length(chars)
+          length = visible_line_length(chars, styles)
           next [] if length.zero?
 
           segments = []
@@ -426,13 +426,25 @@ module Meringue
       end
 
       def visible_row_indexes
-        content_row = @cells.rindex { |line| line.any? { |character| character.to_s != " " } }
+        content_row = @cells.each_index.reverse_each.find do |row_index|
+          line = @cells[row_index]
+          styles = @styles[row_index]
+          line.each_index.any? do |column|
+            line[column].to_s != " " || !styles[column].to_s.empty?
+          end
+        end
         finish = [content_row || 0, @cursor_row].max
         (0..finish).to_a
       end
 
-      def visible_line_length(chars)
-        index = chars.rindex { |character| character.to_s != " " }
+      # A terminal row can be visually meaningful even when every character is a
+      # space: Pi uses styled padding for selected/highlighted rows. Keep those
+      # cells in the focused view so the ANSI background reaches the viewport
+      # edge instead of being mistaken for trailing empty space.
+      def visible_line_length(chars, styles = nil)
+        index = chars.each_index.reverse_each.find do |column|
+          chars[column].to_s != " " || (styles && !styles[column].to_s.empty?)
+        end
         index ? index + 1 : 0
       end
 
