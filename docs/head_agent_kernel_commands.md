@@ -39,8 +39,8 @@ Natural-language mapping:
 | "switch to claude/pi/antigravity" | `SetHarness` |
 | "show the defaults", "which model will future agents use" | `GetSessionDefaults` (no slash command; this is its only user-facing route) |
 | "what models can I use", "list the available models", "refresh the model list" | `GetModelCatalog` (a status report; the browsable list is the TUI model picker behind `/models`) |
-| "use provider/model-id for future Pi agents" / "use openai/gpt-5.6-sol for heads" | `SetDefaultSessionModel` (optional `role`) |
-| "use high thinking for future Pi agents" / "use low thinking for heads" | `SetDefaultSessionThinkingLevel` (optional `role`) |
+| "use provider/model-id for future agents" / "use openai/gpt-5.6-sol for heads" | `SetDefaultSessionModel` (optional `role`) |
+| "use high thinking for future agents" / "use low thinking for heads" | `SetDefaultSessionThinkingLevel` (optional `role`) |
 | "show P1-I9-W3's model/thinking settings" | `GetInfo` with `target_id` (the agent record carries `session_settings`; there is no per-session settings command) |
 | "resync/reconcile the sessions" | `ReconcileSessions` |
 | "this is already done", "no change is needed", "the existing issue already covers it" | Usually a plain `response` explaining why no action is needed; `NoOp` remains available for explicit command-level no-op bookkeeping |
@@ -1662,7 +1662,7 @@ There is no command for reading one existing session's effective settings. `/ses
 record carries the `session_settings` object Meringue refreshes from the harness on spawn, prompt,
 and reconcile.
 
-Default changes affect future Pi sessions only; existing sessions retain their effective settings.
+Default changes affect future sessions on the active role harnesses only; existing sessions retain their effective settings. Switching harnesses re-resolves incompatible future thinking defaults, including role-specific values when split defaults are enabled.
 Accepted thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`, and that
 ladder is what `SetDefaultSessionThinkingLevel` validates against, independently of the model
 catalog. A rejected level names the whole ladder in its message. The catalog says which levels a

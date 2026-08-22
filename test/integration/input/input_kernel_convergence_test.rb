@@ -110,6 +110,34 @@ class InputKernelConvergenceTest < Minitest::Test
     end
   end
 
+  def test_harness_switch_repairs_incompatible_shared_and_role_defaults_without_rewriting_sessions
+    input_sandbox do |sandbox|
+      write_config(
+        sandbox.config_path,
+        <<~TOML
+          [harness]
+          provider = "pi"
+          model = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"
+          thinking_level = "off"
+          head_thinking_level = "minimal"
+          worker_thinking_level = "off"
+        TOML
+      )
+
+      result = sandbox.submit("/harness claude")
+      assert_equal [%w[SetHarness accepted]], sandbox.command_result_pairs(result)
+
+      saved = Meringue::Config.load(path: sandbox.config_path)
+      assert_equal "claude", saved.setting("agent.head_harness", env: {})
+      assert_equal "claude", saved.setting("agent.worker_harness", env: {})
+      assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", saved.setting("agent.head_model", env: {})
+      assert_equal "max", saved.setting("agent.head_thinking", env: {})
+      assert_equal "max", saved.setting("agent.worker_thinking", env: {})
+      assert_equal "max", sandbox.state.dig("metadata", "agent_session_defaults", "thinking_level")
+      assert_empty sandbox.state.fetch("agents")
+    end
+  end
+
   def test_future_pi_default_slash_commands_validate_and_persist_in_the_sandbox
     input_sandbox do |sandbox|
       model = sandbox.submit("/model openai/gpt-5.6-sol")

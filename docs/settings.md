@@ -10,7 +10,7 @@ One schema (`Meringue::Config::Schema`) owns the supported paths, compatibility 
 
 Categories:
 
-1. **Agent defaults** — separate future head/worker harness, Pi model, and Pi thinking defaults.
+1. **Agent defaults** — separate future head/worker harness, model, and harness-translated thinking defaults.
 2. **Appearance** — theme and animation.
 3. **Experiments** — registry-backed opt-in product capabilities.
 4. **Harnesses** — provider commands, environment, arguments, Pi session directory, head names/timeouts, and Claude schema mode.
@@ -47,6 +47,10 @@ Theme selection previews immediately in memory. Cancel/discard restores the orig
 
 Long categories use a selected-row window and show `N–M of T`. Exact command/model values are tail-clipped in rows but remain complete in the editor.
 
+## Harness migration and split defaults
+
+The `split_defaults` experiment is registry-backed and enabled by default. It makes role-specific harness/model/thinking rows authoritative for their role; disabling it keeps the role rows for migration but uses shared values for both roles. Switching a harness re-resolves incompatible future thinking values for the affected shared or role-specific defaults in the same config transaction. Model references remain shape-validated rather than catalog-gated, so exact unverified references survive a stale or unavailable catalog. Existing sessions keep their stored effective settings.
+
 ## Save transaction
 
 Opening Settings captures the parsed file, effective values and sources, the file fingerprint, and the original theme. Save submits one non-head-proposable `SaveConfiguration` kernel command.
@@ -63,7 +67,7 @@ The config store:
 8. flushes and fsyncs the file, atomically renames it, then fsyncs the directory where supported;
 9. cleans temporary files after success or failure.
 
-A successful command mirrors role-aware harness and Pi defaults into state, applies runtime-safe settings, and logs changed setting IDs only. Provider environment values never enter the log. Theme, keybindings, animation, role defaults, and experiments apply live. Provider process arguments/environment and workspace/launcher construction are saved but listed as restart-required.
+A successful command mirrors role-aware harness, model, and thinking defaults into state, applies runtime-safe settings, and logs changed setting IDs only. Provider environment values never enter the log. Theme, keybindings, animation, role defaults, and experiments apply live. Provider process arguments/environment and workspace/launcher construction are saved but listed as restart-required.
 
 Role serialization preserves old readers:
 
@@ -75,14 +79,15 @@ Role serialization preserves old readers:
 
 `Meringue::Experiments::Registry` is the only experiment list. Definitions carry an ID, config path, label, description/risk note, default, dependencies/conflicts, and live/restart mode. Both `/config` and first-run Setup derive their checkboxes from it.
 
-The capability audit found only one capability that currently warrants an experiment:
+The current experiment definitions are:
 
 ```toml
 [experiments]
 github_support = false
+split_defaults = true
 ```
 
-Goal loops, non-Pi providers, focused workspaces, read-only workers, command blacklists, presentation preferences, and terminal launchers already have explicit activation or are core safety/preferences; adding a second opt-in gate would make them less clear.
+`split_defaults` is enabled by default and controls independent future head/worker defaults. Existing role values are preserved if it is disabled, but shared values are used for both roles. Goal loops, non-Pi providers, focused workspaces, read-only workers, command blacklists, presentation preferences, and terminal launchers already have explicit activation or are core safety/preferences.
 
 ### GitHub support
 

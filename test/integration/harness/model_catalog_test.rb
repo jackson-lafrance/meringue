@@ -34,6 +34,19 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
     assert_equal "available", catalog.to_h.fetch("availability")
   end
 
+  def test_catalog_normalization_is_bounded
+    models = (0..(Catalog::MAX_MODELS + 25)).map do |index|
+      { "provider" => "test", "id" => "model-#{index}" }
+    end
+
+    catalog = Catalog.available(harness: "test", models: models, source: "test")
+
+    assert_equal Catalog::MAX_MODELS, catalog.model_count
+    assert_equal "test/model-0", catalog.references.first
+    assert_equal "test/model-#{Catalog::MAX_MODELS - 1}", catalog.references.last
+    assert_nil Catalog.normalize_entry("provider" => "test", "id" => "x" * Catalog::MAX_REFERENCE_BYTES)
+  end
+
   def test_empty_and_failed_catalogs_stay_explicit_instead_of_pretending_to_be_available
     empty = Catalog.available(harness: "pi", models: [], source: "test")
     refute empty.available?
@@ -235,7 +248,36 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
     assert_equal Meringue::Harness::ModelCatalog::EMPTY_CATALOG_REASON, empty_catalog.reason
   end
 
-  def test_registry_serves_pi_catalogs_and_reports_other_harnesses_as_unsupported
+  def test_claude_code_catalog_parses_authoritative_aliases_and_effort_levels
+    output = JSON.generate(
+      "type" => "result",
+      "result" => "Current model: Opus 5 (effort: xhigh)\nUsage: /model <name>. Available: sonnet, opus, haiku, or a full model ID such as claude-sonnet-4-6."
+    )
+    catalog = Meringue::Harness::ClaudeModelCatalog.parse(output)
+
+    assert catalog.available?, catalog.to_h.inspect
+    assert_equal "claude_print_model_command", catalog.source
+    assert_equal %w[anthropic/sonnet anthropic/opus anthropic/haiku anthropic/claude-sonnet-4-6], catalog.references
+    assert_equal %w[low medium high xhigh max], catalog.thinking_levels_for("anthropic/opus")
+    assert_equal true, catalog.entry_for("anthropic/sonnet").fetch("reasoning")
+  end
+
+  def test_claude_code_catalog_fetch_is_ephemeral_and_reports_failures
+    script = File.join(tmpdir, "claude-catalog")
+    File.write(script, "#!/bin/sh\nprintf '%s\\n' '#{output = JSON.generate("type" => "result", "result" => "Usage: /model <name>. Available: sonnet, opus, or a full model ID.")}'\n")
+    File.chmod(0o755, script)
+
+    catalog = Meringue::Harness::ClaudeModelCatalog.fetch(command: [script], cwd: tmpdir)
+    assert catalog.available?, catalog.to_h.inspect
+    assert_equal %w[anthropic/sonnet anthropic/opus], catalog.references
+
+    failed = Meringue::Harness::ClaudeModelCatalog.fetch(command: [File.join(tmpdir, "missing-claude")], cwd: tmpdir)
+    refute failed.available?
+    assert_equal Meringue::Harness::ModelCatalog::UNAVAILABLE, failed.availability
+    assert_equal "fetch_failed", failed.reason
+  end
+
+  def test_registry_serves_pi_and_claude_catalogs_and_reports_failures_truthfully
     stub = write_pi_stub(tmpdir, default_stub_paths(tmpdir, {}, prefix: "registry-pi"))
     config = build_config(
       {
@@ -259,8 +301,10 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
     assert_includes pi_catalog.references, "anthropic/claude-opus-5"
 
     claude_catalog = registry.model_catalog(provider: "claude", cwd: tmpdir)
-    assert claude_catalog.unsupported?
+    refute claude_catalog.available?
+    assert_equal Meringue::Harness::ModelCatalog::UNAVAILABLE, claude_catalog.availability
     assert_equal "claude", claude_catalog.harness
+    assert_includes claude_catalog.note, "Could not read Claude Code's model catalog"
 
     assert_raises(ArgumentError) { registry.model_catalog(provider: "codex") }
   end

@@ -179,7 +179,7 @@ class TuiTransactionalSetupTest < Minitest::Test
     send_key(ENTER)
     command = wait_for_command
     assert_equal "skipped", command.payload.fetch("onboarding_outcome")
-    assert_equal({ "experiments.github_support" => false }, command.payload.fetch("changes"))
+    assert_equal({ "experiments.github_support" => false, "experiments.split_defaults" => true }, command.payload.fetch("changes"))
     refute command.payload.fetch("changes").key?("appearance.theme")
   end
 

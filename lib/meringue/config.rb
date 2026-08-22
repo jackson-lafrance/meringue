@@ -89,15 +89,16 @@ module Meringue
       )
     end
 
-    def self.save_harness_defaults!(head_provider:, worker_provider:, path: DEFAULT_PATH)
+    def self.save_harness_defaults!(head_provider:, worker_provider:, session_default_changes: {}, path: DEFAULT_PATH)
       expanded_path = File.expand_path(path.to_s)
       store = Store.new(path: expanded_path)
+      changes = {
+        "agent.head_harness" => head_provider,
+        "agent.worker_harness" => worker_provider
+      }.merge(deep_stringify(session_default_changes || {}))
       store.save(
         base_fingerprint: store.fingerprint,
-        changes: {
-          "agent.head_harness" => head_provider,
-          "agent.worker_harness" => worker_provider
-        }
+        changes: changes
       ).fetch("config")
     end
 
