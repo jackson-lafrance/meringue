@@ -160,6 +160,14 @@ module Meringue
         @model_picker_harness = nil
         @model_picker_role = "head"
         @model_picker_kind = "model"
+        # Theme previews are process-local until the normal SetTheme command is
+        # accepted. Keep the original so Escape/click-away never leaks a preview.
+        @theme_picker_original = nil
+        @theme_picker_pending_original = nil
+        # Open-question picker: transient UI that leaves `/answer <id> ` in the
+        # composer so the user can type the answer before submitting it.
+        @question_picker_active = false
+        @question_picker_index = 0
         # Full-screen schema-backed Settings. The draft is purely in memory until
         # one SaveConfiguration command succeeds.
         @settings_active = false
@@ -173,8 +181,17 @@ module Meringue
         @settings_saving = false
         @github_access_test_result = nil
         @settings_mode = "settings"
+        @settings_footer_button = "next"
         @settings_setup_auto = false
         @settings_setup_outcome = nil
+        # Status-bar composition is a separate in-memory draft. Preview changes
+        # never touch the config until the single SaveConfiguration transaction
+        # succeeds, so Esc and failed saves are deterministic.
+        @status_bar_composer_active = false
+        @status_bar_composer_draft = nil
+        @status_bar_composer_saving = false
+        @status_bar_composer_drag = nil
+        @status_bar_composer_return_to_settings = false
         # First-run setup is a curated mode of the same transactional Settings
         # draft and full-screen pane. It is disabled for `meringue demo`, where no
         # kernel exists to save the draft or completion marker.
@@ -386,6 +403,8 @@ module Meringue
         # Quitting with Settings/setup open discards the in-memory draft and
         # restores any theme preview. No setup marker is written on process exit.
         close_settings(discard: true) if @settings_active
+        close_model_picker
+        close_status_bar_composer if @status_bar_composer_active
         persist_agent_workspace if @agent_workspace_active
         if @agent_workspace_active
           close_agent_workspace(async_interactive: false)
@@ -466,10 +485,19 @@ module Meringue
 
         @chat_pastes.sync!(input_buffer)
 
-        # Settings owns the complete screen and keeps Esc/Ctrl-S as hard recovery
-        # keys regardless of configured dashboard bindings.
+        # Settings and its nested status-bar composer own the complete screen and
+        # keep Esc/Ctrl-S as hard recovery keys regardless of dashboard bindings.
+        if @status_bar_composer_active
+          return handle_status_bar_composer_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
+
         if @settings_active
           return handle_settings_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
+
+        if @question_picker_active
+          picker_result = handle_question_picker_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+          return picker_result if picker_result
         end
 
         if @model_picker_active
@@ -2615,6 +2643,7 @@ module Meringue
         text = input_buffer.to_s.strip
         return handle_local_jump_command(text, state) if jump_command?(text)
         return handle_local_pull_requests_command(state) if pull_requests_picker_command?(text)
+        return handle_local_questions_command(state) if questions_picker_command?(text)
         return handle_local_models_command(text, state) if models_picker_command?(text)
         return handle_local_thinking_command(text, state) if thinking_picker_command?(text)
         return handle_local_theme_command(text, state) if theme_picker_command?(text)
@@ -2625,6 +2654,7 @@ module Meringue
         return handle_local_config_command(text, state) if config_command?(text)
         return handle_local_reload_command if reload_command?(text)
         return handle_local_update_command if update_command?(text)
+        return handle_local_status_bar_command(state) if status_bar_command?(text)
         return handle_local_quit_command if quit_command?(text)
 
         false
@@ -2651,6 +2681,11 @@ module Meringue
         else
           open_settings(state)
         end
+        true
+      end
+
+      def handle_local_status_bar_command(state)
+        open_status_bar_composer(state)
         true
       end
 
@@ -2755,7 +2790,9 @@ module Meringue
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode. In the AgentTree, #{keys_for("rename_selected")} starts a quick rename for the selected project or issue by pre-filling `/project rename` or `/issue rename`; type its new name in the composer and press Enter.
           Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
           Pull-request picker: /prs opens every tracked PR that is still open, regardless of the AgentTree selection; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} opens the highlighted PR, and #{keys_for("cancel_navigation")} closes. #{keys_for("open_delivery_pr")} keeps its selection-aware behavior: it opens the selected issue's PR, or this picker when chat is unscoped.
-          Settings pickers: bare /model or /models opens models, bare /thinking opens thinking levels, bare /theme opens themes, and bare /harness opens harnesses. They are bordered popovers; #{keys_for("cursor_left")}/#{keys_for("cursor_right")} switches role tabs where shown, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} moves, #{keys_for("submit")} applies, #{keys_for("refresh_model_catalog")} refreshes the model catalog, and #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker. /prs opens the pull-request popover.
+          Settings pickers: bare /model or /models opens models, bare /thinking opens thinking levels, bare /theme or /themes opens themes, and bare /harness opens harnesses. They are bordered popovers; #{keys_for("cursor_left")}/#{keys_for("cursor_right")} switches role tabs where shown, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} moves, #{keys_for("submit")} applies, #{keys_for("refresh_model_catalog")} refreshes the model catalog, and #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker. /prs opens the pull-request popover.
+          Question picker: /questions opens existing open questions with local 1-based display numbers; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} inserts /answer <question_id> into chat, and #{keys_for("cancel_navigation")} closes.
+          Status-bar composer: /status-bar opens the live bottom, agent-information, and focused-worker layout editor; Tab/Shift-Tab changes bars, Up/Down selects, Left/Right reorders, Home/End moves to an edge, R resets, Enter/Ctrl-S saves, Esc cancels, and mouse drag reorders items.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace or a selected head's saved harness session; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
           Head/session debugging: select a head and press #{keys_for("open_agent_workspace")}, or use /open-session <agent_id>, to open its saved harness session externally without turning it into a chat target.
           Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
@@ -2840,6 +2877,15 @@ module Meringue
         text.to_s.strip.downcase == "/prs"
       end
 
+      def questions_picker_command?(text)
+        text.to_s.strip.downcase == "/questions"
+      end
+
+      def handle_local_questions_command(state)
+        open_question_picker(state)
+        true
+      end
+
       def handle_local_pull_requests_command(state)
         unless github_support_enabled?(state)
           append_jump_response(github_support_disabled_message)
@@ -2883,7 +2929,7 @@ module Meringue
       end
 
       def theme_picker_command?(text)
-        text.to_s.strip.downcase == "/theme"
+        %w[/theme /themes].include?(text.to_s.strip.downcase)
       end
 
       def harness_picker_command?(text)
@@ -2976,13 +3022,17 @@ module Meringue
         text.to_s.strip == "/update"
       end
 
+      def status_bar_command?(text)
+        ["/status-bar", "/statusbar", "/layout"].include?(text.to_s.strip.downcase)
+      end
+
       def quit_command?(text)
         text == "/quit"
       end
 
       def local_navigation_command_without_id?(input_buffer)
         text = input_buffer.to_s.strip.downcase
-        return true if ["/jump", "/prs", "/setup", "/config", "/open-session"].include?(text)
+        return true if ["/jump", "/prs", "/questions", "/theme", "/themes", "/setup", "/config", "/status-bar", "/statusbar", "/layout", "/open-session"].include?(text)
         return true if models_picker_command?(text)
         return true if thinking_picker_command?(text)
         return true if theme_picker_command?(text)
@@ -3094,10 +3144,11 @@ module Meringue
         # The logs caret belongs to the dashboard logs pane, so opening the
         # focused workspace disarms it instead of leaving Ctrl-C bound to copy.
         deactivate_logs_cursor_quietly
-        # The open-PR and model pickers are dashboard chrome, so they must not
-        # survive into the focused workspace and reappear on return.
+        # The picker overlays are dashboard chrome, so they must not survive
+        # into the focused workspace and reappear on return.
         close_delivery_pr_picker
         close_model_picker
+        close_question_picker
         @agent_workspace_active = true
         @agent_workspace_interactive = false
         @force_full_redraw = true
@@ -3326,6 +3377,172 @@ module Meringue
         { "active" => true, "index" => @delivery_pr_picker_index }
       end
 
+      def question_picker_snapshot
+        return nil unless @question_picker_active
+
+        { "active" => true, "index" => @question_picker_index }
+      end
+
+      # --- status-bar composer ---------------------------------------------
+
+      def open_status_bar_composer(_state, return_to_settings: false)
+        initial_value = if return_to_settings && @settings_draft
+                          @settings_draft.value("appearance.status_bar_layout")
+                        end
+        @status_bar_composer_draft = StatusBarComposer::Draft.new(config, initial_value: initial_value)
+        @status_bar_composer_active = true
+        @status_bar_composer_saving = false
+        @status_bar_composer_drag = nil
+        @status_bar_composer_return_to_settings = return_to_settings == true
+        close_delivery_pr_picker
+        close_model_picker
+        close_question_picker
+        @force_full_redraw = true
+        true
+      rescue StandardError => e
+        append_jump_response("Could not open Status bar composer: #{e.message}")
+        false
+      end
+
+      def close_status_bar_composer
+        @status_bar_composer_active = false
+        @status_bar_composer_draft = nil
+        @status_bar_composer_saving = false
+        @status_bar_composer_drag = nil
+        @status_bar_composer_return_to_settings = false
+        @force_full_redraw = true
+        true
+      end
+
+      def status_bar_composer_snapshot
+        return nil unless @status_bar_composer_active && @status_bar_composer_draft
+
+        @status_bar_composer_draft.saving_snapshot(saving: @status_bar_composer_saving)
+      end
+
+      def handle_status_bar_composer_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
+        return unchanged unless @status_bar_composer_draft
+
+        if mouse_event?(key)
+          return unchanged if @status_bar_composer_saving
+
+          return handle_status_bar_composer_mouse(key, unchanged, on_submit, state)
+        end
+        return unchanged if @status_bar_composer_saving
+
+        if hard_escape_key?(key)
+          close_status_bar_composer
+        elsif hard_save_key?(key) || ENTER_KEYS.include?(key)
+          save_status_bar_composer(on_submit, state)
+        elsif TAB_KEYS.include?(key) || FOCUS_FORWARD_KEYS.include?(key)
+          @status_bar_composer_draft.cycle_bar(1)
+        elsif SHIFT_TAB_KEYS.include?(key) || FOCUS_BACK_KEYS.include?(key)
+          @status_bar_composer_draft.cycle_bar(-1)
+        elsif UP_KEYS.include?(key)
+          @status_bar_composer_draft.select_item(@status_bar_composer_draft.item_index - 1)
+        elsif DOWN_KEYS.include?(key)
+          @status_bar_composer_draft.select_item(@status_bar_composer_draft.item_index + 1)
+        elsif LEFT_KEYS.include?(key)
+          @status_bar_composer_draft.move_selected(-1)
+        elsif RIGHT_KEYS.include?(key) || key == " "
+          @status_bar_composer_draft.move_selected(1)
+        elsif HOME_KEYS.include?(key)
+          @status_bar_composer_draft.move_item(@status_bar_composer_draft.item_index, 0)
+        elsif END_KEYS.include?(key)
+          @status_bar_composer_draft.move_item(@status_bar_composer_draft.item_index, @status_bar_composer_draft.items.length - 1)
+        elsif key.to_s.downcase == "r"
+          @status_bar_composer_draft.reset!
+        end
+        unchanged
+      rescue StandardError => e
+        @status_bar_composer_draft.apply_save_failure("Status bar input failed: #{e.message}")
+        unchanged
+      end
+
+      def handle_status_bar_composer_mouse(key, unchanged, on_submit, state)
+        if mouse_wheel_up?(key) || mouse_wheel_down?(key)
+          hit = layout.status_bar_composer_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+          if hit.is_a?(Array) && hit.first == :item
+            @status_bar_composer_draft.select_item(@status_bar_composer_draft.item_index + (mouse_wheel_up?(key) ? -1 : 1))
+          elsif hit.is_a?(Array) && hit.first == :bar
+            @status_bar_composer_draft.select_bar(@status_bar_composer_draft.bar_index + (mouse_wheel_up?(key) ? -1 : 1))
+          end
+          return unchanged
+        end
+
+        if mouse_button_press?(key)
+          hit = layout.status_bar_composer_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+          case hit
+          when :save then save_status_bar_composer(on_submit, state)
+          when :cancel then close_status_bar_composer
+          when :reset then @status_bar_composer_draft.reset!
+          when Array
+            kind, index = hit
+            if kind == :bar
+              @status_bar_composer_draft.select_bar(index)
+              @status_bar_composer_drag = nil
+            elsif kind == :item
+              @status_bar_composer_draft.select_item(index)
+              @status_bar_composer_drag = { bar: @status_bar_composer_draft.bar, index: index }
+            end
+          end
+          return unchanged
+        end
+
+        if mouse_drag?(key) && @status_bar_composer_drag
+          hit = layout.status_bar_composer_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+          if hit.is_a?(Array) && hit.first == :item
+            @status_bar_composer_draft.move_item(@status_bar_composer_drag.fetch(:index), hit.fetch(1))
+            @status_bar_composer_drag[:index] = hit.fetch(1)
+          end
+          return unchanged
+        end
+
+        if mouse_button_release?(key)
+          @status_bar_composer_drag = nil
+          return unchanged
+        end
+
+        unchanged
+      end
+
+      def save_status_bar_composer(on_submit, state)
+        return false if @status_bar_composer_saving
+        unless @status_bar_composer_draft.validate
+          return false
+        end
+
+        if @status_bar_composer_return_to_settings && @settings_draft
+          layout = @status_bar_composer_draft.layout
+          value = layout.configured? ? layout.serialized : ""
+          @settings_draft.set("appearance.status_bar_layout", value)
+          close_status_bar_composer
+          return true
+        end
+
+        changes = @status_bar_composer_draft.changes
+        if changes.empty?
+          close_status_bar_composer
+          return true
+        end
+
+        unless on_submit
+          @status_bar_composer_draft.apply_save_failure("Configuration save is unavailable in this TUI session.")
+          return false
+        end
+
+        payload = {
+          "base_fingerprint" => @status_bar_composer_draft.baseline_fingerprint,
+          "changes" => changes
+        }
+        encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
+        @status_bar_composer_saving = true
+        @status_bar_composer_draft.clear_save_failure
+        submit_prompt("/config save #{encoded}", on_submit, state)
+        true
+      end
+
       # --- full-screen settings --------------------------------------------
 
       def github_support_enabled?(state = nil)
@@ -3354,11 +3571,13 @@ module Meringue
         @settings_picker = nil
         @settings_keybinding_capture = nil
         @settings_footer_focus = false
+        @settings_footer_button = "next"
         @settings_discard_confirm = false
         @settings_saving = false
         @github_access_test_result = nil
         close_delivery_pr_picker
         close_model_picker
+        close_question_picker
         @force_full_redraw = true
         true
       rescue StandardError => e
@@ -3377,12 +3596,14 @@ module Meringue
         @settings_picker = nil
         @settings_keybinding_capture = nil
         @settings_footer_focus = false
+        @settings_footer_button = "next"
         @settings_discard_confirm = false
         @settings_saving = false
         @github_access_test_result = nil
         @settings_setup_auto = false
         @settings_setup_outcome = nil
         @settings_mode = "settings"
+        close_question_picker
         @force_full_redraw = true
         true
       end
@@ -3413,12 +3634,20 @@ module Meringue
 
       def settings_rows
         return [] unless @settings_draft
-        return setup_rows.map { |row| decorate_github_access_action_row(row) } if setup_mode?
+        if setup_mode?
+          return setup_rows.filter_map do |row|
+            decorate_github_access_action_row(row) if settings_row_visible?(row)
+          end
+        end
 
         expanded = @settings_expanded_advanced.fetch(settings_category, false)
         definitions = @settings_draft.definitions_for(settings_category, include_advanced: expanded)
-        rows = definitions.map { |definition| decorate_github_access_action_row(@settings_draft.row(definition)) }
-        hidden = @settings_draft.definitions_for(settings_category, include_advanced: true).count(&:advanced)
+        rows = definitions.filter_map do |definition|
+          row = @settings_draft.row(definition)
+          decorate_github_access_action_row(row) if settings_row_visible?(row)
+        end
+        all_definitions = @settings_draft.definitions_for(settings_category, include_advanced: true)
+        hidden = all_definitions.count { |definition| definition.advanced && settings_row_visible?(@settings_draft.row(definition)) }
         if !expanded && hidden.positive?
           rows << synthetic_settings_row(
             "_show_advanced",
@@ -3445,6 +3674,14 @@ module Meringue
             @settings_draft.row(definition) if definition
           end
         end
+      end
+
+      def settings_row_visible?(row)
+        return true unless row.fetch("id", nil) == "experiments.github_support_test_access"
+
+        @settings_draft.value("experiments.github_support") == true
+      rescue KeyError
+        false
       end
 
       def decorate_github_access_action_row(row)
@@ -3510,7 +3747,9 @@ module Meringue
             count = category == settings_category ? rows.length : 0
             [category, { "visible" => count, "total" => count, "hidden_advanced" => 0 }]
           else
-            definitions = @settings_draft.definitions_for(category, include_advanced: true)
+            definitions = @settings_draft.definitions_for(category, include_advanced: true).select do |definition|
+              settings_row_visible?(@settings_draft.row(definition))
+            end
             advanced = definitions.count(&:advanced)
             hidden = @settings_expanded_advanced.fetch(category, false) ? 0 : advanced
             visible = definitions.length - hidden
@@ -3522,7 +3761,11 @@ module Meringue
       def settings_picker_snapshot
         return nil unless @settings_picker
 
+        options = settings_picker_options
+        @settings_picker["index"] = @settings_picker.fetch("index", 0).to_i.clamp(0, [options.length - 1, 0].max)
         @settings_picker.merge(
+          "options" => options,
+          "query" => @settings_picker.fetch("query", "").to_s,
           "row" => @settings_picker.fetch("row", {}).merge(
             "error" => (@settings_draft ? @settings_draft.errors[@settings_picker.fetch("id")] : nil)
           ).compact
@@ -3565,6 +3808,7 @@ module Meringue
           "keybinding_capture" => capture,
           "picker" => settings_picker_snapshot,
           "footer_focus" => @settings_footer_focus,
+          "footer_button" => @settings_footer_button,
           "setup_last_step" => setup_mode? && @settings_category_index.to_i == settings_categories.length - 1,
           "discard_confirm" => @settings_discard_confirm.is_a?(String),
           "confirmation" => (@settings_discard_confirm if @settings_discard_confirm.is_a?(String)),
@@ -3634,9 +3878,11 @@ module Meringue
         elsif HOME_KEYS.include?(key)
           @settings_row_index = 0
           @settings_footer_focus = false
+          @settings_footer_button = "next"
         elsif END_KEYS.include?(key)
           @settings_row_index = [rows.length - 1, 0].max
           @settings_footer_focus = false
+          @settings_footer_button = "next"
         elsif LEFT_KEYS.include?(key)
           cycle_or_move_settings(-1, state)
         elsif RIGHT_KEYS.include?(key)
@@ -3645,7 +3891,7 @@ module Meringue
           activate_settings_row(state, toggle_only: true, on_submit: on_submit) unless setup_mode?
         elsif ENTER_KEYS.include?(key)
           if setup_mode? && @settings_footer_focus
-            setup_next_or_finish(on_submit, state)
+            activate_setup_footer(on_submit, state)
           else
             activate_settings_row(state, on_submit: on_submit)
           end
@@ -3794,7 +4040,7 @@ module Meringue
         when Array
           kind, index = hit
           if kind == :picker
-            option = Array(@settings_picker&.fetch("options", []))[index.to_i]
+            option = settings_picker_options[index.to_i]
             if option
               id = @settings_picker.fetch("id")
               value = option.is_a?(Hash) ? option.fetch("reference") : option
@@ -3805,9 +4051,12 @@ module Meringue
           elsif kind == :category
             @settings_category_index = index.to_i.clamp(0, [settings_categories.length - 1, 0].max)
             @settings_row_index = 0
+            @settings_footer_focus = false
+            @settings_footer_button = "next"
           elsif %i[row toggle].include?(kind)
             @settings_row_index = index.to_i.clamp(0, [settings_rows.length - 1, 0].max)
             @settings_footer_focus = false
+            @settings_footer_button = "next"
             activate_settings_row(state, toggle_only: kind == :toggle, on_submit: on_submit)
           end
         end
@@ -3833,6 +4082,7 @@ module Meringue
                                    end
         @settings_row_index = 0
         @settings_footer_focus = false
+        @settings_footer_button = "next"
       end
 
       def move_settings_row(delta)
@@ -3845,12 +4095,14 @@ module Meringue
               return
             elsif @settings_row_index.to_i >= count - 1
               @settings_footer_focus = true
+              @settings_footer_button = "next"
             else
               @settings_row_index += 1
             end
           elsif delta.to_i.negative?
             if @settings_footer_focus
               @settings_footer_focus = false
+              @settings_footer_button = "next"
               @settings_row_index = [count - 1, 0].max
             else
               @settings_row_index = [@settings_row_index.to_i - 1, 0].max
@@ -3872,7 +4124,10 @@ module Meringue
       end
 
       def cycle_or_move_settings(delta, state)
-        return if setup_mode? && @settings_footer_focus
+        if setup_mode? && @settings_footer_focus
+          @settings_footer_button = @settings_footer_button == "next" ? "back" : "next"
+          return
+        end
 
         row = selected_settings_row
         return move_settings_row(delta) if setup_mode? && !row
@@ -3901,14 +4156,28 @@ module Meringue
 
       # The model list a settings row should offer belongs to the harness that row is about, so a
       # user editing the worker model is never shown another backend's catalog.
-      def settings_model_harness
-        Harness::Registry.new(config: config).worker_provider
+      def settings_model_harness(state = nil, role: nil)
+        selected_role = role.to_s.strip.downcase
+        selected_role = "worker" unless %w[head worker].include?(selected_role)
+        configured = @settings_draft&.value("agent.#{selected_role}_harness").to_s.strip
+        if configured.empty?
+          configured = begin
+            Harness::Registry.new(config: config).worker_provider.to_s.strip
+          rescue StandardError
+            ""
+          end
+        end
+        if configured.to_s.strip.empty? && state.is_a?(Hash)
+          configured = state.dig("metadata", "active_worker_harness") || state.dig("metadata", "active_harness")
+        end
+        configured.to_s.strip.empty? ? nil : configured
       rescue StandardError
         nil
       end
 
       def cycle_settings_model(row, delta, state)
-        options = ModelPicker.entries(state, harness: settings_model_harness, query: "").map { |entry| entry.fetch("reference") }
+        role = row.fetch("id", "").to_s.split(".").fetch(1, "").sub(/_model\\z/, "")
+        options = ModelPicker.entries(state, harness: settings_model_harness(state, role: role), query: "").map { |entry| entry.fetch("reference") }
         current = @settings_draft.value(row.fetch("id")).to_s
         options.unshift(current) unless options.include?(current)
         return if options.empty?
@@ -3943,6 +4212,9 @@ module Meringue
         case row.fetch("editor", nil)
         when "checkbox"
           @settings_draft.toggle(id)
+        when "status_bar"
+          return false if toggle_only
+          open_status_bar_composer(state, return_to_settings: true)
         when "keybinding"
           return false if toggle_only
           open_settings_keybinding_capture(row)
@@ -3992,7 +4264,8 @@ module Meringue
       def open_settings_picker(row, state)
         id = row.fetch("id")
         options = if row.fetch("editor") == "model"
-                    ModelPicker.entries(state, harness: "pi", query: "").map do |entry|
+                    role = row.fetch("id", "").to_s.split(".").fetch(1, "").sub(/_model\\z/, "")
+                    ModelPicker.entries(state, harness: settings_model_harness(state, role: role), query: "").map do |entry|
                       { "reference" => entry.fetch("reference"), "name" => entry.fetch("name", entry.fetch("reference")) }
                     end
                   else
@@ -4005,7 +4278,9 @@ module Meringue
         @settings_picker = {
           "id" => id,
           "row" => row,
+          "all_options" => options,
           "options" => options,
+          "query" => "",
           "index" => [options.index { |option| option.is_a?(Hash) ? option.fetch("reference") == current : option == current } || 0, 0].max
         }
         true
@@ -4015,7 +4290,7 @@ module Meringue
         if mouse_event?(key)
           return handle_settings_mouse(key, unchanged, _on_submit, _state)
         end
-        options = Array(@settings_picker.fetch("options", []))
+        options = settings_picker_options
         if UP_KEYS.include?(key)
           @settings_picker["index"] = (@settings_picker.fetch("index", 0).to_i - 1) % [options.length, 1].max
         elsif DOWN_KEYS.include?(key)
@@ -4029,10 +4304,35 @@ module Meringue
             @settings_draft.preview_theme if id == "appearance.theme"
             @settings_picker = nil
           end
-        elsif hard_escape_key?(key) || BACKSPACE_KEYS.include?(key) || DELETE_KEYS.include?(key)
+        elsif keybinding?("delete_word_backward", key)
+          @settings_picker["query"] = ""
+          @settings_picker["index"] = 0
+        elsif keybinding?("delete_backward", key)
+          @settings_picker["query"] = @settings_picker.fetch("query", "").to_s.chars[0...-1].join
+          @settings_picker["index"] = 0
+        elsif printable_key?(key)
+          @settings_picker["query"] = "#{@settings_picker.fetch("query", "")}#{key}"
+          @settings_picker["index"] = 0
+        elsif key == "\e" || hard_escape_key?(key)
           @settings_picker = nil
         end
         unchanged
+      end
+
+      def settings_picker_options
+        return [] unless @settings_picker
+
+        tokens = @settings_picker.fetch("query", "").to_s.downcase.split(/\s+/).reject(&:empty?)
+        Array(@settings_picker.fetch("all_options", @settings_picker.fetch("options", []))).select do |option|
+          next true if tokens.empty?
+
+          haystack = if option.is_a?(Hash)
+                       [option.fetch("reference", ""), option.fetch("name", "")].join(" ")
+                     else
+                       option.to_s
+                     end.downcase
+          tokens.all? { |token| haystack.include?(token) }
+        end
       end
 
       def open_settings_keybinding_capture(row)
@@ -4071,6 +4371,14 @@ module Meringue
 
         @settings_discard_confirm = "discard"
         true
+      end
+
+      def activate_setup_footer(on_submit, state)
+        if @settings_footer_button == "back"
+          move_settings_category(-1)
+        else
+          setup_next_or_finish(on_submit, state)
+        end
       end
 
       def setup_next_or_finish(on_submit, state)
@@ -4211,6 +4519,7 @@ module Meringue
       # answer, and a chat line or blank popup is not. The model path reads the
       # kernel-cached snapshot, so opening it never starts a harness process.
       def open_model_picker(state, harness: nil, role: nil)
+        close_model_picker
         @model_picker_active = true
         @model_picker_index = 0
         @model_picker_query = +""
@@ -4218,10 +4527,12 @@ module Meringue
         @model_picker_role = %w[head worker].include?(role.to_s.downcase) ? role.to_s.downcase : "head"
         @model_picker_kind = "model"
         close_delivery_pr_picker
+        close_question_picker
         true
       end
 
       def open_thinking_picker(state, role: nil)
+        close_model_picker
         @model_picker_active = true
         @model_picker_index = 0
         @model_picker_query = +""
@@ -4229,21 +4540,26 @@ module Meringue
         @model_picker_role = %w[head worker].include?(role.to_s.downcase) ? role.to_s.downcase : "head"
         @model_picker_kind = "thinking"
         close_delivery_pr_picker
+        close_question_picker
         true
       end
 
       def open_theme_picker(state)
+        close_model_picker
+        @theme_picker_original = Style.current_colorscheme.to_s
         @model_picker_active = true
-        @model_picker_index = 0
+        @model_picker_index = Style.colorschemes.index(@theme_picker_original) || 0
         @model_picker_query = +""
         @model_picker_harness = nil
         @model_picker_role = "head"
         @model_picker_kind = "theme"
         close_delivery_pr_picker
+        close_question_picker
         true
       end
 
       def open_harness_picker(state, role: nil)
+        close_model_picker
         @model_picker_active = true
         @model_picker_index = 0
         @model_picker_query = +""
@@ -4251,16 +4567,45 @@ module Meringue
         @model_picker_role = %w[head worker].include?(role.to_s.downcase) ? role.to_s.downcase : "head"
         @model_picker_kind = "harness"
         close_delivery_pr_picker
+        close_question_picker
         true
       end
 
-      def close_model_picker
+      def close_model_picker(restore_theme: true)
+        if restore_theme && @model_picker_kind == "theme" && @theme_picker_original
+          restore_theme_picker(@theme_picker_original)
+        end
+        @theme_picker_original = nil if @model_picker_kind == "theme"
         @model_picker_active = false
         @model_picker_query = +""
         @model_picker_index = 0
         @model_picker_harness = nil
         @model_picker_role = "head"
         @model_picker_kind = "model"
+      end
+
+      def restore_theme_picker(theme)
+        return if theme.to_s.empty? || Style.current_colorscheme == theme.to_s
+
+        Style.configure!(theme.to_s)
+      rescue ArgumentError
+        nil
+      end
+
+      def restore_pending_theme_picker
+        original = @theme_picker_pending_original
+        @theme_picker_pending_original = nil
+        restore_theme_picker(original) if original
+      end
+
+      def preview_theme_picker(state)
+        entry = selected_model_picker_entry(model_picker_entries(state))
+        return unless entry
+
+        theme = entry.fetch("reference")
+        Style.configure!(theme) unless Style.current_colorscheme == theme
+      rescue ArgumentError
+        nil
       end
 
       def model_picker_entries(state)
@@ -4321,11 +4666,11 @@ module Meringue
           return unchanged
         end
         if keybinding?("suggestion_previous", key)
-          move_model_picker(-1, entries.length)
+          move_model_picker(-1, entries.length, state: state)
           return unchanged
         end
         if keybinding?("suggestion_next", key)
-          move_model_picker(1, entries.length)
+          move_model_picker(1, entries.length, state: state)
           return unchanged
         end
         if keybinding?("refresh_model_catalog", key)
@@ -4345,16 +4690,19 @@ module Meringue
         if keybinding?("delete_word_backward", key)
           @model_picker_query = +""
           @model_picker_index = 0
+          preview_theme_picker(state) if @model_picker_kind == "theme"
           return unchanged
         end
         if keybinding?("delete_backward", key)
           @model_picker_query = @model_picker_query.to_s.chars[0...-1].join
           @model_picker_index = 0
+          preview_theme_picker(state) if @model_picker_kind == "theme"
           return unchanged
         end
         if printable_key?(key)
           @model_picker_query = "#{@model_picker_query}#{key}"
           @model_picker_index = 0
+          preview_theme_picker(state) if @model_picker_kind == "theme"
           return unchanged
         end
 
@@ -4369,7 +4717,7 @@ module Meringue
         if mouse_wheel?(key)
           return nil if hit == :outside
 
-          move_model_picker(mouse_wheel_up?(key) ? -1 : 1, entries.length)
+          move_model_picker(mouse_wheel_up?(key) ? -1 : 1, entries.length, state: state)
           return unchanged
         end
 
@@ -4381,10 +4729,11 @@ module Meringue
         unchanged
       end
 
-      def move_model_picker(step, count)
+      def move_model_picker(step, count, state: nil)
         return if count <= 0
 
         @model_picker_index = (@model_picker_index.to_i + step) % count
+        preview_theme_picker(state) if @model_picker_kind == "theme"
       end
 
       def switch_model_picker_role(step)
@@ -4413,7 +4762,13 @@ module Meringue
 
         kind = @model_picker_kind
         role = @model_picker_role
-        close_model_picker
+        if kind == "theme"
+          original = @theme_picker_original
+          close_model_picker(restore_theme: false)
+          @theme_picker_pending_original = original
+        else
+          close_model_picker
+        end
         command = case kind
                   when "thinking"
                     "/thinking #{role} #{entry.fetch("level")}"
@@ -4437,6 +4792,91 @@ module Meringue
         true
       end
 
+      def open_question_picker(state)
+        @question_picker_active = true
+        @question_picker_index = 0
+        close_delivery_pr_picker
+        close_model_picker
+        true
+      end
+
+      def close_question_picker
+        @question_picker_active = false
+        @question_picker_index = 0
+      end
+
+      def question_picker_entries(state)
+        QuestionPicker.entries(state)
+      end
+
+      def handle_question_picker_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
+        entries = question_picker_entries(state)
+        return handle_question_picker_mouse(key, unchanged, state, entries) if mouse_event?(key)
+
+        if keybinding?("suggestion_previous", key)
+          move_question_picker(-1, entries.length)
+          return unchanged
+        end
+        if keybinding?("suggestion_next", key)
+          move_question_picker(1, entries.length)
+          return unchanged
+        end
+        if keybinding?("submit", key)
+          return apply_question_picker_entry(selected_question_picker_entry(entries), unchanged)
+        end
+        if keybinding?("cancel_navigation", key)
+          close_question_picker
+          return unchanged
+        end
+
+        close_question_picker
+        nil
+      end
+
+      def handle_question_picker_mouse(key, unchanged, state, entries)
+        return unchanged unless mouse_button_press?(key) || mouse_wheel?(key)
+
+        hit = layout.question_picker_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+        if mouse_wheel?(key)
+          return nil if hit == :outside
+
+          move_question_picker(mouse_wheel_up?(key) ? -1 : 1, entries.length)
+          return unchanged
+        end
+
+        if hit.is_a?(Integer)
+          apply_question_picker_entry(entries[hit], unchanged)
+        elsif hit == :outside
+          close_question_picker
+          unchanged
+        else
+          unchanged
+        end
+      end
+
+      def move_question_picker(step, count)
+        return if count <= 0
+
+        @question_picker_index = (@question_picker_index.to_i + step) % count
+      end
+
+      def selected_question_picker_entry(entries)
+        return nil if entries.empty?
+
+        entries[@question_picker_index.to_i.clamp(0, entries.length - 1)]
+      end
+
+      def apply_question_picker_entry(entry, unchanged)
+        # The empty-list explanation is already rendered inside the popup. Keep
+        # Enter inert there rather than duplicating expected unavailability in chat.
+        return unchanged unless entry
+
+        close_question_picker
+        command = "/answer #{entry.fetch("id")} "
+        [command, command.chars.length, NO_SLASH_SELECTION]
+      end
+
       def open_delivery_pr_picker(state)
         unless github_support_enabled?(state)
           append_jump_response(github_support_disabled_message)
@@ -4450,8 +4890,8 @@ module Meringue
         # available at that instant.
         @delivery_pr_picker_active = true
         @delivery_pr_picker_index = @delivery_pr_picker_index.to_i.clamp(0, [entries.length - 1, 0].max)
-        return true if entries.empty?
-
+        close_question_picker
+        close_model_picker
         true
       end
 
@@ -4943,14 +5383,20 @@ module Meringue
                        unavailable_prompt_handler_result
                      end
             if slash_command
-              apply_slash_command_results(result.fetch("command_results", []) || []) if result.fetch("event", nil) == "slash_command_applied"
+              command_results = result.fetch("command_results", []) || []
+              apply_slash_command_results(command_results) if result.fetch("event", nil) == "slash_command_applied"
+              resolve_theme_picker_submission(command_results)
             else
               final_text = result_logged_to_kernel?(result) ? "" : log_text_for(result)
               visible = !final_text.to_s.strip.empty?
               update_message(assistant_message_id, text: final_text, status: nil, visible: visible, persist: visible)
             end
           rescue StandardError => e
-            if slash_command && text.start_with?("/config save ") && @settings_active && @settings_draft
+            restore_pending_theme_picker if slash_command && text.start_with?("/theme ")
+            if slash_command && text.start_with?("/config save ") && @status_bar_composer_active && @status_bar_composer_draft
+              @status_bar_composer_saving = false
+              @status_bar_composer_draft.apply_save_failure("Configuration save failed: #{e.class}: #{e.message}")
+            elsif slash_command && text.start_with?("/config save ") && @settings_active && @settings_draft
               @settings_saving = false
               @settings_draft.apply_save_failure("Configuration save failed: #{e.class}: #{e.message}")
             elsif assistant_message_id
@@ -5095,12 +5541,21 @@ module Meringue
         if result.fetch("status", nil) == "accepted"
           outcome = result.dig("result", "onboarding_outcome") || @settings_setup_outcome
           setup_was_active = @settings_active && setup_mode?
+          composer_was_active = @status_bar_composer_active
           @config = config.reload_file
           @keybindings = Keybindings.from_config(@config.section("tui", "keybindings"))
           close_settings(discard: outcome == "skipped") if @settings_active
+          close_status_bar_composer if composer_was_active
           if setup_was_active && outcome
             append_jump_response(outcome == "skipped" ? Onboarding.skip_card : Onboarding.completion_card(@config))
           end
+        elsif @status_bar_composer_active && @status_bar_composer_draft
+          @status_bar_composer_saving = false
+          details = result.fetch("result", {}) || {}
+          @status_bar_composer_draft.apply_save_failure(
+            result.fetch("message", "Configuration was not saved."),
+            details.fetch("field_errors", {})
+          )
         elsif @settings_active && @settings_draft
           @settings_saving = false
           details = result.fetch("result", {}) || {}
@@ -5110,7 +5565,10 @@ module Meringue
           )
         end
       rescue StandardError => e
-        if @settings_active && @settings_draft
+        if @status_bar_composer_active && @status_bar_composer_draft
+          @status_bar_composer_saving = false
+          @status_bar_composer_draft.apply_save_failure("Configuration result could not be applied: #{e.message}")
+        elsif @settings_active && @settings_draft
           @settings_saving = false
           @settings_draft.apply_save_failure("Configuration result could not be applied: #{e.message}")
         end
@@ -5153,15 +5611,29 @@ module Meringue
       end
 
       def apply_theme_command_results(command_results)
-        Array(command_results).each do |result|
-          next unless result.fetch("command_type", nil) == "SetTheme"
-          next unless result.fetch("status", nil) == "accepted"
+        theme_result = Array(command_results).reverse.find do |result|
+          result.fetch("command_type", nil) == "SetTheme"
+        end
+        return unless theme_result
 
-          theme = (result.fetch("result", {}) || {})["theme"]
+        if theme_result.fetch("status", nil) == "accepted"
+          theme = (theme_result.fetch("result", {}) || {})["theme"]
           Style.configure!(theme) if theme
+          @theme_picker_pending_original = nil
+        else
+          restore_pending_theme_picker
         end
       rescue StandardError
-        nil
+        restore_pending_theme_picker
+      end
+
+      # A slash submission can finish without a SetTheme result (for example an
+      # unavailable callback). Do not leave the process-local preview active.
+      def resolve_theme_picker_submission(command_results)
+        return if @theme_picker_pending_original.nil?
+        return if Array(command_results).any? { |result| result.fetch("command_type", nil) == "SetTheme" }
+
+        restore_pending_theme_picker
       end
 
       def append_head_result_applied_summary(message_id, event)
@@ -5288,6 +5760,8 @@ module Meringue
         composed_state = state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
           Settings::STATE_KEY => settings_snapshot,
+          StatusBarComposer::STATE_KEY => status_bar_composer_snapshot,
+          "_status_bar_layout" => StatusBarLayout.from_config(config),
           "_capabilities" => { "github_support" => github_support_enabled?(state) },
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
           LogScope::STATE_KEY => LogScope.snapshot(state, @log_scope_id),
@@ -5876,7 +6350,8 @@ module Meringue
             "selection" => @chat_selection,
             "pending_count" => @pending_count,
             "delivery_pr_picker" => delivery_pr_picker_snapshot,
-            "model_picker" => model_picker_snapshot
+            "model_picker" => model_picker_snapshot,
+            "question_picker" => question_picker_snapshot
           }
         end
       end

@@ -16,16 +16,24 @@ module Meringue
       def initialize(agent_tree_pane: Panes::AgentTreePane.new,
                      chat_pane: Panes::ChatPane.new,
                      agent_workspace_pane: Panes::AgentWorkspacePane.new,
-                     settings_pane: Panes::SettingsPane.new)
+                     settings_pane: Panes::SettingsPane.new,
+                     status_bar_composer_pane: StatusBarComposer::Pane.new)
         @agent_tree_pane = agent_tree_pane
         @chat_pane = chat_pane
         @agent_workspace_pane = agent_workspace_pane
         @settings_pane = settings_pane
+        @status_bar_composer_pane = status_bar_composer_pane
       end
 
       def render(state, width:, height:, color: false)
         raw_width = [width.to_i, 1].max
         raw_height = [height.to_i, 1].max
+        if status_bar_composer_active?(state)
+          width = bounded_width(width)
+          height = bounded_height(height)
+          canvas = Canvas.new(width: width, height: height)
+          return render_status_bar_composer(canvas, state, width, height, color: color)
+        end
         if settings_active?(state)
           canvas = Canvas.new(width: raw_width, height: raw_height)
           return render_setup(canvas, state, raw_width, raw_height, color: color) if Settings.snapshot(state).fetch("mode", "settings") == "setup"
@@ -134,19 +142,21 @@ module Meringue
           border_style: composer_border_style(state, active: composer_active),
           title_style: composer_title_style(state)
         )
+        bottom_left, bottom_right = dashboard_status_bar_lines(state)
         draw_hint_line(
           canvas,
           metrics.fetch(:hint_x),
           metrics.fetch(:hint_y),
           metrics.fetch(:hint_width),
-          chat_pane.bottom_hint_line(state),
-          chat_pane.bottom_right_status_line(state)
+          bottom_left,
+          bottom_right
         )
 
         canvas.render(color: color)
       end
 
       def pane_at(state, width:, height:, x:, y:)
+        return "status_bar_composer" if status_bar_composer_active?(state)
         return "settings" if settings_active?(state)
         return "agent_workspace" if fullscreen_agent_workspace?(state)
 
@@ -215,10 +225,11 @@ module Meringue
 
         label = OpenPullRequests.summary_label(state)
         offset = 0
-        chat_pane.bottom_hint_line(state).each do |segment|
+        dashboard_left, dashboard_right = dashboard_status_bar_lines(state)
+        dashboard_left.each do |segment|
           text = segment.is_a?(Array) ? segment.fetch(0, "").to_s : segment.to_s
           if text == label
-            visible_width = [text.length, hint_left_width(metrics.fetch(:hint_width), chat_pane.bottom_right_status_line(state)) - offset].min
+            visible_width = [text.length, hint_left_width(metrics.fetch(:hint_width), dashboard_right) - offset].min
             return false unless visible_width.positive?
 
             start_x = metrics.fetch(:hint_x) + offset
@@ -403,6 +414,26 @@ module Meringue
         )
       end
 
+      # Where a click landed relative to the open-question picker: the entry index
+      # for a row, `:chrome` for the picker's own border/footer, and `:outside`
+      # for anywhere else (which is what dismisses it).
+      def question_picker_hit(state, width:, height:, x:, y:)
+        return :outside unless chat_pane.question_picker?(state)
+
+        metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
+        return :outside unless metrics.fetch(:suggestion_height).positive?
+
+        bounds = pane_bounds(metrics, :suggestion_x, :suggestion_y, :suggestion_width, :suggestion_height)
+        bounds = bounds.merge(height: bounds.fetch(:height) + metrics.fetch(:suggestion_footer_height))
+        return :outside unless point_in_bounds?(x.to_i, y.to_i, bounds)
+
+        row = y.to_i - metrics.fetch(:suggestion_y) - 1
+        return :chrome if row.negative? || row >= Panes::ChatPane::QUESTION_PICKER_VISIBLE_LIMIT
+
+        index = chat_pane.question_picker_window_start(state) + row
+        index < QuestionPicker.entries(state).length ? index : :chrome
+      end
+
       # Where a click landed relative to the open-PR picker: the entry index for a
       # row, `:chrome` for the picker's own border/footer, and `:outside` for
       # anywhere else (which is what dismisses it).
@@ -433,6 +464,12 @@ module Meringue
         return :inert unless settings_active?(state)
 
         settings_pane.hit(state, width: width, height: height, x: x, y: y)
+      end
+
+      def status_bar_composer_hit(state, width:, height:, x:, y:)
+        return :inert unless status_bar_composer_active?(state)
+
+        status_bar_composer_pane.hit(StatusBarComposer.snapshot(state), width: width, height: height, x: x, y: y)
       end
 
       # Same three answers for the model picker: a row index, `:chrome` for its
@@ -578,7 +615,7 @@ module Meringue
       end
 
       def scroll_limits(state, width:, height:)
-        return { "agent_tree" => 0, "logs" => 0, "chat" => 0 } if settings_active?(state) || fullscreen_agent_workspace?(state)
+        return { "agent_tree" => 0, "logs" => 0, "chat" => 0 } if settings_active?(state) || status_bar_composer_active?(state) || fullscreen_agent_workspace?(state)
 
         width = [width.to_i, MIN_WIDTH].max
         height = [height.to_i, MIN_HEIGHT].max
@@ -594,7 +631,7 @@ module Meringue
 
       private
 
-      attr_reader :agent_tree_pane, :chat_pane, :agent_workspace_pane, :settings_pane
+      attr_reader :agent_tree_pane, :chat_pane, :agent_workspace_pane, :settings_pane, :status_bar_composer_pane
 
       def agent_workspace_active?(state)
         return false if settings_active?(state)
@@ -610,6 +647,41 @@ module Meringue
 
       def fullscreen_agent_workspace?(state)
         agent_workspace_active?(state) && !embedded_agent_workspace?(state)
+      end
+
+      def status_bar_composer_active?(state)
+        StatusBarComposer.enabled?(state)
+      end
+
+      def render_status_bar_composer(canvas, state, width, height, color:)
+        status_bar_composer_pane.render(StatusBarComposer.snapshot(state), width: width, height: height, color: color)
+      end
+
+      # The stock bars deliberately keep their existing rendering path. Once a
+      # valid saved layout is present, the same live segments become reorderable
+      # slots; invalid or absent data therefore cannot blank a footer.
+      def dashboard_status_bar_lines(state)
+        layout_data = StatusBarLayout.custom_for_state(state, "bottom")
+        return [chat_pane.bottom_hint_line(state), chat_pane.bottom_right_status_line(state)] unless layout_data
+
+        layout = StatusBarLayout.new(layout_data)
+        components = {
+          "context" => chat_pane.bottom_hint_line(state),
+          "status" => chat_pane.bottom_right_status_line(state)
+        }
+        [layout.compose("bottom", components), []]
+      end
+
+      def focused_status_bar_segments(state, width:)
+        layout_data = StatusBarLayout.custom_for_state(state, "focused_worker")
+        return nil unless layout_data
+
+        layout = StatusBarLayout.new(layout_data)
+        default_state = state.dup
+        default_state.delete(StatusBarLayout::STATE_KEY)
+        hint = agent_workspace_pane.hint_line(default_state, width: width)
+        status = agent_workspace_pane.status_line(default_state)
+        layout.compose("focused_worker", { "controls" => hint, "status" => status })
       end
 
       def render_setup(canvas, state, width, height, color:)
@@ -638,17 +710,28 @@ module Meringue
         view.fetch(:lines).each_with_index do |line, index|
           draw_line(canvas, view.fetch(:content_x), view.fetch(:content_y) + index, content_width, line)
         end
-        counter = view.fetch(:counter).to_s
-        unless counter.empty?
-          write_centered_segments(canvas, card.fetch(:x) + 2, card.fetch(:y) + card.fetch(:height) - 2, content_width, [[counter, Style::DIM]])
-        end
-
         footer_y = geometry.fetch(:footer_y)
         footer = settings_pane.setup_footer_segments(state, width: width)
         actions = !view.fetch(:modal, false) ? settings_pane.action_segments(state) : []
         action_width = segment_text_width(actions)
-        canvas.write_segments(1, footer_y, footer, max_width: [width - action_width - 3, 1].max, default_style: Style::DIM)
-        canvas.write_segments([width - action_width - 1, 0].max, footer_y, actions, max_width: action_width)
+        action_x = if actions.empty?
+                     card.fetch(:x) + card.fetch(:width) - 2
+                   else
+                     card.fetch(:x) + card.fetch(:width) - action_width - 2
+                   end
+        counter = view.fetch(:counter).to_s
+        unless counter.empty?
+          canvas.write_segments(
+            card.fetch(:x) + 2,
+            geometry.fetch(:action_y),
+            [[counter, Style::DIM]],
+            max_width: [action_x - card.fetch(:x) - 3, 1].max
+          )
+        end
+        unless actions.empty?
+          canvas.write_segments([action_x, card.fetch(:x) + 1].max, geometry.fetch(:action_y), actions, max_width: action_width)
+        end
+        canvas.write_segments(1, footer_y, footer, max_width: [width - 2, 1].max, default_style: Style::DIM)
         canvas.render(color: color)
       end
 
@@ -809,16 +892,21 @@ module Meringue
 
         status_line = agent_workspace_pane.status_line(state)
         hint_width = pane_width - 2
-        status_width = segment_text_width(status_line)
-        available_hint_width = [hint_width - (status_width.positive? ? status_width + 2 : 0), 0].max
-        draw_hint_line(
-          canvas,
-          pane_x + 1,
-          hint_y,
-          hint_width,
-          agent_workspace_pane.hint_line(state, width: available_hint_width),
-          status_line
-        )
+        custom_focused = focused_status_bar_segments(state, width: hint_width)
+        if custom_focused
+          draw_hint_line(canvas, pane_x + 1, hint_y, hint_width, custom_focused, [])
+        else
+          status_width = segment_text_width(status_line)
+          available_hint_width = [hint_width - (status_width.positive? ? status_width + 2 : 0), 0].max
+          draw_hint_line(
+            canvas,
+            pane_x + 1,
+            hint_y,
+            hint_width,
+            agent_workspace_pane.hint_line(state, width: available_hint_width),
+            status_line
+          )
+        end
         canvas.render(color: color)
       end
 
@@ -1013,10 +1101,10 @@ module Meringue
       end
 
       # One popup slot above the composer, shared by slash suggestions and every
-      # interactive choice picker (models, thinking, themes, harnesses, and open
-      # PRs; see ChatPane#popup?), so all of them stay on-screen instead of
-      # duplicating feedback in chat. Only the number of visible rows differs:
-      # browsed pickers are allowed to be taller. First-run setup is
+      # interactive choice picker (models, thinking, themes, harnesses, open
+      # questions, and open PRs; see ChatPane#popup?), so all of them stay on-screen
+      # instead of duplicating feedback in chat. Only the number of visible rows
+      # differs: browsed pickers are allowed to be taller. First-run setup is
       # not in this slot; it takes over the screen.
       #
       # The caption under the box gets its own reserved row, so the box keeps every

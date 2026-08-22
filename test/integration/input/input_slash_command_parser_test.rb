@@ -217,6 +217,19 @@ class InputSlashCommandParserTest < Minitest::Test
     )
   end
 
+  def test_bare_theme_aliases_are_local_picker_commands_outside_the_tui
+    ["/theme", "/themes"].each do |input|
+      parsed = parse_slash(input)
+
+      assert_equal "InvalidSlashCommand", parsed.fetch("type"), "expected #{input.inspect} to stay TUI-local"
+      assert_includes parsed.fetch("payload").fetch("message"), "theme picker"
+    end
+
+    invalid = parse_slash("/themes catppuccin")
+    assert_equal "InvalidSlashCommand", invalid.fetch("type")
+    assert_equal "Usage: /themes", invalid.fetch("payload").fetch("message")
+  end
+
   def test_missing_arguments_for_strict_commands_return_invalid_slash_command
     ["/theme", "/theme a b", "/harness", "/model a b",
      "/thinking", "/thinking high extra", "/thinking reviewer high", "/thinking head high extra",
@@ -325,7 +338,7 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   def test_local_tui_commands_are_reported_as_not_kernel_commands
-    %w[/quit /reload /update /jump /prs /keybind /config /setup /open-session].each do |input|
+    %w[/quit /reload /update /jump /prs /keybind /config /setup /status-bar /statusbar /layout /open-session /theme /themes].each do |input|
       parsed = parse_slash(input)
       assert_equal "InvalidSlashCommand", parsed.fetch("type")
       assert_match(/local TUI command/, parsed.fetch("payload").fetch("message"))
@@ -427,6 +440,16 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_includes parser_entry.fetch(1), "picker"
     refute_nil help_entry
     assert_includes help_entry.fetch(1), "TUI local"
+  end
+
+  def test_questions_is_discovered_as_a_picker_in_parser_and_kernel_help
+    parser_entry = Meringue::Input::SlashCommandParser::COMMAND_SPECS.find { |usage, _description| usage == "/questions" }
+    help_entry = Meringue::Kernel::Engine::HELP_COMMANDS.find { |usage, _description| usage == "/questions" }
+
+    refute_nil parser_entry
+    assert_includes parser_entry.fetch(1), "picker"
+    refute_nil help_entry
+    assert_includes help_entry.fetch(1), "picker"
   end
 
   def test_answer_and_dismiss_suggestions_only_offer_open_questions

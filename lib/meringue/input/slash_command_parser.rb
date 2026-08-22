@@ -14,7 +14,8 @@ module Meringue
         ["/quit", "Quit the interactive TUI."],
         ["/reload", "Restart Meringue with the current installed source and configuration."],
         ["/update", "Update the installed Meringue source, install missing dependencies, and reload."],
-        ["/theme <name>", "With no arguments, open the theme picker; otherwise set and persist the TUI theme."],
+        ["/theme [name]", "With no arguments, open the theme picker; otherwise set and persist the TUI theme."],
+        ["/themes", "Open the interactive theme picker."],
         ["/project add <path> [name]", "Register a project directory."],
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
@@ -42,13 +43,14 @@ module Meringue
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/prs", "Open the picker for every tracked pull request that is still open."],
-        ["/setup", "Reopen Setup for theme, separate head/worker defaults, and experiments."],
+        ["/setup", "Reopen Setup for theme, separate head/worker defaults, status-bar layout, and Meringue Xtras."],
         ["/keybind", "Show all TUI keybindings."],
         ["/config", "Open full-screen Settings; /config --text prints read-only diagnostics."],
+        ["/status-bar", "Open the status-bar layout composer."],
         ["/github test", "Test read-only GitHub authentication and repository access."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
-        ["/questions", "List questions and their statuses."],
+        ["/questions", "Open the picker for existing open questions."],
         ["/answer <question_id> \"<answer>\"", "Answer an open question and let a head route the work it unblocks."],
         ["/dismiss <question_id>", "Dismiss an open question without answering it."],
         ["/prune", "Remove resolved and errored records plus their safely cleanable managed worktrees."],
@@ -780,6 +782,8 @@ module Meringue
           invalid("/update is a local TUI command. Run it in the interactive TUI to update and restart Meringue.", usage: "/update")
         when "theme"
           parse_theme(arguments)
+        when "themes"
+          parse_themes(arguments)
         when "harness"
           parse_harness(arguments)
         when "models"
@@ -818,6 +822,13 @@ module Meringue
           invalid("/keybind is a local TUI command. Run it in the interactive TUI to show keybindings.", usage: "/keybind")
         when "config"
           parse_config(arguments)
+        when "status-bar", "statusbar", "layout"
+          tokens = split_arguments(arguments)
+          if tokens.empty?
+            invalid("/status-bar is a local TUI command. Run it in the interactive TUI to compose status-bar layouts.", usage: "/status-bar")
+          else
+            invalid("Usage: /status-bar")
+          end
         when "github"
           parse_github(arguments)
         when "tree"
@@ -883,9 +894,23 @@ module Meringue
 
       def parse_theme(arguments)
         tokens = split_arguments(arguments)
-        return invalid("Usage: /theme <name>") unless tokens.length == 1
+        return invalid(
+          "Usage: /theme [name]. Without a name, this local TUI command opens the theme picker in the interactive TUI.",
+          usage: "/theme [name]"
+        ) if tokens.empty?
+        return invalid("Usage: /theme [name]") unless tokens.length == 1
 
         kernel_command("SetTheme", "theme" => tokens[0])
+      end
+
+      def parse_themes(arguments)
+        tokens = split_arguments(arguments)
+        return invalid(
+          "Usage: /themes. This local TUI command opens the theme picker in the interactive TUI.",
+          usage: "/themes"
+        ) if tokens.empty?
+
+        invalid("Usage: /themes")
       end
 
       def parse_harness(arguments)
@@ -966,7 +991,7 @@ module Meringue
         tokens = split_arguments(arguments)
         if tokens.empty?
           return invalid(
-            "/setup is a local TUI command. Run it in the interactive TUI to review theme, separate head/worker defaults, and experiments.",
+            "/setup is a local TUI command. Run it in the interactive TUI to review theme, separate head/worker defaults, status-bar layout, and Meringue Xtras.",
             usage: "/setup"
           )
         end

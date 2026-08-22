@@ -6,15 +6,16 @@ Setup is not a chat prompt and does not maintain a second settings implementatio
 
 ## Steps
 
-The centered card shows one dynamic `Step N of 5` indicator:
+The centered card shows one dynamic `Step N of 6` indicator:
 
 1. **Welcome** — starts the flow.
 2. **Theme** — theme and animation preference. Theme changes preview immediately in memory.
-3. **Head defaults** — harness, Pi model, and Pi thinking level for future routing heads.
-4. **Worker defaults** — independently chosen harness, Pi model, and Pi thinking level for future workers.
-5. **Experiments** — controls derived directly from `Experiments::Registry`. GitHub support is currently the only experiment; when it is enabled, the page also offers the read-only **Test GitHub access** action.
+3. **Head defaults** — harness, model, and thinking level for future routing heads.
+4. **Worker defaults** — independently chosen harness, model, and thinking level for future workers.
+5. **Status bar** — opens the live composer for the dashboard bottom, agent-information, and focused-worker bars. Saving the composer returns its layout to the setup draft without writing the config yet.
+6. **Meringue Xtras** — experiment controls derived directly from `Experiments::Registry`. The read-only **Test GitHub access** action is completely absent until GitHub support is selected.
 
-Experiments is the final page and its navigation action is **Complete**. The access action checks the current `origin` with bounded, non-interactive `gh auth status` and `gh repo view` calls; it does not write GitHub resources and reports its result in the setup card. The flow derives navigation from the step list, so future setup sections can be appended without introducing a review-only special case.
+Meringue Xtras is the final page and its navigation action is **Complete**. The access action checks the current `origin` with bounded, non-interactive `gh auth status` and `gh repo view` calls; it does not write GitHub resources and reports its result in the setup card. The flow derives navigation from the step list, so future setup sections can be appended without introducing a review-only special case.
 
 The complete `/config` editor remains available for provider commands and environment, workspaces, safety, launchers, keybindings, and read-only provenance. Setup deliberately presents only the decisions useful on a first launch.
 
@@ -28,7 +29,7 @@ The complete `/config` editor remains available for provider commands and enviro
 - `Esc`: first-run skip or manual cancel, as described below.
 - Left-click: select controls, choose picker entries, or click the displayed **Next**, **Back**, or **Complete** navigation controls.
 
-Every setup screen uses the same **Navigate** footer. It displays the current action (`Next` or `Complete`), Enter, and the Delete/Backspace Back action.
+Every setup screen uses the same **Navigate** footer. The bordered card contains focusable **Back** and **Next** (or **Complete**) actions after the option rows; `←`/`→` chooses between them when the footer is focused.
 - Mouse wheel: move the current list. Empty space, chrome, right-click, releases, and drags are inert.
 
 Exact model references remain supported when the catalog is unavailable. Enter opens the cached Pi model picker without making a harness request; setup itself performs no model/network lookup.
@@ -38,7 +39,7 @@ Exact model references remain supported when the catalog is unavailable. Enter o
 Theme previews and all setting changes remain in `Settings::Draft`. Moving forward or back never writes a command and never loses an edit. Complete validates the whole draft and submits one private `/config save …` command carrying:
 
 - the file fingerprint captured when setup opened;
-- all changed schema setting IDs;
+- all changed schema setting IDs, including a status-bar layout composed during Setup;
 - explicit defaults for experiment paths that are still absent; and
 - `onboarding_outcome = "completed"`.
 
