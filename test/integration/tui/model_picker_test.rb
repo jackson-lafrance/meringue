@@ -208,6 +208,17 @@ class TuiModelPickerTest < Minitest::Test
     refute @pane.model_picker?(compose)
   end
 
+  def test_theme_rows_omit_current_and_future_dashboard_labels
+    Meringue::TUI::Style.configure!("meringue")
+    picker = open_picker("/theme")
+    rows = plain_lines(@pane.popup_lines(picker))
+
+    assert_includes rows, "› meringue  current · meringue"
+    assert_includes rows, "  catppuccin  catppuccin"
+    refute_match(/current theme|future dashboard theme/i, rows.join("\n"))
+    assert @app.send(:model_picker_entries, picker).none? { |entry| entry.key?("description") }
+  end
+
   def test_theme_alias_previews_and_escape_restores_without_chat_feedback
     Meringue::TUI::Style.configure!("meringue")
     picker = open_picker("/themes")
