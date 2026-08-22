@@ -637,16 +637,18 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     assert_equal ["Pi output"], snapshot.fetch("agent_session").fetch("lines")
 
     app.send(:handle_agent_workspace_key, "x", "", 0, nil, nil, state)
-    assert_equal ["x"], controller.keys
+    app.send(:handle_agent_workspace_key, "\u001a", "", 0, nil, nil, state)
+    assert_equal ["x", "\u001a"], controller.keys
     app.send(:switch_agent_workspace_view, state)
     assert_equal "terminal", app.instance_variable_get(:@agent_workspace_view)
     assert_equal 0, @service.views.length
     app.send(:handle_agent_workspace_key, "ls\n", "", 0, nil, nil, state)
-    assert_equal ["ls\n"], controller.terminal_keys
+    app.send(:handle_agent_workspace_key, "\u001a", "", 0, nil, nil, state)
+    assert_equal ["ls\n", "\u001a"], controller.terminal_keys
 
     app.send(:switch_agent_workspace_view, state)
     app.send(:handle_agent_workspace_key, "y", "", 0, nil, nil, state)
-    assert_equal ["x", "y"], controller.keys
+    assert_equal ["x", "\u001a", "y"], controller.keys
 
     app.send(:close_agent_workspace)
     assert_equal 1, controller.closed
