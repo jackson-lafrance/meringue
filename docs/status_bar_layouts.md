@@ -1,8 +1,6 @@
 # Custom status-bar layouts
 
-Meringue keeps the hand-tuned status bars until a layout is explicitly saved. To
-open the composer, type `/status-bar` (the `/statusbar` and `/layout` spellings
-are aliases). The composer edits three surfaces:
+Meringue keeps the hand-tuned status bars until a layout is explicitly saved. The composer is available as a dedicated step during first-run Setup and every manual `/setup` rerun. It remains directly available with `/status-bar` (the `/statusbar` and `/layout` spellings are aliases). The composer edits three surfaces:
 
 - **Bottom status bar** — the dashboard context/actions and live status.
 - **Agent-information bar** — the focused worker's identity and workspace controls.
@@ -20,9 +18,8 @@ items are moved, or when the preview is cancelled.
   it to the first or last position; Space moves it one position to the right.
 - `R` restores all three bars to their built-in order.
 - `Enter` or `Ctrl-S` saves. `Esc` cancels the preview without saving.
-- A save is one atomic configuration transaction. If the configuration changed
-  elsewhere first, the save is rejected and the composer remains open so the
-  user can review the draft against the newer file.
+- From `/status-bar`, Save is one atomic configuration transaction. If the configuration changed elsewhere first, the save is rejected and the composer remains open so the user can review the draft against the newer file.
+- From Setup, Save returns the layout to Setup without writing; the final Complete action persists it in Setup's one atomic transaction with the onboarding marker.
 
 ## Mouse workflow
 

@@ -363,7 +363,7 @@ Key letters and labels come from the active bindings, so custom bindings render 
 ### Status-bar composer
 
 `/status-bar` opens a full-screen layout editor for the dashboard bottom bar,
-the focused worker's agent-information bar, and its focused-worker bar. The
+the focused worker's agent-information bar, and its focused-worker bar. The same editor opens from the Status bar step in first-run and manual Setup. The
 preview is local until saved: `Tab`/`Shift-Tab` changes bars, `Up`/`Down`
 selects items, `Left`/`Right` reorders them, `Home`/`End` moves an item to an
 edge, `R` restores defaults, `Enter`/`Ctrl-S` saves, and `Esc` cancels. Items

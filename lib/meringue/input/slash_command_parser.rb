@@ -43,9 +43,10 @@ module Meringue
         ["/kill <agent_or_issue_id>", "Kill an agent, issue subtree, or project subtree."],
         ["/jump [agent_id]", "Open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/prs", "Open the picker for every tracked pull request that is still open."],
-        ["/setup", "Reopen Setup for theme, shared model/thinking defaults, and Meringue Xtras."],
+        ["/setup", "Reopen Setup for theme, separate head/worker defaults, status-bar layout, and Meringue Xtras."],
         ["/keybind", "Show all TUI keybindings."],
         ["/config", "Open full-screen Settings; /config --text prints read-only diagnostics."],
+        ["/status-bar", "Open the status-bar layout composer."],
         ["/github test", "Test read-only GitHub authentication and repository access."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
@@ -821,6 +822,13 @@ module Meringue
           invalid("/keybind is a local TUI command. Run it in the interactive TUI to show keybindings.", usage: "/keybind")
         when "config"
           parse_config(arguments)
+        when "status-bar", "statusbar", "layout"
+          tokens = split_arguments(arguments)
+          if tokens.empty?
+            invalid("/status-bar is a local TUI command. Run it in the interactive TUI to compose status-bar layouts.", usage: "/status-bar")
+          else
+            invalid("Usage: /status-bar")
+          end
         when "github"
           parse_github(arguments)
         when "tree"
@@ -983,7 +991,7 @@ module Meringue
         tokens = split_arguments(arguments)
         if tokens.empty?
           return invalid(
-            "/setup is a local TUI command. Run it in the interactive TUI to review theme, shared model/thinking defaults, and Meringue Xtras.",
+            "/setup is a local TUI command. Run it in the interactive TUI to review theme, separate head/worker defaults, status-bar layout, and Meringue Xtras.",
             usage: "/setup"
           )
         end

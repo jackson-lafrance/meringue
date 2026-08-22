@@ -28,6 +28,12 @@ module Meringue
       def render(state, width:, height:, color: false)
         raw_width = [width.to_i, 1].max
         raw_height = [height.to_i, 1].max
+        if status_bar_composer_active?(state)
+          width = bounded_width(width)
+          height = bounded_height(height)
+          canvas = Canvas.new(width: width, height: height)
+          return render_status_bar_composer(canvas, state, width, height, color: color)
+        end
         if settings_active?(state)
           canvas = Canvas.new(width: raw_width, height: raw_height)
           return render_setup(canvas, state, raw_width, raw_height, color: color) if Settings.snapshot(state).fetch("mode", "settings") == "setup"
@@ -37,7 +43,6 @@ module Meringue
         width = bounded_width(width)
         height = bounded_height(height)
         canvas = Canvas.new(width: width, height: height)
-        return render_status_bar_composer(canvas, state, width, height, color: color) if status_bar_composer_active?(state)
         return render_agent_workspace(canvas, state, width, height, color: color) if fullscreen_agent_workspace?(state)
 
         metrics = layout_metrics(width, height, state)
@@ -151,8 +156,8 @@ module Meringue
       end
 
       def pane_at(state, width:, height:, x:, y:)
-        return "settings" if settings_active?(state)
         return "status_bar_composer" if status_bar_composer_active?(state)
+        return "settings" if settings_active?(state)
         return "agent_workspace" if fullscreen_agent_workspace?(state)
 
         metrics = layout_metrics([width.to_i, MIN_WIDTH].max, [height.to_i, MIN_HEIGHT].max, state)
@@ -610,7 +615,7 @@ module Meringue
       end
 
       def scroll_limits(state, width:, height:)
-        return { "agent_tree" => 0, "logs" => 0, "chat" => 0 } if settings_active?(state) || fullscreen_agent_workspace?(state)
+        return { "agent_tree" => 0, "logs" => 0, "chat" => 0 } if settings_active?(state) || status_bar_composer_active?(state) || fullscreen_agent_workspace?(state)
 
         width = [width.to_i, MIN_WIDTH].max
         height = [height.to_i, MIN_HEIGHT].max
@@ -705,17 +710,28 @@ module Meringue
         view.fetch(:lines).each_with_index do |line, index|
           draw_line(canvas, view.fetch(:content_x), view.fetch(:content_y) + index, content_width, line)
         end
-        counter = view.fetch(:counter).to_s
-        unless counter.empty?
-          write_centered_segments(canvas, card.fetch(:x) + 2, card.fetch(:y) + card.fetch(:height) - 2, content_width, [[counter, Style::DIM]])
-        end
-
         footer_y = geometry.fetch(:footer_y)
         footer = settings_pane.setup_footer_segments(state, width: width)
         actions = !view.fetch(:modal, false) ? settings_pane.action_segments(state) : []
         action_width = segment_text_width(actions)
-        canvas.write_segments(1, footer_y, footer, max_width: [width - action_width - 3, 1].max, default_style: Style::DIM)
-        canvas.write_segments([width - action_width - 1, 0].max, footer_y, actions, max_width: action_width)
+        action_x = if actions.empty?
+                     card.fetch(:x) + card.fetch(:width) - 2
+                   else
+                     card.fetch(:x) + card.fetch(:width) - action_width - 2
+                   end
+        counter = view.fetch(:counter).to_s
+        unless counter.empty?
+          canvas.write_segments(
+            card.fetch(:x) + 2,
+            geometry.fetch(:action_y),
+            [[counter, Style::DIM]],
+            max_width: [action_x - card.fetch(:x) - 3, 1].max
+          )
+        end
+        unless actions.empty?
+          canvas.write_segments([action_x, card.fetch(:x) + 1].max, geometry.fetch(:action_y), actions, max_width: action_width)
+        end
+        canvas.write_segments(1, footer_y, footer, max_width: [width - 2, 1].max, default_style: Style::DIM)
         canvas.render(color: color)
       end
 

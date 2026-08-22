@@ -34,7 +34,7 @@ bundle install
 bundle exec meringue
 ```
 
-The first interactive launch opens the guided setup for harness, model, thinking, theme, and optional experiments. To explore the interface without starting or authenticating a harness, run `bundle exec meringue demo` instead. See [first-run onboarding](docs/onboarding.md) and the [configuration reference](docs/config.md) for details.
+The first interactive launch opens the guided setup for harness, model, thinking, theme, status-bar layout, and optional experiments. To explore the interface without starting or authenticating a harness, run `bundle exec meringue demo` instead. See [first-run onboarding](docs/onboarding.md) and the [configuration reference](docs/config.md) for details.
 
 ### 2. Update it later
 
@@ -153,7 +153,7 @@ test/support/                      # shared test helpers and fakes
 
 The [quick start](#quick-start) covers the normal interactive launch and the harness-free demo. `bundle exec meringue tui` is an explicit equivalent of `bundle exec meringue`.
 
-The first interactive launch opens Setup as the same polished full-screen overlay used by `/config`. Choose a theme, review the head and worker harnesses plus shared model/thinking defaults, and opt into Meringue Xtras such as GitHub support. Enable the experimental split-defaults option later in `/config` if heads and workers should use different model/thinking values. Experiments is the final step; its Complete action atomically saves the settings and `[onboarding]` marker together. Back never loses edits. Automatic first-run `Esc` confirms a safe skip; `Esc` on a manual `/setup` rerun cancels without changing the marker. The overlay remains recoverable through resize, validation, and persistence failures. See [`docs/onboarding.md`](docs/onboarding.md).
+The first interactive launch opens Setup as the same polished full-screen overlay used by `/config`. Choose a theme, review separate head and worker defaults, arrange the status bars, and opt into Meringue Xtras such as GitHub support. Experiments is the final step; the GitHub access test is absent until GitHub support is selected, and Complete atomically saves the settings and `[onboarding]` marker together. Back never loses edits. Automatic first-run `Esc` confirms a safe skip; `Esc` on a manual `/setup` rerun cancels without changing the marker. The overlay remains recoverable through resize, validation, and persistence failures. See [`docs/onboarding.md`](docs/onboarding.md).
 
 Print the CLI help:
 
@@ -204,7 +204,7 @@ Useful slash commands inside the TUI include:
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
 - `/prs` — with **Settings → Experiments → GitHub support** enabled, open the picker for every tracked pull request that is still open. Use `↑`/`↓` to move, `Enter` to open, and `Esc` to close.
 - `/github test` — with GitHub support enabled, run the bounded read-only authentication and current-repository access check. It never mutates GitHub.
-- `/setup` — reopen the shared full-screen Setup overlay for theme, separate head/worker defaults, and experiment checkboxes. Manual cancel writes nothing.
+- `/setup` — reopen the shared full-screen Setup overlay for theme, separate head/worker defaults, status-bar layout, and experiment checkboxes. Manual cancel writes nothing.
 - `/reload` — restart Meringue with the current source and configuration.
 - `/update` — update the clean source checkout, install missing dependencies, and reload automatically.
 - `/questions` — open the picker for existing open questions; use `↑`/`↓` to move, `Enter` to insert `/answer <question_id>`, and `Esc` to close.
