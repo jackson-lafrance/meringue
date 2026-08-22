@@ -242,6 +242,8 @@ module Meringue
 
       HELP_COMMANDS = [
         ["/help", "Show slash command help."],
+        ["/reload", "TUI local: restart Meringue with the current installed source and configuration."],
+        ["/update", "TUI local: update the installed Meringue source, install missing dependencies, and reload."],
         ["/theme <name>", "Set and persist the TUI theme. Available: catppuccin, gruvbox, kanagawa, meringue, rose-pine, tokyonight."],
         ["/project add <path> [name]", "Register a project directory."],
         ["/project rename <project_id> \"<name>\"", "Rename a project."],

@@ -5,6 +5,7 @@ require "optparse"
 module Meringue
   class CLI
     def initialize(argv, input: $stdin, out: $stdout, err: $stderr)
+      @original_argv = argv.dup
       @argv = argv.dup
       @input = input
       @out = out
@@ -141,12 +142,13 @@ module Meringue
       keybindings = configured_keybindings(config)
 
       registry = Harness::Registry.new(config: config)
+      lifecycle = Lifecycle::Manager.new(arguments: @original_argv)
       store = state_store(path: options.fetch(:state_path))
       engine = enable_agents ? tui_engine(store, registry, config: config, config_path: options.fetch(:config_path)) : nil
       agent_session_service = engine ? Sessions::WorkerSessionService.new(engine: engine) : nil
       workspace_controller = Workspace::Controller.from_config(config, focus_session_service: agent_session_service)
       prompt_loop = engine ? Heads::PromptLoop.new(engine: engine, wait_for_workers: false) : nil
-      App.new(
+      result = App.new(
         input: input,
         out: out,
         err: err,
@@ -161,6 +163,7 @@ module Meringue
           log_store: store,
           keybindings: keybindings,
           config: config,
+          lifecycle: lifecycle,
           # First-run setup saves its Settings draft through the kernel, so it is
           # only offered when there is a kernel behind the UI. `meringue demo`
           # has none and must never open it.
@@ -172,6 +175,13 @@ module Meringue
         prompt_handler: prompt_loop,
         reconciler: engine ? -> { engine.reconcile_sessions } : nil
       ).run
+      return 0 unless result == :reload
+
+      reload_result = lifecycle.reload
+      return 0 unless reload_result.is_a?(Hash) && reload_result.fetch("status", nil) == "failed"
+
+      err.puts reload_result.fetch("message", "Meringue could not reload.")
+      1
     rescue ArgumentError => e
       err.puts e.message
       1
@@ -368,6 +378,8 @@ module Meringue
           /                         # show slash command suggestions in an otherwise empty prompt
           /help                     # list command syntax
           /quit                     # quit the TUI
+          /reload                   # restart Meringue with the current source and configuration
+          /update                   # update the source, install dependencies as needed, and reload
           /theme <name>             # set and persist the TUI theme
           /harness [head|worker] <pi|claude|antigravity> # select role-aware harness defaults
           /models [harness]         # open the searchable model picker; bare /model is an alias

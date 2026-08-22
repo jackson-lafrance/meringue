@@ -47,6 +47,8 @@ class InputCLITest < Minitest::Test
 
     assert_includes out, "/help"
     assert_includes out, "/recount"
+    assert_includes out, "/reload"
+    assert_includes out, "/update"
     refute_includes out, "/answer"
     refute_includes out, "/questions"
     refute_includes out, "/dismiss"

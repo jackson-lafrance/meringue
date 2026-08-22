@@ -35,6 +35,11 @@ module Meringue
       CLEAR_SCREEN = "\e[2J\e[H"
       HOME = "\e[H"
       CLEAR_LINE = "\e[K"
+      # Canvas frames are rectangular in terminal cells, but colored rows carry
+      # extra CSI bytes for every SGR run. Geometry must be measured after those
+      # control sequences are removed or streaming styled output looks like a
+      # resize and triggers a full-screen clear.
+      ANSI_CSI_SEQUENCE = /\e\[[0-?]*[ -\/]*[@-~]/.freeze
 
       attr_reader :input, :output
 
@@ -334,7 +339,8 @@ module Meringue
 
       def frame_dimensions(frame)
         lines = frame.to_s.lines(chomp: true)
-        [lines.length, lines.map(&:length).max.to_i]
+        visible_width = lines.map { |line| line.gsub(ANSI_CSI_SEQUENCE, "").length }.max.to_i
+        [lines.length, visible_width]
       end
 
       def write_frame_diff(previous_frame, frame)
