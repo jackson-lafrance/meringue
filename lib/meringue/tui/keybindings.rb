@@ -6,6 +6,7 @@ module Meringue
       DEFAULT_BINDINGS = {
         "quit" => ["ctrl-d"],
         "clear_or_quit" => ["ctrl-c"],
+        "undo" => ["ctrl-z"],
         "cancel_navigation" => ["escape"],
         "open_delivery_pr" => ["ctrl-b"],
         "refresh_model_catalog" => ["ctrl-r"],
@@ -82,6 +83,7 @@ module Meringue
       ACTION_LABELS = {
         "quit" => "Quit",
         "clear_or_quit" => "Clear input / quit empty prompt",
+        "undo" => "Undo chat input edit",
         "cancel_navigation" => "Cancel dashboard navigation",
         "open_delivery_pr" => "Open the selected issue's delivery PR, or pick from the open PRs",
         "refresh_model_catalog" => "In the model picker: re-fetch the harness model catalog",
@@ -150,6 +152,7 @@ module Meringue
         "ctrl-space" => ["\u0000", "\e[32;5u", "\e[27;5;32~"],
         "ctrl-x" => ["\u0018", "\e[120;5u", "\e[27;5;120~"],
         "ctrl-v" => ["\u0016", "\e[118;5u", "\e[27;5;118~"],
+        "ctrl-z" => ["\u001a", "\e[122;5u", "\e[90;5u", "\e[27;5;122~", "\e[27;5;90~"],
         "alt-c" => ["\ec", "\e[99;3u", "\e[27;3;99~"],
         "alt-v" => ["\ev", "\e[118;3u", "\e[27;3;118~"],
         "enter" => ["\r", "\n"],
