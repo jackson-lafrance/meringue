@@ -12,9 +12,9 @@ The centered card shows one dynamic `Step N of 5` indicator:
 2. **Theme** — theme and animation preference. Theme changes preview immediately in memory.
 3. **Head defaults** — harness, Pi model, and Pi thinking level for future routing heads.
 4. **Worker defaults** — independently chosen harness, Pi model, and Pi thinking level for future workers.
-5. **Experiments** — checkboxes derived directly from `Experiments::Registry`. GitHub support is currently the only experiment.
+5. **Experiments** — controls derived directly from `Experiments::Registry`. GitHub support is currently the only experiment; when it is enabled, the page also offers the read-only **Test GitHub access** action.
 
-Experiments is the final page and its navigation action is **Complete**. The flow derives navigation from the step list, so future setup sections can be appended without introducing a review-only special case.
+Experiments is the final page and its navigation action is **Complete**. The access action checks the current `origin` with bounded, non-interactive `gh auth status` and `gh repo view` calls; it does not write GitHub resources and reports its result in the setup card. The flow derives navigation from the step list, so future setup sections can be appended without introducing a review-only special case.
 
 The complete `/config` editor remains available for provider commands and environment, workspaces, safety, launchers, keybindings, and read-only provenance. Setup deliberately presents only the decisions useful on a first launch.
 

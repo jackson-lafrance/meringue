@@ -8,6 +8,8 @@ module Meringue
     class GitHubClient
       DEFAULT_COMMAND_TIMEOUT_SECONDS = 5.0
       TERMINATION_GRACE_SECONDS = 0.1
+      ACCESS_RESULT_OUTCOMES = %w[success unavailable unauthenticated permission_denied timeout malformed_remote].freeze
+      MAX_ERROR_LENGTH = 300
 
       class CommandTimeout < StandardError; end
 
@@ -15,6 +17,86 @@ module Meringue
 
       def initialize(command_timeout: DEFAULT_COMMAND_TIMEOUT_SECONDS)
         @command_timeout = Float(command_timeout)
+      end
+
+      # Return the owner/repository portion of a supported GitHub origin without
+      # contacting GitHub. Keeping this parser in the forge client gives the
+      # kernel and access checks the same remote conventions.
+      def self.repository_from_remote(remote)
+        text = remote.to_s.strip.sub(/\.git\z/i, "")
+        match = text.match(%r{\A(?:https?://github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\z}i)
+        match && match[1]
+      end
+
+      # Check exactly the read-only GitHub capabilities that delivery workflows
+      # need: the CLI can identify the current account and that account can read
+      # the repository. Neither command creates or changes a GitHub resource.
+      def test_access(repository:, timeout: nil)
+        repository = repository.to_s.strip
+        unless repository.match?(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z})
+          return access_result("malformed_remote", "The GitHub repository remote is malformed.", repository: repository)
+        end
+
+        deadline = monotonic_time + Float(timeout || command_timeout)
+        auth_stdout, auth_stderr, auth_status = run_gh(
+          "auth",
+          "status",
+          "--hostname",
+          "github.com",
+          timeout: remaining_timeout(deadline)
+        )
+        unless auth_status.success?
+          output = join_command_output(auth_stdout, auth_stderr)
+          outcome = network_failure?(output) ? "unavailable" : "unauthenticated"
+          message = if outcome == "unavailable"
+                      "GitHub authentication status is unavailable: #{short_error(output)}"
+                    else
+                      "GitHub is not authenticated. Run `gh auth login` and try again."
+                    end
+          return access_result(outcome, message, repository: repository, error: short_error(output), exit_status: auth_status.exitstatus)
+        end
+
+        identity = github_account(join_command_output(auth_stdout, auth_stderr))
+        repo_stdout, repo_stderr, repo_status = run_gh(
+          "repo",
+          "view",
+          repository,
+          "--json",
+          "nameWithOwner",
+          timeout: remaining_timeout(deadline)
+        )
+        unless repo_status.success?
+          output = join_command_output(repo_stdout, repo_stderr)
+          outcome = network_failure?(output) ? "unavailable" : "permission_denied"
+          message = if outcome == "unavailable"
+                      "GitHub is unavailable while checking #{repository}: #{short_error(output)}"
+                    else
+                      "GitHub authentication works, but #{repository} is not accessible with this account."
+                    end
+          return access_result(outcome, message, repository: repository, identity: identity, error: short_error(output), exit_status: repo_status.exitstatus)
+        end
+
+        data = JSON.parse(repo_stdout)
+        confirmed_repository = data["nameWithOwner"].to_s.strip
+        unless confirmed_repository.match?(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z})
+          return access_result("unavailable", "GitHub returned an invalid repository response for #{repository}.", repository: repository, identity: identity)
+        end
+
+        account = identity ? " as #{identity}" : ""
+        access_result(
+          "success",
+          "GitHub access is ready#{account}; read access to #{confirmed_repository} is confirmed.",
+          repository: confirmed_repository,
+          identity: identity
+        )
+      rescue CommandTimeout => e
+        access_result("timeout", "GitHub access test timed out. Try again; no GitHub resource was changed.", repository: repository, error: short_error(e.message))
+      rescue Errno::ENOENT => e
+        access_result("unavailable", "GitHub CLI is unavailable: #{short_error(e.message)}", repository: repository, error: short_error(e.message))
+      rescue JSON::ParserError => e
+        access_result("unavailable", "GitHub returned an invalid response while checking #{repository}.", repository: repository, error: short_error(e.message))
+      rescue ArgumentError => e
+        access_result("timeout", "GitHub access test could not start within its bounded time: #{short_error(e.message)}", repository: repository, error: short_error(e.message))
       end
 
       def pull_request_urls_for_branch(repository:, branch:, timeout: nil)
@@ -84,6 +166,43 @@ module Meringue
 
       private
 
+      def access_result(outcome, message, repository:, identity: nil, error: nil, exit_status: nil)
+        {
+          "outcome" => outcome.to_s,
+          "status" => outcome.to_s,
+          "message" => message.to_s,
+          "repository" => repository.to_s,
+          "identity" => identity,
+          "error" => error,
+          "exit_status" => exit_status
+        }.compact
+      end
+
+      def monotonic_time
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      def remaining_timeout(deadline)
+        [deadline - monotonic_time, 0.001].max
+      end
+
+      def join_command_output(stdout, stderr)
+        [stdout, stderr].map { |value| value.to_s.strip }.reject(&:empty?).join(" ")
+      end
+
+      def short_error(error)
+        error.to_s.strip.gsub(/\s+/, " ")[0, MAX_ERROR_LENGTH]
+      end
+
+      def network_failure?(output)
+        output.to_s.match?(/could not resolve host|network|connection|timed out|timeout|tls|dns|proxy|api\.github\.com|http\s+5\d\d|server error|service unavailable|rate limit/i)
+      end
+
+      def github_account(output)
+        match = output.to_s.match(/\baccount\s+([A-Za-z0-9][A-Za-z0-9-]*)\b/i)
+        match && match[1]
+      end
+
       # `gh` can wait on DNS, authentication helpers, or the network indefinitely. Run it in its
       # own process group, drain both pipes concurrently, and terminate the whole group when the
       # bounded budget expires so a maintenance command can conservatively retain the PR-backed
@@ -94,8 +213,13 @@ module Meringue
 
         stdin = stdout = stderr = wait_thread = nil
         stdout_reader = stderr_reader = nil
+        environment = SubprocessEnvironment.clean.merge(
+          "GH_PROMPT_DISABLED" => "1",
+          "GH_PAGER" => "cat",
+          "GIT_TERMINAL_PROMPT" => "0"
+        )
         stdin, stdout, stderr, wait_thread = Open3.popen3(
-          SubprocessEnvironment.clean, "gh", *arguments, pgroup: true
+          environment, "gh", *arguments, pgroup: true
         )
         stdin.close
         stdout_reader = Thread.new { stdout.read }

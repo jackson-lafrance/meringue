@@ -470,7 +470,7 @@ module Meringue
           editor = row.fetch("editor", nil)
           value = row.fetch("display_value", "").to_s
           value = row.fetch("value", false) == true ? "[x]" : "[ ]" if editor == "checkbox"
-          value = "Enter" if editor == "action"
+          value = "Enter" if editor == "action" && value.empty?
           label = row.fetch("label", row.fetch("id", "setting")).to_s
           hint = selected ? setup_control_hint(row) : ""
           available = [width.to_i - marker.length - dirty.length - label.length - hint.length - 6, 4].max

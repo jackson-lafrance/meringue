@@ -191,6 +191,7 @@ Useful slash commands inside the TUI include:
 - `/prompt <agent_id> "<message>"` — follow up with an existing worker, or take over a still-routing head; use `/retry <head_id>` for a stopped head.
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
 - `/prs` — with **Settings → Experiments → GitHub support** enabled, open the picker for every tracked pull request that is still open. Use `↑`/`↓` to move, `Enter` to open, and `Esc` to close.
+- `/github test` — with GitHub support enabled, run the bounded read-only authentication and current-repository access check. It never mutates GitHub.
 - `/setup` — reopen the shared full-screen Setup overlay for theme, separate head/worker defaults, and experiment checkboxes. Manual cancel writes nothing.
 - `/questions` — list questions and their statuses.
 - `/answer <question_id> "<answer>"` — answer an open question; the kernel records the answer and routes the work it unblocks.

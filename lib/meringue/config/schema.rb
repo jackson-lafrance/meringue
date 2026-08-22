@@ -392,6 +392,20 @@ module Meringue
             label: experiment.label,
             description: "#{experiment.description} #{experiment.risk}".strip
           )
+          experiment.actions.each do |action|
+            settings << definition(
+              "experiments.#{action.fetch("id")}",
+              nil,
+              "Experiments",
+              "action",
+              nil,
+              editor: "action",
+              apply_mode: "none",
+              label: action.fetch("label"),
+              description: action.fetch("description"),
+              dependencies: ["experiments.#{experiment.id}"]
+            )
+          end
         end
       end
 

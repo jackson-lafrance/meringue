@@ -24,6 +24,8 @@ github_support = false
 
 New installations default GitHub support off. Existing installations with a pre-upgrade state file or onboarding marker migrate it on so upgrading does not silently remove PR behavior; an explicit value always wins. Disabling it performs no built-in `gh` subprocess/network lookup, hides GitHub-specific TUI commands and status, and preserves historical PR records. See [`settings.md`](settings.md#github-support).
 
+When GitHub support is enabled, **Test GitHub access** appears as a non-persistent action under Settings → Experiments (and in the Setup Experiments step). It checks the current checkout's `origin` remote, then runs bounded read-only `gh auth status --hostname github.com` and `gh repo view OWNER/REPO --json nameWithOwner` checks. It never creates, edits, closes, comments on, or otherwise mutates a GitHub resource. The same check is available as `/github test`; it reports success, unavailable CLI/service, unauthenticated, repository permission denied, timeout, and malformed-remote outcomes. The action is safe to retry.
+
 ## First-run setup marker
 
 The first interactive launch opens the shared Settings overlay for a theme,
