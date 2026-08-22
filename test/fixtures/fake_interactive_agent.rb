@@ -31,6 +31,7 @@ options = {
   "fail_turn" => false,
   "tool_turn" => false,
   "exit_before_answer" => false,
+  "styled_turn" => false,
   "transcript" => true
 }
 
@@ -46,6 +47,7 @@ until argv.empty?
   when "--fail-turn" then options["fail_turn"] = true
   when "--tool-turn" then options["tool_turn"] = true
   when "--exit-before-answer" then options["exit_before_answer"] = true
+  when "--styled-turn" then options["styled_turn"] = true
   when "--no-transcript" then options["transcript"] = false
   when "--system-prompt", "--name", "--model", "--effort" then argv.shift
   end
@@ -119,7 +121,8 @@ loop do
     buffer = +""
     next if pending.empty?
 
-    print "\r\nworking on: #{pending[0, 40]}\r\n"
+    working_label = options.fetch("styled_turn") ? "\e[1;33mworking on\e[0m" : "working on"
+    print "\r\n#{working_label}: #{pending[0, 40]}\r\n"
     prompt_uuid = SecureRandom.uuid
     if options.fetch("transcript")
       append(transcript, {
@@ -183,7 +186,11 @@ loop do
       append(transcript, record)
     end
 
-    print "done\r\n❯ \r\n"
+    if options.fetch("styled_turn")
+      print "\e[1;32mdone\e[0m\r\n\e[1;36m❯\e[0m \r\n"
+    else
+      print "done\r\n❯ \r\n"
+    end
     next
   end
 

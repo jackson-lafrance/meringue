@@ -100,6 +100,33 @@ class InteractiveClientTest < InteractiveAgentTest
     view&.close
   end
 
+  def test_focused_live_terminal_preserves_streaming_styled_output_and_cursor
+    client = build_interactive_client(agent_flags: ["--styled-turn", "--turn-delay", "0.3"])
+    ref = client.spawn_session(
+      kind: "worker",
+      cwd: interactive_workspace,
+      prompt: "render this while streaming",
+      system_prompt: "",
+      session_name: "W1"
+    )
+    terminal = client.live_terminal(ref)
+
+    streaming = wait_until(message: "styled streaming output never reached the focused screen") do
+      snapshot = terminal.snapshot(rows: 18, columns: 64)
+      snapshot if snapshot.fetch("lines").any? { |line| line.include?("working on") }
+    end
+    assert_equal [18, 64], [streaming.fetch("rows"), streaming.fetch("columns")]
+    assert streaming.fetch("cursor").is_a?(Array)
+    assert streaming.fetch("styled_lines").flatten(1).any? { |text, style| text.include?("working on") && style == "\e[1;33m" }
+
+    settled = wait_until_settled(client, ref)
+    final = terminal.snapshot(rows: 18, columns: 64)
+    assert_equal "answered: render this while streaming", client.last_assistant_text(settled)
+    assert final.fetch("lines").any? { |line| line.include?("done") }
+    assert final.fetch("styled_lines").flatten(1).any? { |text, style| text == "done" && style == "\e[1;32m" }
+    assert_operator final.fetch("revision"), :>=, streaming.fetch("revision")
+  end
+
   def test_events_carry_the_conversation_and_derive_progress
     client = build_interactive_client(agent_flags: ["--tool-turn"])
     ref = client.spawn_session(kind: "worker", cwd: interactive_workspace, prompt: "do work", system_prompt: "", session_name: "W1")
