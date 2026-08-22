@@ -29,15 +29,19 @@ module Meringue
           STEPS
         end
 
-        def setting_ids(step)
-          return Experiments::Registry.setting_ids if step.to_s == "Experiments"
+        def setting_ids(step, draft: nil)
+          return FIXED_SETTING_IDS.fetch(step.to_s, []) unless step.to_s == "Experiments"
 
-          FIXED_SETTING_IDS.fetch(step.to_s, [])
+          ids = Experiments::Registry.setting_ids.dup
+          if draft && draft.value("experiments.worker_spawning_guidance") == true
+            ids << "experiments.worker_spawning_guidance_prompt"
+          end
+          ids
         end
 
         def step_for_setting(id)
           candidate = id.to_s
-          steps.find { |step| setting_ids(step).include?(candidate) }
+          steps.find { |step| setting_ids(step).include?(candidate) || (step == "Experiments" && candidate == "experiments.worker_spawning_guidance_prompt") }
         end
 
         def experiment_defaults(draft, explicit_only: false)
@@ -78,7 +82,7 @@ module Meringue
 
         def definitions_for(category, include_advanced: true)
           definitions.select do |definition|
-            definition.category == category.to_s && (include_advanced || !definition.advanced)
+            definition.category == category.to_s && (include_advanced || !definition.advanced) && visible_definition?(definition)
           end
         end
 
@@ -223,6 +227,14 @@ module Meringue
         end
 
         private
+
+        def visible_definition?(definition)
+          return true unless definition.id == "experiments.worker_spawning_guidance_prompt"
+
+          truthy?(value("experiments.worker_spawning_guidance"))
+        rescue KeyError
+          false
+        end
 
         def truthy?(value)
           value == true || value.to_s.strip.downcase == "true"

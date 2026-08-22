@@ -869,7 +869,7 @@ module Meringue
         end
 
         def slash_prompt?(input_buffer)
-          input_buffer.to_s.strip.start_with?("/")
+          input_buffer.to_s.strip.start_with?("/") || Meringue::Input::SlashCommandParser.inline_suggestion_active?(input_buffer)
         end
 
         private

@@ -220,6 +220,7 @@ module Meringue
         "theme" => "SetTheme",
         "set_theme" => "SetTheme",
         "save_configuration" => "SaveConfiguration",
+        "set_worker_selection_guidance" => "SetWorkerSelectionGuidance",
         "test_github_access" => "TestGitHubAccess",
         "get_state" => "GetState",
         "get_session_defaults" => "GetSessionDefaults",
@@ -250,6 +251,7 @@ module Meringue
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
         ["/move <agent_id> <issue_id>", "Move an existing worker to a different issue without restarting its harness session. The worker keeps its session, worktree, and branch; only its AgentTree assignment changes."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
+        ["/worker guide \"<additional system prompt>\"", "Persist the additional worker model-selection system prompt when its experiment is enabled."],
         ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."],
         ["/worker resume <agent_id>", "Resume a paused worker session."],
         ["/worker export <bundle_path> [agent_id...]", "Export current workers for a fresh retry on another computer."],
@@ -1859,6 +1861,8 @@ module Meringue
           prompt_agent_command(command_id, command_type, payload)
         elsif command_type == "RetryHead"
           retry_head_command(command_id, command_type, payload)
+        elsif command_type == "SetWorkerSelectionGuidance"
+          set_worker_selection_guidance(command_id, command_type, payload)
         elsif command_type == "SpawnWorker"
           @worker_spawn_mutex.synchronize { spawn_worker(command_id, command_type, payload) }
         elsif command_type == "ApplyHeadResult"
@@ -1936,6 +1940,8 @@ module Meringue
           complete_onboarding(command_id, command_type, payload)
         when "SaveConfiguration"
           save_configuration(command_id, command_type, payload)
+        when "SetWorkerSelectionGuidance"
+          set_worker_selection_guidance(command_id, command_type, payload)
         when "TestGitHubAccess"
           test_github_access(command_id, command_type, payload)
         when "SetTheme"
@@ -2392,6 +2398,7 @@ module Meringue
 
         poll_results = agents.map { |agent| poll_agent_session(agent) }
         applied_results = apply_poll_results(poll_results)
+        self_fixing_worker_results = reconcile_step("self_fixing_workers", []) { reconcile_self_fixing_workers }
         # Completion-triggered heads are resolved after polls so a worker that completed during
         # this pass can route follow-on commands immediately. A continuation carrying an external
         # gate is only armed here; it remains durable state on the completed worker until the shared
@@ -2417,6 +2424,7 @@ module Meringue
         # activated worker rather than a record that is still waiting.
         goal_steps = reconcile_step("advance_goal_loops", []) { advance_goal_loops }
         changed_count = applied_results.count { |result| result.fetch("changed", false) }
+        changed_count += self_fixing_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += completion_continuation_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += gate_check_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += deferred_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
@@ -2454,9 +2462,10 @@ module Meringue
             "deferred_worker_gate_results" => gate_check_results,
             "deferred_worker_results" => deferred_worker_results,
             "goal_loop_steps" => goal_steps,
-            "poll_results" => applied_results
+            "poll_results" => applied_results,
+            "self_fixing_worker_results" => self_fixing_worker_results
           },
-          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + interactive_focus_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pause_results.flat_map { |result| result.fetch("log_entry_ids", []) } + resume_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + completion_continuation_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + gate_check_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) }).uniq
+          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + interactive_focus_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pause_results.flat_map { |result| result.fetch("log_entry_ids", []) } + resume_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + completion_continuation_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + gate_check_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + self_fixing_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) }).uniq
         )
       rescue StandardError => e
         error = error_payload(e)
@@ -2464,6 +2473,114 @@ module Meringue
       end
 
       private :reconcile_sessions_once
+
+      # Self-fixing is deliberately a reconciliation concern rather than a worker completion hook:
+      # it sees both terminal errors and blocked resume failures, and it also runs after a poll batch
+      # has been durably applied. Claiming the source under the state lock makes concurrent
+      # dashboards converge on one recovery; the marker on the child prevents recovery recursion.
+      def reconcile_self_fixing_workers
+        return [] unless config.experiment_enabled?("self_fixing_workers")
+
+        candidates = synchronized_state do
+          state = normalized_state
+          agents = state.fetch("agents")
+          agents.filter_map do |worker|
+            next unless Experiments::SelfFixingWorkers.claimable?(worker)
+            next if agents.any? { |child| Experiments::SelfFixingWorkers.child?(child, worker.fetch("id")) }
+
+            deep_copy(worker)
+          end
+        end
+
+        candidates.filter_map do |candidate|
+          claim = claim_self_fixing_worker(candidate.fetch("id"))
+          next unless claim.fetch("claimed", false)
+
+          source = claim.fetch("worker")
+          recovery_id = claim.fetch("command_id")
+          payload = {
+            "issue_id" => source.fetch("issue_id"),
+            "title" => Experiments::SelfFixingWorkers.title(source),
+            "prompt" => Experiments::SelfFixingWorkers.prompt(source),
+            "follow_up_of_agent_id" => source.fetch("id"),
+            "_self_fixing_recovery" => {
+              "source_worker_id" => source.fetch("id"),
+              "attempt" => claim.fetch("attempt")
+            }
+          }
+          result = @worker_spawn_mutex.synchronize { spawn_worker(recovery_id, "SpawnWorker", payload) }
+          result = record_self_fixing_outcome(source.fetch("id"), result, claim.fetch("attempt"), recovery_id)
+          result.merge("self_fixing_source_worker_id" => source.fetch("id"), "self_fixing_attempt" => claim.fetch("attempt"))
+        rescue StandardError => e
+          failure = failed_result(
+            recovery_id,
+            "SpawnWorker",
+            "Self-fixing recovery was not started: #{sanitized_error_message(e)}",
+            [e.class.name, sanitized_error_message(e)]
+          )
+          record_self_fixing_outcome(candidate.fetch("id"), failure, claim && claim.fetch("attempt", 1), recovery_id)
+          failure.merge("self_fixing_source_worker_id" => candidate.fetch("id"))
+        end
+      end
+
+      def claim_self_fixing_worker(worker_id)
+        synchronized_state do
+          state = normalized_state
+          worker = find_agent(state, worker_id)
+          return { "claimed" => false, "reason" => "worker_not_found" } unless worker
+          return { "claimed" => false, "reason" => "not_eligible" } unless Experiments::SelfFixingWorkers.claimable?(worker)
+          return { "claimed" => false, "reason" => "recovery_already_present" } if state.fetch("agents").any? { |child| Experiments::SelfFixingWorkers.child?(child, worker_id) }
+
+          now = timestamp
+          attempt = Experiments::SelfFixingWorkers.attempts(worker) + 1
+          command_id = "self-fix:#{worker_id}:#{attempt}"
+          metadata = worker.fetch("harness_metadata", {}) || {}
+          recovery = Experiments::SelfFixingWorkers.recovery_record(worker).merge(
+            "state" => "spawning",
+            "attempts" => attempt,
+            "claimed_at" => now,
+            "command_id" => command_id
+          )
+          worker["harness_metadata"] = metadata.merge("self_fixing_recovery" => recovery)
+          worker["updated_at"] = now
+          touch_state!(state, now)
+          store.save(state)
+          { "claimed" => true, "worker" => deep_copy(worker), "attempt" => attempt, "command_id" => command_id }
+        end
+      end
+
+      def record_self_fixing_outcome(source_worker_id, result, attempt, command_id)
+        synchronized_state do
+          state = normalized_state
+          source = find_agent(state, source_worker_id)
+          return result unless source
+
+          now = timestamp
+          metadata = source.fetch("harness_metadata", {}) || {}
+          previous = Experiments::SelfFixingWorkers.recovery_record(source)
+          accepted = result.fetch("status", nil) == "accepted"
+          recovery = previous.merge(
+            "state" => accepted ? "spawned" : "failed",
+            "attempts" => attempt.to_i,
+            "command_id" => command_id,
+            "recovery_worker_id" => result.fetch("target_id", nil),
+            "completed_at" => now
+          ).compact
+          source["harness_metadata"] = metadata.merge("self_fixing_recovery" => recovery)
+          source["updated_at"] = now
+          log_ids = append_log(
+            state,
+            source_type: "worker",
+            source_id: source_worker_id,
+            level: accepted ? "warning" : "error",
+            message: accepted ? "Started one bounded self-fixing recovery for worker #{source_worker_id}." : "Self-fixing recovery for worker #{source_worker_id} was not started.",
+            details: recovery.merge("result_status" => result.fetch("status", nil)).compact
+          )
+          touch_state!(state, now)
+          store.save(state)
+          result.merge("log_entry_ids" => (Array(result.fetch("log_entry_ids", [])) + log_ids).uniq)
+        end
+      end
 
       private
 
@@ -2676,6 +2793,7 @@ module Meringue
             "workspace_path" => metadata.fetch("requested_workspace_path", nil),
             "follow_up_of_agent_id" => metadata.fetch("follow_up_of_agent_id", nil),
             "replace_agent_id" => metadata.fetch("replace_agent_id", nil),
+            "_self_fixing_recovery" => metadata.fetch("self_fixing_recovery", nil),
             "model" => metadata.dig("spawn_session_settings", "model"),
             "thinking_level" => metadata.dig("spawn_session_settings", "thinking_level"),
             "workspace_mode" => agent.fetch("workspace_mode", metadata.fetch("workspace_mode", WORKSPACE_MODE_ISOLATED)),
@@ -4752,7 +4870,9 @@ module Meringue
             takeover_context: takeover_context,
             cwd: cwd,
             state_path: store.path,
-            github_support: github_support_enabled?(snapshot)
+            github_support: github_support_enabled?(snapshot),
+            worker_spawning_guidance: worker_spawning_guidance_enabled?,
+            worker_spawning_guidance_prompt: worker_spawning_guidance_prompt
           )
 
           {
@@ -7555,6 +7675,39 @@ module Meringue
         method.parameters.any? do |kind, name|
           kind == :keyrest || (%i[key keyreq].include?(kind) && name == :timeout)
         end
+      end
+
+      def worker_spawning_guidance_enabled?
+        config.experiment_enabled?("worker_spawning_guidance")
+      end
+
+      def worker_spawning_guidance_prompt
+        config.setting("experiments.worker_spawning_guidance_prompt")
+      rescue KeyError, Config::ParseError
+        Meringue::Experiments::WorkerSpawningGuidance.default_text
+      end
+
+      def set_worker_selection_guidance(command_id, command_type, payload)
+        unless worker_spawning_guidance_enabled?
+          return rejected_result(
+            command_id,
+            command_type,
+            "Worker model selection guidance is disabled. Enable it in Settings → Experiments.",
+            ["worker_spawning_guidance_disabled"]
+          )
+        end
+
+        prompt = value_at(payload, "prompt", "Prompt", "system_prompt", "systemPrompt")
+        unless prompt.is_a?(String)
+          return rejected_result(command_id, command_type, "Worker model selection prompt is required.", ["prompt_required"])
+        end
+
+        save_configuration(
+          command_id,
+          command_type,
+          "base_fingerprint" => Config::Store.fingerprint(config_path),
+          "changes" => { "experiments.worker_spawning_guidance_prompt" => prompt }
+        )
       end
 
       def github_support_enabled?(state = nil)
@@ -10983,6 +11136,8 @@ module Meringue
         rerouted_from_issue_id = present_string(value_at(payload, "_rerouted_from_issue_id", "rerouted_from_issue_id"))
         portable_import = value_at(payload, "_portable_import", "portable_import")
         portable_import = portable_import.is_a?(Hash) ? deep_copy(portable_import) : nil
+        self_fixing_recovery = value_at(payload, "_self_fixing_recovery", "self_fixing_recovery")
+        self_fixing_recovery = self_fixing_recovery.is_a?(Hash) ? deep_copy(self_fixing_recovery) : nil
         # Set by the kernel when it restarts a worker whose session can no longer be replayed. The
         # successor takes over the dead worker's existing worktree and branch instead of allocating
         # a new one, because that is where the unfinished work already lives.
@@ -11186,6 +11341,7 @@ module Meringue
                   # provisioned when it activates, and whether its predecessor's worktree is free
                   # can only be answered then. The *intent* is persisted so activation, a
                   # provisioning retry, and a restart all resolve it the same way.
+                  self_fixing_recovery: self_fixing_recovery,
                   workspace_reuse_request: workspace_mode == WORKSPACE_MODE_SHARED_READ_ONLY ? nil : workspace_reuse_request(
                     share_workspace: share_workspace,
                     reuse_agent_id: reuse_workspace_agent_id,
@@ -11313,6 +11469,7 @@ module Meringue
               workspace_reuse_request: reuse_request,
               workspace_mode: workspace_mode,
               portable_import: portable_import,
+              self_fixing_recovery: self_fixing_recovery,
               now: now,
               harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
             )
@@ -12602,7 +12759,8 @@ module Meringue
                                 requested_workspace_path:, follow_up_of_agent_id:, predecessor:,
                                 chain_depth:, failure_policy:, include_predecessor_result:, completion_continuation:,
                                 rerouted_from_issue_id:, command_gate: nil, workspace_reuse_request: nil,
-                                session_settings_override: {}, workspace_mode: WORKSPACE_MODE_ISOLATED)
+                                session_settings_override: {}, workspace_mode: WORKSPACE_MODE_ISOLATED,
+                                self_fixing_recovery: nil)
         now = timestamp
         agent_id = next_worker_id!(state, issue.fetch("id"))
         workspace = resolve_worker_workspace(
@@ -12638,6 +12796,7 @@ module Meringue
           session_settings_override: session_settings_override,
           workspace_reuse_request: workspace_reuse_request,
           workspace_mode: workspace_mode,
+          self_fixing_recovery: self_fixing_recovery,
           now: now,
           harness_generation: state.fetch("metadata").fetch("harness_generation", 0).to_i
         )
@@ -13789,7 +13948,8 @@ module Meringue
       def build_worker_reservation(agent_id:, issue:, project:, workspace:, provider:, command_id:, prompt:, title:,
                                    requested_workspace_path:, follow_up_of_agent_id:, replace_agent_id:, now:, harness_generation:,
                                    after_agent_id: nil, completion_continuation: nil, workspace_reuse_request: nil,
-                                   session_settings_override: {}, workspace_mode: WORKSPACE_MODE_ISOLATED, portable_import: nil)
+                                   session_settings_override: {}, workspace_mode: WORKSPACE_MODE_ISOLATED, portable_import: nil,
+                                   self_fixing_recovery: nil)
         plan = workspace.fetch("plan", nil) || workspace
         {
           "id" => agent_id,
@@ -13825,6 +13985,7 @@ module Meringue
             "provisioning_state" => "allocating_workspace",
             "workspace_reuse_request" => workspace_reuse_request,
             "portable_import" => portable_import,
+            "self_fixing_recovery" => self_fixing_recovery,
             "workspace_plan" => plan,
             "harness_generation" => harness_generation,
             **instance_ownership_metadata,
@@ -19079,7 +19240,9 @@ module Meringue
           takeover_context: request.fetch("takeover_context", nil),
           cwd: cwd,
           state_path: store.path,
-          github_support: github_support_enabled?(snapshot)
+          github_support: github_support_enabled?(snapshot),
+          worker_spawning_guidance: worker_spawning_guidance_enabled?,
+          worker_spawning_guidance_prompt: worker_spawning_guidance_prompt
         )
         runner.spawn_head_session(
           user_message: request.fetch("user_message"),
