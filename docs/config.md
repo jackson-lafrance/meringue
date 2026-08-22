@@ -8,7 +8,7 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
-Run `/config` for the full-screen schema-driven editor covering every supported setting. `/config --text` retains the read-only diagnostic listing. Existing `/theme`, `/model [head|worker] <provider>/<model-id>`, `/thinking [head|worker] <level>`, `/harness [head|worker] <provider>`, and setup compatibility commands use the same validated atomic persistence layer. First-run Setup is a curated mode of this same overlay. See [`settings.md`](settings.md) for interaction, responsive layouts, transactional save/cancel behavior, and provenance.
+Run `/config` for the full-screen schema-driven editor covering every supported setting. `/config --text` retains the read-only diagnostic listing. Bare `/theme` (or `/themes`) opens a preview picker; `/theme <name>`, `/model [head|worker] <provider>/<model-id>`, `/thinking [head|worker] <level>`, `/harness [head|worker] <provider>`, `/status-bar`, and setup compatibility commands use the same validated atomic persistence layer. First-run Setup is a curated mode of this same overlay. See [`settings.md`](settings.md) for interaction, responsive layouts, transactional save/cancel behavior, and provenance.
 
 ## Settings schema and experiments
 
@@ -29,7 +29,7 @@ When GitHub support is enabled, **Test GitHub access** appears as a non-persiste
 ## First-run setup marker
 
 The first interactive launch opens the shared Settings overlay for a theme,
-separate head/worker defaults, and experiment checkboxes. Finishing or confirming
+separate head/worker defaults, status-bar layout, and experiment checkboxes. Finishing or confirming
 a first-run skip records one marker here:
 
 ```toml
@@ -627,3 +627,9 @@ Catalogs are cached in Meringue state under `metadata.harness_model_catalogs.<ha
 Claude Code runs in its own interactive mode inside a PTY Meringue owns for the life of the session; see [`interactive-harness-backends.md`](interactive-harness-backends.md). Its catalog is `available` only when Claude Code returns a non-empty authoritative answer; missing CLI, auth/exit failure, or an empty/malformed response is `unavailable`, and a failed refresh after a confirmed answer is `stale` with the last confirmed models retained. Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace, so it has no live session to steer and currently reports an explicit `unsupported` catalog.
 
 Do not store API keys or secrets in the config file. Prefer each provider CLI's normal auth flow or environment setup.
+
+### Status-bar layouts
+
+Use `/status-bar` to open the live status-bar composer. The same composer is a dedicated step in both first-run Setup and manual `/setup`; there it returns the layout to the shared setup draft so Complete can save it with the onboarding marker. It edits the bottom, agent-information, and focused-worker bars without changing durable configuration until Save or Setup Complete succeeds. The saved `tui.status_bar_layout` value is versioned JSON; an
+absent value keeps the built-in rendering. See [`status_bar_layouts.md`](status_bar_layouts.md)
+for the complete keyboard, mouse, cancellation, resize, and migration workflow.

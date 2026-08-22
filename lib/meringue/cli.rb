@@ -368,11 +368,14 @@ module Meringue
           /                         # show slash command suggestions in an otherwise empty prompt
           /help                     # list command syntax
           /quit                     # quit the TUI
-          /theme <name>             # set and persist the TUI theme
+          /theme [name]             # open the theme picker, or set and persist a named TUI theme
+          /themes                   # open the interactive theme picker
           /harness [head|worker] <pi|claude|antigravity> # select role-aware harness defaults
           /models [harness]         # open the searchable model picker; bare /model is an alias
           /keybind                  # show all TUI keybindings
           /config                   # open full-screen Settings (/config --text prints diagnostics)
+          /setup                    # review setup defaults, status-bar layout, and experiments
+          /status-bar               # open the status-bar layout composer
           /jump [agent_id]          # open a focused workspace; omit id to navigate the AgentTree
           /recount                  # compact AgentTree numbering after records are removed
           Ctrl-B                    # open the selected issue's verified delivery PR; with nothing selected, pick from the open PRs
