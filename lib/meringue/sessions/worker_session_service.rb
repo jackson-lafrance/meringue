@@ -37,6 +37,12 @@ module Meringue
         engine.detach_agent_live_terminal(agent_id)
       end
 
+      # Focused PTY input bypasses dashboard PromptAgent routing. Notify the kernel at the point a
+      # prompt is submitted so a completed resumable worker is visible as active immediately.
+      def note_agent_interactive_prompt(agent_id)
+        engine.note_agent_interactive_prompt(agent_id)
+      end
+
       # Focus uses the same application service as transcript views, but remains a
       # process transition owned by the kernel rather than by a pane renderer.
       def begin_agent_interactive_focus(agent_id)

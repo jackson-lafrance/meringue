@@ -297,7 +297,17 @@ module Meringue
         bytes = terminal_key_bytes(key)
         return { "status" => "ignored" } if bytes.nil? || bytes.empty?
 
-        entry.fetch("session").write(bytes)
+        result = entry.fetch("session").write(bytes)
+        if prompt_submission_bytes?(bytes) && focus_session_service.respond_to?(:note_agent_interactive_prompt) && !failed_result?(result)
+          begin
+            focus_session_service.note_agent_interactive_prompt(agent.fetch("id"))
+          rescue StandardError
+            # The provider already received the key. A notification failure must not turn valid
+            # focused input into a terminal error; reconciliation remains the durable fallback.
+            nil
+          end
+        end
+        result
       end
 
       # Releasing a viewer claim is only meaningful for a service that hands them out.
@@ -562,6 +572,10 @@ module Meringue
       # placeholder text to the child instead of the pasted content, and the
       # rendering cost belongs to the child's screen, which the TerminalScreen
       # already bounds to its scrollback.
+      def prompt_submission_bytes?(bytes)
+        bytes == "\r" || bytes == "\n"
+      end
+
       def terminal_key_bytes(key)
         if key.is_a?(Hash)
           return key.fetch("text", "").to_s.tr("\r", "\n") if key.fetch("type", nil) == "paste"

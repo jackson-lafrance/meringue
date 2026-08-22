@@ -119,11 +119,12 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
   end
 
   class BlockingFocusService
-    attr_reader :begun, :ended
+    attr_reader :begun, :ended, :prompted
 
     def initialize
       @begun = Queue.new
       @ended = Queue.new
+      @prompted = []
       @release = Queue.new
     end
 
@@ -143,6 +144,11 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
 
     def end_agent_interactive_focus(agent_id)
       @ended << agent_id
+      { "status" => "accepted" }
+    end
+
+    def note_agent_interactive_prompt(agent_id)
+      @prompted << agent_id
       { "status" => "accepted" }
     end
   end
@@ -408,7 +414,10 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       assert focus.ended.empty?, "a completed worker must stay under native focus ownership"
 
       app.send(:handle_key, "x", "", 0, -1, nil, state)
-      assert_equal ["x"], interactive_session.writes
+      app.send(:handle_key, "\r", "", 0, -1, nil, state)
+      assert_equal ["x", "\r"], interactive_session.writes
+      assert_equal ["P1-I1-W1"], focus.prompted,
+                   "submitting a prompt in focused workspace must notify the kernel lifecycle"
 
       app.send(:close_agent_workspace)
       assert_equal "P1-I1-W1", Timeout.timeout(2) { focus.ended.pop }

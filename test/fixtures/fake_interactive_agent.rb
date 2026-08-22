@@ -16,6 +16,7 @@
 #   --fail-turn      answer with an API-error record instead of a normal reply
 #   --tool-turn      emit a tool call and its result before the final answer
 #   --no-transcript  never write a transcript, to exercise the unreadable-session path
+#   --exit-before-answer  exit after recording the prompt, before writing an assistant response
 
 require "fileutils"
 require "io/console"
@@ -29,6 +30,7 @@ options = {
   "turn_delay" => 0.2,
   "fail_turn" => false,
   "tool_turn" => false,
+  "exit_before_answer" => false,
   "transcript" => true
 }
 
@@ -43,6 +45,7 @@ until argv.empty?
   when "--turn-delay" then options["turn_delay"] = argv.shift.to_f
   when "--fail-turn" then options["fail_turn"] = true
   when "--tool-turn" then options["tool_turn"] = true
+  when "--exit-before-answer" then options["exit_before_answer"] = true
   when "--no-transcript" then options["transcript"] = false
   when "--system-prompt", "--name", "--model", "--effort" then argv.shift
   end
@@ -131,6 +134,7 @@ loop do
     end
 
     sleep options.fetch("turn_delay")
+    exit 42 if options.fetch("exit_before_answer")
 
     if options.fetch("tool_turn") && options.fetch("transcript")
       tool_uuid = SecureRandom.uuid
