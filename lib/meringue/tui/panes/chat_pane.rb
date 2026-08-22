@@ -663,7 +663,6 @@ module Meringue
                 "reference" => theme,
                 "name" => theme,
                 "current" => theme == Style.current_colorscheme,
-                "description" => theme == Style.current_colorscheme ? "current theme" : "future dashboard theme",
                 "index" => index
               }
             end
