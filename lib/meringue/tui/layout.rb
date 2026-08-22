@@ -54,6 +54,7 @@ module Meringue
           scroll_offset: agent_tree_offset
         )
         if embedded_agent_workspace?(state)
+          workspace = state.fetch("_agent_workspace", {}) || {}
           draw_pane(
             canvas,
             metrics.fetch(:main_x),
@@ -64,7 +65,7 @@ module Meringue
             agent_workspace_pane.content_lines(state, width: metrics.fetch(:main_width) - 4),
             active: scroll_pane_active?(state, "logs"),
             overflow: :terminal,
-            scroll_offset: 0,
+            scroll_offset: workspace.fetch("scroll_offset", 0),
             title_style: agent_workspace_title_style(state)
           )
           status = agent_workspace_pane.top_status_layout(state, width: metrics.fetch(:main_width) - 4)
@@ -556,17 +557,23 @@ module Meringue
         width = [width.to_i, MIN_WIDTH].max
         height = [height.to_i, MIN_HEIGHT].max
         workspace = state.fetch("_agent_workspace", {}) || {}
-        pane_width = width - (OUTER_MARGIN * 2)
-        content_width = pane_width - 4
-        lines = agent_workspace_pane.content_lines(state, width: content_width)
 
-        if workspace.fetch("view", "agent") == "terminal"
-          [lines.length - ((height - BOTTOM_HINT_HEIGHT) - 2), 0].max
+        if embedded_agent_workspace?(state)
+          dimensions = embedded_agent_workspace_dimensions(state, width: width, height: height)
+          lines = agent_workspace_pane.content_lines(state, width: dimensions.fetch("columns"))
+          [lines.length - dimensions.fetch("rows"), 0].max
         else
-          composer_line_count = agent_workspace_pane.composer_lines(state, width: pane_width - 4).length
-          composer_height = composer_height_for(height - BOTTOM_HINT_HEIGHT, composer_line_count)
-          content_height = height - BOTTOM_HINT_HEIGHT - composer_height - GAP - 2
-          pinned_tail_scroll_max(lines, content_height)
+          pane_width = width - (OUTER_MARGIN * 2)
+          content_width = pane_width - 4
+          lines = agent_workspace_pane.content_lines(state, width: content_width)
+          if workspace.fetch("view", "agent") == "terminal"
+            [lines.length - ((height - BOTTOM_HINT_HEIGHT) - 2), 0].max
+          else
+            composer_line_count = agent_workspace_pane.composer_lines(state, width: pane_width - 4).length
+            composer_height = composer_height_for(height - BOTTOM_HINT_HEIGHT, composer_line_count)
+            content_height = height - BOTTOM_HINT_HEIGHT - composer_height - GAP - 2
+            pinned_tail_scroll_max(lines, content_height)
+          end
         end
       end
 

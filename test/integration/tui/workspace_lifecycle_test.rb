@@ -45,6 +45,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
 
   class InteractiveController
     attr_reader :keys, :terminal_keys, :closed, :opened_sizes, :resized_sizes
+    attr_accessor :snapshot_lines
 
     def initialize
       @keys = []
@@ -52,6 +53,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       @closed = 0
       @opened_sizes = []
       @resized_sizes = []
+      @snapshot_lines = ["Pi output"]
     end
 
     def open_workspace(agent:, state:, rows:, columns:)
@@ -62,7 +64,14 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
 
     def agent_snapshot(agent:, state:, rows:, columns:)
       _ = [agent, state, rows, columns]
-      { "interactive" => true, "lines" => ["Pi output"], "styled_lines" => [[ ["Pi output", nil] ]], "cursor" => [0, 2], "revision" => 7, "status" => "running" }
+      {
+        "interactive" => true,
+        "lines" => @snapshot_lines,
+        "styled_lines" => @snapshot_lines.map { |line| [[line, nil]] },
+        "cursor" => [0, 2],
+        "revision" => 7,
+        "status" => "running"
+      }
     end
 
     def handle_agent_key(key:, agent:, state:)
@@ -632,6 +641,55 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
 
     app.send(:close_agent_workspace)
     assert_equal 1, controller.closed
+  end
+
+  def test_embedded_native_session_scrolls_with_page_keys_and_wheel_and_keeps_position_on_resize
+    controller = InteractiveController.new
+    controller.snapshot_lines = Array.new(48) { |index| "Pi row #{index.to_s.rjust(2, "0")}" }
+    app = Meringue::TUI::App.new(
+      layout: Meringue::TUI::Layout.new,
+      terminal: TUISupport::FakeTerminal.new,
+      workspace_controller: controller
+    )
+    state = @state.merge("agents" => [agent_record(
+      "P1-I1-W1",
+      "type" => "worker",
+      "status" => "working",
+      "harness" => "pi",
+      "project_id" => "P1",
+      "issue_id" => "P1-I1"
+    )])
+
+    assert app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+    snapshot = app.send(:agent_workspace_snapshot, state, "", 0)
+    scroll_state = state.merge("_agent_workspace" => snapshot)
+    maximum = app.send(:agent_workspace_scroll_max, scroll_state)
+    assert_operator maximum, :>, 0
+
+    app.send(:handle_key, "\e[5~", "", 0, -1, nil, scroll_state)
+    offset = app.instance_variable_get(:@workspace_agent_scroll_offset)
+    assert_equal [Meringue::TUI::App::PAGE_SCROLL_STEP, maximum].min, offset
+    assert_equal offset, app.send(:agent_workspace_snapshot, state, "", 0).fetch("scroll_offset")
+
+    app.send(
+      :handle_key,
+      { "type" => "mouse", "kind" => "wheel_down", "pressed" => true, "button" => 65, "count" => 1, "x" => 50, "y" => 3 },
+      "",
+      0,
+      -1,
+      nil,
+      app.send(:agent_workspace_snapshot, state, "", 0).then { |current| state.merge("_agent_workspace" => current) }
+    )
+    assert_equal [offset - Meringue::TUI::App::MOUSE_SCROLL_STEP, 0].max, app.instance_variable_get(:@workspace_agent_scroll_offset)
+    assert_empty controller.keys, "TUI scrolling should not forward a retained-row wheel to Pi"
+
+    app.instance_variable_set(:@last_render_height, 18)
+    resized_snapshot = app.send(:agent_workspace_snapshot, state, "", 0)
+    resized_state = state.merge("_agent_workspace" => resized_snapshot)
+    resized_maximum = app.send(:agent_workspace_scroll_max, resized_state)
+    assert_operator app.instance_variable_get(:@workspace_agent_scroll_offset), :<=, resized_maximum
+    expected = Meringue::TUI::Layout.new.embedded_agent_workspace_dimensions(resized_state, width: 100, height: 18)
+    assert_equal [expected.fetch("rows"), expected.fetch("columns")], controller.resized_sizes.last
   end
 
   def test_rejected_native_focus_restores_the_dashboard_with_an_actionable_status
