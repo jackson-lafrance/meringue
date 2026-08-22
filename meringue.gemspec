@@ -13,19 +13,24 @@ Gem::Specification.new do |spec|
   spec.required_ruby_version = ">= 3.1"
 
   spec.metadata = {
+    "allowed_push_host" => "https://rubygems.org",
+    "bug_tracker_uri" => "#{spec.homepage}/issues",
+    "changelog_uri" => "#{spec.homepage}/blob/main/CHANGELOG.md",
+    "rubygems_mfa_required" => "true",
     "source_code_uri" => spec.homepage
   }
 
   spec.files = Dir.chdir(__dir__) do
     Dir[
-      "AGENTS.md",
+      "CHANGELOG.md",
+      "LICENSE*",
       "README.md",
-      "bin/*",
-      "docs/**/*.md",
-      "fixtures/**/*",
+      "bin/meringue",
+      "docs/head_agent_kernel_commands.md",
+      "fixtures/demo_state.json",
       "lib/**/*.rb",
       "lib/**/*.js"
-    ].select { |path| File.file?(path) }
+    ].select { |path| File.file?(path) }.sort
   end
   spec.bindir = "bin"
   spec.executables = ["meringue"]

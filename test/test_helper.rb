@@ -6,5 +6,6 @@ $LOAD_PATH.unshift(__dir__)
 require "minitest/autorun"
 require "fileutils"
 require "json"
+require "set"
 require "tmpdir"
 require "meringue"
