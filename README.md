@@ -38,9 +38,20 @@ The first interactive launch opens the guided setup for harness, model, thinking
 
 ### 2. Update it later
 
-run `/update` in meringue or `git pull` and `bundle install` yourself
+From the interactive dashboard, `/update` safely updates the clean source checkout, installs dependencies only when `bundle check` reports they are missing, and automatically reloads Meringue. `/reload` restarts the current process without updating the checkout.
 
-Your config and state live under `~/.meringue/`, outside the checkout, so this does not replace them.
+Both commands preserve your configuration and state under `~/.meringue/`. `/update` refuses to run when the installation has local Git changes, so commit or stash them before retrying.
+
+For manual updates, update the same checkout and refresh its dependencies:
+
+```bash
+cd /path/to/meringue
+git pull --ff-only
+bundle install
+bundle exec meringue --version
+```
+
+Your config and state live under `~/.meringue/`, outside the checkout, so updating the source does not replace them.
 
 ### Troubleshooting executable discovery
 
@@ -193,6 +204,8 @@ Useful slash commands inside the TUI include:
 - `/prs` — with **Settings → Experiments → GitHub support** enabled, open the picker for every tracked pull request that is still open. Use `↑`/`↓` to move, `Enter` to open, and `Esc` to close.
 - `/github test` — with GitHub support enabled, run the bounded read-only authentication and current-repository access check. It never mutates GitHub.
 - `/setup` — reopen the shared full-screen Setup overlay for theme, separate head/worker defaults, and experiment checkboxes. Manual cancel writes nothing.
+- `/reload` — restart Meringue with the current source and configuration.
+- `/update` — update the clean source checkout, install missing dependencies, and reload automatically.
 - `/questions` — list questions and their statuses.
 - `/answer <question_id> "<answer>"` — answer an open question; the kernel records the answer and routes the work it unblocks.
 - `/dismiss <question_id>` — close an open question without answering it.

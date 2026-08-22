@@ -325,11 +325,21 @@ class InputSlashCommandParserTest < Minitest::Test
   end
 
   def test_local_tui_commands_are_reported_as_not_kernel_commands
-    %w[/quit /jump /prs /keybind /config /setup /open-session].each do |input|
+    %w[/quit /reload /update /jump /prs /keybind /config /setup /open-session].each do |input|
       parsed = parse_slash(input)
       assert_equal "InvalidSlashCommand", parsed.fetch("type")
       assert_match(/local TUI command/, parsed.fetch("payload").fetch("message"))
     end
+  end
+
+  def test_reload_and_update_are_discoverable
+    usages = Meringue::Input::SlashCommandParser::COMMAND_SPECS.map(&:first)
+
+    assert_includes usages, "/reload"
+    assert_includes usages, "/update"
+    assert_includes Meringue::Kernel::Engine::HELP_COMMANDS.map(&:first), "/reload"
+    assert_includes Meringue::Kernel::Engine::HELP_COMMANDS.map(&:first), "/update"
+    assert_includes Meringue::Input::SlashCommandParser.command_suggestions("/up", limit: 5).map(&:first), "/update"
   end
 
   def test_command_word_is_case_insensitive_and_surrounding_whitespace_is_ignored

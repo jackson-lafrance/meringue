@@ -12,6 +12,8 @@ module Meringue
       COMMAND_SPECS = [
         ["/help", "Show slash command help."],
         ["/quit", "Quit the interactive TUI."],
+        ["/reload", "Restart Meringue with the current installed source and configuration."],
+        ["/update", "Update the installed Meringue source, install missing dependencies, and reload."],
         ["/theme <name>", "With no arguments, open the theme picker; otherwise set and persist the TUI theme."],
         ["/project add <path> [name]", "Register a project directory."],
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
@@ -734,6 +736,10 @@ module Meringue
           kernel_command("Help")
         when "quit"
           invalid("/quit is a local TUI command. Run it in the interactive TUI to exit.", usage: "/quit")
+        when "reload"
+          invalid("/reload is a local TUI command. Run it in the interactive TUI to restart Meringue.", usage: "/reload")
+        when "update"
+          invalid("/update is a local TUI command. Run it in the interactive TUI to update and restart Meringue.", usage: "/update")
         when "theme"
           parse_theme(arguments)
         when "harness"
