@@ -34,7 +34,7 @@ bundle install
 bundle exec meringue
 ```
 
-The first interactive launch opens the guided setup for harness, model, thinking, theme, and optional experiments. To explore the interface without starting or authenticating a harness, run `bundle exec meringue demo` instead. See [first-run onboarding](docs/onboarding.md) and the [configuration reference](docs/config.md) for details.
+The first interactive launch opens the guided setup for harness, model, thinking, theme, status-bar layout, and optional experiments. To explore the interface without starting or authenticating a harness, run `bundle exec meringue demo` instead. See [first-run onboarding](docs/onboarding.md) and the [configuration reference](docs/config.md) for details.
 
 ### 2. Update it later
 
@@ -153,7 +153,7 @@ test/support/                      # shared test helpers and fakes
 
 The [quick start](#quick-start) covers the normal interactive launch and the harness-free demo. `bundle exec meringue tui` is an explicit equivalent of `bundle exec meringue`.
 
-The first interactive launch opens Setup as the same polished full-screen overlay used by `/config`. Choose a theme, review separate head and worker harness/model/thinking defaults, and opt into experiments such as GitHub support. Experiments is the final step; its Complete action atomically saves the settings and `[onboarding]` marker together. Back never loses edits. Automatic first-run `Esc` confirms a safe skip; `Esc` on a manual `/setup` rerun cancels without changing the marker. The overlay remains recoverable through resize, validation, and persistence failures. See [`docs/onboarding.md`](docs/onboarding.md).
+The first interactive launch opens Setup as the same polished full-screen overlay used by `/config`. Choose a theme, review separate head and worker defaults, arrange the status bars, and opt into Meringue Xtras such as GitHub support. Experiments is the final step; the GitHub access test is absent until GitHub support is selected, and Complete atomically saves the settings and `[onboarding]` marker together. Back never loses edits. Automatic first-run `Esc` confirms a safe skip; `Esc` on a manual `/setup` rerun cancels without changing the marker. The overlay remains recoverable through resize, validation, and persistence failures. See [`docs/onboarding.md`](docs/onboarding.md).
 
 Print the CLI help:
 
@@ -204,14 +204,15 @@ Useful slash commands inside the TUI include:
 - `/jump [agent_id]` — open an agent's focused workspace; omit the id to navigate issues/workers and open PRs from jump mode.
 - `/prs` — with **Settings → Experiments → GitHub support** enabled, open the picker for every tracked pull request that is still open. Use `↑`/`↓` to move, `Enter` to open, and `Esc` to close.
 - `/github test` — with GitHub support enabled, run the bounded read-only authentication and current-repository access check. It never mutates GitHub.
-- `/setup` — reopen the shared full-screen Setup overlay for theme, separate head/worker defaults, and experiment checkboxes. Manual cancel writes nothing.
+- `/setup` — reopen the shared full-screen Setup overlay for theme, separate head/worker defaults, status-bar layout, and experiment checkboxes. Manual cancel writes nothing.
 - `/reload` — restart Meringue with the current source and configuration.
 - `/update` — update the clean source checkout, install missing dependencies, and reload automatically.
-- `/questions` — list questions and their statuses.
+- `/questions` — open the picker for existing open questions; use `↑`/`↓` to move, `Enter` to insert `/answer <question_id>`, and `Esc` to close.
 - `/answer <question_id> "<answer>"` — answer an open question; the kernel records the answer and routes the work it unblocks.
 - `/dismiss <question_id>` — close an open question without answering it.
-- `/theme <name>` — with no arguments, open the on-screen theme picker; otherwise persist a TUI colorscheme.
+- `/theme [name]` — with no name, open the on-screen theme picker; otherwise persist a TUI colorscheme. The `/themes` alias opens the same picker.
 - `/config` — open the full-screen transactional Settings editor for themes, separate head/worker defaults, experiments, harnesses, workspaces, safety, and every keybinding. Use `/config --text` for the old read-only diagnostic listing.
+- `/status-bar` — open the live composer for bottom, agent-information, and focused-worker status bars. Reorder with the keyboard or mouse; Save persists one atomic layout, while Esc discards the preview. See [`docs/status_bar_layouts.md`](docs/status_bar_layouts.md).
 - `/harness [head|worker] <pi|claude|antigravity>` — with no arguments, open the on-screen harness picker; otherwise select the harness for future agents; omit the role to update both.
 - `/models [harness]` — open the model picker: a searchable list of the models the selected harness reports, with clear Head/Worker tabs. `←`/`→` switches roles, `↑`/`↓` moves, `Enter` applies the selected role's future-session default, `Ctrl-R` re-asks the harness, and `Esc` closes. `/models refresh [harness]` skips the picker and just re-fetches the catalog.
 - `/model [head|worker] <provider>/<model-id>` — with no arguments, open the same Head/Worker picker as `/models`; with a model reference, persist the model for all future Pi sessions. Omit the role to update both (the backward-compatible form), or name `head`/`worker` to update only that role. Existing sessions are unchanged. The reference is split on the first slash, so the model id may itself contain `/` and `:` (`/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`). An id the model catalog does not list is still set, and reported as unverified. The values in force are always visible in the dashboard status line (`harness: Pi · model: <model> · thinking: <level>` when both roles match, or a compact head/worker form when they differ) and in `/config`.
@@ -248,7 +249,7 @@ When a head cannot route a request safely it asks a clarifying question, and the
 - Replying in plain chat also works. A head reads the open questions in its context; if your message clearly answers exactly one of them, it closes that question and routes the unblocked work in the same step. If several questions could match, or the message is a new goal, the questions stay open and the message is routed as its own request.
 - `/dismiss Q1` closes a question you no longer care about without routing any work.
 
-Open questions are visible as a `? <count>` marker in the chat header and through `/questions`, which also prints the exact `/answer` command to use.
+Open questions are visible as a `? <count>` marker in the chat header and through the `/questions` picker, which shows local display numbers and inserts the exact `/answer <question_id>` command to use.
 
 ### Reading the logs pane
 
@@ -304,7 +305,7 @@ Default paths:
 ~/.meringue/state.json    # persisted Meringue state
 ```
 
-The config supports TUI colorschemes, animations, every TUI keybinding, separate head/worker harness/model/thinking defaults, provider commands/environment/arguments, workspace and launcher bounds, safety policy, experiments, and the first-run setup marker. `/config` edits these through one schema-backed atomic transaction. For a file-based starting point, copy [`fixtures/config.example.toml`](fixtures/config.example.toml) to `~/.meringue/config.toml`; keep API keys out of this file and use each harness's normal authentication or environment variables. GitHub support is an opt-in experiment for new installations; disabling it removes built-in `gh` lookups and GitHub-specific commands/status/UI without deleting historical PR records. See [`docs/config.md`](docs/config.md) and [`docs/settings.md`](docs/settings.md). Workers may commit assigned work only under the user's repository identity; see [`docs/commit-authorship.md`](docs/commit-authorship.md) for the enforcement path and history audit. Branches, commits, and pull request metadata must describe only the product task; see [`docs/delivery-artifact-privacy.md`](docs/delivery-artifact-privacy.md).
+The config supports TUI colorschemes, animations, every TUI keybinding, separate head/worker harnesses, shared model/thinking defaults (or role-specific values when the split-defaults experiment is enabled), provider commands/environment/arguments, workspace and launcher bounds, safety policy, experiments, the first-run setup marker, and optional status-bar layouts. `/config` and `/status-bar` edit these through one schema-backed atomic transaction. See [`docs/status_bar_layouts.md`](docs/status_bar_layouts.md). For a file-based starting point, copy [`fixtures/config.example.toml`](fixtures/config.example.toml) to `~/.meringue/config.toml`; keep API keys out of this file and use each harness's normal authentication or environment variables. GitHub support is an opt-in experiment for new installations; disabling it removes built-in `gh` lookups and GitHub-specific commands/status/UI without deleting historical PR records. See [`docs/config.md`](docs/config.md) and [`docs/settings.md`](docs/settings.md). Workers may commit assigned work only under the user's repository identity; see [`docs/commit-authorship.md`](docs/commit-authorship.md) for the enforcement path and history audit. Branches, commits, and pull request metadata must describe only the product task; see [`docs/delivery-artifact-privacy.md`](docs/delivery-artifact-privacy.md).
 
 The state file stores projects, issues, agents, questions, logs, counters, and harness session metadata. The kernel is the only layer that should mutate this orchestration state. Durable logs retain the newest 500 entries so lifecycle history cannot grow without bound. Independent events remain chronological, while explicitly identified evolving statuses—currently per-worker workspace-provisioning elapsed time and checkout percentage—replace only their own preceding entry so the dashboard shows one latest value. See [`docs/log-retention.md`](docs/log-retention.md) for replacement/retention semantics and the measured rationale, and [`docs/scalability.md`](docs/scalability.md) for the hermetic process-level responsiveness sweep.
 

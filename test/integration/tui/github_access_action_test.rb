@@ -63,23 +63,26 @@ class TuiGithubAccessActionTest < Minitest::Test
     assert_includes @app.render(compose, width: 100, height: 30, color: false), "read access to acme/app"
 
     @app.send(:open_settings, @state, mode: "setup")
-    4.times { send_key(TAB) }
+    5.times { send_key(TAB) }
     assert_equal "Experiments", @app.send(:settings_category)
     assert @app.send(:settings_rows).any? { |row| row.fetch("id") == "experiments.github_support_test_access" }
   end
 
-  def test_disabled_action_is_gated_in_the_configuration_ui
+  def test_disabled_action_is_completely_absent_in_settings_and_setup
     write_config(false)
     @app = Meringue::TUI::App.new(layout: @layout, config: Meringue::Config.load(path: @config_path))
     @app.send(:open_settings, @state)
     2.times { send_key(TAB) }
-    row = @app.send(:settings_rows).find { |candidate| candidate.fetch("id") == "experiments.github_support_test_access" }
-    @app.instance_variable_set(:@settings_row_index, @app.send(:settings_rows).index(row))
 
-    refute @app.send(:activate_settings_row, @state, on_submit: @handler)
+    refute @app.send(:settings_rows).any? { |row| row.fetch("id") == "experiments.github_support_test_access" }
+    refute_includes @app.render(compose, width: 100, height: 30, color: false), "Test GitHub access"
     assert_equal 0, @submitted.size
-    assert_equal "Enable support", @app.send(:selected_settings_row).fetch("display_value")
-    assert_includes @app.render(compose, width: 100, height: 30, color: false), "Enable GitHub support"
+
+    @app.send(:open_settings, @state, mode: "setup")
+    5.times { send_key(TAB) }
+    assert_equal "Experiments", @app.send(:settings_category)
+    refute @app.send(:settings_rows).any? { |row| row.fetch("id") == "experiments.github_support_test_access" }
+    refute_includes @app.render(compose, width: 100, height: 30, color: false), "Test GitHub access"
   end
 
   def test_all_client_outcomes_have_clear_configuration_labels
