@@ -184,6 +184,7 @@ Useful slash commands inside the TUI include:
 - `/issue create <project_id> "<title>" ["description"]` — create an issue manually.
 - `/issue rename <issue_id> "<title>"` — rename an issue. For both rename commands, focus the AgentTree, select a row, and press `r` to prefill the one that matches the selected row (a worker resolves to its issue).
 - `/worker spawn <issue_id> "<prompt>"` — spawn a worker for an issue.
+- `/worker guide "<additional system prompt>"` — persist the opt-in worker model-selection prompt; use `@` for model completion and `#` for thinking-level completion.
 - `/worker pause <agent_id>` — stop the current worker turn without killing its resumable session.
 - `/worker resume <agent_id>` — continue a paused worker from the same session and workspace.
 - `/worker export <bundle_path> [agent_id...]` — export current worker context for retry on another computer; paths, session handles, and credentials are not copied.

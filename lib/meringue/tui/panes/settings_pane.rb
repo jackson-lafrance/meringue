@@ -489,6 +489,7 @@ module Meringue
           case row.fetch("editor", nil)
           when "checkbox" then "  · Enter toggle"
           when "selector", "model" then "  · Enter open picker"
+          when "text" then "  · Enter edit"
           when "action" then "  · Enter select"
           else ""
           end
@@ -598,7 +599,12 @@ module Meringue
           lines.concat(wrapped.first([height.to_i - 5, 1].max).map { |line| [[line, Style::SELECTION]] })
           error = row.fetch("error", nil).to_s
           lines << [["! #{error}", Style::ERROR]] unless error.empty?
-          { lines: lines.first([height.to_i, 1].max), window_start: 0, visible_count: 0, counter: "text editor", selected_row: row }
+          counter = if row.fetch("id", nil) == "experiments.worker_spawning_guidance_prompt"
+                      "text editor · Tab completes @ models / # thinking levels"
+                    else
+                      "text editor"
+                    end
+          { lines: lines.first([height.to_i, 1].max), window_start: 0, visible_count: 0, counter: counter, selected_row: row }
         end
 
         def confirmation_detail(snap, width:, height:)

@@ -3339,7 +3339,7 @@ module Meringue
             "Enter"
           )]
         else
-          Settings::SetupFlow.setting_ids(settings_category).filter_map do |id|
+          Settings::SetupFlow.setting_ids(settings_category, draft: @settings_draft).filter_map do |id|
             definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
             @settings_draft.row(definition) if definition
           end
@@ -3616,6 +3616,10 @@ module Meringue
           insert_settings_editor_text(paste_text(key))
           return unchanged
         end
+        if (TAB_KEYS.include?(key) || keybinding?("complete_suggestion", key)) && editor.fetch("id") == "experiments.worker_spawning_guidance_prompt"
+          complete_settings_guidance_editor(state)
+          return unchanged
+        end
         if keybinding?("delete_backward", key)
           chars = editor.fetch("buffer").chars
           cursor = editor.fetch("cursor").to_i
@@ -3639,6 +3643,18 @@ module Meringue
           return unchanged
         end
         unchanged
+      end
+
+      def complete_settings_guidance_editor(state)
+        editor = @settings_editor
+        records = Input::SlashCommandParser.command_suggestion_records(editor.fetch("buffer"), limit: nil, state: state)
+        record = records.find { |candidate| candidate.fetch("completion", "") != editor.fetch("buffer") }
+        return false unless record
+
+        completion = record.fetch("completion")
+        editor["buffer"] = completion
+        editor["cursor"] = completion.chars.length
+        true
       end
 
       def insert_settings_editor_text(text)
@@ -4746,7 +4762,7 @@ module Meringue
       end
 
       def slash_suggestions_active?(input_buffer)
-        input_buffer.to_s.strip.start_with?("/")
+        input_buffer.to_s.strip.start_with?("/") || Input::SlashCommandParser.inline_suggestion_active?(input_buffer)
       end
 
       def slash_suggestion_records(input_buffer, state)
