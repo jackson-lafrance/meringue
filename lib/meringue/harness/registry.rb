@@ -31,6 +31,11 @@ module Meringue
         "claude" => { "model" => "--model", "thinking_level" => "--effort", "qualified_model" => false },
         "antigravity" => {}
       }.freeze
+      PROVIDER_THINKING_LEVELS = {
+        "pi" => ModelCatalog::THINKING_LEVELS,
+        "claude" => ClaudeModelCatalog::EFFORT_LEVELS,
+        "antigravity" => []
+      }.freeze
       PROVIDER_LABELS = {
         "pi" => "Pi",
         "claude" => "Claude Code",
@@ -207,6 +212,10 @@ module Meringue
         !PROVIDER_SESSION_FLAGS.fetch(normalize_provider(provider), {}).empty?
       end
 
+      def self.thinking_levels_for(provider)
+        Array(PROVIDER_THINKING_LEVELS.fetch(normalize_provider(provider), ModelCatalog::THINKING_LEVELS)).dup
+      end
+
       def self.ascii_glyphs?
         !ENV.fetch("MERINGUE_ASCII_GLYPHS", "").to_s.strip.empty?
       end
@@ -340,8 +349,39 @@ module Meringue
 
       # Effective model and reasoning defaults the registry will use the next time it starts a head
       # or a worker on this backend. Role details stay visible when dedicated per-role defaults or
-      # older explicit argv values differ.
+      # older explicit argv values differ. With split defaults, an unqualified call reports both
+      # active harnesses instead of pretending the worker harness describes the head too.
       def session_defaults(provider: nil)
+        if provider.nil?
+          providers = { "head" => safe_provider_for("head"), "worker" => safe_provider_for("worker") }
+          if providers.values.compact.uniq.length > 1
+            role_defaults = providers.values.uniq.to_h do |role_provider|
+              [role_provider, session_defaults(provider: role_provider)]
+            rescue ArgumentError
+              # A harness such as Antigravity may not expose model/thinking argv controls, but its
+              # role still needs a truthful neutral value in status and `/config`.
+              [role_provider, harness_neutral_session_defaults]
+            end
+            # The role's own harness is authoritative; do not make the worker's command-line
+            # defaults appear on a head merely because both use a client.
+            roles = {
+              "head" => role_defaults.fetch(providers.fetch("head")).fetch("roles").fetch("head"),
+              "worker" => role_defaults.fetch(providers.fetch("worker")).fetch("roles").fetch("worker")
+            }
+            shared_model = roles.values.map { |role| role["model"] }.uniq
+            shared_thinking = roles.values.map { |role| role["thinking_level"] }.uniq
+            return {
+              "harness" => "mixed",
+              "model" => shared_model.length == 1 ? shared_model.first : nil,
+              "thinking_level" => shared_thinking.length == 1 ? shared_thinking.first : nil,
+              "consistency" => shared_model.length == 1 && shared_thinking.length == 1 ? "consistent" : "mixed",
+              "roles" => roles,
+              "role_harnesses" => providers,
+              "scope" => "future_sessions"
+            }
+          end
+        end
+
         provider = resolved_session_defaults_provider(provider)
         # Model and reasoning defaults are harness-neutral, so they can be read and set before a
         # harness has been chosen. Only the rendering into argv needs to know which backend it is
@@ -349,13 +389,13 @@ module Meringue
         return harness_neutral_session_defaults unless provider
         raise ArgumentError, "#{self.class.provider_label(provider)} does not expose model or reasoning defaults." unless session_defaults_supported?(provider)
 
-        flags = PROVIDER_SESSION_FLAGS.fetch(provider, {})
         provider_settings = provider_config(provider)
         roles = %w[head worker].to_h do |kind|
-          args = extra_args_for(provider, provider_settings, kind)
           [kind, {
-            "model" => command_option(args, flags["model"]),
-            "thinking_level" => command_option(args, flags["thinking_level"])
+            # Report the stored qualified reference even when the provider receives a bare id on
+            # argv. `/model` and `/config` need a value users can copy between harnesses.
+            "model" => resolved_role_setting(provider, provider_settings, kind, "model"),
+            "thinking_level" => resolved_role_setting(provider, provider_settings, kind, "thinking_level")
           }.compact]
         end
         shared_model = roles.values.map { |role| role["model"] }.uniq
@@ -386,8 +426,8 @@ module Meringue
         configured = neutral_session_defaults
         roles = %w[head worker].to_h do |kind|
           [kind, {
-            "model" => configured["#{kind}_model"] || configured["model"] || DEFAULT_MODEL,
-            "thinking_level" => configured["#{kind}_thinking_level"] || configured["thinking_level"] || DEFAULT_THINKING_LEVEL
+            "model" => neutral_role_setting(configured, kind, "model"),
+            "thinking_level" => neutral_role_setting(configured, kind, "thinking_level")
           }]
         end
         shared_model = roles.values.map { |role| role.fetch("model") }.uniq
@@ -411,6 +451,7 @@ module Meringue
           agent.head_harness agent.worker_harness
           agent.head_model agent.worker_model
           agent.head_thinking agent.worker_thinking
+          experiments.split_defaults
         ]
         ids = Array(changed_ids).map(&:to_s)
         return self if (ids & live_role_ids).empty?
@@ -418,12 +459,19 @@ module Meringue
         data = config.to_h
         data["harness"] = {} unless data["harness"].is_a?(Hash)
         updated_harness = updated_config.section("harness")
-        %w[provider head_provider worker_provider].each do |key|
+        %w[provider head_provider worker_provider model head_model worker_model thinking_level head_thinking_level worker_thinking_level].each do |key|
           if updated_harness.key?(key)
             data.fetch("harness")[key] = Config.deep_copy(updated_harness[key])
           else
             data.fetch("harness").delete(key)
           end
+        end
+        data["experiments"] = {} unless data["experiments"].is_a?(Hash)
+        updated_experiments = updated_config.section("experiments")
+        if updated_experiments.key?("split_defaults")
+          data.fetch("experiments")["split_defaults"] = Config.deep_copy(updated_experiments["split_defaults"])
+        else
+          data.fetch("experiments").delete("split_defaults")
         end
         PROVIDERS.each do |provider|
           data.fetch("harness")[provider] = {} unless data.fetch("harness")[provider].is_a?(Hash)
@@ -543,12 +591,12 @@ module Meringue
         args = (Array(provider_config["extra_args"]) + Array(provider_config["#{kind}_extra_args"])).dup
         flags = PROVIDER_SESSION_FLAGS.fetch(provider, {})
 
-        model = role_setting(provider_config, kind, "model")
+        model = resolved_role_setting(provider, provider_config, kind, "model")
         unless model.empty? || flags["model"].nil?
           args.concat([flags.fetch("model"), flags.fetch("qualified_model", true) ? model : ModelReference.bare_id(model)])
         end
 
-        thinking_level = role_setting(provider_config, kind, "thinking_level")
+        thinking_level = resolved_role_setting(provider, provider_config, kind, "thinking_level")
         args.concat([flags.fetch("thinking_level"), thinking_level]) unless thinking_level.empty? || flags["thinking_level"].nil?
 
         if kind == "worker" && !@command_blacklist.empty? && provider == "pi"
@@ -558,12 +606,59 @@ module Meringue
       end
 
       # A role-specific value wins over the shared one, so "workers use a bigger model than heads"
-      # is expressible without repeating everything else.
+      # is expressible without repeating everything else. Invalid persisted values are not passed to
+      # a harness: this is important during a harness migration, when an old effort vocabulary can
+      # otherwise make every future session fail at spawn time.
+      def resolved_role_setting(provider, provider_config, kind, key)
+        value = role_setting(provider_config, kind, key)
+        return value if key == "model" ? valid_model_reference?(value) : valid_thinking_level?(value, provider)
+
+        shared = provider_config[key].to_s.strip
+        return shared if key == "model" ? valid_model_reference?(shared) : valid_thinking_level?(shared, provider)
+
+        key == "model" ? DEFAULT_MODEL : default_thinking_level_for(provider)
+      end
+
       def role_setting(provider_config, kind, key)
         role_key = key == "model" ? "#{kind}_model" : "#{kind}_#{key}"
-        value = provider_config[role_key].to_s.strip
+        value = split_defaults_enabled? ? provider_config[role_key].to_s.strip : ""
         value = provider_config[key].to_s.strip if value.empty?
         value
+      end
+
+      def split_defaults_enabled?
+        value = config.value("experiments", "split_defaults")
+        return true if value.nil?
+
+        value == true || %w[true yes 1].include?(value.to_s.downcase)
+      end
+
+      def neutral_role_setting(configured, kind, key)
+        role_key = "#{kind}_#{key}"
+        role_value = split_defaults_enabled? ? configured[role_key] : nil
+        return role_value if key == "model" ? valid_model_reference?(role_value) : valid_thinking_level?(role_value, nil)
+
+        shared = configured[key]
+        return shared if key == "model" ? valid_model_reference?(shared) : valid_thinking_level?(shared, nil)
+
+        key == "model" ? DEFAULT_MODEL : DEFAULT_THINKING_LEVEL
+      end
+
+      def valid_model_reference?(value)
+        ModelReference.valid?(value)
+      end
+
+      def valid_thinking_level?(value, provider)
+        text = value.to_s.strip
+        return false if text.empty?
+
+        levels = provider ? self.class.thinking_levels_for(provider) : ModelCatalog::THINKING_LEVELS
+        levels.include?(text)
+      end
+
+      def default_thinking_level_for(provider)
+        levels = self.class.thinking_levels_for(provider)
+        levels.include?(DEFAULT_THINKING_LEVEL) ? DEFAULT_THINKING_LEVEL : levels.last.to_s
       end
 
       def command_option(args, option)
@@ -629,6 +724,12 @@ module Meringue
 
       def normalize_provider!(provider)
         self.class.normalize_provider!(provider)
+      end
+
+      def safe_provider_for(kind)
+        provider_for(kind)
+      rescue MissingProviderError
+        nil
       end
     end
   end

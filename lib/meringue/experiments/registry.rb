@@ -65,6 +65,19 @@ module Meringue
             }
           ],
           availability_probe: nil
+        ),
+        Definition.new(
+          id: "split_defaults",
+          config_path: %w[experiments split_defaults],
+          label: "Split head and worker defaults",
+          description: "Allow heads and workers to keep independent harness, model, and thinking defaults.",
+          default: true,
+          restart_required: false,
+          risk: "Future heads and workers may intentionally use different providers and settings.",
+          dependencies: [],
+          conflicts: [],
+          migration: "preserve_existing_role_defaults",
+          availability_probe: nil
         )
       ].freeze
 

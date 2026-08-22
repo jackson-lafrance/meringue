@@ -15,8 +15,23 @@ module Meringue
     # production constructs it.
     class ClaudeClient < ProcessClient
       DEFAULT_COMMAND = "claude"
+      DEFAULT_MODEL_CATALOG_TIMEOUT = ClaudeModelCatalog::DEFAULT_TIMEOUT
 
       attr_reader :use_json_schema, :claude_home
+
+      def model_catalog_supported?
+        true
+      end
+
+      def available_models(cwd: nil)
+        ClaudeModelCatalog.fetch(
+          command: command,
+          env: env,
+          cwd: cwd,
+          extra_args: extra_args,
+          timeout: DEFAULT_MODEL_CATALOG_TIMEOUT
+        )
+      end
 
       def initialize(command: DEFAULT_COMMAND, env: {}, extra_args: [], use_json_schema: true,
                      claude_home: ENV.fetch("CLAUDE_CONFIG_DIR", File.expand_path("~/.claude")), **kwargs)

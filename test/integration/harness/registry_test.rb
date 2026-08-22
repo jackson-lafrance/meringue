@@ -49,6 +49,31 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_match(/pi, claude, antigravity/, error.message)
   end
 
+  def test_split_role_defaults_use_each_active_harness_and_repair_incompatible_effort_values
+    subject = registry(
+      "experiments" => { "split_defaults" => true },
+      "harness" => {
+        "head_provider" => "claude",
+        "worker_provider" => "pi",
+        "model" => "anthropic/shared",
+        "thinking_level" => "off",
+        "head_thinking_level" => "low",
+        "worker_thinking_level" => "xhigh"
+      }
+    )
+
+    defaults = subject.session_defaults
+
+    assert_equal "mixed", defaults.fetch("harness")
+    assert_equal "claude", defaults.dig("role_harnesses", "head")
+    assert_equal "pi", defaults.dig("role_harnesses", "worker")
+    assert_equal "low", defaults.dig("roles", "head", "thinking_level")
+    assert_equal "xhigh", defaults.dig("roles", "worker", "thinking_level")
+    # A Claude-only explicit value is repaired to its provider fallback without affecting Pi.
+    claude = registry("harness" => { "provider" => "claude", "thinking_level" => "off" }).session_defaults
+    assert_equal Registry::DEFAULT_THINKING_LEVEL, claude.fetch("thinking_level")
+  end
+
   def test_provider_metadata_is_public_facing
     assert_equal %w[pi claude antigravity], Registry.supported_provider_names
     assert_equal "Pi", Registry.provider_label("pi")
