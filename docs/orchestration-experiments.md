@@ -32,7 +32,7 @@ A recovery is not a replacement and does not retry the original session. It is a
 
 The command is accepted only while the experiment is enabled. The prompt input row is hidden from both Settings and Setup while it is disabled; the stored value is retained so disabling and re-enabling does not lose it. It only guides model and thinking-level selection for workers; it does not change worker defaults or alter ordinary spawn behavior.
 
-The guidance prefers a fresh worker for each distinct task where practical because worker context grows quickly. It gives task-oriented examples such as using `@openai/gpt-5.6-luna` with `#xhigh` thinking for implementation and `@openai/gpt-5.6-sol` for investigation. The examples are catalog references, not a hard-coded allowlist.
+The guidance gives task-oriented examples such as using `@openai/gpt-5.6-luna` with `#xhigh` thinking for implementation and `@openai/gpt-5.6-sol` for investigation. The examples are catalog references, not a hard-coded allowlist; the prompt does not add general worker-spawning or reuse advice.
 
 Inline completion in the composer uses the same catalog and validation conventions as `/model` and `/thinking`:
 

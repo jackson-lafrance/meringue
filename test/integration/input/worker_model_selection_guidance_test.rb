@@ -110,6 +110,15 @@ class WorkerModelSelectionGuidanceTest < Minitest::Test
     end
   end
 
+  def test_default_prompt_stays_limited_to_model_and_thinking_selection
+    prompt = Meringue::Experiments::WorkerSpawningGuidance.default_text
+
+    assert_includes prompt, "@openai/gpt-5.6-luna"
+    assert_includes prompt, "#xhigh"
+    refute_match(/prefer (?:a )?(?:fresh|existing) worker/i, prompt)
+    refute_match(/reuse (?:a )?worker/i, prompt)
+  end
+
   def test_head_context_delivers_the_saved_prompt_only_when_enabled
     snapshot = Meringue::State::Models.empty_state
     prompt = "Use @openai/gpt-5.6-luna #xhigh for implementation."
