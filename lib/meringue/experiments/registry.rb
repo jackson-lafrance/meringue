@@ -78,6 +78,32 @@ module Meringue
           conflicts: [],
           migration: "preserve_existing_role_defaults",
           availability_probe: nil
+        ),
+        Definition.new(
+          id: "self_fixing_workers",
+          config_path: %w[experiments self_fixing_workers],
+          label: "Self-fixing workers",
+          description: "Diagnose and attempt one bounded recovery for eligible errored or blocked workers.",
+          default: false,
+          restart_required: false,
+          risk: "May start one isolated recovery worker per failed worker; recovery workers cannot recursively recover themselves.",
+          dependencies: [],
+          conflicts: [],
+          migration: nil,
+          availability_probe: nil
+        ),
+        Definition.new(
+          id: "worker_spawning_guidance",
+          config_path: %w[experiments worker_spawning_guidance],
+          label: "Worker model selection guidance",
+          description: "Append model and thinking-level selection guidance to head system prompts.",
+          default: false,
+          restart_required: false,
+          risk: "Changes the instructions future heads receive; it does not change worker defaults or spawn behavior.",
+          dependencies: [],
+          conflicts: [],
+          migration: nil,
+          availability_probe: nil
         )
       ].freeze
 

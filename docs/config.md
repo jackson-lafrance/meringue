@@ -20,9 +20,11 @@ schema_version = 1
 
 [experiments]
 github_support = false
+worker_spawning_guidance = false
+# worker_spawning_guidance_prompt = "..."  # shown and applied only when the toggle is true
 ```
 
-New installations default GitHub support off. Existing installations with a pre-upgrade state file or onboarding marker migrate it on so upgrading does not silently remove PR behavior; an explicit value always wins. Disabling it performs no built-in `gh` subprocess/network lookup, hides GitHub-specific TUI commands and status, and preserves historical PR records. See [`settings.md`](settings.md#github-support).
+New installations default GitHub support off. Existing installations with a pre-upgrade state file or onboarding marker migrate it on so upgrading does not silently remove PR behavior; an explicit value always wins. Disabling it performs no built-in `gh` subprocess/network lookup, hides GitHub-specific TUI commands and status, and preserves historical PR records. The worker model-selection prompt is editable through Settings → Experiments, Setup → Experiments, or `/worker guide \"...\"`, but its input is hidden and ignored while the toggle is off. See [`settings.md`](settings.md#github-support) and [`orchestration-experiments.md`](orchestration-experiments.md).
 
 When GitHub support is enabled, **Test GitHub access** appears as a non-persistent action under Settings → Experiments (and in the Setup Experiments step). It checks the current checkout's `origin` remote, then runs bounded read-only `gh auth status --hostname github.com` and `gh repo view OWNER/REPO --json nameWithOwner` checks. It never creates, edits, closes, comments on, or otherwise mutates a GitHub resource. The same check is available as `/github test`; it reports success, unavailable CLI/service, unauthenticated, repository permission denied, timeout, and malformed-remote outcomes. The action is safe to retry.
 
