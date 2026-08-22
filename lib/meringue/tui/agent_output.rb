@@ -19,7 +19,8 @@ module Meringue
       module_function
 
       def normalize(text, source_id: nil, pr_urls: [])
-        output = strip_terminal_sequences(text.to_s)
+        output = text.to_s.dup.force_encoding(Encoding::UTF_8).scrub
+        output = strip_terminal_sequences(output)
         output = output.gsub("\r\n", "\n").tr("\r", "\n").tr("\u00a0", " ")
         output = output.gsub("\t", "  ").gsub(/[^\P{C}\n]/u, "")
 

@@ -49,7 +49,7 @@ class StateStorePersistenceTest < Minitest::Test
 
       contents = File.read(path)
       assert contents.end_with?("\n"), "state file should end with a newline"
-      assert_includes contents, "\n  \"projects\": []", "state should be pretty-generated"
+      assert_match(/\n  "projects": \[\s*\],/, contents, "state should be pretty-generated")
       assert_kind_of Hash, JSON.parse(contents)
     end
   end

@@ -357,7 +357,9 @@ class TuiModelPickerTest < Minitest::Test
     state = state_with_catalog(catalogs: { "pi" => stale.to_h })
     now = Time.new(2026, 8, 16, 14, 30, 0, "-04:00")
 
-    assert_equal "last confirmed [wed 14:28]", ModelPicker.state_label(state, now: now)
+    with_env("TZ" => "America/New_York") do
+      assert_equal "last confirmed [wed 14:28]", ModelPicker.state_label(state, now: now)
+    end
   end
 
   def test_clicking_a_row_applies_it_and_clicking_away_dismisses_the_picker

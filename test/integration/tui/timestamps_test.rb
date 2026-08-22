@@ -8,6 +8,15 @@ class TuiRecencyTimestampsTest < Minitest::Test
 
   Timestamps = Meringue::TUI::Timestamps
 
+  def setup
+    @original_timezone = ENV.fetch("TZ", nil)
+    ENV["TZ"] = "America/New_York"
+  end
+
+  def teardown
+    @original_timezone.nil? ? ENV.delete("TZ") : ENV["TZ"] = @original_timezone
+  end
+
   def test_today_uses_local_hour_and_minute
     now = Time.new(2026, 8, 16, 14, 30, 0, "-04:00")
 
