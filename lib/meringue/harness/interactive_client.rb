@@ -158,13 +158,21 @@ module Meringue
 
       def get_state(session_ref)
         entry = live_entry(session_ref)
-        return completed_session_ref(session_ref) unless entry
+        unless entry
+          return completed_session_ref(session_ref).merge(
+            "metadata" => metadata_with(session_ref, "process_gone" => true)
+          )
+        end
 
         process = entry.fetch("process")
         unless process.alive?
           discard_session(entry.fetch("session_id"))
           return completed_session_ref(session_ref).merge(
-            "metadata" => metadata_with(session_ref, "exit_status" => process.exit_status)
+            "metadata" => metadata_with(
+              session_ref,
+              "process_gone" => true,
+              "exit_status" => process.exit_status
+            )
           )
         end
 
@@ -686,6 +694,21 @@ module Meringue
       def session_ref_for(entry, previous: {})
         process = entry.fetch("process", nil)
         state = session_state(entry)
+        metadata = (previous.fetch("metadata", {}) || {}).merge(
+          {
+            "kind" => entry.fetch("kind", nil),
+            "session_name" => entry.fetch("session_name", nil),
+            "transport" => "interactive_pty",
+            "session_state" => state,
+            "started_at" => process&.started_at&.iso8601
+          }.compact
+        )
+        # A restarted interactive process must not carry the previous process's exit evidence into
+        # its next turn. The durable transcript remains the source of truth for completed output.
+        if process&.alive?
+          metadata.delete("process_gone")
+          metadata.delete("exit_status")
+        end
         {
           "harness" => harness_name,
           "pid" => process&.alive? ? process.pid : nil,
@@ -694,15 +717,7 @@ module Meringue
           "session_file" => entry.fetch("transcript_path", nil),
           "is_streaming" => state == "streaming",
           "last_event_at" => entry.fetch("last_event_at", nil),
-          "metadata" => (previous.fetch("metadata", {}) || {}).merge(
-            {
-              "kind" => entry.fetch("kind", nil),
-              "session_name" => entry.fetch("session_name", nil),
-              "transport" => "interactive_pty",
-              "session_state" => state,
-              "started_at" => process&.started_at&.iso8601
-            }.compact
-          )
+          "metadata" => metadata
         }
       end
 

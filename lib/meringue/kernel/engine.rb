@@ -1524,6 +1524,33 @@ module Meringue
         end
       end
 
+      # A focused Agent session writes directly to its provider PTY, so it does not pass through the
+      # dashboard PromptAgent command. Enter is the durable boundary at which the kernel can expose a
+      # completed worker as active; reconciliation later confirms whether the submitted turn is still
+      # streaming or has already completed.
+      def note_agent_interactive_prompt(agent_id)
+        synchronized_state do
+          state = normalized_state
+          current = find_agent(state, agent_id.to_s)
+          return rejected_result(nil, "FocusPrompt", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless current
+          return rejected_result(nil, "FocusPrompt", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless current.fetch("type", nil) == "worker"
+          return accepted_result(nil, "FocusPrompt", current.fetch("id"), "Worker #{current.fetch("id")} is already #{current.fetch("status")}.", deep_copy(current), []) unless current.fetch("status", nil) == "completed"
+          return rejected_result(nil, "FocusPrompt", "Worker #{agent_id} has no resumable agent session.", ["missing_harness_session"]) unless agent_has_session_reference?(current)
+
+          now = timestamp
+          current["status"] = "working"
+          current["updated_at"] = now
+          current["harness_metadata"] = (current.fetch("harness_metadata", {}) || {}).merge(
+            "is_streaming" => true,
+            "focused_prompt_at" => now
+          ).compact
+          refresh_worker_parent_statuses!(state, current, now)
+          touch_state!(state, now)
+          store.save(state)
+          accepted_result(nil, "FocusPrompt", current.fetch("id"), "Worker #{current.fetch("id")} is working on its focused prompt.", deep_copy(current), [])
+        end
+      end
+
       # The Agent session is a kernel-owned transport transition, not a TUI-side attach. The managed
       # RPC writer is quiesced before the workspace controller launches the interactive PTY, and a
       # durable marker makes reconciliation stand down while that PTY owns the session file.
@@ -1538,7 +1565,10 @@ module Meringue
           return rejected_result(nil, "BeginInteractiveFocus", "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless candidate
           return rejected_result(nil, "BeginInteractiveFocus", "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless candidate.fetch("type", nil) == "worker"
 
-          metadata = candidate.fetch("harness_metadata", {}) || {}
+          metadata = (candidate.fetch("harness_metadata", {}) || {}).dup
+          # This marker belongs to one focused turn; do not let a prior focus return preserve
+          # `working` if this focus session is only being viewed.
+          metadata.delete("focused_prompt_at")
           existing = metadata.fetch("interactive_handoff", nil)
           if existing.is_a?(Hash) && INTERACTIVE_HANDOFF_STATES.include?(existing.fetch("state", nil).to_s)
             retrying_reclaim = existing.fetch("state", nil).to_s == "reclaim_failed"
@@ -1774,8 +1804,15 @@ module Meringue
               "ended_at" => now
             )
           ).compact
+          focused_prompt_at = parse_time_or_nil(metadata.fetch("focused_prompt_at", nil))
+          focus_started_at = parse_time_or_nil(handoff_marker.fetch("started_at", nil))
+          focused_prompt_submitted = focused_prompt_at && (!focus_started_at || focused_prompt_at >= focus_started_at)
           unless TERMINAL_AGENT_STATUSES.include?(current.fetch("status", nil))
-            current["status"] = resumed.fetch("is_streaming", false) ? "working" : "idle"
+            current["status"] = if resumed.fetch("is_streaming", false) || focused_prompt_submitted
+                                  "working"
+                                else
+                                  "idle"
+                                end
             refresh_worker_parent_statuses!(state, current, now)
           end
           current["updated_at"] = now
@@ -17891,8 +17928,12 @@ module Meringue
         events = client.respond_to?(:read_events) ? client.read_events(state_ref) : []
         # A worker whose live session a person is currently driving keeps reporting progress, but
         # its record is not retired underneath them. The turn they just watched finish is the end
-        # of *their* exchange, not the end of the worker's assignment.
-        settled = completed_session?(state_ref) && !live_focus_attached?(agent)
+        # of *their* exchange, not the end of the worker's assignment. A newly-started interactive
+        # head is similarly not settled until its provider has had time to publish initial transcript
+        # state (Claude can spend substantially longer in this phase than Pi).
+        settled = completed_session?(state_ref) &&
+                  !live_focus_attached?(agent) &&
+                  !head_startup_grace_active?(agent, state_ref)
         assistant_text = settled ? safe_last_assistant_text(client, state_ref) : nil
         # A settled session is only a completion when nothing says its turn died.
         settle_failure = if settled && agent.fetch("type", nil) == "worker"
@@ -18705,8 +18746,8 @@ module Meringue
           "kind" => SETTLE_FAILURE_PROCESS_EXIT_KIND,
           "reason" => harness_process_exit_reason(exit_status),
           "source" => "harness_process_exit",
-          "error_class" => error.class.name,
-          "error_message" => sanitized_error_message(error),
+          "error_class" => error&.class&.name,
+          "error_message" => error && sanitized_error_message(error),
           "exit_status" => exit_status,
           "stderr_tail" => stderr_tail && truncate_for_state(stderr_tail, PROCESS_EXIT_STDERR_MAX_BYTES),
           "process_exited_at" => present_string(evidence.fetch("last_event_at", nil))
@@ -19111,23 +19152,36 @@ module Meringue
           return mark_agent_errored_from_poll(poll_result) unless agent.fetch("type", nil) == "worker"
 
           now = timestamp
+          metadata = agent.fetch("harness_metadata", {}) || {}
           reconcile = poll_result.fetch("reconcile", {}).merge("state" => RECONCILE_STATE_RESUME_FAILED).compact
+          attempt = reconcile.fetch("resume_attempt_count", 0).to_i
+          warning_logged_attempt = metadata.fetch("resume_warning_logged_attempt", nil)
+          if agent.fetch("status", nil) == "blocked" && !warning_logged_attempt.nil? && warning_logged_attempt.to_i == attempt
+            return poll_result.merge("changed" => false, "blocked" => true, "reconcile" => metadata.fetch("reconcile", reconcile), "log_entry_ids" => [])
+          end
+          should_log_warning = warning_logged_attempt.to_i != attempt
+          reconcile["warning_logged_attempt"] = attempt if should_log_warning
           agent["status"] = "blocked"
           agent["updated_at"] = now
-          agent["harness_metadata"] = (agent.fetch("harness_metadata", {}) || {}).merge(
+          agent["harness_metadata"] = metadata.merge(
             "is_streaming" => false,
+            "resume_warning_logged_attempt" => attempt,
             "reconcile_state" => RECONCILE_STATE_RESUME_FAILED,
             "reconcile" => reconcile
           ).compact
           refresh_worker_parent_statuses!(state, agent, now)
-          log_ids = append_log(
-            state,
-            source_type: "worker",
-            source_id: agent.fetch("id"),
-            level: "warning",
-            message: "Worker #{agent.fetch("id")} could not resume its agent session; will retry reconciliation.",
-            details: reconcile
-          )
+          log_ids = if should_log_warning
+                       append_log(
+                         state,
+                         source_type: "worker",
+                         source_id: agent.fetch("id"),
+                         level: "warning",
+                         message: "Worker #{agent.fetch("id")} could not resume its agent session; will retry reconciliation.",
+                         details: reconcile
+                       )
+                     else
+                       []
+                     end
           touch_state!(state, now)
           store.save(state)
           poll_result.merge("changed" => true, "blocked" => true, "reconcile" => reconcile, "log_entry_ids" => log_ids)
@@ -19244,6 +19298,29 @@ module Meringue
         false
       end
 
+      # An interactive provider can have a live PTY before its transcript reader has observed the
+      # first turn. In that narrow startup window, an empty/unknown conversation is not a completed
+      # head result. Keep the head working while its owned process is alive; once the window expires,
+      # the normal invalid-result repair and genuine failure paths remain authoritative.
+      def head_startup_grace_active?(agent, session_ref)
+        return false unless agent.fetch("type", nil) == "head"
+        return false unless session_ref.is_a?(Hash)
+
+        metadata = session_ref.fetch("metadata", {}) || {}
+        metadata = stringify_keys(metadata) if metadata.is_a?(Hash)
+        return false unless metadata.is_a?(Hash)
+        return false unless metadata.fetch("session_state", nil).to_s == "unknown"
+        return false if truthy?(metadata.fetch("process_gone", false))
+
+        pid = session_ref.fetch("pid", nil).to_i
+        return false unless pid.positive? && owner_process_alive?(pid)
+
+        started_at = metadata.fetch("head_session_started_at", nil) ||
+                     metadata.fetch("started_at", nil) ||
+                     agent.fetch("created_at", nil)
+        started_at && head_reconcile_grace_active?(started_at, timestamp)
+      end
+
       def head_reconcile_warning_due?(agent, first_error_at, now)
         started_at = agent.fetch("created_at", nil) || first_error_at
         reference_time = [parse_time_or_nil(started_at), parse_time_or_nil(first_error_at)].compact.min
@@ -19327,7 +19404,30 @@ module Meringue
         return failure if failure
         return nil if present_string(last_assistant_text)
 
-        settle_failure_from_events(events)
+        failure = settle_failure_from_events(events)
+        return failure if failure
+
+        settle_failure_from_session_exit(session_ref)
+      end
+
+      # Interactive clients can lose their in-memory process entry before the kernel asks for state
+      # (for example after a Claude PTY exits or after Meringue restarts). That state is non-streaming,
+      # but it is not a completion unless the transcript supplied a final assistant response. The
+      # client marks this durable absence explicitly so it cannot be mistaken for a clean turn.
+      def settle_failure_from_session_exit(session_ref)
+        return nil unless session_ref.is_a?(Hash)
+
+        metadata = session_ref.fetch("metadata", {}) || {}
+        metadata = stringify_keys(metadata) if metadata.is_a?(Hash)
+        return nil unless metadata.is_a?(Hash)
+        return nil unless truthy?(metadata.fetch("process_gone", false)) || metadata.fetch("exit_status", nil).is_a?(Hash)
+
+        evidence = {
+          "exit_status" => metadata.fetch("exit_status", nil),
+          "stderr_tail" => metadata.fetch("stderr_tail", nil),
+          "last_event_at" => metadata.fetch("process_exited_at", nil) || metadata.fetch("last_event_at", nil)
+        }.compact
+        harness_process_exit_settle_failure(nil, evidence)
       end
 
       def worker_settle_failure(agent_id:, session_ref:, events:, last_assistant_text:)

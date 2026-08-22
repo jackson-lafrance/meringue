@@ -594,6 +594,38 @@ class KernelMaintenanceReconcileSessionsTest < Minitest::Test
     assert_documented_status_vocabulary(read_state)
   end
 
+  def test_a_healthy_claude_head_with_an_empty_startup_transcript_stays_working
+    started_at = Time.now.utc.iso8601
+    write_state(
+      state_fixture(
+        agents: [
+          head_record(
+            id: "H1",
+            status: "working",
+            harness: "claude",
+            pid: Process.pid.to_s,
+            session_id: "claude-head-sess",
+            harness_metadata: {
+              "head_session_started_at" => started_at,
+              "session_state" => "unknown"
+            }
+          )
+        ]
+      )
+    )
+    engine, client = stub_engine({ "claude-head-sess" => { "streaming" => false, "completed" => false } })
+
+    result = apply_command(engine, "ReconcileSessions", {})
+    poll = result.dig("result", "poll_results").first
+    head = agent_by_id(read_state, "H1")
+
+    assert_equal "working", poll.fetch("state")
+    assert_equal "working", head.fetch("status")
+    assert_empty client.calls.select { |call| call.first == "prompt_session" },
+                 "healthy startup must not trigger an invalid-result repair prompt"
+    refute head.fetch("harness_metadata").key?("head_result_repair_count")
+  end
+
   def test_head_errors_once_the_grace_window_and_recovery_budget_are_spent
     write_state(
       state_fixture(

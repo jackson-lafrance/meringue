@@ -399,6 +399,44 @@ class KernelWorkersInteractiveFocusTest < Minitest::Test
     assert_equal replacement_file, client.resumed.last.fetch("session_file")
   end
 
+  def test_a_focused_prompt_reactivates_a_completed_worker_and_rolls_up_its_issue
+    client = InteractiveHarnessClient.new
+    engine = build_engine(harness_client: client)
+    context = project_with_issue(engine)
+    worker_id = spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
+    patch_state! do |durable_state|
+      durable_state.fetch("agents").find { |record| record.fetch("id") == worker_id }["status"] = "completed"
+      durable_state.fetch("issues").find { |record| record.fetch("id") == context.fetch("issue_id") }["status"] = "completed"
+    end
+
+    result = engine.note_agent_interactive_prompt(worker_id)
+    worker = agent(engine, worker_id)
+
+    assert_equal "accepted", result.fetch("status")
+    assert_equal "working", worker.fetch("status")
+    assert_equal true, worker.dig("harness_metadata", "is_streaming")
+    assert_equal "working", issue(engine, context.fetch("issue_id")).fetch("status")
+    assert_equal worker.fetch("updated_at"), worker.dig("harness_metadata", "focused_prompt_at")
+  end
+
+  def test_returning_after_a_completed_worker_was_prompted_keeps_it_working_until_reconciled
+    client = InteractiveHarnessClient.new
+    client.native_completed = true
+    engine = build_engine(harness_client: client)
+    context = project_with_issue(engine)
+    worker_id = spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
+    patch_agent!(worker_id) { |record| record["status"] = "completed" }
+
+    engine.begin_agent_interactive_focus(worker_id)
+    engine.mark_agent_interactive_focus_started(worker_id, pid: 52_424)
+    engine.note_agent_interactive_prompt(worker_id)
+    resumed = engine.end_agent_interactive_focus(worker_id)
+
+    assert_equal "accepted", resumed.fetch("status")
+    assert_equal "working", agent(engine, worker_id).fetch("status")
+    assert_equal "working", issue(engine, context.fetch("issue_id")).fetch("status")
+  end
+
   def test_focus_reclaims_a_live_native_process_left_by_a_crashed_owner
     client = InteractiveHarnessClient.new
     engine = build_engine(harness_client: client)
