@@ -6,7 +6,7 @@ The goal is simple: keep the developer in one place while many agents work in pa
 
 ## Quick start
 
-> **Current distribution:** Meringue is not yet published to RubyGems or GitHub Releases. The supported installation is a source checkout.
+> **Pre-release distribution:** Meringue is not yet published to RubyGems or GitHub Releases. Until the first authorized release, use a source checkout. The release process and planned Homebrew channel are documented in [Releasing and distribution](docs/releasing.md).
 
 ### 1. Check the prerequisites
 
@@ -36,11 +36,14 @@ bundle exec meringue
 
 The first interactive launch opens the guided setup for harness, model, thinking, theme, and optional experiments. To explore the interface without starting or authenticating a harness, run `bundle exec meringue demo` instead. See [first-run onboarding](docs/onboarding.md) and the [configuration reference](docs/config.md) for details.
 
-### 2. Update it later
+### 3. Update a source checkout
 
-run `/update` in meringue or `git pull` and `bundle install` yourself
+```bash
+git pull --ff-only
+bundle install
+```
 
-Your config and state live under `~/.meringue/`, outside the checkout, so this does not replace them.
+Your config and state live under `~/.meringue/`, outside the checkout, so this does not replace them. After the first RubyGems release, the normal install and update commands will be `gem install meringue` and `gem update meringue`; do not use them until a release is announced.
 
 ### Troubleshooting executable discovery
 
@@ -118,6 +121,7 @@ lib/meringue/tui/                  # terminal rendering, panes, navigation, styl
 lib/meringue/state/                # JSON persistence models and store
 lib/meringue/goals/                # goal-loop record, decisions, judge, and metric probe
 docs/config.md                     # config and harness provider reference
+docs/releasing.md                  # RubyGems release gates and Homebrew strategy
 docs/settings.md                   # full-screen settings, persistence, experiments, and shared setup UI
 docs/video-recording.md             # macOS proof-video workflow
 docs/commit-authorship.md          # worker commit identity policy and history audit
