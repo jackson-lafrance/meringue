@@ -12,19 +12,26 @@ module Meringue
         "antigravity" => "agy"
       }.freeze
       DEFAULT_ALACRITTY_COMMAND = "alacritty"
-      DEFAULT_SESSION_DIR = File.expand_path(
-        ENV.fetch("MERINGUE_AGENT_SESSION_DIR", ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
-      )
+      DEFAULT_SESSION_DIRECTORIES = {
+        "pi" => File.expand_path(
+          ENV.fetch("MERINGUE_AGENT_SESSION_DIR", ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
+        )
+      }.freeze
+      # Backward-compatible constant for callers that predate provider-keyed configuration.
+      DEFAULT_SESSION_DIR = DEFAULT_SESSION_DIRECTORIES.fetch("pi")
       MACOS_ALACRITTY_PATHS = [
         "/Applications/Alacritty.app/Contents/MacOS/alacritty",
         File.expand_path("~/Applications/Alacritty.app/Contents/MacOS/alacritty")
       ].freeze
 
-      def initialize(pi_command: nil, session_dir: DEFAULT_SESSION_DIR, alacritty_command: ENV["MERINGUE_ALACRITTY_COMMAND"], commands: {})
-        configured_commands = DEFAULT_COMMANDS.merge(stringify_keys(commands || {}))
-        configured_commands["pi"] = pi_command if present?(pi_command)
-        @commands = configured_commands
-        @session_dir = session_dir
+      def initialize(alacritty_command: ENV["MERINGUE_ALACRITTY_COMMAND"], commands: {}, session_directories: {},
+                     pi_command: nil, session_dir: nil)
+        @commands = DEFAULT_COMMANDS.merge(stringify_keys(commands || {}))
+        @session_directories = DEFAULT_SESSION_DIRECTORIES.merge(stringify_keys(session_directories || {}))
+        # Preserve the pre-registry constructor for external callers while all generic call sites
+        # use provider-keyed maps. These compatibility keywords configure the Pi launcher only.
+        @commands["pi"] = pi_command if present?(pi_command)
+        @session_directories["pi"] = session_dir if present?(session_dir)
         @custom_alacritty_command = present?(alacritty_command)
         @alacritty_command = @custom_alacritty_command ? alacritty_command : DEFAULT_ALACRITTY_COMMAND
       end
@@ -46,7 +53,7 @@ module Meringue
 
       private
 
-      attr_reader :commands, :session_dir, :alacritty_command
+      attr_reader :commands, :session_directories, :alacritty_command
 
       def custom_alacritty_command?
         @custom_alacritty_command
@@ -80,7 +87,8 @@ module Meringue
       end
 
       def pi_launch(agent)
-        session_file, error = available_pi_session_file(agent)
+        session_dir = provider_session_directory("pi")
+        session_file, error = available_pi_session_file(agent, session_dir: session_dir)
         return { "error" => "#{error} #{preserved_record_note}" } if error
 
         argv = command_parts("pi")
@@ -99,7 +107,7 @@ module Meringue
         command_parts("antigravity") + ["--continue"]
       end
 
-      def available_pi_session_file(agent)
+      def available_pi_session_file(agent, session_dir:)
         configured_file = expanded_session_file(agent)
         session_id = agent.fetch("harness_session_id", nil)
 
@@ -108,7 +116,7 @@ module Meringue
           return error ? [nil, unavailable_pi_session_message(agent, configured_file, error)] : [configured_file, nil]
         end
 
-        discovered_file, discovery_error = discover_pi_session_file(session_id)
+        discovered_file, discovery_error = discover_pi_session_file(session_id, session_dir: session_dir)
         return [discovered_file, nil] if discovered_file
 
         if configured_file
@@ -132,7 +140,7 @@ module Meringue
         File.expand_path(session_file) if present?(session_file)
       end
 
-      def discover_pi_session_file(session_id)
+      def discover_pi_session_file(session_id, session_dir:)
         return [nil, nil] unless present?(session_id) && present?(session_dir)
 
         directory = File.expand_path(session_dir)
@@ -183,6 +191,11 @@ module Meringue
 
       def unavailable_pi_session_message(agent, path, error)
         "Agent session history for #{agent_id(agent)} is unavailable because its saved session file is malformed: #{path} (#{error})."
+      end
+
+      def provider_session_directory(harness)
+        directory = session_directories[harness.to_s]
+        File.expand_path(directory) if present?(directory)
       end
 
       def preserved_record_note

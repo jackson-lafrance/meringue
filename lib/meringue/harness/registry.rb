@@ -64,6 +64,16 @@ module Meringue
       }.freeze
       # Matches the AgentTree's unknown-status convention.
       UNKNOWN_PROVIDER_GLYPH = "?"
+      # Environment markers that a workspace shell must not inherit from an
+      # enclosing managed session. The workspace passes this union to its
+      # generic shell adapter; focused harness sessions receive their own env.
+      MANAGED_SESSION_ENVIRONMENT_PATTERNS = [
+        /\API_/,
+        /\ACLAUDECODE\z/,
+        /\ACLAUDE_CODE_/,
+        /\ACLAUDE_PID\z/,
+        /\ACLAUDE_EFFORT\z/
+      ].freeze
       PROVIDER_ALIASES = {
         "pi" => "pi",
         "claude" => "claude",
@@ -77,9 +87,9 @@ module Meringue
         "antigravity cli" => "antigravity",
         "agy" => "antigravity"
       }.freeze
-      # Where a harness that stores its own session files keeps them. The directory name is Pi's
-      # because the files in it are Pi's; the environment variable is neutral because any backend
-      # with the same need reads it.
+      # Where the file-backed provider keeps its sessions. The legacy directory and environment
+      # variable names remain readable for existing installations; the neutral variable is the
+      # preferred setting for any backend with the same need.
       DEFAULT_AGENT_SESSION_DIR = File.expand_path(
         ENV.fetch("MERINGUE_AGENT_SESSION_DIR", ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
       )
@@ -193,7 +203,7 @@ module Meringue
       #
       # This deliberately does not reuse normalize_provider, which resolves a
       # blank value to the default provider: "no harness recorded" must not
-      # render as Pi.
+      # render as a selected backend.
       def self.provider_glyph(provider, ascii: ascii_glyphs?)
         name = provider.to_s.strip.downcase.gsub(/\s+/, " ")
         return UNKNOWN_PROVIDER_GLYPH if name.empty?
@@ -216,6 +226,16 @@ module Meringue
         Array(PROVIDER_THINKING_LEVELS.fetch(normalize_provider(provider), ModelCatalog::THINKING_LEVELS)).dup
       end
 
+      # Some harnesses adjust a requested reasoning level when a model does not
+      # advertise it. That policy belongs with provider integration data, not in
+      # the kernel, input parser, or TUI. Nil means the harness has no adjustment
+      # behavior Meringue can state authoritatively.
+      def self.adjusted_thinking_level(provider, requested, available_levels)
+        return nil unless normalize_provider(provider) == "pi"
+
+        PiClient.clamp_thinking_level(requested, available_levels)
+      end
+
       def self.ascii_glyphs?
         !ENV.fetch("MERINGUE_ASCII_GLYPHS", "").to_s.strip.empty?
       end
@@ -226,6 +246,10 @@ module Meringue
 
       def self.supported_provider_names
         PROVIDERS.map { |provider| public_provider_name(provider) }
+      end
+
+      def self.managed_session_environment_patterns
+        MANAGED_SESSION_ENVIRONMENT_PATTERNS
       end
 
       def self.provider_choices
@@ -314,7 +338,9 @@ module Meringue
       def terminal_session_opener
         TerminalSessionOpener.new(
           commands: PROVIDERS.each_with_object({}) { |provider, result| result[provider] = provider_command(provider) },
-          session_dir: provider_config("pi").fetch("session_dir", DEFAULT_AGENT_SESSION_DIR),
+          session_directories: {
+            "pi" => provider_config("pi").fetch("session_dir", DEFAULT_AGENT_SESSION_DIR)
+          },
           alacritty_command: config.value("terminal", "alacritty_command") || ENV["MERINGUE_ALACRITTY_COMMAND"]
         )
       end
@@ -445,7 +471,7 @@ module Meringue
       # Applies only runtime-safe provider defaults after an atomic Settings
       # transaction. Provider commands/environment/arguments and blacklist policy
       # remain restart-required, and cached clients stay attached to existing
-      # sessions. Pi clients receive only replacement spawn defaults.
+      # sessions. Cached clients receive only replacement spawn defaults.
       def reload_config!(updated_config, changed_ids: [])
         live_role_ids = %w[
           agent.head_harness agent.worker_harness
@@ -489,7 +515,7 @@ module Meringue
         self
       end
 
-      # Saves the selected values and reconfigures cached Pi clients in place.
+      # Saves the selected values and reconfigures cached provider clients in place.
       # Existing RPC processes keep their current effective settings; only a
       # later new-session spawn applies the replacement model/thinking argv.
       def update_session_defaults!(provider: nil, model: nil, model_role: nil, thinking_level: nil, thinking_role: nil)

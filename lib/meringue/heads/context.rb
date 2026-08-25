@@ -91,7 +91,7 @@ module Meringue
           You may answer directly with the HeadResult "response" field when no command, clarification, or substantive investigation is needed and the answer is already supported by the supplied context or stable Meringue behavior. Keep "summary" for a short description of your decision; it is not the user-facing answer. A nonblank response is a handled result and needs no NoOp.
           Always return exactly one HeadResult JSON object, even for a direct answer: put the answer in the "response" string field and never write prose without the JSON wrapper. The "response" field is optional, so omit it or use an empty string when routing only through commands; never use JSON null. Escape newlines inside every JSON string value as \\n instead of writing literal line breaks, and never embed a ``` code fence inside a string value.
           Do not perform substantive investigation yourself. When an informational request requires inspecting or synthesizing records, logs, prompts, dependencies, project files, or external facts beyond the supplied routing context, create or reuse an issue and spawn or prompt an informational worker to return the investigated answer.
-          Meringue housekeeping is different: when the user asks for maintenance the kernel already owns (prune, recount, kill, clear, direct record details, tree/state listings, theme, harness, or Pi session/default model and thinking settings), propose that user command yourself instead of creating an issue or spawning a worker. Follow the destructive-command confirmation rules in the reference below.
+          Meringue housekeeping is different: when the user asks for maintenance the kernel already owns (prune, recount, kill, clear, direct record details, tree/state listings, theme, harness, or agent session/default model and reasoning settings), propose that user command yourself instead of creating an issue or spawning a worker. Follow the destructive-command confirmation rules in the reference below.
           Treat the supplied routing context as candidate evidence, not a conversation database. Classify whether this message starts a new goal, follows an existing issue, or answers an open question, then deliberately choose whether to prompt, follow up, or replace an existing worker.
           Resolve project identity from the current user request before considering recent activity, active issues, or worker sessions. An explicit project name, id, repository path, or clearly identified local repository is authoritative; never attach a request to an unrelated recent issue merely because it is active or recent. If the identified local repository is not registered, propose AddProject before creating or routing work. If multiple projects remain plausible, ask for clarification instead of guessing.
           When routing_context.selected_target is present, it is explicit UI routing context: keep this message on its resolved issue. An agent selection resolves to that agent's owning issue; use the selected agent as a session-context hint, but still choose the appropriate healthy worker and PromptAgent mode through kernel commands. Never bypass head routing or prompt an agent from another issue.
@@ -99,7 +99,7 @@ module Meringue
           #{guidance_text}
           When proposing AddProject, use the concise suggested product name from project_discovery when available. Preserve intentional capitalization exactly, and do not use a worktree suffix, repository path slug, or verbose product description as the name.
           Before creating a GitHub-backed Meringue issue, resolve the relevant GitHub issue or pull request's exact current title with the permitted read-only title lookup and use that title unchanged as the Meringue issue title. Never substitute a generic number-based title such as "Fix PR #123", "Rebase PR #123", or "GitHub issue #123". If the relevant GitHub target or its exact title cannot be resolved unambiguously, ask a clarifying question instead of creating the issue.
-          Prefer a healthy existing worker session when its Pi or other harness history contains the context needed for the follow-up. Do not duplicate that harness history in Meringue state.
+          Prefer a healthy existing worker session when its harness history contains the context needed for the follow-up. Do not duplicate that harness history in Meringue state.
           When a takeover block is present, a previous head was still routing this request. Preserve its original request, any previous result/journal, and guidance, use the new user prompt as the correction or continuation, and do not re-propose durable work that the previous head already landed. The kernel releases the previous head only after this replacement session is recorded; return one coherent HeadResult for the replacement.
           An issue is the durable goal and a worker is one session step, so one goal that needs research and then implementation is one issue with two workers on it (issue_from_command on both, plus after_from_command and follow_up_of_command on the implementer), not two issues. Create a second issue only for a genuinely independent goal. Never write a worker prompt that polls Meringue state or sleeps waiting for another worker: the kernel owns that wait. An ordinary request to implement and deliver ends when the verified change is pushed and its pull request is opened or updated: do not create a completion head, CI/review continuation, checker worker, or external-condition gate, and do not tell the worker to watch checks or reviews. The user will explicitly retrigger follow-up work. Only when the user specifically requests CI remediation, review response, merge/deploy monitoring, or another post-delivery action may you route that named action; if it must wait for an external condition, queue it with after_command rather than making a worker poll. When explicitly requested completion-head routing itself must wait and the condition is known up front, put after_command inside the completion_head object so the kernel holds the continuation without spawning a checker worker.
           When the user wants an outcome driven to completion rather than attempted once ("keep going until", "don't stop until", "this is critical, it has to actually land") and there is a finish line the kernel can measure by running a command, that is a goal loop: propose CreateGoal instead of a single one-shot worker. CreateGoal mints its own issue from a prompt (send prompt plus project_id, or project_from_command for a project this batch registers), so you never have to create an issue first, and the kernel spawns and judges the attempt workers itself. When the outcome has no number but could be judged by reading the result (prose, onboarding copy, UX polish, "until it looks right"), that is still a goal loop: send judge.mode "reviewer" with the standard as success_criteria and no metric, and a reviewer session judges each iteration. Urgency alone is not a goal loop: if neither a command nor a reviewable standard defines done, route the work normally or ask one question about what done is measured by, rather than inventing a fake metric or using a goal to buy ordinary work extra iterations.
@@ -474,7 +474,7 @@ module Meringue
             "prompt_mode_note" => prompt_mode_note(agent, streaming: streaming, session_available: session_available),
             "prompt_count" => metadata.fetch("prompt_count", 0).to_i,
             "last_prompt_mode" => metadata.fetch("last_prompt_mode", nil),
-            "context_utilization" => context_utilization(metadata),
+            "context_utilization" => context_utilization(agent, metadata),
             "last_result" => complete_text(metadata.fetch("last_assistant_text", nil)),
             "workspace_branch" => agent.fetch("workspace_branch", nil),
             "workspace_mode" => agent.fetch("workspace_mode", "isolated"),
@@ -605,12 +605,11 @@ module Meringue
       def supported_prompt_modes(agent, streaming:, session_available:)
         return [] unless session_available
         return [] if terminal_for_prompting?(agent)
+        return ["normal"] unless streaming
 
-        if streaming
-          agent.fetch("harness", nil) == "pi" ? %w[steer follow_up] : []
-        else
-          ["normal"]
-        end
+        metadata = agent.fetch("harness_metadata", {}) || {}
+        advertised = Array(metadata.fetch("prompt_modes", [])).map(&:to_s)
+        advertised & %w[steer follow_up]
       end
 
       def recommended_prompt_mode(agent, streaming:, session_available:)
@@ -630,9 +629,21 @@ module Meringue
           "a normal prompt is accepted but the kernel delivers it as a follow-up."
       end
 
-      def context_utilization(metadata)
-        value = metadata.fetch("context_utilization", nil) || metadata.dig("pi_state", "contextUtilization")
-        value&.to_f
+      def context_utilization(agent, metadata)
+        usage = agent.dig("session_stats", "context_usage")
+        usage = {} unless usage.is_a?(Hash)
+        value = usage.fetch("percent", nil)
+        if value.nil?
+          used = usage.fetch("tokens", usage.fetch("used", nil))
+          capacity = usage.fetch("capacity", nil)
+          value = used.to_f / capacity.to_f if used && capacity && capacity.to_f.positive?
+        end
+        value ||= metadata.fetch("context_utilization", nil)
+        return nil if value.nil?
+
+        value = value.to_f
+        value /= 100.0 if value > 1.0
+        value
       end
 
       def routing_sort_key(record)

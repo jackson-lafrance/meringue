@@ -372,6 +372,7 @@ module Meringue
           process_metadata(process).merge(
             "kind" => kind.to_s,
             "session_name" => session_name,
+            "prompt_modes" => prompt_modes,
             "completed" => completed,
             "last_assistant_text" => completed ? extract_last_assistant_text(process.records, process.stdout_text) : nil
           ).compact

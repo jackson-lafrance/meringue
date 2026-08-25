@@ -6,7 +6,7 @@ require "stringio"
 # Shared, hermetic helpers for the TUI integration tests.
 #
 # Everything here renders into an in-memory Canvas/StringIO: no TTY is claimed,
-# no raw mode is entered, no Pi process is started, and nothing outside of a
+# no raw mode is entered, no harness process is started, and nothing outside of a
 # caller-provided Dir.mktmpdir is written.
 module TUISupport
   DEMO_STATE_PATH = File.expand_path("../../fixtures/demo_state.json", __dir__)

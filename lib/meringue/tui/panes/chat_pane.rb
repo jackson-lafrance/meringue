@@ -382,11 +382,11 @@ module Meringue
 
         def bottom_right_status_line(state)
           segments = compact_harness_status_segments(state)
-          defaults = (state.fetch("metadata", {}) || {}).fetch("pi_session_defaults", {}) || {}
+          defaults = (state.fetch("metadata", {}) || {}).fetch("agent_session_defaults", {}) || {}
           return [] if segments.empty? && defaults.empty?
 
           unless defaults.empty?
-            role_values = normalized_pi_role_defaults(defaults)
+            role_values = normalized_agent_role_defaults(defaults)
             segments << [" · ", Style::DIM] unless segments.empty?
             segments.concat(compact_model_status_segments(**role_values))
           end
@@ -399,7 +399,7 @@ module Meringue
         # to render. Otherwise a save that moves from a shared value to role
         # overrides can make the right-aligned footer alternate between a compact
         # shared label and a misleading "mixed" placeholder across frames.
-        def normalized_pi_role_defaults(defaults)
+        def normalized_agent_role_defaults(defaults)
           shared_model = present_status_value(defaults["model"])
           shared_thinking = present_status_value(defaults["thinking_level"])
           roles = defaults["roles"].is_a?(Hash) ? defaults["roles"] : {}
@@ -1003,8 +1003,7 @@ module Meringue
           )
           capacity = nil unless capacity&.positive?
           used = numeric_telemetry_value(usage.key?("tokens") ? usage["tokens"] : usage["used"])
-          approximate = usage["approximate"] == true || usage["estimated"] == true ||
-                        usage["source"].to_s == "pi_session_stats"
+          approximate = usage["approximate"] == true || usage["estimated"] == true
           prefix = approximate && used ? "~" : ""
           used_text = used.nil? ? "?" : token_count(used)
           capacity_text = capacity.nil? ? "?" : token_count(capacity)

@@ -131,7 +131,7 @@ module Meringue
         state["counters"]["workers_by_issue"] ||= {}
         state["metadata"] ||= {}
         migrate_active_harness_defaults!(state)
-        migrate_pi_session_defaults!(state)
+        migrate_agent_session_defaults!(state)
         state["metadata"]["created_at"] ||= now
         state["metadata"]["updated_at"] ||= state["metadata"].fetch("created_at")
         migrate_pull_requests_to_issues!(state)
@@ -156,17 +156,21 @@ module Meringue
         state
       end
 
-      # Older state snapshots stored one shared Pi model alongside role-specific
-      # thinking values. Materialize that shared model into both role records so
-      # renderers and later settings code can consume one stable shape while the
-      # legacy top-level value remains intact for compatibility.
-      def migrate_pi_session_defaults!(state)
+      # State written when Pi was the only harness used a provider-specific key
+      # for future agent defaults. Import it once into the generic metadata shape;
+      # the neutral key is authoritative when both are present. Older snapshots
+      # also stored one shared model alongside role-specific thinking values, so
+      # materialize that model into both role records for stable consumers.
+      def migrate_agent_session_defaults!(state)
         metadata = state["metadata"]
         return state unless metadata.is_a?(Hash)
 
-        defaults = metadata["pi_session_defaults"]
+        legacy_defaults = metadata["pi_session_defaults"]
+        defaults = metadata["agent_session_defaults"]
+        defaults = copy_state_value(legacy_defaults) unless defaults.is_a?(Hash)
         return state unless defaults.is_a?(Hash)
 
+        metadata["agent_session_defaults"] = defaults
         shared_model = defaults["model"].to_s.strip
         roles = defaults["roles"]
         roles = {} unless roles.is_a?(Hash)
@@ -179,6 +183,17 @@ module Meringue
           migrated[role] = role_defaults
         end
         state
+      end
+
+      def copy_state_value(value)
+        case value
+        when Hash
+          value.each_with_object({}) { |(key, nested), copy| copy[key] = copy_state_value(nested) }
+        when Array
+          value.map { |nested| copy_state_value(nested) }
+        else
+          value
+        end
       end
 
       # Older worker records predate the explicit safety contract. Their historical workspaces

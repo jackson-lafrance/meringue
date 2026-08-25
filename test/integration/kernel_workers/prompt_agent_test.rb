@@ -153,7 +153,7 @@ class KernelWorkersPromptAgentTest < Minitest::Test
     assert_includes worker.fetch("harness_metadata").fetch("prompt_command_ids"), "H138-C5"
     assert_empty worker.fetch("harness_metadata").fetch("pending_prompts")
     assert state(engine).fetch("logs").any? { |entry|
-      entry.fetch("details", {}).fetch("delivery_confirmation", nil) == "pi_session_transcript"
+      entry.fetch("details", {}).fetch("delivery_confirmation", nil) == "harness_session_receipt"
     }
   end
 

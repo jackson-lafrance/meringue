@@ -200,7 +200,7 @@ Paste is composer-only; the logs pane is copy-only.
 
 ### Large pastes collapse to a placeholder
 
-A paste over 10 lines or 1000 characters does not enter the composer as text. It is parked in memory and the composer shows a single placeholder chunk instead, the same shape Pi uses:
+A paste over 10 lines or 1000 characters does not enter the composer as text. It is parked in memory and the composer shows a single placeholder chunk:
 
 ```txt
 › [paste #1 +3000 lines] please review this

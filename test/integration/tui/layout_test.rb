@@ -30,7 +30,7 @@ class TuiLayoutTest < Minitest::Test
       empty_state.merge(
         "metadata" => {
           "active_harness" => "pi",
-          "pi_session_defaults" => {
+          "agent_session_defaults" => {
             "roles" => {
               "head" => { "model" => "openai/gpt-5.6-luna", "thinking_level" => "low" },
               "worker" => { "model" => "anthropic/claude-opus-5", "thinking_level" => "max" }

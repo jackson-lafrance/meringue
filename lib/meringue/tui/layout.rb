@@ -580,8 +580,8 @@ module Meringue
       # same geometry the renderer uses. Callers clamp with this so scrolling
       # past the end cannot build up a dead offset.
       # Native focus uses the dashboard's logs rectangle rather than the former
-      # full-screen workspace rectangle. The PTY receives exactly the drawable
-      # content size so Pi reflows and handles terminal resize events correctly.
+      # full-screen workspace rectangle. The harness PTY receives exactly the
+      # drawable content size so it can reflow and handle terminal resize events.
       def embedded_agent_workspace_dimensions(state, width:, height:)
         metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
         {

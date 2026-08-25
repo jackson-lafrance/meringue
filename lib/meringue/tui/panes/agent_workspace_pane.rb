@@ -542,7 +542,7 @@ module Meringue
                       else
                         value
                       end
-          # Pi emits UTC ISO8601 or epoch timestamps. Use the same recency-aware
+          # Harnesses may emit UTC ISO8601 or epoch timestamps. Use the same recency-aware
           # local-clock formatting as the dashboard instead of the source zone.
           Timestamps.display(timestamp) || value.to_s
         rescue ArgumentError, RangeError, TypeError

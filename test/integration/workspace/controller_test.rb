@@ -255,15 +255,23 @@ class WorkspaceControllerTest < Minitest::Test
     end
   end
 
-  def test_open_workspace_runs_native_pi_in_the_focus_pty_and_resumes_on_close
+  def test_open_workspace_runs_the_focused_harness_pty_and_resumes_on_close
     with_workspace_tmpdir do |tmp|
       workspace = File.join(tmp, "worktree")
       FileUtils.mkdir_p(workspace)
       focus = InteractiveFocusDouble.new
+      focus.begin_result = {
+        "status" => "accepted",
+        "result" => {
+          "interactive_argv" => ["agent-cli", "--session", "session.json"],
+          "interactive_env" => {},
+          "interactive_shutdown_input" => "\u0003"
+        }
+      }
       controller = Meringue::Workspace::Controller.new(
         terminal_manager: Meringue::Workspace::TerminalManager.new(
           session_factory: lambda {
-            session = WorkspaceSupport::FakeTerminalSession.new(output: "Pi ready\r\n")
+            session = WorkspaceSupport::FakeTerminalSession.new(output: "Agent ready\r\n")
             @sessions << session
             session
           }
@@ -271,14 +279,14 @@ class WorkspaceControllerTest < Minitest::Test
         editor_launcher: @editor,
         focus_session_service: focus,
         interactive_session_factory: lambda { |command:, env:|
-          assert_equal ["pi", "--session", "session.json"], command
+          assert_equal ["agent-cli", "--session", "session.json"], command
           assert_equal({}, env)
-          session = WorkspaceSupport::FakeTerminalSession.new(output: "Pi ready\r\n")
+          session = WorkspaceSupport::FakeTerminalSession.new(output: "Agent ready\r\n")
           @sessions << session
           session
         }
       )
-      agent = worker_agent(workspace_path: workspace, **{ "harness" => "pi" })
+      agent = worker_agent(workspace_path: workspace, **{ "harness" => "custom" })
 
       opened = controller.open_workspace(agent: agent, rows: 10, columns: 30)
       assert_equal "active", opened.fetch("status")
@@ -288,12 +296,12 @@ class WorkspaceControllerTest < Minitest::Test
 
       snapshot = controller.agent_snapshot(agent: agent, rows: 10, columns: 30)
       assert_equal true, snapshot.fetch("interactive")
-      assert_equal ["Pi ready", ""], snapshot.fetch("lines")
+      assert_equal ["Agent ready", ""], snapshot.fetch("lines")
       assert_equal({ "status" => "written", "bytes" => 2 }, controller.handle_agent_key(key: "x\n", agent: agent))
 
       closed = controller.close_workspace(agent: agent)
       assert_equal "closed", closed.fetch("status")
-      assert_equal ["x\n", "\e"], @sessions.last.writes
+      assert_equal ["x\n", "\u0003"], @sessions.last.writes
       assert_equal 1, @sessions.last.closes
       assert_equal [agent.fetch("id")], focus.ended
     ensure
@@ -301,11 +309,19 @@ class WorkspaceControllerTest < Minitest::Test
     end
   end
 
-  def test_async_native_close_interrupts_compaction_without_blocking_the_caller
+  def test_async_handoff_close_uses_the_provider_shutdown_input_without_blocking_the_caller
     with_workspace_tmpdir do |tmp|
       workspace = File.join(tmp, "worktree")
       FileUtils.mkdir_p(workspace)
       focus = CompactingFocusDouble.new
+      focus.begin_result = {
+        "status" => "accepted",
+        "result" => {
+          "interactive_argv" => ["agent-cli", "--session", "session.json"],
+          "interactive_env" => {},
+          "interactive_shutdown_input" => "\e"
+        }
+      }
       interactive_session = WorkspaceSupport::FakeTerminalSession.new
       controller = Meringue::Workspace::Controller.new(
         editor_launcher: @editor,
@@ -324,7 +340,7 @@ class WorkspaceControllerTest < Minitest::Test
       assert_equal "pending", closing.fetch("status")
       assert_equal agent.fetch("id"), Timeout.timeout(2) { focus.resume_started.pop }
       assert_equal ["\e"], interactive_session.writes,
-                   "Pi's interrupt key must cancel autocompaction before PTY shutdown"
+                   "the provider's interrupt input must be sent before PTY shutdown"
       refute controller.agent_interactive?(agent: agent)
       assert controller.interactive_close_pending?(agent: agent)
 

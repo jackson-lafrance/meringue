@@ -473,7 +473,7 @@ class InputSlashCommandParserTest < Minitest::Test
 
   def test_future_default_value_suggestions_offer_models_and_thinking_levels
     state = sample_state
-    state["metadata"] = { "pi_session_defaults" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "xhigh" } }
+    state["metadata"] = { "agent_session_defaults" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "xhigh" } }
     state.fetch("agents").first["harness_session_id"] = "pi-session-1"
 
     models = Meringue::Input::SlashCommandParser.command_suggestion_records("/model openai", limit: 5, state: state)
@@ -488,7 +488,7 @@ class InputSlashCommandParserTest < Minitest::Test
     state = sample_state
     state["metadata"] = {
       "active_harness" => "pi",
-      "pi_session_defaults" => {
+      "agent_session_defaults" => {
         "model" => "openai/gpt-5.6-sol",
         "roles" => {
           "head" => { "thinking_level" => "low" },
@@ -506,7 +506,7 @@ class InputSlashCommandParserTest < Minitest::Test
 
   def test_role_specific_model_suggestions_lead_with_that_roles_default
     state = sample_state_with_model_catalog
-    state["metadata"]["pi_session_defaults"] = {
+    state["metadata"]["agent_session_defaults"] = {
       "model" => "anthropic/claude-opus-5",
       "roles" => {
         "head" => { "model" => "openai/gpt-5.6-sol" },
@@ -659,13 +659,13 @@ class InputSlashCommandParserTest < Minitest::Test
     thinking = suggestion_records("/thinking ", state)
     assert_equal "xhigh", thinking.first.fetch("usage")
     assert_includes thinking.first.fetch("description"), "supported by anthropic-flex/claude-opus-5"
-    assert_equal Meringue::Harness::PiClient::THINKING_LEVELS.sort,
+    assert_equal Meringue::Harness::ModelCatalog::THINKING_LEVELS.sort,
                  thinking.map { |record| record.fetch("usage") }.sort
   end
 
   # The catalog labels thinking levels; it no longer decides which ones exist.
   # Every level the kernel accepts is offered, the saved default leads the list,
-  # and a level the model does not advertise says what Pi will run instead.
+  # and provider-specific adjustment copy comes from the harness registry.
   def test_thinking_suggestions_offer_every_accepted_level_and_lead_with_the_current_default
     state = sample_state_with_model_catalog
 
@@ -677,12 +677,12 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_includes records.first.fetch("description"), "supported by anthropic-flex/claude-opus-5"
 
     # anthropic-flex/claude-opus-5 advertises only xhigh/max, so the rest of the
-    # ladder stays selectable but says Pi will clamp it.
+    # ladder stays selectable but explains the selected harness's adjustment.
     minimal = records.find { |record| record.fetch("usage") == "minimal" }
     refute minimal.fetch("current")
     assert_includes minimal.fetch("description"), "future sessions"
     assert_includes minimal.fetch("description"), "not listed for anthropic-flex/claude-opus-5"
-    assert_includes minimal.fetch("description"), "Pi clamps it to xhigh"
+    assert_includes minimal.fetch("description"), "Pi adjusts it to xhigh"
 
     max = records.find { |record| record.fetch("usage") == "max" }
     assert_includes max.fetch("description"), "supported by anthropic-flex/claude-opus-5"
@@ -698,6 +698,26 @@ class InputSlashCommandParserTest < Minitest::Test
     # cannot resolve to the saved default "xhigh" just because it is hoisted.
     assert_equal %w[high xhigh], suggestion_records("/thinking hi", state).map { |record| record.fetch("usage") }
     assert_equal ["off"], suggestion_records("/thinking of", state).map { |record| record.fetch("usage") }
+  end
+
+  def test_thinking_suggestions_do_not_apply_pi_adjustment_rules_to_another_harness
+    reference = "anthropic/claude-opus-5"
+    catalogs = {
+      "claude" => model_catalog_snapshot(
+        harness: "claude",
+        models: [
+          { "provider" => "anthropic", "id" => "claude-opus-5", "name" => "Claude Opus 5",
+            "thinking_levels" => %w[low medium high], "reasoning" => true }
+        ]
+      )
+    }
+    state = sample_state_with_model_catalog(harness: "claude", catalogs: catalogs, default_model: reference)
+
+    minimal = suggestion_records("/thinking minimal", state).first
+
+    assert_includes minimal.fetch("description"), "not listed for #{reference}"
+    assert_includes minimal.fetch("description"), "verify support with Claude Code"
+    refute_includes minimal.fetch("description"), "Pi"
   end
 
   # Regression for "the max thinking level isn't appearing in /thinking even
@@ -717,19 +737,19 @@ class InputSlashCommandParserTest < Minitest::Test
       )
     }
     state = sample_state_with_model_catalog(catalogs: catalogs, default_model: proxy)
-    state.dig("metadata", "pi_session_defaults")["thinking_level"] = "max"
+    state.dig("metadata", "agent_session_defaults")["thinking_level"] = "max"
 
     records = suggestion_records("/thinking ", state)
     usages = records.map { |record| record.fetch("usage") }
 
     assert_includes usages, "max"
     assert_includes usages, "xhigh"
-    assert_equal Meringue::Harness::PiClient::THINKING_LEVELS.sort, usages.sort
+    assert_equal Meringue::Harness::ModelCatalog::THINKING_LEVELS.sort, usages.sort
     # The level in force is the first thing the three-row popup shows.
     assert_equal "max", usages.first
     assert_includes records.first.fetch("description"), "current default"
     assert_includes records.first.fetch("description"), "not listed for #{proxy}"
-    assert_includes records.first.fetch("description"), "Pi clamps it to xhigh"
+    assert_includes records.first.fetch("description"), "Pi adjusts it to xhigh"
     # Typing the level the kernel accepts still completes it.
     assert_equal "/thinking max", suggestion_records("/thinking max", state).first.fetch("completion")
   end

@@ -1,6 +1,6 @@
 # Focused worker workspace: delivery and recovery
 
-The focused workspace is an auxiliary, issue-specific deep-interaction tool. The dashboard's natural-language chat and stateless head agents remain Meringue's default orchestration path. Open a worker workspace only when an issue benefits from sustained direction, iterative planning, research, investigation, or direct visibility into worker responses and tool calls. Direct workspace follow-ups continue the selected worker's existing harness context through kernel-owned prompting; they do not create a second conversation model or expose raw Pi process controls.
+The focused workspace is an auxiliary, issue-specific deep-interaction tool. The dashboard's natural-language chat and stateless head agents remain Meringue's default orchestration path. Open a worker workspace only when an issue benefits from sustained direction, iterative planning, research, investigation, or direct visibility into worker responses and tool calls. Direct workspace follow-ups continue the selected worker's existing harness context through kernel-owned prompting; they do not create a second conversation model or expose raw harness process controls.
 
 This document describes the persistence and degraded-state contracts used by that workspace. The renderer and terminal/editor adapters consume these contracts rather than copying delivery metadata or deleting records when a dependency disappears.
 

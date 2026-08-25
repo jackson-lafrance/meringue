@@ -222,6 +222,7 @@ class KernelMaintenanceReconcileSessionsTest < Minitest::Test
         "completed" => false,
         "is_streaming" => true,
         "last_event_at" => "2026-01-01T00:00:01Z",
+        "provider_state" => { "message_count" => 7, "status" => "active" },
         "reconcile_state" => "healthy"
       }
     )
@@ -230,7 +231,10 @@ class KernelMaintenanceReconcileSessionsTest < Minitest::Test
       "sess-1" => {
         "streaming" => true,
         "last_event_at" => "2026-01-01T00:00:02Z",
-        "metadata" => { "messageCount" => 42 }
+        "metadata" => {
+          "messageCount" => 42,
+          "provider_state" => { "message_count" => 99, "status" => "active" }
+        }
       }
     }
     client_class = Class.new(StubHarnessClient) do
@@ -257,6 +261,7 @@ class KernelMaintenanceReconcileSessionsTest < Minitest::Test
     assert_equal before.fetch("projects").first.fetch("updated_at"), after.fetch("projects").first.fetch("updated_at")
     assert_equal before.fetch("issues").first.fetch("updated_at"), after.fetch("issues").first.fetch("updated_at")
     assert_equal before.fetch("agents").first.fetch("updated_at"), after.fetch("agents").first.fetch("updated_at")
+    assert_equal 7, after.dig("agents", 0, "harness_metadata", "provider_state", "message_count")
   end
 
   def test_session_identity_transition_is_persisted_immediately

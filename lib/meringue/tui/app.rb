@@ -1004,8 +1004,8 @@ module Meringue
           if agent_workspace_scroll_max(state).positive?
             scroll_agent_workspace(key, state)
           else
-            # When the TUI has no retained rows of its own, let Pi keep its native
-            # mouse behavior (for example, its internal selection/list scrolling).
+            # When the TUI has no retained rows of its own, let the focused harness keep
+            # its native mouse behavior (for example, internal selection/list scrolling).
             event = layout.agent_workspace_mouse_event(
               state,
               width: render_width,
@@ -2282,7 +2282,7 @@ module Meringue
 
       # One leader line describes the whole focused workspace. Labels come from
       # the active keybindings so custom bindings stay accurate, and they stay
-      # harness-agnostic so a non-Pi backend reads correctly.
+      # harness-agnostic so every backend reads correctly.
       def workspace_leader_commands
         WORKSPACE_COMMAND_ACTIONS.filter_map do |action|
           next if action == "workspace_open_pull_request" && !github_support_enabled?
@@ -5998,8 +5998,8 @@ module Meringue
         if current
           status = current.fetch("status", nil).to_s
           return unless %w[completed killed].include?(status)
-          # A completed Pi worker is already terminal when native focus begins. Keep its pending
-          # or active PTY alive; treating that pre-existing status as a new settle cancels the
+          # A completed worker is already terminal when native focus begins. Keep its pending or
+          # active harness PTY alive; treating that pre-existing status as a new settle cancels the
           # handoff on the next frame and immediately resumes the dashboard session.
           return if status == "completed" && embedded_agent_workspace?
         end

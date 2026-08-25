@@ -438,8 +438,8 @@ module Meringue
       end
 
       # A terminal row can be visually meaningful even when every character is a
-      # space: Pi uses styled padding for selected/highlighted rows. Keep those
-      # cells in the focused view so the ANSI background reaches the viewport
+      # space: interactive programs use styled padding for selected/highlighted
+      # rows. Keep those cells so the ANSI background reaches the viewport
       # edge instead of being mistaken for trailing empty space.
       def visible_line_length(chars, styles = nil)
         index = chars.each_index.reverse_each.find do |column|
