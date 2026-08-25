@@ -7,9 +7,7 @@ module Meringue
     # exposed by the input layer.
     module WorkerSpawningGuidance
       DEFAULT_PROMPT = <<~TEXT.strip
-        Choose a worker's model and thinking level for the task instead of applying one setting to every task.
-
-        Use the exact @<provider>/<model> and #<thinking-level> markers when expressing a deliberate worker selection. Examples from the model catalog: implementation work can use @openai/gpt-5.6-luna with #xhigh thinking; investigation work can use @openai/gpt-5.6-sol with a task-appropriate thinking level. These are examples, not a hard-coded allowlist: choose from the configured catalog when it is available, and use only accepted thinking levels (off, minimal, low, medium, high, xhigh, max). Put the selected model and thinking_level on SpawnWorker, and leave either field omitted when no deliberate choice is needed.
+        Choose each worker's model and thinking level from the task's complexity, risk, and need for speed. Use lighter choices for routine, bounded work and stronger choices for ambiguous or high-impact work. Set both model and thinking_level explicitly on every SpawnWorker, using an available model and one of off, minimal, low, medium, high, xhigh, or max.
       TEXT
 
       module_function

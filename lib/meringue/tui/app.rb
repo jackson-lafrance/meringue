@@ -4044,34 +4044,78 @@ module Meringue
           end
           return unchanged
         end
-        if ENTER_KEYS.include?(key)
+        if keybinding?("newline", key)
+          insert_settings_editor_text("\n")
+          return unchanged
+        end
+        if keybinding?("submit", key)
           @settings_editor = nil if apply_settings_editor
           return unchanged
         end
-        if paste_key?(key)
-          insert_settings_editor_text(paste_text(key))
+        if paste_key?(key) || plain_text_paste_key?(key)
+          insert_settings_editor_text(paste_key?(key) ? paste_text(key) : key)
           return unchanged
         end
         if (TAB_KEYS.include?(key) || keybinding?("complete_suggestion", key)) && editor.fetch("id") == "experiments.worker_spawning_guidance_prompt"
           complete_settings_guidance_editor(state)
           return unchanged
         end
-        if keybinding?("delete_backward", key)
-          chars = editor.fetch("buffer").chars
-          cursor = editor.fetch("cursor").to_i
-          if cursor.positive?
-            chars.delete_at(cursor - 1)
-            editor["buffer"] = chars.join
-            editor["cursor"] = cursor - 1
+
+        selection_action = SELECTION_MOVEMENTS.keys.find { |action| keybinding?(action, key) }
+        if selection_action
+          move_settings_editor_selection(SELECTION_MOVEMENTS.fetch(selection_action), state)
+          return unchanged
+        end
+        if keybinding?("copy_selection", key) && settings_editor_selection_range
+          copy_settings_editor_selection
+          return unchanged
+        end
+        if keybinding?("cut_selection", key) && settings_editor_selection_range
+          copy_settings_editor_selection
+          delete_settings_editor_selection
+          return unchanged
+        end
+        if keybinding?("paste_clipboard", key)
+          text = Clipboard.paste
+          if text.to_s.empty?
+            editor["status"] = "clipboard is empty"
+          else
+            insert_settings_editor_text(text)
           end
           return unchanged
         end
-        if LEFT_KEYS.include?(key)
-          editor["cursor"] = [editor.fetch("cursor").to_i - 1, 0].max
+        if ctrl_c_key?(key)
+          editor["buffer"] = +""
+          editor["cursor"] = 0
+          clear_settings_editor_selection
           return unchanged
         end
-        if RIGHT_KEYS.include?(key)
-          editor["cursor"] = [editor.fetch("cursor").to_i + 1, editor.fetch("buffer").chars.length].min
+
+        if selection_edit_key?(key) && settings_editor_selection_range
+          delete_settings_editor_selection
+          return unchanged
+        end
+        if keybinding?("delete_backward", key)
+          update_settings_editor_buffer(*delete_backward(editor.fetch("buffer"), editor.fetch("cursor")))
+          return unchanged
+        end
+        if keybinding?("delete_forward", key)
+          update_settings_editor_buffer(*delete_forward(editor.fetch("buffer"), editor.fetch("cursor")))
+          return unchanged
+        end
+        if keybinding?("delete_word_backward", key)
+          update_settings_editor_buffer(*delete_backward_word(editor.fetch("buffer"), editor.fetch("cursor")))
+          return unchanged
+        end
+        if keybinding?("delete_word_forward", key)
+          update_settings_editor_buffer(*delete_forward_word(editor.fetch("buffer"), editor.fetch("cursor")))
+          return unchanged
+        end
+
+        moved = settings_editor_cursor_after_navigation(key, state)
+        if moved != editor.fetch("cursor").to_i
+          editor["cursor"] = moved
+          clear_settings_editor_selection
           return unchanged
         end
         if printable_key?(key)
@@ -4083,24 +4127,130 @@ module Meringue
 
       def complete_settings_guidance_editor(state)
         editor = @settings_editor
-        records = Input::SlashCommandParser.command_suggestion_records(editor.fetch("buffer"), limit: nil, state: state)
-        record = records.find { |candidate| candidate.fetch("completion", "") != editor.fetch("buffer") }
+        chars = editor.fetch("buffer").chars
+        cursor = editor.fetch("cursor").to_i.clamp(0, chars.length)
+        prefix = chars.first(cursor).join
+        suffix = chars.drop(cursor).join
+        records = Input::SlashCommandParser.command_suggestion_records(prefix, limit: nil, state: state)
+        record = records.find { |candidate| candidate.fetch("completion", "") != prefix }
         return false unless record
 
         completion = record.fetch("completion")
-        editor["buffer"] = completion
+        editor["buffer"] = completion + suffix
         editor["cursor"] = completion.chars.length
+        clear_settings_editor_selection
         true
       end
 
       def insert_settings_editor_text(text)
         editor = @settings_editor
-        chars = editor.fetch("buffer").chars
+        delete_settings_editor_selection if settings_editor_selection_range
+        buffer, cursor = insert_text(editor.fetch("buffer"), editor.fetch("cursor"), text)
+        update_settings_editor_buffer(buffer, cursor)
+      end
+
+      def settings_editor_selection_range
+        selection = @settings_editor&.fetch("selection", nil)
+        return nil unless selection.is_a?(Hash)
+
+        length = @settings_editor.fetch("buffer", "").chars.length
+        start_index = selection.fetch("start", 0).to_i.clamp(0, length)
+        finish_index = selection.fetch("end", 0).to_i.clamp(0, length)
+        return nil if finish_index <= start_index
+
+        (start_index...finish_index)
+      end
+
+      def clear_settings_editor_selection
+        return unless @settings_editor
+
+        @settings_editor.delete("selection")
+        @settings_editor.delete("selection_anchor")
+      end
+
+      def update_settings_editor_buffer(buffer, cursor)
+        @settings_editor["buffer"] = buffer
+        @settings_editor["cursor"] = cursor
+        @settings_editor.delete("status")
+        clear_settings_editor_selection
+        [buffer, cursor]
+      end
+
+      def delete_settings_editor_selection
+        range = settings_editor_selection_range
+        return false unless range
+
+        buffer, cursor = delete_range(@settings_editor.fetch("buffer"), range)
+        update_settings_editor_buffer(buffer, cursor)
+        true
+      end
+
+      def copy_settings_editor_selection
+        range = settings_editor_selection_range
+        return false unless range
+
+        text = @settings_editor.fetch("buffer").chars[range].join
+        transport = Clipboard.copy(text, output: clipboard_output)
+        @settings_editor["status"] = transport ? copy_status_text(text) : "clipboard unavailable"
+        !transport.nil?
+      end
+
+      def move_settings_editor_selection(movement, state)
+        editor = @settings_editor
+        cursor = editor.fetch("cursor").to_i
+        anchor = editor.fetch("selection_anchor", cursor).to_i
+        moved = settings_editor_cursor_for_movement(movement, state: state)
+        editor["cursor"] = moved
+        editor["selection_anchor"] = anchor
+        start_index, finish_index = [anchor, moved].minmax
+        if finish_index > start_index
+          editor["selection"] = { "start" => start_index, "end" => finish_index }
+        else
+          editor.delete("selection")
+        end
+        moved
+      end
+
+      def settings_editor_cursor_after_navigation(key, state)
+        movement = if keybinding?("cursor_left", key) then :left
+                   elsif keybinding?("cursor_right", key) then :right
+                   elsif keybinding?("cursor_up", key) then :up
+                   elsif keybinding?("cursor_down", key) then :down
+                   elsif keybinding?("cursor_home", key) then :home
+                   elsif keybinding?("cursor_end", key) then :end
+                   elsif keybinding?("cursor_word_left", key) then :word_left
+                   elsif keybinding?("cursor_word_right", key) then :word_right
+                   end
+        return @settings_editor.fetch("cursor").to_i unless movement
+
+        settings_editor_cursor_for_movement(movement, state: state)
+      end
+
+      def settings_editor_cursor_for_movement(movement, state: nil)
+        editor = @settings_editor
+        buffer = editor.fetch("buffer").to_s
+        chars = buffer.chars
         cursor = editor.fetch("cursor").to_i.clamp(0, chars.length)
-        insertion = text.to_s.chars
-        chars.insert(cursor, *insertion)
-        editor["buffer"] = chars.join
-        editor["cursor"] = cursor + insertion.length
+        case movement
+        when :left then [cursor - 1, 0].max
+        when :right then [cursor + 1, chars.length].min
+        when :up, :down
+          MultilineInput.vertical_cursor(
+            buffer,
+            cursor,
+            direction: movement,
+            width: layout.settings_text_width(
+              state || compose_state(-> { State::Models.empty_state }, ""),
+              width: render_width,
+              height: render_height
+            )
+          )
+        when :home then current_line_start(chars, cursor)
+        when :end then current_line_end(chars, cursor)
+        when :word_left then previous_word_boundary(chars, cursor)
+        when :word_right then next_word_start(chars, cursor)
+        else cursor
+        end
       end
 
       def apply_settings_editor
@@ -5132,7 +5282,7 @@ module Meringue
       end
 
       def paste_text(key)
-        key.fetch("text", "").to_s.tr("\r", "\n")
+        normalize_input_text(key.fetch("text", ""))
       end
 
       def plain_text_paste_key?(key)

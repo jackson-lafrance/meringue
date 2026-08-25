@@ -466,6 +466,17 @@ module Meringue
         settings_pane.hit(state, width: width, height: height, x: x, y: y)
       end
 
+      # Content width used by the inline guidance editor. It is the same width
+      # SettingsPane renders, so soft-wrap cursor movement cannot drift from the
+      # visible rows.
+      def settings_text_width(state, width:, height:)
+        geometry = settings_pane.geometry(state, width: width, height: height)
+        return 1 if geometry.fetch(:too_small, false)
+
+        bounds = geometry.fetch(geometry.fetch(:setup, false) ? :card : :detail)
+        [bounds.fetch(:width).to_i - 4, 1].max
+      end
+
       def status_bar_composer_hit(state, width:, height:, x:, y:)
         return :inert unless status_bar_composer_active?(state)
 
