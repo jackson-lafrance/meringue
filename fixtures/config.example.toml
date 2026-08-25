@@ -16,7 +16,7 @@ schema_version = 1
 # lookups, delivery PR verification, markers, pickers, and opening actions.
 github_support = false
 # worker_spawning_guidance = false
-# worker_spawning_guidance_prompt = "For implementation use @openai/gpt-5.6-luna #xhigh; for investigation use @openai/gpt-5.6-sol."
+# worker_spawning_guidance_prompt = "Choose lighter models for routine work and stronger models for ambiguous or high-impact work. Set both model and thinking_level explicitly on every SpawnWorker."
 
 [tui]
 # Default yellow/white Meringue palette. Other options:
@@ -42,7 +42,7 @@ colorscheme = "meringue"
 # provider applies to both head and worker agents unless overridden below.
 provider = "pi"
 # head_provider = "claude"
-# worker_provider = "antigravity"
+# worker_provider = "pi"
 
 [harness.pi]
 command = "pi"
@@ -76,11 +76,6 @@ command = "claude"
 use_json_schema = true
 head_extra_args = ["--effort", "high", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan", "--disable-slash-commands"]
 worker_extra_args = ["--effort", "high", "--permission-mode", "acceptEdits"]
-
-[harness.antigravity]
-command = "agy"
-head_extra_args = []
-worker_extra_args = []
 
 [terminal]
 # alacritty_command = "/Applications/Alacritty.app/Contents/MacOS/alacritty"

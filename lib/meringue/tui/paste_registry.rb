@@ -72,6 +72,20 @@ module Meringue
         @entries[id.to_i]
       end
 
+      # Undo snapshots need the parked bodies as well as the visible markers.
+      # The strings are immutable from this class's perspective, so shallow
+      # copies keep snapshots cheap even for multi-thousand-line pastes.
+      def snapshot
+        { entries: @entries.dup, counter: @counter }
+      end
+
+      def restore!(snapshot)
+        value = snapshot.is_a?(Hash) ? snapshot : {}
+        @entries = (value[:entries] || {}).dup
+        @counter = value.fetch(:counter, 0).to_i
+        self
+      end
+
       def large?(text)
         value = text.to_s
         return false if value.empty?

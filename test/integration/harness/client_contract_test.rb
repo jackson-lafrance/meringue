@@ -13,8 +13,7 @@ class HarnessClientContractTest < HarnessIntegrationTest
     Harness::FakeClient,
     Harness::PiClient,
     Harness::ClaudeClient,
-    Harness::ClaudeCodeClient,
-    Harness::AntigravityClient
+    Harness::ClaudeCodeClient
   ].freeze
 
   def test_base_client_requires_every_contract_method
@@ -80,11 +79,10 @@ class HarnessClientContractTest < HarnessIntegrationTest
     assert_equal "pi", Harness::PiClient.new.harness_name
     assert_equal "claude", Harness::ClaudeClient.new(claude_home: tmpdir).harness_name
     assert_equal "claude", Harness::ClaudeCodeClient.new(claude_home: tmpdir).harness_name
-    assert_equal "antigravity", Harness::AntigravityClient.new.harness_name
   end
 
   def test_fake_pi_and_process_clients_agree_on_the_session_ref_shape
-    refs = { "fake" => fake_ref, "pi" => pi_ref, "claude" => claude_ref, "antigravity" => antigravity_ref }
+    refs = { "fake" => fake_ref, "pi" => pi_ref, "claude" => claude_ref }
 
     refs.each do |harness, ref|
       assert_kind_of Hash, ref
@@ -102,7 +100,6 @@ class HarnessClientContractTest < HarnessIntegrationTest
     # kind in metadata (see test/findings/harness.md).
     assert_equal "worker", refs.fetch("pi").fetch("metadata").fetch("kind")
     assert_equal "worker", refs.fetch("claude").fetch("metadata").fetch("kind")
-    assert_equal "worker", refs.fetch("antigravity").fetch("metadata").fetch("kind")
     refute refs.fetch("fake").fetch("metadata").key?("kind")
 
     shapes = refs.values.map { |ref| (ref.keys & HarnessSupport::REQUIRED_SESSION_REF_KEYS).sort }
@@ -235,17 +232,5 @@ class HarnessClientContractTest < HarnessIntegrationTest
 
   def claude_ref
     claude_client_and_ref.last
-  end
-
-  def antigravity_ref
-    stub = write_process_stub(
-      tmpdir,
-      { "stdout_lines" => [{ "type" => "result", "result" => "done" }], "sleep" => 0.3 },
-      name: "agy_contract_stub.rb"
-    )
-    client = Harness::AntigravityClient.new(command: stub.fetch("command"), env: stub.fetch("env"),
-                                            shutdown_timeout: 1)
-    track_session(client, client.spawn_session(kind: "worker", cwd: tmpdir, prompt: "do it",
-                                               system_prompt: nil, session_name: "Task"))
   end
 end

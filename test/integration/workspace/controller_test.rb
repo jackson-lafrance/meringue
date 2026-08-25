@@ -194,7 +194,11 @@ class WorkspaceControllerTest < Minitest::Test
 
       controller.handle_agent_key(key: "x", agent: agent)
       controller.handle_agent_key(key: { "type" => "paste", "text" => "hello" }, agent: agent)
-      assert_equal ["x", "hello"], terminal.writes
+      controller.handle_agent_key(
+        key: { "type" => "mouse", "kind" => "wheel_up", "count" => 2, "x" => 7, "y" => 4 },
+        agent: agent
+      )
+      assert_equal ["x", "hello", "\e[5~\e[5~"], terminal.writes
 
       controller.resize_agent(agent: agent, rows: 30, columns: 100)
       assert_includes terminal.resizes, [30, 100]
@@ -298,10 +302,15 @@ class WorkspaceControllerTest < Minitest::Test
       assert_equal true, snapshot.fetch("interactive")
       assert_equal ["Agent ready", ""], snapshot.fetch("lines")
       assert_equal({ "status" => "written", "bytes" => 2 }, controller.handle_agent_key(key: "x\n", agent: agent))
+      assert_equal({ "status" => "written", "bytes" => 4 }, controller.handle_agent_key(key: "\e[5~", agent: agent))
+      assert_equal(
+        { "status" => "written", "bytes" => 4 },
+        controller.handle_agent_key(key: { "type" => "mouse", "kind" => "wheel_down", "x" => 3, "y" => 2 }, agent: agent)
+      )
 
       closed = controller.close_workspace(agent: agent)
       assert_equal "closed", closed.fetch("status")
-      assert_equal ["x\n", "\u0003"], @sessions.last.writes
+      assert_equal ["x\n", "\e[5~", "\e[6~", "\u0003"], @sessions.last.writes
       assert_equal 1, @sessions.last.closes
       assert_equal [agent.fetch("id")], focus.ended
     ensure

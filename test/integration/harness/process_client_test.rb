@@ -3,9 +3,8 @@
 require "test_helper"
 require "support/harness_support"
 
-# ProcessClient-backed harnesses (Claude Code, Antigravity) run one short-lived
-# process per turn and stream JSONL on stdout. These tests drive a scripted stub
-# instead of the real CLI.
+# ProcessClient-backed harnesses run one short-lived process per turn and stream
+# JSONL on stdout. These tests drive a scripted Claude stub instead of the real CLI.
 class HarnessProcessClientTest < HarnessIntegrationTest
   ProcessClient = Meringue::Harness::ProcessClient
 
@@ -21,18 +20,6 @@ class HarnessProcessClientTest < HarnessIntegrationTest
       command: stub.fetch("command"),
       env: stub.fetch("env"),
       claude_home: File.join(tmpdir, "claude-home"),
-      event_timeout: 15,
-      shutdown_timeout: 1,
-      **kwargs
-    )
-    [client, stub]
-  end
-
-  def build_antigravity_client(stub_config: {}, **kwargs)
-    stub = write_process_stub(tmpdir, stub_config, name: "agy_stub.rb")
-    client = Meringue::Harness::AntigravityClient.new(
-      command: stub.fetch("command"),
-      env: stub.fetch("env"),
       event_timeout: 15,
       shutdown_timeout: 1,
       **kwargs
@@ -274,57 +261,25 @@ class HarnessProcessClientTest < HarnessIntegrationTest
   end
 
   def test_missing_binary_is_reported_as_a_harness_error
-    client = Meringue::Harness::AntigravityClient.new(command: [File.join(tmpdir, "not-installed")])
+    client = Meringue::Harness::ClaudeCodeClient.new(
+      command: [File.join(tmpdir, "not-installed")],
+      claude_home: File.join(tmpdir, "claude-home")
+    )
 
     error = assert_raises(ProcessClient::Error) do
       client.spawn_session(kind: "worker", cwd: tmpdir, prompt: "hi", system_prompt: nil, session_name: "Task")
     end
 
-    assert_match(/Unable to start antigravity process/, error.message)
-  end
-
-  def test_antigravity_spawn_combines_the_system_prompt_into_the_user_prompt
-    client, stub = build_antigravity_client(
-      stub_config: { "stdout_lines" => [{ "type" => "result", "result" => "agy done" }] },
-      extra_args: ["--quiet"]
-    )
-
-    ref = client.spawn_session(kind: "worker", cwd: tmpdir, prompt: "ship it", system_prompt: "you are a worker",
-                               session_name: "Task")
-    client.wait_for_settled(ref)
-
-    argv = stub_argv(stub)
-    assert_equal "--print", argv.first
-    assert_includes argv, "--quiet"
-    assert_includes argv.last, "System instructions:\nyou are a worker"
-    assert_includes argv.last, "User prompt:\nship it"
-    assert_equal "antigravity", client.harness_name
-    assert_equal "agy done", client.last_assistant_text(client.get_state(ref))
-  end
-
-  def test_antigravity_resume_uses_continue
-    client, stub = build_antigravity_client(
-      stub_config: { "stdout_lines" => [{ "type" => "result", "result" => "agy done" }] }
-    )
-    ref = client.spawn_session(kind: "worker", cwd: tmpdir, prompt: "ship it", system_prompt: nil, session_name: "Task")
-    client.wait_for_settled(ref)
-
-    resumed = client.prompt_session(client.get_state(ref), "one more thing")
-    client.wait_for_settled(resumed)
-
-    argv = stub_argv(stub)
-    assert_equal %w[--print --continue], argv.first(2)
-    assert_equal "one more thing", argv.last
-    assert_equal "antigravity", resumed.fetch("harness")
+    assert_match(/Unable to start claude process/, error.message)
   end
 
   def test_wait_for_settled_times_out_instead_of_hanging
-    client, = build_antigravity_client(stub_config: { "stdout_lines" => [], "sleep" => 30 })
+    client, = build_claude_client(stub_config: { "stdout_lines" => [], "sleep" => 30 })
     ref = client.spawn_session(kind: "worker", cwd: tmpdir, prompt: "hi", system_prompt: nil, session_name: "Task")
     track_session(client, ref)
 
     error = assert_raises(ProcessClient::Error) { client.wait_for_settled(ref, timeout: 0.2) }
 
-    assert_match(/Timed out waiting for antigravity session to settle/, error.message)
+    assert_match(/Timed out waiting for claude session to settle/, error.message)
   end
 end

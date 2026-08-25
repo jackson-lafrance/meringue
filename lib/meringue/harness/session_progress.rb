@@ -45,9 +45,8 @@ module Meringue
       # Progress for line-oriented CLI harnesses (Claude Code and anything else built on
       # `ProcessClient`). Their events are the wrapper `ManagedProcess` puts around each parsed
       # stdout record: `{"type" => ..., "timestamp" => ..., "data" => {original record}}`.
-      #
-      # A harness whose stdout is not JSON (Antigravity's `--print`) produces no records at all,
-      # so this returns `[]` and the worker simply has no derived progress.
+      # A process that emits no JSON records returns `[]`, so its worker simply has no derived
+      # progress.
       def from_process_events(events)
         Array(events).flat_map { |event| from_process_event(event) }.compact
       end

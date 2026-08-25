@@ -8,8 +8,7 @@ module Meringue
     class TerminalSessionOpener
       DEFAULT_COMMANDS = {
         "pi" => "pi",
-        "claude" => "claude",
-        "antigravity" => "agy"
+        "claude" => "claude"
       }.freeze
       DEFAULT_ALACRITTY_COMMAND = "alacritty"
       DEFAULT_SESSION_DIRECTORIES = {
@@ -81,8 +80,6 @@ module Meringue
         when "claude"
           argv = claude_argv(agent)
           argv ? { "argv" => argv } : { "error" => "Agent #{agent_id(agent)} has no saved Claude session to open." }
-        when "antigravity"
-          { "argv" => antigravity_argv(agent) }
         end
       end
 
@@ -101,10 +98,6 @@ module Meringue
         return nil unless present?(session_id)
 
         command_parts("claude") + ["--resume", session_id]
-      end
-
-      def antigravity_argv(agent)
-        command_parts("antigravity") + ["--continue"]
       end
 
       def available_pi_session_file(agent, session_dir:)

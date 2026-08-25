@@ -20,6 +20,7 @@ module Meringue
       DRAG_AUTOSCROLL_STEP = 1
       PAGE_SCROLL_STEP = 8
       CHAT_INPUT_HISTORY_LIMIT = 100
+      CHAT_UNDO_LIMIT = 100
       DOUBLE_CLICK_INTERVAL_SECONDS = 0.5
       # A double-click has to land on the same row, but a one column wobble
       # between the two presses is normal on a trackpad and still counts.
@@ -139,6 +140,7 @@ module Meringue
         @chat_input_history = []
         @chat_history_index = nil
         @chat_history_draft = nil
+        @chat_undo_history = []
         @agent_tree_navigation_active = false
         @quit_requested = false
         @agent_tree_navigation_mode = :agent
@@ -473,6 +475,21 @@ module Meringue
       end
 
       def handle_chat_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state, legacy_slash_navigation: false)
+        undo_snapshot = chat_undo_snapshot(input_buffer, input_cursor, slash_suggestion_index) if dashboard_chat_surface?
+        history_index = @chat_history_index
+        result = dispatch_chat_key(
+          key,
+          input_buffer,
+          input_cursor,
+          slash_suggestion_index,
+          on_submit,
+          state,
+          legacy_slash_navigation: legacy_slash_navigation
+        )
+        update_chat_undo_history(key, input_buffer, result, undo_snapshot, history_index)
+      end
+
+      def dispatch_chat_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state, legacy_slash_navigation: false)
         input_cursor = clamp_cursor(input_buffer, input_cursor)
         unless key
           continue_logs_drag_autoscroll(state)
@@ -481,6 +498,10 @@ module Meringue
 
         if @agent_workspace_active && !embedded_agent_workspace?
           return handle_agent_workspace_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
+
+        if dashboard_chat_undo_key?(key)
+          return undo_chat_edit(input_buffer, input_cursor, slash_suggestion_index)
         end
 
         @chat_pastes.sync!(input_buffer)
@@ -679,6 +700,74 @@ module Meringue
 
       def ctrl_c_key?(key)
         keybinding?("clear_or_quit", key)
+      end
+
+      def dashboard_chat_surface?
+        !@agent_workspace_active || embedded_agent_workspace?
+      end
+
+      def dashboard_chat_undo_key?(key)
+        return false unless keybinding?("undo", key) && @focused_pane == "chat"
+        return false if @settings_active || @status_bar_composer_active
+        return false if @question_picker_active || @model_picker_active || @delivery_pr_picker_active
+
+        true
+      end
+
+      def chat_undo_snapshot(input_buffer, input_cursor, slash_suggestion_index)
+        selection = @selection_pane == "chat" && @chat_selection ? @chat_selection.dup : nil
+        {
+          buffer: input_buffer.to_s.dup,
+          cursor: clamp_cursor(input_buffer, input_cursor),
+          slash_suggestion_index: slash_suggestion_index.to_i,
+          selection: selection,
+          selection_anchor: selection ? @chat_selection_anchor.to_i : nil,
+          pastes: @chat_pastes.snapshot
+        }
+      end
+
+      def update_chat_undo_history(key, prior_buffer, result, snapshot, prior_history_index)
+        return result unless snapshot && result.is_a?(Array)
+        return result if keybinding?("undo", key)
+
+        history_moved = (keybinding?("cursor_up", key) || keybinding?("cursor_down", key)) &&
+                        prior_history_index != @chat_history_index
+        if history_moved
+          reset_chat_undo_history
+          return result
+        end
+        return result if result.first.to_s == prior_buffer.to_s
+
+        if ctrl_c_key?(key) || (keybinding?("submit", key) && result.first.to_s.empty?)
+          reset_chat_undo_history
+        else
+          @chat_undo_history << snapshot
+          @chat_undo_history.shift while @chat_undo_history.length > CHAT_UNDO_LIMIT
+        end
+        result
+      end
+
+      def undo_chat_edit(input_buffer, input_cursor, slash_suggestion_index)
+        snapshot = @chat_undo_history.pop
+        return [input_buffer, input_cursor, slash_suggestion_index] unless snapshot
+
+        reset_chat_history_navigation
+        @chat_pastes.restore!(snapshot.fetch(:pastes))
+        clear_chat_selection
+        if snapshot.fetch(:selection, nil)
+          @selection_pane = "chat"
+          @chat_selection_anchor = snapshot.fetch(:selection_anchor)
+          @chat_selection = snapshot.fetch(:selection).dup
+        end
+        [
+          snapshot.fetch(:buffer).dup,
+          snapshot.fetch(:cursor),
+          snapshot.fetch(:slash_suggestion_index)
+        ]
+      end
+
+      def reset_chat_undo_history
+        @chat_undo_history.clear
       end
 
       def slash_suggestion_key?(key)
@@ -1001,7 +1090,13 @@ module Meringue
       # the focused pane, which is the older behavior.
       def handle_mouse_wheel_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         if embedded_agent_workspace? && pane_at_mouse_position(key, state) == "logs"
-          if agent_workspace_scroll_max(state).positive?
+          # A native harness owns its history. Scrolling Meringue's captured
+          # viewport only moves old pixels and leaves Pi, Claude, or another
+          # interactive backend unaware that the user asked to navigate. Route
+          # the wheel through the harness PTY adapter instead; it translates the
+          # event to portable page navigation. The separate worktree terminal
+          # keeps its existing outer-viewport behavior.
+          if @agent_workspace_view == "terminal" && agent_workspace_scroll_max(state).positive?
             scroll_agent_workspace(key, state)
           else
             # When the TUI has no retained rows of its own, let the focused harness keep
@@ -1996,11 +2091,10 @@ module Meringue
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
-        if workspace_scroll_key?(remainder) && agent_workspace_scroll_max(state).positive?
-          scroll_agent_workspace(remainder, state)
-          return [input_buffer, input_cursor, slash_suggestion_index]
-        end
-
+        # PageUp/PageDown and every other non-leader key belong to the embedded
+        # application. In particular, do not page through Meringue's captured
+        # screen rows: that changes pixels without changing the harness's own
+        # history position.
         if @agent_workspace_view == "terminal"
           forward_agent_workspace_terminal_key(remainder, state)
         else
@@ -2302,8 +2396,9 @@ module Meringue
         keybindings.display_name_for("workspace_leader") || "workspace leader"
       end
 
-      # Page keys stay available to the shell in terminal view; the wheel is
-      # never forwarded to a shell, so it scrolls either view.
+      # Page keys scroll Meringue's transcript view and stay available to the
+      # shell in terminal view. Embedded harness sessions are routed before this
+      # helper and receive both page keys and wheel events directly.
       def workspace_scroll_key?(key)
         mouse_wheel_up?(key) || mouse_wheel_down?(key) ||
           (@agent_workspace_view == "agent" && (keybinding?("scroll_page_up", key) || keybinding?("scroll_page_down", key)))
@@ -2785,7 +2880,7 @@ module Meringue
           Selection: drag with the mouse in the logs pane or the composer to select text; holding a logs drag against or beyond the top/bottom text edge scrolls and extends it automatically; double-click selects a word, and triple-click selects a complete logs paragraph; #{keys_for("copy_selection")} copies the selection to the system clipboard; #{keys_for("cancel_navigation")} clears it.
           Logs selection (keyboard): focus the logs pane, then #{keys_for("logs_selection_mode")} toggles the selection cursor or any Shift+movement starts it. #{keys_for("cursor_left")}/#{keys_for("cursor_right")}/#{keys_for("cursor_up")}/#{keys_for("cursor_down")} move the cursor, #{keys_for("cursor_word_left")}/#{keys_for("cursor_word_right")} move by word, #{keys_for("cursor_home")}/#{keys_for("cursor_end")} jump to the line edges, and #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} move by page. #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")}, #{keys_for("select_home")}/#{keys_for("select_end")}, #{keys_for("select_word_left")}/#{keys_for("select_word_right")}, and #{keys_for("select_page_up")}/#{keys_for("select_page_down")} extend the selection. #{keys_for("copy_selection")} copies the selection (or the cursor line when nothing is extended); #{keys_for("cancel_navigation")} exits.
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
-          Chat: #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")} move by character; #{keys_for("cursor_up")}/#{keys_for("cursor_down")} move through hard and soft-wrapped rows, then browse sent-input history at the first/last row; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
+          Chat: #{keys_for("undo")} undoes the most recent edit while the input is focused; #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")} move by character; #{keys_for("cursor_up")}/#{keys_for("cursor_down")} move through hard and soft-wrapped rows, then browse sent-input history at the first/last row; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
           Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode. In the AgentTree, #{keys_for("rename_selected")} starts a quick rename for the selected project or issue by pre-filling `/project rename` or `/issue rename`; type its new name in the composer and press Enter.
           Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
@@ -2795,7 +2890,7 @@ module Meringue
           Status-bar composer: /status-bar opens the live bottom, agent-information, and focused-worker layout editor; Tab/Shift-Tab changes bars, Up/Down selects, Left/Right reorders, Home/End moves to an edge, R resets, Enter/Ctrl-S saves, Esc cancels, and mouse drag reorders items.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace or a selected head's saved harness session; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
           Head/session debugging: select a head and press #{keys_for("open_agent_workspace")}, or use /open-session <agent_id>, to open its saved harness session externally without turning it into a chat target.
-          Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
+          Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls Meringue-rendered transcripts and is delivered directly to embedded harness applications for native history navigation. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
         TEXT
       end
 
@@ -3955,34 +4050,78 @@ module Meringue
           end
           return unchanged
         end
-        if ENTER_KEYS.include?(key)
+        if keybinding?("newline", key)
+          insert_settings_editor_text("\n")
+          return unchanged
+        end
+        if keybinding?("submit", key)
           @settings_editor = nil if apply_settings_editor
           return unchanged
         end
-        if paste_key?(key)
-          insert_settings_editor_text(paste_text(key))
+        if paste_key?(key) || plain_text_paste_key?(key)
+          insert_settings_editor_text(paste_key?(key) ? paste_text(key) : key)
           return unchanged
         end
         if (TAB_KEYS.include?(key) || keybinding?("complete_suggestion", key)) && editor.fetch("id") == "experiments.worker_spawning_guidance_prompt"
           complete_settings_guidance_editor(state)
           return unchanged
         end
-        if keybinding?("delete_backward", key)
-          chars = editor.fetch("buffer").chars
-          cursor = editor.fetch("cursor").to_i
-          if cursor.positive?
-            chars.delete_at(cursor - 1)
-            editor["buffer"] = chars.join
-            editor["cursor"] = cursor - 1
+
+        selection_action = SELECTION_MOVEMENTS.keys.find { |action| keybinding?(action, key) }
+        if selection_action
+          move_settings_editor_selection(SELECTION_MOVEMENTS.fetch(selection_action), state)
+          return unchanged
+        end
+        if keybinding?("copy_selection", key) && settings_editor_selection_range
+          copy_settings_editor_selection
+          return unchanged
+        end
+        if keybinding?("cut_selection", key) && settings_editor_selection_range
+          copy_settings_editor_selection
+          delete_settings_editor_selection
+          return unchanged
+        end
+        if keybinding?("paste_clipboard", key)
+          text = Clipboard.paste
+          if text.to_s.empty?
+            editor["status"] = "clipboard is empty"
+          else
+            insert_settings_editor_text(text)
           end
           return unchanged
         end
-        if LEFT_KEYS.include?(key)
-          editor["cursor"] = [editor.fetch("cursor").to_i - 1, 0].max
+        if ctrl_c_key?(key)
+          editor["buffer"] = +""
+          editor["cursor"] = 0
+          clear_settings_editor_selection
           return unchanged
         end
-        if RIGHT_KEYS.include?(key)
-          editor["cursor"] = [editor.fetch("cursor").to_i + 1, editor.fetch("buffer").chars.length].min
+
+        if selection_edit_key?(key) && settings_editor_selection_range
+          delete_settings_editor_selection
+          return unchanged
+        end
+        if keybinding?("delete_backward", key)
+          update_settings_editor_buffer(*delete_backward(editor.fetch("buffer"), editor.fetch("cursor")))
+          return unchanged
+        end
+        if keybinding?("delete_forward", key)
+          update_settings_editor_buffer(*delete_forward(editor.fetch("buffer"), editor.fetch("cursor")))
+          return unchanged
+        end
+        if keybinding?("delete_word_backward", key)
+          update_settings_editor_buffer(*delete_backward_word(editor.fetch("buffer"), editor.fetch("cursor")))
+          return unchanged
+        end
+        if keybinding?("delete_word_forward", key)
+          update_settings_editor_buffer(*delete_forward_word(editor.fetch("buffer"), editor.fetch("cursor")))
+          return unchanged
+        end
+
+        moved = settings_editor_cursor_after_navigation(key, state)
+        if moved != editor.fetch("cursor").to_i
+          editor["cursor"] = moved
+          clear_settings_editor_selection
           return unchanged
         end
         if printable_key?(key)
@@ -3994,24 +4133,130 @@ module Meringue
 
       def complete_settings_guidance_editor(state)
         editor = @settings_editor
-        records = Input::SlashCommandParser.command_suggestion_records(editor.fetch("buffer"), limit: nil, state: state)
-        record = records.find { |candidate| candidate.fetch("completion", "") != editor.fetch("buffer") }
+        chars = editor.fetch("buffer").chars
+        cursor = editor.fetch("cursor").to_i.clamp(0, chars.length)
+        prefix = chars.first(cursor).join
+        suffix = chars.drop(cursor).join
+        records = Input::SlashCommandParser.command_suggestion_records(prefix, limit: nil, state: state)
+        record = records.find { |candidate| candidate.fetch("completion", "") != prefix }
         return false unless record
 
         completion = record.fetch("completion")
-        editor["buffer"] = completion
+        editor["buffer"] = completion + suffix
         editor["cursor"] = completion.chars.length
+        clear_settings_editor_selection
         true
       end
 
       def insert_settings_editor_text(text)
         editor = @settings_editor
-        chars = editor.fetch("buffer").chars
+        delete_settings_editor_selection if settings_editor_selection_range
+        buffer, cursor = insert_text(editor.fetch("buffer"), editor.fetch("cursor"), text)
+        update_settings_editor_buffer(buffer, cursor)
+      end
+
+      def settings_editor_selection_range
+        selection = @settings_editor&.fetch("selection", nil)
+        return nil unless selection.is_a?(Hash)
+
+        length = @settings_editor.fetch("buffer", "").chars.length
+        start_index = selection.fetch("start", 0).to_i.clamp(0, length)
+        finish_index = selection.fetch("end", 0).to_i.clamp(0, length)
+        return nil if finish_index <= start_index
+
+        (start_index...finish_index)
+      end
+
+      def clear_settings_editor_selection
+        return unless @settings_editor
+
+        @settings_editor.delete("selection")
+        @settings_editor.delete("selection_anchor")
+      end
+
+      def update_settings_editor_buffer(buffer, cursor)
+        @settings_editor["buffer"] = buffer
+        @settings_editor["cursor"] = cursor
+        @settings_editor.delete("status")
+        clear_settings_editor_selection
+        [buffer, cursor]
+      end
+
+      def delete_settings_editor_selection
+        range = settings_editor_selection_range
+        return false unless range
+
+        buffer, cursor = delete_range(@settings_editor.fetch("buffer"), range)
+        update_settings_editor_buffer(buffer, cursor)
+        true
+      end
+
+      def copy_settings_editor_selection
+        range = settings_editor_selection_range
+        return false unless range
+
+        text = @settings_editor.fetch("buffer").chars[range].join
+        transport = Clipboard.copy(text, output: clipboard_output)
+        @settings_editor["status"] = transport ? copy_status_text(text) : "clipboard unavailable"
+        !transport.nil?
+      end
+
+      def move_settings_editor_selection(movement, state)
+        editor = @settings_editor
+        cursor = editor.fetch("cursor").to_i
+        anchor = editor.fetch("selection_anchor", cursor).to_i
+        moved = settings_editor_cursor_for_movement(movement, state: state)
+        editor["cursor"] = moved
+        editor["selection_anchor"] = anchor
+        start_index, finish_index = [anchor, moved].minmax
+        if finish_index > start_index
+          editor["selection"] = { "start" => start_index, "end" => finish_index }
+        else
+          editor.delete("selection")
+        end
+        moved
+      end
+
+      def settings_editor_cursor_after_navigation(key, state)
+        movement = if keybinding?("cursor_left", key) then :left
+                   elsif keybinding?("cursor_right", key) then :right
+                   elsif keybinding?("cursor_up", key) then :up
+                   elsif keybinding?("cursor_down", key) then :down
+                   elsif keybinding?("cursor_home", key) then :home
+                   elsif keybinding?("cursor_end", key) then :end
+                   elsif keybinding?("cursor_word_left", key) then :word_left
+                   elsif keybinding?("cursor_word_right", key) then :word_right
+                   end
+        return @settings_editor.fetch("cursor").to_i unless movement
+
+        settings_editor_cursor_for_movement(movement, state: state)
+      end
+
+      def settings_editor_cursor_for_movement(movement, state: nil)
+        editor = @settings_editor
+        buffer = editor.fetch("buffer").to_s
+        chars = buffer.chars
         cursor = editor.fetch("cursor").to_i.clamp(0, chars.length)
-        insertion = text.to_s.chars
-        chars.insert(cursor, *insertion)
-        editor["buffer"] = chars.join
-        editor["cursor"] = cursor + insertion.length
+        case movement
+        when :left then [cursor - 1, 0].max
+        when :right then [cursor + 1, chars.length].min
+        when :up, :down
+          MultilineInput.vertical_cursor(
+            buffer,
+            cursor,
+            direction: movement,
+            width: layout.settings_text_width(
+              state || compose_state(-> { State::Models.empty_state }, ""),
+              width: render_width,
+              height: render_height
+            )
+          )
+        when :home then current_line_start(chars, cursor)
+        when :end then current_line_end(chars, cursor)
+        when :word_left then previous_word_boundary(chars, cursor)
+        when :word_right then next_word_start(chars, cursor)
+        else cursor
+        end
       end
 
       def apply_settings_editor
@@ -4436,6 +4681,13 @@ module Meringue
       # --- first-run setup --------------------------------------------------
 
       def frame_refresh_interval(_state)
+        if embedded_agent_workspace?
+          # The child PTY needs a fast visual cadence while it owns keyboard
+          # focus. When the user moves to dashboard chat or the AgentTree, input
+          # still wakes the run loop immediately; polling the unchanged native
+          # screen at 40 Hz only competes with the pane the user is typing in.
+          return @focused_pane == "logs" ? TERMINAL_REFRESH_INTERVAL : REFRESH_INTERVAL
+        end
         if @agent_workspace_active && (@agent_workspace_interactive || @agent_workspace_view == "terminal")
           return TERMINAL_REFRESH_INTERVAL
         end
@@ -5043,7 +5295,7 @@ module Meringue
       end
 
       def paste_text(key)
-        key.fetch("text", "").to_s.tr("\r", "\n")
+        normalize_input_text(key.fetch("text", ""))
       end
 
       def plain_text_paste_key?(key)

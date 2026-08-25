@@ -30,7 +30,7 @@ module Meringue
         ["/prompt <agent_id> \"<message>\"", "Continue a worker session or take over a still-routing head."],
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
-        ["/harness [head|worker] <pi|claude|antigravity>", "With no arguments, open the harness picker; otherwise select role-aware harness defaults for future agents; omit the role to update both."],
+        ["/harness [head|worker] <pi|claude>", "With no arguments, open the harness picker; otherwise select role-aware harness defaults for future agents; omit the role to update both."],
         ["/model [head|worker] <provider>/<model-id>", "With no arguments, open the model picker; otherwise persist the model for future agent sessions. Omit the role to update both future heads and workers. Existing sessions are unchanged. The model id may itself contain / and :."],
         ["/thinking [head|worker] <level>", "With no arguments, open the Head/Worker thinking picker; otherwise persist a reasoning default for future agent sessions. Omit the role to update both future heads and workers; existing sessions are unchanged."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
@@ -922,7 +922,7 @@ module Meringue
           return kernel_command("SetHarness", "role" => tokens[0].downcase, "provider" => tokens[1])
         end
 
-        invalid("Usage: /harness [head|worker] <pi|claude|antigravity>")
+        invalid("Usage: /harness [head|worker] <pi|claude>")
       end
 
       # `/models` opens the local TUI model picker: a searchable list of the

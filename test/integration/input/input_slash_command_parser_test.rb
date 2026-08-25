@@ -610,8 +610,8 @@ class InputSlashCommandParserTest < Minitest::Test
 
     # A harness that reports no catalog at all explains itself the same way.
     unsupported = sample_state_with_model_catalog(
-      harness: "antigravity",
-      catalogs: { "antigravity" => Meringue::Harness::ModelCatalog.unsupported(harness: "antigravity").to_h }
+      harness: "future",
+      catalogs: { "future" => Meringue::Harness::ModelCatalog.unsupported(harness: "future").to_h }
     )
     unsupported_records = suggestion_records("/model ", unsupported)
     assert_equal "session_models_unavailable", unsupported_records.last.fetch("kind")
@@ -778,7 +778,7 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_equal "InvalidSlashCommand", parse_slash("/models pi claude").fetch("type")
 
     records = suggestion_records("/models ", sample_state_with_model_catalog)
-    assert_equal %w[pi claude antigravity], records.map { |record| record.fetch("usage") }
+    assert_equal %w[pi claude], records.map { |record| record.fetch("usage") }
     assert_includes records.first.fetch("description"), "List the models Pi reports"
   end
 

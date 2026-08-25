@@ -40,17 +40,86 @@ module Meringue
                      worker_spawning_guidance_prompt: nil)
         @head_id = head_id
         @user_message = user_message
-        @snapshot = snapshot
+        @worker_spawning_guidance = worker_spawning_guidance == true
+        @worker_spawning_guidance_prompt = worker_spawning_guidance_prompt
+        @hidden_worker_model_references = self.class.send(:worker_default_model_references, snapshot)
+        @snapshot = @worker_spawning_guidance ? self.class.without_worker_selection_defaults(snapshot) : snapshot
         @question_id = question_id
         @selected_target = selected_target
         @takeover_context = takeover_context.is_a?(Hash) ? takeover_context : nil
         @kernel_commands_path = kernel_commands_path
         @cwd = File.expand_path(cwd)
-        @state_path = File.expand_path(state_path)
+        @state_path = @worker_spawning_guidance ? nil : File.expand_path(state_path)
         @github_support = github_support != false
-        @worker_spawning_guidance = worker_spawning_guidance == true
-        @worker_spawning_guidance_prompt = worker_spawning_guidance_prompt
       end
+
+      # Guidance-based routing must not learn worker defaults indirectly from
+      # the kernel snapshot. Keep catalogs and routing facts, but remove stored
+      # defaults, worker effective settings, and system logs that disclose those
+      # values. The original state remains untouched.
+      def self.without_worker_selection_defaults(snapshot)
+        filtered = JSON.parse(JSON.generate(snapshot || {}))
+        metadata = filtered["metadata"]
+        if metadata.is_a?(Hash)
+          hidden_models = worker_default_model_references(snapshot)
+          metadata.keys.grep(/session_defaults\z/).each { |key| metadata.delete(key) }
+          catalogs = metadata["harness_model_catalogs"]
+          if catalogs.is_a?(Hash)
+            catalogs.each_value do |catalog|
+              next unless catalog.is_a?(Hash)
+
+              catalog["models"] = Array(catalog["models"]).reject do |model|
+                model.is_a?(Hash) && hidden_models.include?(model.fetch("reference", "").to_s.strip.downcase)
+              end
+            end
+          end
+        end
+        Array(filtered["agents"]).each do |agent|
+          next unless agent.is_a?(Hash) && agent["type"] == "worker"
+
+          agent.delete("session_settings")
+          harness_metadata = agent["harness_metadata"]
+          if harness_metadata.is_a?(Hash)
+            %w[command pi_state session session_ref session_settings spawn_session_settings].each do |key|
+              harness_metadata.delete(key)
+            end
+          end
+        end
+        filtered["logs"] = Array(filtered["logs"]).reject { |log| worker_default_disclosure_log?(log) }
+        filtered
+      end
+
+      def self.worker_default_model_references(snapshot)
+        metadata = snapshot.is_a?(Hash) ? snapshot["metadata"] : nil
+        return [] unless metadata.is_a?(Hash)
+
+        defaults = ["agent_session_defaults"].filter_map do |key|
+          value = metadata[key]
+          value.is_a?(Hash) ? value : nil
+        end
+        defaults.flat_map do |value|
+          [value["model"], value.dig("roles", "worker", "model"), value["worker_model"]]
+        end.filter_map do |reference|
+          next if reference.nil? || reference.to_s.strip.empty?
+
+          reference.to_s.strip.downcase
+        end.uniq
+      end
+      private_class_method :worker_default_model_references
+
+      def self.worker_default_disclosure_log?(log)
+        return false unless log.is_a?(Hash)
+
+        details = log["details"]
+        if details.is_a?(Hash)
+          return true if details.keys.any? { |key| %w[agent_session_defaults previous_defaults session_settings previous_session_settings spawn_session_settings].include?(key.to_s) }
+          return true if details["command_type"].to_s == "GetSessionDefaults"
+          return true if details["scope"].to_s.start_with?("future_") && %w[model thinking_level].include?(details["changed_field"].to_s)
+        end
+
+        log["source_type"].to_s == "kernel" && log["message"].to_s.match?(/future (?:heads|workers)|worker(?:s)? use .*\b(?:model|thinking)\b/i)
+      end
+      private_class_method :worker_default_disclosure_log?
 
       def to_h
         to_prompt_h.merge("kernel_command_reference" => kernel_command_reference)
@@ -66,6 +135,7 @@ module Meringue
           "project_discovery" => project_discovery,
           "current_state_summary" => current_state_summary,
           "routing_context" => routing_context,
+          "worker_selection_catalog" => worker_selection_catalog,
           "additional_system_prompt" => guidance_text,
           # Keep the experiment-named key for consumers of the original PR's
           # context shape while the semantic name documents what is delivered.
@@ -75,6 +145,7 @@ module Meringue
           )
         }
         unless worker_spawning_guidance
+          prompt.delete("worker_selection_catalog")
           prompt.delete("additional_system_prompt")
           prompt.delete("worker_spawning_guidance")
         end
@@ -85,13 +156,13 @@ module Meringue
         prompt = <<~PROMPT
           You are a stateless Meringue head agent.
           Read the user message and return a HeadResult JSON object only.
-          The prompt includes the Meringue state file path and read-only commands you may run when state details are necessary.
-          Do not assume all state is embedded in the prompt; inspect only the parts of state you need.
+          #{state_access_system_instruction}
+          Do not assume unavailable state is embedded in the prompt; inspect only the routing information you receive.
           You may use tools to inspect local projects and git repositories before deciding, but discovery must be read-only and limited to routing/orchestration context.
           You may answer directly with the HeadResult "response" field when no command, clarification, or substantive investigation is needed and the answer is already supported by the supplied context or stable Meringue behavior. Keep "summary" for a short description of your decision; it is not the user-facing answer. A nonblank response is a handled result and needs no NoOp.
           Always return exactly one HeadResult JSON object, even for a direct answer: put the answer in the "response" string field and never write prose without the JSON wrapper. The "response" field is optional, so omit it or use an empty string when routing only through commands; never use JSON null. Escape newlines inside every JSON string value as \\n instead of writing literal line breaks, and never embed a ``` code fence inside a string value.
           Do not perform substantive investigation yourself. When an informational request requires inspecting or synthesizing records, logs, prompts, dependencies, project files, or external facts beyond the supplied routing context, create or reuse an issue and spawn or prompt an informational worker to return the investigated answer.
-          Meringue housekeeping is different: when the user asks for maintenance the kernel already owns (prune, recount, kill, clear, direct record details, tree/state listings, theme, harness, or agent session/default model and reasoning settings), propose that user command yourself instead of creating an issue or spawning a worker. Follow the destructive-command confirmation rules in the reference below.
+          #{housekeeping_system_instruction}
           Treat the supplied routing context as candidate evidence, not a conversation database. Classify whether this message starts a new goal, follows an existing issue, or answers an open question, then deliberately choose whether to prompt, follow up, or replace an existing worker.
           Resolve project identity from the current user request before considering recent activity, active issues, or worker sessions. An explicit project name, id, repository path, or clearly identified local repository is authoritative; never attach a request to an unrelated recent issue merely because it is active or recent. If the identified local repository is not registered, propose AddProject before creating or routing work. If multiple projects remain plausible, ask for clarification instead of guessing.
           When routing_context.selected_target is present, it is explicit UI routing context: keep this message on its resolved issue. An agent selection resolves to that agent's owning issue; use the selected agent as a session-context hint, but still choose the appropriate healthy worker and PromptAgent mode through kernel commands. Never bypass head routing or prompt an agent from another issue.
@@ -127,13 +198,37 @@ module Meringue
         Meringue::Experiments::WorkerSpawningGuidance.text(worker_spawning_guidance_prompt)
       end
 
+      def state_access_system_instruction
+        if worker_spawning_guidance
+          "The prompt contains a privacy-filtered routing snapshot. Worker model and thinking selections from configuration and existing sessions are intentionally unavailable; route new workers only from the supplied worker-selection guidance and catalog."
+        else
+          "The prompt includes the Meringue state file path and read-only commands you may run when state details are necessary."
+        end
+      end
+
+      def housekeeping_system_instruction
+        if worker_spawning_guidance
+          "Meringue housekeeping is different: when the user asks for maintenance the kernel already owns (prune, recount, kill, clear, direct record details, tree/state listings, theme, harness, or model-catalog refresh), propose that user command yourself instead of creating an issue or spawning a worker. Follow the destructive-command confirmation rules in the reference below."
+        else
+          "Meringue housekeeping is different: when the user asks for maintenance the kernel already owns (prune, recount, kill, clear, direct record details, tree/state listings, theme, harness, or Pi session/default model and thinking settings), propose that user command yourself instead of creating an issue or spawning a worker. Follow the destructive-command confirmation rules in the reference below."
+        end
+      end
+
       def kernel_command_reference
         @kernel_command_reference ||= begin
           reference = File.read(kernel_commands_path)
+          reference = reference.lines.map { |line| worker_guidance_reference_line(line) }.join if worker_spawning_guidance
           github_support ? reference : reference.lines.reject { |line| github_guidance_line?(line) }.join
         end
       rescue Errno::ENOENT
         raise ArgumentError, "Head kernel command reference not found: #{kernel_commands_path}"
+      end
+
+      def worker_guidance_reference_line(line)
+        return nil if line.include?("GetSessionDefaults") || line.match?(/show the defaults|which model will future agents|future-session head and worker model and thinking levels/i)
+        return line unless line.include?("When the user explicitly requests a model or thinking level for this worker")
+
+        "When worker selection guidance is enabled, set both `model` and `thinking_level` on every head-proposed `SpawnWorker`; an explicit user request takes precedence over the guidance. The kernel rejects a guided head spawn that omits either selection.\n"
       end
 
       def github_guidance_line?(line)
@@ -157,6 +252,14 @@ module Meringue
       end
 
       def state_access
+        if worker_spawning_guidance
+          return {
+            "read_only" => true,
+            "privacy_filtered" => true,
+            "guidance" => "Use the supplied routing context and worker-selection catalog. The persisted state path is intentionally withheld so configured and effective worker model/thinking selections cannot enter this head session."
+          }
+        end
+
         {
           "state_path" => state_path,
           "read_only" => true,
@@ -174,6 +277,28 @@ module Meringue
             }
           ]
         }
+      end
+
+      def worker_selection_catalog
+        return nil unless worker_spawning_guidance
+
+        metadata = snapshot.fetch("metadata", {}) || {}
+        harness = metadata.fetch("active_worker_harness", metadata.fetch("active_harness", nil)).to_s
+        catalogs = metadata.fetch("harness_model_catalogs", {}) || {}
+        selected = catalogs[harness]
+        models = selected.is_a?(Hash) ? Array(selected["models"]) : []
+        {
+          "harness" => (harness unless harness.empty?),
+          "availability" => (selected["availability"] if selected.is_a?(Hash)),
+          "models" => models.filter_map do |model|
+            next unless model.is_a?(Hash)
+            next if @hidden_worker_model_references.include?(model.fetch("reference", "").to_s.strip.downcase)
+
+            model.slice("reference", "provider", "id", "name", "thinking_levels", "context_window")
+          end,
+          "accepted_thinking_levels" => Meringue::Harness::ModelCatalog::THINKING_LEVELS,
+          "instruction" => "Choose only from this catalog when it is available. Apply the guidance to the task and set both model and thinking_level explicitly on every SpawnWorker."
+        }.compact
       end
 
       def current_state_summary
@@ -219,7 +344,7 @@ module Meringue
             "Spawn a follow-up worker on the same issue only when no suitable session is resumable, work should be independent or parallel, context is known to be over 50%, or a delivered workspace should remain immutable.",
             "One goal that needs several steps is one issue with several workers. A research step and the implementation step that consumes its findings belong on the same issue: one CreateIssue, then one SpawnWorker per step bound with issue_from_command, with after_from_command for the ordering and follow_up_of_command (or follow_up_of_agent_id: \"@<command_id>\") for the visible lineage on the later step. Separate PRs or a findings-only step never justify a second issue.",
             "For a newly spawned investigation-only or informational worker that needs no file, git, dependency, command, or remote mutation, explicitly set SpawnWorker.workspace_mode to \"shared_read_only\". Its harness has only read/grep/find/ls tools and may share a validated existing main checkout with concurrent readers. Never choose this mode for implementation, delivery, testing that writes artifacts, shell-command investigation, or any task that may need mutation; omit workspace_mode (the isolated default) for those. If a follow-up changes from findings to implementation, spawn an isolated worker rather than prompting the read-only session to edit.",
-            "When the user names a model or thinking level for a new worker, put it in SpawnWorker.model and/or SpawnWorker.thinking_level. These override only that worker. Omit unspecified fields so the configured future-session defaults still apply; thinking levels are off, minimal, low, medium, high, xhigh, and max.",
+            worker_selection_routing_rule,
             "Never write a worker prompt that waits on another worker by polling Meringue state, sleeping between checks, or budgeting hours for a predecessor to settle. The kernel owns that wait through after_agent_id/after_from_command and hands over the predecessor's final report itself.",
             "Use replace_agent_id only when the old worker is stale, unhealthy, pursuing the wrong approach, or must stop before a successor continues. Replacement starts the successor before killing the old session.",
             "replace_agent_id (and replace_agent_from_command) cannot be combined with follow_up_of_agent_id or after_agent_id on one SpawnWorker. The kernel rejects that payload and spawns nothing, so pick exactly one: replace to take over from a live session, or follow_up/after to continue behind it. follow_up_of_agent_id together with after_agent_id is still allowed.",
@@ -244,6 +369,14 @@ module Meringue
         context["selected_target"] = target if target
         context.delete("head_takeover") unless takeover_context
         context
+      end
+
+      def worker_selection_routing_rule
+        if worker_spawning_guidance
+          "Set both SpawnWorker.model and SpawnWorker.thinking_level on every new worker. An explicit model or thinking level in the user message takes precedence; otherwise choose only by applying the supplied worker-selection guidance to the task and using worker_selection_catalog."
+        else
+          "When the user names a model or thinking level for a new worker, put it in SpawnWorker.model and/or SpawnWorker.thinking_level. These override only that worker. Omit unspecified fields so the configured future-session defaults still apply; thinking levels are off, minimal, low, medium, high, xhigh, and max."
+        end
       end
 
       def selected_target_context

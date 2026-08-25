@@ -303,7 +303,7 @@ module Meringue
         return failed("Agent session is not running for this worker.") unless entry
         return { "status" => "ignored" } unless entry.fetch("session").alive?
 
-        bytes = terminal_key_bytes(key)
+        bytes = agent_key_bytes(key)
         return { "status" => "ignored" } if bytes.nil? || bytes.empty?
 
         result = entry.fetch("session").write(bytes)
@@ -340,15 +340,16 @@ module Meringue
         screen = interactive_screen(agent, rows: rows, columns: columns)
         screen.feed(session.drain_output)
         status = session.status
+        rendered = screen.render_snapshot
         {
           "interactive" => true,
-          "lines" => screen.lines,
-          "styled_lines" => screen.styled_lines,
-          "cursor" => screen.cursor,
+          "lines" => rendered.fetch("lines"),
+          "styled_lines" => rendered.fetch("styled_lines"),
+          "cursor" => rendered.fetch("cursor"),
           "status" => status.fetch("state", nil),
           "pid" => status.fetch("pid", nil),
           "workspace_path" => status.fetch("workspace_path", nil),
-          "revision" => screen.revision,
+          "revision" => rendered.fetch("revision"),
           "notice" => interactive_notice(status)
         }.compact
       end
@@ -433,15 +434,16 @@ module Meringue
         screen = ensure_screen(agent)
         screen.feed(session.drain_output)
         status = session.status
+        rendered = screen.render_snapshot
         snapshot = {
-          "lines" => screen.lines,
-          "styled_lines" => screen.styled_lines,
-          "cursor" => screen.cursor,
+          "lines" => rendered.fetch("lines"),
+          "styled_lines" => rendered.fetch("styled_lines"),
+          "cursor" => rendered.fetch("cursor"),
           "status" => status.fetch("state", nil),
           "pid" => status.fetch("pid", nil),
           "workspace_path" => status.fetch("workspace_path", nil),
           # Renderers reuse cached terminal lines while this does not change.
-          "revision" => screen.revision
+          "revision" => rendered.fetch("revision")
         }.compact
         if !status.fetch("alive", false) && status.fetch("state", nil) == "exited"
           exit_status = status.fetch("exit_status", {}) || {}
@@ -592,6 +594,21 @@ module Meringue
           return nil
         end
         key.is_a?(String) ? key : nil
+      end
+
+      # Pi and Claude currently expose page navigation but do not request mouse
+      # reporting from their PTYs. Sending a raw SGR report can therefore be
+      # ignored or leak into an editor. Translate a coalesced wheel burst to the
+      # same PageUp/PageDown bytes as the corresponding keyboard action. Other
+      # keys and pastes keep the terminal pass-through contract.
+      def agent_key_bytes(key)
+        return terminal_key_bytes(key) unless key.is_a?(Hash) && key.fetch("type", nil) == "mouse"
+
+        kind = key.fetch("kind", nil).to_s
+        return nil unless %w[wheel_up wheel_down].include?(kind)
+
+        page = kind == "wheel_up" ? "\e[5~" : "\e[6~"
+        page * [key.fetch("count", 1).to_i, 1].max
       end
 
       # The dashboard parser already normalizes mouse input. Re-encode it as
