@@ -33,7 +33,11 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
   end
 
   def opener(alacritty: @alacritty, commands: {})
-    Opener.new(session_dir: @session_dir, alacritty_command: alacritty, commands: commands)
+    Opener.new(
+      session_directories: { "pi" => @session_dir },
+      alacritty_command: alacritty,
+      commands: commands
+    )
   end
 
   def agent(overrides = {})
@@ -62,6 +66,22 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
     assert_equal "rejected", result.fetch("status")
     assert_equal "Opening this agent session in a terminal is not supported yet.", result.fetch("message")
     assert_empty launches
+  end
+
+  def test_provider_maps_configure_commands_and_session_directories_without_provider_named_keywords
+    session_file = pi_session_file(@session_dir, session_id: "sess-provider-command")
+    configured = Opener.new(
+      commands: { "pi" => "pi-dev --quiet" },
+      session_directories: { "pi" => @session_dir },
+      alacritty_command: @alacritty
+    )
+
+    result = configured.open(agent("harness_session_file" => session_file, "harness_session_id" => "sess-provider-command"))
+
+    assert_equal "opened", result.fetch("status")
+    argv = launches.fetch(0)
+    assert_equal "pi-dev", argv.fetch(3)
+    assert_equal @session_dir, argv.fetch(argv.index("--session-dir") + 1)
   end
 
   def test_opening_a_pi_session_launches_the_configured_command_in_the_workspace
@@ -162,7 +182,7 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
     assert_empty launches
   end
 
-  def test_claude_codex_and_antigravity_launch_commands
+  def test_claude_and_codex_launch_commands
     claude = opener(commands: { "claude" => "claude" }).open(
       { "id" => "P1-I1-W2", "harness" => "claude", "workspace_path" => tmpdir, "harness_session_id" => "claude-1" }
     )
@@ -174,12 +194,6 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
     )
     assert_equal "opened", codex.fetch("status")
     assert_equal ["--working-directory", tmpdir, "-e", "codex", "resume", "codex-1"], launches.fetch(1)
-
-    antigravity = opener(commands: { "antigravity" => "agy" }).open(
-      { "id" => "P1-I1-W4", "harness" => "antigravity", "workspace_path" => tmpdir }
-    )
-    assert_equal "opened", antigravity.fetch("status")
-    assert_equal ["--working-directory", tmpdir, "-e", "agy", "--continue"], launches.fetch(2)
   end
 
   def test_interactive_agent_without_a_session_id_is_rejected

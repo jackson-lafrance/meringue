@@ -5,7 +5,7 @@ module Meringue
     # Large pastes never enter the composer buffer.
     #
     # A paste over the threshold is parked here and the buffer receives a compact
-    # Pi-style marker instead ("[paste #1 +3000 lines]"). Everything the TUI does
+    # marker instead ("[paste #1 +3000 lines]"). Everything the TUI does
     # per keystroke — wrapping, cursor math, slash completion, composer height,
     # frame diffing — then runs over ~22 characters instead of a quarter megabyte,
     # and the body is spliced back in exactly once, when the message is submitted.
@@ -13,8 +13,7 @@ module Meringue
     # One registry belongs to one composer surface, so the dashboard composer and
     # the focused-workspace composer number and clear their pastes independently.
     class PasteRegistry
-      # Pi's own thresholds (packages/tui/src/components/editor.ts): a paste is
-      # "large" past 10 lines or 1000 characters. Below that the text is short
+      # A paste is "large" past 10 lines or 1000 characters. Below that it is short
       # enough to read in the composer and cheap enough to wrap every frame.
       LINE_THRESHOLD = 10
       CHARACTER_THRESHOLD = 1_000
@@ -71,6 +70,20 @@ module Meringue
 
       def content(id)
         @entries[id.to_i]
+      end
+
+      # Undo snapshots need the parked bodies as well as the visible markers.
+      # The strings are immutable from this class's perspective, so shallow
+      # copies keep snapshots cheap even for multi-thousand-line pastes.
+      def snapshot
+        { entries: @entries.dup, counter: @counter }
+      end
+
+      def restore!(snapshot)
+        value = snapshot.is_a?(Hash) ? snapshot : {}
+        @entries = (value[:entries] || {}).dup
+        @counter = value.fetch(:counter, 0).to_i
+        self
       end
 
       def large?(text)

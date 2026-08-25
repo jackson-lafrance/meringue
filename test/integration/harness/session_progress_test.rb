@@ -99,8 +99,8 @@ class HarnessSessionProgressTest < HarnessIntegrationTest
     assert_empty client.read_events(ref), "progress must not require a second drain"
   end
 
-  def test_a_harness_without_json_events_reports_no_progress_instead_of_failing
-    client, = build_antigravity_client(stub_config: { "stdout_lines" => ["plain text output, no JSON here"] })
+  def test_a_process_without_json_events_reports_no_progress_instead_of_failing
+    client, = build_claude_client(stub_config: { "stdout_lines" => ["plain text output, no JSON here"] })
     ref = client.spawn_session(kind: "worker", cwd: tmpdir, prompt: "do it", system_prompt: nil, session_name: "Task")
     client.wait_for_settled(ref)
 
@@ -136,18 +136,6 @@ class HarnessSessionProgressTest < HarnessIntegrationTest
       command: stub.fetch("command"),
       env: stub.fetch("env"),
       claude_home: File.join(tmpdir, "claude-home"),
-      event_timeout: 15,
-      shutdown_timeout: 1,
-      **kwargs
-    )
-    [client, stub]
-  end
-
-  def build_antigravity_client(stub_config: {}, **kwargs)
-    stub = write_process_stub(tmpdir, stub_config, name: "agy_progress_stub.rb")
-    client = Meringue::Harness::AntigravityClient.new(
-      command: stub.fetch("command"),
-      env: stub.fetch("env"),
       event_timeout: 15,
       shutdown_timeout: 1,
       **kwargs

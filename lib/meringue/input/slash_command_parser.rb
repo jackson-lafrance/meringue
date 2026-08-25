@@ -30,9 +30,9 @@ module Meringue
         ["/prompt <agent_id> \"<message>\"", "Continue a worker session or take over a still-routing head."],
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
-        ["/harness [head|worker] <pi|claude|codex|antigravity>", "With no arguments, open the harness picker; otherwise select role-aware harness defaults for future agents; omit the role to update both."],
-        ["/model [head|worker] <provider>/<model-id>", "With no arguments, open the model picker; otherwise persist the model for future sessions on the selected harness. Omit the role to update both future heads and workers. Existing sessions are unchanged. The model id may itself contain / and :."],
-        ["/thinking [head|worker] <level>", "With no arguments, open the Head/Worker thinking picker; otherwise persist a thinking default for future sessions on the selected harness. Omit the role to update both future heads and workers; existing sessions are unchanged."],
+        ["/harness [head|worker] <pi|claude|codex>", "With no arguments, open the harness picker; otherwise select role-aware harness defaults for future agents; omit the role to update both."],
+        ["/model [head|worker] <provider>/<model-id>", "With no arguments, open the model picker; otherwise persist the model for future agent sessions. Omit the role to update both future heads and workers. Existing sessions are unchanged. The model id may itself contain / and :."],
+        ["/thinking [head|worker] <level>", "With no arguments, open the Head/Worker thinking picker; otherwise persist a reasoning default for future agent sessions. Omit the role to update both future heads and workers; existing sessions are unchanged."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
         ["/goal create [issue_id] \"<prompt>\" --metric \"<command>\" --target <number> [flags]", "Start a goal loop: name an issue, or give only a prompt and Meringue creates the issue for it. It iterates until the metric hits its target or a budget guard trips."],
         ["/goal create [issue_id] \"<prompt>\" --reviewer [--max-iterations <n>]", "Start a reviewer-judged goal loop for work with no number: it iterates until a reviewer approves the work or the iteration budget runs out."],
@@ -539,11 +539,10 @@ module Meringue
       #
       # Filtering the list by the catalog silently hid levels a user could really
       # set: kernel validation is deliberately catalog-independent (the same rule
-      # `/model` follows), and Pi clamps a level a model does not advertise rather
-      # than failing. A provider extension that omits `max` from its
-      # `thinkingLevelMap` — a 250k-context proxy in front of Claude Opus 5, say —
-      # therefore made `/thinking max` succeed while `max` was missing from
-      # `/thinking`'s own list, so the saved default was invisible in its picker.
+      # `/model` follows), and a harness may adjust a level a model does not
+      # advertise rather than reject it. A provider extension that omits `max`
+      # from its model metadata can therefore make `/thinking max` succeed while
+      # `max` is missing from `/thinking`'s own list, hiding the saved default.
       def self.thinking_level_suggestion_records(context, state, catalog, harness)
         reference = thinking_level_model_reference(state, harness, context["thinking_role"])
         supported = normalized_thinking_levels(catalog.thinking_levels_for(reference))
@@ -552,7 +551,7 @@ module Meringue
         matching_thinking_levels(query, current).map.with_index do |level, index|
           {
             "usage" => level,
-            "description" => thinking_level_description(level, reference, supported, current),
+            "description" => thinking_level_description(level, reference, supported, current, harness),
             "completion" => "#{context.fetch("completion_prefix")} #{level}",
             "requires_arguments" => false,
             "append_space" => false,
@@ -563,10 +562,10 @@ module Meringue
         end
       end
 
-      # Every level Meringue accepts for a Pi default. Completion and kernel
-      # validation must agree on this ladder, so both read it from one place.
+      # Every reasoning level in Meringue's harness-neutral vocabulary.
+      # Completion and kernel validation must agree, so both read one contract.
       def self.thinking_levels
-        Meringue::Harness::PiClient::THINKING_LEVELS
+        Meringue::Harness::ModelCatalog::THINKING_LEVELS
       end
 
       def self.thinking_usage_message
@@ -599,7 +598,7 @@ module Meringue
       end
 
       def self.current_default_thinking_level(state, harness, role = nil)
-        defaults = state.dig("metadata", "pi_session_defaults") || {}
+        defaults = state.dig("metadata", "agent_session_defaults") || {}
         level = if %w[head worker].include?(role.to_s)
                   role_level = defaults.dig("roles", role.to_s, "thinking_level").to_s.strip
                   role_level.empty? ? defaults["thinking_level"] : role_level
@@ -615,7 +614,7 @@ module Meringue
       # role's effective model (falling back to the shared summary), while the
       # bare form reads the shared summary that is nil when roles differ.
       def self.current_default_model(state, harness, role = nil)
-        defaults = state.dig("metadata", "pi_session_defaults") || {}
+        defaults = state.dig("metadata", "agent_session_defaults") || {}
         model = if %w[head worker].include?(role.to_s)
                   role_model = defaults.dig("roles", role.to_s, "model").to_s.strip
                   role_model.empty? ? defaults["model"] : role_model
@@ -632,7 +631,7 @@ module Meringue
       end
 
       def self.thinking_level_model_reference(state, harness, role = nil)
-        defaults = state.dig("metadata", "pi_session_defaults") || {}
+        defaults = state.dig("metadata", "agent_session_defaults") || {}
         reference = if %w[head worker].include?(role.to_s)
                       role_reference = defaults.dig("roles", role.to_s, "model").to_s.strip
                       role_reference.empty? ? defaults["model"] : role_reference
@@ -644,20 +643,23 @@ module Meringue
         reference
       end
 
-      def self.thinking_level_description(level, reference, supported, current)
+      def self.thinking_level_description(level, reference, supported, current, harness)
         scope = level == current ? "current default" : "future sessions"
-        "#{scope} · #{thinking_level_support_label(level, reference, supported)}"
+        "#{scope} · #{thinking_level_support_label(level, reference, supported, harness)}"
       end
 
-      # Says what the catalog knows without pretending it is the last word: an
-      # unlisted level still sets the default, and Pi clamps it for a model that
-      # cannot run it.
-      def self.thinking_level_support_label(level, reference, supported)
+      # Says what the catalog knows without treating an advertised list as a
+      # permission boundary. A harness-specific adjustment policy is resolved in
+      # the integration registry rather than assumed by this generic parser.
+      def self.thinking_level_support_label(level, reference, supported, harness)
         return "model support not verified yet" if supported.empty? || reference.to_s.empty?
         return "supported by #{reference}" if supported.include?(level)
 
-        clamped = Meringue::Harness::PiClient.clamp_thinking_level(level, supported)
-        "not listed for #{reference} · Pi clamps it to #{clamped}"
+        label = Meringue::Harness::Registry.provider_label(harness)
+        adjusted = Meringue::Harness::Registry.adjusted_thinking_level(harness, level, supported)
+        return "not listed for #{reference} · #{label} adjusts it to #{adjusted}" if adjusted
+
+        "not listed for #{reference} · verify support with #{label}"
       end
 
       # Id completion for `/kill`, `/prompt`, `/jump`, and friends is ranked shallowest-first:
@@ -920,7 +922,7 @@ module Meringue
           return kernel_command("SetHarness", "role" => tokens[0].downcase, "provider" => tokens[1])
         end
 
-        invalid("Usage: /harness [head|worker] <pi|claude|codex|antigravity>")
+        invalid("Usage: /harness [head|worker] <pi|claude|codex>")
       end
 
       # `/models` opens the local TUI model picker: a searchable list of the

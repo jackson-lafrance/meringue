@@ -253,7 +253,7 @@ module Meringue
         "Setup"
       ].freeze
       THINKING_LEVELS = %w[off minimal low medium high xhigh max].freeze
-      PROVIDERS = %w[pi claude codex antigravity].freeze
+      PROVIDERS = %w[pi claude codex].freeze
 
       module_function
 
@@ -467,8 +467,7 @@ module Meringue
             "command" => ["codex"],
             "head_extra_args" => ["--sandbox", "read-only", "--ask-for-approval", "never"],
             "worker_extra_args" => ["--dangerously-bypass-approvals-and-sandbox"]
-          },
-          "antigravity" => { "command" => ["agy"], "head_extra_args" => [], "worker_extra_args" => [] }
+          }
         }
         PROVIDERS.each do |provider|
           label = { "claude" => "Claude Code", "codex" => "Codex CLI" }.fetch(provider, provider.capitalize)

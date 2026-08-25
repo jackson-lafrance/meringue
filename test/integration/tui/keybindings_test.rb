@@ -33,6 +33,8 @@ class TuiKeybindingsTest < Minitest::Test
     assert @keys.match?("submit", "\n")
     assert @keys.match?("quit", "\u0004")
     assert @keys.match?("clear_or_quit", "\u0003")
+    assert @keys.match?("undo", "\u001a")
+    assert @keys.match?("undo", "\e[122;5u")
     assert @keys.match?("cancel_navigation", "\e")
     assert @keys.match?("focus_next", "\t")
     assert @keys.match?("focus_previous", "\e[Z")
@@ -172,6 +174,7 @@ class TuiKeybindingsTest < Minitest::Test
     assert_includes documentation, "`Ctrl-D`: quit."
     assert_includes documentation, "`Ctrl-B`"
     assert_includes documentation, "`Shift-Tab`"
+    assert_includes documentation, "`Ctrl-Z`: undo the most recent composer edit"
     assert @keys.match?("open_delivery_pr", "\u0002")
   end
 end

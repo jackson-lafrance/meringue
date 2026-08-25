@@ -335,6 +335,8 @@ class HarnessPiClientProtocolTest < HarnessIntegrationTest
     assert_equal session_file, state.fetch("session_file")
     assert_equal false, state.fetch("is_streaming")
     assert_equal "Pi Named Session", state.fetch("metadata").fetch("session_name")
+    assert_equal false, state.fetch("metadata").fetch("completed")
+    assert_equal %w[normal steer follow_up], state.fetch("metadata").fetch("prompt_modes")
     assert_equal "sess-99", state.fetch("metadata").fetch("pi_state").fetch("sessionId")
   end
 

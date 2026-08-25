@@ -120,9 +120,9 @@ class InputConfigTest < Minitest::Test
     Dir.mktmpdir("meringue-config-test") do |dir|
       config = Meringue::Config.load(path: write_config(File.join(dir, "config.toml"), FULL_CONFIG))
 
-      merged = config.with_overrides("harness" => { "provider" => "antigravity" })
+      merged = config.with_overrides("harness" => { "provider" => "claude" })
 
-      assert_equal "antigravity", merged.value("harness", "provider")
+      assert_equal "claude", merged.value("harness", "provider")
       assert_equal "claude", merged.value("harness", "head_provider")
       assert_equal "pi", merged.value("harness", "pi", "command")
       assert_equal "gruvbox", merged.value("tui", "colorscheme")
@@ -158,19 +158,19 @@ class InputConfigTest < Minitest::Test
         assert_equal "pi", config_registry.worker_provider
 
         # CLI flags arrive as config overrides.
-        cli_overrides = parse_cli_runtime_options(["--worker-harness", "antigravity"]).fetch("overrides")
+        cli_overrides = parse_cli_runtime_options(["--worker-harness", "claude_code"]).fetch("overrides")
         cli_registry = Meringue::Harness::Registry.new(config: config.with_overrides(cli_overrides))
         assert_equal "claude", cli_registry.head_provider
-        assert_equal "antigravity", cli_registry.worker_provider
+        assert_equal "claude", cli_registry.worker_provider
 
         # Env vars win over both config and CLI flags.
-        with_env("MERINGUE_HARNESS" => "antigravity") do
-          assert_equal "antigravity", config_registry.head_provider
-          assert_equal "antigravity", config_registry.worker_provider
+        with_env("MERINGUE_HARNESS" => "pi") do
+          assert_equal "pi", config_registry.head_provider
+          assert_equal "pi", config_registry.worker_provider
 
           with_env("MERINGUE_HEAD_HARNESS" => "cc") do
             assert_equal "claude", config_registry.head_provider
-            assert_equal "antigravity", config_registry.worker_provider
+            assert_equal "pi", config_registry.worker_provider
           end
         end
       end
@@ -197,7 +197,6 @@ class InputConfigTest < Minitest::Test
     assert_equal "claude", Meringue::Harness::Registry.normalize_provider("cc")
     assert_equal "codex", Meringue::Harness::Registry.normalize_provider("Codex CLI")
     assert_equal "codex", Meringue::Harness::Registry.normalize_provider("openai-codex")
-    assert_equal "antigravity", Meringue::Harness::Registry.normalize_provider("agy")
     assert_equal "", Meringue::Harness::Registry.normalize_provider("")
     assert_equal "", Meringue::Harness::Registry.normalize_provider(nil)
   end

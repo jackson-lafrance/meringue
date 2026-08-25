@@ -2,8 +2,8 @@
 
 Automated coverage added by the harness slice of the first Meringue test suite.
 Everything here is asserted by `test/integration/harness/**` against scripted
-JSONL stubs generated inside `Dir.mktmpdir`: no real `pi`, `claude`, `agy`, or
-`gh` binary is executed, no network call is made, and nothing is written outside
+JSONL stubs generated inside `Dir.mktmpdir`: no real `pi`, `claude`, or `gh`
+binary is executed, no network call is made, and nothing is written outside
 the per-test temp directory (`~/.meringue` is never touched, because every client
 receives an explicit `session_dir`, `transport_ownership`, or `claude_home`).
 
@@ -19,7 +19,7 @@ receives an explicit `session_dir`, `transport_ownership`, or `claude_home`).
 | pid + start-time liveness/identity gate | `process_identity_test.rb` |
 | Cross-instance ownership records and advisory locking | `transport_ownership_test.rb` |
 | Session views (live, history, malformed lines, read-only handle) | `session_view_test.rb` |
-| Claude/Antigravity process transports (argv, stream parsing, lifecycle) | `process_client_test.rb` |
+| Generic process transport via Claude (argv, stream parsing, lifecycle) | `process_client_test.rb` |
 | Terminal session opening validation | `terminal_session_opener_test.rb` |
 | Forge `gh` request/response mapping and error handling | `forge_github_client_test.rb` |
 

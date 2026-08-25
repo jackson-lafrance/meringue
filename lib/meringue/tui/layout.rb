@@ -73,7 +73,10 @@ module Meringue
             agent_workspace_pane.content_lines(state, width: metrics.fetch(:main_width) - 4),
             active: scroll_pane_active?(state, "logs"),
             overflow: :terminal,
-            scroll_offset: workspace.fetch("scroll_offset", 0),
+            # Native harness history is application-owned and is changed by
+            # forwarded wheel/page input. Only the separate worktree terminal
+            # retains a Meringue viewport offset.
+            scroll_offset: workspace.fetch("view", "agent") == "terminal" ? workspace.fetch("scroll_offset", 0) : 0,
             title_style: agent_workspace_title_style(state)
           )
           status = agent_workspace_pane.top_status_layout(state, width: metrics.fetch(:main_width) - 4)
@@ -466,6 +469,17 @@ module Meringue
         settings_pane.hit(state, width: width, height: height, x: x, y: y)
       end
 
+      # Content width used by the inline guidance editor. It is the same width
+      # SettingsPane renders, so soft-wrap cursor movement cannot drift from the
+      # visible rows.
+      def settings_text_width(state, width:, height:)
+        geometry = settings_pane.geometry(state, width: width, height: height)
+        return 1 if geometry.fetch(:too_small, false)
+
+        bounds = geometry.fetch(geometry.fetch(:setup, false) ? :card : :detail)
+        [bounds.fetch(:width).to_i - 4, 1].max
+      end
+
       def status_bar_composer_hit(state, width:, height:, x:, y:)
         return :inert unless status_bar_composer_active?(state)
 
@@ -580,8 +594,8 @@ module Meringue
       # same geometry the renderer uses. Callers clamp with this so scrolling
       # past the end cannot build up a dead offset.
       # Native focus uses the dashboard's logs rectangle rather than the former
-      # full-screen workspace rectangle. The PTY receives exactly the drawable
-      # content size so Pi reflows and handles terminal resize events correctly.
+      # full-screen workspace rectangle. The harness PTY receives exactly the
+      # drawable content size so it can reflow and handle terminal resize events.
       def embedded_agent_workspace_dimensions(state, width:, height:)
         metrics = layout_metrics(bounded_width(width), bounded_height(height), state)
         {
@@ -596,6 +610,11 @@ module Meringue
         workspace = state.fetch("_agent_workspace", {}) || {}
 
         if embedded_agent_workspace?(state)
+          # The embedded harness owns its history position; its captured screen
+          # is always rendered as one viewport. The worktree terminal remains a
+          # Meringue-owned surface and keeps its existing retained-row scrolling.
+          return 0 unless workspace.fetch("view", "agent") == "terminal"
+
           dimensions = embedded_agent_workspace_dimensions(state, width: width, height: height)
           lines = agent_workspace_pane.content_lines(state, width: dimensions.fetch("columns"))
           [lines.length - dimensions.fetch("rows"), 0].max

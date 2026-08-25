@@ -7,7 +7,7 @@ require "fileutils"
 
 # Shared helpers for the harness integration suite.
 #
-# Everything here is hermetic: no real pi/claude/agy/gh binary is ever executed,
+# Everything here is hermetic: no real pi/claude/gh binary is ever executed,
 # nothing is written outside Dir.mktmpdir, and no network call is made. Process
 # backed clients are driven by tiny scripted stubs generated per test that speak
 # the JSONL protocol the client expects.
@@ -288,7 +288,7 @@ module HarnessSupport
     end
   RUBY
 
-  # Generic process-backed harness stub (claude / antigravity style): prints a
+  # Generic process-backed harness stub: prints a
   # scripted stream of JSONL records to stdout, then exits.
   PROCESS_STUB_SOURCE = <<~'RUBY'
     # frozen_string_literal: true

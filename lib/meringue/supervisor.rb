@@ -13,9 +13,8 @@ module Meringue
   #
   # See {Meringue::Supervisor::Service} for the durable ownership, handoff,
   # `supervision_lost` lifecycle, downtime accounting, and recovery contract.
-  # See {Meringue::Supervisor::TransportAdapter} for the backend contract a new
-  # harness (Pi, Claude Code, Codex, ...) implements to plug into the
-  # supervisor without touching the kernel or TUI.
+  # See {Meringue::Supervisor::TransportAdapter} for the backend contract each
+  # harness implements to plug into the supervisor without touching the kernel or TUI.
   module Supervisor
     # Registered transport adapters by harness name. Adding a backend means
     # registering an adapter class here; the supervisor and kernel never branch

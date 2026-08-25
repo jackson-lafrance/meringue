@@ -174,6 +174,24 @@ class WorkspaceTerminalScreenTest < Minitest::Test
     assert_equal second, screen.styled_lines
   end
 
+  def test_immutable_render_snapshot_is_reused_until_screen_content_changes
+    screen = Meringue::Workspace::TerminalScreen.new(rows: 2, columns: 20)
+    screen.feed("cached screen")
+
+    first = screen.render_snapshot
+    second = screen.render_snapshot
+
+    assert_same first, second
+    assert first.frozen?
+    assert first.fetch("lines").frozen?
+    assert first.fetch("styled_lines").frozen?
+
+    screen.feed(" changed")
+    third = screen.render_snapshot
+    refute_same first, third
+    assert_operator third.fetch("revision"), :>, first.fetch("revision")
+  end
+
   def test_resize_shrinks_around_the_cursor_and_bumps_the_revision
     screen = Meringue::Workspace::TerminalScreen.new(rows: 4, columns: 10)
     screen.feed("l1\r\nl2\r\nl3\r\nl4")

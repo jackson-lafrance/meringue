@@ -89,7 +89,7 @@ worker_spawning_guidance = false
 # worker_spawning_guidance_prompt is shown only while the toggle is enabled
 ```
 
-`split_defaults` is enabled by default and controls independent future head/worker defaults. Existing role values are preserved if it is disabled, but shared values are used for both roles. `worker_spawning_guidance` is off by default; when enabled, its additional model-selection prompt is editable in the Experiments section and through `/worker guide "..."`. The prompt row is hidden while disabled and its saved value is retained. Goal loops, non-Pi providers, focused workspaces, read-only workers, command blacklists, presentation preferences, and terminal launchers already have explicit activation or are core safety/preferences.
+`split_defaults` is enabled by default and controls independent future head/worker defaults. Existing role values are preserved if it is disabled, but shared values are used for both roles. `worker_spawning_guidance` is off by default; when enabled, its additional model-selection prompt is edited inline in the Experiments section of both Settings and Setup, or through `/worker guide "..."`. The prompt row is hidden while disabled and its saved value is retained. Guided heads receive neither configured nor effective worker model/reasoning defaults, and guided `SpawnWorker` commands must set both selections explicitly. Goal loops, harness selection, focused workspaces, read-only workers, command blacklists, presentation preferences, and terminal launchers already have explicit activation or are core safety/preferences.
 
 ### GitHub support
 

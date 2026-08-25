@@ -10,7 +10,7 @@ For every workload the parent process:
 2. starts a separate Ruby/Meringue child process (never the user's running Meringue);
 3. gives every generated worker a `fake` harness and `mock-session-*` reference;
 4. runs the real `Meringue::App` and `Meringue::TUI::App` event/render loop behind a JSON protocol terminal;
-5. runs synthetic reconciliation concurrently at the requested cadence. It calls `Harness::FakeClient#get_state`, advances every active session revision, appends uniquely identified lifecycle activity, and atomically saves state. It never starts Pi, another harness CLI, a network request, or a model turn;
+5. runs synthetic reconciliation concurrently at the requested cadence. It calls `Harness::FakeClient#get_state`, advances every active session revision, appends uniquely identified lifecycle activity, and atomically saves state. It never starts a real harness CLI, makes a network request, or runs a model turn;
 6. writes one input and waits for the child to acknowledge the frame rendered from that input. Elapsed time therefore includes input transport, state refresh/composition, layout, Canvas rendering, and frame output—not just a key handler;
 7. records median, p95, p99, and maximum independently for typing and mouse-wheel scrolling and samples child RSS. Frame acknowledgements include revision and viewport digests extracted from the bytes the child rendered: every wheel sample must change the visible logs viewport. After measured samples, an unmeasured barrier pauses reconciliation and requires the final committed revision onscreen; every active agent must converge to that revision, and retained event IDs must equal the complete ordered suffix of committed revisions (not merely be unique).
 

@@ -7,7 +7,7 @@ require "tmpdir"
 # Shared fixtures and doubles for the head-agent slice of the suite.
 #
 # Everything here is hermetic: temporary directories only, no network, no real
-# Pi/harness processes, and no reads or writes under ~/.meringue.
+# harness processes, and no reads or writes under ~/.meringue.
 module HeadsSupport
   # Stands in for Workspace::Manager so head/worker integration tests never shell
   # out to git. It mirrors the small contract the kernel depends on.
@@ -395,11 +395,12 @@ module HeadsSupport
           "pid" => 4242,
           "workspace_path" => "/tmp/workspaces/w1",
           "workspace_branch" => "meringue/add-question-answering",
+          "session_stats" => { "context_usage" => { "tokens" => 50_000, "capacity" => 200_000, "percent" => 0.25 } },
           "harness_metadata" => {
             "title" => "Wire AnswerQuestion into head routing",
             "prompt_count" => 2,
             "last_prompt_mode" => "follow_up",
-            "context_utilization" => 0.25,
+            "prompt_modes" => %w[normal steer follow_up],
             "is_streaming" => false,
             "last_assistant_text" => "I updated the engine and added logging.",
             # Transcript-ish and secret-ish keys that must not reach the head.

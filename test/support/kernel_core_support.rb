@@ -7,9 +7,9 @@ require "test_helper"
 # Every engine built here is fully hermetic: state, config, and workspace roots all live
 # inside a per-test Dir.mktmpdir, the harness client is the in-process fake, and the head
 # runner is a local recording stub. Nothing touches ~/.meringue, the network, or a real
-# Pi/Claude process.
+# harness process.
 module KernelCoreSupport
-  # Deterministic stand-in for Heads::PiRunner. It records what the kernel handed it and
+  # Deterministic stand-in for Heads::Runner. It records what the kernel handed it and
   # returns a fixed HeadResult, so kernel-side behaviour is the only thing under test.
   class RecordingHeadRunner < Meringue::Heads::Runner
     attr_reader :calls

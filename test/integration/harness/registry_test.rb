@@ -35,10 +35,8 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_equal "claude", Registry.normalize_provider("claude-code")
     assert_equal "claude", Registry.normalize_provider("claude_code")
     assert_equal "claude", Registry.normalize_provider("CC")
-    assert_equal "antigravity", Registry.normalize_provider("agy")
     assert_equal "codex", Registry.normalize_provider("Codex CLI")
     assert_equal "codex", Registry.normalize_provider("openai-codex")
-    assert_equal "antigravity", Registry.normalize_provider("Antigravity CLI")
     assert_equal "cursor", Registry.normalize_provider("Cursor"), "unknown names normalize but do not resolve"
   end
 
@@ -48,7 +46,18 @@ class HarnessRegistryTest < HarnessIntegrationTest
     error = assert_raises(ArgumentError) { Registry.normalize_provider!("cursor") }
 
     assert_match(/Unsupported harness provider "cursor"/, error.message)
-    assert_match(/pi, claude, codex, antigravity/, error.message)
+    assert_match(/pi, claude, codex/, error.message)
+  end
+
+  def test_removed_provider_names_are_not_registered
+    %w[antigravity agy].each do |name|
+      assert_equal name, Registry.normalize_provider(name)
+      error = assert_raises(ArgumentError) { Registry.normalize_provider!(name) }
+      assert_includes error.message, "Unsupported harness provider"
+    end
+
+    refute Registry::PROVIDER_ALIASES.key?("antigravity")
+    refute Registry::PROVIDER_ALIASES.key?("agy")
   end
 
   def test_split_role_defaults_use_each_active_harness_and_repair_incompatible_effort_values
@@ -77,18 +86,17 @@ class HarnessRegistryTest < HarnessIntegrationTest
   end
 
   def test_provider_metadata_is_public_facing
-    assert_equal %w[pi claude codex antigravity], Registry.supported_provider_names
+    assert_equal %w[pi claude codex], Registry.supported_provider_names
     assert_equal "Pi", Registry.provider_label("pi")
     assert_equal "Claude Code", Registry.provider_label("cc")
     assert_equal "Codex CLI", Registry.provider_label("openai-codex")
-    assert_equal "Antigravity CLI", Registry.provider_label("agy")
     assert_equal "cursor", Registry.provider_label("cursor")
     assert_equal "claude", Registry.public_provider_name("claude-code")
 
     choices = Registry.provider_choices
-    assert_equal %w[pi claude codex antigravity], choices.map { |choice| choice.fetch("provider") }
-    assert_equal %w[pi claude codex antigravity], choices.map { |choice| choice.fetch("internal_provider") }
-    assert_equal ["Pi", "Claude Code", "Codex CLI", "Antigravity CLI"], choices.map { |choice| choice.fetch("label") }
+    assert_equal %w[pi claude codex], choices.map { |choice| choice.fetch("provider") }
+    assert_equal %w[pi claude codex], choices.map { |choice| choice.fetch("internal_provider") }
+    assert_equal ["Pi", "Claude Code", "Codex CLI"], choices.map { |choice| choice.fetch("label") }
     assert(choices.all? { |choice| choice.fetch("description").start_with?("Use ") })
   end
 
@@ -101,8 +109,6 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_equal "✳", Registry.provider_glyph("CC")
     assert_equal "◇", Registry.provider_glyph("codex")
     assert_equal "◇", Registry.provider_glyph("openai-codex")
-    assert_equal "↑", Registry.provider_glyph("antigravity")
-    assert_equal "↑", Registry.provider_glyph("agy")
 
     glyphs = Registry::PROVIDERS.map { |provider| Registry.provider_glyph(provider) }
     assert_equal glyphs.uniq, glyphs, "each shipped provider needs its own mark"
@@ -114,6 +120,7 @@ class HarnessRegistryTest < HarnessIntegrationTest
     # masquerading as a shipped backend. "fake" is the test/dev harness.
     assert_equal "f", Registry.provider_glyph("fake")
     assert_equal "c", Registry.provider_glyph("cursor")
+    assert_equal "a", Registry.provider_glyph("antigravity"), "a removed provider is handled like any unknown backend"
     assert_equal "?", Registry.provider_glyph("!!")
 
     # A blank harness means nothing was recorded, and renders as unknown rather than as any
@@ -133,7 +140,6 @@ class HarnessRegistryTest < HarnessIntegrationTest
       assert_equal "p", Registry.provider_glyph("pi")
       assert_equal "c", Registry.provider_glyph("claude-code")
       assert_equal "x", Registry.provider_glyph("codex")
-      assert_equal "a", Registry.provider_glyph("agy")
       assert_equal "?", Registry.provider_glyph(nil)
     end
 
@@ -165,9 +171,9 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_equal "claude", subject.head_provider
     assert_equal "claude", subject.worker_provider
 
-    split = registry("harness" => { "provider" => "claude", "worker_provider" => "agy", "head_provider" => "pi" })
+    split = registry("harness" => { "provider" => "pi", "worker_provider" => "claude-code", "head_provider" => "pi" })
     assert_equal "pi", split.head_provider
-    assert_equal "antigravity", split.worker_provider
+    assert_equal "claude", split.worker_provider
   end
 
   def test_environment_overrides_beat_configuration
@@ -177,10 +183,10 @@ class HarnessRegistryTest < HarnessIntegrationTest
       assert_equal "claude", subject.worker_provider
     end
 
-    with_env("MERINGUE_HARNESS" => "claude", "MERINGUE_WORKER_HARNESS" => "agy") do
+    with_env("MERINGUE_HARNESS" => "pi", "MERINGUE_WORKER_HARNESS" => "claude-code") do
       subject = registry
-      assert_equal "claude", subject.head_provider
-      assert_equal "antigravity", subject.worker_provider
+      assert_equal "pi", subject.head_provider
+      assert_equal "claude", subject.worker_provider
     end
   end
 
@@ -422,18 +428,16 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_includes error.message, "must be an array of glob strings"
   end
 
-  def test_client_for_builds_interactive_and_process_clients
+  def test_client_for_builds_interactive_clients
     subject = registry(
       "harness" => {
         "claude" => { "command" => "claude --beta", "env" => { "CLAUDE_TOKEN" => "x" } },
-        "codex" => { "command" => "codex --beta", "env" => { "CODEX_HOME" => File.join(tmpdir, "codex") } },
-        "antigravity" => { "command" => ["agy", "--flag"], "extra_args" => ["--shared"] }
+        "codex" => { "command" => "codex --beta", "env" => { "CODEX_HOME" => File.join(tmpdir, "codex") } }
       }
     )
 
     claude = subject.client_for(provider: "claude-code", kind: "head")
     codex = subject.client_for(provider: "openai-codex", kind: "worker")
-    antigravity = subject.client_for(provider: "agy", kind: "worker")
 
     assert_kind_of Meringue::Harness::ClaudeInteractiveClient, claude
     assert_equal ["claude", "--beta"], claude.command
@@ -443,9 +447,6 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_equal ["codex", "--beta"], codex.command
     assert_equal File.join(tmpdir, "codex"), codex.codex_home
     assert codex.live_terminal_supported?, "Codex is driven through its own interactive session"
-    assert_kind_of Meringue::Harness::AntigravityClient, antigravity
-    assert_equal ["agy", "--flag"], antigravity.command
-    assert_equal ["--shared"], antigravity.extra_args
   end
 
   def test_client_for_rejects_unknown_providers
@@ -472,8 +473,7 @@ class HarnessRegistryTest < HarnessIntegrationTest
     runners = {
       "pi" => subject.head_runner_for(provider: "pi", cwd: tmpdir),
       "claude" => subject.head_runner_for(provider: "claude", cwd: tmpdir),
-      "codex" => subject.head_runner_for(provider: "codex", cwd: tmpdir),
-      "antigravity" => subject.head_runner_for(provider: "antigravity", cwd: tmpdir)
+      "codex" => subject.head_runner_for(provider: "codex", cwd: tmpdir)
     }
 
     runners.each_value { |runner| assert_kind_of Meringue::Heads::AgentRunner, runner }
@@ -507,12 +507,11 @@ class HarnessRegistryTest < HarnessIntegrationTest
   end
 
   def test_provider_command_is_exposed_for_terminal_launching
-    subject = registry("harness" => { "antigravity" => { "command" => %w[agy --flag] } })
+    subject = registry("harness" => { "claude" => { "command" => %w[claude --flag] } })
 
     assert_equal "pi", subject.provider_command("pi")
-    assert_equal "claude", subject.provider_command("claude")
+    assert_equal "claude --flag", subject.provider_command("claude")
     assert_equal "codex", subject.provider_command("codex")
-    assert_equal "agy --flag", subject.provider_command("antigravity")
   end
 
   def test_terminal_session_opener_is_built_from_configuration
@@ -525,7 +524,7 @@ class HarnessRegistryTest < HarnessIntegrationTest
 
     assert_kind_of Meringue::Harness::TerminalSessionOpener, opener
     assert_equal "pi-dev", opener.send(:command_parts, "pi").first
-    assert_equal File.expand_path(@session_dir), File.expand_path(opener.send(:session_dir))
+    assert_equal File.expand_path(@session_dir), opener.send(:provider_session_directory, "pi")
   end
 
   def test_public_provider_names_are_used_for_configuration_sections

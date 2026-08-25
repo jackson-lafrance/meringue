@@ -48,7 +48,7 @@ test/findings/                 # notes about real bugs found while writing tests
 - File names end in `_test.rb`; the Rake glob is `test/**/*_test.rb`.
 - Each file begins with `require "test_helper"` (never `require_relative`), because the Rake task and the single-file command both put `test/` on the load path.
 - Each file defines a uniquely named subclass of `Minitest::Test`, prefixed by its area (for example `class FoundationCliEntrypointTest < Minitest::Test`). Unique names keep parallel work from colliding.
-- Tests are hermetic: no network, no real Pi/Claude/Codex/Antigravity processes, no dependence on installed harness CLIs, and no reads or writes under `~/.meringue`. Use `Dir.mktmpdir` for any filesystem work, and `Meringue::Harness::FakeClient` / `Meringue::Heads::FakeRunner` for harness behavior.
+- Tests are hermetic: no network, no real Pi, Claude Code, or Codex processes, no dependence on installed harness CLIs, and no reads or writes under `~/.meringue`. Use `Dir.mktmpdir` for any filesystem work, and `Meringue::Harness::FakeClient` / `Meringue::Heads::FakeRunner` for harness behavior.
 - Tests are fast and deterministic: no `sleep`-based coordination where an injected clock or a direct call will do, and no reliance on wall-clock ordering.
 - No failing tests and no `skip`. If a test reveals a real bug that is out of scope, assert the current actual behavior, say so in a comment, and record the bug in `test/findings/<area>.md`.
 - Tests are development-only: `meringue.gemspec` does not package `test/`.
@@ -57,7 +57,7 @@ test/findings/                 # notes about real bugs found while writing tests
 
 These need real credentials, real processes, or a real terminal, so they stay manual:
 
-- Real harness backends (Pi, Claude Code, Codex CLI, Antigravity): spawning, resuming, or prompting an actual harness process, and anything requiring an authenticated harness CLI. The interactive *transport* is an exception and is covered for real — `test/integration/harness/interactive_client_test.rb` drives an actual PTY against `test/fixtures/fake_interactive_agent.rb`, and `codex_interactive_client_test.rb` drives `fake_codex_agent.rb`, because bracketed paste, provider-assigned session discovery, the interrupt/queue keys, and a transcript written while work happens cannot be exercised any other way. It still touches no network and writes only inside `Dir.mktmpdir`.
+- Real harness backends (Pi, Claude Code, and Codex CLI): spawning, resuming, or prompting an actual harness process, and anything requiring an authenticated harness CLI. The interactive *transport* is an exception and is covered for real — `test/integration/harness/interactive_client_test.rb` drives an actual PTY against `test/fixtures/fake_interactive_agent.rb`, a stand-in agent CLI, and `codex_interactive_client_test.rb` drives `fake_codex_agent.rb`, because bracketed paste, provider-assigned session discovery, the interrupt/queue keys, and a transcript written while work happens cannot be exercised any other way. They still touch no network and write only inside `Dir.mktmpdir`.
 - Live backend proofs. `test/e2e/claude_interactive_proof.rb` and `test/e2e/claude_head_proof.rb` talk to a real `claude` install and spend real tokens, so they are deliberately outside `rake test`. Run them by hand when changing the interactive transport:
 
   ```bash

@@ -94,8 +94,7 @@ It is deliberately not a second read. `ProcessClient::ManagedProcess` keeps a si
 | Pi | raw RPC events (`PiSessionView.progress_items`) | `message_end` carries the complete assistant message, including its text blocks, *before* its tool calls execute. Per-token `message_update` and every `tool_execution_*` event are ignored outright. |
 | Claude Code | durable interactive transcript records (`ClaudeTranscript.progress`) | complete assistant-authored text records only; tool traffic and the settled final result are excluded. |
 | Codex CLI | durable rollout events (`CodexTranscript.progress`) | `agent_message` commentary only; `final_answer`, tool traffic, and token events are excluded. |
-| Other `ProcessClient` backends | wrapped stdout records (`SessionProgress.from_process_events`) | assistant records' text blocks only. Terminal `result` records are skipped because the kernel logs completion output. |
-| Antigravity | plain-text `--print` stdout | no JSON records, so no progress. |
+| Other `ProcessClient` backends | wrapped stdout records (`SessionProgress.from_process_events`) | assistant records' text blocks only. `tool_use` blocks are ignored, and the terminal `result` record is skipped because the kernel already logs it as the worker's completion output. |
 | Fake, and any client that does not override the contract | — | `[]`. |
 
 The default on `Harness::Client` is `[]`, so a backend that cannot describe its own activity simply stays quiet; nothing else about it degrades. A client that raises is caught and treated the same way, because progress must never be able to break a reconcile pass.
@@ -117,7 +116,7 @@ Heads are excluded: they are short-lived routers that already log their own summ
 
 ## Harness-neutral log copy
 
-User-visible log lines, status strings, and notices describe the coding agent, never the harness backend that runs it. The kernel logs `Started agent session for head H68.`, `Resumed agent session for worker P1-I9-W3 and prompted it to continue.`, and `Could not start an agent session for worker P1-I9-W3: …` rather than naming Pi, Claude, Codex, or Antigravity. `agent session` is the standing vocabulary for the human-readable session noun; `harness` stays in structured data (the `harness` field, log `details`, config keys such as `[harness.pi]`, and the `/harness` selection command, where naming the backend is deliberate).
+User-visible log lines, status strings, and notices describe the coding agent, never the harness backend that runs it. The kernel logs `Started agent session for head H68.`, `Resumed agent session for worker P1-I9-W3 and prompted it to continue.`, and `Could not start an agent session for worker P1-I9-W3: …` rather than naming Pi, Claude Code, or Codex. `agent session` is the standing vocabulary for the human-readable session noun; `harness` stays in structured data (the `harness` field, log `details`, config keys such as `[harness.pi]`, and the `/harness` selection command, where naming the backend is deliberate).
 
 ## Terminal Markdown
 

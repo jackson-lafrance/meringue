@@ -15,7 +15,7 @@ You need:
 - Git;
 - Ruby 3.1 or newer;
 - Bundler (included with most Ruby installations);
-- for real agent work, a supported harness CLI installed and authenticated. Meringue supports Claude Code (`claude`), Codex CLI (`codex`), Pi (`pi`), and Antigravity (`agy`), and does not assume one: pick a harness during first-run setup, in `/config`, or with `[harness] provider`. A harness is not needed for demo mode.
+- for real agent work, a supported harness CLI installed and authenticated. Meringue supports Claude Code (`claude`), Codex CLI (`codex`), and Pi (`pi`), and does not assume one: pick a harness during first-run setup, in `/config`, or with `[harness] provider`. A harness is not needed for demo mode.
 
 Confirm the required development tools are available:
 
@@ -57,7 +57,7 @@ Your config and state live under `~/.meringue/`, outside the checkout, so updati
 
 - **`meringue: command not found`:** the source install does not add a global command. Run `bundle exec meringue` from the checkout. If Bundler cannot discover the executable, `./bin/meringue --version` verifies the checked-in entrypoint directly.
 - **`bundle: command not found`:** install Bundler for the Ruby you intend to use with `gem install --user-install bundler -v '~> 2.5'`. If RubyGems says its executable directory is not on `PATH`, add it for the current shell with `export PATH="$(ruby -r rubygems -e 'print Gem.user_dir')/bin:$PATH"`, then persist that line in your shell startup file.
-- **A harness executable is missing:** check it with `command -v pi` (or `claude` / `codex` / `agy`). Put the executable's directory on `PATH`, or set that provider's `command` to its absolute path as described in [harness configuration](docs/config.md#provider-sections).
+- **A harness executable is missing:** check it with `command -v pi` (or `claude` / `codex`). Put the executable's directory on `PATH`, or set that provider's `command` to its absolute path as described in [harness configuration](docs/config.md#provider-sections).
 
 ## The problem
 
@@ -87,7 +87,6 @@ Supported provider names in the current config surface include:
 - `pi`
 - `claude` / `claude_code` / `claude-code` / `cc`
 - `codex` / `codex-cli` / `openai-codex`
-- `antigravity`
 
 That provider list should grow over time without changing the core product model.
 ## Product value
@@ -215,10 +214,10 @@ Useful slash commands inside the TUI include:
 - `/theme [name]` — with no name, open the on-screen theme picker; otherwise persist a TUI colorscheme. The `/themes` alias opens the same picker.
 - `/config` — open the full-screen transactional Settings editor for themes, separate head/worker defaults, experiments, harnesses, workspaces, safety, and every keybinding. Use `/config --text` for the old read-only diagnostic listing.
 - `/status-bar` — open the live composer for bottom, agent-information, and focused-worker status bars. Reorder with the keyboard or mouse; Save persists one atomic layout, while Esc discards the preview. See [`docs/status_bar_layouts.md`](docs/status_bar_layouts.md).
-- `/harness [head|worker] <pi|claude|codex|antigravity>` — with no arguments, open the on-screen harness picker; otherwise select the harness for future agents; omit the role to update both.
+- `/harness [head|worker] <pi|claude|codex>` — with no arguments, open the on-screen harness picker; otherwise select the harness for future agents; omit the role to update both.
 - `/models [harness]` — open the model picker: a searchable list of the models the selected harness reports, with clear Head/Worker tabs. `←`/`→` switches roles, `↑`/`↓` moves, `Enter` applies the selected role's future-session default, `Ctrl-R` re-asks the harness, and `Esc` closes. `/models refresh [harness]` skips the picker and just re-fetches the catalog.
-- `/model [head|worker] <provider>/<model-id>` — with no arguments, open the same Head/Worker picker as `/models`; with a model reference, persist the model for all future sessions on the selected harness. Omit the role to update both (the backward-compatible form), or name `head`/`worker` to update only that role. Existing sessions are unchanged. The reference is split on the first slash, so the model id may itself contain `/` and `:` (`/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`). An id the model catalog does not list is still set, and reported as unverified. The values in force are always visible in the dashboard status line (`harness: Pi · model: <model> · thinking: <level>` when both roles match, or a compact head/worker form when they differ) and in `/config`.
-- `/thinking [head|worker] <off|minimal|low|medium|high|xhigh|max>` — with no arguments, open the clear Head/Worker thinking picker; otherwise persist a thinking level for future sessions on the selected harness. Omit the role to update both (the backward-compatible form), or name `head`/`worker` to update only that role; existing sessions are unchanged.
+- `/model [head|worker] <provider>/<model-id>` — with no arguments, open the same Head/Worker picker as `/models`; with a model reference, persist the model for all future agent sessions. Omit the role to update both (the backward-compatible form), or name `head`/`worker` to update only that role. Existing sessions are unchanged. The reference is split on the first slash, so the model id may itself contain `/` and `:` (`/model fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`). An id the model catalog does not list is still set, and reported as unverified. The values in force are always visible in the dashboard status line (`harness: <harness> · model: <model> · thinking: <level>` when both roles match, or a compact head/worker form when they differ) and in `/config`.
+- `/thinking [head|worker] <off|minimal|low|medium|high|xhigh|max>` — with no arguments, open the clear Head/Worker thinking picker; otherwise persist a reasoning level for future agent sessions. Omit the role to update both (the backward-compatible form), or name `head`/`worker` to update only that role; existing sessions are unchanged.
 - `/keybind` — show active TUI keybindings.
 - `/prune` — one cleanup pass that removes resolved (completed/killed) and errored records together and removes their clean, unlocked Meringue-managed worktrees. Unsafe cleanup (dirty, locked, ambiguous, or failed) retains the bundle and logs why so it can be retried. A worktree shared by several workers is removed once the last of them is pruned.
 - `/recount` — compact project, issue, worker, question, and goal numbering after records are removed.
@@ -276,14 +275,13 @@ HEADS
   └─ ●   I1  Fix signup validation 1/3
     ├─ ● π W1  Add collision check
     ├─ ✓ ✳ W2  Hide password field
-    ├─ · ◇ W3  Check the migration
-    └─ · ↑ W4  Review the rollout
+    └─ · ◇ W3  Check the migration
 ```
 
 - The id and logo are drawn in that agent's **identity color** — the same deterministic per-id color its log rows and `▌` gutter already use, and the same color the chat composer takes when the row is selected. One agent is one color in all three places.
 - Color is additive and status-independent: a working agent, a completed agent with its `✓`, and idle/queued/blocked/errored/killed agents all keep their color and logo. Status stays legible through the status glyph's own semantic color and the muted title of a completed row.
 - A project row is only its product name (`meringue`, not `meringue working`). Lifecycle status is carried by the status glyph on every row, so it is never spelled out beside a name; the kernel strips a trailing status word from any project name it stores and repairs one that an older state file already contains.
-- The logo is the agent's harness: `π` Pi, `✳` Claude Code, `◇` Codex CLI, `↑` Antigravity. A harness Meringue does not ship shows a plain ASCII initial, and a record with no harness shows `?`. Every variant is exactly one column wide, and issue/project rows reserve the same cell so all ids stay in one column. Set `MERINGUE_ASCII_GLYPHS=1` for `p`/`c`/`x`/`a` if your font cannot draw the marks, or `NO_COLOR=1` to drop color while keeping glyphs, ids, and statuses.
+- The logo is the agent's harness: `π` Pi, `✳` Claude Code, and `◇` Codex CLI. A harness Meringue does not ship shows a plain ASCII initial, and a record with no harness shows `?`. Every variant is exactly one column wide, and issue/project rows reserve the same cell so all ids stay in one column. Set `MERINGUE_ASCII_GLYPHS=1` for `p`/`c`/`x` if your font cannot draw the marks, or `NO_COLOR=1` to drop color while keeping glyphs, ids, and statuses.
 
 Single-click a project, issue, head, or worker row in the AgentTree to filter the logs pane to that node: a worker shows its own logs, an issue adds its workers and child issues, and a project covers its whole subtree. Right-click an issue row to open its associated delivery PR; worker rows do not duplicate that PR affordance. If no PR is tracked, Meringue shows a transient notice and leaves the current selection unchanged. Issue and worker selections also focus subsequent natural-language chat: an issue targets itself, while a worker resolves to its owning issue and remains a preferred session-context hint. Head rows are log-only: a stranded head (`errored`, `killed`, or `blocked` because the kernel rejected or failed part of its batch) is marked `retry me` and can be retried deliberately with `/retry H<n>` or by double-clicking that row. A partially applied head is retried without re-routing what already landed — the retry head is handed the commands that were accepted and told to reuse those records — and the old head row is removed from the active tree once the fresh retry head starts. Selected prompts are tagged to the issue (and the selected worker when applicable), so they remain visible in the focused logs.
 

@@ -24,6 +24,20 @@ class InputSettingsSchemaStoreTest < Minitest::Test
     end
   end
 
+  def test_removed_harness_is_absent_from_settings_choices_and_validation
+    config = empty_config
+    definitions = Meringue::Config::Schema.definitions
+
+    assert_equal %w[pi claude codex], Meringue::Config::Schema.fetch("agent.head_harness").option_values(config)
+    assert_equal %w[pi claude codex], Meringue::Config::Schema.fetch("agent.worker_harness").option_values(config)
+    refute definitions.any? { |definition| definition.id.start_with?("harnesses.antigravity.") }
+
+    error = assert_raises(Meringue::Config::ValidationError) do
+      Meringue::Config::Schema.validate_changes({ "agent.head_harness" => "antigravity" }, config: config)
+    end
+    assert_includes error.field_errors.fetch("agent.head_harness"), "pi, claude, codex"
+  end
+
   def test_every_supported_editor_type_normalizes_and_validates
     samples = {
       "boolean" => true,

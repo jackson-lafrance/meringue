@@ -34,6 +34,10 @@ module Meringue
       CONVERSATION_WINDOW_RECORDS = 64
       PROMPT_MODES = %w[normal steer follow_up].freeze
 
+      def prompt_modes
+        PROMPT_MODES
+      end
+
       class Error < StandardError; end
       class SessionNotRunningError < Error
         include SessionProcessGoneError
@@ -800,6 +804,7 @@ module Meringue
             "session_name" => entry.fetch("session_name", nil),
             "workspace_mode" => entry.fetch("workspace_mode", nil),
             "transport" => "interactive_pty",
+            "prompt_modes" => prompt_modes,
             "session_state" => state,
             "started_at" => process&.started_at&.iso8601
           }.compact

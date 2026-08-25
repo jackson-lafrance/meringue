@@ -318,17 +318,12 @@ module Meringue
         # wraps. At the first/last row it deliberately returns the original
         # cursor so App can hand that edge gesture to input-history navigation.
         def composer_vertical_cursor(input_buffer, input_cursor, direction:, width: nil)
-          input = input_buffer.to_s
-          cursor = input_cursor.to_i.clamp(0, input.chars.length)
-          spans = input_row_spans(input, composer_available_width(input, width))
-          return cursor if spans.empty?
-
-          row, column = composer_cursor_location(spans, cursor)
-          target_row = direction.to_sym == :up ? row - 1 : row + 1
-          return cursor unless target_row.between?(0, spans.length - 1)
-
-          target = spans.fetch(target_row)
-          target.fetch(:start) + [column, target.fetch(:length)].min
+          MultilineInput.vertical_cursor(
+            input_buffer,
+            input_cursor,
+            direction: direction,
+            width: width
+          )
         end
 
         def composer_char_index_at(state, row:, column:, width: nil)
@@ -382,11 +377,11 @@ module Meringue
 
         def bottom_right_status_line(state)
           segments = compact_harness_status_segments(state)
-          defaults = (state.fetch("metadata", {}) || {}).fetch("pi_session_defaults", {}) || {}
+          defaults = (state.fetch("metadata", {}) || {}).fetch("agent_session_defaults", {}) || {}
           return [] if segments.empty? && defaults.empty?
 
           unless defaults.empty?
-            role_values = normalized_pi_role_defaults(defaults)
+            role_values = normalized_agent_role_defaults(defaults)
             segments << [" · ", Style::DIM] unless segments.empty?
             segments.concat(compact_model_status_segments(**role_values))
           end
@@ -399,7 +394,7 @@ module Meringue
         # to render. Otherwise a save that moves from a shared value to role
         # overrides can make the right-aligned footer alternate between a compact
         # shared label and a misleading "mixed" placeholder across frames.
-        def normalized_pi_role_defaults(defaults)
+        def normalized_agent_role_defaults(defaults)
           shared_model = present_status_value(defaults["model"])
           shared_thinking = present_status_value(defaults["thinking_level"])
           roles = defaults["roles"].is_a?(Hash) ? defaults["roles"] : {}
@@ -1003,8 +998,7 @@ module Meringue
           )
           capacity = nil unless capacity&.positive?
           used = numeric_telemetry_value(usage.key?("tokens") ? usage["tokens"] : usage["used"])
-          approximate = usage["approximate"] == true || usage["estimated"] == true ||
-                        usage["source"].to_s == "pi_session_stats"
+          approximate = usage["approximate"] == true || usage["estimated"] == true
           prefix = approximate && used ? "~" : ""
           used_text = used.nil? ? "?" : token_count(used)
           capacity_text = capacity.nil? ? "?" : token_count(capacity)
@@ -1685,78 +1679,29 @@ module Meringue
 
         def wrapped_input_lines(input_buffer, input_cursor:, width: nil, selection: nil,
                                 prompt_style: Style::ACCENT_BOLD, placeholder: "enter a prompt")
-          if input_buffer.empty?
-            return [[
-              ["›", prompt_style],
-              [" #{placeholder}", Style::MUTED]
-            ]]
-          end
-
-          chars = input_buffer.chars
-          cursor = input_cursor.to_i.clamp(0, chars.length)
-          spans = input_row_spans(input_buffer, composer_available_width(input_buffer, width))
-          cursor_row, cursor_column = composer_cursor_location(spans, cursor)
-          selection_range = composer_selection_range(selection, chars.length)
-          paste_ranges = PasteRegistry.marker_ranges_in(input_buffer)
-
-          spans.each_with_index.map do |span, index|
-            input_line_segments(
-              chars,
-              span,
-              first_line: index.zero?,
-              cursor_column: index == cursor_row ? cursor_column : nil,
-              selection_range: selection_range,
-              prompt_style: prompt_style,
-              paste_ranges: paste_ranges
-            )
-          end
+          MultilineInput.lines(
+            input_buffer,
+            input_cursor: input_cursor,
+            width: width,
+            selection: selection,
+            prompt_style: prompt_style,
+            placeholder: placeholder
+          )
         end
 
         def composer_available_width(input_buffer, width)
-          return [width.to_i - 2, 1].max if width
-
-          [input_buffer.to_s.chars.length, 1].max
+          MultilineInput.available_width(input_buffer, width)
         end
 
         # Wrapping is computed from the buffer itself (not from a buffer with the
         # cursor marker spliced in) so visual rows map back to exact character
         # indexes for mouse selection.
         def input_row_spans(input_buffer, available_width)
-          spans = []
-          index = 0
-          input_buffer.to_s.split("\n", -1).each do |logical_line|
-            line_length = logical_line.chars.length
-            if line_length.zero?
-              spans << { start: index, length: 0 }
-            else
-              offset = 0
-              while offset < line_length
-                length = [available_width, line_length - offset].min
-                spans << { start: index + offset, length: length }
-                offset += length
-              end
-            end
-            index += line_length + 1
-          end
-          spans
+          MultilineInput.row_spans(input_buffer, available_width)
         end
 
         def composer_cursor_location(spans, cursor)
-          spans.each_with_index do |span, index|
-            finish = span.fetch(:start) + span.fetch(:length)
-            return [index, cursor - span.fetch(:start)] if cursor < finish
-            next unless cursor == finish
-
-            next_span = spans[index + 1]
-            # A cursor sitting at the end of a wrapped row belongs at the start of
-            # the continuation row; a hard newline keeps it on the current row.
-            return [index, cursor - span.fetch(:start)] if next_span.nil? || next_span.fetch(:start) > cursor
-
-            return [index + 1, 0]
-          end
-
-          last_span = spans.last
-          [[spans.length - 1, 0].max, last_span ? last_span.fetch(:length) : 0]
+          MultilineInput.cursor_location(spans, cursor)
         end
 
         def paste_marker_index?(paste_ranges, index)

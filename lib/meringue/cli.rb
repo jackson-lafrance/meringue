@@ -146,7 +146,11 @@ module Meringue
       store = state_store(path: options.fetch(:state_path))
       engine = enable_agents ? tui_engine(store, registry, config: config, config_path: options.fetch(:config_path)) : nil
       agent_session_service = engine ? Sessions::WorkerSessionService.new(engine: engine) : nil
-      workspace_controller = Workspace::Controller.from_config(config, focus_session_service: agent_session_service)
+      workspace_controller = Workspace::Controller.from_config(
+        config,
+        focus_session_service: agent_session_service,
+        session_environment_patterns: Harness::Registry.managed_session_environment_patterns
+      )
       prompt_loop = engine ? Heads::PromptLoop.new(engine: engine, wait_for_workers: false) : nil
       result = App.new(
         input: input,
@@ -202,13 +206,13 @@ module Meringue
         option_parser.on("--config PATH", "Read Meringue harness config TOML from PATH. Defaults to #{Config::DEFAULT_PATH}.") do |path|
           options[:config_path] = path
         end
-        option_parser.on("--harness NAME", "Use one harness provider for heads and workers: pi, claude/claude_code, codex, or antigravity.") do |name|
+        option_parser.on("--harness NAME", "Use one harness provider for heads and workers: pi, claude/claude_code, or codex.") do |name|
           options[:harness] = name
         end
-        option_parser.on("--head-harness NAME", "Use a specific head harness provider: pi, claude/claude_code, codex, or antigravity.") do |name|
+        option_parser.on("--head-harness NAME", "Use a specific head harness provider: pi, claude/claude_code, or codex.") do |name|
           options[:head_harness] = name
         end
-        option_parser.on("--worker-harness NAME", "Use a specific worker harness provider: pi, claude/claude_code, codex, or antigravity.") do |name|
+        option_parser.on("--worker-harness NAME", "Use a specific worker harness provider: pi, claude/claude_code, or codex.") do |name|
           options[:worker_harness] = name
         end
       end
@@ -354,6 +358,7 @@ module Meringue
           meringue tui                           # open the TUI and route chat prompts through configured head agents
           meringue tui --state PATH              # open the TUI against a specific Meringue state JSON file
           meringue tui --config PATH             # open the TUI with a specific harness/config TOML file
+          meringue tui --harness claude          # use Claude Code for both heads and workers
           meringue tui --harness codex           # use Codex CLI for both heads and workers
           meringue tui --head-harness claude --worker-harness codex
           meringue demo                          # display the fake demo state fixture without agent prompting
@@ -368,7 +373,7 @@ module Meringue
 
         Config:
           Default path: #{Config::DEFAULT_PATH}
-          Supported harness providers: pi, claude (aliases: claude_code, claude-code, cc), codex, antigravity
+          Supported harness providers: pi, claude (aliases: claude_code, claude-code, cc), codex (alias: codex-cli)
           Supported TUI colorschemes: #{TUI::Style.colorschemes.join(", ")}
           TUI keybindings can be customized under [tui.keybindings]; omitted actions keep defaults.
           CLI flags override config.toml, and MERINGUE_HARNESS / MERINGUE_HEAD_HARNESS / MERINGUE_WORKER_HARNESS override both.
@@ -382,7 +387,7 @@ module Meringue
           /update                   # update the source, install dependencies as needed, and reload
           /theme [name]             # open the theme picker, or set and persist a named TUI theme
           /themes                   # open the interactive theme picker
-          /harness [head|worker] <pi|claude|codex|antigravity> # select role-aware harness defaults
+          /harness [head|worker] <pi|claude|codex> # select role-aware harness defaults
           /models [harness]         # open the searchable model picker; bare /model is an alias
           /keybind                  # show all TUI keybindings
           /config                   # open full-screen Settings (/config --text prints diagnostics)

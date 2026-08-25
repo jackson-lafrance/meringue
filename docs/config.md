@@ -24,7 +24,7 @@ worker_spawning_guidance = false
 # worker_spawning_guidance_prompt = "..."  # shown and applied only when the toggle is true
 ```
 
-New installations default GitHub support off. Existing installations with a pre-upgrade state file or onboarding marker migrate it on so upgrading does not silently remove PR behavior; an explicit value always wins. Disabling it performs no built-in `gh` subprocess/network lookup, hides GitHub-specific TUI commands and status, and preserves historical PR records. The worker model-selection prompt is editable through Settings → Experiments, Setup → Experiments, or `/worker guide \"...\"`, but its input is hidden and ignored while the toggle is off. See [`settings.md`](settings.md#github-support) and [`orchestration-experiments.md`](orchestration-experiments.md).
+New installations default GitHub support off. Existing installations with a pre-upgrade state file or onboarding marker migrate it on so upgrading does not silently remove PR behavior; an explicit value always wins. Disabling it performs no built-in `gh` subprocess/network lookup, hides GitHub-specific TUI commands and status, and preserves historical PR records. The worker model-selection prompt is editable inline through Settings → Experiments, Setup → Experiments, or `/worker guide \"...\"`, but its input is hidden and ignored while the toggle is off. When enabled, heads receive a privacy-filtered routing snapshot without configured or effective worker model/thinking defaults; guided head spawns must set both selections explicitly. See [`settings.md`](settings.md#github-support) and [`orchestration-experiments.md`](orchestration-experiments.md).
 
 When GitHub support is enabled, **Test GitHub access** appears as a non-persistent action under Settings → Experiments (and in the Setup Experiments step). It checks the current checkout's `origin` remote, then runs bounded read-only `gh auth status --hostname github.com` and `gh repo view OWNER/REPO --json nameWithOwner` checks. It never creates, edits, closes, comments on, or otherwise mutates a GitHub resource. The same check is available as `/github test`; it reports success, unavailable CLI/service, unauthenticated, repository permission denied, timeout, and malformed-remote outcomes. The action is safe to retry.
 
@@ -68,7 +68,7 @@ Supported colorschemes:
 
 Every colorscheme also defines an eight-color agent palette. Each agent id is hashed to one palette slot, so the same head or worker always renders in the same color for a given theme, and that assignment is used for its rows in the logs pane and its id/harness logo in the AgentTree (in every status, completed rows included). The chat composer also uses the palette while a worker or issue is the selected chat target; heads are log-only and never tint the composer. Heads use a bold `◆`, workers use `✦`, completed results use `✓`, actionable warnings/errors use `!`, and kernel/command logs keep the theme accent with `▪`. Set `NO_COLOR=1` to render the TUI without color; icons, explicit ids, harness logos, status text, the composer title, and the `▌` gutter still separate agent output from kernel logs.
 
-AgentTree rows also show which harness backs each session: `π` Pi, `✳` Claude Code, `◇` Codex CLI, `↑` Antigravity. A harness Meringue does not ship renders a plain ASCII initial and a record with no harness renders `?`, always in exactly one column. Set `MERINGUE_ASCII_GLYPHS=1` to render `p` / `c` / `x` / `a` instead of the marks when a font cannot draw them.
+AgentTree rows also show which harness backs each session: `π` Pi, `✳` Claude Code, and `◇` Codex CLI. A harness Meringue does not ship renders a plain ASCII initial and a record with no harness renders `?`, always in exactly one column. Set `MERINGUE_ASCII_GLYPHS=1` to render `p` / `c` / `x` instead of the marks when a font cannot draw them.
 
 `color_scheme` is accepted as a compatibility alias for `colorscheme`. Running `/theme <name>` writes a single `colorscheme` value and removes the older `color_scheme` alias from the `[tui]` section.
 
@@ -100,6 +100,7 @@ Supported action names:
 
 - `quit`
 - `clear_or_quit`
+- `undo` (defaults to `ctrl-z`; only active while the chat input is focused)
 - `cancel_navigation`
 - `open_delivery_pr` (defaults to `ctrl-b`)
 - `refresh_model_catalog` (defaults to `ctrl-r`; only active inside the `/models` model picker)
@@ -219,7 +220,7 @@ compound command from running partially.
 This enforcement applies to isolated **Pi worker** sessions and to resumed Pi
 workers. Heads do not receive this policy, and shared read-only workers have no
 `bash` tool at all. If a worker blacklist is configured while the selected
-worker provider is Claude Code, Codex, or Antigravity, worker startup fails closed with
+worker provider is Claude Code or Codex, worker startup fails closed with
 a clear unsupported-provider error instead of relying on prompt instructions.
 Restart Meringue after changing this setting so all future workers use the new
 configuration; an already-running worker keeps the policy loaded when its Pi
@@ -520,7 +521,7 @@ Defaults, in precedence order:
 - editor: `MERINGUE_EDITOR`, then `VISUAL`, then `EDITOR`, then `code`;
 - editor args: `["."]`.
 
-The shell is started in a PTY whose current directory is the worker's real worktree directory. Meringue resolves that directory from the worker record (`workspace_path`, then the harness `cwd`, then the recorded workspace plan/worktree root) and always converts it to an absolute path; a relative value is resolved against the recorded project/git root rather than the Meringue process working directory, so a workspace-relative value can never be nested inside an already workspace-rooted cwd. If the recorded directory is gone but its worktree root still exists, the shell opens there and says so; if nothing usable exists, the workspace shows a clear stale-worktree notice instead of opening a shell at a bogus path. It remains alive while switching views or leaving with the workspace `q` command, receives terminal resize events, and is stopped with its process group when explicitly closed or when Meringue exits. Child-process ANSI/SGR colors are preserved by the embedded screen model. It is separate from the managed coding-agent process; terminal cleanup never signals the worker harness pid. Meringue also removes inherited `PI_*` variables so the shell cannot accidentally target the enclosing managed Pi session.
+The shell is started in a PTY whose current directory is the worker's real worktree directory. Meringue resolves that directory from the worker record (`workspace_path`, then the harness `cwd`, then the recorded workspace plan/worktree root) and always converts it to an absolute path; a relative value is resolved against the recorded project/git root rather than the Meringue process working directory, so a workspace-relative value can never be nested inside an already workspace-rooted cwd. If the recorded directory is gone but its worktree root still exists, the shell opens there and says so; if nothing usable exists, the workspace shows a clear stale-worktree notice instead of opening a shell at a bogus path. It remains alive while switching views or leaving with the workspace `q` command, receives terminal resize events, and is stopped with its process group when explicitly closed or when Meringue exits. Child-process ANSI/SGR colors are preserved by the embedded screen model. It is separate from the managed coding-agent process; terminal cleanup never signals the worker harness pid. Meringue also removes inherited provider session markers from the shell environment so it cannot accidentally target the enclosing managed agent session.
 
 The editor command is spawned directly with the worktree as both its current directory and, by default, the `.` argument. GUI editor CLIs normally detach or reuse an existing window. For a terminal-only editor, configure a terminal-emulator wrapper as the command (for example, an Alacritty command ending in `-e nvim`) so the editor has its own terminal. A missing executable, invalid command/argument type, malformed quoting, or removed worktree is reported in the workspace rather than crashing Meringue or mutating agent state.
 
@@ -543,7 +544,7 @@ Supported workspace action names:
 [harness]
 provider = "pi"              # default for heads and workers
 # head_provider = "claude"   # optional override for head agents
-# worker_provider = "codex"   # optional override for worker agents
+# worker_provider = "codex"  # optional override for worker agents
 ```
 
 Supported provider names in this slice:
@@ -551,7 +552,6 @@ Supported provider names in this slice:
 - `pi`
 - `claude` for Claude Code (aliases: `claude_code`, `claude-code`, `cc`)
 - `codex` for Codex CLI (aliases: `codex-cli`, `codex_cli`, `openai-codex`)
-- `antigravity`
 
 The `split_defaults` experiment is enabled by default and makes head/worker harness, model, and thinking settings independent. Disable it only for a compatibility migration: role-specific values remain stored, but the shared values are used for both roles. Harness selection re-resolves incompatible future thinking values for each affected role in the same config transaction; it never rewrites an existing session.
 
@@ -603,11 +603,6 @@ worker_extra_args = ["--dangerously-bypass-approvals-and-sandbox"]
 [harness.codex.env]
 # Optional when Codex state lives outside ~/.codex:
 # CODEX_HOME = "/path/to/codex-home"
-
-[harness.antigravity]
-command = "agy"
-head_extra_args = []
-worker_extra_args = []
 ```
 
 Codex heads run with a read-only sandbox and denied approval requests. Isolated Codex workers use the same unattended full-access posture as the Claude worker integration because the kernel has already placed them in dedicated worktrees; `shared_read_only` always replaces those worker flags with enforced `read-only`/`never` settings. Codex stores durable rollouts below `CODEX_HOME/sessions` (default `~/.codex/sessions`). Meringue answers Codex's one-time directory trust prompt before typing the assignment, records Codex's provider-assigned thread id and rollout path, and resumes with `codex resume <session-id>` after process loss.
@@ -625,7 +620,7 @@ A configured `PATH` replaces, rather than appends to, the inherited value, so in
 
 A model reference is `<provider>/<model-id>`, split on the first slash, so the model id may itself contain `/` and `:` (`model = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"` is valid). See [`session-settings.md`](session-settings.md#the-accepted-model-reference-grammar) for the exact grammar and for what is still rejected.
 
-`/config` and the dashboard status line show each future role's harness, model, and thinking level (the shared model when both roles agree, split by role when they differ). `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. An existing session's own effective pair has no slash command either: it is recorded on the agent record and shown in the focused worker workspace and raw `/state`. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
+`/config` and the dashboard status line show each future role's model and reasoning level for its configured harness (the shared model when both roles agree, split by role when they differ). `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. An existing session's own effective pair has no slash command either: it is recorded on the agent record and shown in the focused worker workspace and raw `/state`. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
 
 ### Model catalogs and provider resource flags
 
@@ -638,7 +633,7 @@ That probe reuses the configured provider `command`, `env`, `extra_args`, and ro
 
 Catalogs are cached in Meringue state under `metadata.harness_model_catalogs.<harness>` and refreshed in the background by reconciliation (about every 10 minutes, retried after about 1 minute when a fetch failed). `/models refresh` (or `Ctrl-R` inside the model picker) forces an immediate re-fetch after you log into a provider, install an extension, or edit `~/.pi/agent/models.json`.
 
-Claude Code and Codex run in their own interactive modes inside PTYs Meringue owns for the life of each session; see [`interactive-harness-backends.md`](interactive-harness-backends.md). Each catalog is `available` only when its CLI returns a non-empty authoritative answer; missing CLI, auth/exit failure, or an empty/malformed response is `unavailable`, and a failed refresh after a confirmed answer is `stale` with the last confirmed models retained. Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace, so it has no live session to steer and currently reports an explicit `unsupported` catalog.
+Claude Code and Codex run in their own interactive modes inside PTYs Meringue owns for the life of each session; see [`interactive-harness-backends.md`](interactive-harness-backends.md). Each catalog is `available` only when its CLI returns a non-empty authoritative answer; missing CLI, auth/exit failure, or an empty/malformed response is `unavailable`, and a failed refresh after a confirmed answer is `stale` with the last confirmed models retained.
 
 Do not store API keys or secrets in the config file. Prefer each provider CLI's normal auth flow or environment setup.
 
