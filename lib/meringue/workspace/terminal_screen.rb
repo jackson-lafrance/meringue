@@ -22,6 +22,8 @@ module Meringue
         @sequence = +""
         @pending_bytes = +"".b
         @revision = 0
+        @render_snapshot_revision = nil
+        @render_snapshot = nil
       end
 
       attr_reader :rows, :columns
@@ -84,32 +86,60 @@ module Meringue
       end
 
       def lines
-        visible_row_indexes.map { |index| @cells[index].join.rstrip }
+        render_snapshot.fetch("lines").map(&:dup)
       end
 
       # Styled segments preserve child-process SGR colors without allowing raw
-      # PTY escape sequences to enter Canvas content.
+      # PTY escape sequences to enter Canvas content. Public arrays remain
+      # mutable for compatibility, while focused renderers use render_snapshot
+      # to share the immutable cached representation directly.
       def styled_lines
-        visible_row_indexes.map do |row_index|
+        render_snapshot.fetch("styled_lines").map do |line|
+          line.map { |text, style| [text.dup, style] }
+        end
+      end
+
+      # Builds plain and styled rows together once per screen revision. Focused
+      # sessions are sampled on a low-latency cadence even when idle; sharing
+      # this deeply frozen snapshot keeps those samples from reconstructing the
+      # complete PTY viewport and competing with dashboard chat input.
+      def render_snapshot
+        return @render_snapshot if @render_snapshot && @render_snapshot_revision == @revision
+
+        indexes = visible_row_indexes
+        plain_lines = []
+        styled = []
+        indexes.each do |row_index|
           chars = @cells[row_index]
           styles = @styles[row_index]
+          plain_lines << chars.join.rstrip.freeze
           length = visible_line_length(chars, styles)
-          next [] if length.zero?
+          if length.zero?
+            styled << [].freeze
+            next
+          end
 
           segments = []
           chars.first(length).each_with_index do |character, column|
             style = styles[column]
-            # Cells hold shared frozen characters, so a segment must own its own
-            # buffer. Appending into a cell's string would rewrite the screen and
-            # duplicate its content again on every later render.
             if segments.last && segments.last[1] == style
               segments.last[0] << character
             else
               segments << [+"#{character}", style]
             end
           end
-          segments
+          styled << segments.map do |text, style|
+            [text.freeze, style.nil? || style.frozen? ? style : style.dup.freeze].freeze
+          end.freeze
         end
+
+        @render_snapshot_revision = @revision
+        @render_snapshot = {
+          "lines" => plain_lines.freeze,
+          "styled_lines" => styled.freeze,
+          "cursor" => cursor.freeze,
+          "revision" => @revision
+        }.freeze
       end
 
       private
@@ -438,8 +468,8 @@ module Meringue
       end
 
       # A terminal row can be visually meaningful even when every character is a
-      # space: Pi uses styled padding for selected/highlighted rows. Keep those
-      # cells in the focused view so the ANSI background reaches the viewport
+      # space: interactive programs use styled padding for selected/highlighted
+      # rows. Keep those cells so the ANSI background reaches the viewport
       # edge instead of being mistaken for trailing empty space.
       def visible_line_length(chars, styles = nil)
         index = chars.each_index.reverse_each.find do |column|

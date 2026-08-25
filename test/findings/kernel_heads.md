@@ -18,7 +18,7 @@ Test files:
 - `test/support/kernel_heads_support.rb` (fake head runners, fake harness clients, stub
   workspace manager, stub forge client, tmpdir-scoped engine builder)
 
-All tests are hermetic: no real Pi/harness processes, no `git`, no `gh`, no network, and
+All tests are hermetic: no real harness processes, no `git`, no `gh`, no network, and
 every state/config file lives under a per-test `Dir.mktmpdir`.
 
 ## Confirmed behavior (locked in by tests)

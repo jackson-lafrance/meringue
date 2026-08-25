@@ -14,7 +14,7 @@ module Meringue
 
       # Deliberately absent. Meringue is harness-agnostic, so there is no backend it falls back to.
       DEFAULT_PROVIDER = nil
-      PROVIDERS = %w[pi claude antigravity].freeze
+      PROVIDERS = %w[pi claude].freeze
       # How each backend spells a model and a reasoning level on its own command line, and whether
       # it wants a bare model id or a qualified `provider/model` reference. This is the whole of
       # what the registry needs to know about a provider's session defaults; there is no branch on
@@ -28,23 +28,19 @@ module Meringue
         "pi" => { "model" => "--model", "thinking_level" => "--thinking", "qualified_model" => true },
         # Claude Code is single-vendor, so it rejects a provider-qualified reference, and it calls
         # the reasoning level "effort".
-        "claude" => { "model" => "--model", "thinking_level" => "--effort", "qualified_model" => false },
-        "antigravity" => {}
+        "claude" => { "model" => "--model", "thinking_level" => "--effort", "qualified_model" => false }
       }.freeze
       PROVIDER_THINKING_LEVELS = {
         "pi" => ModelCatalog::THINKING_LEVELS,
-        "claude" => ClaudeModelCatalog::EFFORT_LEVELS,
-        "antigravity" => []
+        "claude" => ClaudeModelCatalog::EFFORT_LEVELS
       }.freeze
       PROVIDER_LABELS = {
         "pi" => "Pi",
-        "claude" => "Claude Code",
-        "antigravity" => "Antigravity CLI"
+        "claude" => "Claude Code"
       }.freeze
       PUBLIC_PROVIDER_NAMES = {
         "pi" => "pi",
-        "claude" => "claude",
-        "antigravity" => "antigravity"
+        "claude" => "claude"
       }.freeze
       # Single-cell display glyphs, so a session's backend is identifiable at a
       # glance next to its Meringue id. Provider presentation already lives in
@@ -52,34 +48,37 @@ module Meringue
       # they ask the registry for a glyph instead of knowing about Pi or Claude.
       PROVIDER_GLYPHS = {
         "pi" => "π",
-        "claude" => "✳",
-        "antigravity" => "↑"
+        "claude" => "✳"
       }.freeze
       # Same marks in plain ASCII for fonts/terminals that cannot draw the
       # glyphs above, selected with MERINGUE_ASCII_GLYPHS.
       PROVIDER_ASCII_GLYPHS = {
         "pi" => "p",
-        "claude" => "c",
-        "antigravity" => "a"
+        "claude" => "c"
       }.freeze
       # Matches the AgentTree's unknown-status convention.
       UNKNOWN_PROVIDER_GLYPH = "?"
+      # Environment markers that a workspace shell must not inherit from an
+      # enclosing managed session. The workspace passes this union to its
+      # generic shell adapter; focused harness sessions receive their own env.
+      MANAGED_SESSION_ENVIRONMENT_PATTERNS = [
+        /\API_/,
+        /\ACLAUDECODE\z/,
+        /\ACLAUDE_CODE_/,
+        /\ACLAUDE_PID\z/,
+        /\ACLAUDE_EFFORT\z/
+      ].freeze
       PROVIDER_ALIASES = {
         "pi" => "pi",
         "claude" => "claude",
         "claude-code" => "claude",
         "claude_code" => "claude",
         "claude code" => "claude",
-        "cc" => "claude",
-        "antigravity" => "antigravity",
-        "antigravity-cli" => "antigravity",
-        "antigravity_cli" => "antigravity",
-        "antigravity cli" => "antigravity",
-        "agy" => "antigravity"
+        "cc" => "claude"
       }.freeze
-      # Where a harness that stores its own session files keeps them. The directory name is Pi's
-      # because the files in it are Pi's; the environment variable is neutral because any backend
-      # with the same need reads it.
+      # Where the file-backed provider keeps its sessions. The legacy directory and environment
+      # variable names remain readable for existing installations; the neutral variable is the
+      # preferred setting for any backend with the same need.
       DEFAULT_AGENT_SESSION_DIR = File.expand_path(
         ENV.fetch("MERINGUE_AGENT_SESSION_DIR", ENV.fetch("MERINGUE_PI_SESSION_DIR", "~/.meringue/pi-sessions"))
       )
@@ -142,11 +141,6 @@ module Meringue
           "worker_extra_args" => [
             "--permission-mode", "bypassPermissions"
           ]
-        },
-        "antigravity" => {
-          "command" => "agy",
-          "head_extra_args" => [],
-          "worker_extra_args" => []
         }
       }.freeze
 
@@ -193,7 +187,7 @@ module Meringue
       #
       # This deliberately does not reuse normalize_provider, which resolves a
       # blank value to the default provider: "no harness recorded" must not
-      # render as Pi.
+      # render as a selected backend.
       def self.provider_glyph(provider, ascii: ascii_glyphs?)
         name = provider.to_s.strip.downcase.gsub(/\s+/, " ")
         return UNKNOWN_PROVIDER_GLYPH if name.empty?
@@ -216,6 +210,16 @@ module Meringue
         Array(PROVIDER_THINKING_LEVELS.fetch(normalize_provider(provider), ModelCatalog::THINKING_LEVELS)).dup
       end
 
+      # Some harnesses adjust a requested reasoning level when a model does not
+      # advertise it. That policy belongs with provider integration data, not in
+      # the kernel, input parser, or TUI. Nil means the harness has no adjustment
+      # behavior Meringue can state authoritatively.
+      def self.adjusted_thinking_level(provider, requested, available_levels)
+        return nil unless normalize_provider(provider) == "pi"
+
+        PiClient.clamp_thinking_level(requested, available_levels)
+      end
+
       def self.ascii_glyphs?
         !ENV.fetch("MERINGUE_ASCII_GLYPHS", "").to_s.strip.empty?
       end
@@ -226,6 +230,10 @@ module Meringue
 
       def self.supported_provider_names
         PROVIDERS.map { |provider| public_provider_name(provider) }
+      end
+
+      def self.managed_session_environment_patterns
+        MANAGED_SESSION_ENVIRONMENT_PATTERNS
       end
 
       def self.provider_choices
@@ -314,7 +322,9 @@ module Meringue
       def terminal_session_opener
         TerminalSessionOpener.new(
           commands: PROVIDERS.each_with_object({}) { |provider, result| result[provider] = provider_command(provider) },
-          session_dir: provider_config("pi").fetch("session_dir", DEFAULT_AGENT_SESSION_DIR),
+          session_directories: {
+            "pi" => provider_config("pi").fetch("session_dir", DEFAULT_AGENT_SESSION_DIR)
+          },
           alacritty_command: config.value("terminal", "alacritty_command") || ENV["MERINGUE_ALACRITTY_COMMAND"]
         )
       end
@@ -358,8 +368,8 @@ module Meringue
             role_defaults = providers.values.uniq.to_h do |role_provider|
               [role_provider, session_defaults(provider: role_provider)]
             rescue ArgumentError
-              # A harness such as Antigravity may not expose model/thinking argv controls, but its
-              # role still needs a truthful neutral value in status and `/config`.
+              # A future harness may not expose model/thinking argv controls, but its role still
+              # needs a truthful neutral value in status and `/config`.
               [role_provider, harness_neutral_session_defaults]
             end
             # The role's own harness is authoritative; do not make the worker's command-line
@@ -445,7 +455,7 @@ module Meringue
       # Applies only runtime-safe provider defaults after an atomic Settings
       # transaction. Provider commands/environment/arguments and blacklist policy
       # remain restart-required, and cached clients stay attached to existing
-      # sessions. Pi clients receive only replacement spawn defaults.
+      # sessions. Cached clients receive only replacement spawn defaults.
       def reload_config!(updated_config, changed_ids: [])
         live_role_ids = %w[
           agent.head_harness agent.worker_harness
@@ -489,7 +499,7 @@ module Meringue
         self
       end
 
-      # Saves the selected values and reconfigures cached Pi clients in place.
+      # Saves the selected values and reconfigures cached provider clients in place.
       # Existing RPC processes keep their current effective settings; only a
       # later new-session spawn applies the replacement model/thinking argv.
       def update_session_defaults!(provider: nil, model: nil, model_role: nil, thinking_level: nil, thinking_role: nil)
@@ -552,8 +562,6 @@ module Meringue
           PiClient.new(command: command, session_dir: session_dir, env: env, extra_args: extra_args)
         when "claude"
           ClaudeInteractiveClient.new(command: command, env: env, extra_args: extra_args)
-        when "antigravity"
-          AntigravityClient.new(command: command, env: env, extra_args: extra_args)
         else
           raise ArgumentError, "Unsupported harness provider: #{provider.inspect}"
         end

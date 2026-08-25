@@ -103,10 +103,12 @@ class InputKernelConvergenceTest < Minitest::Test
       accepted = sandbox.submit("/harness pi")
       assert_equal [%w[SetHarness accepted]], sandbox.command_result_pairs(accepted)
 
-      rejected = sandbox.submit("/harness bogus")
-      result = sandbox.command_results(rejected).first
-      assert_equal "rejected", result.fetch("status")
-      assert_includes result.fetch("errors"), "unsupported_harness_provider"
+      %w[bogus antigravity agy].each do |provider|
+        rejected = sandbox.submit("/harness #{provider}")
+        result = sandbox.command_results(rejected).first
+        assert_equal "rejected", result.fetch("status")
+        assert_includes result.fetch("errors"), "unsupported_harness_provider"
+      end
     end
   end
 

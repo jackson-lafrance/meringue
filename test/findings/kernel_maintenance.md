@@ -21,7 +21,7 @@ Files added by this slice (plus later prune-worktree lifecycle coverage):
 - shared contract files `Rakefile` and `test/test_helper.rb` (created verbatim)
 
 All tests are hermetic: state lives in a per-test `Dir.mktmpdir`, the forge client
-and harness sessions are stubbed in-process, and no real Pi process is started.
+and harness sessions are stubbed in-process, and no real harness process is started.
 Verified by running the suite with `HOME` pointed at an empty temp directory: the
 suite passes and creates nothing under that fake `HOME`, so `~/.meringue` is never
 touched.

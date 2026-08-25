@@ -5,7 +5,7 @@ require "support/tui_support"
 require "timeout"
 require "stringio"
 
-# A large paste must never reach the composer buffer: it collapses to a Pi-style
+# A large paste must never reach the composer buffer: it collapses to a compact
 # marker, every per-keystroke pass runs over that marker, and the full body is
 # spliced back in only when the message is submitted.
 class TuiLargePasteCollapseTest < Minitest::Test

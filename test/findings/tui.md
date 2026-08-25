@@ -4,7 +4,7 @@ Slice: `tui` (integration tests for TUI rendering and panes).
 Owned paths: `test/integration/tui/**`, `test/support/tui_support.rb`, `test/findings/tui.md`,
 plus deletion of `scripts/benchmark_tui_typing.rb`.
 
-All tests are hermetic: no TTY, no raw mode, no network, no Pi processes, no writes outside
+All tests are hermetic: no TTY, no raw mode, no network, no harness processes, no writes outside
 `Dir.mktmpdir`, and nothing touches `~/.meringue`. Every pane renders into an in-memory
 `TUI::Canvas` or a `StringIO`, and assertions run against the produced buffer/lines.
 

@@ -5,19 +5,17 @@ module Meringue
     # One place that decides what a `provider/model` reference looks like.
     #
     # Meringue used to spell this rule as `%r{\A[^/\s]+/[^/\s]+\z}` in the kernel
-    # and again as a three-way `split("/", 3)` in the Pi client. Both encoded
+    # and again as a three-way split in one provider client. Both encoded
     # "exactly one slash", which is not the grammar any harness actually uses. A
     # real Fireworks router model is
     # `fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast`: the provider
     # is `fireworks` and the model id is an account/router path with four more
-    # slashes and a colon. Pi lists that model in `get_available_models`, accepts
-    # it on `--model`, and reports it back from `get_state`, so Meringue refusing
-    # it made a model the user could run unreachable from `/model` and from the
-    # picker.
+    # slashes and a colon. A harness can list, accept, and report that model, so
+    # Meringue refusing it would make a runnable model unreachable from `/model`
+    # and from the picker.
     #
-    # The rule here is Pi's own (`findExactModelReferenceMatch` /
-    # `resolveModel` in pi's model-resolver: split on the *first* slash), stated
-    # harness-neutrally:
+    # The rule is stated harness-neutrally: split on the *first* slash and keep
+    # the rest of the model id intact:
     #
     #   <provider>/<model-id>
     #

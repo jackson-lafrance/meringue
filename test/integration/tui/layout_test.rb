@@ -30,7 +30,7 @@ class TuiLayoutTest < Minitest::Test
       empty_state.merge(
         "metadata" => {
           "active_harness" => "pi",
-          "pi_session_defaults" => {
+          "agent_session_defaults" => {
             "roles" => {
               "head" => { "model" => "openai/gpt-5.6-luna", "thinking_level" => "low" },
               "worker" => { "model" => "anthropic/claude-opus-5", "thinking_level" => "max" }
@@ -411,7 +411,7 @@ class TuiLayoutTest < Minitest::Test
     assert_includes @layout.render(refreshed, width: 100, height: 32), "H99"
   end
 
-  def test_embedded_pi_scroll_offset_selects_rows_without_changing_pane_geometry
+  def test_embedded_native_screen_ignores_outer_scroll_offset_without_changing_pane_geometry
     width = 100
     height = 32
     rows = Meringue::TUI::Layout.new.embedded_agent_workspace_dimensions(
@@ -419,17 +419,16 @@ class TuiLayoutTest < Minitest::Test
       width: width,
       height: height
     ).fetch("rows")
-    lines = Array.new(rows + 5) { |index| "Pi row #{index}" }
-    offset = 2
+    lines = Array.new(rows + 5) { |index| "Claude row #{index}" }
     state = composed_state(
-      empty_state.merge("agents" => [agent_record("P1-I1-W1", "harness" => "pi")]),
+      empty_state.merge("agents" => [agent_record("P1-I1-W1", "harness" => "claude")]),
       workspace: {
         "active" => true,
         "embedded" => true,
         "interactive" => true,
         "agent_id" => "P1-I1-W1",
         "view" => "agent",
-        "scroll_offset" => offset,
+        "scroll_offset" => 2,
         "agent_session" => {
           "lines" => lines,
           "styled_lines" => lines.map { |line| [[line, nil]] },
@@ -444,10 +443,10 @@ class TuiLayoutTest < Minitest::Test
     metrics = @layout.send(:layout_metrics, width, height, state)
     content_row = TUISupport.strip_ansi(frame.split("\n", -1).fetch(metrics.fetch(:top_y) + 1))
     content_width = metrics.fetch(:main_width) - 4
-    first_visible = lines.length - offset - rows
+    first_visible = lines.length - rows
 
     assert_equal lines.fetch(first_visible), content_row[metrics.fetch(:main_x) + 2, content_width].rstrip
-    assert_equal [lines.length - rows, 0].max, @layout.agent_workspace_scroll_max(state, width: width, height: height)
+    assert_equal 0, @layout.agent_workspace_scroll_max(state, width: width, height: height)
     assert_equal [width], frame.split("\n", -1).map { |line| TUISupport.strip_ansi(line).length }.uniq
   end
 

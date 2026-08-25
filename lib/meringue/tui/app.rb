@@ -1092,11 +1092,17 @@ module Meringue
       # the focused pane, which is the older behavior.
       def handle_mouse_wheel_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         if embedded_agent_workspace? && pane_at_mouse_position(key, state) == "logs"
-          if agent_workspace_scroll_max(state).positive?
+          # A native harness owns its history. Scrolling Meringue's captured
+          # viewport only moves old pixels and leaves Pi, Claude, or another
+          # interactive backend unaware that the user asked to navigate. Route
+          # the wheel through the harness PTY adapter instead; it translates the
+          # event to portable page navigation. The separate worktree terminal
+          # keeps its existing outer-viewport behavior.
+          if @agent_workspace_view == "terminal" && agent_workspace_scroll_max(state).positive?
             scroll_agent_workspace(key, state)
           else
-            # When the TUI has no retained rows of its own, let Pi keep its native
-            # mouse behavior (for example, its internal selection/list scrolling).
+            # When the TUI has no retained rows of its own, let the focused harness keep
+            # its native mouse behavior (for example, internal selection/list scrolling).
             event = layout.agent_workspace_mouse_event(
               state,
               width: render_width,
@@ -2087,11 +2093,10 @@ module Meringue
           return [input_buffer, input_cursor, slash_suggestion_index]
         end
 
-        if workspace_scroll_key?(remainder) && agent_workspace_scroll_max(state).positive?
-          scroll_agent_workspace(remainder, state)
-          return [input_buffer, input_cursor, slash_suggestion_index]
-        end
-
+        # PageUp/PageDown and every other non-leader key belong to the embedded
+        # application. In particular, do not page through Meringue's captured
+        # screen rows: that changes pixels without changing the harness's own
+        # history position.
         if @agent_workspace_view == "terminal"
           forward_agent_workspace_terminal_key(remainder, state)
         else
@@ -2373,7 +2378,7 @@ module Meringue
 
       # One leader line describes the whole focused workspace. Labels come from
       # the active keybindings so custom bindings stay accurate, and they stay
-      # harness-agnostic so a non-Pi backend reads correctly.
+      # harness-agnostic so every backend reads correctly.
       def workspace_leader_commands
         WORKSPACE_COMMAND_ACTIONS.filter_map do |action|
           next if action == "workspace_open_pull_request" && !github_support_enabled?
@@ -2393,8 +2398,9 @@ module Meringue
         keybindings.display_name_for("workspace_leader") || "workspace leader"
       end
 
-      # Page keys stay available to the shell in terminal view; the wheel is
-      # never forwarded to a shell, so it scrolls either view.
+      # Page keys scroll Meringue's transcript view and stay available to the
+      # shell in terminal view. Embedded harness sessions are routed before this
+      # helper and receive both page keys and wheel events directly.
       def workspace_scroll_key?(key)
         mouse_wheel_up?(key) || mouse_wheel_down?(key) ||
           (@agent_workspace_view == "agent" && (keybinding?("scroll_page_up", key) || keybinding?("scroll_page_down", key)))
@@ -2886,7 +2892,7 @@ module Meringue
           Status-bar composer: /status-bar edits only the dashboard bottom bar; Up/Down selects components, Left/Right reorders or changes alignment, Home/End moves to an edge, Space places/removes, R resets, Enter/Ctrl-S saves, Esc cancels, and mouse drag moves items between the left and right drop zones.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace or a selected head's saved harness session; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
           Head/session debugging: select a head and press #{keys_for("open_agent_workspace")}, or use /open-session <agent_id>, to open its saved harness session externally without turning it into a chat target.
-          Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls the transcript. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
+          Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls Meringue-rendered transcripts and is delivered directly to embedded harness applications for native history navigation. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
         TEXT
       end
 
@@ -4825,6 +4831,13 @@ module Meringue
       # --- first-run setup --------------------------------------------------
 
       def frame_refresh_interval(_state)
+        if embedded_agent_workspace?
+          # The child PTY needs a fast visual cadence while it owns keyboard
+          # focus. When the user moves to dashboard chat or the AgentTree, input
+          # still wakes the run loop immediately; polling the unchanged native
+          # screen at 40 Hz only competes with the pane the user is typing in.
+          return @focused_pane == "logs" ? TERMINAL_REFRESH_INTERVAL : REFRESH_INTERVAL
+        end
         if @agent_workspace_active && (@agent_workspace_interactive || @agent_workspace_view == "terminal")
           return TERMINAL_REFRESH_INTERVAL
         end
@@ -6387,8 +6400,8 @@ module Meringue
         if current
           status = current.fetch("status", nil).to_s
           return unless %w[completed killed].include?(status)
-          # A completed Pi worker is already terminal when native focus begins. Keep its pending
-          # or active PTY alive; treating that pre-existing status as a new settle cancels the
+          # A completed worker is already terminal when native focus begins. Keep its pending or
+          # active harness PTY alive; treating that pre-existing status as a new settle cancels the
           # handoff on the next frame and immediately resumes the dashboard session.
           return if status == "completed" && embedded_agent_workspace?
         end

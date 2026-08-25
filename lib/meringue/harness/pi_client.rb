@@ -123,6 +123,10 @@ module Meringue
       attr_reader :command, :env, :session_dir, :command_timeout,
                   :event_timeout, :shutdown_timeout
 
+      def prompt_modes
+        %w[normal steer follow_up]
+      end
+
       def harness_name
         "pi"
       end
@@ -829,6 +833,9 @@ module Meringue
           "interactive_argv" => interactive_argv,
           "interactive_executable" => interactive_executable,
           "interactive_env" => interactive_env,
+          # Escape is Pi's interrupt key for active turns and autocompaction;
+          # Ctrl-C only clears its editor. Keep that rule inside this adapter.
+          "interactive_shutdown_input" => "\e",
           "handoff" => interactive_handoff_metadata(
             was_streaming: was_streaming,
             events: events,
@@ -1756,6 +1763,8 @@ module Meringue
             "workspace_mode" => workspace_mode.to_s,
             "started_at" => process.started_at,
             "command" => process.argv,
+            "prompt_modes" => prompt_modes,
+            "completed" => !!pi_state["completed"],
             "pi_state" => pi_state,
             "stderr_tail" => process.stderr_tail,
             "supervision" => {
@@ -1808,6 +1817,7 @@ module Meringue
           "metadata" => metadata_with(
             session_ref,
             "session_name" => summary.fetch("session_name", nil) || metadata_value(session_ref, "session_name"),
+            "completed" => summary.fetch("completed", false),
             "pi_state" => pi_state,
             "session_file_summary" => summary,
             "reconnected_from_session_file" => true

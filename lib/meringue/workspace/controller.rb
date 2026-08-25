@@ -3,12 +3,16 @@
 module Meringue
   module Workspace
     # Adapter used by the focused agent workspace UI. It coordinates UI-owned
-    # shell/editor processes and the native Pi PTY; the kernel service owns the
+    # shell, editor, and focused harness processes; the kernel service owns the
     # session handoff and transport state, not this renderer/controller.
     class Controller
-      def self.from_config(config, env: ENV, focus_session_service: nil)
+      def self.from_config(config, env: ENV, focus_session_service: nil, session_environment_patterns: [])
         new(
-          terminal_manager: TerminalManager.from_config(config, env: env),
+          terminal_manager: TerminalManager.from_config(
+            config,
+            env: env,
+            session_environment_patterns: session_environment_patterns
+          ),
           editor_launcher: EditorLauncher.from_config(config, env: env),
           focus_session_service: focus_session_service
         )
@@ -28,8 +32,8 @@ module Meringue
       end
 
       # Starts a workspace transition without making the TUI input/render thread wait for a
-      # harness handoff. An Agent session may need to abort an active turn and wait for Pi's RPC
-      # response, so that work belongs on a controller-owned thread.
+      # harness handoff. An agent session may need to abort an active turn and wait for its
+      # transport, so that work belongs on a controller-owned thread.
       def open_workspace_async(agent:, state: nil, rows: TerminalSession::DEFAULT_ROWS, columns: TerminalSession::DEFAULT_COLUMNS, &callback)
         key = agent_key(agent)
         operation = { "cancelled" => false }
@@ -55,9 +59,9 @@ module Meringue
         }
       end
 
-      # Returning ownership can wait for native Pi to abort compaction, stop its PTY, and start the
-      # dashboard RPC transport. Keep that bounded work off the TUI input/render thread while the
-      # durable kernel handoff marker continues enforcing one writer.
+      # Returning ownership can wait for the focused harness process to settle, stop its PTY, and
+      # restore dashboard transport. Keep that bounded work off the TUI input/render thread while
+      # the durable kernel handoff marker continues enforcing one writer.
       def close_workspace_async(agent:, &callback)
         key = agent_key(agent)
         operation = nil
@@ -83,7 +87,7 @@ module Meringue
             result = begin
               close_workspace(agent: agent)
             rescue StandardError => e
-              failed("Could not close native Pi focus: #{e.message}")
+              failed("Could not close the focused agent session: #{e.message}")
             end
             callbacks = @mutex.synchronize do
               @pending_interactive_closes.delete(key) if @pending_interactive_closes[key].equal?(operation)
@@ -239,7 +243,12 @@ module Meringue
 
         key = agent_key(agent)
         @mutex.synchronize do
-          @interactive_sessions[key] = { "agent" => agent.dup, "session" => session, "mode" => "handoff" }
+          @interactive_sessions[key] = {
+            "agent" => agent.dup,
+            "session" => session,
+            "mode" => "handoff",
+            "shutdown_input" => transition.dig("result", "interactive_shutdown_input")
+          }.compact
           @interactive_screens[key] = TerminalScreen.new(rows: rows, columns: columns)
         end
         if cancellation_requested?(cancellation)
@@ -294,7 +303,7 @@ module Meringue
         return failed("Agent session is not running for this worker.") unless entry
         return { "status" => "ignored" } unless entry.fetch("session").alive?
 
-        bytes = terminal_key_bytes(key)
+        bytes = agent_key_bytes(key)
         return { "status" => "ignored" } if bytes.nil? || bytes.empty?
 
         result = entry.fetch("session").write(bytes)
@@ -331,15 +340,16 @@ module Meringue
         screen = interactive_screen(agent, rows: rows, columns: columns)
         screen.feed(session.drain_output)
         status = session.status
+        rendered = screen.render_snapshot
         {
           "interactive" => true,
-          "lines" => screen.lines,
-          "styled_lines" => screen.styled_lines,
-          "cursor" => screen.cursor,
+          "lines" => rendered.fetch("lines"),
+          "styled_lines" => rendered.fetch("styled_lines"),
+          "cursor" => rendered.fetch("cursor"),
           "status" => status.fetch("state", nil),
           "pid" => status.fetch("pid", nil),
           "workspace_path" => status.fetch("workspace_path", nil),
-          "revision" => screen.revision,
+          "revision" => rendered.fetch("revision"),
           "notice" => interactive_notice(status)
         }.compact
       end
@@ -424,15 +434,16 @@ module Meringue
         screen = ensure_screen(agent)
         screen.feed(session.drain_output)
         status = session.status
+        rendered = screen.render_snapshot
         snapshot = {
-          "lines" => screen.lines,
-          "styled_lines" => screen.styled_lines,
-          "cursor" => screen.cursor,
+          "lines" => rendered.fetch("lines"),
+          "styled_lines" => rendered.fetch("styled_lines"),
+          "cursor" => rendered.fetch("cursor"),
           "status" => status.fetch("state", nil),
           "pid" => status.fetch("pid", nil),
           "workspace_path" => status.fetch("workspace_path", nil),
           # Renderers reuse cached terminal lines while this does not change.
-          "revision" => screen.revision
+          "revision" => rendered.fetch("revision")
         }.compact
         if !status.fetch("alive", false) && status.fetch("state", nil) == "exited"
           exit_status = status.fetch("exit_status", {}) || {}
@@ -533,10 +544,9 @@ module Meringue
         end
 
         session = entry.fetch("session")
-        # Escape is Pi's interrupt key for both active turns and autocompaction. Ctrl-C only clears
-        # its editor, so using it here leaves compaction running until the later process signals.
+        shutdown_input = entry.fetch("shutdown_input", nil)
         begin
-          session.write("\e") if session.alive?
+          session.write(shutdown_input) if shutdown_input && session.alive?
         rescue StandardError
           nil
         end
@@ -566,8 +576,8 @@ module Meringue
       end
 
       # Deliberately pass-through, including for large pastes. This is not a
-      # Meringue composer: the bytes go to a child program in a PTY (a shell, or
-      # Pi itself), and that program owns how it echoes, collapses, or submits a
+      # Meringue composer: the bytes go to a child program in a PTY (a shell or
+      # focused harness), and that program owns how it echoes, collapses, or submits a
       # paste. Substituting a "[paste #1 ...]" placeholder here would send the
       # placeholder text to the child instead of the pasted content, and the
       # rendering cost belongs to the child's screen, which the TerminalScreen
@@ -584,6 +594,21 @@ module Meringue
           return nil
         end
         key.is_a?(String) ? key : nil
+      end
+
+      # Pi and Claude currently expose page navigation but do not request mouse
+      # reporting from their PTYs. Sending a raw SGR report can therefore be
+      # ignored or leak into an editor. Translate a coalesced wheel burst to the
+      # same PageUp/PageDown bytes as the corresponding keyboard action. Other
+      # keys and pastes keep the terminal pass-through contract.
+      def agent_key_bytes(key)
+        return terminal_key_bytes(key) unless key.is_a?(Hash) && key.fetch("type", nil) == "mouse"
+
+        kind = key.fetch("kind", nil).to_s
+        return nil unless %w[wheel_up wheel_down].include?(kind)
+
+        page = kind == "wheel_up" ? "\e[5~" : "\e[6~"
+        page * [key.fetch("count", 1).to_i, 1].max
       end
 
       # The dashboard parser already normalizes mouse input. Re-encode it as

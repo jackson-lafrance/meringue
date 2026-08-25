@@ -6,13 +6,18 @@ module Meringue
     # point for TUI shutdown. Sessions are intentionally independent from the
     # worker harness process even when both use the same worktree.
     class TerminalManager
-      def self.from_config(config, env: ENV)
+      def self.from_config(config, env: ENV, session_environment_patterns: [])
         section = config.respond_to?(:section) ? config.section("workspace") : {}
         section = {} unless section.is_a?(Hash)
         command = section["shell_command"]
         max_buffer_bytes = section.fetch("terminal_buffer_bytes", TerminalSession::DEFAULT_BUFFER_BYTES)
         new(session_factory: lambda {
-          TerminalSession.new(command: command, env: env, max_buffer_bytes: max_buffer_bytes)
+          TerminalSession.new(
+            command: command,
+            env: env,
+            max_buffer_bytes: max_buffer_bytes,
+            session_environment_patterns: session_environment_patterns
+          )
         })
       end
 

@@ -4,7 +4,7 @@ require "test_helper"
 
 # Shared seams and helpers for the kernel head/question integration tests.
 #
-# Everything here is hermetic: no real Pi/harness processes, no network, no git
+# Everything here is hermetic: no real harness processes, no network, no git
 # subprocesses, and every byte of state lives under a per-test Dir.mktmpdir.
 module KernelHeadsSupport
   # Returns a caller-supplied HeadResult instead of routing heuristics, and records
