@@ -4871,7 +4871,6 @@ module Meringue
             {
               "reference" => theme,
               "name" => theme,
-              "current" => theme == Style.current_colorscheme,
               "index" => index
             }
           end
