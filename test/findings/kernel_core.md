@@ -116,6 +116,6 @@ a rename.
 - `SpawnWorker` coverage passes an explicit `workspace_path`, which takes the
   `requested_workspace_path` branch of `resolve_worker_workspace` and avoids `git` subprocesses
   entirely; the harness is `Harness::FakeClient`.
-- Head coverage uses a local `RecordingHeadRunner` stub, so no Pi/Claude process is ever started.
+- Head coverage uses a local `RecordingHeadRunner` stub, so no real harness process is ever started.
   `mark_worker_completed` is deliberately not exercised here because its delivery-PR verification
   path can shell out to `git`/`gh`.

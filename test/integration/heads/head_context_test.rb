@@ -96,17 +96,42 @@ class HeadContextTest < Minitest::Test
     assert worker.fetch("has_delivery_pull_request")
   end
 
-  def test_streaming_pi_worker_supports_steer_and_follow_up
+  def test_context_percentage_from_harness_telemetry_is_normalized_to_a_fraction
+    snapshot = head_snapshot
+    snapshot.fetch("agents").first["session_stats"] = { "context_usage" => { "percent" => 25.0 } }
+
+    candidate = build_head_context(snapshot: snapshot)
+                  .to_prompt_h.dig("routing_context", "worker_candidates").first
+
+    assert_in_delta 0.25, candidate.fetch("context_utilization")
+  end
+
+  def test_streaming_worker_supports_harness_neutral_steer_and_follow_up_modes
     snapshot = head_snapshot
     worker = snapshot.fetch("agents").first
+    worker["harness"] = "claude"
     worker.fetch("harness_metadata")["is_streaming"] = true
 
     candidate = build_head_context(snapshot: snapshot)
                   .to_prompt_h.dig("routing_context", "worker_candidates").first
 
+    assert_equal "claude", candidate.fetch("harness")
     assert candidate.fetch("is_streaming")
     assert_equal %w[steer follow_up], candidate.fetch("supported_prompt_modes_now")
     assert_equal "follow_up", candidate.fetch("recommended_prompt_mode")
+  end
+
+  def test_streaming_worker_without_live_prompt_capabilities_is_not_offered_unsafe_modes
+    snapshot = head_snapshot
+    worker = snapshot.fetch("agents").first
+    worker.fetch("harness_metadata")["prompt_modes"] = ["normal"]
+    worker.fetch("harness_metadata")["is_streaming"] = true
+
+    candidate = build_head_context(snapshot: snapshot)
+                  .to_prompt_h.dig("routing_context", "worker_candidates").first
+
+    assert_empty candidate.fetch("supported_prompt_modes_now")
+    refute candidate.key?("recommended_prompt_mode")
   end
 
   # A head must be able to see that a queued worker is held by a script condition, not just by

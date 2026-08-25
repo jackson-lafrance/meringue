@@ -7,8 +7,8 @@ module Meringue
     # A worker can run for tens of minutes between the line that says it was spawned and the line
     # that carries its final report. The kernel turns these items into a small number of durable
     # progress log lines so that stretch is not silent. The items themselves are deliberately
-    # dumb: extraction happens inside each harness client (Pi event names never leave
-    # `PiSessionView`), and every item is derived from events the caller has *already* drained, so
+    # dumb: extraction happens inside each harness client (provider event names never leave
+    # their adapter), and every item is derived from events the caller has *already* drained, so
     # producing progress never costs an extra harness round trip.
     #
     # Item shape:

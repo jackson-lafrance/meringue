@@ -59,7 +59,7 @@ class StateModelsShapeTest < Minitest::Test
     assert state.fetch("questions").first.key?("unknown")
   end
 
-  def test_ensure_state_shape_migrates_shared_pi_model_into_role_defaults
+  def test_ensure_state_shape_migrates_legacy_pi_defaults_to_agent_defaults
     state = {
       "metadata" => {
         "pi_session_defaults" => {
@@ -73,8 +73,11 @@ class StateModelsShapeTest < Minitest::Test
     }
 
     Models.ensure_state_shape!(state)
-    defaults = state.dig("metadata", "pi_session_defaults")
+    defaults = state.dig("metadata", "agent_session_defaults")
 
+    assert_equal "openai/gpt-5.6-sol", state.dig("metadata", "pi_session_defaults", "model")
+    assert_nil state.dig("metadata", "pi_session_defaults", "roles", "head", "model")
+    assert_equal({ "thinking_level" => "max" }, state.dig("metadata", "pi_session_defaults", "roles", "worker"))
     assert_equal "openai/gpt-5.6-sol", defaults.fetch("model")
     assert_equal "openai/gpt-5.6-sol", defaults.dig("roles", "head", "model")
     assert_equal "openai/gpt-5.6-sol", defaults.dig("roles", "worker", "model")
@@ -83,7 +86,21 @@ class StateModelsShapeTest < Minitest::Test
 
     snapshot = JSON.generate(state)
     Models.ensure_state_shape!(state)
-    assert_equal snapshot, JSON.generate(state), "the model migration must be idempotent"
+    assert_equal snapshot, JSON.generate(state), "the defaults migration must be idempotent"
+  end
+
+  def test_agent_session_defaults_are_authoritative_over_legacy_pi_defaults
+    state = {
+      "metadata" => {
+        "agent_session_defaults" => { "model" => "anthropic/claude-opus-5" },
+        "pi_session_defaults" => { "model" => "openai/legacy" }
+      }
+    }
+
+    Models.ensure_state_shape!(state)
+
+    assert_equal "anthropic/claude-opus-5", state.dig("metadata", "agent_session_defaults", "model")
+    assert_equal "openai/legacy", state.dig("metadata", "pi_session_defaults", "model")
   end
 
   # A lifecycle status is never part of a project's name. State written before that was

@@ -8,7 +8,7 @@ require "tmpdir"
 #
 # Everything here is hermetic: state, config, and project directories live in a
 # Dir.mktmpdir sandbox, head agents are stubbed plain Ruby objects, and the
-# harness is Meringue's in-repo fake client. No Pi or Claude Code process is
+# harness is Meringue's in-repo fake client. No real provider process is
 # ever started, no network call is made, and the real ~/.meringue directory is
 # never read or written.
 module InputSupport
@@ -228,7 +228,7 @@ module InputSupport
     )
     state["metadata"] = {
       "active_harness" => harness,
-      "pi_session_defaults" => { "model" => default_model, "thinking_level" => "xhigh" },
+      "agent_session_defaults" => { "model" => default_model, "thinking_level" => "xhigh" },
       "harness_model_catalogs" => catalogs || { harness => model_catalog_snapshot(harness: harness) }
     }
     state

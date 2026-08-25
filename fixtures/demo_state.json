@@ -24,7 +24,7 @@
       "project_id": "P1",
       "parent_issue_id": null,
       "title": "Build fake TUI demo",
-      "description": "Render the three primary panes from fake fixture data without real Pi sessions or state mutation.",
+      "description": "Render the three primary panes from fake fixture data without real harness sessions or state mutation.",
       "status": "working",
       "agent_ids": ["P1-I1-W1", "P1-I1-W2"],
       "created_at": "2026-07-11T00:02:00Z",

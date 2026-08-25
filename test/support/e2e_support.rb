@@ -4,7 +4,7 @@ require "open3"
 
 # Shared scaffolding for the end-to-end suite.
 #
-# Everything here is hermetic: no real Pi/harness processes, no network, no GitHub, no TTY.
+# Everything here is hermetic: no real harness processes, no network, no GitHub, no TTY.
 # Each test gets its own tmpdir containing a throwaway git repository (the "managed project"),
 # a Meringue state file, and a workspace root for git worktrees. ~/.meringue and this
 # repository's own git state are never touched.

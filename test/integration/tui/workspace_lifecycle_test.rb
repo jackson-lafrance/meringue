@@ -165,7 +165,11 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     def begin_agent_interactive_focus(agent_id)
       {
         "status" => "accepted",
-        "result" => { "interactive_argv" => ["/bin/sh"], "interactive_env" => {} },
+        "result" => {
+          "interactive_argv" => ["/bin/sh"],
+          "interactive_env" => {},
+          "interactive_shutdown_input" => "\e"
+        },
         "agent_id" => agent_id
       }
     end

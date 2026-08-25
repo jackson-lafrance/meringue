@@ -32,7 +32,7 @@ The complete `/config` editor remains available for provider commands and enviro
 Every setup screen uses the same **Navigate** footer. The bordered card contains focusable **Back** and **Next** (or **Complete**) actions after the option rows; `←`/`→` chooses between them when the footer is focused.
 - Mouse wheel: move the current list. Empty space, chrome, right-click, releases, and drags are inert.
 
-Exact model references remain supported when the catalog is unavailable. Enter opens the cached Pi model picker without making a harness request; setup itself performs no model/network lookup.
+Exact model references remain supported when the catalog is unavailable. Enter opens the cached model picker for the selected harness without making a harness request; setup itself performs no model/network lookup.
 
 ## One draft, one write
 

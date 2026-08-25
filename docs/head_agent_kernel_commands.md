@@ -157,7 +157,7 @@ Issue and worker selection rules for the MVP:
 - If your own user message says it is a retry of an earlier head, it also lists the commands that head already applied and the ones that never landed. That list is authoritative: reuse the records it names (do not create a second issue or worker for them), route only the part that is still unrouted, and fix whatever the kernel objected to instead of re-proposing the identical command.
 - Keep a selected message on `selected_target.issue_id`. Do not create or prompt work on another issue while the target is active. If the user's text explicitly conflicts with the selected issue, ask them to clear/change the selection rather than silently ignoring either signal.
 - Selection does not bypass you. Deliberately choose the healthy worker and `PromptAgent` mode, follow-up/replacement worker, or clarification on that issue. Do not blindly prompt the selected agent when it is stale, killed, errored, or otherwise inappropriate.
-- Treat an issue as the durable user goal and each worker as a stateful harness session for an execution or investigation step. Pi's persisted session is the preferred source of detailed follow-up context; do not duplicate its transcript in Meringue state.
+- Treat an issue as the durable user goal and each worker as a stateful harness session for an execution or investigation step. The harness's persisted session is the preferred source of detailed follow-up context; do not duplicate its transcript in Meringue state.
 - One goal that needs several steps is still one issue. A research step and the implementation step that consumes its findings are two workers on the same issue, ordered with `after_from_command`, not two issues. Deliverables do not define issues: a separate PR, a "no PR, findings only" step, and an implementation step can all live under one issue. See "One goal, two steps: research then implementation".
 - Resolve project identity from the current request before classifying the issue relationship. Without a selected target, an explicit project name/id/path or clearly identified local repository wins over recent routing activity, active issues, latest worker results, and active session metadata. Only after the project is established should you compare issue titles and decide whether this is a follow-up.
 - A refinement, correction, question about findings, or next step for an existing goal should reuse that issue. Use `CreateIssue` only when no existing issue represents the durable goal, and use `CreateGoal`'s prompt form instead when the request is an outcome to iterate towards rather than a task to perform once.
@@ -783,7 +783,7 @@ When the worker belongs to an issue this same HeadResult creates, set `issue_fro
 
 When the predecessor worker is spawned by this same HeadResult, reference its `SpawnWorker` command instead of predicting its agent id: set `follow_up_of_command` (a `command_id` or 0-based position), or write `follow_up_of_agent_id: "@<command_id>"`/`"@index:<position>"`. `replace_agent_id` and `reuse_workspace_of_agent_id` accept the same reference form through `replace_agent_from_command` and `reuse_workspace_from_command`, though a replaced worker almost always already exists. The referenced `SpawnWorker` must appear earlier in `commands`; the kernel resolves it to the worker id it minted and rejects an unresolvable reference with `batch_agent_reference_not_found`, `batch_agent_reference_out_of_order`, or `batch_agent_reference_unresolved`.
 
-Worker delivery names and text must contain only the human product task. When supplying a worker title or prompt, use the actual issue/task title or requested change that should become the branch and PR title. Never request or suggest Meringue branding or a `meringue/` prefix; project/issue/worker/head ids in any formatting (including `P5-I2-W3`, `p5_i2_w3`, and `P5/I2/W3`); agent, Pi, harness, or session identities; AI confidence scores or authorship trailers; or descriptions of which agents worked on the change in branches, worktree names, commits, PR titles/bodies, release notes, or other delivery artifacts. Unsafe supplied/generated values must be sanitized rather than copied. See [`delivery-artifact-privacy.md`](delivery-artifact-privacy.md).
+Worker delivery names and text must contain only the human product task. When supplying a worker title or prompt, use the actual issue/task title or requested change that should become the branch and PR title. Never request or suggest Meringue branding or a `meringue/` prefix; project/issue/worker/head ids in any formatting (including `P5-I2-W3`, `p5_i2_w3`, and `P5/I2/W3`); agent, harness, provider, or session identities; AI confidence scores or authorship trailers; or descriptions of which agents worked on the change in branches, worktree names, commits, PR titles/bodies, release notes, or other delivery artifacts. Unsafe supplied/generated values must be sanitized rather than copied. See [`delivery-artifact-privacy.md`](delivery-artifact-privacy.md).
 
 When the user explicitly requests a model or thinking level for this worker, set `model` and/or `thinking_level` on `SpawnWorker`. For example, “spawn a worker using openai/gpt-5.6-sol at medium thinking” becomes `"model": "openai/gpt-5.6-sol", "thinking_level": "medium"`. These settings apply only to that worker. Omit either field to use the configured future-session default for that field; never copy defaults into the command speculatively. Model references use `<provider>/<model-id>` (the model id may contain additional `/` and `:` characters). Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
 
@@ -1630,14 +1630,14 @@ Payload:
 }
 ```
 
-### Pi session model and thinking commands
+### Agent session model and reasoning commands
 
 Most of these back a dashboard slash command, and all of them are proposable by heads with the
 same validation as the typed path; `GetSessionDefaults` is head-only. They use normal
-kernel/harness validation: a non-Pi or non-resumable target is rejected rather than guessed.
+kernel/harness validation: an unsupported or non-resumable target is rejected rather than guessed.
 
-- `GetSessionDefaults` reports the future-session head and worker model and thinking levels and takes `{}`. It has no
-  slash command: the dashboard status line already shows `harness: Pi` plus a compact model/thinking summary, and
+- `GetSessionDefaults` reports the future-session head and worker model and reasoning levels and takes `{}`. It has no
+  slash command: the dashboard status line already shows each role's harness plus a compact model/reasoning summary, and
   `/config` displays each role in the full-screen Agent defaults category (`/config --text` prints diagnostics), so the typed `/defaults` was removed. Propose it when the
   user asks about the defaults in natural language.
 - `GetModelCatalog` backs `/models refresh [harness]` with `{ "harness": "pi", "refresh": true }` (the `harness` key stays optional). It is read-only: it asks the harness which models exist, reuses the cached snapshot unless `refresh` is set, and reports an explicit unavailable/unsupported state instead of guessing when the harness cannot answer. Its output is a status (harness, availability, model count, timestamps, note) plus a few example references, not a listing: browsing the catalog is the TUI model picker that bare `/models` opens, which reads the same persisted snapshot. A head proposing this command for "what models can I use" therefore gets a short, scannable answer instead of a hundred log lines.
@@ -1666,8 +1666,8 @@ Default changes affect future sessions on the active role harnesses only; existi
 Accepted thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`, and that
 ladder is what `SetDefaultSessionThinkingLevel` validates against, independently of the model
 catalog. A rejected level names the whole ladder in its message. The catalog says which levels a
-specific model advertises: an unadvertised level is still accepted and the accepted message reports
-the level Pi will clamp to, because a provider extension can under-declare its model's levels.
+specific model advertises: an unadvertised level is still accepted, and the accepted message reports
+an adjusted level only when the selected harness exposes an authoritative adjustment policy.
 
 See [`session-settings.md`](session-settings.md#authoritative-model-catalog-discovery) for how the
 model catalog is discovered, cached, and degraded.

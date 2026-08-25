@@ -426,7 +426,7 @@ class TuiModelPickerTest < Minitest::Test
     empty_state.merge(
       "metadata" => {
         "active_harness" => active_harness,
-        "pi_session_defaults" => { "model" => default_model, "thinking_level" => "high" },
+        "agent_session_defaults" => { "model" => default_model, "thinking_level" => "high" },
         "harness_model_catalogs" => catalogs || { "pi" => catalog_snapshot("pi") }
       }
     )

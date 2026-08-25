@@ -146,7 +146,11 @@ module Meringue
       store = state_store(path: options.fetch(:state_path))
       engine = enable_agents ? tui_engine(store, registry, config: config, config_path: options.fetch(:config_path)) : nil
       agent_session_service = engine ? Sessions::WorkerSessionService.new(engine: engine) : nil
-      workspace_controller = Workspace::Controller.from_config(config, focus_session_service: agent_session_service)
+      workspace_controller = Workspace::Controller.from_config(
+        config,
+        focus_session_service: agent_session_service,
+        session_environment_patterns: Harness::Registry.managed_session_environment_patterns
+      )
       prompt_loop = engine ? Heads::PromptLoop.new(engine: engine, wait_for_workers: false) : nil
       result = App.new(
         input: input,

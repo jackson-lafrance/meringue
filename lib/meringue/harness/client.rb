@@ -18,6 +18,13 @@ module Meringue
         false
       end
 
+      # The kernel and heads use these generic modes without knowing a provider's
+      # transport. Clients advertise the modes they can deliver; a basic one-shot
+      # process supports only a normal continuation.
+      def prompt_modes
+        ["normal"]
+      end
+
       # Modes are harness neutral: "normal" continues a settled session, "steer" interrupts active
       # work, and "follow_up" queues behind active work.
       #
@@ -32,7 +39,7 @@ module Meringue
       end
 
       # Some RPC transports can accept a prompt before their acknowledgement reaches Meringue (for
-      # example Pi compacts a large saved session before persisting the user message). A timeout in
+      # example while compacting a large saved session before persisting the user message). A timeout in
       # that window is an ambiguous outcome, not proof of failure. Receipt-capable clients receive a
       # stable delivery id, persist it with the harness prompt, and can later report:
       #
@@ -210,8 +217,9 @@ module Meringue
       # obligation when that turn has no final result, quiesce its managed transport, and only then
       # return argv for the persisted session. It must never leave two session writers alive. The
       # preparation result may also include `interactive_executable`, an absolute path resolved
-      # with provider-specific installation knowledge. This is important for app/GUI launches whose
-      # PATH cannot see a package-manager bin directory even though the harness can supply it.
+      # with provider-specific installation knowledge, and `interactive_shutdown_input`, bytes the
+      # harness needs before its focused process closes. Generic workspace code must not assume one
+      # backend's interrupt key. These values matter for app/GUI launches and safe handoff cleanup.
       def interactive_session_supported?
         false
       end

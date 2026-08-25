@@ -8,21 +8,21 @@ require "support/workspace_support"
 class WorkspaceTerminalSessionTest < Minitest::Test
   include WorkspaceSupport
 
-  def test_builds_a_literal_pty_buffer_for_the_native_pi_command
+  def test_builds_a_literal_pty_buffer_for_a_focused_harness_command
     with_workspace_tmpdir do |tmp|
-      pi = stub_executable(File.join(tmp, "bin", "pi"))
+      agent_cli = stub_executable(File.join(tmp, "bin", "agent-cli"))
       workspace = File.join(tmp, "worktree")
       FileUtils.mkdir_p(workspace)
       pty = WorkspaceSupport::RecordingPty.new
       session = Meringue::Workspace::TerminalSession.new(
-        command: [pi, "--session", File.join(tmp, "session.jsonl")],
+        command: [agent_cli, "--session", File.join(tmp, "session.jsonl")],
         env: { "PATH" => File.join(tmp, "bin") },
         pty: pty
       )
 
       result = session.start(workspace_path: workspace, rows: 32, columns: 120)
 
-      assert_equal [pi, "--session", File.join(tmp, "session.jsonl")], pty.last_call.fetch("argv")
+      assert_equal [agent_cli, "--session", File.join(tmp, "session.jsonl")], pty.last_call.fetch("argv")
       assert_equal({ chdir: workspace }, pty.last_call.fetch("options"))
       assert_equal "failed", result.fetch("status")
     end
@@ -36,7 +36,7 @@ class WorkspaceTerminalSessionTest < Minitest::Test
       pty = WorkspaceSupport::RecordingPty.new
       session = Meringue::Workspace::TerminalSession.new(
         command: [shell, "-i", "-l"],
-        env: { "PATH" => File.join(tmp, "bin"), "TERM" => "dumb", "PI_SESSION_ID" => "abc", "PI_MODEL" => "m" },
+        env: { "PATH" => File.join(tmp, "bin"), "TERM" => "dumb" },
         pty: pty
       )
 
@@ -50,7 +50,7 @@ class WorkspaceTerminalSessionTest < Minitest::Test
     end
   end
 
-  def test_terminal_environment_scrubs_managed_harness_variables
+  def test_terminal_environment_scrubs_inherited_agent_session_variables_for_every_harness
     with_workspace_tmpdir do |tmp|
       shell = stub_executable(File.join(tmp, "sh-stub"))
       workspace = File.join(tmp, "worktree")
@@ -58,8 +58,18 @@ class WorkspaceTerminalSessionTest < Minitest::Test
       pty = WorkspaceSupport::RecordingPty.new
       session = Meringue::Workspace::TerminalSession.new(
         command: [shell],
-        env: { "PATH" => "", "PI_SESSION_ID" => "abc", "PI_MODEL" => "m", "SHELL" => "/bin/zsh" },
-        pty: pty
+        env: {
+          "PATH" => "",
+          "PI_SESSION_ID" => "pi-parent",
+          "PI_MODEL" => "pi-model",
+          "CLAUDECODE" => "1",
+          "CLAUDE_CODE_SESSION_ID" => "claude-parent",
+          "CLAUDE_PID" => "123",
+          "API_TOKEN" => "keep-me",
+          "SHELL" => "/bin/zsh"
+        },
+        pty: pty,
+        session_environment_patterns: Meringue::Harness::Registry.managed_session_environment_patterns
       )
 
       session.start(workspace_path: workspace)
@@ -67,6 +77,10 @@ class WorkspaceTerminalSessionTest < Minitest::Test
 
       assert_nil environment.fetch("PI_SESSION_ID")
       assert_nil environment.fetch("PI_MODEL")
+      assert_nil environment.fetch("CLAUDECODE")
+      assert_nil environment.fetch("CLAUDE_CODE_SESSION_ID")
+      assert_nil environment.fetch("CLAUDE_PID")
+      assert_equal "keep-me", environment.fetch("API_TOKEN")
       assert_equal "xterm-256color", environment.fetch("TERM")
       assert_equal "truecolor", environment.fetch("COLORTERM")
       assert_equal workspace, environment.fetch("MERINGUE_WORKSPACE")

@@ -492,7 +492,7 @@ class HarnessRegistryTest < HarnessIntegrationTest
 
     assert_kind_of Meringue::Harness::TerminalSessionOpener, opener
     assert_equal "pi-dev", opener.send(:command_parts, "pi").first
-    assert_equal File.expand_path(@session_dir), File.expand_path(opener.send(:session_dir))
+    assert_equal File.expand_path(@session_dir), opener.send(:provider_session_directory, "pi")
   end
 
   def test_public_provider_names_are_used_for_configuration_sections
