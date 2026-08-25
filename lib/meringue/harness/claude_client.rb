@@ -10,9 +10,8 @@ module Meringue
     # `ClaudeInteractiveClient`, which keeps one interactive session alive so the same process can
     # be both driven and watched. See `docs/interactive-harness-backends.md`.
     #
-    # It is kept because it is the worked example of a `ProcessClient` — the per-invocation shape
-    # Antigravity still uses — and the suite exercises that shared base class through it. Nothing in
-    # production constructs it.
+    # It is kept as the worked example of a `ProcessClient`, and the suite exercises that shared
+    # base class through it. Nothing in production constructs it.
     class ClaudeClient < ProcessClient
       DEFAULT_COMMAND = "claude"
       DEFAULT_MODEL_CATALOG_TIMEOUT = ClaudeModelCatalog::DEFAULT_TIMEOUT

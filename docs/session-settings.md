@@ -22,7 +22,7 @@ Examples:
 /models pi refresh
 ```
 
-`/models` is a **local TUI command** that opens the model picker: a searchable, keyboard-navigable list of the models the selected harness itself reports, showing each model's provider/id reference, display name, and supported thinking levels. The picker has explicit Head and Worker tabs; `←`/`→` switches roles, and selecting a row applies only the active role. Bare `/model` is an alias for that same argumentless picker command; `/model <provider>/<model-id>` and its role-specific forms retain their setting behavior. With no argument `/models` shows the active harness; an explicit `pi`, `claude`, or `antigravity` scopes the picker (and its refresh) to that harness instead.
+`/models` is a **local TUI command** that opens the model picker: a searchable, keyboard-navigable list of the models the selected harness itself reports, showing each model's provider/id reference, display name, and supported thinking levels. The picker has explicit Head and Worker tabs; `←`/`→` switches roles, and selecting a row applies only the active role. Bare `/model` is an alias for that same argumentless picker command; `/model <provider>/<model-id>` and its role-specific forms retain their setting behavior. With no argument `/models` shows the active harness; an explicit `pi` or `claude` scopes the picker (and its refresh) to that harness instead.
 
 It replaced the old behavior, where `/models` printed the entire catalog into the visible log. A harness that reports 120 models produced 120 log lines nobody could act on, truncated with a hint that pointed at a different command.
 
@@ -231,7 +231,7 @@ Discovery is harness-neutral. A harness client answers `available_models`, and M
 - `available`: the harness answered with at least one model.
 - `stale`: a previously confirmed list whose newest refresh failed. The models are kept, `fetched_at` still marks when the harness confirmed them, and `last_attempt_at`/`last_error`/`note` describe the failed attempt.
 - `unavailable`: the harness answered with an empty list (`reason: "empty_catalog"`) or could not be reached (`reason: "fetch_failed"`) and there is no earlier list to keep, with `note` carrying the harness's own explanation.
-- `unsupported`: the harness has no catalog API yet (currently Antigravity), or this Meringue instance was built without a catalog source.
+- `unsupported`: the harness has no catalog API, or this Meringue instance was built without a catalog source.
 
 A failed or empty refresh never shrinks a working list. Without that rule one harness hiccup (a restart, a provider auth blip, a sleeping laptop) would replace a full catalog with an empty one, and the selector would silently fall back to the two or three references Meringue remembers from config and existing sessions — which looks exactly like discovery never worked.
 
@@ -246,8 +246,6 @@ That list is the model's own declaration, so treat it as description, not permis
 ### How Claude Code answers
 
 Claude Code's authoritative source is a short-lived `claude --print --output-format json "/model"` invocation with session persistence and saved spawn-only model/effort arguments disabled. Meringue parses the aliases and effort vocabulary Claude Code reports, stores them as `anthropic/<id>` references, and does not start or modify a managed interactive session. A missing CLI, failed auth, non-zero exit, empty response, or malformed response is `unavailable`; after a confirmed list, a failed refresh is `stale` and retains that list with the failure note. A valid exact model reference remains settable when it is not in the cached list, and is labelled unverified rather than rejected.
-
-Antigravity currently reports `unsupported` because it has no authoritative catalog adapter.
 
 ### Caching and refresh
 
