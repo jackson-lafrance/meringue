@@ -4834,7 +4834,8 @@ module Meringue
             snapshot_issue_ids: state.fetch("issues").map { |issue| issue.fetch("id", nil) }.compact,
             snapshot_project_ids: state.fetch("projects").map { |project| project.fetch("id", nil) }.compact,
             snapshot_unapplied_head_ids: unapplied_head_ids_for_issue_visibility(state),
-            snapshot_counters: deep_copy(state.fetch("counters", {}))
+            snapshot_counters: deep_copy(state.fetch("counters", {})),
+            worker_spawning_guidance: worker_spawning_guidance_enabled?
           )
           state.fetch("agents") << agent
 
@@ -4880,7 +4881,10 @@ module Meringue
           {
             "context" => context,
             "log_ids" => log_ids,
-            "snapshot" => snapshot,
+            # A guidance-enabled Context owns a privacy-filtered copy. Pass the
+            # same copy to every runner seam so a fake/custom runner cannot see
+            # defaults that the real harness prompt does not receive.
+            "snapshot" => context.snapshot,
             "head_runner" => active_runner,
             "takeover_of_head_id" => takeover_target&.fetch("id", nil),
             "follow_up_of_head_id" => follow_up_of_head_id
@@ -6094,12 +6098,40 @@ module Meringue
                 when "Kill" then kill_head_guard(head, payload)
                 when "PromptAgent" then prompt_agent_head_guard(head, payload)
                 when "SpawnHead" then head_takeover_command_guard(head, payload)
+                when "SpawnWorker" then worker_selection_guidance_spawn_guard(head, payload)
+                when "GetSessionDefaults" then worker_selection_guidance_defaults_guard(head)
                 end
         return nil unless guard
 
         synchronized_state do
           rejected_result(command_id, command_type, guard.fetch("message"), guard.fetch("errors"))
         end
+      end
+
+      def worker_selection_guidance_defaults_guard(head)
+        return nil unless worker_spawning_guidance_for_head?(head)
+
+        {
+          "message" => "Future worker model and thinking defaults are unavailable while guidance-based selection is enabled.",
+          "errors" => ["worker_selection_guidance_hides_defaults"]
+        }
+      end
+
+      def worker_selection_guidance_spawn_guard(head, payload)
+        return nil unless worker_spawning_guidance_for_head?(head)
+
+        missing = []
+        missing << "model" if blank?(value_at(payload, "model", "Model"))
+        missing << "thinking_level" if blank?(value_at(payload, "thinking_level", "thinkingLevel", "ThinkingLevel"))
+        return nil if missing.empty?
+
+        {
+          "message" => "Worker was not spawned because guidance-based selection requires an explicit model and thinking_level.",
+          "errors" => [
+            "worker_selection_guidance_requires_explicit_settings",
+            "missing: #{missing.join(", ")}"
+          ]
+        }
       end
 
       def clear_state_head_guard(head, payload)
@@ -7681,6 +7713,13 @@ module Meringue
 
       def worker_spawning_guidance_enabled?
         config.experiment_enabled?("worker_spawning_guidance")
+      end
+
+      def worker_spawning_guidance_for_head?(head)
+        metadata = head.fetch("harness_metadata", {}) || {}
+        return metadata.fetch("worker_spawning_guidance") == true if metadata.is_a?(Hash) && metadata.key?("worker_spawning_guidance")
+
+        worker_spawning_guidance_enabled?
       end
 
       def worker_spawning_guidance_prompt
@@ -14580,7 +14619,8 @@ module Meringue
       def build_head_agent(head_id:, now:, provider:, runner:, harness_generation: 0, user_message: nil, question_id: nil,
                            selected_target: nil, takeover_of_head_id: nil, follow_up_of_head_id: nil, takeover_context: nil,
                            retry_of: nil, completion_trigger: nil, input_submission_id: nil,
-                           snapshot_issue_ids: [], snapshot_project_ids: [], snapshot_unapplied_head_ids: [], snapshot_counters: {})
+                           snapshot_issue_ids: [], snapshot_project_ids: [], snapshot_unapplied_head_ids: [], snapshot_counters: {},
+                           worker_spawning_guidance: false)
         retry_of = nil unless retry_of.is_a?(Hash)
         takeover_context = nil unless takeover_context.is_a?(Hash)
         completion_trigger = nil unless completion_trigger.is_a?(Hash)
@@ -14601,6 +14641,7 @@ module Meringue
             "runner" => runner.class.name,
             "cwd" => cwd,
             "harness_generation" => harness_generation,
+            "worker_spawning_guidance" => worker_spawning_guidance == true,
             "head_session_state" => HEAD_SESSION_STATE_PENDING,
             **instance_ownership_metadata,
             # What this head can actually see. A batch command that targets an issue outside this
@@ -19243,12 +19284,12 @@ module Meringue
           cwd: cwd,
           state_path: store.path,
           github_support: github_support_enabled?(snapshot),
-          worker_spawning_guidance: worker_spawning_guidance_enabled?,
+          worker_spawning_guidance: worker_spawning_guidance_for_head?(agent),
           worker_spawning_guidance_prompt: worker_spawning_guidance_prompt
         )
         runner.spawn_head_session(
           user_message: request.fetch("user_message"),
-          snapshot: snapshot,
+          snapshot: context.snapshot,
           question_id: request.fetch("question_id", nil),
           context: context
         )
