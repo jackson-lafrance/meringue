@@ -222,6 +222,29 @@ class InputSettingsSchemaStoreTest < Minitest::Test
     end
   end
 
+  def test_setup_moves_untouched_model_defaults_with_the_selected_harness
+    config = Meringue::Config.new({}, path: "/tmp/settings-codex.toml", file_data: {})
+    draft = Meringue::TUI::Settings::Draft.new(config, env: {})
+
+    assert_equal Meringue::Harness::Registry::DEFAULT_MODEL, draft.value("agent.head_model")
+    draft.set("agent.head_harness", "codex")
+    assert_equal "openai/gpt-5.6-sol", draft.value("agent.head_model")
+
+    draft.set("agent.head_harness", "claude")
+    assert_equal Meringue::Harness::Registry::DEFAULT_MODEL, draft.value("agent.head_model")
+
+    draft.set("agent.head_model", "openai/custom-model")
+    draft.set("agent.head_harness", "codex")
+    assert_equal "openai/custom-model", draft.value("agent.head_model"), "an explicit model choice must survive a harness switch"
+
+    configured = Meringue::Config.new(
+      { "harness" => { "provider" => "codex" } },
+      path: "/tmp/settings-codex-existing.toml",
+      file_data: { "harness" => { "provider" => "codex" } }
+    )
+    assert_equal "openai/gpt-5.6-sol", configured.setting("agent.head_model", env: {})
+  end
+
   def test_runtime_override_provenance_is_not_mistaken_for_file_data
     config = Meringue::Config.new(
       { "harness" => { "provider" => "pi" } },

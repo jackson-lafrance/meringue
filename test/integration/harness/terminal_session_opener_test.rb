@@ -57,7 +57,7 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
   end
 
   def test_unsupported_harness_is_rejected
-    result = opener.open(agent("harness" => "codex"))
+    result = opener.open(agent("harness" => "cursor"))
 
     assert_equal "rejected", result.fetch("status")
     assert_equal "Opening this agent session in a terminal is not supported yet.", result.fetch("message")
@@ -162,25 +162,34 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
     assert_empty launches
   end
 
-  def test_claude_and_antigravity_launch_commands
+  def test_claude_codex_and_antigravity_launch_commands
     claude = opener(commands: { "claude" => "claude" }).open(
       { "id" => "P1-I1-W2", "harness" => "claude", "workspace_path" => tmpdir, "harness_session_id" => "claude-1" }
     )
     assert_equal "opened", claude.fetch("status")
     assert_equal ["--working-directory", tmpdir, "-e", "claude", "--resume", "claude-1"], launches.fetch(0)
 
+    codex = opener(commands: { "codex" => "codex" }).open(
+      { "id" => "P1-I1-W3", "harness" => "codex", "workspace_path" => tmpdir, "harness_session_id" => "codex-1" }
+    )
+    assert_equal "opened", codex.fetch("status")
+    assert_equal ["--working-directory", tmpdir, "-e", "codex", "resume", "codex-1"], launches.fetch(1)
+
     antigravity = opener(commands: { "antigravity" => "agy" }).open(
-      { "id" => "P1-I1-W3", "harness" => "antigravity", "workspace_path" => tmpdir }
+      { "id" => "P1-I1-W4", "harness" => "antigravity", "workspace_path" => tmpdir }
     )
     assert_equal "opened", antigravity.fetch("status")
-    assert_equal ["--working-directory", tmpdir, "-e", "agy", "--continue"], launches.fetch(1)
+    assert_equal ["--working-directory", tmpdir, "-e", "agy", "--continue"], launches.fetch(2)
   end
 
-  def test_claude_agent_without_a_session_id_is_rejected
-    result = opener.open({ "id" => "P1-I1-W2", "harness" => "claude", "workspace_path" => tmpdir })
+  def test_interactive_agent_without_a_session_id_is_rejected
+    claude = opener.open({ "id" => "P1-I1-W2", "harness" => "claude", "workspace_path" => tmpdir })
+    codex = opener.open({ "id" => "P1-I1-W3", "harness" => "codex", "workspace_path" => tmpdir })
 
-    assert_equal "rejected", result.fetch("status")
-    assert_match(/has no saved Claude session to open/, result.fetch("message"))
+    assert_equal "rejected", claude.fetch("status")
+    assert_match(/has no saved Claude session to open/, claude.fetch("message"))
+    assert_equal "rejected", codex.fetch("status")
+    assert_match(/has no saved Codex session to open/, codex.fetch("message"))
     assert_empty launches
   end
 

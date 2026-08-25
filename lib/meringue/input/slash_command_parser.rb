@@ -30,9 +30,9 @@ module Meringue
         ["/prompt <agent_id> \"<message>\"", "Continue a worker session or take over a still-routing head."],
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
-        ["/harness [head|worker] <pi|claude|antigravity>", "With no arguments, open the harness picker; otherwise select role-aware harness defaults for future agents; omit the role to update both."],
-        ["/model [head|worker] <provider>/<model-id>", "With no arguments, open the model picker; otherwise persist the model for future Pi sessions. Omit the role to update both future heads and workers. Existing sessions are unchanged. The model id may itself contain / and :."],
-        ["/thinking [head|worker] <level>", "With no arguments, open the Head/Worker thinking picker; otherwise persist a Pi thinking default. Omit the role to update both future heads and workers; existing sessions are unchanged."],
+        ["/harness [head|worker] <pi|claude|codex|antigravity>", "With no arguments, open the harness picker; otherwise select role-aware harness defaults for future agents; omit the role to update both."],
+        ["/model [head|worker] <provider>/<model-id>", "With no arguments, open the model picker; otherwise persist the model for future sessions on the selected harness. Omit the role to update both future heads and workers. Existing sessions are unchanged. The model id may itself contain / and :."],
+        ["/thinking [head|worker] <level>", "With no arguments, open the Head/Worker thinking picker; otherwise persist a thinking default for future sessions on the selected harness. Omit the role to update both future heads and workers; existing sessions are unchanged."],
         ["/models [harness] [refresh]", "Open the searchable model picker for the harness's own model list; add refresh to re-fetch the catalog instead."],
         ["/goal create [issue_id] \"<prompt>\" --metric \"<command>\" --target <number> [flags]", "Start a goal loop: name an issue, or give only a prompt and Meringue creates the issue for it. It iterates until the metric hits its target or a budget guard trips."],
         ["/goal create [issue_id] \"<prompt>\" --reviewer [--max-iterations <n>]", "Start a reviewer-judged goal loop for work with no number: it iterates until a reviewer approves the work or the iteration budget runs out."],
@@ -920,7 +920,7 @@ module Meringue
           return kernel_command("SetHarness", "role" => tokens[0].downcase, "provider" => tokens[1])
         end
 
-        invalid("Usage: /harness [head|worker] <pi|claude|antigravity>")
+        invalid("Usage: /harness [head|worker] <pi|claude|codex|antigravity>")
       end
 
       # `/models` opens the local TUI model picker: a searchable list of the

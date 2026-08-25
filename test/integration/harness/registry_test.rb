@@ -36,17 +36,19 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_equal "claude", Registry.normalize_provider("claude_code")
     assert_equal "claude", Registry.normalize_provider("CC")
     assert_equal "antigravity", Registry.normalize_provider("agy")
+    assert_equal "codex", Registry.normalize_provider("Codex CLI")
+    assert_equal "codex", Registry.normalize_provider("openai-codex")
     assert_equal "antigravity", Registry.normalize_provider("Antigravity CLI")
-    assert_equal "codex", Registry.normalize_provider("Codex"), "unknown names normalize but do not resolve"
+    assert_equal "cursor", Registry.normalize_provider("Cursor"), "unknown names normalize but do not resolve"
   end
 
   def test_normalize_provider_bang_rejects_unknown_harnesses
     Registry::PROVIDERS.each { |provider| assert_equal provider, Registry.normalize_provider!(provider) }
 
-    error = assert_raises(ArgumentError) { Registry.normalize_provider!("codex") }
+    error = assert_raises(ArgumentError) { Registry.normalize_provider!("cursor") }
 
-    assert_match(/Unsupported harness provider "codex"/, error.message)
-    assert_match(/pi, claude, antigravity/, error.message)
+    assert_match(/Unsupported harness provider "cursor"/, error.message)
+    assert_match(/pi, claude, codex, antigravity/, error.message)
   end
 
   def test_split_role_defaults_use_each_active_harness_and_repair_incompatible_effort_values
@@ -75,17 +77,18 @@ class HarnessRegistryTest < HarnessIntegrationTest
   end
 
   def test_provider_metadata_is_public_facing
-    assert_equal %w[pi claude antigravity], Registry.supported_provider_names
+    assert_equal %w[pi claude codex antigravity], Registry.supported_provider_names
     assert_equal "Pi", Registry.provider_label("pi")
     assert_equal "Claude Code", Registry.provider_label("cc")
+    assert_equal "Codex CLI", Registry.provider_label("openai-codex")
     assert_equal "Antigravity CLI", Registry.provider_label("agy")
-    assert_equal "codex", Registry.provider_label("codex")
+    assert_equal "cursor", Registry.provider_label("cursor")
     assert_equal "claude", Registry.public_provider_name("claude-code")
 
     choices = Registry.provider_choices
-    assert_equal %w[pi claude antigravity], choices.map { |choice| choice.fetch("provider") }
-    assert_equal %w[pi claude antigravity], choices.map { |choice| choice.fetch("internal_provider") }
-    assert_equal ["Pi", "Claude Code", "Antigravity CLI"], choices.map { |choice| choice.fetch("label") }
+    assert_equal %w[pi claude codex antigravity], choices.map { |choice| choice.fetch("provider") }
+    assert_equal %w[pi claude codex antigravity], choices.map { |choice| choice.fetch("internal_provider") }
+    assert_equal ["Pi", "Claude Code", "Codex CLI", "Antigravity CLI"], choices.map { |choice| choice.fetch("label") }
     assert(choices.all? { |choice| choice.fetch("description").start_with?("Use ") })
   end
 
@@ -96,6 +99,8 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_equal "✳", Registry.provider_glyph("claude")
     assert_equal "✳", Registry.provider_glyph("Claude Code")
     assert_equal "✳", Registry.provider_glyph("CC")
+    assert_equal "◇", Registry.provider_glyph("codex")
+    assert_equal "◇", Registry.provider_glyph("openai-codex")
     assert_equal "↑", Registry.provider_glyph("antigravity")
     assert_equal "↑", Registry.provider_glyph("agy")
 
@@ -108,7 +113,7 @@ class HarnessRegistryTest < HarnessIntegrationTest
     # An unrecognized provider keeps a stable ASCII initial instead of
     # masquerading as a shipped backend. "fake" is the test/dev harness.
     assert_equal "f", Registry.provider_glyph("fake")
-    assert_equal "c", Registry.provider_glyph("codex")
+    assert_equal "c", Registry.provider_glyph("cursor")
     assert_equal "?", Registry.provider_glyph("!!")
 
     # A blank harness means nothing was recorded, and renders as unknown rather than as any
@@ -127,6 +132,7 @@ class HarnessRegistryTest < HarnessIntegrationTest
       assert Registry.ascii_glyphs?
       assert_equal "p", Registry.provider_glyph("pi")
       assert_equal "c", Registry.provider_glyph("claude-code")
+      assert_equal "x", Registry.provider_glyph("codex")
       assert_equal "a", Registry.provider_glyph("agy")
       assert_equal "?", Registry.provider_glyph(nil)
     end
@@ -179,7 +185,7 @@ class HarnessRegistryTest < HarnessIntegrationTest
   end
 
   def test_unknown_configured_provider_is_rejected
-    error = assert_raises(ArgumentError) { registry("harness" => { "provider" => "codex" }).worker_provider }
+    error = assert_raises(ArgumentError) { registry("harness" => { "provider" => "cursor" }).worker_provider }
 
     assert_match(/Unsupported harness provider/, error.message)
   end
@@ -212,6 +218,21 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_includes worker.extra_args.each_cons(2).to_a, ["--model", Registry::DEFAULT_MODEL]
     assert_includes worker.extra_args.each_cons(2).to_a, ["--thinking", Registry::DEFAULT_THINKING_LEVEL]
     assert_equal ["pi"], worker.command
+  end
+
+  def test_codex_clients_get_native_model_reasoning_and_role_safety_arguments
+    subject = registry
+
+    head = subject.client_for(provider: "codex", kind: "head")
+    worker = subject.client_for(provider: "codex", kind: "worker")
+
+    assert_kind_of Meringue::Harness::CodexInteractiveClient, head
+    assert_includes head.extra_args.each_cons(2).to_a, ["--sandbox", "read-only"]
+    assert_includes head.extra_args.each_cons(2).to_a, ["--ask-for-approval", "never"]
+    assert_includes worker.extra_args, "--dangerously-bypass-approvals-and-sandbox"
+    assert_includes worker.extra_args.each_cons(2).to_a, ["--model", "gpt-5.6-sol"]
+    assert_includes worker.extra_args.each_cons(2).to_a, ["-c", "model_reasoning_effort=\"max\""]
+    assert_equal "openai/gpt-5.6-sol", subject.session_defaults(provider: "codex").fetch("model")
   end
 
   def test_pi_scalar_session_defaults_override_role_argv_for_future_heads_and_workers
@@ -401,38 +422,46 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_includes error.message, "must be an array of glob strings"
   end
 
-  def test_client_for_builds_claude_and_antigravity_clients
+  def test_client_for_builds_interactive_and_process_clients
     subject = registry(
       "harness" => {
         "claude" => { "command" => "claude --beta", "env" => { "CLAUDE_TOKEN" => "x" } },
+        "codex" => { "command" => "codex --beta", "env" => { "CODEX_HOME" => File.join(tmpdir, "codex") } },
         "antigravity" => { "command" => ["agy", "--flag"], "extra_args" => ["--shared"] }
       }
     )
 
     claude = subject.client_for(provider: "claude-code", kind: "head")
+    codex = subject.client_for(provider: "openai-codex", kind: "worker")
     antigravity = subject.client_for(provider: "agy", kind: "worker")
 
     assert_kind_of Meringue::Harness::ClaudeInteractiveClient, claude
     assert_equal ["claude", "--beta"], claude.command
     assert_equal({ "CLAUDE_TOKEN" => "x" }, claude.env)
     assert claude.live_terminal_supported?, "Claude Code is driven through its own interactive session"
+    assert_kind_of Meringue::Harness::CodexInteractiveClient, codex
+    assert_equal ["codex", "--beta"], codex.command
+    assert_equal File.join(tmpdir, "codex"), codex.codex_home
+    assert codex.live_terminal_supported?, "Codex is driven through its own interactive session"
     assert_kind_of Meringue::Harness::AntigravityClient, antigravity
     assert_equal ["agy", "--flag"], antigravity.command
     assert_equal ["--shared"], antigravity.extra_args
   end
 
   def test_client_for_rejects_unknown_providers
-    assert_raises(ArgumentError) { registry.client_for(provider: "codex", kind: "worker") }
+    assert_raises(ArgumentError) { registry.client_for(provider: "cursor", kind: "worker") }
   end
 
   def test_client_for_agent_follows_the_agent_record
     subject = registry("harness" => { "provider" => "pi" })
 
     claude_worker = subject.client_for_agent("harness" => "claude", "type" => "worker")
+    codex_worker = subject.client_for_agent("harness" => "codex", "type" => "worker")
     pi_head = subject.client_for_agent("harness" => "pi", "type" => "head")
     defaulted = subject.client_for_agent("id" => "P1-I1-W1")
 
     assert_kind_of Meringue::Harness::ClaudeInteractiveClient, claude_worker
+    assert_kind_of Meringue::Harness::CodexInteractiveClient, codex_worker
     assert_kind_of Meringue::Harness::PiClient, pi_head
     assert_same subject.worker_client, defaulted
   end
@@ -443,14 +472,16 @@ class HarnessRegistryTest < HarnessIntegrationTest
     runners = {
       "pi" => subject.head_runner_for(provider: "pi", cwd: tmpdir),
       "claude" => subject.head_runner_for(provider: "claude", cwd: tmpdir),
+      "codex" => subject.head_runner_for(provider: "codex", cwd: tmpdir),
       "antigravity" => subject.head_runner_for(provider: "antigravity", cwd: tmpdir)
     }
 
     runners.each_value { |runner| assert_kind_of Meringue::Heads::AgentRunner, runner }
     assert_kind_of Meringue::Harness::PiClient, runners.fetch("pi").harness_client
     assert_kind_of Meringue::Harness::ClaudeInteractiveClient, runners.fetch("claude").harness_client
+    assert_kind_of Meringue::Harness::CodexInteractiveClient, runners.fetch("codex").harness_client
     assert_kind_of Meringue::Heads::AgentRunner, subject.head_runner(cwd: tmpdir)
-    assert_raises(ArgumentError) { subject.head_runner_for(provider: "codex", cwd: tmpdir) }
+    assert_raises(ArgumentError) { subject.head_runner_for(provider: "cursor", cwd: tmpdir) }
   end
 
   # An interactive backend boots a whole agent CLI before it can answer, so it is allowed longer
@@ -480,6 +511,7 @@ class HarnessRegistryTest < HarnessIntegrationTest
 
     assert_equal "pi", subject.provider_command("pi")
     assert_equal "claude", subject.provider_command("claude")
+    assert_equal "codex", subject.provider_command("codex")
     assert_equal "agy --flag", subject.provider_command("antigravity")
   end
 

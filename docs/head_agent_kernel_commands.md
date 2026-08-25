@@ -36,7 +36,7 @@ Natural-language mapping:
 | "pause/resume that goal", "raise the goal's iteration budget", "change the goal target to 90" | `ModifyGoal` |
 | "stop that goal", "that goal is done, stop looping" | `StopGoal` |
 | "use the gruvbox theme" | `SetTheme` |
-| "switch to claude/pi/antigravity" | `SetHarness` |
+| "switch to claude/codex/pi/antigravity" | `SetHarness` |
 | "show the defaults", "which model will future agents use" | `GetSessionDefaults` (no slash command; this is its only user-facing route) |
 | "what models can I use", "list the available models", "refresh the model list" | `GetModelCatalog` (a status report; the browsable list is the TUI model picker behind `/models`) |
 | "use provider/model-id for future agents" / "use openai/gpt-5.6-sol for heads" | `SetDefaultSessionModel` (optional `role`) |
@@ -1620,7 +1620,7 @@ Payload:
 
 ### SetHarness
 
-Selects the active harness backend for future heads and workers, backing `/harness <pi|claude|antigravity>`.
+Selects the active harness backend for future heads and workers, backing `/harness <pi|claude|codex|antigravity>`.
 
 Payload:
 
@@ -1630,14 +1630,14 @@ Payload:
 }
 ```
 
-### Pi session model and thinking commands
+### Session model and thinking commands
 
 Most of these back a dashboard slash command, and all of them are proposable by heads with the
 same validation as the typed path; `GetSessionDefaults` is head-only. They use normal
-kernel/harness validation: a non-Pi or non-resumable target is rejected rather than guessed.
+kernel/harness validation: an unsupported or non-resumable target is rejected rather than guessed.
 
 - `GetSessionDefaults` reports the future-session head and worker model and thinking levels and takes `{}`. It has no
-  slash command: the dashboard status line already shows `harness: Pi` plus a compact model/thinking summary, and
+  slash command: the dashboard status line already shows the selected role harnesses plus a compact model/thinking summary, and
   `/config` displays each role in the full-screen Agent defaults category (`/config --text` prints diagnostics), so the typed `/defaults` was removed. Propose it when the
   user asks about the defaults in natural language.
 - `GetModelCatalog` backs `/models refresh [harness]` with `{ "harness": "pi", "refresh": true }` (the `harness` key stays optional). It is read-only: it asks the harness which models exist, reuses the cached snapshot unless `refresh` is set, and reports an explicit unavailable/unsupported state instead of guessing when the harness cannot answer. Its output is a status (harness, availability, model count, timestamps, note) plus a few example references, not a listing: browsing the catalog is the TUI model picker that bare `/models` opens, which reads the same persisted snapshot. A head proposing this command for "what models can I use" therefore gets a short, scannable answer instead of a hundred log lines.

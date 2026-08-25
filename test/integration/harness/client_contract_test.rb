@@ -80,6 +80,7 @@ class HarnessClientContractTest < HarnessIntegrationTest
     assert_equal "pi", Harness::PiClient.new.harness_name
     assert_equal "claude", Harness::ClaudeClient.new(claude_home: tmpdir).harness_name
     assert_equal "claude", Harness::ClaudeCodeClient.new(claude_home: tmpdir).harness_name
+    assert_equal "codex", Harness::CodexInteractiveClient.new(codex_home: tmpdir).harness_name
     assert_equal "antigravity", Harness::AntigravityClient.new.harness_name
   end
 

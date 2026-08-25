@@ -111,7 +111,7 @@ There are two ways to focus a worker, and which one applies is the backend's ans
 
 ### Live attach (interactive backends)
 
-A backend whose session already runs in an interactive process Meringue owns — Claude Code today — is focused by attaching to that process. Nothing is prepared and nothing is transferred:
+A backend whose session already runs in an interactive process Meringue owns — Claude Code and Codex CLI today — is focused by attaching to that process. Nothing is prepared and nothing is transferred:
 
 1. The kernel records a durable `live_focus` marker naming the owning dashboard instance, so a person owning the prompt box is visible to every other writer.
 2. `live_terminal` returns a handle onto the running process. It carries input and screen only (`write`, `snapshot`, `resize`, `alive?`), so the pane can type and watch but cannot detach, signal, or kill the session; ownership stays with the kernel.

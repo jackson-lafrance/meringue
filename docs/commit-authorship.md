@@ -8,7 +8,7 @@ plumbing; it is not a commit identity.
 ## Enforcement path
 
 Worker sessions are started by the harness clients, not by a Meringue Git
-commit command. Immediately before Pi, Claude Code, or Antigravity starts a managed or
+commit command. Immediately before Pi, Claude Code, Codex CLI, or Antigravity starts a managed or
 focused external process, `Meringue::Git::CommitIdentity`:
 
 1. reads the repository's local, global, and system Git identities;

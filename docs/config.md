@@ -68,7 +68,7 @@ Supported colorschemes:
 
 Every colorscheme also defines an eight-color agent palette. Each agent id is hashed to one palette slot, so the same head or worker always renders in the same color for a given theme, and that assignment is used for its rows in the logs pane and its id/harness logo in the AgentTree (in every status, completed rows included). The chat composer also uses the palette while a worker or issue is the selected chat target; heads are log-only and never tint the composer. Heads use a bold `◆`, workers use `✦`, completed results use `✓`, actionable warnings/errors use `!`, and kernel/command logs keep the theme accent with `▪`. Set `NO_COLOR=1` to render the TUI without color; icons, explicit ids, harness logos, status text, the composer title, and the `▌` gutter still separate agent output from kernel logs.
 
-AgentTree rows also show which harness backs each session: `π` Pi, `✳` Claude Code, `↑` Antigravity. A harness Meringue does not ship renders a plain ASCII initial and a record with no harness renders `?`, always in exactly one column. Set `MERINGUE_ASCII_GLYPHS=1` to render `p` / `c` / `a` instead of the marks when a font cannot draw them.
+AgentTree rows also show which harness backs each session: `π` Pi, `✳` Claude Code, `◇` Codex CLI, `↑` Antigravity. A harness Meringue does not ship renders a plain ASCII initial and a record with no harness renders `?`, always in exactly one column. Set `MERINGUE_ASCII_GLYPHS=1` to render `p` / `c` / `x` / `a` instead of the marks when a font cannot draw them.
 
 `color_scheme` is accepted as a compatibility alias for `colorscheme`. Running `/theme <name>` writes a single `colorscheme` value and removes the older `color_scheme` alias from the `[tui]` section.
 
@@ -146,7 +146,7 @@ provider = "claude"            # applies to both roles
 
 ### Model and reasoning defaults
 
-These are harness-neutral: they follow whichever backend is selected rather than belonging to one of them. Each backend renders them in its own vocabulary — Pi receives `--model` and `--thinking`, Claude Code receives `--model` and `--effort` — and a backend that accepts neither simply ignores them.
+These are harness-neutral: they follow whichever backend is selected rather than belonging to one of them. Each backend renders them in its own vocabulary — Pi receives `--model` and `--thinking`, Claude Code receives `--model` and `--effort`, and Codex receives `--model` plus `model_reasoning_effort` — and a backend that accepts neither simply ignores them.
 
 ```toml
 [harness]
@@ -158,7 +158,7 @@ thinking_level = "max"                   # shared fallback for either omitted ro
 # worker_thinking_level = "max"
 ```
 
-The model is stored as a qualified `provider/model-id` reference because a multi-vendor harness has to disambiguate a bare id. A single-vendor harness such as Claude Code is handed the bare id instead, so one stored value works for both.
+The model is stored as a qualified `provider/model-id` reference because a multi-vendor harness has to disambiguate a bare id. A single-vendor harness such as Claude Code or Codex is handed the bare id instead, so one stored value works for both.
 
 A value set under a specific backend still wins for that backend, which is where a model that only exists on one harness belongs:
 
@@ -219,7 +219,7 @@ compound command from running partially.
 This enforcement applies to isolated **Pi worker** sessions and to resumed Pi
 workers. Heads do not receive this policy, and shared read-only workers have no
 `bash` tool at all. If a worker blacklist is configured while the selected
-worker provider is Claude Code or Antigravity, worker startup fails closed with
+worker provider is Claude Code, Codex, or Antigravity, worker startup fails closed with
 a clear unsupported-provider error instead of relying on prompt instructions.
 Restart Meringue after changing this setting so all future workers use the new
 configuration; an already-running worker keeps the policy loaded when its Pi
@@ -543,13 +543,14 @@ Supported workspace action names:
 [harness]
 provider = "pi"              # default for heads and workers
 # head_provider = "claude"   # optional override for head agents
-# worker_provider = "antigravity" # optional override for worker agents
+# worker_provider = "codex"   # optional override for worker agents
 ```
 
 Supported provider names in this slice:
 
 - `pi`
 - `claude` for Claude Code (aliases: `claude_code`, `claude-code`, `cc`)
+- `codex` for Codex CLI (aliases: `codex-cli`, `codex_cli`, `openai-codex`)
 - `antigravity`
 
 The `split_defaults` experiment is enabled by default and makes head/worker harness, model, and thinking settings independent. Disable it only for a compatibility migration: role-specific values remain stored, but the shared values are used for both roles. Harness selection re-resolves incompatible future thinking values for each affected role in the same config transaction; it never rewrites an existing session.
@@ -559,14 +560,14 @@ CLI flags override `config.toml`:
 ```bash
 bin/meringue tui --harness claude
 bin/meringue tui --harness claude_code
-bin/meringue tui --head-harness antigravity --worker-harness claude
+bin/meringue tui --head-harness claude --worker-harness codex
 ```
 
 Environment variables override both config and CLI flags:
 
 ```bash
 MERINGUE_HARNESS=claude bin/meringue tui
-MERINGUE_HEAD_HARNESS=antigravity MERINGUE_WORKER_HARNESS=claude bin/meringue tui
+MERINGUE_HEAD_HARNESS=claude MERINGUE_WORKER_HARNESS=codex bin/meringue tui
 ```
 
 ## Provider sections
@@ -594,13 +595,24 @@ use_json_schema = true
 head_extra_args = ["--effort", "high", "--permission-mode", "plan"]
 worker_extra_args = ["--effort", "high", "--permission-mode", "acceptEdits"]
 
+[harness.codex]
+command = "codex"
+head_extra_args = ["--sandbox", "read-only", "--ask-for-approval", "never"]
+worker_extra_args = ["--dangerously-bypass-approvals-and-sandbox"]
+
+[harness.codex.env]
+# Optional when Codex state lives outside ~/.codex:
+# CODEX_HOME = "/path/to/codex-home"
+
 [harness.antigravity]
 command = "agy"
 head_extra_args = []
 worker_extra_args = []
 ```
 
-Heads and workers default to `anthropic/claude-opus-5` at the maximum reasoning level. Use `/model head <provider>/<model-id>` and `/model worker <provider>/<model-id>`, or set `head_model` and `worker_model`, for distinct role model defaults; use `/thinking head <level>` and `/thinking worker <level>`, or set `head_thinking_level` and `worker_thinking_level`, for distinct role reasoning defaults. The existing `/model <provider>/<model-id>` command and `model` key, and `/thinking <level>` command and `thinking_level` key, remain the shared form; those commands also clear role overrides. A role key wins over the shared key, and either scalar wins over a `--model`/`--thinking` flag in that role's argument array. A configured role array still replaces that role's default array entirely, so include every other flag you need. Claude Code receives a bare model id and `--effort`; Meringue still reports the stored qualified reference so status and `/config` remain portable across harnesses. Values that are valid references but absent from a catalog remain allowed and are labelled unverified.
+Codex heads run with a read-only sandbox and denied approval requests. Isolated Codex workers use the same unattended full-access posture as the Claude worker integration because the kernel has already placed them in dedicated worktrees; `shared_read_only` always replaces those worker flags with enforced `read-only`/`never` settings. Codex stores durable rollouts below `CODEX_HOME/sessions` (default `~/.codex/sessions`). Meringue answers Codex's one-time directory trust prompt before typing the assignment, records Codex's provider-assigned thread id and rollout path, and resumes with `codex resume <session-id>` after process loss.
+
+Pi and Claude Code default to `anthropic/claude-opus-5`; Codex defaults to `openai/gpt-5.6-sol`. All three default to the maximum reasoning level. Use `/model head <provider>/<model-id>` and `/model worker <provider>/<model-id>`, or set `head_model` and `worker_model`, for distinct role model defaults; use `/thinking head <level>` and `/thinking worker <level>`, or set `head_thinking_level` and `worker_thinking_level`, for distinct role reasoning defaults. The existing `/model <provider>/<model-id>` command and `model` key, and `/thinking <level>` command and `thinking_level` key, remain the shared form; those commands also clear role overrides. A role key wins over the shared key, and either scalar wins over a model/reasoning value in that role's argument array. A configured role array still replaces that role's default array entirely, so include every other flag you need. Claude Code receives a bare model id and `--effort`; Codex receives a bare model id and a `model_reasoning_effort` config override. Meringue still reports the stored qualified reference so status and `/config` remain portable across harnesses. Values that are valid references but absent from a catalog remain allowed and are labelled unverified.
 
 A provider `command` may be a bare executable such as `pi`, an absolute path, or a command with arguments. Meringue uses the provider's effective environment—the environment that launched Meringue plus any configured `env` overrides—for harness sessions, catalog probes, and focus. Native focus resolves the executable against that same effective `PATH` before transferring session ownership, rather than trying to find `pi` again in a reduced PTY environment. This keeps focus working when Pi is installed by a version manager or package manager in a non-system directory. For services or GUI launchers whose startup environment has no usable shell `PATH`, configure an absolute path (for example, `command = "/opt/homebrew/bin/pi"`) or add the installation directory explicitly:
 
@@ -613,20 +625,20 @@ A configured `PATH` replaces, rather than appends to, the inherited value, so in
 
 A model reference is `<provider>/<model-id>`, split on the first slash, so the model id may itself contain `/` and `:` (`model = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"` is valid). See [`session-settings.md`](session-settings.md#the-accepted-model-reference-grammar) for the exact grammar and for what is still rejected.
 
-`/config` and the dashboard status line show each future Pi role's model and thinking level (the shared model when both roles agree, split by role when they differ). `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. An existing session's own effective pair has no slash command either: it is recorded on the agent record and shown in the focused worker workspace and raw `/state`. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
+`/config` and the dashboard status line show each future role's harness, model, and thinking level (the shared model when both roles agree, split by role when they differ). `/model` and `/thinking` update only future-session defaults and never rewrite existing sessions. An existing session's own effective pair has no slash command either: it is recorded on the agent record and shown in the focused worker workspace and raw `/state`. See [`session-settings.md`](session-settings.md) for the exact scope and propagation rules.
 
 ### Model catalogs and provider resource flags
 
 The `/models` model picker, and the completion list behind `/model`, come from the harness itself rather than a list maintained in Meringue. For Pi, Meringue starts a short-lived ephemeral RPC probe (`pi --mode rpc --no-session`) and reads `get_available_models`.
 
-That probe reuses the configured provider `command`, `env`, `extra_args`, and role `*_extra_args`, minus `--model`/`--thinking`, because provider availability depends on those flags. Claude Code uses an ephemeral `claude --print --output-format json "/model"` command instead, strips `--model`/`--effort`, and parses Claude Code's own aliases and effort levels. Picker and setup rendering use only the persisted snapshot and never make a network request. Two consequences matter when configuring Pi:
+That probe reuses the configured provider `command`, `env`, `extra_args`, and role `*_extra_args`, minus `--model`/`--thinking`, because provider availability depends on those flags. Claude Code uses an ephemeral `claude --print --output-format json "/model"` command, while Codex uses `codex debug models`; each adapter keeps only the harness's authoritative model metadata and reasoning levels. Picker and setup rendering use only the persisted snapshot and never make a network request. Two consequences matter when configuring Pi:
 
 - If `worker_extra_args` contains `--no-extensions` and your models come from a Pi extension, the catalog is legitimately empty, and Meringue reports `unavailable` with Pi's own answer instead of inventing entries. Keep the `--extension <path>` flag that registers your provider in the same array (as in the example above) so probes and real sessions agree.
 - Model/thinking defaults are dropped from the probe on purpose: an unavailable saved default must not stop Pi from reporting which models exist.
 
 Catalogs are cached in Meringue state under `metadata.harness_model_catalogs.<harness>` and refreshed in the background by reconciliation (about every 10 minutes, retried after about 1 minute when a fetch failed). `/models refresh` (or `Ctrl-R` inside the model picker) forces an immediate re-fetch after you log into a provider, install an extension, or edit `~/.pi/agent/models.json`.
 
-Claude Code runs in its own interactive mode inside a PTY Meringue owns for the life of the session; see [`interactive-harness-backends.md`](interactive-harness-backends.md). Its catalog is `available` only when Claude Code returns a non-empty authoritative answer; missing CLI, auth/exit failure, or an empty/malformed response is `unavailable`, and a failed refresh after a confirmed answer is `stale` with the last confirmed models retained. Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace, so it has no live session to steer and currently reports an explicit `unsupported` catalog.
+Claude Code and Codex run in their own interactive modes inside PTYs Meringue owns for the life of each session; see [`interactive-harness-backends.md`](interactive-harness-backends.md). Each catalog is `available` only when its CLI returns a non-empty authoritative answer; missing CLI, auth/exit failure, or an empty/malformed response is `unavailable`, and a failed refresh after a confirmed answer is `stale` with the last confirmed models retained. Antigravity runs through `agy --print` and resumes completed turns with `agy --continue` from the worker workspace, so it has no live session to steer and currently reports an explicit `unsupported` catalog.
 
 Do not store API keys or secrets in the config file. Prefer each provider CLI's normal auth flow or environment setup.
 

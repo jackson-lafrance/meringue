@@ -253,7 +253,7 @@ module Meringue
         "Setup"
       ].freeze
       THINKING_LEVELS = %w[off minimal low medium high xhigh max].freeze
-      PROVIDERS = %w[pi claude antigravity].freeze
+      PROVIDERS = %w[pi claude codex antigravity].freeze
 
       module_function
 
@@ -363,15 +363,27 @@ module Meringue
           # under one backend's section. The legacy [harness.pi] paths stay readable as fallbacks so
           # an existing configuration keeps working, and a value set under a specific backend still
           # wins for that backend.
-          definition("agent.head_model", %w[harness head_model], "Agent defaults", "model_reference", "anthropic/claude-opus-5", fallback_paths: [%w[harness model], %w[harness pi head_model], %w[harness pi model]], editor: "model", apply_mode: "live", label: "Head model", description: "Model for future heads; exact provider/model references remain allowed when the catalog is unavailable."),
+          definition("agent.head_model", %w[harness head_model], "Agent defaults", "model_reference", ->(config, env) { default_model_for_role(config, env, "head") }, fallback_paths: [%w[harness model], %w[harness pi head_model], %w[harness pi model]], editor: "model", apply_mode: "live", label: "Head model", description: "Model for future heads; exact provider/model references remain allowed when the catalog is unavailable."),
           definition("agent.head_thinking", %w[harness head_thinking_level], "Agent defaults", "thinking_level", "max", fallback_paths: [%w[harness thinking_level], %w[harness pi head_thinking_level], %w[harness pi thinking_level]], options: THINKING_LEVELS, editor: "selector", apply_mode: "live", label: "Head reasoning", description: "Reasoning level for future heads."),
           definition("agent.worker_harness", %w[harness worker_provider], "Agent defaults", "enum", nil, fallback_paths: [%w[harness provider]], options: PROVIDERS, editor: "selector", apply_mode: "live", label: "Worker harness", description: "Agent harness used for future workers.", override_env: %w[MERINGUE_WORKER_HARNESS MERINGUE_HARNESS], env_overrides: true),
-          definition("agent.worker_model", %w[harness worker_model], "Agent defaults", "model_reference", "anthropic/claude-opus-5", fallback_paths: [%w[harness model], %w[harness pi worker_model], %w[harness pi model]], editor: "model", apply_mode: "live", label: "Worker model", description: "Model for future workers; existing sessions are unchanged."),
+          definition("agent.worker_model", %w[harness worker_model], "Agent defaults", "model_reference", ->(config, env) { default_model_for_role(config, env, "worker") }, fallback_paths: [%w[harness model], %w[harness pi worker_model], %w[harness pi model]], editor: "model", apply_mode: "live", label: "Worker model", description: "Model for future workers; existing sessions are unchanged."),
           definition("agent.worker_thinking", %w[harness worker_thinking_level], "Agent defaults", "thinking_level", "max", fallback_paths: [%w[harness thinking_level], %w[harness pi worker_thinking_level], %w[harness pi thinking_level]], options: THINKING_LEVELS, editor: "selector", apply_mode: "live", label: "Worker reasoning", description: "Reasoning level for future workers."),
           definition("agent.shared_harness_compatibility", %w[harness provider], "Agent defaults", "read_only", nil, visibility: "internal", apply_mode: "none", label: "Shared harness compatibility", description: "Backward-compatible shared harness fallback."),
           definition("agent.shared_model_compatibility", %w[harness model], "Agent defaults", "read_only", "anthropic/claude-opus-5", visibility: "internal", apply_mode: "none", label: "Shared model compatibility", description: "Backward-compatible shared model fallback."),
           definition("agent.shared_thinking_compatibility", %w[harness thinking_level], "Agent defaults", "read_only", "max", visibility: "internal", apply_mode: "none", label: "Shared reasoning compatibility", description: "Backward-compatible shared reasoning fallback.")
         ])
+      end
+
+      def default_model_for_role(config, env, role)
+        role_provider = env["MERINGUE_#{role.upcase}_HARNESS"] || env["MERINGUE_HARNESS"] ||
+                        config&.value("harness", "#{role}_provider") || config&.value("harness", "provider")
+        if defined?(Meringue::Harness::Registry) && !role_provider.to_s.strip.empty?
+          Meringue::Harness::Registry.default_model_for(role_provider)
+        else
+          "anthropic/claude-opus-5"
+        end
+      rescue ArgumentError
+        "anthropic/claude-opus-5"
       end
 
       def add_appearance(settings)
@@ -451,10 +463,15 @@ module Meringue
             "head_extra_args" => ["--effort", "high", "--tools", "Read,Glob,Grep,Bash", "--permission-mode", "plan", "--disable-slash-commands"],
             "worker_extra_args" => ["--effort", "high", "--permission-mode", "acceptEdits"]
           },
+          "codex" => {
+            "command" => ["codex"],
+            "head_extra_args" => ["--sandbox", "read-only", "--ask-for-approval", "never"],
+            "worker_extra_args" => ["--dangerously-bypass-approvals-and-sandbox"]
+          },
           "antigravity" => { "command" => ["agy"], "head_extra_args" => [], "worker_extra_args" => [] }
         }
         PROVIDERS.each do |provider|
-          label = provider == "claude" ? "Claude Code" : provider.capitalize
+          label = { "claude" => "Claude Code", "codex" => "Codex CLI" }.fetch(provider, provider.capitalize)
           settings.concat([
             definition("harnesses.#{provider}.command", ["harness", provider, "command"], "Harnesses", "command_argv", defaults.dig(provider, "command"), editor: "command", label: "#{label} command", description: "Executable and arguments used to launch #{label}.", advanced: true),
             definition("harnesses.#{provider}.env", ["harness", provider, "env"], "Harnesses", "environment_map", {}, editor: "environment", label: "#{label} environment", description: "Additional process environment. Values are redacted outside the editor.", sensitive: true, advanced: true),
@@ -524,6 +541,7 @@ module Meringue
           definition("runtime.config_path", nil, "Setup", "read_only", ->(config, _env) { config&.path.to_s }, visibility: "read_only", apply_mode: "none", label: "Config file", description: "File opened by this Settings draft; --config and MERINGUE_CONFIG choose it before startup.", override_env: %w[MERINGUE_CONFIG], advanced: true),
           definition("runtime.state_path", nil, "Setup", "read_only", "default state path", visibility: "read_only", apply_mode: "none", label: "State file override", description: "MERINGUE_STATE_PATH or --state is process-only and is never saved here.", override_env: %w[MERINGUE_STATE_PATH], advanced: true),
           definition("runtime.claude_config_dir", nil, "Setup", "read_only", "not set", visibility: "read_only", apply_mode: "none", label: "Claude config directory", description: "Process-only Claude Code resource override.", override_env: %w[CLAUDE_CONFIG_DIR], advanced: true),
+          definition("runtime.codex_home", nil, "Setup", "read_only", "not set", visibility: "read_only", apply_mode: "none", label: "Codex home", description: "Process-only Codex config and rollout directory override.", override_env: %w[CODEX_HOME], advanced: true),
           definition("runtime.no_color", nil, "Setup", "read_only", "not set", visibility: "read_only", apply_mode: "none", label: "No color", description: "NO_COLOR disables terminal color for this process.", override_env: %w[NO_COLOR], advanced: true),
           definition("runtime.ascii_glyphs", nil, "Setup", "read_only", "not set", visibility: "read_only", apply_mode: "none", label: "ASCII glyphs", description: "MERINGUE_ASCII_GLYPHS replaces Unicode marks for this process.", override_env: %w[MERINGUE_ASCII_GLYPHS], advanced: true),
           definition("runtime.locale", nil, "Setup", "read_only", ->(_config, env) { env["LC_ALL"] || env["LC_CTYPE"] || env["LANG"] || "not set" }, visibility: "read_only", apply_mode: "none", label: "Terminal locale", description: "Locale controls UTF-8 presentation and is process-only.", override_env: %w[LC_ALL LC_CTYPE LANG], advanced: true),
