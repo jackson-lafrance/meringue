@@ -149,11 +149,12 @@ module Meringue
       def snapshot(rows: nil, columns: nil)
         resize(rows: rows, columns: columns) if rows && columns
         @mutex.synchronize do
+          rendered = @screen.render_snapshot
           {
-            "lines" => @screen.lines,
-            "styled_lines" => @screen.styled_lines,
-            "cursor" => @screen.cursor,
-            "revision" => @screen.revision,
+            "lines" => rendered.fetch("lines"),
+            "styled_lines" => rendered.fetch("styled_lines"),
+            "cursor" => rendered.fetch("cursor"),
+            "revision" => rendered.fetch("revision"),
             "rows" => @rows,
             "columns" => @columns,
             "pid" => @pid,
