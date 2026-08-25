@@ -394,7 +394,7 @@ module Meringue
         def bottom_status_bar_components(state)
           metadata = state.fetch("metadata", {}) || {}
           defaults = metadata.fetch("pi_session_defaults", {}) || {}
-          role_values = defaults.empty? ? nil : normalized_pi_role_defaults(defaults)
+          role_values = defaults.empty? ? nil : normalized_agent_role_defaults(defaults)
           workers = active_agent_count(state, "worker")
           heads = active_agent_count(state, "head")
           {
