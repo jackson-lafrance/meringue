@@ -16,7 +16,6 @@ module Meringue
       READ_CHUNK_BYTES = 16 * 1024
       TERMINATION_GRACE_SECONDS = 1.0
       POLL_INTERVAL = 0.025
-      MANAGED_HARNESS_ENV_PATTERN = /\API_/.freeze
 
       def self.from_config(config, env: ENV)
         section = config.respond_to?(:section) ? config.section("workspace") : {}
@@ -28,8 +27,10 @@ module Meringue
         )
       end
 
-      def initialize(command: nil, env: ENV, max_buffer_bytes: DEFAULT_BUFFER_BYTES, pty: PTY)
+      def initialize(command: nil, env: ENV, max_buffer_bytes: DEFAULT_BUFFER_BYTES, pty: PTY,
+                     session_environment_patterns: [])
         @env = stringify_environment(env)
+        @session_environment_patterns = Array(session_environment_patterns)
         @pty = pty
         @max_buffer_bytes = normalize_buffer_size(max_buffer_bytes)
         @mutex = Mutex.new
@@ -250,9 +251,10 @@ module Meringue
       end
 
       def terminal_environment(workspace_path)
-        scrubbed = env.keys.grep(MANAGED_HARNESS_ENV_PATTERN).to_h { |key| [key, nil] }
-        env.merge(
-          scrubbed,
+        SubprocessEnvironment.clean_agent_session(
+          env,
+          session_environment_patterns: @session_environment_patterns
+        ).merge(
           "TERM" => env.fetch("TERM", "xterm-256color"),
           "COLORTERM" => env.fetch("COLORTERM", "truecolor"),
           "MERINGUE_WORKSPACE" => workspace_path.to_s

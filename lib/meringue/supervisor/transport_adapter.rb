@@ -6,8 +6,7 @@ module Meringue
     # operations a backend must expose so the persistent supervisor can own
     # harness sessions independent of the interactive dashboard process.
     #
-    # Pi is the current backend, but Claude Code, Codex, and other harnesses are
-    # planned as optional backends. The supervisor talks to every backend
+    # Each supported harness supplies an adapter; the supervisor talks to every backend
     # through this contract alone, so adding a backend never reaches into the
     # supervisor or the kernel: a new adapter implements these methods and
     # registers it with the harness registry.
@@ -60,7 +59,7 @@ module Meringue
       # transport. Returns a Hash shaped like:
       #
       #   { "source" => "transport_ownership",
-      #     "transport_key" => "pi-...",
+      #     "transport_key" => "harness-session-...",
       #     "owner_pid" => 123, "owner_started_at" => "...",
       #     "owner_alive" => true,
       #     "harness_pid" => 456, "harness_started_at" => "...",
@@ -120,7 +119,7 @@ module Meringue
         raise NotImplementedError, "transport adapters must implement #wait_for_settled"
       end
 
-      # The harness name this adapter serves (for example "pi"). Used only for
+      # The harness name this adapter serves. Used only for
       # diagnostics and log attribution; the supervisor never branches on it.
       def harness_name
         raise NotImplementedError, "transport adapters must implement #harness_name"

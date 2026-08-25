@@ -104,7 +104,7 @@ module Meringue
       end
 
       def default_model_reference(state, role: nil)
-        defaults = (state || {}).dig("metadata", "pi_session_defaults") || {}
+        defaults = (state || {}).dig("metadata", "agent_session_defaults") || {}
         role_name = role.to_s.strip.downcase
         reference = if %w[head worker].include?(role_name)
                       role_reference = defaults.dig("roles", role_name, "model").to_s.strip

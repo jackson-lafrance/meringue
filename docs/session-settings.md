@@ -83,7 +83,7 @@ Omission is meaningful. An omitted field remains late-bound to the configured fu
 
 ### The accepted model-reference grammar
 
-One place owns this rule (`Meringue::Harness::ModelReference`), and it is the harness's own rule rather than a stricter Meringue invention. Pi resolves a reference by splitting on the **first** slash (`resolveModel` / `findExactModelReferenceMatch`), so Meringue does too:
+One place owns Meringue's accepted rule (`Meringue::Harness::ModelReference`). It preserves the provider-qualified references harnesses report instead of imposing a stricter one-slash shape. Pi, for example, resolves a reference by splitting on the **first** slash (`resolveModel` / `findExactModelReferenceMatch`), so the shared grammar does too:
 
 ```text
 <provider>/<model-id>
@@ -109,7 +109,7 @@ What is still rejected is limited to shapes that cannot be a model reference at 
 Validation is a shape check only; it never consults the catalog. Whether a well-formed id names a model that exists is the harness's answer, and it is reported, not enforced:
 
 ```text
-Set the default Pi model to openai/gpt-5.6-sol for all future Pi heads and workers. Existing Pi sessions were not changed. Pi's model list (confirmed 2026-07-29T18:55:30Z) does not include openai/gpt-5.6-sol, so the id is unverified; run /models refresh if it should be there. Pi validates it when the next Pi session starts.
+Set the default model to openai/gpt-5.6-sol for all future heads and workers. Existing sessions were not changed. Pi's model list (confirmed 2026-07-29T18:55:30Z) does not include openai/gpt-5.6-sol, so the id is unverified; run /models refresh if it should be there. Pi validates it when the next session starts.
 ```
 
 With no usable catalog at all the same accepted line says `Meringue has no confirmed Pi model list right now, so <reference> is unverified`, which is the degraded/unverified state the picker and completion already describe. A catalog that does not list a model can never make that model unsettable.
@@ -117,35 +117,35 @@ With no usable catalog at all the same accepted line says `Meringue has no confi
 Every rejection states its reason in the line the user reads, in the same shape as an invalid thinking level:
 
 ```text
-Default Pi model was not changed: "glm-5p2-fast" has no provider prefix. Use <provider>/<model-id>, for example openai/gpt-5.6-sol; the model id may itself contain / and :, as in fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast.
+Default model was not changed: "glm-5p2-fast" has no provider prefix. Use <provider>/<model-id>, for example openai/gpt-5.6-sol; the model id may itself contain / and :, as in fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast.
 ```
 
-The old bare `Rejected SetDefaultSessionModel: Default Pi model was not changed.` kept the reason in the `errors` detail only, so a malformed id, an unknown id, and an over-strict rule all looked identical.
+The old bare `Rejected SetDefaultSessionModel: Default Pi model was not changed.` is retained here only as historical failure output: it kept the reason in the `errors` detail, so a malformed id, an unknown id, and an over-strict rule all looked identical.
 
 ### Thinking levels
 
-The accepted ladder is exactly `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, in that order, and it is the same set on every surface: the `/thinking` completion list, kernel validation, and the rejection message all read `Meringue::Harness::PiClient::THINKING_LEVELS`. A completion list that is narrower than what the kernel accepts is a bug — it was the reported one: a proxy provider that omits `max` from its model's `thinkingLevelMap` made `/thinking` hide `max` while `/thinking max` still set the default, so the level in force was missing from its own picker.
+The accepted ladder is exactly `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, in that order, and it is the same set on every surface: the `/thinking` completion list, kernel validation, and the rejection message all read `Meringue::Harness::ModelCatalog::THINKING_LEVELS`. A completion list that is narrower than what the kernel accepts is a bug — it was the reported one: a proxy provider that omits `max` from its model's `thinkingLevelMap` made `/thinking` hide `max` while `/thinking max` still set the default, so the level in force was missing from its own picker.
 
 The model catalog therefore *labels* levels; it never removes them:
 
 - The saved default is listed first and labelled `current default`, so the three-row popup always shows the level in force.
 - A level the model advertises is labelled `supported by <provider/model>`.
-- A level it does not advertise stays selectable and is labelled `not listed for <provider/model> · Pi clamps it to <level>`, because Pi clamps an unknown level (up the ladder first, then down, mirroring Pi's `clampThinkingLevel`) rather than failing, and a provider extension can under-declare what its model really supports.
+- A level it does not advertise stays selectable. A harness-specific adjustment policy may label it `not listed for <provider/model> · <harness> adjusts it to <level>` rather than hiding or rejecting it; a provider extension can under-declare what its model really supports.
 - When the catalog knows nothing about the configured model, every level is labelled `model support not verified yet`.
 
-Setting a level the catalog does not list for the configured default model is accepted and the result says what Pi will actually run:
+Setting a level the catalog does not list for the configured default model is accepted and the result says what the selected harness will actually run when it has an adjustment policy:
 
 ```text
-Set the default Pi thinking level to max for all future Pi heads and workers. Existing Pi sessions were not changed.
-Pi's catalog does not list max for anthropic-250k-proxy/claude-opus-5, so future Pi sessions run xhigh instead.
+Set the default thinking level to max for all future heads and workers. Existing sessions were not changed.
+Pi's catalog does not list max for anthropic-250k-proxy/claude-opus-5, so future sessions run xhigh instead.
 ```
 
-A head-proposed `GetSessionDefaults` repeats that caveat for the saved pair, so an inspected default never reads as honoured when Pi will clamp it.
+A head-proposed `GetSessionDefaults` repeats that caveat for the saved pair, so an inspected default never reads as honoured when a harness will adjust it.
 
 An invalid level names the valid ones instead of only saying nothing changed, and points at the obvious near-miss:
 
 ```text
-Default Pi thinking level was not changed: "xhi" is not a Pi thinking level. Did you mean xhigh? Valid levels: off, minimal, low, medium, high, xhigh, max.
+Default reasoning level was not changed: "xhi" is not a supported reasoning level. Did you mean xhigh? Valid levels: off, minimal, low, medium, high, xhigh, max.
 ```
 
 There is no slash command for inspecting one existing session's effective settings. `/session-settings <agent_id>` and its old dashboard `/session <agent_id>` alias were removed, along with the `GetSessionSettings` kernel command they dispatched to, so typing either is now an unknown command. Existing sessions keep their own model and thinking values, and Meringue still records them: see [Authoritative existing-session discovery](#authoritative-existing-session-discovery) for where they are read and displayed.
@@ -164,7 +164,7 @@ head_thinking_level = "low"
 worker_thinking_level = "xhigh"
 ```
 
-For each role, its dedicated key wins over the shared `model`/`thinking_level` fallback; the shared key then wins over a `--model`/`--thinking` value in that role's extra-argument array. This preserves old configs that use only the shared keys or only role argument arrays. `/model <provider>/<model-id>` and `/thinking <level>` write the shared key and remove both role keys, while the `head` and `worker` forms write only the selected role key. When an older `state.json` has only the shared model in `metadata.pi_session_defaults`, state normalization materializes that value into both role entries while retaining the legacy field.
+For each role, its dedicated key wins over the shared `model`/`thinking_level` fallback; the shared key then wins over a `--model`/`--thinking` value in that role's extra-argument array. This preserves old configs that use only the shared keys or only role argument arrays. `/model <provider>/<model-id>` and `/thinking <level>` write the shared key and remove both role keys, while the `head` and `worker` forms write only the selected role key. State exposes the resolved values at `metadata.agent_session_defaults`. When an older `state.json` has only the shared model in legacy `metadata.pi_session_defaults`, state normalization imports it into the neutral field, materializes that value into both role entries, and retains the legacy field for compatibility.
 
 The dashboard keeps the active harness separate from a compact role-aware summary. It shows `harness: Pi · model: <model> · thinking: <level>` when both roles match; `head model: … · worker model: … · thinking: …` when only models differ; `model: … · head thinking: … · worker thinking: …` when only thinking differs; and `head model: <model> (thinking: <level>) · worker model: <model> (thinking: <level>)` when both differ. The explicit labels keep model ids containing `/` unambiguous. A focused worker workspace labels the effective per-session line as `session settings · model … · thinking …`, so a user can distinguish what a future worker will get from what the selected worker is actually using.
 
@@ -186,7 +186,7 @@ Meringue records effective session settings in a harness-neutral `session_settin
 }
 ```
 
-For a live Pi RPC process, Meringue reads `model` and `thinkingLevel` from Pi's `get_state` response. It never substitutes spawn arguments or Meringue defaults for an effective session value.
+Each harness translates its own authoritative state into that object. For a live Pi RPC process, for example, Meringue reads `model` and `thinkingLevel` from Pi's `get_state` response. Generic consumers never read those provider fields and never substitute spawn arguments or Meringue defaults for an effective session value.
 
 That object is refreshed by the normal session paths rather than by a user command: spawning, prompting, and each reconcile poll merge the harness's reported settings back onto the agent record. It is visible in the focused worker workspace (`session settings · model … · thinking …`), in the raw `/state` output, and in the `GetInfo` record for an agent.
 
@@ -196,7 +196,7 @@ When logs are filtered to one worker, the logs border adds that worker's lifecyc
 
 For a resumable process whose RPC transport is unavailable, Pi's persisted JSONL session is authoritative. Meringue walks the current branch and reads `model_change` and `thinking_level_change` entries. An assistant message's provider/model is only a fallback for older session files. If Pi persisted no thinking level, Meringue reports `unknown` rather than guessing.
 
-Claude Code and other harnesses can implement the same generic live-session operations later. Meringue does not infer existing-session settings from command-line arguments; a provider either reports its effective pair or the agent record says that it is unavailable.
+Meringue does not infer existing-session settings from command-line arguments; a harness either reports its effective pair through the shared contract or the agent record says that it is unavailable.
 
 ## Authoritative model catalog discovery
 
@@ -268,4 +268,4 @@ The kernel owns catalog state. Snapshots live in `metadata.harness_model_catalog
 - A `stale` catalog is offered in full, with every entry labelled `last confirmed list` and a trailing note naming the failed refresh, so a temporary harness problem never hides models that exist.
 - When no catalog has ever been fetched, completion still offers the references Meringue knows (current session model, saved default, models in use) labelled `catalog unavailable — id not verified`, and appends one non-destructive note row explaining the state and pointing at `/models refresh`. Selecting the note re-inserts only what was already typed, so it can never overwrite a valid explicit id.
 
-Validation is unchanged by catalog state: `/model` requires an exact `<provider>/<model-id>` shape (see [The accepted model-reference grammar](#the-accepted-model-reference-grammar)), and `/thinking` requires one of the seven levels on the ladder. An id the catalog does not list is accepted and labelled unverified. Pi still rejects an unavailable model id at spawn time, and clamps a thinking level the chosen model does not map.
+Validation is unchanged by catalog state: `/model` requires an exact `<provider>/<model-id>` shape (see [The accepted model-reference grammar](#the-accepted-model-reference-grammar)), and `/thinking` requires one of the seven levels on the ladder. An id the catalog does not list is accepted and labelled unverified. The selected harness validates model availability when it starts a session and applies only its own documented reasoning-level policy; Pi's clamp remains an implementation detail of the Pi adapter.

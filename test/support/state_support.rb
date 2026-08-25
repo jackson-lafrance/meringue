@@ -4,7 +4,7 @@ require "time"
 
 # Shared helpers for the state-layer integration tests (store, models, logs, compactor).
 #
-# Everything here is hermetic: temporary directories only, no network, no real Pi
+# Everything here is hermetic: temporary directories only, no network, no real harness
 # processes, and never a read or write against ~/.meringue.
 module StateSupport
   REPO_ROOT = File.expand_path("../..", __dir__)

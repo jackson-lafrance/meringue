@@ -34,8 +34,8 @@ module Meringue
     #                    continue receives a continuation prompt.
     #
     # The service is harness-agnostic: it talks to a `TransportAdapter` and a
-    # `StateStore`, and never references Pi, Claude Code, or any other backend
-    # directly. Adding a backend means registering a new adapter.
+    # `StateStore`, and never references a provider implementation directly.
+    # Adding a backend means registering a new adapter.
     class Service
       attr_reader :adapter, :state_store, :owner_pid, :owner_started_at,
                   :settle_timeout, :handoff_timeout
@@ -82,9 +82,8 @@ module Meringue
       end
 
       # Harness-neutral supervision evidence for a session, merged with the
-      # durable supervision record. Generalizes
-      # `PiClient#session_supervision_evidence` so the kernel and TUI can ask
-      # one question regardless of backend.
+      # durable supervision record. The kernel and TUI ask one question here
+      # regardless of backend.
       def evidence(session_ref)
         adapter_evidence = adapter.evidence(session_ref)
         return nil unless adapter_evidence.is_a?(Hash)

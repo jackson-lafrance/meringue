@@ -181,12 +181,12 @@ class TuiChatPaneTest < Minitest::Test
     assert_equal "harness: Custom Harness", plain_line(@pane.bottom_right_status_line(labelled))
   end
 
-  def test_bottom_right_status_distinguishes_future_pi_defaults_from_the_active_harness
+  def test_bottom_right_status_distinguishes_future_agent_defaults_from_the_active_harness
     state = composed_state(
       empty_state.merge(
         "metadata" => {
           "active_harness" => "pi",
-          "pi_session_defaults" => {
+          "agent_session_defaults" => {
             "model" => "openai/gpt-5.6-sol",
             "thinking_level" => "xhigh"
           }
@@ -204,7 +204,7 @@ class TuiChatPaneTest < Minitest::Test
       empty_state.merge(
         "metadata" => {
           "active_harness" => "pi",
-          "pi_session_defaults" => {
+          "agent_session_defaults" => {
             "roles" => {
               "head" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "high" },
               "worker" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "high" }
@@ -225,7 +225,7 @@ class TuiChatPaneTest < Minitest::Test
       empty_state.merge(
         "metadata" => {
           "active_harness" => "pi",
-          "pi_session_defaults" => {
+          "agent_session_defaults" => {
             "model" => "openai/gpt-5.6-sol",
             "thinking_level" => "high",
             "roles" => {
@@ -246,7 +246,7 @@ class TuiChatPaneTest < Minitest::Test
       empty_state.merge(
         "metadata" => {
           "active_harness" => "pi",
-          "pi_session_defaults" => {
+          "agent_session_defaults" => {
             "model" => "anthropic/claude-opus-5",
             "roles" => {
               "head" => { "thinking_level" => "low" },
@@ -266,7 +266,7 @@ class TuiChatPaneTest < Minitest::Test
       empty_state.merge(
         "metadata" => {
           "active_harness" => "pi",
-          "pi_session_defaults" => {
+          "agent_session_defaults" => {
             "roles" => {
               "head" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "high" },
               "worker" => { "model" => "anthropic/claude-opus-5", "thinking_level" => "high" }
@@ -285,7 +285,7 @@ class TuiChatPaneTest < Minitest::Test
       empty_state.merge(
         "metadata" => {
           "active_harness" => "pi",
-          "pi_session_defaults" => {
+          "agent_session_defaults" => {
             "roles" => {
               "head" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "low" },
               "worker" => { "model" => "anthropic/claude-opus-5", "thinking_level" => "max" }
@@ -373,7 +373,7 @@ class TuiChatPaneTest < Minitest::Test
       empty_state.merge(
         "metadata" => {
           "active_harness" => "pi",
-          "pi_session_defaults" => {
+          "agent_session_defaults" => {
             "model" => "anthropic-250k-prefer-using-this-one/claude-opus-5",
             "thinking_level" => "max"
           },
@@ -391,7 +391,7 @@ class TuiChatPaneTest < Minitest::Test
     )
 
     records = @pane.slash_suggestion_records(state)
-    assert_equal Meringue::Harness::PiClient::THINKING_LEVELS.length, records.length
+    assert_equal Meringue::Harness::ModelCatalog::THINKING_LEVELS.length, records.length
     assert_includes records.map { |record| record.fetch("usage") }, "max"
 
     rows = plain_lines(@pane.slash_suggestion_lines(state))

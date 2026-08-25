@@ -11,7 +11,7 @@ require "time"
 # Everything here is hermetic:
 # - state lives in a per-test Dir.mktmpdir, never ~/.meringue
 # - forge/PR lookups are stubbed, so GitHub is never contacted
-# - harness sessions are stubbed in-process, so no real Pi process is spawned
+# - harness sessions are stubbed in-process, so no real harness process is spawned
 module KernelMaintenanceSupport
   BASE_TIME = "2026-01-01T00:00:00Z"
 

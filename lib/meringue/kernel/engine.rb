@@ -38,7 +38,7 @@ module Meringue
 
         During longer work, keep progress visible by briefly reporting meaningful findings, decisions, and implementation milestones when they occur. Do not narrate routine tool use or invent progress when there is no substantive update.
 
-        Delivery artifacts must describe only the human product task. Never put Meringue branding or a `meringue/` prefix; project, issue, worker, head, agent, Pi, or session identifiers; AI confidence scores; or statements about which agents worked on the change into branch/worktree names, commit subjects or bodies, tags, pull request titles or bodies, release notes, or other externally visible delivery text. This includes formatting variants such as `P5-I2-W3`, `p5_i2_w3`, and `P5/I2/W3`, AI-authorship trailers, and "worked on by" disclosures. Do not derive names from the assigned issue id, your identity, session metadata, or orchestration context.
+        Delivery artifacts must describe only the human product task. Never put Meringue branding or a `meringue/` prefix; project, issue, worker, head, agent, harness, provider, or session identifiers; AI confidence scores; or statements about which agents worked on the change into branch/worktree names, commit subjects or bodies, tags, pull request titles or bodies, release notes, or other externally visible delivery text. This includes formatting variants such as `P5-I2-W3`, `p5_i2_w3`, and `P5/I2/W3`, AI-authorship trailers, and "worked on by" disclosures. Do not derive names from the assigned issue id, your identity, session metadata, or orchestration context.
 
         Derive delivery names and prose only from the product task title and requested change. The current branch was already allocated under this policy; do not rename it unless it is unusable. If you must supply another name, sanitize unsafe supplied/generated values and use a short opaque suffix for uniqueness. Before delivery, inspect commit metadata and the rendered pull request title/body and remove prohibited text; update an existing compliant pull request rather than opening an agent-specific one.
 
@@ -158,9 +158,8 @@ module Meringue
         |overloaded|502|503|504
       /ix.freeze
       # A dead turn that resuming can never repair, because what the provider rejected is the
-      # saved transcript itself. The harness classifies it (Pi:
-      # `PiClient::UNREPLAYABLE_SESSION_PATTERN`); this pattern is the kernel's fallback for the
-      # same evidence arriving through session events instead of a turn outcome.
+      # saved transcript itself. The harness classifies it; this pattern is the kernel's fallback
+      # for the same evidence arriving through session events instead of a turn outcome.
       SETTLE_FAILURE_UNREPLAYABLE_KIND = "unreplayable_session"
       SETTLE_FAILURE_UNREPLAYABLE_PATTERN = /
         (?:thinking|redacted_thinking)[^\n]{0,200}?cannot\s+be\s+modified
@@ -1071,7 +1070,7 @@ module Meringue
       end
 
       # Resume uses PromptAgent's exactly-once delivery bookkeeping with a durable request marker.
-      # If the dashboard exits after Pi accepts the continuation but before the worker record is
+      # If the dashboard exits after the harness accepts the continuation but before the worker record is
       # finalized, reconciliation replays the same delivery id and PromptAgent recognizes it as
       # already delivered rather than sending a second continuation.
       def resume_worker(command_id, command_type, payload)
@@ -1656,6 +1655,7 @@ module Meringue
               "interactive_argv" => prepared.fetch("interactive_argv"),
               "interactive_executable" => prepared.fetch("interactive_executable", nil),
               "interactive_env" => prepared.fetch("interactive_env", nil),
+              "interactive_shutdown_input" => prepared.fetch("interactive_shutdown_input", nil),
               "handoff" => handoff,
               "session_ref" => prepared.fetch("session_ref")
             },
@@ -3438,12 +3438,12 @@ module Meringue
         end
         role = nil if role.empty?
         level = requested.to_s.strip.downcase
-        unless Meringue::Harness::PiClient::THINKING_LEVELS.include?(level)
+        unless Meringue::Harness::ModelCatalog::THINKING_LEVELS.include?(level)
           return rejected_result(
             command_id,
             command_type,
             invalid_thinking_level_message("Default reasoning level", requested),
-            ["thinking level must be one of: #{Meringue::Harness::PiClient::THINKING_LEVELS.join(", ")}"]
+            ["thinking level must be one of: #{Meringue::Harness::ModelCatalog::THINKING_LEVELS.join(", ")}"]
           )
         end
 
@@ -3622,10 +3622,10 @@ module Meringue
         end.map { |agent| agent.fetch("id", nil) }.compact
       end
 
-      # A level the model's catalog entry does not advertise is still saved: Pi
-      # clamps it at spawn time, and a provider extension can under-declare what
-      # its model really supports. Saying which level Pi will actually run keeps
-      # the accepted result honest without refusing a level the user may set.
+      # A level the model's catalog entry does not advertise is still saved: a
+      # provider extension can under-declare what its model really supports. Ask
+      # the harness registry for any authoritative adjustment policy so the
+      # result stays honest without making the kernel assume one backend's rules.
       def clamped_default_thinking_note(defaults, changed_field, role: nil)
         return nil unless %w[thinking_level model].include?(changed_field)
 
@@ -3653,9 +3653,13 @@ module Meringue
         supported = Array(supported).map { |value| value.to_s.downcase }
         return nil if supported.empty? || supported.include?(level)
 
-        clamped = Meringue::Harness::PiClient.clamp_thinking_level(level, supported)
+        adjusted = Meringue::Harness::Registry.adjusted_thinking_level(harness, level, supported)
         label = Meringue::Harness::Registry.provider_label(harness)
-        "#{label}'s catalog does not list #{level} for #{reference}, so future sessions run #{clamped} instead."
+        if adjusted
+          "#{label}'s catalog does not list #{level} for #{reference}, so future sessions run #{adjusted} instead."
+        else
+          "#{label}'s catalog does not list #{level} for #{reference}; verify the effective reasoning level when the next session starts."
+        end
       end
 
       # `/model` used to reject with a bare "Default model was not changed.",
@@ -3722,7 +3726,7 @@ module Meringue
         candidate = typed.to_s.strip.downcase
         return [] if candidate.empty?
 
-        matches = Meringue::Harness::PiClient::THINKING_LEVELS.select do |level|
+        matches = Meringue::Harness::ModelCatalog::THINKING_LEVELS.select do |level|
           level.start_with?(candidate) || candidate.start_with?(level) || level.include?(candidate)
         end
         matches.length > 2 ? [] : matches
@@ -3790,7 +3794,7 @@ module Meringue
             command_id,
             command_type,
             invalid_thinking_level_message("Session thinking level", level),
-            ["thinking level must be one of: #{Meringue::Harness::PiClient::THINKING_LEVELS.join(", ")}"]
+            ["thinking level must be one of: #{Meringue::Harness::ModelCatalog::THINKING_LEVELS.join(", ")}"]
           )
         end
 
@@ -9162,7 +9166,7 @@ module Meringue
             prompt: prompt.to_s,
             mode: mode,
             pending_prompt_id: pending_prompt_id,
-            error: StandardError.new("an earlier Pi prompt is still awaiting its durable delivery receipt")
+            error: StandardError.new("an earlier agent prompt is still awaiting its durable delivery receipt")
           )
         end
 
@@ -9221,8 +9225,8 @@ module Meringue
           end
           session_ref = client.prompt_session(session_ref, prompt.to_s, **prompt_options)
         rescue StandardError => e
-          # A timeout after Pi accepted a prompt is not proof that delivery failed. Keep the
-          # deterministic receipt pending until the Pi JSONL transcript either contains it or the
+          # A timeout after a receipt-capable harness accepted a prompt is not proof that delivery
+          # failed. Keep the deterministic receipt pending until the harness can classify it or the
           # process exits without it; retrying while the original process lives can duplicate work.
           if client.respond_to?(:ambiguous_prompt_delivery_error?) && client.ambiguous_prompt_delivery_error?(e)
             return queue_ambiguous_prompt(
@@ -9406,7 +9410,7 @@ module Meringue
           command_id,
           command_type,
           agent.fetch("id"),
-          "Waiting for Pi to confirm the timed-out #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")}; it will not be sent twice.",
+          "Waiting for the agent harness to confirm the timed-out #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")}; it will not be sent twice.",
           {
             "agent_id" => agent.fetch("id"),
             "queued" => true,
@@ -9418,10 +9422,9 @@ module Meringue
         )
       end
 
-      # Persist an ambiguous RPC outcome before releasing the delivery claim. Reconciliation polls
-      # the durable Pi transcript through PromptAgent, but does not poll or resume the worker itself
-      # until this receipt settles; doing either could write a duplicate continuation into the same
-      # long-running compaction request.
+      # Persist an ambiguous transport outcome before releasing the delivery claim. Reconciliation
+      # checks the receipt through PromptAgent, but does not poll or resume the worker itself until
+      # it settles; doing either could duplicate a continuation in the original request.
       def queue_ambiguous_prompt(command_id:, command_type:, agent_id:, prompt:, mode:, pending_prompt_id:,
                                  delivery_id:, delivery_started_at:, error:)
         state = normalized_state
@@ -9474,7 +9477,7 @@ module Meringue
                       source_type: "kernel",
                       source_id: agent.fetch("id"),
                       level: "warning",
-                      message: "The Pi RPC timed out while delivering the #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")}; waiting for its durable session receipt instead of retrying it.",
+                      message: "The agent harness timed out while delivering the #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")}; waiting for its durable session receipt instead of retrying it.",
                       details: {
                         "agent_id" => agent.fetch("id"),
                         "issue_id" => agent.fetch("issue_id", nil),
@@ -9493,7 +9496,7 @@ module Meringue
           command_id,
           command_type,
           agent.fetch("id"),
-          "Tracking the timed-out #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} until Pi confirms whether it landed.",
+          "Tracking the timed-out #{prompt_delivery_noun(mode)} for worker #{agent.fetch("id")} until the agent harness confirms whether it landed.",
           {
             "agent_id" => agent.fetch("id"),
             "queued" => true,
@@ -9560,7 +9563,7 @@ module Meringue
             "issue_id" => agent.fetch("issue_id", nil),
             "mode" => delivered_mode,
             "requested_mode" => mode,
-            "delivery_confirmation" => "pi_session_transcript",
+            "delivery_confirmation" => "harness_session_receipt",
             "delivery_id" => receipt_entry&.fetch("delivery_id", nil),
             "delivered_at" => receipt.fetch("delivered_at", nil)
           }.compact
@@ -9709,7 +9712,7 @@ module Meringue
               entry.is_a?(Hash) && present_string(entry.fetch("prompt", nil))
             end
             awaiting_receipt = entries.find { |entry| entry.fetch("delivery_state", nil) == "awaiting_receipt" }
-            # While one Pi request has an ambiguous outcome, no later queued prompt may pass it.
+            # While one harness request has an ambiguous outcome, no later queued prompt may pass it.
             # Reconciliation checks only that receipt; after it settles, remaining prompts are
             # delivered in their existing order on the next pass.
             entries = [awaiting_receipt] if awaiting_receipt
@@ -11199,10 +11202,10 @@ module Meringue
         end
         if requested_thinking_level
           level = requested_thinking_level.to_s.strip.downcase
-          if Meringue::Harness::PiClient::THINKING_LEVELS.include?(level)
+          if Meringue::Harness::ModelCatalog::THINKING_LEVELS.include?(level)
             session_settings_override["thinking_level"] = level
           else
-            errors << "thinking_level must be one of: #{Meringue::Harness::PiClient::THINKING_LEVELS.join(", ")}"
+            errors << "thinking_level must be one of: #{Meringue::Harness::ModelCatalog::THINKING_LEVELS.join(", ")}"
           end
         end
         share_workspace = normalized_share_workspace(payload, errors: errors)
@@ -18111,7 +18114,7 @@ module Meringue
         # stale marker is recovered above; if recovery failed, keep it out of polling as well so an
         # old assistant message cannot be promoted to a completion.
         return false if interactive_handoff_marker?(agent)
-        # A prompt RPC can time out while Pi is still compacting and before its response reaches us.
+        # A prompt RPC can time out while the harness is still compacting and before its response reaches us.
         # Pending-prompt delivery checks the durable receipt first; ordinary polling/resume is
         # suppressed because it could race that live request and write a duplicate continuation.
         return false if Array(metadata.fetch("pending_prompts", [])).any? { |entry|
@@ -18237,7 +18240,7 @@ module Meringue
         # its record is not retired underneath them. The turn they just watched finish is the end
         # of *their* exchange, not the end of the worker's assignment. A newly-started interactive
         # head is similarly not settled until its provider has had time to publish initial transcript
-        # state (Claude can spend substantially longer in this phase than Pi).
+        # state (some harnesses can spend substantially longer in this phase than others).
         settled = completed_session?(state_ref) &&
                   !live_focus_attached?(agent) &&
                   !head_startup_grace_active?(agent, state_ref)
@@ -18690,14 +18693,14 @@ module Meringue
       # session left, so no later RPC can be answered. Reconciliation used to discover this only by
       # *trying to resume* the session, and then spent its whole resume budget on `prompt` RPCs that
       # could only time out - which is why a real incident reported
-      # `RpcTimeoutError: Timed out waiting for Pi RPC response to "prompt"` for a worker whose
+      # `RpcTimeoutError: Timed out waiting for a harness response to "prompt"` for a worker whose
       # actual failure was `ProcessExitedError`. The exit is now recorded on the first pass that
       # observes it, named for what it is.
       def worker_harness_process_gone?(agent, error)
         agent.fetch("type", nil) == "worker" && Harness.session_process_gone_error?(error)
       end
 
-      # Recover only the shared-supervisor failure mode. A lone Pi crash while its Meringue owner is
+      # Recover only the shared-supervisor failure mode. A lone harness crash while its Meringue owner is
       # alive still follows the normal process-exit settle path, so an arbitrary harness failure can
       # never turn into an automatic prompt. Transport ownership is the causal proof: both the
       # recorded child and the Meringue process that owned its pipes are gone.
@@ -19695,15 +19698,12 @@ module Meringue
         metadata = session_ref.fetch("metadata", {}) || {}
         return true if metadata.fetch("completed", false)
 
-        pi_state = metadata.fetch("pi_state", {}) || {}
-        return true if pi_state["completed"]
-
         !session_ref.fetch("is_streaming", false)
       end
 
       # Evidence that a settled turn ended without finishing, in order of authority:
-      #   1. the harness's own turn outcome (Pi reads the stop reason of the turn's final
-      #      assistant message, so a dropped connection is still visible after the fact)
+      #   1. the harness's own turn outcome, including a persisted provider/transport stop reason
+      #      that keeps a dropped connection visible after the fact
       #   2. a turn outcome a harness already attached to the session ref metadata
       #   3. session events proving the transport died, but only when the settled turn produced
       #      no final assistant message at all
@@ -20250,25 +20250,12 @@ module Meringue
       def merge_session_ref_into_agent!(agent, session_ref, persist_heartbeat: true)
         metadata = session_ref.fetch("metadata", {}) || {}
         unless persist_heartbeat
-          # Harness freshness is runtime health evidence, not orchestration state. Pi's state
-          # summary also moves message counters and last-event fields while a turn streams; omit
-          # those volatile fields from routine polls so they cannot touch lifecycle timestamps or
-          # invalidate the durable snapshot. Visible drained events and progress are persisted by
-          # their dedicated journal paths below.
-          metadata = deep_copy(metadata)
-          metadata.delete("last_event_at")
-          metadata.delete("messageCount")
-          metadata.delete("message_count")
-          %w[pi_state session_file_summary].each do |container_key|
-            next unless metadata[container_key].is_a?(Hash)
-
-            persisted = agent.dig("harness_metadata", container_key)
-            persisted = {} unless persisted.is_a?(Hash)
-            volatile = persisted.select { |key, _value| heartbeat_session_metadata_key?(key) }
-            metadata[container_key] = volatile.merge(
-              metadata.fetch(container_key).reject { |key, _value| heartbeat_session_metadata_key?(key) }
-            )
-          end
+          # Harness freshness is runtime health evidence, not orchestration state. Provider state
+          # may move message counters and last-event fields while a turn streams; preserve the
+          # persisted values at any nesting depth so routine polls cannot touch lifecycle timestamps
+          # or invalidate the durable snapshot. Drained events and progress use dedicated paths.
+          persisted_metadata = agent.fetch("harness_metadata", {}) || {}
+          metadata = stable_session_metadata(metadata, persisted_metadata)
         end
         agent["harness"] = session_ref.fetch("harness", agent.fetch("harness", nil))
         agent["pid"] = session_ref.fetch("pid", agent.fetch("pid", nil))
@@ -20286,6 +20273,21 @@ module Meringue
           "reconcile" => nil
         ).compact
         mark_head_session_active!(agent)
+      end
+
+      def stable_session_metadata(incoming, persisted)
+        return deep_copy(incoming) unless incoming.is_a?(Hash)
+
+        persisted = {} unless persisted.is_a?(Hash)
+        incoming.each_with_object({}) do |(key, value), stable|
+          if heartbeat_session_metadata_key?(key)
+            stable[key] = deep_copy(persisted[key]) if persisted.key?(key)
+          elsif value.is_a?(Hash)
+            stable[key] = stable_session_metadata(value, persisted[key])
+          else
+            stable[key] = deep_copy(value)
+          end
+        end
       end
 
       def heartbeat_session_metadata_key?(key)

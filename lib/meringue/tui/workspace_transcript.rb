@@ -66,8 +66,8 @@ module Meringue
       timestamp = item.fetch("timestamp", nil)
       entries = []
 
-      # Control records from a Pi session (compaction, branch summaries, model changes, and
-      # visible extension messages) are already normalized by the harness adapter. They are
+      # Harness control records (compaction, branch summaries, model changes, and visible
+      # extension messages) are already normalized by the provider adapter. They are
       # session output, not Meringue log entries, so render them in the same stream without
       # trying to infer a fake assistant message.
       if item.fetch("kind", nil).to_s == "notice" && item.fetch("content", item.fetch("text", "")).to_s.strip != ""

@@ -6,8 +6,8 @@ module Meringue
     # has produced no completed response". It is the opposite of `TransientSessionError`: nothing
     # about the condition is momentary, so replaying a prompt into it can only fail again.
     #
-    # This distinction exists because Meringue used to treat the two the same. A worker whose Pi
-    # process exited mid-tool-call was re-attached and re-prompted three times; each `prompt` RPC
+    # This distinction exists because Meringue used to treat the two the same. A worker whose
+    # long-lived harness process exited mid-tool-call was re-attached and re-prompted three times; each `prompt` RPC
     # timed out, and the failure the user finally read named the downstream `RpcTimeoutError`
     # instead of the process exit that actually happened. A client that can prove the process is
     # gone raises an error carrying this marker so the kernel settles the worker honestly instead.
