@@ -43,7 +43,7 @@ Terminal rendering with screen blitting of our three main sections
 
 Meringue is harness-agnostic and assumes no backend: nothing runs until a harness is named.
 Harness-specific code stays isolated behind a harness interface so the product can support cc, codex,
-antigravity, cursor, and other coding harnesses without rewriting the kernel or TUI.
+cursor, and other coding harnesses without rewriting the kernel or TUI.
 We will store Meringue state in a simple JSON file using harness session ids to reconnect, resume, or explain sessions on reload of the tool.
 We should focus on keeping this project extensible and self-modifying for a users specific needs
 

@@ -8,7 +8,7 @@ require "tmpdir"
 #
 # Everything here is hermetic: state, config, and project directories live in a
 # Dir.mktmpdir sandbox, head agents are stubbed plain Ruby objects, and the
-# harness is Meringue's in-repo fake client. No Pi/Claude/Antigravity process is
+# harness is Meringue's in-repo fake client. No Pi or Claude Code process is
 # ever started, no network call is made, and the real ~/.meringue directory is
 # never read or written.
 module InputSupport

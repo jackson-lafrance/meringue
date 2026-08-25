@@ -36,7 +36,7 @@ Natural-language mapping:
 | "pause/resume that goal", "raise the goal's iteration budget", "change the goal target to 90" | `ModifyGoal` |
 | "stop that goal", "that goal is done, stop looping" | `StopGoal` |
 | "use the gruvbox theme" | `SetTheme` |
-| "switch to claude/pi/antigravity" | `SetHarness` |
+| "switch to claude/pi" | `SetHarness` |
 | "show the defaults", "which model will future agents use" | `GetSessionDefaults` (no slash command; this is its only user-facing route) |
 | "what models can I use", "list the available models", "refresh the model list" | `GetModelCatalog` (a status report; the browsable list is the TUI model picker behind `/models`) |
 | "use provider/model-id for future agents" / "use openai/gpt-5.6-sol for heads" | `SetDefaultSessionModel` (optional `role`) |
@@ -1620,7 +1620,7 @@ Payload:
 
 ### SetHarness
 
-Selects the active harness backend for future heads and workers, backing `/harness <pi|claude|antigravity>`.
+Selects the active harness backend for future heads and workers, backing `/harness <pi|claude>`.
 
 Payload:
 

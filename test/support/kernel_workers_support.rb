@@ -12,7 +12,7 @@ require "tmpdir"
 # No real harness process is ever started; the kernel talks to
 # RecordingHarnessClient, which records the calls the kernel makes.
 module KernelWorkersSupport
-  # Harness client seam used in place of Pi/Claude/Antigravity.
+  # Harness client seam used in place of Pi or Claude Code.
   #
   # It records every kernel -> harness call so tests can assert on the cwd the
   # kernel handed to the harness, the session name it chose, and the prompt mode

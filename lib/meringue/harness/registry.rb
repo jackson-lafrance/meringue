@@ -14,7 +14,7 @@ module Meringue
 
       # Deliberately absent. Meringue is harness-agnostic, so there is no backend it falls back to.
       DEFAULT_PROVIDER = nil
-      PROVIDERS = %w[pi claude antigravity].freeze
+      PROVIDERS = %w[pi claude].freeze
       # How each backend spells a model and a reasoning level on its own command line, and whether
       # it wants a bare model id or a qualified `provider/model` reference. This is the whole of
       # what the registry needs to know about a provider's session defaults; there is no branch on
@@ -28,23 +28,19 @@ module Meringue
         "pi" => { "model" => "--model", "thinking_level" => "--thinking", "qualified_model" => true },
         # Claude Code is single-vendor, so it rejects a provider-qualified reference, and it calls
         # the reasoning level "effort".
-        "claude" => { "model" => "--model", "thinking_level" => "--effort", "qualified_model" => false },
-        "antigravity" => {}
+        "claude" => { "model" => "--model", "thinking_level" => "--effort", "qualified_model" => false }
       }.freeze
       PROVIDER_THINKING_LEVELS = {
         "pi" => ModelCatalog::THINKING_LEVELS,
-        "claude" => ClaudeModelCatalog::EFFORT_LEVELS,
-        "antigravity" => []
+        "claude" => ClaudeModelCatalog::EFFORT_LEVELS
       }.freeze
       PROVIDER_LABELS = {
         "pi" => "Pi",
-        "claude" => "Claude Code",
-        "antigravity" => "Antigravity CLI"
+        "claude" => "Claude Code"
       }.freeze
       PUBLIC_PROVIDER_NAMES = {
         "pi" => "pi",
-        "claude" => "claude",
-        "antigravity" => "antigravity"
+        "claude" => "claude"
       }.freeze
       # Single-cell display glyphs, so a session's backend is identifiable at a
       # glance next to its Meringue id. Provider presentation already lives in
@@ -52,15 +48,13 @@ module Meringue
       # they ask the registry for a glyph instead of knowing about Pi or Claude.
       PROVIDER_GLYPHS = {
         "pi" => "π",
-        "claude" => "✳",
-        "antigravity" => "↑"
+        "claude" => "✳"
       }.freeze
       # Same marks in plain ASCII for fonts/terminals that cannot draw the
       # glyphs above, selected with MERINGUE_ASCII_GLYPHS.
       PROVIDER_ASCII_GLYPHS = {
         "pi" => "p",
-        "claude" => "c",
-        "antigravity" => "a"
+        "claude" => "c"
       }.freeze
       # Matches the AgentTree's unknown-status convention.
       UNKNOWN_PROVIDER_GLYPH = "?"
@@ -70,12 +64,7 @@ module Meringue
         "claude-code" => "claude",
         "claude_code" => "claude",
         "claude code" => "claude",
-        "cc" => "claude",
-        "antigravity" => "antigravity",
-        "antigravity-cli" => "antigravity",
-        "antigravity_cli" => "antigravity",
-        "antigravity cli" => "antigravity",
-        "agy" => "antigravity"
+        "cc" => "claude"
       }.freeze
       # Where a harness that stores its own session files keeps them. The directory name is Pi's
       # because the files in it are Pi's; the environment variable is neutral because any backend
@@ -142,11 +131,6 @@ module Meringue
           "worker_extra_args" => [
             "--permission-mode", "bypassPermissions"
           ]
-        },
-        "antigravity" => {
-          "command" => "agy",
-          "head_extra_args" => [],
-          "worker_extra_args" => []
         }
       }.freeze
 
@@ -358,8 +342,8 @@ module Meringue
             role_defaults = providers.values.uniq.to_h do |role_provider|
               [role_provider, session_defaults(provider: role_provider)]
             rescue ArgumentError
-              # A harness such as Antigravity may not expose model/thinking argv controls, but its
-              # role still needs a truthful neutral value in status and `/config`.
+              # A future harness may not expose model/thinking argv controls, but its role still
+              # needs a truthful neutral value in status and `/config`.
               [role_provider, harness_neutral_session_defaults]
             end
             # The role's own harness is authoritative; do not make the worker's command-line
@@ -552,8 +536,6 @@ module Meringue
           PiClient.new(command: command, session_dir: session_dir, env: env, extra_args: extra_args)
         when "claude"
           ClaudeInteractiveClient.new(command: command, env: env, extra_args: extra_args)
-        when "antigravity"
-          AntigravityClient.new(command: command, env: env, extra_args: extra_args)
         else
           raise ArgumentError, "Unsupported harness provider: #{provider.inspect}"
         end
