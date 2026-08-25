@@ -40,7 +40,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     open_setup
 
     {
-      [100, 32] => ["Setup", "Welcome to Meringue", "Step 1 of 6", "Navigate: Enter or Arrow keys toggle", "[ Begin Setup ]", "[ Next ]", "[ Back ]"],
+      [100, 32] => ["Setup", "Welcome to Meringue", "Step 1 of 6", "Navigate: Enter or Arrow keys toggle", "[ Begin Setup ]", "[ Next ]"],
       [79, 24] => ["Setup", "Welcome to Meringue", "Step 1 of 6", "Navigate: Enter or Arrow keys toggle", "[ Begin Setup ]"],
       [46, 18] => ["Setup", "Welcome to Meringue", "Step 1 of 6", "Navigate: Enter or Arrow keys toggle"],
       [32, 10] => ["Setup", "Welcome", "Step 1 of 6", "Navigate"],
@@ -109,9 +109,8 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     geometry = @layout.send(:settings_pane).geometry(snap, width: WIDTH, height: HEIGHT)
     actions = @layout.send(:settings_pane).action_segments(snap)
     action_width = actions.sum { |text, _style| text.length }
-    action_start = card.fetch(:x) + card.fetch(:width) - action_width - 2
-    next_start = action_start + actions.first.fetch(0).length + 1
-    send_mouse("x" => next_start + 1, "y" => geometry.fetch(:action_y))
+    action_start = card.fetch(:x) + (card.fetch(:width) - action_width) / 2
+    send_mouse("x" => action_start + 1, "y" => geometry.fetch(:action_y))
     assert_equal "Head defaults", snapshot.fetch("category")
     assert_empty drain_submitted
   end
@@ -210,7 +209,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     assert_nil snapshot["picker"]
   end
 
-  def test_setup_footer_buttons_follow_option_rows_and_arrows_choose_back_or_next
+  def test_setup_has_one_centered_next_action_and_keeps_the_backspace_keybinding
     open_setup
     send_key(ENTER) # Theme
     send_key(TAB) # Head defaults
@@ -220,12 +219,14 @@ class TuiSetupOverlayScreenTest < Minitest::Test
 
     assert snapshot.fetch("footer_focus")
     assert_equal "next", snapshot.fetch("footer_button")
+    assert_equal ["[ Next ]"], @layout.send(:settings_pane).action_segments(compose).map(&:first)
+    refute_includes render, "[ Back ]"
     send_key(LEFT)
-    assert_equal "back", snapshot.fetch("footer_button")
-    send_key(RIGHT)
     assert_equal "next", snapshot.fetch("footer_button")
     send_key(ENTER)
     assert_equal "Worker defaults", snapshot.fetch("category")
+    send_key(BACKSPACE)
+    assert_equal "Head defaults", snapshot.fetch("category")
   end
 
   def test_setup_animation_and_ascii_fallbacks_are_restrained_and_accessible

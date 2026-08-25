@@ -633,6 +633,4 @@ Do not store API keys or secrets in the config file. Prefer each provider CLI's 
 
 ### Status-bar layouts
 
-Use `/status-bar` to open the live status-bar composer. The same composer is a dedicated step in both first-run Setup and manual `/setup`; there it returns the layout to the shared setup draft so Complete can save it with the onboarding marker. It edits the bottom, agent-information, and focused-worker bars without changing durable configuration until Save or Setup Complete succeeds. The saved `tui.status_bar_layout` value is versioned JSON; an
-absent value keeps the built-in rendering. See [`status_bar_layouts.md`](status_bar_layouts.md)
-for the complete keyboard, mouse, cancellation, resize, and migration workflow.
+Use `/status-bar` to open the live dashboard bottom-bar composer. The same composer is rendered directly on the Status bar page in first-run Setup and manual `/setup`; there every move updates only the shared setup draft so Complete can save it with the onboarding marker. Components can be reordered and moved between left/right alignment zones. The focused worker's other two bars remain on their built-in renderers. The saved `tui.status_bar_layout` value is versioned JSON; an absent or invalid value uses the complete default. See [`status_bar_layouts.md`](status_bar_layouts.md) for the keyboard, mouse, cancellation, resize, and version-1 migration workflow.

@@ -275,20 +275,16 @@ On macOS terminals, `Alt-V` requires Option to be sent as Meta (Terminal.app: "U
 The first interactive launch opens Setup as a curated mode of the full-screen
 Settings overlay, and `/setup` reopens it any time.
 
-- `↑` / `↓`: move through controls; moving past the last control focuses the Navigate footer.
-- `←` / `→`: change a focused boolean toggle or move focus. Right Arrow never advances a setup step.
-- `Enter`: begin, toggle a checkbox, open a picker for theme/models and other list-backed values, or activate the focused footer action.
+- `↑` / `↓`: move through controls; moving past the last ordinary control focuses the Navigate footer. On Status bar they select a component.
+- `←` / `→`: change a focused boolean toggle or move focus. Right Arrow never advances a setup step. On Status bar these keys reorder/change alignment.
+- `Enter`: begin, toggle a checkbox, open a picker for theme/models and other list-backed values, or activate the single centered Next/Complete action.
 - `Delete` / `Backspace`: go back one setup step.
-- `Tab` / `Shift-Tab`: next/back through Welcome, Theme, Head defaults, Worker defaults, and Experiments.
+- `Tab` / `Shift-Tab`: next/back through Welcome, Theme, Head defaults, Worker defaults, Status bar, and Experiments.
 - `Ctrl-S`: activate the current setup navigation action (including Complete on Experiments).
 - First-run `Esc`: open a skip confirmation. Confirming discards the draft and saves only the skipped marker plus explicit experiment defaults.
 - Manual `/setup` `Esc`: cancel a clean draft, or open the ordinary discard confirmation for a dirty draft. It never changes the existing marker.
 
-Setup owns the whole screen and the mouse. Left-click selects a visible row,
-toggles a checkbox, chooses a picker entry, or presses the displayed Next, Back,
-or Complete navigation control. The wheel moves the visible list. Empty space,
-chrome, right-click, release, and drag reports are inert and never reach the
-dashboard underneath.
+Setup owns the whole screen and the mouse. Left-click selects a visible row, toggles a checkbox, chooses a picker entry, or presses the displayed centered Next/Complete control. Status-bar components are draggable within and between its two drop zones. The wheel moves the visible list or component selection. Empty space, chrome, and right-click never reach the dashboard underneath.
 
 See [`onboarding.md`](onboarding.md) for transactional persistence, resize and
 failure recovery, first-run versus rerun behavior, and the completion marker.
@@ -363,14 +359,9 @@ Key letters and labels come from the active bindings, so custom bindings render 
 
 ### Status-bar composer
 
-`/status-bar` opens a full-screen layout editor for the dashboard bottom bar,
-the focused worker's agent-information bar, and its focused-worker bar. The same editor opens from the Status bar step in first-run and manual Setup. The
-preview is local until saved: `Tab`/`Shift-Tab` changes bars, `Up`/`Down`
-selects items, `Left`/`Right` reorders them, `Home`/`End` moves an item to an
-edge, `R` restores defaults, `Enter`/`Ctrl-S` saves, and `Esc` cancels. Items
-can also be dragged with the mouse. Invalid or old layout configuration falls
-back to the normal renderer. See [`status_bar_layouts.md`](status_bar_layouts.md)
-for persistence and recovery details.
+`/status-bar` opens a full-screen editor only for the dashboard bottom bar. `Up`/`Down` selects open-PR, worker/head count, harness, model, and thinking components; `Left`/`Right` reorders or moves the selected component across the left/right alignment boundary; `Home`/`End` moves it to an outer edge; `Space` places/removes it; `R` restores the useful default; `Enter`/`Ctrl-S` saves; and `Esc` cancels. Components can also be dragged within or between the two drop zones.
+
+The same composer is rendered directly on the Status bar page in first-run and manual Setup instead of opening a second screen. There, `Tab`, `Enter`, or `Ctrl-S` chooses the centered Next action, while Backspace, Delete, and `Shift-Tab` retain backwards navigation. The focused worker's agent-information and focused-worker bars always keep their built-in layouts. Invalid configuration falls back to the complete bottom-bar default. See [`status_bar_layouts.md`](status_bar_layouts.md) for persistence and migration details.
 
 ### Workspace slash commands
 

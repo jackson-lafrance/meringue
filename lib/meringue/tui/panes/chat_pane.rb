@@ -388,6 +388,25 @@ module Meringue
           segments
         end
 
+        # The bottom-bar composer works with real semantic components rather
+        # than opaque precomposed presets. Both the dashboard and Setup preview
+        # call this method, so shared/split role defaults use one resolution path.
+        def bottom_status_bar_components(state)
+          metadata = state.fetch("metadata", {}) || {}
+          defaults = metadata.fetch("pi_session_defaults", {}) || {}
+          role_values = defaults.empty? ? nil : normalized_pi_role_defaults(defaults)
+          workers = active_agent_count(state, "worker")
+          heads = active_agent_count(state, "head")
+          {
+            "open_pull_requests" => bottom_open_pull_request_segments(state),
+            "workers" => bottom_agent_count_segments(workers, "worker", Style::WORKING),
+            "heads" => bottom_agent_count_segments(heads, "head", Style::ACCENT_BOLD),
+            "harness" => compact_harness_status_segments(state),
+            "model" => role_values ? bottom_model_segments(**role_values) : [],
+            "thinking" => role_values ? bottom_thinking_segments(**role_values) : []
+          }
+        end
+
         # Config and old state files can represent the same effective settings in
         # two ways: a shared top-level value, or one value under each role. Read
         # both forms once and resolve empty strings as absent before deciding how
@@ -417,6 +436,41 @@ module Meringue
 
         def present_status_value(value)
           value.to_s.strip unless value.to_s.strip.empty?
+        end
+
+        def bottom_open_pull_request_segments(state)
+          return [] unless Settings.github_enabled?(state)
+
+          total = OpenPullRequests.count(state)
+          [[OpenPullRequests.summary_label(state), total.positive? ? Style::ACCENT_BOLD : Style::MUTED]]
+        end
+
+        def bottom_agent_count_segments(count, singular, active_style)
+          count = count.to_i
+          label = "#{count} #{singular}#{count == 1 ? "" : "s"}"
+          count.positive? ? [["● ", active_style], [label, active_style]] : [[label, Style::MUTED]]
+        end
+
+        def bottom_model_segments(head_model:, worker_model:, **)
+          if head_model == worker_model
+            [["model: ", Style::DIM], [head_model.to_s, Style::MUTED]]
+          else
+            [
+              ["head model: ", Style::DIM], [head_model.to_s, Style::MUTED],
+              [" · worker model: ", Style::DIM], [worker_model.to_s, Style::MUTED]
+            ]
+          end
+        end
+
+        def bottom_thinking_segments(head_thinking:, worker_thinking:, **)
+          if head_thinking == worker_thinking
+            [["thinking: ", Style::DIM], [head_thinking.to_s, Style::MUTED]]
+          else
+            [
+              ["head thinking: ", Style::DIM], [head_thinking.to_s, Style::MUTED],
+              [" · worker thinking: ", Style::DIM], [worker_thinking.to_s, Style::MUTED]
+            ]
+          end
         end
 
         # Keep the footer short when the two roles share values, while making

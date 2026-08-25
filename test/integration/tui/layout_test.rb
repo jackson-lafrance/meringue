@@ -81,7 +81,11 @@ class TuiLayoutTest < Minitest::Test
     assert_includes frame, "─ agent tree "
     assert_includes frame, "─ logs ─"
     assert_includes frame, "─ chat ─"
-    assert_includes frame, "● 1W 1H"
+    # The bottom bar keeps its worker and head counts at the minimum size; the
+    # composer's default layout spells them out rather than using the old
+    # compact "1W 1H" form.
+    assert_includes frame, "● 1 worker"
+    assert_includes frame, "● 1 head"
     refute_includes frame, "Enter send"
     refute_includes frame, "/keybind keys"
   end

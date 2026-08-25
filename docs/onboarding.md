@@ -12,7 +12,7 @@ The centered card shows one dynamic `Step N of 6` indicator:
 2. **Theme** — theme and animation preference. Theme changes preview immediately in memory.
 3. **Head defaults** — harness, model, and thinking level for future routing heads.
 4. **Worker defaults** — independently chosen harness, model, and thinking level for future workers.
-5. **Status bar** — opens the live composer for the dashboard bottom, agent-information, and focused-worker bars. Saving the composer returns its layout to the setup draft without writing the config yet.
+5. **Status bar** — contains the live dashboard bottom-bar composer directly on the page. Drag open-PR, worker/head count, harness, model, and thinking components between left/right alignment zones; the other two worker bars retain their built-in defaults.
 6. **Meringue Xtras** — experiment controls derived directly from `Experiments::Registry`. The read-only **Test GitHub access** action is completely absent until GitHub support is selected.
 
 Meringue Xtras is the final page and its navigation action is **Complete**. The access action checks the current `origin` with bounded, non-interactive `gh auth status` and `gh repo view` calls; it does not write GitHub resources and reports its result in the setup card. The flow derives navigation from the step list, so future setup sections can be appended without introducing a review-only special case.
@@ -21,16 +21,16 @@ The complete `/config` editor remains available for provider commands and enviro
 
 ## Interaction
 
-- `↑` / `↓`: move through the current card's controls; moving past the last control focuses the navigation footer.
-- `←` / `→`: change a focused boolean toggle or move focus; they never advance to another setup step.
-- `Enter`: begin, toggle a checkbox, open a picker for list-backed values such as theme and models, or activate **Next** when the navigation footer is focused.
+- `↑` / `↓`: move through the current card's controls; moving past the last ordinary control focuses the navigation footer. On the status-bar page these keys select a component.
+- `←` / `→`: change a focused boolean toggle or move focus; they never advance to another setup step. On the status-bar page they reorder the selected component and move it across the center alignment boundary.
+- `Enter`: begin, toggle a checkbox, open a picker for list-backed values such as theme and models, or activate the single centered **Next** action. On the status-bar page `Space` places/removes the selected component and `X` removes it.
 - `Delete` / `Backspace`: go back one setup step.
 - `Tab`: next setup step; `Shift-Tab` remains available as a backwards step shortcut.
 - `Esc`: first-run skip or manual cancel, as described below.
-- Left-click: select controls, choose picker entries, or click the displayed **Next**, **Back**, or **Complete** navigation controls.
+- Left-click: select controls, choose picker entries, or click the displayed **Next** or **Complete** navigation control. On the status-bar page, drag components within or between its left/right drop zones.
+- Mouse wheel: move the current list or status-bar component selection. Empty space and right-click remain inert.
 
-Every setup screen uses the same **Navigate** footer. The bordered card contains focusable **Back** and **Next** (or **Complete**) actions after the option rows; `←`/`→` chooses between them when the footer is focused.
-- Mouse wheel: move the current list. Empty space, chrome, right-click, releases, and drags are inert.
+Every setup screen uses the same **Navigate** footer. The bordered card contains one centered **Next** (or **Complete**) action; the redundant Back button is omitted because Backspace, Delete, and Shift-Tab already provide the documented backwards navigation.
 
 Exact model references remain supported when the catalog is unavailable. Enter opens the cached Pi model picker without making a harness request; setup itself performs no model/network lookup.
 
@@ -39,7 +39,7 @@ Exact model references remain supported when the catalog is unavailable. Enter o
 Theme previews and all setting changes remain in `Settings::Draft`. Moving forward or back never writes a command and never loses an edit. Complete validates the whole draft and submits one private `/config save …` command carrying:
 
 - the file fingerprint captured when setup opened;
-- all changed schema setting IDs, including a status-bar layout composed during Setup;
+- all changed schema setting IDs, including the bottom-bar layout composed inline during Setup;
 - explicit defaults for experiment paths that are still absent; and
 - `onboarding_outcome = "completed"`.
 
@@ -72,7 +72,7 @@ Setup automatically opens only when:
 
 Responsive presentation keeps the setup card centered without requiring a large terminal:
 
-- **80+ columns:** a spacious centered card with a centered, enlarged Begin Setup action and clickable Next/Back/Complete controls.
+- **80+ columns:** a spacious centered card with centered Begin Setup and Next/Complete actions plus the inline status-bar drag-and-drop surface.
 - **46–79 columns:** the same card shrinks to the available width while retaining the heading, single step indicator, and keyboard hints.
 - **32–45 columns:** compact card copy and the single step indicator, with `Esc` recovery always visible.
 - **below 32×10:** terminal-too-small message and `Esc cancel` only.

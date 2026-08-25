@@ -483,6 +483,22 @@ module Meringue
         status_bar_composer_pane.hit(StatusBarComposer.snapshot(state), width: width, height: height, x: x, y: y)
       end
 
+      def inline_status_bar_composer_hit(state, width:, height:, x:, y:)
+        snap = Settings.snapshot(state)
+        composer = snap.fetch("status_bar_composer", nil)
+        return :inert unless composer.is_a?(Hash)
+
+        view = settings_pane.setup_view(state, width: width, height: height)
+        bounds = view.fetch(:composer_bounds, nil)
+        return :inert unless bounds
+
+        status_bar_composer_pane.hit(composer, width: width, height: height, x: x, y: y, bounds: bounds)
+      end
+
+      def status_bar_component_segments(state)
+        chat_pane.bottom_status_bar_components(state)
+      end
+
       # Same three answers for the model picker: a row index, `:chrome` for its
       # own border/caption, and `:outside` for a click-away dismiss.
       def model_picker_hit(state, width:, height:, x:, y:)
@@ -668,31 +684,13 @@ module Meringue
         status_bar_composer_pane.render(StatusBarComposer.snapshot(state), width: width, height: height, color: color)
       end
 
-      # The stock bars deliberately keep their existing rendering path. Once a
-      # valid saved layout is present, the same live segments become reorderable
-      # slots; invalid or absent data therefore cannot blank a footer.
+      # Only the dashboard footer is configurable. Invalid or absent data uses
+      # the useful component default; the focused-worker surfaces never read this
+      # document and therefore retain their prior hand-tuned behavior.
       def dashboard_status_bar_lines(state)
-        layout_data = StatusBarLayout.custom_for_state(state, "bottom")
-        return [chat_pane.bottom_hint_line(state), chat_pane.bottom_right_status_line(state)] unless layout_data
-
-        layout = StatusBarLayout.new(layout_data)
-        components = {
-          "context" => chat_pane.bottom_hint_line(state),
-          "status" => chat_pane.bottom_right_status_line(state)
-        }
-        [layout.compose("bottom", components), []]
-      end
-
-      def focused_status_bar_segments(state, width:)
-        layout_data = StatusBarLayout.custom_for_state(state, "focused_worker")
-        return nil unless layout_data
-
-        layout = StatusBarLayout.new(layout_data)
-        default_state = state.dup
-        default_state.delete(StatusBarLayout::STATE_KEY)
-        hint = agent_workspace_pane.hint_line(default_state, width: width)
-        status = agent_workspace_pane.status_line(default_state)
-        layout.compose("focused_worker", { "controls" => hint, "status" => status })
+        layout = StatusBarLayout.new(StatusBarLayout.from_state(state))
+        components = chat_pane.bottom_status_bar_components(state)
+        [layout.compose("left", components), layout.compose("right", components)]
       end
 
       def render_setup(canvas, state, width, height, color:)
@@ -718,18 +716,18 @@ module Meringue
         progress = view.fetch(:progress)
         write_centered_segments(canvas, card.fetch(:x) + 2, card.fetch(:y) + 2, content_width, progress.fetch(:caption))
         write_centered_segments(canvas, card.fetch(:x) + 2, card.fetch(:y) + 3, content_width, progress.fetch(:bar)) unless progress.fetch(:bar).empty?
-        view.fetch(:lines).each_with_index do |line, index|
-          draw_line(canvas, view.fetch(:content_x), view.fetch(:content_y) + index, content_width, line)
+        if view.fetch(:composer, nil).is_a?(Hash) && view.fetch(:composer_bounds, nil)
+          status_bar_composer_pane.draw_inline(canvas, view.fetch(:composer), bounds: view.fetch(:composer_bounds))
+        else
+          view.fetch(:lines).each_with_index do |line, index|
+            draw_line(canvas, view.fetch(:content_x), view.fetch(:content_y) + index, content_width, line)
+          end
         end
         footer_y = geometry.fetch(:footer_y)
         footer = settings_pane.setup_footer_segments(state, width: width)
         actions = !view.fetch(:modal, false) ? settings_pane.action_segments(state) : []
         action_width = segment_text_width(actions)
-        action_x = if actions.empty?
-                     card.fetch(:x) + card.fetch(:width) - 2
-                   else
-                     card.fetch(:x) + card.fetch(:width) - action_width - 2
-                   end
+        action_x = actions.empty? ? card.fetch(:x) + card.fetch(:width) - 2 : card.fetch(:x) + [(card.fetch(:width) - action_width) / 2, 1].max
         counter = view.fetch(:counter).to_s
         unless counter.empty?
           canvas.write_segments(
@@ -903,21 +901,16 @@ module Meringue
 
         status_line = agent_workspace_pane.status_line(state)
         hint_width = pane_width - 2
-        custom_focused = focused_status_bar_segments(state, width: hint_width)
-        if custom_focused
-          draw_hint_line(canvas, pane_x + 1, hint_y, hint_width, custom_focused, [])
-        else
-          status_width = segment_text_width(status_line)
-          available_hint_width = [hint_width - (status_width.positive? ? status_width + 2 : 0), 0].max
-          draw_hint_line(
-            canvas,
-            pane_x + 1,
-            hint_y,
-            hint_width,
-            agent_workspace_pane.hint_line(state, width: available_hint_width),
-            status_line
-          )
-        end
+        status_width = segment_text_width(status_line)
+        available_hint_width = [hint_width - (status_width.positive? ? status_width + 2 : 0), 0].max
+        draw_hint_line(
+          canvas,
+          pane_x + 1,
+          hint_y,
+          hint_width,
+          agent_workspace_pane.hint_line(state, width: available_hint_width),
+          status_line
+        )
         canvas.render(color: color)
       end
 

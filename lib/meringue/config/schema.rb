@@ -386,8 +386,8 @@ module Meringue
           aliases: [%w[tui status_bars], %w[tui status_bar]],
           editor: "status_bar",
           apply_mode: "live",
-          label: "Status bar layout",
-          description: "Optional JSON layout for the bottom, agent-information, and focused-worker status bars. Use /status-bar to edit it.",
+          label: "Bottom bar layout",
+          description: "Optional JSON layout for the dashboard bottom bar's left- and right-aligned components. Use /status-bar to edit it.",
           advanced: true,
           normalize: ->(value) { value.nil? ? "" : value.to_s },
           validate: ->(value, _config) {
