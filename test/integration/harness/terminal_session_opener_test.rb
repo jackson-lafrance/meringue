@@ -162,18 +162,12 @@ class HarnessTerminalSessionOpenerTest < HarnessIntegrationTest
     assert_empty launches
   end
 
-  def test_claude_and_antigravity_launch_commands
+  def test_claude_launch_command
     claude = opener(commands: { "claude" => "claude" }).open(
       { "id" => "P1-I1-W2", "harness" => "claude", "workspace_path" => tmpdir, "harness_session_id" => "claude-1" }
     )
     assert_equal "opened", claude.fetch("status")
     assert_equal ["--working-directory", tmpdir, "-e", "claude", "--resume", "claude-1"], launches.fetch(0)
-
-    antigravity = opener(commands: { "antigravity" => "agy" }).open(
-      { "id" => "P1-I1-W3", "harness" => "antigravity", "workspace_path" => tmpdir }
-    )
-    assert_equal "opened", antigravity.fetch("status")
-    assert_equal ["--working-directory", tmpdir, "-e", "agy", "--continue"], launches.fetch(1)
   end
 
   def test_claude_agent_without_a_session_id_is_rejected

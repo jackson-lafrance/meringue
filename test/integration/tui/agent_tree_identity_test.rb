@@ -141,16 +141,14 @@ class TuiAgentTreeIdentityTest < Minitest::Test
     state = agent_tree(
       agent_record("P1-I1-W1", "issue_id" => "P1-I1", "harness" => "pi", "harness_metadata" => { "title" => "pi work" }),
       agent_record("P1-I1-W2", "issue_id" => "P1-I1", "harness" => "claude", "harness_metadata" => { "title" => "claude work" }),
-      agent_record("P1-I1-W3", "issue_id" => "P1-I1", "harness" => "antigravity", "harness_metadata" => { "title" => "antigravity work" }),
-      agent_record("P1-I1-W4", "issue_id" => "P1-I1", "harness" => "mystery", "harness_metadata" => { "title" => "unknown harness" })
+      agent_record("P1-I1-W3", "issue_id" => "P1-I1", "harness" => "mystery", "harness_metadata" => { "title" => "unknown harness" })
     )
 
     assert_includes plain_line(row(state, "pi work")), "● W1  pi work"
     assert_includes plain_line(row(state, "claude work")), "● W2  claude work"
-    assert_includes plain_line(row(state, "antigravity work")), "● W3  antigravity work"
-    assert_includes plain_line(row(state, "unknown harness")), "● W4  unknown harness"
+    assert_includes plain_line(row(state, "unknown harness")), "● W3  unknown harness"
     rendered = plain_lines(@pane.lines(state, width: 60)).join("\n")
-    %w[π ✳ ↑].each { |glyph| refute_includes rendered, glyph }
+    %w[π ✳].each { |glyph| refute_includes rendered, glyph }
     refute_match(/●\s{2,}W\d/, rendered, "status and id should be separated by one space")
   end
 

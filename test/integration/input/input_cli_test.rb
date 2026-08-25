@@ -191,14 +191,14 @@ class InputCLITest < Minitest::Test
 
   def test_harness_flags_become_config_overrides
     parsed = parse_cli_runtime_options(
-      ["--harness", "claude_code", "--head-harness", "antigravity", "--worker-harness", "pi"]
+      ["--harness", "pi", "--head-harness", "claude_code", "--worker-harness", "pi"]
     )
 
     assert_equal(
       {
         "harness" => {
-          "provider" => "claude_code",
-          "head_provider" => "antigravity",
+          "provider" => "pi",
+          "head_provider" => "claude_code",
           "worker_provider" => "pi"
         }
       },

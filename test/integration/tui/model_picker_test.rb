@@ -331,14 +331,14 @@ class TuiModelPickerTest < Minitest::Test
 
   def test_an_unsupported_harness_says_it_has_no_catalog_at_all
     @state = state_with_catalog(
-      active_harness: "antigravity",
-      catalogs: { "antigravity" => Meringue::Harness::ModelCatalog.unsupported(harness: "antigravity").to_h }
+      active_harness: "future",
+      catalogs: { "future" => Meringue::Harness::ModelCatalog.unsupported(harness: "future").to_h }
     )
     state = open_picker
     row = plain_lines(@pane.popup_lines(state)).fetch(0)
 
     assert_includes row, "does not expose a model catalog"
-    assert_equal "models (antigravity) · [Head]  Worker", @pane.popup_pane_title(state)
+    assert_equal "models (future) · [Head]  Worker", @pane.popup_pane_title(state)
   end
 
   # A stale list is still the harness's own answer, so it stays listed in full and

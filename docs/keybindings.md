@@ -51,13 +51,13 @@ HEADS
   └─ ●   I1  Fix signup validation 1/3
     ├─ ● π W1  Add collision check
     ├─ ✓ ✳ W2  Hide password field
-    └─ · ↑ W3  Check the migration
+    └─ · π W3  Check the migration
 ```
 
 - **Identity color.** The logo and the id use that agent's deterministic per-id color from the active colorscheme's identity palette (`AGENT_PALETTE` in `lib/meringue/tui/style.rb`, assigned by `Style.agent_palette_index`). It is the same color as that agent's log header, its `▌` log gutter, and the composer tint it produces when selected — one palette, one color per agent, everywhere. Heads draw their logo bold, exactly like their log headers, so two sessions in the same palette slot still separate.
 - **Every status keeps it.** Working agents, completed agents with a `✓`, and idle, queued, blocked, errored, and killed agents all keep their color and logo. Color is additive, never a replacement for status: the status glyph keeps its own semantic color (`○` queued, `●` working, `·` idle, `!` blocked, `✓` completed, `×` errored, `∅` killed) and a completed row still dims its title.
-- **Harness logos.** `π` Pi, `✳` Claude Code, `↑` Antigravity, taken from the agent's own recorded harness (provider aliases such as `cc` or `agy` resolve to the same mark). The glyphs live with the other provider presentation in the harness registry, so panes never hard-code a backend.
-- **Graceful degradation.** A harness Meringue does not ship (for example the `fake` harness used by tests) renders a plain ASCII initial rather than borrowing a shipped mark, and a record with no harness at all renders `?`, matching the unknown-status convention. Every branch is exactly one column wide. `MERINGUE_ASCII_GLYPHS=1` renders `p` / `c` / `a` instead of the marks for fonts that cannot draw them, and `NO_COLOR=1` drops color while keeping glyphs, ids, statuses, and titles.
+- **Harness logos.** `π` Pi and `✳` Claude Code, taken from the agent's own recorded harness (provider aliases such as `cc` resolve to the same mark). The glyphs live with the other provider presentation in the harness registry, so panes never hard-code a backend.
+- **Graceful degradation.** A harness Meringue does not ship (for example the `fake` harness used by tests) renders a plain ASCII initial rather than borrowing a shipped mark, and a record with no harness at all renders `?`, matching the unknown-status convention. Every branch is exactly one column wide. `MERINGUE_ASCII_GLYPHS=1` renders `p` / `c` instead of the marks for fonts that cannot draw them, and `NO_COLOR=1` drops color while keeping glyphs, ids, statuses, and titles.
 - **No reflow.** Issue and project rows have no harness of their own, so they reserve the same logo cell. Every id in the tree therefore starts in one column — including a child issue and a worker that are siblings at the same depth — and wrapped title rows hang under the title column.
 - **Selected rows.** The highlighted row keeps its logo but hands its foreground to the selection palette, which guarantees contrast on the highlight background in every theme. Its identity color is still visible: it is what the composer is tinted with while that row is selected.
 
