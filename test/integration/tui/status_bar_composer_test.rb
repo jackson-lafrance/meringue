@@ -34,10 +34,32 @@ class TuiStatusBarComposerTest < Minitest::Test
     state = composed_state(runtime_state)
     left, right = Meringue::TUI::Layout.new.send(:dashboard_status_bar_lines, state)
 
-    assert_equal "no open PRs · ● 1 worker · ● 1 head", plain(left)
+    # Context leads the default left zone, so an idle dashboard still offers the
+    # standing discovery hints ahead of the counts.
+    assert_equal "Ctrl-C clear/quit · Tab focus · / commands · no open PRs · ● 1 worker · ● 1 head", plain(left)
     assert_equal "harness: Pi · model: openai/gpt-5.6-sol · thinking: high", plain(right)
     assert_nil Meringue::TUI::StatusBarLayout.from_state(state)
     assert_includes Meringue::TUI::Layout.new.render(state, width: 150, height: 30, color: false), "thinking: high"
+  end
+
+  # The composed bar replaced a hand-written hint line, so the affordances that
+  # line carried have to survive as a component rather than disappear: the
+  # gesture that clears a selected chat target, and that target's pull request.
+  def test_context_component_carries_the_selection_gesture_and_omits_the_counts
+    @state = runtime_state
+    assert @app.send(:select_agent_tree_item, @state, "P1-I1-W1")
+    @app.send(:exit_agent_tree_navigation)
+    components = Meringue::TUI::Layout.new.send(:chat_pane).bottom_status_bar_components(compose)
+    context = plain(components.fetch("context"))
+
+    # Selecting a chat target must still offer the gesture that clears it: the
+    # composed bar replaced the hand-written hint line that used to carry it.
+    assert_includes context, "Esc clears"
+    # The counts belong to the workers and heads components, so context does not
+    # print them a second time when all three are placed.
+    refute_includes context, "1 worker"
+    assert_includes Meringue::TUI::StatusBarLayout::COMPONENT_IDS, "context"
+    assert_includes Meringue::TUI::StatusBarLayout.default_items("left"), "context"
   end
 
   def test_invalid_and_legacy_documents_migrate_only_the_bottom_bar
@@ -73,7 +95,7 @@ class TuiStatusBarComposerTest < Minitest::Test
     )
 
     loaded = Meringue::TUI::StatusBarLayout.from_config(Meringue::Config.load(path: @config_path))
-    assert_equal %w[open_pull_requests workers], loaded.dig("bottom", "left")
+    assert_equal %w[context open_pull_requests workers], loaded.dig("bottom", "left")
     assert_equal %w[heads harness model thinking], loaded.dig("bottom", "right")
     assert_equal %w[bottom version], loaded.keys.sort
 
@@ -85,7 +107,7 @@ class TuiStatusBarComposerTest < Minitest::Test
     draft = Meringue::TUI::StatusBarComposer::Draft.new(@config)
     draft.select_component_id("heads")
     assert draft.place("heads", "right", 1)
-    assert_equal %w[open_pull_requests workers], draft.layout.items("left")
+    assert_equal %w[context open_pull_requests workers], draft.layout.items("left")
     assert_equal %w[harness heads model thinking], draft.layout.items("right")
 
     draft.nudge_selected(1)
@@ -111,7 +133,7 @@ class TuiStatusBarComposerTest < Minitest::Test
     assert_includes frame, "right aligned"
 
     send_key(RIGHT)
-    assert_equal %w[workers open_pull_requests heads], standalone_draft.layout.items("left")
+    assert_equal %w[open_pull_requests context workers heads], standalone_draft.layout.items("left")
     refute File.exist?(@config_path)
 
     send_key(ESC)
@@ -128,7 +150,7 @@ class TuiStatusBarComposerTest < Minitest::Test
     assert_equal "SaveConfiguration", command.type
     assert_equal @config.fingerprint, command.payload.fetch("base_fingerprint")
     value = command.payload.fetch("changes").fetch("appearance.status_bar_layout")
-    assert_equal %w[workers open_pull_requests heads], Meringue::TUI::StatusBarLayout.normalize(value).dig("bottom", "left")
+    assert_equal %w[open_pull_requests context workers heads], Meringue::TUI::StatusBarLayout.normalize(value).dig("bottom", "left")
     assert @app.instance_variable_get(:@status_bar_composer_saving)
   end
 
@@ -153,7 +175,7 @@ class TuiStatusBarComposerTest < Minitest::Test
 
     send_key(END_KEY)
     value = settings.value("appearance.status_bar_layout")
-    assert_equal %w[harness model thinking open_pull_requests], Meringue::TUI::StatusBarLayout.normalize(value).dig("bottom", "right")
+    assert_equal %w[harness model thinking context], Meringue::TUI::StatusBarLayout.normalize(value).dig("bottom", "right")
     assert_empty submitted
     refute File.exist?(@config_path)
 
@@ -163,8 +185,8 @@ class TuiStatusBarComposerTest < Minitest::Test
     command = Meringue::Input::SlashCommandParser.new.parse(@submitted.pop)
     assert_equal "completed", command.payload.fetch("onboarding_outcome")
     saved = Meringue::TUI::StatusBarLayout.normalize(command.payload.fetch("changes").fetch("appearance.status_bar_layout"))
-    assert_equal %w[workers heads], saved.dig("bottom", "left")
-    assert_equal %w[harness model thinking open_pull_requests], saved.dig("bottom", "right")
+    assert_equal %w[open_pull_requests workers heads], saved.dig("bottom", "left")
+    assert_equal %w[harness model thinking context], saved.dig("bottom", "right")
   end
 
   def test_inline_mouse_drag_reorders_components_and_resize_keeps_a_full_frame
@@ -183,13 +205,13 @@ class TuiStatusBarComposerTest < Minitest::Test
     send_mouse("kind" => "button", "pressed" => false, "x" => right.fetch(:x) + 3, "y" => right.fetch(:y) + 2)
 
     draft = @app.instance_variable_get(:@settings_status_bar_draft)
-    assert_equal %w[open_pull_requests workers], draft.layout.items("left")
-    assert_equal %w[harness heads model thinking], draft.layout.items("right")
+    assert_equal %w[context open_pull_requests heads], draft.layout.items("left")
+    assert_equal %w[harness workers model thinking], draft.layout.items("right")
 
     send_mouse("kind" => "button", "pressed" => true, "x" => right.fetch(:x) + 3, "y" => right.fetch(:y) + 1)
     send_mouse("kind" => "motion", "pressed" => true, "x" => right.fetch(:x) + 3, "y" => right.fetch(:y) + 3)
     send_mouse("kind" => "button", "pressed" => false, "x" => right.fetch(:x) + 3, "y" => right.fetch(:y) + 3)
-    assert_equal %w[heads model harness thinking], draft.layout.items("right")
+    assert_equal %w[workers model harness thinking], draft.layout.items("right")
     [[100, 32], [79, 24], [46, 18], [32, 10]].each do |width, height|
       frame = @app.render(compose, width: width, height: height, color: false)
       assert_equal height, frame.lines.length, "#{width}x#{height} should not clip its canvas"
@@ -235,7 +257,7 @@ class TuiStatusBarComposerTest < Minitest::Test
       ],
       "metadata" => {
         "active_harness" => "pi",
-        "pi_session_defaults" => {
+        "agent_session_defaults" => {
           "model" => "openai/gpt-5.6-sol",
           "thinking_level" => "high"
         }
@@ -248,7 +270,7 @@ class TuiStatusBarComposerTest < Minitest::Test
       "metadata" => {
         "active_head_harness" => "pi",
         "active_worker_harness" => "claude",
-        "pi_session_defaults" => {
+        "agent_session_defaults" => {
           "roles" => {
             "head" => { "model" => "openai/gpt-5.6-sol", "thinking_level" => "low" },
             "worker" => { "model" => "anthropic/claude-opus-5", "thinking_level" => "max" }

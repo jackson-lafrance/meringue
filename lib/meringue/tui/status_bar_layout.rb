@@ -13,8 +13,9 @@ module Meringue
       STATE_KEY = "_status_bar_layout"
       CONFIG_PATH = %w[tui status_bar_layout].freeze
       ZONES = %w[left right].freeze
-      COMPONENT_IDS = %w[open_pull_requests workers heads harness model thinking].freeze
+      COMPONENT_IDS = %w[context open_pull_requests workers heads harness model thinking].freeze
       COMPONENT_LABELS = {
+        "context" => "Context",
         "open_pull_requests" => "Open PRs",
         "workers" => "Workers",
         "heads" => "Heads",
@@ -23,6 +24,7 @@ module Meringue
         "thinking" => "Thinking"
       }.freeze
       COMPONENT_DESCRIPTIONS = {
+        "context" => "Selection gestures, open questions, and the selected target's pull request",
         "open_pull_requests" => "Open pull requests across the AgentTree",
         "workers" => "Currently working workers",
         "heads" => "Currently working heads",
@@ -31,6 +33,8 @@ module Meringue
         "thinking" => "Shared or role-specific thinking defaults"
       }.freeze
       COMPONENT_ALIASES = {
+        "hints" => "context",
+        "selection" => "context",
         "prs" => "open_pull_requests",
         "pull_requests" => "open_pull_requests",
         "worker_count" => "workers",
@@ -41,7 +45,7 @@ module Meringue
       DEFAULTS = {
         "version" => VERSION,
         "bottom" => {
-          "left" => %w[open_pull_requests workers heads],
+          "left" => %w[context open_pull_requests workers heads],
           "right" => %w[harness model thinking]
         }
       }.freeze

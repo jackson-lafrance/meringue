@@ -8,13 +8,16 @@ The composer appears directly on the **Status bar** page during first-run Setup 
 
 The centered preview renders the real bottom bar from the current draft and current AgentTree state. Its palette contains:
 
+- **Context** — what is true right now rather than a standing count: the pinned log scope, the gesture that clears a selected chat target, unanswered questions, and the selected target's own pull request. With nothing selected it shows the standing discovery hints instead;
 - **Open PRs** — the number of currently open delivery pull requests;
 - **Workers** and **Heads** — current working counts;
 - **Harness** — one shared harness or explicit head/worker values;
 - **Model** — one shared model or explicit head/worker values; and
 - **Thinking** — one shared thinking level or explicit head/worker values.
 
-Each component can be absent or placed once in either the **left aligned** or **right aligned** drop zone. Dragging within a zone reorders it; dragging across zones changes its alignment; dragging back to the palette removes it. The default puts PR and agent counts on the left and harness, model, and thinking on the right, so future-session defaults remain visible. Split head/worker values are never collapsed into a misleading shared label.
+Each component can be absent or placed once in either the **left aligned** or **right aligned** drop zone. Dragging within a zone reorders it; dragging across zones changes its alignment; dragging back to the palette removes it. The default puts context, PR, and agent counts on the left and harness, model, and thinking on the right, so future-session defaults remain visible. Split head/worker values are never collapsed into a misleading shared label.
+
+Context is a component rather than a fixed part of the bar, but removing it also removes the affordances it carries, so it leads the default left zone. It deliberately omits the worker and head counts that the **Workers** and **Heads** components render, so placing all three prints each count once.
 
 Preview changes stay in memory. Setup folds them into its existing settings draft; `/status-bar` owns a separate draft. Neither path writes while the user moves an item.
 
@@ -45,7 +48,7 @@ The saved `tui.status_bar_layout` value is versioned JSON inside TOML:
 
 ```toml
 [tui]
-status_bar_layout = "{\"version\":2,\"bottom\":{\"left\":[\"open_pull_requests\",\"workers\",\"heads\"],\"right\":[\"harness\",\"model\",\"thinking\"]}}"
+status_bar_layout = "{\"version\":2,\"bottom\":{\"left\":[\"context\",\"open_pull_requests\",\"workers\",\"heads\"],\"right\":[\"harness\",\"model\",\"thinking\"]}}"
 ```
 
 Version 2 accepts only known components, rejects duplicates across zones, and rejects malformed or unknown versions as a whole. Invalid or absent data falls back to the complete default instead of drawing a blank footer. Reset followed by Save removes a custom value.

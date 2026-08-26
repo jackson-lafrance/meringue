@@ -3680,7 +3680,7 @@ module Meringue
           metadata.delete("active_harness")
           metadata.delete("active_harness_label")
         end
-        metadata["pi_session_defaults"] = {
+        metadata["agent_session_defaults"] = {
           "roles" => {
             "head" => {
               "model" => @settings_draft.value("agent.head_model"),
