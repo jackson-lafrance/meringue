@@ -388,6 +388,60 @@ module Meringue
           segments
         end
 
+        # The bottom-bar composer works with real semantic components rather
+        # than opaque precomposed presets. Both the dashboard and Setup preview
+        # call this method, so shared/split role defaults use one resolution path.
+        def bottom_status_bar_components(state)
+          metadata = state.fetch("metadata", {}) || {}
+          defaults = metadata.fetch("agent_session_defaults", {}) || {}
+          role_values = defaults.empty? ? nil : normalized_agent_role_defaults(defaults)
+          workers = active_agent_count(state, "worker")
+          heads = active_agent_count(state, "head")
+          {
+            "context" => bottom_context_segments(state),
+            "open_pull_requests" => bottom_open_pull_request_segments(state),
+            "workers" => bottom_agent_count_segments(workers, "worker", Style::WORKING),
+            "heads" => bottom_agent_count_segments(heads, "head", Style::ACCENT_BOLD),
+            "harness" => compact_harness_status_segments(state),
+            "model" => role_values ? bottom_model_segments(**role_values) : [],
+            "thinking" => role_values ? bottom_thinking_segments(**role_values) : []
+          }
+        end
+
+        # What the bar has to say about where you are right now, as opposed to
+        # the standing counts the other components render: which log scope is
+        # pinned, the gesture that clears a selected chat target, unanswered
+        # questions, and the delivery pull request of the selected target.
+        #
+        # The worker/head counts that the old combined hint line also carried are
+        # deliberately absent, because the `workers` and `heads` components
+        # render them; including them here would print each count twice whenever
+        # both are placed.
+        #
+        # With nothing selected and nothing pending there is no context to state,
+        # so the idle dashboard falls back to the standing discovery hints. A
+        # half-typed slash command suppresses those, since the popup above the
+        # bar is already showing that inventory.
+        def bottom_context_segments(state)
+          chat = chat_state(state)
+          segments = log_scope_hint_segments(state)
+          segments = join_context_segments(segments, selection_hint_segments(state))
+          open_questions = state.fetch("questions", []).count { |question| question["status"] == "open" }
+          segments = join_context_segments(segments, [["? #{open_questions}", Style::WARNING]]) if open_questions.positive?
+          segments = join_context_segments(segments, delivery_pr_hint_segments(state))
+          return segments unless segments.empty?
+          return [] if slash_prompt?(chat.fetch("input_buffer", ""))
+
+          interaction_hint_segments
+        end
+
+        def join_context_segments(segments, addition)
+          return segments if addition.empty?
+          return addition if segments.empty?
+
+          segments + [["  ·  ", Style::DIM]] + addition
+        end
+
         # Config and old state files can represent the same effective settings in
         # two ways: a shared top-level value, or one value under each role. Read
         # both forms once and resolve empty strings as absent before deciding how
@@ -417,6 +471,41 @@ module Meringue
 
         def present_status_value(value)
           value.to_s.strip unless value.to_s.strip.empty?
+        end
+
+        def bottom_open_pull_request_segments(state)
+          return [] unless Settings.github_enabled?(state)
+
+          total = OpenPullRequests.count(state)
+          [[OpenPullRequests.summary_label(state), total.positive? ? Style::ACCENT_BOLD : Style::MUTED]]
+        end
+
+        def bottom_agent_count_segments(count, singular, active_style)
+          count = count.to_i
+          label = "#{count} #{singular}#{count == 1 ? "" : "s"}"
+          count.positive? ? [["● ", active_style], [label, active_style]] : [[label, Style::MUTED]]
+        end
+
+        def bottom_model_segments(head_model:, worker_model:, **)
+          if head_model == worker_model
+            [["model: ", Style::DIM], [head_model.to_s, Style::MUTED]]
+          else
+            [
+              ["head model: ", Style::DIM], [head_model.to_s, Style::MUTED],
+              [" · worker model: ", Style::DIM], [worker_model.to_s, Style::MUTED]
+            ]
+          end
+        end
+
+        def bottom_thinking_segments(head_thinking:, worker_thinking:, **)
+          if head_thinking == worker_thinking
+            [["thinking: ", Style::DIM], [head_thinking.to_s, Style::MUTED]]
+          else
+            [
+              ["head thinking: ", Style::DIM], [head_thinking.to_s, Style::MUTED],
+              [" · worker thinking: ", Style::DIM], [worker_thinking.to_s, Style::MUTED]
+            ]
+          end
         end
 
         # Keep the footer short when the two roles share values, while making

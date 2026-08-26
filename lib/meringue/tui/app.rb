@@ -186,6 +186,8 @@ module Meringue
         @settings_footer_button = "next"
         @settings_setup_auto = false
         @settings_setup_outcome = nil
+        @settings_status_bar_draft = nil
+        @settings_status_bar_drag = nil
         # Status-bar composition is a separate in-memory draft. Preview changes
         # never touch the config until the single SaveConfiguration transaction
         # succeeds, so Esc and failed saves are deterministic.
@@ -2887,7 +2889,7 @@ module Meringue
           Pull-request picker: /prs opens every tracked PR that is still open, regardless of the AgentTree selection; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} opens the highlighted PR, and #{keys_for("cancel_navigation")} closes. #{keys_for("open_delivery_pr")} keeps its selection-aware behavior: it opens the selected issue's PR, or this picker when chat is unscoped.
           Settings pickers: bare /model or /models opens models, bare /thinking opens thinking levels, bare /theme or /themes opens themes, and bare /harness opens harnesses. They are bordered popovers; #{keys_for("cursor_left")}/#{keys_for("cursor_right")} switches role tabs where shown, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} moves, #{keys_for("submit")} applies, #{keys_for("refresh_model_catalog")} refreshes the model catalog, and #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker. /prs opens the pull-request popover.
           Question picker: /questions opens existing open questions with local 1-based display numbers; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} inserts /answer <question_id> into chat, and #{keys_for("cancel_navigation")} closes.
-          Status-bar composer: /status-bar opens the live bottom, agent-information, and focused-worker layout editor; Tab/Shift-Tab changes bars, Up/Down selects, Left/Right reorders, Home/End moves to an edge, R resets, Enter/Ctrl-S saves, Esc cancels, and mouse drag reorders items.
+          Status-bar composer: /status-bar edits only the dashboard bottom bar; Up/Down selects components, Left/Right reorders or changes alignment, Home/End moves to an edge, Space places/removes, R resets, Enter/Ctrl-S saves, Esc cancels, and mouse drag moves items between the left and right drop zones.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace or a selected head's saved harness session; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
           Head/session debugging: select a head and press #{keys_for("open_agent_workspace")}, or use /open-session <agent_id>, to open its saved harness session externally without turning it into a chat target.
           Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls Meringue-rendered transcripts and is delivered directly to embedded harness applications for native history navigation. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
@@ -3509,10 +3511,14 @@ module Meringue
         true
       end
 
-      def status_bar_composer_snapshot
+      def status_bar_composer_snapshot(state = nil)
         return nil unless @status_bar_composer_active && @status_bar_composer_draft
 
-        @status_bar_composer_draft.saving_snapshot(saving: @status_bar_composer_saving)
+        preview_state = status_bar_preview_state(state || State::Models.empty_state)
+        @status_bar_composer_draft.saving_snapshot(
+          saving: @status_bar_composer_saving,
+          preview_components: layout.status_bar_component_segments(preview_state)
+        )
       end
 
       def handle_status_bar_composer_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
@@ -3530,22 +3536,24 @@ module Meringue
           close_status_bar_composer
         elsif hard_save_key?(key) || ENTER_KEYS.include?(key)
           save_status_bar_composer(on_submit, state)
-        elsif TAB_KEYS.include?(key) || FOCUS_FORWARD_KEYS.include?(key)
-          @status_bar_composer_draft.cycle_bar(1)
-        elsif SHIFT_TAB_KEYS.include?(key) || FOCUS_BACK_KEYS.include?(key)
-          @status_bar_composer_draft.cycle_bar(-1)
         elsif UP_KEYS.include?(key)
-          @status_bar_composer_draft.select_item(@status_bar_composer_draft.item_index - 1)
-        elsif DOWN_KEYS.include?(key)
-          @status_bar_composer_draft.select_item(@status_bar_composer_draft.item_index + 1)
+          @status_bar_composer_draft.select_component(@status_bar_composer_draft.component_index - 1)
+        elsif DOWN_KEYS.include?(key) || TAB_KEYS.include?(key) || FOCUS_FORWARD_KEYS.include?(key)
+          @status_bar_composer_draft.select_component(@status_bar_composer_draft.component_index + 1)
+        elsif SHIFT_TAB_KEYS.include?(key) || FOCUS_BACK_KEYS.include?(key)
+          @status_bar_composer_draft.select_component(@status_bar_composer_draft.component_index - 1)
         elsif LEFT_KEYS.include?(key)
-          @status_bar_composer_draft.move_selected(-1)
-        elsif RIGHT_KEYS.include?(key) || key == " "
-          @status_bar_composer_draft.move_selected(1)
+          @status_bar_composer_draft.nudge_selected(-1)
+        elsif RIGHT_KEYS.include?(key)
+          @status_bar_composer_draft.nudge_selected(1)
         elsif HOME_KEYS.include?(key)
-          @status_bar_composer_draft.move_item(@status_bar_composer_draft.item_index, 0)
+          @status_bar_composer_draft.move_to_edge("left")
         elsif END_KEYS.include?(key)
-          @status_bar_composer_draft.move_item(@status_bar_composer_draft.item_index, @status_bar_composer_draft.items.length - 1)
+          @status_bar_composer_draft.move_to_edge("right")
+        elsif key == " "
+          @status_bar_composer_draft.cycle_selected_location
+        elsif BACKSPACE_KEYS.include?(key) || DELETE_KEYS.include?(key) || key.to_s.downcase == "x"
+          @status_bar_composer_draft.remove
         elsif key.to_s.downcase == "r"
           @status_bar_composer_draft.reset!
         end
@@ -3557,48 +3565,37 @@ module Meringue
 
       def handle_status_bar_composer_mouse(key, unchanged, on_submit, state)
         if mouse_wheel_up?(key) || mouse_wheel_down?(key)
-          hit = layout.status_bar_composer_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
-          if hit.is_a?(Array) && hit.first == :item
-            @status_bar_composer_draft.select_item(@status_bar_composer_draft.item_index + (mouse_wheel_up?(key) ? -1 : 1))
-          elsif hit.is_a?(Array) && hit.first == :bar
-            @status_bar_composer_draft.select_bar(@status_bar_composer_draft.bar_index + (mouse_wheel_up?(key) ? -1 : 1))
-          end
+          delta = mouse_wheel_up?(key) ? -1 : 1
+          @status_bar_composer_draft.select_component(@status_bar_composer_draft.component_index + delta)
           return unchanged
         end
 
+        hit = layout.status_bar_composer_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
         if mouse_button_press?(key)
-          hit = layout.status_bar_composer_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
           case hit
           when :save then save_status_bar_composer(on_submit, state)
           when :cancel then close_status_bar_composer
           when :reset then @status_bar_composer_draft.reset!
           when Array
-            kind, index = hit
-            if kind == :bar
-              @status_bar_composer_draft.select_bar(index)
-              @status_bar_composer_drag = nil
-            elsif kind == :item
-              @status_bar_composer_draft.select_item(index)
-              @status_bar_composer_drag = { bar: @status_bar_composer_draft.bar, index: index }
+            component = status_bar_hit_component(status_bar_composer_snapshot(state), hit)
+            if component
+              @status_bar_composer_draft.select_component_id(component)
+              @status_bar_composer_drag = { component: component, moved: false }
             end
           end
           return unchanged
         end
 
         if mouse_drag?(key) && @status_bar_composer_drag
-          hit = layout.status_bar_composer_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
-          if hit.is_a?(Array) && hit.first == :item
-            @status_bar_composer_draft.move_item(@status_bar_composer_drag.fetch(:index), hit.fetch(1))
-            @status_bar_composer_drag[:index] = hit.fetch(1)
-          end
+          @status_bar_composer_drag[:moved] = true if apply_status_bar_drop(
+            @status_bar_composer_draft,
+            @status_bar_composer_drag.fetch(:component),
+            hit
+          )
           return unchanged
         end
 
-        if mouse_button_release?(key)
-          @status_bar_composer_drag = nil
-          return unchanged
-        end
-
+        @status_bar_composer_drag = nil if mouse_button_release?(key)
         unchanged
       end
 
@@ -3638,6 +3635,150 @@ module Meringue
         true
       end
 
+      def status_bar_hit_component(snapshot, hit)
+        kind, source, index = Array(hit)
+        return nil unless kind == :component
+
+        records = source.to_s == "palette" ? Array(snapshot["palette"]) : Array(snapshot.dig("zones", source.to_s))
+        records[index.to_i]&.fetch("id", nil)
+      end
+
+      def apply_status_bar_drop(draft, component, hit)
+        kind, zone, index = Array(hit)
+        return false unless %i[component drop].include?(kind)
+        return draft.remove(component) if zone.to_s == "palette"
+        return false unless StatusBarLayout::ZONES.include?(zone.to_s)
+
+        draft.place(component, zone, index)
+      end
+
+      def inline_status_bar_step?
+        setup_mode? && settings_category == "Status bar" && @settings_status_bar_draft
+      end
+
+      def inline_status_bar_composer_snapshot(state)
+        return nil unless inline_status_bar_step?
+
+        preview_state = status_bar_preview_state(state || State::Models.empty_state)
+        @settings_status_bar_draft.saving_snapshot(
+          inline: true,
+          preview_components: layout.status_bar_component_segments(preview_state)
+        )
+      end
+
+      def status_bar_preview_state(state)
+        return state unless @settings_draft
+
+        metadata = Config.deep_copy(state.fetch("metadata", {}) || {})
+        head_harness = @settings_draft.value("agent.head_harness").to_s.strip
+        worker_harness = @settings_draft.value("agent.worker_harness").to_s.strip
+        metadata["active_head_harness"] = head_harness unless head_harness.empty?
+        metadata["active_worker_harness"] = worker_harness unless worker_harness.empty?
+        if !head_harness.empty? && head_harness == worker_harness
+          metadata["active_harness"] = head_harness
+        else
+          metadata.delete("active_harness")
+          metadata.delete("active_harness_label")
+        end
+        metadata["agent_session_defaults"] = {
+          "roles" => {
+            "head" => {
+              "model" => @settings_draft.value("agent.head_model"),
+              "thinking_level" => @settings_draft.value("agent.head_thinking")
+            },
+            "worker" => {
+              "model" => @settings_draft.value("agent.worker_model"),
+              "thinking_level" => @settings_draft.value("agent.worker_thinking")
+            }
+          }
+        }
+        state.merge(
+          "metadata" => metadata,
+          "_capabilities" => { "github_support" => @settings_draft.value("experiments.github_support") == true }
+        )
+      rescue KeyError
+        state
+      end
+
+      def sync_inline_status_bar_layout
+        value = @settings_status_bar_draft.layout
+        @settings_draft.set("appearance.status_bar_layout", value.configured? ? value.serialized : "")
+        @force_full_redraw = true
+      end
+
+      def handle_inline_status_bar_key(key, unchanged, on_submit, state)
+        if hard_escape_key?(key)
+          request_settings_cancel
+        elsif hard_save_key?(key) || ENTER_KEYS.include?(key) || TAB_KEYS.include?(key) || FOCUS_FORWARD_KEYS.include?(key)
+          setup_next_or_finish(on_submit, state)
+        elsif SHIFT_TAB_KEYS.include?(key) || FOCUS_BACK_KEYS.include?(key) || BACKSPACE_KEYS.include?(key) || DELETE_KEYS.include?(key)
+          move_settings_category(-1)
+        elsif UP_KEYS.include?(key)
+          @settings_status_bar_draft.select_component(@settings_status_bar_draft.component_index - 1)
+        elsif DOWN_KEYS.include?(key)
+          @settings_status_bar_draft.select_component(@settings_status_bar_draft.component_index + 1)
+        elsif LEFT_KEYS.include?(key)
+          @settings_status_bar_draft.nudge_selected(-1)
+          sync_inline_status_bar_layout
+        elsif RIGHT_KEYS.include?(key)
+          @settings_status_bar_draft.nudge_selected(1)
+          sync_inline_status_bar_layout
+        elsif HOME_KEYS.include?(key)
+          @settings_status_bar_draft.move_to_edge("left")
+          sync_inline_status_bar_layout
+        elsif END_KEYS.include?(key)
+          @settings_status_bar_draft.move_to_edge("right")
+          sync_inline_status_bar_layout
+        elsif key == " "
+          @settings_status_bar_draft.cycle_selected_location
+          sync_inline_status_bar_layout
+        elsif key.to_s.downcase == "x"
+          @settings_status_bar_draft.remove
+          sync_inline_status_bar_layout
+        elsif key.to_s.downcase == "r"
+          @settings_status_bar_draft.reset!
+          sync_inline_status_bar_layout
+        end
+        unchanged
+      end
+
+      def handle_inline_status_bar_mouse(key, unchanged, state)
+        hit = layout.inline_status_bar_composer_hit(
+          state,
+          width: render_width,
+          height: render_height,
+          x: mouse_x(key),
+          y: mouse_y(key)
+        )
+        if mouse_wheel_up?(key) || mouse_wheel_down?(key)
+          delta = mouse_wheel_up?(key) ? -1 : 1
+          @settings_status_bar_draft.select_component(@settings_status_bar_draft.component_index + delta)
+          return unchanged
+        end
+        if mouse_button_press?(key) && hit.is_a?(Array)
+          snapshot = inline_status_bar_composer_snapshot(state)
+          component = status_bar_hit_component(snapshot, hit)
+          if component
+            @settings_status_bar_draft.select_component_id(component)
+            @settings_status_bar_drag = { component: component, moved: false }
+          end
+          return unchanged
+        end
+        if mouse_drag?(key) && @settings_status_bar_drag
+          if apply_status_bar_drop(@settings_status_bar_draft, @settings_status_bar_drag.fetch(:component), hit)
+            @settings_status_bar_drag[:moved] = true
+            sync_inline_status_bar_layout
+          end
+          return unchanged
+        end
+        if mouse_button_release?(key)
+          @settings_status_bar_drag = nil
+          return unchanged
+        end
+
+        nil
+      end
+
       # --- full-screen settings --------------------------------------------
 
       def github_support_enabled?(state = nil)
@@ -3659,6 +3800,11 @@ module Meringue
         @settings_mode = mode.to_s == "setup" ? "setup" : "settings"
         @settings_setup_auto = @settings_mode == "setup" && setup_origin.to_s == "auto"
         @settings_setup_outcome = nil
+        @settings_status_bar_draft = StatusBarComposer::Draft.new(
+          config,
+          initial_value: @settings_draft.value("appearance.status_bar_layout")
+        )
+        @settings_status_bar_drag = nil
         @settings_category_index = 0
         @settings_row_index = 0
         @settings_expanded_advanced = {}
@@ -3697,6 +3843,8 @@ module Meringue
         @github_access_test_result = nil
         @settings_setup_auto = false
         @settings_setup_outcome = nil
+        @settings_status_bar_draft = nil
+        @settings_status_bar_drag = nil
         @settings_mode = "settings"
         close_question_picker
         @force_full_redraw = true
@@ -3763,6 +3911,8 @@ module Meringue
             "Start choosing your setup defaults.",
             "Enter"
           )]
+        when "Status bar"
+          []
         else
           Settings::SetupFlow.setting_ids(settings_category, draft: @settings_draft).filter_map do |id|
             definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
@@ -3867,7 +4017,7 @@ module Meringue
         ).compact
       end
 
-      def settings_snapshot
+      def settings_snapshot(state = nil)
         return nil unless @settings_active && @settings_draft
 
         rows = settings_rows
@@ -3902,6 +4052,7 @@ module Meringue
           "editor" => editor,
           "keybinding_capture" => capture,
           "picker" => settings_picker_snapshot,
+          "status_bar_composer" => inline_status_bar_composer_snapshot(state),
           "footer_focus" => @settings_footer_focus,
           "footer_button" => @settings_footer_button,
           "setup_last_step" => setup_mode? && @settings_category_index.to_i == settings_categories.length - 1,
@@ -3931,7 +4082,12 @@ module Meringue
         if @settings_picker
           return handle_settings_picker_key(key, unchanged, on_submit, state)
         end
-        return handle_settings_mouse(key, unchanged, on_submit, state) if mouse_event?(key)
+        if mouse_event?(key)
+          inline_result = handle_inline_status_bar_mouse(key, unchanged, state) if inline_status_bar_step?
+          return inline_result if inline_result
+
+          return handle_settings_mouse(key, unchanged, on_submit, state)
+        end
 
         if @settings_discard_confirm.is_a?(String)
           if ENTER_KEYS.include?(key)
@@ -3949,6 +4105,9 @@ module Meringue
 
         if @settings_editor
           return handle_settings_editor_key(key, unchanged, on_submit, state)
+        end
+        if inline_status_bar_step?
+          return handle_inline_status_bar_key(key, unchanged, on_submit, state)
         end
 
         rows = settings_rows
@@ -4278,8 +4437,6 @@ module Meringue
         case hit
         when :save, :next
           setup_mode? ? setup_next_or_finish(on_submit, state) : save_settings(on_submit, state)
-        when :back
-          setup_mode? ? move_settings_category(-1) : request_settings_cancel
         when :cancel
           request_settings_cancel
         when Array
@@ -4369,10 +4526,7 @@ module Meringue
       end
 
       def cycle_or_move_settings(delta, state)
-        if setup_mode? && @settings_footer_focus
-          @settings_footer_button = @settings_footer_button == "next" ? "back" : "next"
-          return
-        end
+        return if setup_mode? && @settings_footer_focus
 
         row = selected_settings_row
         return move_settings_row(delta) if setup_mode? && !row
@@ -4619,11 +4773,7 @@ module Meringue
       end
 
       def activate_setup_footer(on_submit, state)
-        if @settings_footer_button == "back"
-          move_settings_category(-1)
-        else
-          setup_next_or_finish(on_submit, state)
-        end
+        setup_next_or_finish(on_submit, state)
       end
 
       def setup_next_or_finish(on_submit, state)
@@ -6009,8 +6159,8 @@ module Meringue
         reconcile_log_scope!(state)
         composed_state = state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
-          Settings::STATE_KEY => settings_snapshot,
-          StatusBarComposer::STATE_KEY => status_bar_composer_snapshot,
+          Settings::STATE_KEY => settings_snapshot(state),
+          StatusBarComposer::STATE_KEY => status_bar_composer_snapshot(state),
           "_status_bar_layout" => StatusBarLayout.from_config(config),
           "_capabilities" => { "github_support" => github_support_enabled?(state) },
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,

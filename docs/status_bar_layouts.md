@@ -1,56 +1,58 @@
-# Custom status-bar layouts
+# Custom bottom status-bar layouts
 
-Meringue keeps the hand-tuned status bars until a layout is explicitly saved. The composer is available as a dedicated step during first-run Setup and every manual `/setup` rerun. It remains directly available with `/status-bar` (the `/statusbar` and `/layout` spellings are aliases). The composer edits three surfaces:
+Only the dashboard's bottom status bar is configurable. The agent-information strip on an embedded worker and the focused-worker command/status bar always retain their hand-tuned built-in layouts.
 
-- **Bottom status bar** — the dashboard context/actions and live status.
-- **Agent-information bar** — the focused worker's identity and workspace controls.
-- **Focused-worker bar** — the focused worker's commands and session status.
+The composer appears directly on the **Status bar** page during first-run Setup and every manual `/setup` rerun; moving components never opens another page. It is also available full-screen with `/status-bar` (plus the `/statusbar` and `/layout` aliases).
 
-The right side of the composer is a live preview of the selected bar. Preview
-changes are in memory only. They are not written when the composer opens, while
-items are moved, or when the preview is cancelled.
+## Components and live preview
+
+The centered preview renders the real bottom bar from the current draft and current AgentTree state. Its palette contains:
+
+- **Context** — what is true right now rather than a standing count: the pinned log scope, the gesture that clears a selected chat target, unanswered questions, and the selected target's own pull request. With nothing selected it shows the standing discovery hints instead;
+- **Open PRs** — the number of currently open delivery pull requests;
+- **Workers** and **Heads** — current working counts;
+- **Harness** — one shared harness or explicit head/worker values;
+- **Model** — one shared model or explicit head/worker values; and
+- **Thinking** — one shared thinking level or explicit head/worker values.
+
+Each component can be absent or placed once in either the **left aligned** or **right aligned** drop zone. Dragging within a zone reorders it; dragging across zones changes its alignment; dragging back to the palette removes it. The default puts context, PR, and agent counts on the left and harness, model, and thinking on the right, so future-session defaults remain visible. Split head/worker values are never collapsed into a misleading shared label.
+
+Context is a component rather than a fixed part of the bar, but removing it also removes the affordances it carries, so it leads the default left zone. It deliberately omits the worker and head counts that the **Workers** and **Heads** components render, so placing all three prints each count once.
+
+Preview changes stay in memory. Setup folds them into its existing settings draft; `/status-bar` owns a separate draft. Neither path writes while the user moves an item.
 
 ## Keyboard workflow
 
-- `Tab` / `Shift-Tab` selects the next or previous bar.
-- `Up` / `Down` selects an item in that bar.
-- `Left` / `Right` moves the selected item one position. `Home` and `End` move
-  it to the first or last position; Space moves it one position to the right.
-- `R` restores all three bars to their built-in order.
-- `Enter` or `Ctrl-S` saves. `Esc` cancels the preview without saving.
-- From `/status-bar`, Save is one atomic configuration transaction. If the configuration changed elsewhere first, the save is rejected and the composer remains open so the user can review the draft against the newer file.
-- From Setup, Save returns the layout to Setup without writing; the final Complete action persists it in Setup's one atomic transaction with the onboarding marker.
+In the full-screen `/status-bar` composer:
+
+- `Up` / `Down` selects a palette component.
+- `Left` / `Right` moves it through the visible bar, crossing the center to change alignment.
+- `Home` / `End` moves it to the outer left/right edge.
+- `Space` cycles it from the palette to left, left to right, and right back to the palette. `X`, Backspace, or Delete removes it.
+- `R` restores the useful default.
+- `Enter` or `Ctrl-S` saves; `Esc` cancels without writing.
+
+On the inline Setup page the component keys are the same, except `Enter`, `Ctrl-S`, and `Tab` activate the centered **Next** action. `Shift-Tab`, Backspace, and Delete retain the documented previous-step keybinding. `X` removes a component.
+
+A direct Save is one atomic configuration transaction. If the file changed after the composer opened, the save is rejected and the draft remains visible. In Setup, **Next** only keeps the layout in memory; final **Complete** persists it with every other setup choice and the onboarding marker in one transaction.
 
 ## Mouse workflow
 
-Click a bar in the left rail to select it. Click and drag an item in the preview
-list to its new position. The item follows the pointer while the button is held;
-releasing the button completes the move. The footer also exposes save, reset,
-and cancel targets. Mouse wheel movement changes the selected bar or item when
-it is over the corresponding list.
+Drag any palette or placed component into either drop zone. Hovering a placed component while dragging chooses that insertion point, so the same gesture supports alignment changes and reordering. The direct composer footer also exposes Reset, Save, and Cancel. Mouse-wheel movement changes the selected component.
 
-The composer remains usable after a terminal resize. Small terminals show an
-explicit size warning and keep `Esc` available so a preview cannot trap the
-user.
+The composer remains recoverable after terminal resizing. A full-screen composer below `48×12` shows an explicit warning and keeps `Esc` visible; the inline Setup page follows Setup's responsive card and always retains its navigation/recovery footer.
 
-## Persistence and recovery
+## Persistence and migration
 
-The saved value is the versioned `tui.status_bar_layout` setting. It is a JSON
-string so it can be written by the existing TOML configuration writer without
-introducing a second persistence format:
+The saved `tui.status_bar_layout` value is versioned JSON inside TOML:
 
 ```toml
 [tui]
-status_bar_layout = "{\"version\":1,\"bars\":{\"bottom\":[\"status\",\"context\"],\"agent_information\":[\"identity\",\"controls\"],\"focused_worker\":[\"status\",\"controls\"]}}"
+status_bar_layout = "{\"version\":2,\"bottom\":{\"left\":[\"context\",\"open_pull_requests\",\"workers\",\"heads\"],\"right\":[\"harness\",\"model\",\"thinking\"]}}"
 ```
 
-The composer canonicalizes supported legacy bar names and item aliases, removes
-duplicates, and restores a bar's defaults when an old list is empty. Unknown
-versions, malformed JSON, wrong types, and invalid item names are ignored as a
-whole; Meringue falls back to the existing renderer rather than drawing a blank
-bar. Removing the layout (using `R` followed by Save) writes an empty setting,
-which restores the built-in rendering path on the next frame.
+Version 2 accepts only known components, rejects duplicates across zones, and rejects malformed or unknown versions as a whole. Invalid or absent data falls back to the complete default instead of drawing a blank footer. Reset followed by Save removes a custom value.
 
-No layout is read from or written to Meringue's orchestration `state.json`.
-The temporary `_status_bar_layout` snapshot used by the TUI is presentation-only;
-the config store and kernel remain the sole durable writers.
+Version-1 documents are migrated from their old bottom `context`/`status` blocks. Their agent-information and focused-worker entries are intentionally ignored, restoring those two bars to their prior defaults.
+
+No layout is read from or written to orchestration `state.json`. `_status_bar_layout` and the inline composer snapshot are presentation-only; the config store and kernel remain the sole durable writers.
