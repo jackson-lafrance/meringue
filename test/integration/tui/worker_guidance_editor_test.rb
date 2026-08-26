@@ -24,9 +24,9 @@ class TuiWorkerGuidanceEditorTest < Minitest::Test
     @config_path = File.join(@tmpdir, "config.toml")
     File.write(@config_path, <<~TOML)
       [settings]
-      schema_version = 1
+      schema_version = 2
       [experiments]
-      worker_spawning_guidance = true
+      agent_defaults_mode = "guided"
     TOML
     @config = Meringue::Config.load(path: @config_path)
     @state = empty_state.merge(
@@ -64,7 +64,7 @@ class TuiWorkerGuidanceEditorTest < Minitest::Test
     select_guidance_row
 
     before = render
-    assert_includes before, "Worker model selection guidance"
+    assert_includes before, "Model and reasoning defaults"
     assert_includes before, "Worker selection guidance — Enter to edit"
 
     send_key(ENTER)
@@ -72,9 +72,9 @@ class TuiWorkerGuidanceEditorTest < Minitest::Test
     assert_equal "settings", snapshot.fetch("mode")
     assert_equal "Experiments", snapshot.fetch("category")
     assert_equal GUIDANCE_ID, snapshot.dig("editor", "id")
-    assert_includes frame, "Worker model selection guidance"
+    assert_includes frame, "Model and reasoning defaults"
     assert_includes frame, "Worker selection guidance — editing"
-    refute_includes frame, "Edit Worker model selection prompt"
+    refute_includes frame, "Edit Guided selection prompt"
 
     set_editor("x" * 140, cursor: 110)
     send_key(UP)
@@ -117,7 +117,7 @@ class TuiWorkerGuidanceEditorTest < Minitest::Test
   end
 
   def test_setup_embeds_the_same_editor_on_the_experiments_step
-    File.write(@config_path, "[settings]\nschema_version = 1\n[experiments]\nworker_spawning_guidance = false\n")
+    File.write(@config_path, "[settings]\nschema_version = 2\n[experiments]\nagent_defaults_mode = \"role-specific\"\n")
     @config = Meringue::Config.load(path: @config_path)
     @app = Meringue::TUI::App.new(
       layout: Meringue::TUI::Layout.new,
@@ -132,9 +132,11 @@ class TuiWorkerGuidanceEditorTest < Minitest::Test
     4.times { send_key(TAB) }
     assert_equal "Experiments", snapshot.fetch("category")
 
-    guidance_toggle = snapshot.fetch("rows").index { |row| row.fetch("id") == "experiments.worker_spawning_guidance" }
-    @app.instance_variable_set(:@settings_row_index, guidance_toggle)
-    send_key(ENTER)
+    # Guided is the third mode of the defaults selector, so reaching the prompt
+    # means cycling that row to "guided" rather than flipping a toggle.
+    mode_row = snapshot.fetch("rows").index { |row| row.fetch("id") == "experiments.agent_defaults_mode" }
+    @app.instance_variable_set(:@settings_row_index, mode_row)
+    @app.instance_variable_get(:@settings_draft).set("experiments.agent_defaults_mode", "guided")
     assert_includes snapshot.fetch("rows").map { |row| row.fetch("id") }, GUIDANCE_ID
     assert_includes render, "Worker selection guidance — Enter to edit"
 
@@ -142,9 +144,9 @@ class TuiWorkerGuidanceEditorTest < Minitest::Test
     send_key(ENTER)
     frame = render
     assert_includes frame, "Meringue Xtras"
-    assert_includes frame, "Worker model selection guidance"
+    assert_includes frame, "Model and reasoning defaults"
     assert_includes frame, "Worker selection guidance — editing"
-    refute_includes frame, "Edit Worker model selection prompt"
+    refute_includes frame, "Edit Guided selection prompt"
 
     set_editor("Routine tasks use a light model.", cursor: 32)
     send_key(SHIFT_ENTER)

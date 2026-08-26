@@ -54,22 +54,28 @@ module Meringue
     # `provider` is accepted so a caller can say which backend it was looking at, but it does not
     # change where the values are written; a backend-specific override belongs in that backend's
     # own config section.
+    # Naming a role writes only that role's value while heads and workers are
+    # configured separately. In shared mode there is one value, so naming a role
+    # still writes both: `/model head <id>` used to persist a head key that the
+    # shared-mode reader ignored, and then reported back the unchanged shared
+    # value as though the change had been saved.
     def self.save_agent_session_defaults!(model: nil, model_role: nil, thinking_level: nil, thinking_role: nil, provider: nil, path: DEFAULT_PATH)
       _ = provider
+      expanded_path = File.expand_path(path.to_s)
+      role_specific = Meringue::Experiments::AgentDefaultsMode.role_specific?(load(path: expanded_path))
       changes = {}
       unless model.nil?
         role = model_role.to_s.strip.downcase
         raise ArgumentError, "model_role must be head or worker" unless role.empty? || %w[head worker].include?(role)
-        targets = role.empty? ? %w[head worker] : [role]
+        targets = role.empty? || !role_specific ? %w[head worker] : [role]
         targets.each { |target| changes["agent.#{target}_model"] = model.to_s }
       end
       unless thinking_level.nil?
         role = thinking_role.to_s.strip.downcase
         raise ArgumentError, "thinking_role must be head or worker" unless role.empty? || %w[head worker].include?(role)
-        targets = role.empty? ? %w[head worker] : [role]
+        targets = role.empty? || !role_specific ? %w[head worker] : [role]
         targets.each { |target| changes["agent.#{target}_thinking"] = thinking_level.to_s }
       end
-      expanded_path = File.expand_path(path.to_s)
       store = Store.new(path: expanded_path)
       store.save(base_fingerprint: store.fingerprint, changes: changes).fetch("config")
     end
@@ -113,14 +119,24 @@ module Meringue
       explicit_github = config.value("experiments", "github_support")
       legacy_install = config.onboarding_version.positive? || preexisting_state?(state_path)
       github_support = explicit_github == true || (explicit_github.nil? && legacy_install)
+      patches = {
+        "settings.schema_version" => Schema::VERSION,
+        "experiments.github_support" => github_support
+      }
+      # "Split head and worker defaults" and "worker model selection guidance"
+      # became the three modes of one setting. An installation that set either
+      # boolean keeps the arrangement it had; the retired keys are dropped so
+      # they cannot contradict the mode later.
+      if Experiments::AgentDefaultsMode.normalize(config.value(*Experiments::AgentDefaultsMode::CONFIG_PATH)).nil?
+        legacy_split = config.value(*Experiments::AgentDefaultsMode::LEGACY_SPLIT_PATH)
+        legacy_guidance = config.value(*Experiments::AgentDefaultsMode::LEGACY_GUIDANCE_PATH)
+        unless legacy_split.nil? && legacy_guidance.nil?
+          patches["experiments.agent_defaults_mode"] =
+            Experiments::AgentDefaultsMode.from_legacy(split: legacy_split, guidance: legacy_guidance)
+        end
+      end
       store = Store.new(path: expanded_path)
-      store.patch_paths(
-        base_fingerprint: store.fingerprint,
-        patches: {
-          "settings.schema_version" => Schema::VERSION,
-          "experiments.github_support" => github_support
-        }
-      )
+      store.patch_paths(base_fingerprint: store.fingerprint, patches: patches)
     end
 
     def self.preexisting_state?(state_path)
@@ -232,11 +248,41 @@ module Meringue
 
     def experiment_enabled?(id, legacy: nil)
       definition = Meringue::Experiments::Registry.fetch(id)
+      raise ArgumentError, "#{definition.id} selects a mode, not on/off; use experiment_mode." if definition.mode?
+
       explicit = value(*definition.config_path)
       return explicit if explicit == true || explicit == false
       return legacy unless legacy.nil?
 
       definition.default
+    end
+
+    # The selected mode of a mode experiment, normalized to one of its declared
+    # modes.
+    def experiment_mode(id)
+      definition = Meringue::Experiments::Registry.fetch(id)
+      raise ArgumentError, "#{definition.id} is on/off, not a mode experiment." unless definition.mode?
+
+      configured = value(*definition.config_path).to_s.strip.downcase.tr("- ", "__")
+      definition.modes.include?(configured) ? configured : definition.default
+    end
+
+    # How future heads and workers get their model and reasoning level. The
+    # three arrangements were previously two independent booleans; see
+    # Experiments::AgentDefaultsMode for why they became one setting.
+    def agent_defaults_mode
+      Meringue::Experiments::AgentDefaultsMode.resolve(self)
+    end
+
+    # True when heads and workers may hold different model/reasoning values.
+    # Guided mode assigns per worker, so it is role-specific too.
+    def role_specific_agent_defaults?
+      Meringue::Experiments::AgentDefaultsMode.role_specific?(self)
+    end
+
+    # True when heads are asked to choose each worker's model and reasoning.
+    def worker_spawning_guidance?
+      Meringue::Experiments::AgentDefaultsMode.guided?(self)
     end
 
     # A dependent worker normally cancels when its predecessor fails. `run` is
