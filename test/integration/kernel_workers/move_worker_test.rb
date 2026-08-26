@@ -103,9 +103,38 @@ class KernelWorkersMoveWorkerTest < Minitest::Test
 
     assert_equal "rejected", result.fetch("status")
     assert_includes result.fetch("errors"), "cross_project_move_unsupported"
-    assert_includes result.fetch("message"), "without changing repositories"
+    assert_includes result.fetch("message"), "different repository"
     assert_equal original, agent(@engine, worker)
     assert_nil agent(@engine, "#{second_issue}-W1")
+  end
+
+  # Two logical projects over one directory share a checkout, so the worker keeps
+  # its workspace, branch, and live session and only its board changes.
+  def test_cross_project_move_is_allowed_between_projects_sharing_one_root
+    first = project_with_two_issues(@engine, repo_name: "shared-root-project")
+    second_project = add_project(@engine, first.fetch("root"), name: "Resiliency")
+    second_issue = create_issue(@engine, second_project, title: "Resiliency issue")
+
+    worker = spawn_worker(@engine, first.fetch("first_issue_id")).fetch("target_id")
+    original = agent(@engine, worker)
+    owner_id = original.dig("harness_metadata", "workspace_plan", "workspace_owner_id")
+
+    result = apply_raw(@engine, "MoveWorker", { "agent_id" => worker, "target_issue_id" => second_issue })
+
+    assert_equal "accepted", result.fetch("status")
+    moved_id = result.fetch("target_id")
+    moved = agent(@engine, moved_id)
+
+    assert_equal second_project, moved.fetch("project_id")
+    assert_equal second_issue, moved.fetch("issue_id")
+    # The session and the checkout are untouched: only the board changed.
+    assert_equal original.fetch("harness_session_id"), moved.fetch("harness_session_id")
+    assert_equal original.fetch("pid"), moved.fetch("pid")
+    assert_equal original.fetch("workspace_path"), moved.fetch("workspace_path")
+    assert_equal original.fetch("workspace_branch"), moved.fetch("workspace_branch")
+    # External ownership stays keyed to the original worker id.
+    assert_equal owner_id, moved.dig("harness_metadata", "workspace_plan", "workspace_owner_id")
+    assert_nil agent(@engine, worker)
   end
 
   # --- streaming (in-flight) worker ------------------------------------------------------

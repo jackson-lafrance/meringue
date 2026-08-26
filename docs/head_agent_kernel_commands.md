@@ -379,7 +379,7 @@ Every rejected or skipped `ModifyIssue`, `SpawnWorker`, and `PromptAgent` also s
 
 A corrected route is never silent. The kernel appends `Rerouted from predicted issue <id>.` to the worker's spawn log line, adds `rerouted_from_issue_id` to that log's details and to the worker's `harness_metadata`, and emits a separate warning log naming both issues.
 
-A worker's issue is mutable after spawn through `MoveWorker` (`/move <agent_id> <issue_id>` or `/reparent`) when both issues belong to the same project. Reparenting does not re-provision: the worker keeps its harness session, worktree, branch, and external workspace-owner identity. The kernel renumbers the worker id to the composite key of its new issue (P1-I1-W1 -> P1-I7-W2) and re-points every reference that named the moved worker (after_agent_id, follow_up/replace lineage, issue agent_ids, deferred_spawn handover context, and ids quoted in prose) in the same pass, so `/recount` and dependent activation stay coherent. An in-flight (streaming) worker can be reparented mid-turn without interruption. Cross-project moves are rejected because the preserved session would remain in the source repository; spawn a worker on the destination issue instead. A worker whose workspace is still provisioning is also not movable until its session starts.
+A worker's issue is mutable after spawn through `MoveWorker` (`/move <agent_id> <issue_id>` or `/reparent`) when both issues belong to the same project. Reparenting does not re-provision: the worker keeps its harness session, worktree, branch, and external workspace-owner identity. The kernel renumbers the worker id to the composite key of its new issue (P1-I1-W1 -> P1-I7-W2) and re-points every reference that named the moved worker (after_agent_id, follow_up/replace lineage, issue agent_ids, deferred_spawn handover context, and ids quoted in prose) in the same pass, so `/recount` and dependent activation stay coherent. An in-flight (streaming) worker can be reparented mid-turn without interruption. A move between projects is allowed exactly when the two projects resolve to the same checkout, which is the case for two logical projects registered against one directory: the worker keeps its workspace and only its board changes. A move to a project in a different repository is still rejected, because the preserved session would remain in the source repository; spawn a worker on the destination issue instead. A worker whose workspace is still provisioning is also not movable until its session starts.
 
 ## Answering open questions
 
@@ -519,6 +519,23 @@ head's `AddProject` as a reuse of the already registered project. Its `target_id
 project id, so subsequent `CreateIssue` and `SpawnWorker` commands keep their same-batch routing.
 A standalone duplicate `/project add` still reports `project_already_exists`; this reuse behavior
 is only for a head batch that was already in flight when the registration won elsewhere.
+
+#### More than one project in one directory
+
+A directory can hold several logical projects: a migration effort and a resiliency effort in one
+repository are separate boards over the same files. For a person, project identity is therefore the
+(path, name) pair — `/project add <path> <name>` at an already-registered path opens a second board
+— while an unnamed `/project add` still means "the project at this path" and reuses the one already
+there.
+
+**A head is deliberately excluded from that.** Two heads can each observe an unregistered root and
+propose `AddProject` with a name they invented before either result lands; if the loser's differing
+name created a second board, the rest of its batch would bind to the wrong project. Registration by
+a head is therefore idempotent per path regardless of the name it proposes, and opening a second
+board is left to the person who wants one. Heads must not try to create one.
+
+Issues and workers move between projects that share a directory with `MoveIssue` and `MoveWorker`,
+because those projects resolve to the same checkout.
 
 #### Project naming contract
 
@@ -738,7 +755,7 @@ Example:
 
 Reparents an existing worker onto a different issue in the same project without killing, restarting, or re-provisioning its harness session, worktree, or branch. The worker id is renumbered to the composite key of its new issue and every reference that named it is re-pointed in the same pass. Use this to correct a misfiled worker instead of `SpawnWorker` + `Kill`, which loses the in-progress session.
 
-The target issue and source project must exist. Cross-project moves are rejected because a preserved session would still be operating in the source repository; spawn a worker on the destination issue to receive the correct workspace. A worker whose background workspace provisioning is still using its current id must finish starting first. A worker already on the target issue is rejected as a no-op, and heads may not be reparented.
+The target issue and source project must exist. A move between projects is accepted when both resolve to the same checkout — two logical projects registered against one directory — because the preserved session stays valid and only the board changes. A move to a project in a different repository is rejected with `cross_repository_move_unsupported`, since a preserved session would still be operating in the source repository; spawn a worker on the destination issue to receive the correct workspace. A worker whose background workspace provisioning is still using its current id must finish starting first. A worker already on the target issue is rejected as a no-op, and heads may not be reparented.
 
 Payload:
 
@@ -757,6 +774,37 @@ Example:
   "payload": {
     "agent_id": "P1-I1-W1",
     "target_issue_id": "P1-I7"
+  }
+}
+```
+
+### MoveIssue
+
+Moves an issue: to another project over the same checkout, beneath another issue, or out to the top level. It is the issue-level counterpart to `MoveWorker`, backing `/issue move <issue_id> <project_id|issue_id|top>`.
+
+An issue never moves alone. Its descendant issues and every worker beneath them travel with it, so a board stays internally consistent. Crossing projects renumbers the whole subtree, because an issue id is composite (`P1-I3`) and a worker id is composite on top of it (`P1-I3-W2`); every reference that named a moved record is re-pointed in one pass, and harness sessions, worktrees, branches, and external workspace-owner identities are untouched. Reparenting inside one project changes only parentage, so no id moves at all.
+
+The moved issue's own parent does not travel with it: either the caller names a new one, or the issue becomes top-level in the project it lands in.
+
+Rejections: a target project in a different repository (`cross_repository_move_unsupported`), a parent that sits inside the issue being moved (`parent_is_descendant`), a parent belonging to another project (`parent_in_other_project`), an unknown issue or project, and a move that would change nothing (`already_in_target_location`).
+
+Payload — one of `target_project_id` or `parent_issue_id` is required. An explicitly empty `parent_issue_id` promotes the issue to the top level:
+
+```json
+{
+  "issue_id": "P1-I3",
+  "target_project_id": "P2"
+}
+```
+
+Example:
+
+```json
+{
+  "type": "MoveIssue",
+  "payload": {
+    "issue_id": "P1-I3",
+    "parent_issue_id": "P1-I1"
   }
 }
 ```

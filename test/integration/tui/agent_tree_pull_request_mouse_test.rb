@@ -49,29 +49,51 @@ class TuiAgentTreePullRequestMouseTest < Minitest::Test
     )
   end
 
-  def test_right_clicking_an_issue_opens_its_delivery_pull_request
+  # Right-click now opens the row's menu rather than firing one hard-coded
+  # action, so opening a pull request is a choice inside that menu.
+  def test_right_clicking_an_issue_opens_its_context_menu
     url = "https://github.com/owner/repo/pull/42"
     state = state_with_issue_and_worker("delivery_pull_request" => { "url" => url, "state" => "open" })
 
     result = send_right_click(state, "P1-I1")
 
     assert_equal ["", 0, -1], result
-    assert_equal [url], @opener.opened
+    assert @app.send(:context_menu_active?)
+    assert_empty @opener.opened, "the menu opens; it does not act on its own"
+    labels = menu_entries.map { |entry| entry.fetch("label") }
+    assert_includes labels, "Open pull request"
+    assert_includes labels, "Move to project…"
   end
 
-  def test_right_clicking_a_worker_does_not_duplicate_the_issue_pull_request_affordance
+  def test_choosing_open_pull_request_from_the_menu_opens_it
+    url = "https://github.com/owner/repo/pull/42"
+    state = state_with_issue_and_worker("delivery_pull_request" => { "url" => url, "state" => "open" })
+    send_right_click(state, "P1-I1")
+
+    activate_menu_entry(state, "Open pull request")
+
+    assert_equal [url], @opener.opened
+    refute @app.send(:context_menu_active?)
+  end
+
+  def test_right_clicking_a_worker_offers_worker_verbs_instead_of_the_issue_pull_request
     url = "https://github.com/owner/repo/pull/42"
     state = state_with_issue_and_worker("delivery_pull_request" => { "url" => url, "state" => "open" })
 
     send_right_click(state, "P1-I1-W1")
 
     assert_empty @opener.opened
+    labels = menu_entries.map { |entry| entry.fetch("label") }
+    assert_includes labels, "Open workspace"
+    assert_includes labels, "Move to issue…"
+    refute_includes labels, "Spawn worker…"
   end
 
-  def test_right_clicking_an_issue_without_a_pr_shows_a_transient_notice
+  def test_choosing_open_pull_request_without_one_shows_a_transient_notice
     state = state_with_issue_and_worker
-
     send_right_click(state, "P1-I1")
+
+    activate_menu_entry(state, "Open pull request")
 
     assert_empty @opener.opened
     messages = compose_app_state(@app, state).fetch("_chat").fetch("messages")
@@ -118,6 +140,20 @@ class TuiAgentTreePullRequestMouseTest < Minitest::Test
   end
 
   private
+
+  def menu_entries
+    Array(@app.instance_variable_get(:@context_menu).fetch("entries", []))
+  end
+
+  # Drive the menu the way a person would: move the selection onto the labelled
+  # row, then press Enter.
+  def activate_menu_entry(state, label)
+    index = menu_entries.index { |entry| entry.fetch("label") == label }
+    flunk "no context menu entry labelled #{label.inspect}" unless index
+
+    @app.instance_variable_get(:@context_menu)["index"] = index
+    @app.send(:handle_key, "\r", "", 0, -1, nil, state)
+  end
 
   def state_with_issue_and_worker(issue_overrides = {})
     worker_overrides = issue_overrides.fetch("worker_overrides", {})

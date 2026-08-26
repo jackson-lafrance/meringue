@@ -196,6 +196,8 @@ module Meringue
         "move" => "MoveWorker",
         "reparent_agent" => "MoveWorker",
         "reparent" => "MoveWorker",
+        "move_issue" => "MoveIssue",
+        "reparent_issue" => "MoveIssue",
         "prompt_agent" => "PromptAgent",
         "pause_worker" => "PauseWorker",
         "resume_worker" => "ResumeWorker",
@@ -294,7 +296,7 @@ module Meringue
       HEAD_PROPOSABLE_COMMANDS = %w[
         ListAll GetState GetInfo Help ListQuestions
         GetSessionDefaults GetModelCatalog SetDefaultSessionModel SetDefaultSessionThinkingLevel
-        AddProject ModifyProject CreateIssue ModifyIssue MoveWorker SpawnWorker PromptAgent SpawnHead NoOp
+        AddProject ModifyProject CreateIssue ModifyIssue MoveWorker MoveIssue SpawnWorker PromptAgent SpawnHead NoOp
         CreateGoal ModifyGoal StopGoal ListGoals
         AskQuestion AnswerQuestion DismissQuestion
         PauseWorker ResumeWorker ExportWorkers ImportWorkers
@@ -1960,6 +1962,8 @@ module Meringue
           modify_issue(command_id, command_type, payload)
         when "MoveWorker"
           move_worker(command_id, command_type, payload)
+        when "MoveIssue"
+          move_issue(command_id, command_type, payload)
         when "SpawnWorker"
           spawn_worker(command_id, command_type, payload)
         when "PromptAgent"
@@ -8405,17 +8409,33 @@ module Meringue
         return rejected_result(command_id, command_type, "Project was not added.", errors) unless errors.empty?
 
         state = normalized_state
-        existing_project = state.fetch("projects").find do |project|
+        requested_name = project_display_name(name)
+        projects_at_path = state.fetch("projects").select do |project|
           File.expand_path(project.fetch("root_path")) == expanded_path
         end
+        head_id = present_string(value_at(payload, "_head_id"))
+        head = head_id && find_agent(state, head_id)
+        head_request = !head.nil? && head.fetch("type", nil) == "head"
+
+        # A directory can hold several logical projects: someone working a
+        # migration and a resiliency effort in one repository wants two separate
+        # boards over the same files. So for a person, identity is the
+        # (path, name) pair, and an unnamed request still means "the project at
+        # this path", preserving the historical single-project contract.
+        #
+        # A head is deliberately excluded from that. Two heads can each observe an
+        # unregistered root and propose AddProject with a name they invented
+        # before either result lands; if the loser's differing name created a
+        # second board, the rest of its batch would bind to the wrong project.
+        # Registration by a head therefore stays idempotent per path, and opening
+        # a second board is left to the person who wants one.
+        existing_project = if head_request || requested_name.nil?
+                             projects_at_path.first
+                           else
+                             projects_at_path.find { |project| same_project_name?(project.fetch("name"), requested_name) }
+                           end
         if existing_project
-          # A head can be spawned before another head wins registration of the same root. Keep
-          # AddProject's standalone duplicate rejection (and its slash-command contract), but make
-          # a head batch idempotent so its following CreateIssue/SpawnWorker commands still see the
-          # project that won the race.
-          head_id = present_string(value_at(payload, "_head_id"))
-          head = head_id && find_agent(state, head_id)
-          if head && head.fetch("type", nil) == "head"
+          if head_request
             now = timestamp
             log_ids = append_log(
               state,
@@ -8442,14 +8462,19 @@ module Meringue
             )
           end
 
-          return rejected_result(command_id, command_type, "Project is already registered.", ["project_already_exists"])
+          message = if requested_name && same_project_name?(existing_project.fetch("name"), requested_name)
+                      "Project #{existing_project.fetch("id")} is already registered at that path under the name #{requested_name.inspect}."
+                    else
+                      "Project is already registered."
+                    end
+          return rejected_result(command_id, command_type, message, ["project_already_exists"])
         end
 
         now = timestamp
         project_id = next_project_id!(state)
         project = {
           "id" => project_id,
-          "name" => project_display_name(name) || default_project_name(expanded_path),
+          "name" => requested_name || default_project_name(expanded_path),
           "root_path" => expanded_path,
           "status" => "working",
           "created_at" => now,
@@ -8463,7 +8488,10 @@ module Meringue
           source_id: project_id,
           level: "info",
           message: "Added project #{project_id}: #{project.fetch("name")}",
-          details: { "root_path" => expanded_path }
+          details: {
+            "root_path" => expanded_path,
+            "projects_sharing_root_path" => projects_at_path.length + 1
+          }
         )
         touch_state!(state, now)
         store.save(state)
@@ -8709,12 +8737,18 @@ module Meringue
             ["source_project_not_found"]
           )
         end
-        unless Ids.same?(old_project_id, target_project.fetch("id"))
+        # Moving between projects is safe exactly when it does not change
+        # repositories. Two logical projects over one directory share a checkout,
+        # so the worker keeps its workspace, branch, and live harness session and
+        # only its board changes. Different roots would strand the worker's
+        # worktree under a project that does not own it.
+        cross_project = !Ids.same?(old_project_id, target_project.fetch("id"))
+        if cross_project && !projects_share_root_path?(state, old_project_id, target_project)
           return move_worker_rejection(
             command_id,
             command_type,
             payload,
-            "Worker #{agent.fetch("id")} cannot move across projects without changing repositories. Spawn a worker on #{target_issue.fetch("id")} so it receives that project's workspace.",
+            "Worker #{agent.fetch("id")} cannot move to a project in a different repository. Spawn a worker on #{target_issue.fetch("id")} so it receives that project's workspace.",
             ["cross_project_move_unsupported"]
           )
         end
@@ -8781,6 +8815,10 @@ module Meringue
         refresh_issue_status_after_worker_move!(state, find_issue(state, old_issue_id), now)
         refresh_issue_status_after_worker_move!(state, target_issue, now)
         update_project_status_from_issues!(state, target_project, now)
+        if cross_project
+          source_project = find_project(state, old_project_id)
+          update_project_status_from_issues!(state, source_project, now) if source_project
+        end
 
         log_ids = append_log(
           state,
@@ -8795,7 +8833,7 @@ module Meringue
             "new_issue_id" => new_issue_id,
             "old_project_id" => old_project_id,
             "new_project_id" => new_project_id,
-            "cross_project" => false,
+            "cross_project" => cross_project,
             "harness_session_preserved" => true
           }.compact
         )
@@ -8803,6 +8841,20 @@ module Meringue
         store.save(state)
 
         accepted_result(command_id, command_type, new_agent_id, "Moved worker #{old_agent_id} to #{new_agent_id} on issue #{new_issue_id}.", moved, log_ids)
+      end
+
+      # Two logical projects are the same checkout when their roots resolve to
+      # one directory. Comparing expanded paths keeps `.`/symlink spellings and a
+      # trailing slash from reading as different repositories.
+      def projects_share_root_path?(state, source_project_id, target_project)
+        source_project = find_project(state, source_project_id)
+        return false unless source_project && target_project
+
+        source_root = present_string(source_project.fetch("root_path", nil))
+        target_root = present_string(target_project.fetch("root_path", nil))
+        return false unless source_root && target_root
+
+        File.expand_path(source_root) == File.expand_path(target_root)
       end
 
       def refresh_issue_status_after_worker_move!(state, issue, now)
@@ -8818,6 +8870,232 @@ module Meringue
         else
           update_issue_status_from_workers!(state, issue, now)
         end
+      end
+
+      # MoveIssue is the issue-level counterpart to MoveWorker: it reparents an
+      # issue under another issue, promotes it to the top level, or moves it to a
+      # different logical project over the same checkout. An issue never moves
+      # alone — its descendants and every worker beneath them travel with it, so
+      # a board stays internally consistent.
+      #
+      # Crossing projects renumbers the whole subtree, because an issue id is
+      # composite (`P1-I3`) and a worker id is composite on top of that
+      # (`P1-I3-W2`). Reparenting inside one project changes only parentage, so
+      # ids and sessions are untouched.
+      def move_issue(command_id, command_type, payload)
+        issue_id = value_at(payload, "issue_id", "IssueID", "issueId", "target_id", "TargetID", "targetId")
+        target_project_id = value_at(payload, "target_project_id", "TargetProjectID", "targetProjectId", "project_id", "ProjectID", "projectId")
+        parent_given = payload_key?(payload, "parent_issue_id", "ParentIssueID", "parentIssueId", "parent", "Parent")
+        parent_issue_id = value_at(payload, "parent_issue_id", "ParentIssueID", "parentIssueId", "parent", "Parent")
+
+        return move_issue_rejection(command_id, command_type, payload, "Issue was not moved.", ["issue_id is required"]) if blank?(issue_id)
+        if blank?(target_project_id) && !parent_given
+          return move_issue_rejection(
+            command_id, command_type, payload,
+            "Issue was not moved.",
+            ["target_project_id or parent_issue_id is required"]
+          )
+        end
+
+        state = normalized_state
+        issue = find_issue(state, issue_id)
+        if issue.nil?
+          removal = removed_issue_record(state, issue_id)
+          message = removal ? "Issue #{issue_id} no longer exists: it was removed #{issue_removal_phrase(removal)}." : "Issue #{issue_id} does not exist."
+          return move_issue_rejection(command_id, command_type, payload, message, ["issue_not_found"])
+        end
+
+        source_project_id = issue.fetch("project_id")
+        target_project = if blank?(target_project_id)
+                           find_project(state, source_project_id)
+                         else
+                           find_project(state, target_project_id)
+                         end
+        if target_project.nil?
+          return move_issue_rejection(command_id, command_type, payload, "Project #{target_project_id} does not exist.", ["target_project_not_found"])
+        end
+
+        cross_project = !Ids.same?(source_project_id, target_project.fetch("id"))
+        if cross_project && !projects_share_root_path?(state, source_project_id, target_project)
+          return move_issue_rejection(
+            command_id, command_type, payload,
+            "Issue #{issue.fetch("id")} cannot move to a project in a different repository, because its workers' checkouts belong to #{source_project_id}.",
+            ["cross_repository_move_unsupported"]
+          )
+        end
+
+        subtree = issue_subtree_ids(state, issue.fetch("id"))
+        new_parent_id = nil
+        if parent_given && !blank?(parent_issue_id) && !%w[none root top null].include?(parent_issue_id.to_s.strip.downcase)
+          parent = find_issue(state, parent_issue_id)
+          if parent.nil?
+            return move_issue_rejection(command_id, command_type, payload, "Parent issue #{parent_issue_id} does not exist.", ["parent_issue_not_found"])
+          end
+          if subtree.any? { |candidate| Ids.same?(candidate, parent.fetch("id")) }
+            return move_issue_rejection(
+              command_id, command_type, payload,
+              "Issue #{issue.fetch("id")} cannot become a child of #{parent.fetch("id")}, which sits inside it.",
+              ["parent_is_descendant"]
+            )
+          end
+          unless Ids.same?(parent.fetch("project_id"), target_project.fetch("id"))
+            return move_issue_rejection(
+              command_id, command_type, payload,
+              "Parent issue #{parent.fetch("id")} belongs to #{parent.fetch("project_id")}, not #{target_project.fetch("id")}.",
+              ["parent_in_other_project"]
+            )
+          end
+          new_parent_id = parent.fetch("id")
+        end
+
+        current_parent = present_string(issue.fetch("parent_issue_id", nil))
+        if !cross_project && parent_given && Ids.same?(current_parent.to_s, new_parent_id.to_s)
+          return move_issue_rejection(
+            command_id, command_type, payload,
+            "Issue #{issue.fetch("id")} already sits there; nothing to move.",
+            ["already_in_target_location"]
+          )
+        end
+        if !cross_project && !parent_given
+          return move_issue_rejection(
+            command_id, command_type, payload,
+            "Issue #{issue.fetch("id")} is already in #{target_project.fetch("id")}; nothing to move.",
+            ["already_in_target_location"]
+          )
+        end
+
+        now = timestamp
+        mapping = cross_project ? issue_move_id_mapping(state, subtree, target_project.fetch("id")) : {}
+        repoint_moved_ids!(state, mapping) unless mapping.empty?
+
+        moved_root_id = mapping.fetch(issue.fetch("id"), issue.fetch("id"))
+        moved_ids = subtree.map { |old| mapping.fetch(old, old) }
+        moved_ids.each do |moved_id|
+          record = find_issue(state, moved_id)
+          next unless record
+
+          record["project_id"] = target_project.fetch("id")
+          record["updated_at"] = now
+          state.fetch("agents").each do |agent|
+            next unless agent.is_a?(Hash) && Ids.same?(agent.fetch("issue_id", nil).to_s, moved_id)
+
+            agent["project_id"] = target_project.fetch("id")
+            agent["updated_at"] = now
+          end
+        end
+
+        moved_root = find_issue(state, moved_root_id)
+        # The root's own parent does not travel with it: either the caller named a
+        # new one, or it becomes top-level in the project it landed in.
+        moved_root["parent_issue_id"] = new_parent_id if parent_given || cross_project
+        moved_root["updated_at"] = now
+
+        State::Recounter.rebuild_issue_agent_ids!(state)
+        source_project = find_project(state, source_project_id)
+        update_project_status_from_issues!(state, target_project, now)
+        update_project_status_from_issues!(state, source_project, now) if source_project && cross_project
+
+        description = if cross_project
+                        "Moved issue #{issue.fetch("id")} to #{moved_root_id} in project #{target_project.fetch("id")}."
+                      elsif new_parent_id
+                        "Moved issue #{moved_root_id} under #{new_parent_id}."
+                      else
+                        "Moved issue #{moved_root_id} to the top level of #{target_project.fetch("id")}."
+                      end
+
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: moved_root_id,
+          level: "info",
+          message: description,
+          details: {
+            "old_issue_id" => issue.fetch("id"),
+            "new_issue_id" => moved_root_id,
+            "old_project_id" => source_project_id,
+            "new_project_id" => target_project.fetch("id"),
+            "parent_issue_id" => new_parent_id,
+            "cross_project" => cross_project,
+            "moved_issue_ids" => moved_ids,
+            "renamed_ids" => mapping
+          }.compact
+        )
+        touch_state!(state, now)
+        store.save(state)
+
+        accepted_result(command_id, command_type, moved_root_id, description, moved_root, log_ids)
+      end
+
+      # The issue and every issue beneath it, parents before children, so callers
+      # can mint ids in an order where a parent is always renamed first.
+      def issue_subtree_ids(state, root_id)
+        ordered = []
+        frontier = [root_id]
+        until frontier.empty?
+          current = frontier.shift
+          next if ordered.any? { |seen| Ids.same?(seen, current) }
+
+          ordered << current
+          state.fetch("issues").each do |candidate|
+            next unless candidate.is_a?(Hash)
+            next unless Ids.same?(candidate.fetch("parent_issue_id", nil).to_s, current.to_s)
+
+            frontier << candidate.fetch("id")
+          end
+        end
+        ordered
+      end
+
+      # Old id => new id for a subtree changing projects, covering the issues and
+      # the workers beneath them. Worker numbering restarts under the new issue id
+      # rather than being carried over, matching how MoveWorker renumbers.
+      def issue_move_id_mapping(state, subtree, target_project_id)
+        mapping = {}
+        subtree.each do |old_issue_id|
+          new_issue_id = next_issue_id!(state, target_project_id)
+          mapping[old_issue_id] = new_issue_id
+          workers = state.fetch("agents").select do |agent|
+            agent.is_a?(Hash) && Ids.same?(agent.fetch("issue_id", nil).to_s, old_issue_id)
+          end
+          workers.each_with_index do |worker, index|
+            mapping[worker.fetch("id")] = "#{new_issue_id}-W#{index + 1}"
+          end
+          state.fetch("counters").fetch("workers_by_issue")[new_issue_id] = workers.length
+          state.fetch("counters").fetch("workers_by_issue").delete(old_issue_id)
+        end
+        mapping
+      end
+
+      # One walk applies the whole mapping, so a composite id and the ids nested
+      # under it are rewritten in the same pass and no intermediate state exists
+      # where half a subtree has been renamed.
+      def repoint_moved_ids!(state, mapping)
+        return if mapping.empty?
+
+        State::Recounter.walk_references!(state) do |value, _path, reference, _mode|
+          if reference
+            mapping.fetch(value, value)
+          else
+            repoint_embedded_moved_ids(value, mapping)
+          end
+        end
+      end
+
+      def repoint_embedded_moved_ids(text, mapping)
+        return text unless text.is_a?(String)
+        return text unless mapping.keys.any? { |old| text.include?(old) }
+        return text unless text.match?(State::Recounter::EMBEDDED_ID_PATTERN)
+
+        text.gsub(State::Recounter::EMBEDDED_ID_PATTERN) { |token| mapping.fetch(token, token) }
+      end
+
+      def move_issue_rejection(command_id, command_type, payload, message, errors)
+        rejected_result(
+          command_id,
+          command_type,
+          with_dropped_intent(message, "type" => "MoveIssue", "payload" => payload),
+          errors
+        )
       end
 
       def move_worker_rejection(command_id, command_type, payload, message, errors)
@@ -20356,6 +20634,15 @@ module Meringue
         nil
       end
 
+      # Whether the caller mentioned a key at all, as opposed to what its value
+      # is. MoveIssue needs the difference: an explicitly empty parent means
+      # "promote to top level", while an absent one means "leave parentage alone".
+      def payload_key?(hash, *keys)
+        return false unless hash.respond_to?(:key?)
+
+        keys.any? { |key| hash.key?(key) || hash.key?(key.to_sym) }
+      end
+
       def accepted_result(command_id, command_type, target_id, message, result, log_entry_ids)
         Result.new(
           command_id: command_id,
@@ -20561,6 +20848,13 @@ module Meringue
       def project_display_name(name)
         ProjectNaming.without_status_suffix(present_string(name))
       end
+
+      # Two logical projects over one directory are told apart by name, so the
+      # comparison ignores case and surrounding space the way a person would.
+      def same_project_name?(left, right)
+        left.to_s.strip.casecmp(right.to_s.strip).zero?
+      end
+
 
       def present_string(value)
         value = value.to_s.strip unless value.nil?

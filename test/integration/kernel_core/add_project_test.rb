@@ -128,18 +128,80 @@ class KernelCoreAddProjectTest < Minitest::Test
     assert_log_levels_valid
   end
 
-  def test_add_project_rejects_duplicate_registration_of_the_same_root
+  # Identity is the (path, name) pair. An unnamed request still means "the
+  # project at this path", so the historical single-project contract is intact.
+  def test_add_project_rejects_an_unnamed_duplicate_of_the_same_root
     path = make_project_dir("duplicate")
     assert_accepted(apply_command("AddProject", "path" => path))
     before = domain_snapshot
 
-    duplicate = apply_command("AddProject", "path" => File.join(path, "."), "name" => "Another Name")
+    duplicate = apply_command("AddProject", "path" => File.join(path, "."))
 
     assert_rejected(duplicate, "project_already_exists")
     assert_equal "Project is already registered.", duplicate.fetch("message")
     assert_equal before, domain_snapshot
     assert_equal 1, persisted_projects.length
     assert_equal 1, persisted_state.fetch("counters").fetch("projects")
+  end
+
+  def test_add_project_rejects_a_second_project_with_the_same_name_at_one_root
+    path = make_project_dir("same-name")
+    assert_accepted(apply_command("AddProject", "path" => path, "name" => "Yugabyte migration"))
+    before = domain_snapshot
+
+    duplicate = apply_command("AddProject", "path" => File.join(path, "."), "name" => "  yugabyte MIGRATION ")
+
+    assert_rejected(duplicate, "project_already_exists")
+    assert_includes duplicate.fetch("message"), "already registered at that path"
+    assert_equal before, domain_snapshot
+    assert_equal 1, persisted_projects.length
+  end
+
+  # One repository, two boards: a migration effort and a resiliency effort are
+  # separate projects even though their files live in the same directory.
+  def test_add_project_registers_differently_named_projects_at_one_root
+    path = make_project_dir("shared-root")
+    first = apply_command("AddProject", "path" => path, "name" => "Yugabyte migration")
+    second = apply_command("AddProject", "path" => File.join(path, "."), "name" => "Resiliency")
+
+    assert_accepted(first)
+    assert_accepted(second)
+    refute_equal first.fetch("target_id"), second.fetch("target_id")
+    assert_equal 2, persisted_projects.length
+    assert_equal [File.expand_path(path)] * 2, persisted_projects.map { |project| File.expand_path(project.fetch("root_path")) }
+    assert_equal ["Yugabyte migration", "Resiliency"], persisted_projects.map { |project| project.fetch("name") }
+  end
+
+  # Naming is what separates two boards over one directory, so a second project
+  # there has to be asked for by name. An unnamed request keeps meaning "the
+  # project at this path" and reuses the one already registered.
+  def test_add_project_requires_a_name_for_a_second_project_at_one_root
+    path = make_project_dir("shared-default")
+    assert_accepted(apply_command("AddProject", "path" => path, "name" => "Explicit"))
+
+    assert_rejected(apply_command("AddProject", "path" => path), "project_already_exists")
+    assert_accepted(apply_command("AddProject", "path" => path, "name" => "Second board"))
+
+    names = persisted_projects.map { |project| project.fetch("name") }
+    assert_equal ["Explicit", "Second board"], names
+    assert_equal names.length, names.uniq.length
+  end
+
+  # Two heads can each observe an unregistered root and propose AddProject with a
+  # name they invented before either lands. If the loser's differing name opened a
+  # second board, the rest of its batch would bind to the wrong project, so a head
+  # registers idempotently per path and only a person opens a second board.
+  def test_a_head_reuses_the_project_at_a_path_even_under_a_different_name
+    path = make_project_dir("head-race")
+    first = apply_command("AddProject", "path" => path, "name" => "Chosen by the first head")
+    head_id = spawn_head!.fetch("target_id")
+
+    second = apply_command("AddProject", "path" => path, "name" => "Chosen by the second head", "_head_id" => head_id)
+
+    assert_accepted(second)
+    assert_equal first.fetch("target_id"), second.fetch("target_id")
+    assert_equal 1, persisted_projects.length
+    assert_equal "Chosen by the first head", persisted_projects.first.fetch("name")
   end
 
   def test_add_project_assigns_sequential_ids_per_registration
