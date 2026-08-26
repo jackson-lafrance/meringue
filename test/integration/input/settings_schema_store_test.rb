@@ -28,14 +28,14 @@ class InputSettingsSchemaStoreTest < Minitest::Test
     config = empty_config
     definitions = Meringue::Config::Schema.definitions
 
-    assert_equal %w[pi claude], Meringue::Config::Schema.fetch("agent.head_harness").option_values(config)
-    assert_equal %w[pi claude], Meringue::Config::Schema.fetch("agent.worker_harness").option_values(config)
+    assert_equal %w[pi claude codex], Meringue::Config::Schema.fetch("agent.head_harness").option_values(config)
+    assert_equal %w[pi claude codex], Meringue::Config::Schema.fetch("agent.worker_harness").option_values(config)
     refute definitions.any? { |definition| definition.id.start_with?("harnesses.antigravity.") }
 
     error = assert_raises(Meringue::Config::ValidationError) do
       Meringue::Config::Schema.validate_changes({ "agent.head_harness" => "antigravity" }, config: config)
     end
-    assert_includes error.field_errors.fetch("agent.head_harness"), "pi, claude"
+    assert_includes error.field_errors.fetch("agent.head_harness"), "pi, claude, codex"
   end
 
   def test_every_supported_editor_type_normalizes_and_validates
@@ -234,6 +234,29 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       assert_includes error.field_errors.fetch("safety.worker_blacklist"), "pi"
       refute File.exist?(config_path)
     end
+  end
+
+  def test_setup_moves_untouched_model_defaults_with_the_selected_harness
+    config = Meringue::Config.new({}, path: "/tmp/settings-codex.toml", file_data: {})
+    draft = Meringue::TUI::Settings::Draft.new(config, env: {})
+
+    assert_equal Meringue::Harness::Registry::DEFAULT_MODEL, draft.value("agent.head_model")
+    draft.set("agent.head_harness", "codex")
+    assert_equal "openai/gpt-5.6-sol", draft.value("agent.head_model")
+
+    draft.set("agent.head_harness", "claude")
+    assert_equal Meringue::Harness::Registry::DEFAULT_MODEL, draft.value("agent.head_model")
+
+    draft.set("agent.head_model", "openai/custom-model")
+    draft.set("agent.head_harness", "codex")
+    assert_equal "openai/custom-model", draft.value("agent.head_model"), "an explicit model choice must survive a harness switch"
+
+    configured = Meringue::Config.new(
+      { "harness" => { "provider" => "codex" } },
+      path: "/tmp/settings-codex-existing.toml",
+      file_data: { "harness" => { "provider" => "codex" } }
+    )
+    assert_equal "openai/gpt-5.6-sol", configured.setting("agent.head_model", env: {})
   end
 
   def test_runtime_override_provenance_is_not_mistaken_for_file_data

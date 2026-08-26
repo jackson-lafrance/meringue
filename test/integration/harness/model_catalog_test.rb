@@ -277,7 +277,49 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
     assert_equal "fetch_failed", failed.reason
   end
 
-  def test_registry_serves_pi_and_claude_catalogs_and_reports_failures_truthfully
+  def test_codex_catalog_parses_cli_models_and_supported_reasoning_levels
+    output = JSON.generate(
+      "models" => [
+        {
+          "slug" => "gpt-5.6-sol",
+          "display_name" => "GPT-5.6 Sol",
+          "visibility" => "list",
+          "context_window" => 272_000,
+          "supported_reasoning_levels" => [
+            { "effort" => "low" }, { "effort" => "high" }, { "effort" => "max" }, { "effort" => "ultra" }
+          ]
+        },
+        { "slug" => "hidden", "visibility" => "hide", "supported_reasoning_levels" => [] }
+      ]
+    )
+
+    catalog = Meringue::Harness::CodexModelCatalog.parse(output)
+
+    assert catalog.available?, catalog.to_h.inspect
+    assert_equal "codex_debug_models", catalog.source
+    assert_equal ["openai/gpt-5.6-sol"], catalog.references
+    assert_equal %w[low high max], catalog.thinking_levels_for("openai/gpt-5.6-sol")
+    assert_equal 272_000, catalog.entry_for("openai/gpt-5.6-sol").fetch("context_window")
+  end
+
+  def test_codex_catalog_fetch_is_ephemeral_and_reports_failures
+    script = File.join(tmpdir, "codex-catalog")
+    payload = JSON.generate(
+      "models" => [{ "slug" => "gpt-test", "display_name" => "GPT Test", "supported_reasoning_levels" => [{ "effort" => "medium" }] }]
+    )
+    File.write(script, "#!/bin/sh\nprintf '%s\\n' '#{payload}'\n")
+    File.chmod(0o755, script)
+
+    catalog = Meringue::Harness::CodexModelCatalog.fetch(command: [script], cwd: tmpdir)
+    assert catalog.available?, catalog.to_h.inspect
+    assert_equal ["openai/gpt-test"], catalog.references
+
+    failed = Meringue::Harness::CodexModelCatalog.fetch(command: [File.join(tmpdir, "missing-codex")], cwd: tmpdir)
+    refute failed.available?
+    assert_equal "fetch_failed", failed.reason
+  end
+
+  def test_registry_serves_pi_claude_and_codex_catalogs_and_reports_failures_truthfully
     stub = write_pi_stub(tmpdir, default_stub_paths(tmpdir, {}, prefix: "registry-pi"))
     config = build_config(
       {
@@ -289,7 +331,8 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
             "env" => stub.fetch("env"),
             "worker_extra_args" => []
           },
-          "claude" => { "command" => [File.join(tmpdir, "claude-not-real")] }
+          "claude" => { "command" => [File.join(tmpdir, "claude-not-real")] },
+          "codex" => { "command" => [File.join(tmpdir, "codex-not-real")] }
         }
       }
     )
@@ -306,7 +349,13 @@ class HarnessModelCatalogTest < HarnessIntegrationTest
     assert_equal "claude", claude_catalog.harness
     assert_includes claude_catalog.note, "Could not read Claude Code's model catalog"
 
-    assert_raises(ArgumentError) { registry.model_catalog(provider: "codex") }
+    codex_catalog = registry.model_catalog(provider: "codex", cwd: tmpdir)
+    refute codex_catalog.available?
+    assert_equal Meringue::Harness::ModelCatalog::UNAVAILABLE, codex_catalog.availability
+    assert_equal "codex", codex_catalog.harness
+    assert_includes codex_catalog.note, "Could not read Codex's model catalog"
+
+    assert_raises(ArgumentError) { registry.model_catalog(provider: "cursor") }
   end
 
   def test_unsupported_clients_answer_with_an_explicit_catalog_instead_of_raising

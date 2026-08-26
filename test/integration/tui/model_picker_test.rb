@@ -213,10 +213,23 @@ class TuiModelPickerTest < Minitest::Test
     picker = open_picker("/theme")
     rows = plain_lines(@pane.popup_lines(picker))
 
-    assert_includes rows, "› meringue  current · meringue"
-    assert_includes rows, "  catppuccin  catppuccin"
-    refute_match(/current theme|future dashboard theme/i, rows.join("\n"))
-    assert @app.send(:model_picker_entries, picker).none? { |entry| entry.key?("description") }
+    # Each theme reads as its own name once: no "current" tag, and no second
+    # copy of the slug in the detail column.
+    assert_includes rows, "› meringue"
+    assert_includes rows, "  catppuccin"
+    refute_match(/current|future dashboard theme/i, rows.join("\n"))
+    assert @app.send(:model_picker_entries, picker).none? { |entry| entry.key?("current") || entry.key?("description") }
+  end
+
+  # The harness picker shares choice_picker_line, so dropping the duplicated
+  # theme name must not drop a genuine label such as "Claude Code" next to
+  # "claude", nor the role description.
+  def test_harness_rows_keep_distinct_labels_and_descriptions
+    picker = open_picker("/harness")
+    rows = plain_lines(@pane.popup_lines(picker))
+
+    assert(rows.any? { |row| row.include?("claude") && row.include?("Claude Code") })
+    refute_match(/current/i, rows.join("\n"))
   end
 
   def test_theme_alias_previews_and_escape_restores_without_chat_feedback
