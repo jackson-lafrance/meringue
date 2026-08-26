@@ -778,7 +778,7 @@ class InputSlashCommandParserTest < Minitest::Test
     assert_equal "InvalidSlashCommand", parse_slash("/models pi claude").fetch("type")
 
     records = suggestion_records("/models ", sample_state_with_model_catalog)
-    assert_equal %w[pi claude], records.map { |record| record.fetch("usage") }
+    assert_equal %w[pi claude codex], records.map { |record| record.fetch("usage") }
     assert_includes records.first.fetch("description"), "List the models Pi reports"
   end
 

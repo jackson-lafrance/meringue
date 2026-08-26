@@ -1,6 +1,6 @@
 # Interactive harness backends
 
-Meringue drives some backends by running the agent CLI in its own **native interactive mode**, inside a pseudo-terminal that Meringue owns for the whole life of the session. Claude Code is the first backend built this way.
+Meringue drives some backends by running the agent CLI in its own **native interactive mode**, inside a pseudo-terminal that Meringue owns for the whole life of the session. Claude Code and Codex CLI are the first backends built this way.
 
 The point of the design is that one running process serves two jobs that used to need two:
 
@@ -27,6 +27,7 @@ Only bytes appended since the previous poll are parsed. A worker can run for an 
 | --- | --- |
 | `spawn_argv` / `resume_argv` | how to start a new session, and how to reopen a durable one |
 | `transcript_path` | where this provider writes the session's transcript |
+| `capture_session_identity` / `discover_session_identity` | how a provider that assigns its own id after first input identifies the exact durable session |
 | `prepare_workspace!` | one-time setup a workspace needs before the CLI will run in it |
 | `wait_until_ready` | when the prompt box is actually accepting input |
 | `submit_prompt` / `interrupt` | how a prompt is entered and how a turn is cancelled |
@@ -42,7 +43,7 @@ Everything else — delivery receipts, settle classification, session views, the
 
 **Settling a turn on the previous turn's answer.** Between the keystroke that submits a prompt and the transcript record that proves it landed, the session legitimately still looks settled — from the *last* turn. Every prompt Meringue sends carries a delivery marker, and the session reports `streaming` until that marker appears in the transcript. The same marker doubles as the prompt-delivery receipt, so a write that appeared to fail can still be proven delivered instead of being sent twice.
 
-**Cancelling with the wrong key.** The interrupt key is the one the CLI itself uses to stop a turn. For Claude Code that is Escape: `Ctrl-C` clears the prompt box instead, which would leave the agent working while Meringue believed it had aborted.
+**Cancelling with the wrong key.** The interrupt key is the one the CLI itself uses to stop a turn. Claude Code and Codex both use Escape. In Codex, Tab submits a queued follow-up while a task is active; Enter is ordinary submission.
 
 **Mistaking a subagent's turn for the session's.** Sidechain records are a subagent's own conversation. The parent's turn is not finished because a subagent's was, and a subagent's answer is not the worker's report, so those records are excluded from state.
 
@@ -52,6 +53,16 @@ Everything else — delivery receipts, settle classification, session views, the
 - **Workspace trust.** Claude Code asks once per directory whether the folder is trusted, and it asks *before* accepting any input, including under `--dangerously-skip-permissions` (which governs tool permissions, not workspace trust). Every Meringue worker gets a brand new worktree path, so without handling this every worker would start by blocking on a modal nobody is watching. `Harness::ClaudeWorkspaceTrust` records the same flag the modal writes, and the client also answers the modal on screen in case a concurrent Claude Code write to that shared config drops the flag.
 - **Inherited session markers.** A Claude Code process started from inside another one disables its own transcript and adopts the parent's identity. Since the transcript is Meringue's entire read path, those variables are scrubbed and persistence is forced on.
 - **Permissions for unattended work.** A worker runs in its own worktree with nobody to answer a permission prompt, so workers run with `--permission-mode bypassPermissions`. The isolation that makes that safe is the worktree, not the prompt. Heads are read-only: `--permission-mode plan` with a read-only tool set, and slash commands disabled so a project's own commands cannot redirect an orchestration decision.
+
+## Codex CLI specifics
+
+- **Provider-assigned identity.** Codex does not accept a caller-supplied thread id for a new interactive session and creates its rollout only after the first prompt. Meringue snapshots the existing rollout paths before launch and puts a unique delivery marker in that initial prompt. It then matches a newly created rollout by marker and canonical workspace, persists Codex's real `session_id` and path, and only returns spawn success after that identity is known. Concurrent starts in one checkout therefore cannot claim each other's rollout.
+- **Transcript location and schema.** Codex rollouts live under `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-…-<session-id>.jsonl` (`CODEX_HOME` defaults to `~/.codex`). `CodexTranscript` reads `task_started`, `task_complete`, `turn_aborted`, user/agent messages, and tool response items. A `task_complete.error` is a failed turn, not a completion; `last_agent_message` is the final result.
+- **Workspace trust.** Codex's directory trust modal appears before the composer. The client answers the preselected “Yes, continue” option, then waits for the real `› Ask Codex…` composer before entering a prompt.
+- **Prompt modes.** Escape interrupts an active turn for `steer`. A Codex `follow_up` is pasted into the composer and submitted with Tab, which is Codex's native queue command. Normal settled prompts use Enter.
+- **Permissions.** Heads use `--sandbox read-only --ask-for-approval never`. Isolated workers use `--dangerously-bypass-approvals-and-sandbox` so unattended implementation and delivery do not stop at a modal inside their dedicated worktree. A `shared_read_only` worker strips that flag and enforces the head-style read-only settings.
+- **Resumption.** A lost PTY is restarted with `codex resume <session-id>` in the recorded workspace. The same rollout, worktree, branch, model/reasoning settings, and Meringue agent record continue. Opening focused view while the PTY is live attaches to it without a restart.
+- **Models.** `codex debug models` is the authoritative catalog probe. Meringue keeps only model slug/name, supported reasoning levels, and context size; Codex's large prompt/instruction payloads never enter Meringue state.
 
 ## Focus, concretely
 
@@ -67,9 +78,9 @@ Backends that cannot do this — Pi, today — keep the older handoff path (`pre
 
 ## Testing
 
-`test/integration/harness/interactive_client_test.rb` drives a real PTY against `test/fixtures/fake_interactive_agent.rb`, a stand-in agent CLI. It is deliberately unhelpful — it renders a banner before it is ready, echoes pasted text, takes visible time to "think", and writes its transcript incrementally — because those are the behaviours the transport has to cope with against a real agent. No network call, no vendor install.
+`test/integration/harness/interactive_client_test.rb` drives a real PTY against `test/fixtures/fake_interactive_agent.rb`, a stand-in agent CLI. `test/integration/harness/codex_interactive_client_test.rb` adds a Codex-shaped stand-in that assigns its own session id after first input and writes rollout records below a temporary `CODEX_HOME`. It is deliberately unhelpful — it renders a banner before it is ready, echoes pasted text, takes visible time to "think", and writes its transcript incrementally — because those are the behaviours the transport has to cope with against a real agent. No network call, no vendor install.
 
-`test/e2e/claude_interactive_proof.rb` is the live counterpart. It talks to a real `claude` install and spends real tokens, so it is not part of `rake test`; run it directly when changing the transport:
+`test/e2e/claude_interactive_proof.rb` is the live Claude counterpart. Codex provider behavior remains covered hermetically so the automated suite never needs Codex credentials or spends tokens. It talks to a real `claude` install and spends real tokens, so it is not part of `rake test`; run it directly when changing the transport:
 
 ```bash
 ruby -Ilib test/e2e/claude_interactive_proof.rb

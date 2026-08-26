@@ -112,6 +112,20 @@ class InputKernelConvergenceTest < Minitest::Test
     end
   end
 
+  def test_codex_harness_selection_persists_safe_future_defaults
+    input_sandbox do |sandbox|
+      result = sandbox.submit("/harness codex")
+      assert_equal [%w[SetHarness accepted]], sandbox.command_result_pairs(result)
+
+      saved = Meringue::Config.load(path: sandbox.config_path)
+      assert_equal "codex", saved.setting("agent.head_harness", env: {})
+      assert_equal "codex", saved.setting("agent.worker_harness", env: {})
+      assert_equal "openai/gpt-5.6-sol", saved.setting("agent.head_model", env: {})
+      assert_equal "openai/gpt-5.6-sol", saved.setting("agent.worker_model", env: {})
+      assert_equal "Codex CLI", sandbox.state.dig("metadata", "active_harness_label")
+    end
+  end
+
   def test_harness_switch_repairs_incompatible_shared_and_role_defaults_without_rewriting_sessions
     input_sandbox do |sandbox|
       write_config(

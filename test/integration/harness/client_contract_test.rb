@@ -79,6 +79,7 @@ class HarnessClientContractTest < HarnessIntegrationTest
     assert_equal "pi", Harness::PiClient.new.harness_name
     assert_equal "claude", Harness::ClaudeClient.new(claude_home: tmpdir).harness_name
     assert_equal "claude", Harness::ClaudeCodeClient.new(claude_home: tmpdir).harness_name
+    assert_equal "codex", Harness::CodexInteractiveClient.new(codex_home: tmpdir).harness_name
   end
 
   def test_fake_pi_and_process_clients_agree_on_the_session_ref_shape

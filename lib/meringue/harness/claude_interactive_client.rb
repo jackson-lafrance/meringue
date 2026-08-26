@@ -136,7 +136,8 @@ module Meringue
       # Claude Code's prompt box supports bracketed paste, so a whole multi-line prompt arrives as
       # one submission. Submitting is a separate keystroke after the paste has been drawn, because
       # sending both together can be read as a newline inside the paste.
-      def submit_prompt(process, text)
+      def submit_prompt(process, text, mode: "normal")
+        _ = mode
         process.write("\e[200~#{text}\e[201~")
         process.wait_for_quiet(quiet_for: 0.25, timeout: 15)
         process.write("\r")
