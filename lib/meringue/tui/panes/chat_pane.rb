@@ -657,7 +657,6 @@ module Meringue
               {
                 "reference" => theme,
                 "name" => theme,
-                "current" => theme == Style.current_colorscheme,
                 "index" => index
               }
             end
@@ -760,11 +759,18 @@ module Meringue
           ].compact
         end
 
+        # No row is labelled as the active choice. The theme picker applies each
+        # highlighted theme live, so the dashboard itself already shows which one
+        # is current, and the selection color marks the row; a "current" tag next
+        # to that is redundant. A name that merely repeats the reference (every
+        # theme is listed by its own slug) is dropped for the same reason, so a
+        # theme row reads as one word instead of the same word twice.
         def choice_picker_line(entry, selected:)
           marker = selected ? "›" : " "
+          reference = entry.fetch("reference", "").to_s
+          name = entry.fetch("name", "").to_s
           details = []
-          details << "current" if entry.fetch("current", false)
-          details << entry.fetch("name", "") unless entry.fetch("name", "").to_s.empty?
+          details << name unless name.empty? || name == reference
           details << entry.fetch("description", "") unless entry.fetch("description", "").to_s.empty?
           [
             ["#{marker} ", selected ? Style::ACCENT_BOLD : Style::DIM],
