@@ -21,6 +21,10 @@ module Meringue
       :modes,
       :mode_labels,
       :mode_descriptions,
+      # Optional callable that derives the effective value from a config that
+      # has not recorded this experiment yet, so a setting that replaced older
+      # keys reads correctly before the migration writes it.
+      :resolver,
       keyword_init: true
     ) do
       def initialize(**values)
@@ -93,6 +97,7 @@ module Meringue
         Definition.new(
           id: "agent_defaults_mode",
           config_path: AgentDefaultsMode::CONFIG_PATH,
+          resolver: ->(config) { AgentDefaultsMode.resolve(config) },
           label: "Model and reasoning defaults",
           description: "Choose how future heads and workers get their model and reasoning level.",
           default: AgentDefaultsMode::DEFAULT,

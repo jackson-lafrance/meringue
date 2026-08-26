@@ -116,6 +116,31 @@ class InputAgentDefaultsModeTest < Minitest::Test
     end
   end
 
+  # Settings reads the schema, not the runtime helper, so an installation that
+  # has not been migrated yet must still resolve its old booleans there.
+  # Otherwise opening Settings would show "By role" for a guided installation
+  # and hide the guided prompt row along with it.
+  def test_settings_resolves_the_retired_booleans_before_migration
+    {
+      "worker_spawning_guidance = true" => Mode::GUIDED,
+      "split_defaults = false" => Mode::SHARED
+    }.each do |legacy, expected|
+      with_config("[experiments]\n#{legacy}\n") do |path|
+        config = Meringue::Config.load(path: path)
+
+        assert_equal expected, config.setting("experiments.agent_defaults_mode"), legacy
+        draft = Meringue::TUI::Settings::Draft.new(config, env: {})
+
+        assert_equal expected, draft.value("experiments.agent_defaults_mode"), legacy
+        assert_equal(
+          expected == Mode::GUIDED,
+          draft.definitions_for("Experiments").map(&:id).include?("experiments.worker_spawning_guidance_prompt"),
+          legacy
+        )
+      end
+    end
+  end
+
   def test_an_installation_with_no_experiments_is_role_specific
     with_config("") do |path|
       assert_equal Mode::ROLE_SPECIFIC, Meringue::Config.load(path: path).agent_defaults_mode

@@ -422,7 +422,10 @@ module Meringue
                           experiment.config_path,
                           "Experiments",
                           "enum",
-                          experiment.default,
+                          # A resolver lets an unset value still read correctly
+                          # from whatever keys this experiment replaced, so
+                          # Settings agrees with the runtime before migration.
+                          experiment.resolver ? ->(config, _env) { experiment.resolver.call(config) } : experiment.default,
                           options: experiment.modes,
                           option_labels: experiment.modes.to_h { |mode| [mode, experiment.mode_label(mode)] },
                           option_descriptions: experiment.modes.to_h { |mode| [mode, experiment.mode_description(mode)] },
