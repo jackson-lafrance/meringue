@@ -46,7 +46,7 @@ module Meringue
         ["/setup", "Reopen Setup for theme, separate head/worker defaults, status-bar layout, and Meringue Xtras."],
         ["/keybind", "Show all TUI keybindings."],
         ["/config", "Open full-screen Settings; /config --text prints read-only diagnostics."],
-        ["/status-bar", "Open the status-bar layout composer."],
+        ["/status-bar", "Open the bottom status-bar component composer."],
         ["/github test", "Test read-only GitHub authentication and repository access."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
@@ -827,7 +827,7 @@ module Meringue
         when "status-bar", "statusbar", "layout"
           tokens = split_arguments(arguments)
           if tokens.empty?
-            invalid("/status-bar is a local TUI command. Run it in the interactive TUI to compose status-bar layouts.", usage: "/status-bar")
+            invalid("/status-bar is a local TUI command. Run it in the interactive TUI to compose the dashboard bottom bar.", usage: "/status-bar")
           else
             invalid("Usage: /status-bar")
           end

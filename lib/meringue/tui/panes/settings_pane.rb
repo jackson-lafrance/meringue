@@ -9,7 +9,6 @@ module Meringue
         NEXT_LABEL = "[ Next ]"
         BEGIN_LABEL = "[ Begin ]"
         FINISH_LABEL = "[ Complete ]"
-        BACK_LABEL = "[ Back ]"
         CANCEL_LABEL = "[ Cancel ]"
         HELP_TAGLINE = "Not sure what to change? Ask your agent for help."
         COMPACT_HELP_TAGLINE = "Need help? Ask your agent."
@@ -19,7 +18,7 @@ module Meringue
           "Theme" => "Make the workspace yours",
           "Head defaults" => "Choose how heads think",
           "Worker defaults" => "Choose how workers work",
-          "Status bar" => "Arrange your status bars",
+          "Status bar" => "Build your bottom bar",
           "Experiments" => "Meringue Xtras"
         }.freeze
         SETUP_INTROS = {
@@ -27,7 +26,7 @@ module Meringue
           "Theme" => "Pick a comfortable look. Your preview stays local until you finish.",
           "Head defaults" => "Heads route your requests. These defaults apply only to future heads.",
           "Worker defaults" => "Workers do the work. Keep their future defaults independent from heads.",
-          "Status bar" => "Open the live composer to arrange dashboard and focused-worker status details.",
+          "Status bar" => "Drag live components between the left and right sides. Focused-worker bars keep their familiar defaults.",
           "Experiments" => "Optional capabilities start off until you choose them."
         }.freeze
 
@@ -144,6 +143,33 @@ module Meringue
                      detail(state, width: content_width, height: card_content_height)
                    end
           return setup_modal_view(snap, detail, geometry) if detail
+
+          if snap.fetch("category", "") == "Status bar" && snap.fetch("status_bar_composer", nil).is_a?(Hash)
+            composer_y = card.fetch(:y) + 5
+            return {
+              geometry: geometry,
+              card_title: setup_card_title(snap),
+              heading: setup_heading(snap),
+              progress: setup_progress(snap, width: content_width),
+              content_x: card.fetch(:x) + 2,
+              content_y: composer_y,
+              content_width: content_width,
+              lines: [],
+              row_y: nil,
+              window_start: 0,
+              visible_count: 0,
+              selected_row: nil,
+              counter: "",
+              modal: false,
+              composer: snap.fetch("status_bar_composer"),
+              composer_bounds: {
+                x: card.fetch(:x) + 2,
+                y: composer_y,
+                width: content_width,
+                height: [geometry.fetch(:action_y) - composer_y, 1].max
+              }
+            }
+          end
 
           rows = Array(snap.fetch("rows", []))
           selected = snap.fetch("row_index", 0).to_i.clamp(0, [rows.length - 1, 0].max)
@@ -337,10 +363,7 @@ module Meringue
           save_style = snap.fetch("saving", false) ? Style::DIM : Style::ACCENT_BOLD
           if snap.fetch("mode", "settings") == "setup"
             next_label = snap.fetch("setup_last_step", false) ? FINISH_LABEL : NEXT_LABEL
-            focused_button = snap.fetch("footer_button", "next")
-            next_style = snap.fetch("footer_focus", false) && focused_button == "next" ? Style::ACCENT_BOLD : Style::MUTED
-            back_style = snap.fetch("footer_focus", false) && focused_button == "back" ? Style::ACCENT_BOLD : Style::MUTED
-            return [[BACK_LABEL, save_style == Style::DIM ? Style::DIM : back_style], [" ", Style::DIM], [next_label, save_style == Style::DIM ? Style::DIM : next_style]]
+            return [[next_label, save_style == Style::DIM ? Style::DIM : Style::ACCENT_BOLD]]
           end
           [[primary_label(snap), save_style], [" ", Style::DIM], [CANCEL_LABEL, Style::MUTED]]
         end
@@ -394,12 +417,8 @@ module Meringue
             actions = action_segments(state)
             action_width = actions.sum { |text, _style| text.to_s.length }
             card = geometry.fetch(:card)
-            start = card.fetch(:x) + card.fetch(:width) - action_width - 2
-            back = actions.first&.first.to_s
-            next_label = actions.last&.first.to_s
-            return :back if x.to_i >= start && x.to_i < start + back.length
-            next_start = start + back.length + 1
-            return :next if x.to_i >= next_start && x.to_i < next_start + next_label.length
+            start = card.fetch(:x) + [(card.fetch(:width) - action_width) / 2, 1].max
+            return :next if x.to_i >= start && x.to_i < start + action_width
             return :inert
           end
 
