@@ -7716,7 +7716,7 @@ module Meringue
       end
 
       def worker_spawning_guidance_enabled?
-        config.experiment_enabled?("worker_spawning_guidance")
+        config.worker_spawning_guidance?
       end
 
       def worker_spawning_guidance_for_head?(head)

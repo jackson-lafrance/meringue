@@ -1,11 +1,11 @@
 # Orchestration experiments
 
-Meringue has two independent, opt-in orchestration experiments. Both are off by default and can be changed in **Setup → Experiments** or **Settings → Experiments**:
+Meringue has two orchestration experiments, both changed in **Setup → Experiments** or **Settings → Experiments**:
 
 ```toml
 [experiments]
 self_fixing_workers = false
-worker_spawning_guidance = false
+agent_defaults_mode = "role-specific"   # shared | role-specific | guided
 ```
 
 ## Self-fixing workers
@@ -22,17 +22,19 @@ Safety is durable rather than process-local:
 
 A recovery is not a replacement and does not retry the original session. It is an explicit follow-up worker so the original error remains visible and the recovery has a fresh harness session.
 
-## Worker model selection guidance
+## Guided model selection
 
-`worker_spawning_guidance` appends an additional system prompt to new heads. Its text is persisted at `experiments.worker_spawning_guidance_prompt` and is editable through Settings → Experiments, Setup → Experiments, or:
+Guided selection is the third mode of `agent_defaults_mode` rather than a separate toggle. Guidance asks a head to choose each worker's model and reasoning level, which is only meaningful when heads and workers can hold different values, so the two were never independent: `guided` implies role-specific values, and the retired `worker_spawning_guidance` boolean migrates to it.
+
+In guided mode Meringue appends an additional system prompt to new heads. Its text is persisted at `experiments.worker_spawning_guidance_prompt` and is editable through Settings → Experiments, Setup → Experiments, or:
 
 ```text
 /worker guide "Choose lighter models for routine work and stronger models for ambiguous or high-impact work. Set both model and thinking_level explicitly on every SpawnWorker."
 ```
 
-The command is accepted only while the experiment is enabled. The prompt input row is hidden from both Settings and Setup while it is disabled; the stored value is retained so disabling and re-enabling does not lose it. It only guides model and thinking-level selection for workers; it does not change worker defaults or alter ordinary spawn behavior.
+The command is accepted only in guided mode. The prompt input row is hidden from both Settings and Setup in the other two modes; the stored value is retained so switching away and back does not lose it. It only guides model and thinking-level selection for workers; it does not change worker defaults or alter ordinary spawn behavior.
 
-The built-in guidance is intentionally task-based rather than tied to one configured model: use lighter choices for routine, bounded work and stronger choices for ambiguous or high-impact work. When enabled, heads receive a privacy-filtered routing snapshot: configured and effective worker model/thinking defaults are withheld, and the persisted state path is not supplied. Heads must choose from the supplied catalog and set both `model` and `thinking_level` on every guided `SpawnWorker`; the kernel rejects omissions. Direct user-issued worker spawns retain ordinary default behavior.
+The built-in guidance is intentionally task-based rather than tied to one configured model: use lighter choices for routine, bounded work and stronger choices for ambiguous or high-impact work. In guided mode, heads receive a privacy-filtered routing snapshot: configured and effective worker model/thinking defaults are withheld, and the persisted state path is not supplied. Heads must choose from the supplied catalog and set both `model` and `thinking_level` on every guided `SpawnWorker`; the kernel rejects omissions. Direct user-issued worker spawns retain ordinary default behavior.
 
 Inline completion in the composer uses the same catalog and validation conventions as `/model` and `/thinking`:
 

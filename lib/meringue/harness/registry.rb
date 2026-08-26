@@ -491,7 +491,7 @@ module Meringue
           agent.head_harness agent.worker_harness
           agent.head_model agent.worker_model
           agent.head_thinking agent.worker_thinking
-          experiments.split_defaults
+          experiments.agent_defaults_mode
         ]
         ids = Array(changed_ids).map(&:to_s)
         return self if (ids & live_role_ids).empty?
@@ -508,10 +508,12 @@ module Meringue
         end
         data["experiments"] = {} unless data["experiments"].is_a?(Hash)
         updated_experiments = updated_config.section("experiments")
-        if updated_experiments.key?("split_defaults")
-          data.fetch("experiments")["split_defaults"] = Config.deep_copy(updated_experiments["split_defaults"])
-        else
-          data.fetch("experiments").delete("split_defaults")
+        %w[agent_defaults_mode split_defaults worker_spawning_guidance].each do |key|
+          if updated_experiments.key?(key)
+            data.fetch("experiments")[key] = Config.deep_copy(updated_experiments[key])
+          else
+            data.fetch("experiments").delete(key)
+          end
         end
         PROVIDERS.each do |provider|
           data.fetch("harness")[provider] = {} unless data.fetch("harness")[provider].is_a?(Hash)
@@ -665,23 +667,29 @@ module Meringue
         key == "model" ? DEFAULT_MODEL : default_thinking_level_for(provider)
       end
 
+      # In shared mode both roles report one value, so both read one key rather
+      # than each reading its own and silently disagreeing with what was just
+      # written. Head is the canonical key; a shared-mode write sets both roles,
+      # so they cannot drift apart. The unqualified key remains the fallback for
+      # configurations written before roles existed.
       def role_setting(provider_config, kind, key)
-        role_key = key == "model" ? "#{kind}_model" : "#{kind}_#{key}"
-        value = split_defaults_enabled? ? provider_config[role_key].to_s.strip : ""
+        effective_kind = split_defaults_enabled? ? kind : "head"
+        role_key = key == "model" ? "#{effective_kind}_model" : "#{effective_kind}_#{key}"
+        value = provider_config[role_key].to_s.strip
         value = provider_config[key].to_s.strip if value.empty?
         value
       end
 
+      # Heads and workers hold independent values in every mode except the
+      # shared one. Guided mode needs them too, because that is what a head
+      # assigns per worker.
       def split_defaults_enabled?
-        value = config.value("experiments", "split_defaults")
-        return true if value.nil?
-
-        value == true || %w[true yes 1].include?(value.to_s.downcase)
+        Meringue::Experiments::AgentDefaultsMode.role_specific?(config)
       end
 
       def neutral_role_setting(configured, kind, key)
-        role_key = "#{kind}_#{key}"
-        role_value = split_defaults_enabled? ? configured[role_key] : nil
+        role_key = "#{split_defaults_enabled? ? kind : "head"}_#{key}"
+        role_value = configured[role_key]
         return role_value if key == "model" ? valid_model_reference?(role_value) : valid_thinking_level?(role_value, nil)
 
         shared = configured[key]

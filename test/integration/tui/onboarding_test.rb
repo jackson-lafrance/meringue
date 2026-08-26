@@ -183,9 +183,8 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert_equal(
       {
         "experiments.github_support" => false,
-        "experiments.split_defaults" => true,
-        "experiments.self_fixing_workers" => false,
-        "experiments.worker_spawning_guidance" => false
+        "experiments.agent_defaults_mode" => "role-specific",
+        "experiments.self_fixing_workers" => false
       },
       command.payload.fetch("changes")
     )
