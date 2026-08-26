@@ -195,6 +195,8 @@ class InputConfigTest < Minitest::Test
     assert_equal "claude", Meringue::Harness::Registry.normalize_provider("claude_code")
     assert_equal "claude", Meringue::Harness::Registry.normalize_provider("Claude-Code")
     assert_equal "claude", Meringue::Harness::Registry.normalize_provider("cc")
+    assert_equal "codex", Meringue::Harness::Registry.normalize_provider("Codex CLI")
+    assert_equal "codex", Meringue::Harness::Registry.normalize_provider("openai-codex")
     assert_equal "", Meringue::Harness::Registry.normalize_provider("")
     assert_equal "", Meringue::Harness::Registry.normalize_provider(nil)
   end
