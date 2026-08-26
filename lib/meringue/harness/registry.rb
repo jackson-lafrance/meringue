@@ -14,7 +14,7 @@ module Meringue
 
       # Deliberately absent. Meringue is harness-agnostic, so there is no backend it falls back to.
       DEFAULT_PROVIDER = nil
-      PROVIDERS = %w[pi claude].freeze
+      PROVIDERS = %w[pi claude codex].freeze
       # How each backend spells a model and a reasoning level on its own command line, and whether
       # it wants a bare model id or a qualified `provider/model` reference. This is the whole of
       # what the registry needs to know about a provider's session defaults; there is no branch on
@@ -28,19 +28,27 @@ module Meringue
         "pi" => { "model" => "--model", "thinking_level" => "--thinking", "qualified_model" => true },
         # Claude Code is single-vendor, so it rejects a provider-qualified reference, and it calls
         # the reasoning level "effort".
-        "claude" => { "model" => "--model", "thinking_level" => "--effort", "qualified_model" => false }
+        "claude" => { "model" => "--model", "thinking_level" => "--effort", "qualified_model" => false },
+        "codex" => {
+          "model" => "--model",
+          "thinking_level_config" => "model_reasoning_effort",
+          "qualified_model" => false
+        }
       }.freeze
       PROVIDER_THINKING_LEVELS = {
         "pi" => ModelCatalog::THINKING_LEVELS,
-        "claude" => ClaudeModelCatalog::EFFORT_LEVELS
+        "claude" => ClaudeModelCatalog::EFFORT_LEVELS,
+        "codex" => ModelCatalog::THINKING_LEVELS
       }.freeze
       PROVIDER_LABELS = {
         "pi" => "Pi",
-        "claude" => "Claude Code"
+        "claude" => "Claude Code",
+        "codex" => "Codex CLI"
       }.freeze
       PUBLIC_PROVIDER_NAMES = {
         "pi" => "pi",
-        "claude" => "claude"
+        "claude" => "claude",
+        "codex" => "codex"
       }.freeze
       # Single-cell display glyphs, so a session's backend is identifiable at a
       # glance next to its Meringue id. Provider presentation already lives in
@@ -48,13 +56,15 @@ module Meringue
       # they ask the registry for a glyph instead of knowing about Pi or Claude.
       PROVIDER_GLYPHS = {
         "pi" => "π",
-        "claude" => "✳"
+        "claude" => "✳",
+        "codex" => "◇"
       }.freeze
       # Same marks in plain ASCII for fonts/terminals that cannot draw the
       # glyphs above, selected with MERINGUE_ASCII_GLYPHS.
       PROVIDER_ASCII_GLYPHS = {
         "pi" => "p",
-        "claude" => "c"
+        "claude" => "c",
+        "codex" => "x"
       }.freeze
       # Matches the AgentTree's unknown-status convention.
       UNKNOWN_PROVIDER_GLYPH = "?"
@@ -74,7 +84,13 @@ module Meringue
         "claude-code" => "claude",
         "claude_code" => "claude",
         "claude code" => "claude",
-        "cc" => "claude"
+        "cc" => "claude",
+        "codex" => "codex",
+        "codex-cli" => "codex",
+        "codex_cli" => "codex",
+        "codex cli" => "codex",
+        "openai-codex" => "codex",
+        "openai_codex" => "codex"
       }.freeze
       # Where the file-backed provider keeps its sessions. The legacy directory and environment
       # variable names remain readable for existing installations; the neutral variable is the
@@ -141,6 +157,13 @@ module Meringue
           "worker_extra_args" => [
             "--permission-mode", "bypassPermissions"
           ]
+        },
+        "codex" => {
+          "command" => "codex",
+          "model" => "openai/gpt-5.6-sol",
+          "thinking_level" => DEFAULT_THINKING_LEVEL,
+          "head_extra_args" => ["--sandbox", "read-only", "--ask-for-approval", "never"],
+          "worker_extra_args" => ["--dangerously-bypass-approvals-and-sandbox"]
         }
       }.freeze
 
@@ -208,6 +231,13 @@ module Meringue
 
       def self.thinking_levels_for(provider)
         Array(PROVIDER_THINKING_LEVELS.fetch(normalize_provider(provider), ModelCatalog::THINKING_LEVELS)).dup
+      end
+
+      # Safe model shown when setup selects a harness before the user has made an explicit model
+      # choice. Provider defaults stay in the harness registry rather than leaking into Settings.
+      def self.default_model_for(provider)
+        normalized = normalize_provider!(provider)
+        DEFAULT_PROVIDER_CONFIG.fetch(normalized, {}).fetch("model", DEFAULT_MODEL).to_s
       end
 
       # Some harnesses adjust a requested reasoning level when a model does not
@@ -564,6 +594,8 @@ module Meringue
           PiClient.new(command: command, session_dir: session_dir, env: env, extra_args: extra_args)
         when "claude"
           ClaudeInteractiveClient.new(command: command, env: env, extra_args: extra_args)
+        when "codex"
+          CodexInteractiveClient.new(command: command, env: env, extra_args: extra_args)
         else
           raise ArgumentError, "Unsupported harness provider: #{provider.inspect}"
         end
@@ -607,7 +639,13 @@ module Meringue
         end
 
         thinking_level = resolved_role_setting(provider, provider_config, kind, "thinking_level")
-        args.concat([flags.fetch("thinking_level"), thinking_level]) unless thinking_level.empty? || flags["thinking_level"].nil?
+        unless thinking_level.empty?
+          if flags["thinking_level"]
+            args.concat([flags.fetch("thinking_level"), thinking_level])
+          elsif flags["thinking_level_config"]
+            args.concat(["-c", "#{flags.fetch("thinking_level_config")}=#{JSON.generate(thinking_level)}"])
+          end
+        end
 
         if kind == "worker" && !@command_blacklist.empty? && provider == "pi"
           args.concat(["--extension", COMMAND_BLACKLIST_EXTENSION])

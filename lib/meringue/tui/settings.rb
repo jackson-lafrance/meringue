@@ -115,8 +115,10 @@ module Meringue
 
         def set(id, candidate)
           definition = Config::Schema.fetch(id)
+          previous = values[definition.id]
           normalized = definition.validate_value(candidate, config: config)
           values[definition.id] = normalized
+          update_role_model_for_harness_change(definition.id, previous, normalized)
           errors.delete(definition.id)
           @global_error = nil
           normalized
@@ -230,6 +232,24 @@ module Meringue
         end
 
         private
+
+        def update_role_model_for_harness_change(setting_id, previous_provider, provider)
+          match = setting_id.to_s.match(/\Aagent\.(head|worker)_harness\z/)
+          return unless match
+
+          role = match[1]
+          model_id = "agent.#{role}_model"
+          previous_default = if previous_provider.to_s.strip.empty?
+                               Harness::Registry::DEFAULT_MODEL
+                             else
+                               Harness::Registry.default_model_for(previous_provider)
+                             end
+          return unless values[model_id].to_s == previous_default.to_s
+
+          values[model_id] = Harness::Registry.default_model_for(provider)
+        rescue ArgumentError
+          nil
+        end
 
         # The guided selection prompt only means something in guided mode, so it
         # appears and disappears with that mode rather than sitting inert.

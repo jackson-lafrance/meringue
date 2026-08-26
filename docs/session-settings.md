@@ -22,7 +22,7 @@ Examples:
 /models pi refresh
 ```
 
-`/models` is a **local TUI command** that opens the model picker: a searchable, keyboard-navigable list of the models the selected harness itself reports, showing each model's provider/id reference, display name, and supported thinking levels. The picker has explicit Head and Worker tabs; `←`/`→` switches roles, and selecting a row applies only the active role. Bare `/model` is an alias for that same argumentless picker command; `/model <provider>/<model-id>` and its role-specific forms retain their setting behavior. With no argument `/models` shows the active harness; an explicit `pi` or `claude` scopes the picker (and its refresh) to that harness instead.
+`/models` is a **local TUI command** that opens the model picker: a searchable, keyboard-navigable list of the models the selected harness itself reports, showing each model's provider/id reference, display name, and supported thinking levels. The picker has explicit Head and Worker tabs; `←`/`→` switches roles, and selecting a row applies only the active role. Bare `/model` is an alias for that same argumentless picker command; `/model <provider>/<model-id>` and its role-specific forms retain their setting behavior. With no argument `/models` shows the active harness; an explicit `pi`, `claude`, or `codex` scopes the picker (and its refresh) to that harness instead.
 
 It replaced the old behavior, where `/models` printed the entire catalog into the visible log. A harness that reports 120 models produced 120 log lines nobody could act on, truncated with a hint that pointed at a different command.
 
@@ -196,7 +196,7 @@ When logs are filtered to one worker, the logs border adds that worker's lifecyc
 
 For a resumable process whose RPC transport is unavailable, Pi's persisted JSONL session is authoritative. Meringue walks the current branch and reads `model_change` and `thinking_level_change` entries. An assistant message's provider/model is only a fallback for older session files. If Pi persisted no thinking level, Meringue reports `unknown` rather than guessing.
 
-Meringue does not infer existing-session settings from command-line arguments; a harness either reports its effective pair through the shared contract or the agent record says that it is unavailable.
+Codex reads the latest rollout `turn_context` as its authoritative effective model/reasoning pair and refreshes the agent record during ordinary reconciliation. Resume removes current future-session defaults from argv and reapplies only that recorded pair, so changing defaults cannot rewrite an existing thread. Claude Code and other harnesses can implement the same generic operations later. Meringue does not infer existing-session settings from command-line arguments; a harness either reports its effective pair through the shared contract or the agent record says that it is unavailable.
 
 ## Authoritative model catalog discovery
 
@@ -237,7 +237,7 @@ A failed or empty refresh never shrinks a working list. Without that rule one ha
 
 ### How Pi answers
 
-Pi exposes its catalog per process, not per session, so Meringue starts a short-lived ephemeral probe (`pi --mode rpc --no-session`), sends RPC `get_available_models`, and terminates it. The probe never touches a worker's RPC transport, writes no session file, and reuses the configured Pi `command`, `env`, and role args minus `--model`/`--thinking`. Claude Code uses the same discovery boundary with its own `/model` print command and drops saved `--model`/`--effort` values; no network call is added to picker or setup rendering. See [`config.md`](config.md#model-catalogs-and-provider-resource-flags) for why those resource flags matter.
+Pi exposes its catalog per process, not per session, so Meringue starts a short-lived ephemeral probe (`pi --mode rpc --no-session`), sends RPC `get_available_models`, and terminates it. The probe never touches a worker's RPC transport, writes no session file, and reuses the configured Pi `command`, `env`, and role args minus `--model`/`--thinking`. Claude Code and Codex use the same discovery boundary with their own short-lived commands; no network call is added to picker or setup rendering. See [`config.md`](config.md#model-catalogs-and-provider-resource-flags) for why those resource flags matter.
 
 Each model's thinking levels are derived with Pi's own rule (`getSupportedThinkingLevels`): a model without reasoning support reports `["off"]`, a level mapped to `null` is excluded, and `xhigh`/`max` appear only when the model explicitly maps them. Meringue keeps no hand-maintained model or level table.
 
@@ -246,6 +246,10 @@ That list is the model's own declaration, so treat it as description, not permis
 ### How Claude Code answers
 
 Claude Code's authoritative source is a short-lived `claude --print --output-format json "/model"` invocation with session persistence and saved spawn-only model/effort arguments disabled. Meringue parses the aliases and effort vocabulary Claude Code reports, stores them as `anthropic/<id>` references, and does not start or modify a managed interactive session. A missing CLI, failed auth, non-zero exit, empty response, or malformed response is `unavailable`; after a confirmed list, a failed refresh is `stale` and retains that list with the failure note. A valid exact model reference remains settable when it is not in the cached list, and is labelled unverified rather than rejected.
+
+### How Codex answers
+
+Codex's authoritative source is `codex debug models`. Meringue runs it as a bounded short-lived process using the configured command/environment, then keeps only each visible model's slug, display name, supported Meringue reasoning levels, and context size. The much larger model instruction and prompt fields are discarded before persistence. References are stored as `openai/<slug>` and Codex receives the bare slug plus a `model_reasoning_effort` override. Missing CLI, non-zero exit, timeout, malformed JSON, and an empty visible list follow the same unavailable/stale rules as the other providers.
 
 ### Caching and refresh
 

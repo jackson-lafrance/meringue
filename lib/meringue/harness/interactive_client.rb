@@ -91,17 +91,27 @@ module Meringue
           session_name: session_name.to_s,
           session_settings: session_settings || {}
         )
+        argv = spawn_argv_for_workspace_mode(argv, kind: kind.to_s, workspace_mode: workspace_mode.to_s)
         entry = start_session_entry(
           session_id: session_id,
           cwd: expanded_cwd,
           argv: argv,
           kind: kind.to_s,
           session_name: session_name.to_s,
-          session_settings: session_settings || {}
+          session_settings: session_settings || {},
+          workspace_mode: workspace_mode.to_s
         )
-        deliver_prompt!(entry, prompt.to_s, mode: "normal", delivery_id: nil) if present?(prompt)
+        if present?(prompt)
+          deliver_prompt!(
+            entry,
+            prompt.to_s,
+            mode: "normal",
+            delivery_id: initial_delivery_id(entry.fetch("requested_session_id"))
+          )
+        end
         session_ref_for(entry)
       rescue StandardError
+        discard_session(entry.fetch("session_id")) if defined?(entry) && entry
         discard_session(session_id) if defined?(session_id) && session_id
         raise
       end
@@ -193,6 +203,7 @@ module Meringue
         return [] if records.empty?
 
         observe_delivery(entry, records)
+        observe_transcript_records(entry, records)
         touch_last_event(entry)
         transcript_schema.events(records)
       end
@@ -369,6 +380,43 @@ module Meringue
         raise NotImplementedError, "#{self.class} must implement #transcript_path"
       end
 
+      # Most interactive CLIs accept a caller-supplied session id. A provider that assigns its own
+      # id after the first prompt can opt into the discovery hooks below. The shared transport then
+      # rebinds every transcript cursor and persists the provider's real id before returning the
+      # session ref, while provider-specific file layout and matching stay in the subclass.
+      def capture_session_identity(cwd:, requested_session_id:)
+        _ = [cwd, requested_session_id]
+        nil
+      end
+
+      def discover_session_identity(_entry)
+        nil
+      end
+
+      def session_identity_required?
+        false
+      end
+
+      def initial_delivery_id(_requested_session_id)
+        nil
+      end
+
+      # A provider whose transcript reports effective settings can observe each incremental drain
+      # and cache that neutral value on the session entry. This keeps reconciliation O(new bytes)
+      # instead of rereading an ever-growing transcript merely to find the latest turn context.
+      def initial_reported_session_settings(_session_settings)
+        nil
+      end
+
+      def observe_transcript_records(_entry, _records); end
+
+      # A provider may tighten its argv for a shared read-only checkout. This is separate from the
+      # prompt because read-only support is an enforcement claim, not guidance to the model.
+      def spawn_argv_for_workspace_mode(argv, kind:, workspace_mode:)
+        _ = [kind, workspace_mode]
+        argv
+      end
+
       # Provider-specific one-time setup for a workspace, such as recording that a newly created
       # worktree is trusted so the CLI does not stop at a modal before its prompt appears.
       def prepare_workspace!(_cwd); end
@@ -381,7 +429,8 @@ module Meringue
 
       # How the provider's prompt box receives a whole prompt. Bracketed paste keeps a multi-line
       # prompt one submission instead of letting each newline submit a fragment.
-      def submit_prompt(process, text)
+      def submit_prompt(process, text, mode: "normal")
+        _ = mode
         process.write("\e[200~#{text}\e[201~")
         process.wait_for_quiet(quiet_for: 0.2, timeout: 10)
         process.write("\r")
@@ -414,16 +463,21 @@ module Meringue
 
       private
 
-      def start_session_entry(session_id:, cwd:, argv:, kind:, session_name:, session_settings:)
+      def start_session_entry(session_id:, cwd:, argv:, kind:, session_name:, session_settings:, workspace_mode: "isolated")
+        discovery = capture_session_identity(cwd: cwd, requested_session_id: session_id)
         process = InteractiveProcess.new(argv: argv, cwd: cwd, env: process_environment(cwd))
         process.start
         path = transcript_path(cwd: cwd, session_id: session_id)
         entry = {
           "session_id" => session_id,
+          "requested_session_id" => session_id,
+          "session_identity_discovery" => discovery,
           "cwd" => cwd,
           "kind" => kind,
           "session_name" => session_name,
           "session_settings" => session_settings,
+          "reported_session_settings" => initial_reported_session_settings(session_settings),
+          "workspace_mode" => workspace_mode,
           "process" => process,
           "tail" => TranscriptTail.new(path: path),
           "state_tail" => TranscriptTail.new(path: path),
@@ -441,6 +495,7 @@ module Meringue
         end
 
         @mutex.synchronize { @sessions[session_id] = entry }
+        refresh_session_identity!(entry)
         entry
       end
 
@@ -474,7 +529,8 @@ module Meringue
           argv: argv,
           kind: metadata_value(session_ref, "kind").to_s,
           session_name: metadata_value(session_ref, "session_name").to_s,
-          session_settings: session_ref.fetch("session_settings", {}) || {}
+          session_settings: session_ref.fetch("session_settings", {}) || {},
+          workspace_mode: metadata_value(session_ref, "workspace_mode").to_s.empty? ? "isolated" : metadata_value(session_ref, "workspace_mode").to_s
         )
         # A resumed session's transcript already holds its whole history. Replaying it as new
         # events would re-log the entire conversation as if it had just happened.
@@ -513,7 +569,8 @@ module Meringue
           }
         end
         begin
-          submit_prompt(process, single_line_payload(payload))
+          submit_prompt(process, single_line_payload(payload), mode: delivered_mode)
+          ensure_session_identity!(entry)
         rescue IOError => e
           raise PromptDeliveryError, "could not send the prompt to #{harness_name}: #{e.message}"
         end
@@ -592,6 +649,7 @@ module Meringue
       # Consumes only what this cursor has not seen. It is deliberately a different cursor from the
       # one `read_events` drains, so neither can steal the other's records.
       def refresh_conversation!(entry)
+        refresh_session_identity!(entry)
         tail = entry.fetch("state_tail", nil)
         return unless tail
 
@@ -600,6 +658,7 @@ module Meringue
 
         conversation = transcript_schema.conversation_records(records)
         observe_delivery(entry, records)
+        observe_transcript_records(entry, records)
         return if conversation.empty?
 
         entry.fetch("mutex").synchronize do
@@ -625,6 +684,7 @@ module Meringue
         entry = live_entry(session_ref) || adopted_entry(session_ref)
         return [] unless entry
 
+        refresh_session_identity!(entry)
         entry.fetch("tail").all_records
       end
 
@@ -679,6 +739,46 @@ module Meringue
         transcript_schema.events(records).each { |event| journal.publish(event) }
       end
 
+      def ensure_session_identity!(entry)
+        return true unless session_identity_required?
+        return true if present?(entry.fetch("transcript_path", nil))
+
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + DEFAULT_SUBMIT_SETTLE_TIMEOUT
+        loop do
+          return true if refresh_session_identity!(entry)
+          break unless entry.fetch("process").alive?
+          break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+          sleep 0.05
+        end
+        raise PromptDeliveryError,
+              "#{harness_name} accepted the prompt but Meringue could not identify its saved session within #{DEFAULT_SUBMIT_SETTLE_TIMEOUT}s"
+      end
+
+      def refresh_session_identity!(entry)
+        identity = discover_session_identity(entry)
+        return false unless identity.is_a?(Hash)
+
+        session_id = (identity["session_id"] || identity[:session_id]).to_s
+        path = identity["session_file"] || identity[:session_file] || identity["path"] || identity[:path]
+        return false unless present?(session_id) && present?(path)
+
+        expanded = File.expand_path(path.to_s)
+        return false unless File.file?(expanded)
+
+        old_session_id = entry.fetch("session_id").to_s
+        entry["session_id"] = session_id
+        entry["transcript_path"] = expanded
+        %w[tail state_tail view_tail].each { |key| entry.fetch(key).rebind(expanded) }
+        @mutex.synchronize do
+          @sessions.delete(old_session_id) if @sessions[old_session_id].equal?(entry)
+          @sessions[session_id] = entry if entry.fetch("process", nil)
+        end
+        true
+      rescue StandardError
+        false
+      end
+
       def discard_session(session_id)
         entry = @mutex.synchronize { @sessions.delete(session_id) }
         return false unless entry
@@ -702,6 +802,7 @@ module Meringue
           {
             "kind" => entry.fetch("kind", nil),
             "session_name" => entry.fetch("session_name", nil),
+            "workspace_mode" => entry.fetch("workspace_mode", nil),
             "transport" => "interactive_pty",
             "prompt_modes" => prompt_modes,
             "session_state" => state,
@@ -714,7 +815,7 @@ module Meringue
           metadata.delete("process_gone")
           metadata.delete("exit_status")
         end
-        {
+        ref = {
           "harness" => harness_name,
           "pid" => process&.alive? ? process.pid : nil,
           "cwd" => entry.fetch("cwd"),
@@ -724,6 +825,9 @@ module Meringue
           "last_event_at" => entry.fetch("last_event_at", nil),
           "metadata" => metadata
         }
+        reported_settings = entry.fetch("mutex").synchronize { entry.fetch("reported_session_settings", nil) }
+        ref["session_settings"] = reported_settings if reported_settings.is_a?(Hash)
+        ref
       end
 
       def completed_session_ref(session_ref)

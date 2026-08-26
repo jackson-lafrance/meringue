@@ -88,7 +88,7 @@ class KernelCoreModelCatalogTest < Minitest::Test
     refute_nil persisted_state.dig("metadata", "harness_model_catalogs", "claude")
     assert_nil persisted_state.dig("metadata", "harness_model_catalogs", "pi")
 
-    rejection = apply_command("GetModelCatalog", "harness" => "codex")
+    rejection = apply_command("GetModelCatalog", "harness" => "cursor")
     assert_rejected(rejection, "Unsupported harness provider")
     assert_equal ["claude"], @catalog_source.calls
   end

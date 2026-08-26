@@ -258,7 +258,7 @@ module Meringue
         ["/worker import <bundle_path> --project <path>", "Import workers as fresh sessions in a destination project."],
         ["/prompt <agent_id> \"<message>\"", "Continue a worker session or take over a still-routing head."],
         ["/retry <head_id>", "Retry a blocked, errored, or killed head with a fresh head."],
-        ["/harness [head|worker] <pi|claude>", "Select role-aware harness defaults for future agents; omit the role to update both."],
+        ["/harness [head|worker] <pi|claude|codex>", "Select role-aware harness defaults for future agents; omit the role to update both."],
         ["/models [harness] [refresh]", "List every model the selected harness reports, refreshing the catalog when it is stale."],
         ["/model <provider>/<model-id>", "With no arguments, open the same TUI picker as /models; otherwise persist the model used for all future heads and workers. Existing sessions are unchanged. The model id may itself contain / and :."],
         ["/thinking <level>", "Persist the thinking level used for all future heads and workers: off, minimal, low, medium, high, xhigh, or max."],
