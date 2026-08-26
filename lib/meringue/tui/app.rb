@@ -188,6 +188,7 @@ module Meringue
         @settings_setup_outcome = nil
         @settings_status_bar_draft = nil
         @settings_status_bar_drag = nil
+        @context_menu = nil
         # Status-bar composition is a separate in-memory draft. Preview changes
         # never touch the config until the single SaveConfiguration transaction
         # succeeds, so Esc and failed saves are deterministic.
@@ -516,6 +517,18 @@ module Meringue
 
         if @settings_active
           return handle_settings_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
+        end
+
+        # An open context menu owns every key: it is modal like the pickers, and
+        # anything it does not recognise dismisses it rather than typing into the
+        # composer behind it.
+        if context_menu_active?
+          return handle_context_menu_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        end
+
+        if context_menu_key?(key)
+          opened = open_context_menu_for_selection(state)
+          return [input_buffer, input_cursor, slash_suggestion_index] if opened
         end
 
         if @question_picker_active
@@ -912,21 +925,198 @@ module Meringue
         nil
       end
 
-      # Right-click is a direct AgentTree action rather than a context menu: an
-      # issue row opens its associated delivery PR using the same opener as the
-      # keyboard action. Worker rows deliberately do not duplicate that affordance;
-      # their direct action is the focused workspace on double-click.
+      # Right-click opens the menu for whatever it landed on. It used to be one
+      # hard-coded action (open an issue's PR), which left workers, projects, and
+      # empty space with no gesture at all; ContextMenu decides the entries and
+      # this only owns where the box sits and what happens on activation.
       def handle_mouse_right_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
         pane = pane_at_mouse_position(key, state)
         return nil unless pane == "agent_tree"
 
         item_id = agent_tree_item_at_mouse_position(key, state)
-        record = agent_tree_record(state, item_id)
-        return [input_buffer, input_cursor, slash_suggestion_index] unless record
-        return [input_buffer, input_cursor, slash_suggestion_index] unless issue_tree_record?(record) || record["type"] == "head"
-
-        open_pr_by_agent_id(state, item_id)
+        open_context_menu(state, item_id, x: mouse_x(key) + 1, y: mouse_y(key))
         [input_buffer, input_cursor, slash_suggestion_index]
+      end
+
+      # --- context menu -----------------------------------------------------------------
+
+      # Shift-F10 is the platform convention for opening a context menu from the
+      # keyboard; the Menu/Apps key sends the same thing on terminals that have
+      # one. Both are literal sequences rather than a rebindable action so the
+      # gesture matches what the rest of the desktop does.
+      CONTEXT_MENU_KEYS = ["\e[21;2~", "\e[29~"].freeze
+
+      def context_menu_key?(key)
+        CONTEXT_MENU_KEYS.include?(key)
+      end
+
+      def context_menu_active?
+        @context_menu.is_a?(Hash)
+      end
+
+      def context_menu_snapshot(_state = nil)
+        return nil unless context_menu_active?
+
+        @context_menu.merge("active" => true)
+      end
+
+      CONTEXT_MENU_TITLES = {
+        "worker" => "worker",
+        "head" => "head",
+        "issue" => "issue",
+        "project" => "project",
+        "background" => "agent tree"
+      }.freeze
+
+      def open_context_menu(state, target_id, x:, y:)
+        kind = ContextMenu.kind_for(state, target_id)
+        entries = ContextMenu.entries(state, target_id, github_enabled: github_support_enabled?(state)).map(&:to_h)
+        return false if entries.empty?
+
+        close_model_picker
+        close_delivery_pr_picker
+        close_question_picker
+        # Open on the first entry the user can actually pick, so Enter never
+        # lands on a disabled row.
+        first_enabled = entries.index { |entry| entry.fetch("enabled", true) } || 0
+        @context_menu = {
+          "kind" => kind,
+          "title" => CONTEXT_MENU_TITLES.fetch(kind, kind),
+          "target_id" => target_id.to_s.empty? ? nil : target_id.to_s,
+          "entries" => entries,
+          "index" => first_enabled,
+          "x" => x.to_i,
+          "y" => y.to_i
+        }.compact
+        true
+      end
+
+      def close_context_menu
+        @context_menu = nil
+      end
+
+      # Shift-F10 is the platform convention for "context menu without a mouse".
+      # It targets the selected AgentTree row, or the background when nothing is
+      # selected, and anchors the box next to the tree rather than at a pointer.
+      def open_context_menu_for_selection(state)
+        target_id = @selected_agent_id || @log_scope_id
+        open_context_menu(state, target_id, x: 4, y: 3)
+      end
+
+      def move_context_menu(step)
+        return unless context_menu_active?
+
+        entries = Array(@context_menu.fetch("entries", []))
+        return if entries.empty?
+
+        index = @context_menu.fetch("index", 0).to_i
+        entries.length.times do
+          index = (index + step) % entries.length
+          break if entries[index].fetch("enabled", true)
+        end
+        @context_menu["index"] = index
+      end
+
+      def selected_context_menu_entry
+        return nil unless context_menu_active?
+
+        entries = Array(@context_menu.fetch("entries", []))
+        return nil if entries.empty?
+
+        entries[@context_menu.fetch("index", 0).to_i.clamp(0, entries.length - 1)]
+      end
+
+      # An entry either runs a local view action the app already owns, or hands
+      # the composer a slash command draft. Nothing here writes orchestration
+      # state directly: the kernel stays the only writer, and a drafted command is
+      # exactly what the user could have typed, so it stays cancellable.
+      def activate_context_menu_entry(state, input_buffer, input_cursor, slash_suggestion_index)
+        entry = selected_context_menu_entry
+        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
+        return unchanged unless entry
+        return unchanged unless entry.fetch("enabled", true)
+
+        target_id = @context_menu&.fetch("target_id", nil)
+        draft = entry.fetch("draft", nil)
+        action = entry.fetch("action", nil)
+        close_context_menu
+
+        if draft
+          exit_agent_tree_navigation if @agent_tree_navigation_active
+          set_selection_status("Review the command and press Enter") if draft.end_with?(" ")
+          return [draft, draft.chars.length, NO_SLASH_SELECTION]
+        end
+
+        case action
+        when "open_pr" then open_pr_by_agent_id(state, target_id)
+        when "open_workspace" then open_agent_workspace_by_id(state, target_id)
+        when "info" then show_context_menu_info(state, target_id)
+        end
+        unchanged
+      end
+
+      # `/info` has no slash command, so the menu's Info entry reports the same
+      # facts inline the way other local commands answer.
+      def show_context_menu_info(state, target_id)
+        record = ContextMenu.find_record(state, target_id)
+        return set_selection_status("Nothing selected") unless record
+
+        kind = ContextMenu.kind_for(state, target_id)
+        details = case kind
+                  when "project"
+                    ["#{record.fetch("name", target_id)}", record.fetch("root_path", ""), record.fetch("status", "")]
+                  when "issue"
+                    [record.fetch("title", target_id), "project #{record.fetch("project_id", "?")}", record.fetch("status", "")]
+                  else
+                    [
+                      record.dig("harness_metadata", "title") || record.fetch("id"),
+                      record.fetch("harness", "?").to_s,
+                      record.fetch("status", "").to_s,
+                      record.fetch("workspace_path", nil)
+                    ].compact
+                  end
+        set_selection_status("#{target_id}: #{details.reject { |part| part.to_s.strip.empty? }.join(" · ")}")
+      end
+
+      def handle_context_menu_key(key, input_buffer, input_cursor, slash_suggestion_index, state)
+        unchanged = [input_buffer, input_cursor, slash_suggestion_index]
+        return handle_context_menu_mouse(key, unchanged, state) if mouse_event?(key)
+
+        if keybinding?("suggestion_previous", key) || key == "\e[A"
+          move_context_menu(-1)
+          return unchanged
+        end
+        if keybinding?("suggestion_next", key) || key == "\e[B"
+          move_context_menu(1)
+          return unchanged
+        end
+        if keybinding?("submit", key)
+          return activate_context_menu_entry(state, input_buffer, input_cursor, slash_suggestion_index)
+        end
+
+        # Anything else dismisses rather than leaking into the composer, which is
+        # what a menu that is up is expected to do.
+        close_context_menu
+        unchanged
+      end
+
+      def handle_context_menu_mouse(key, unchanged, state)
+        return unchanged unless mouse_button_press?(key) || mouse_right_button_press?(key)
+
+        index = layout.context_menu_entry_at(
+          compose_state(-> { state }, "", -1, 0),
+          width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key)
+        )
+        if index.nil?
+          close_context_menu
+          return unchanged
+        end
+
+        @context_menu["index"] = index
+        entry = selected_context_menu_entry
+        return unchanged unless entry && entry.fetch("enabled", true)
+
+        activate_context_menu_entry(state, *unchanged)
       end
 
       def handle_mouse_press_key(key, input_buffer, input_cursor, slash_suggestion_index, state, on_submit = nil)
@@ -2884,7 +3074,7 @@ module Meringue
           Composer selection: #{keys_for("select_left")}/#{keys_for("select_right")}/#{keys_for("select_up")}/#{keys_for("select_down")} extend by character or line; #{keys_for("select_home")}/#{keys_for("select_end")} extend to the line edges; #{keys_for("select_word_left")}/#{keys_for("select_word_right")} extend by word; #{keys_for("cut_selection")} cuts; #{keys_for("paste_clipboard")} pastes; typing or Backspace/Delete replaces the selection.
           Chat: #{keys_for("undo")} undoes the most recent edit while the input is focused; #{keys_for("submit")} sends the prompt as typed, or applies a slash suggestion once one is selected; #{keys_for("newline")} inserts a newline; #{keys_for("cursor_left")}/#{keys_for("cursor_right")} move by character; #{keys_for("cursor_up")}/#{keys_for("cursor_down")} move through hard and soft-wrapped rows, then browse sent-input history at the first/last row; #{keys_for("cursor_home")} and #{keys_for("cursor_end")} jump within a line; #{keys_for("cursor_word_left")} and #{keys_for("cursor_word_right")} move by word; #{keys_for("delete_backward")}/#{keys_for("delete_forward")} edit characters; #{keys_for("delete_word_backward")} and #{keys_for("delete_word_forward")} edit words.
           Slash commands: type / for suggestions; nothing is selected until you press #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} or #{keys_for("complete_suggestion")}; #{keys_for("complete_suggestion")} completes; #{keys_for("submit")} inserts the selected suggestion.
-          Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode. In the AgentTree, #{keys_for("rename_selected")} starts a quick rename for the selected project or issue by pre-filling `/project rename` or `/issue rename`; type its new name in the composer and press Enter.
+          Agent tree/logs: focus either pane and press #{keys_for("submit")} to enter jump mode. In the AgentTree, #{keys_for("rename_selected")} starts a quick rename for the selected project or issue by pre-filling `/project rename` or `/issue rename`; type its new name in the composer and press Enter. Right-click any row for its context menu, or press Shift-F10 to open the same menu for the selected row.
           Agent tree scrolling: focus the AgentTree, then #{keys_for("scroll_up")}/#{keys_for("scroll_down")} scroll a line, #{keys_for("scroll_page_up")}/#{keys_for("scroll_page_down")} scroll a page, #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} jump to the first/last row, and the mouse wheel scrolls while the pointer is over the pane. The pane title shows how many rows are hidden above and below (↑ above ↓ below). In jump mode #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} keep the selected item on screen automatically while paging and #{keys_for("scroll_top")}/#{keys_for("scroll_bottom")} still scroll.
           Pull-request picker: /prs opens every tracked PR that is still open, regardless of the AgentTree selection; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} opens the highlighted PR, and #{keys_for("cancel_navigation")} closes. #{keys_for("open_delivery_pr")} keeps its selection-aware behavior: it opens the selected issue's PR, or this picker when chat is unscoped.
           Settings pickers: bare /model or /models opens models, bare /thinking opens thinking levels, bare /theme or /themes opens themes, and bare /harness opens harnesses. They are bordered popovers; #{keys_for("cursor_left")}/#{keys_for("cursor_right")} switches role tabs where shown, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} moves, #{keys_for("submit")} applies, #{keys_for("refresh_model_catalog")} refreshes the model catalog, and #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker. /prs opens the pull-request popover.
@@ -6182,7 +6372,8 @@ module Meringue
           LogScope::STATE_KEY => LogScope.snapshot(state, @log_scope_id),
           "_agent_workspace" => agent_workspace_snapshot(state, input_buffer, input_cursor, slash_suggestion_index),
           "_scroll" => scroll_snapshot,
-          "_selection" => selection_snapshot
+          "_selection" => selection_snapshot,
+          Layout::CONTEXT_MENU_STATE_KEY => context_menu_snapshot(state)
         )
         clamp_scroll_offsets!(composed_state)
         # Reveal reads the offsets it is about to adjust, so it runs against the

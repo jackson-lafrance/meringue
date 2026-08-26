@@ -128,7 +128,7 @@ class TuiAppWiringTest < Minitest::Test
     composed = compose_app_state(@app, provider.to_proc, "typed")
 
     assert_equal(
-      %w[_agent_tree_navigation _agent_workspace _capabilities _chat _log_scope _scroll _selection _settings _status_bar_composer _status_bar_layout],
+      %w[_agent_tree_navigation _agent_workspace _capabilities _chat _context_menu _log_scope _scroll _selection _settings _status_bar_composer _status_bar_layout],
       (composed.keys - demo_state.keys).sort
     )
     # Settings is nil unless /config or the shared first-run Setup mode is active.

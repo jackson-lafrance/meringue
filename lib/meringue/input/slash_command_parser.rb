@@ -20,6 +20,7 @@ module Meringue
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
+        ["/issue move <issue_id> <project_id|issue_id|top>", "Move an issue to another project on the same checkout, reparent it under another issue, or promote it to the top level. Its child issues and their workers move with it."],
         ["/move <agent_id> <issue_id>", "Move an existing worker to a different issue without restarting its harness session."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/worker guide \"<additional system prompt>\"", "Persist the additional worker model-selection system prompt when its experiment is enabled."],
@@ -1037,9 +1038,27 @@ module Meringue
           return invalid("Usage: /issue rename <issue_id> \"<title>\"") unless tokens.length >= 3
 
           kernel_command("ModifyIssue", "issue_id" => tokens[1], "title" => tokens[2..].join(" "))
+        when "move"
+          parse_issue_move(tokens)
         else
-          invalid("Usage: /issue create <project_id> \"<title>\" [\"description\"] | /issue rename <issue_id> \"<title>\"")
+          invalid("Usage: /issue create <project_id> \"<title>\" [\"description\"] | /issue rename <issue_id> \"<title>\" | /issue move <issue_id> <project_id|issue_id|top>")
         end
+      end
+
+      # One destination argument covers the three things "move this issue" can
+      # mean, because the id shape already says which: a project id moves the
+      # issue to that board, an issue id reparents it beneath that issue, and the
+      # literal `top` promotes it out of whatever issue currently owns it.
+      def parse_issue_move(tokens)
+        return invalid("Usage: /issue move <issue_id> <project_id|issue_id|top>") unless tokens.length == 3
+
+        issue_id = tokens[1]
+        destination = tokens[2].to_s.strip
+        return kernel_command("MoveIssue", "issue_id" => issue_id, "parent_issue_id" => "") if %w[top none root].include?(destination.downcase)
+        return kernel_command("MoveIssue", "issue_id" => issue_id, "parent_issue_id" => destination) if destination.match?(/\A[Pp]\d+-[Ii]\d+\z/)
+        return kernel_command("MoveIssue", "issue_id" => issue_id, "target_project_id" => destination) if destination.match?(/\A[Pp]\d+\z/)
+
+        invalid("Usage: /issue move <issue_id> <project_id|issue_id|top>")
       end
 
       def parse_worker(arguments)

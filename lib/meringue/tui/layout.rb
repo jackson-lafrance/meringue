@@ -154,8 +154,106 @@ module Meringue
           bottom_left,
           bottom_right
         )
+        # Drawn last so it floats above every pane it overlaps.
+        draw_context_menu(canvas, state, width, height)
 
         canvas.render(color: color)
+      end
+
+      CONTEXT_MENU_STATE_KEY = "_context_menu"
+
+      def context_menu_snapshot(state)
+        value = (state || {}).fetch(CONTEXT_MENU_STATE_KEY, nil)
+        value.is_a?(Hash) && value.fetch("active", false) ? value : nil
+      end
+
+      # Geometry for the floating menu, clamped so the whole box stays on screen
+      # no matter where the click landed. A click near the right or bottom edge
+      # flips the box back inside rather than being drawn half off the canvas.
+      def context_menu_geometry(state, width:, height:)
+        menu = context_menu_snapshot(state)
+        return nil unless menu
+
+        entries = Array(menu.fetch("entries", []))
+        return nil if entries.empty?
+
+        label_width = entries.map { |entry| context_menu_entry_text(entry).length }.max.to_i
+        box_width = [[label_width + 4, 22].max, [width.to_i - 2, 22].max].min
+        box_height = [entries.length + 2, [height.to_i - 2, 3].max].min
+        x = menu.fetch("x", 0).to_i
+        y = menu.fetch("y", 0).to_i
+        x = [[x, 0].max, [width.to_i - box_width, 0].max].min
+        y = [[y, 0].max, [height.to_i - box_height, 0].max].min
+        { x: x, y: y, width: box_width, height: box_height, entries: entries, visible: box_height - 2 }
+      end
+
+      def ascii_glyphs?
+        defined?(Harness::Registry) && Harness::Registry.ascii_glyphs?
+      end
+
+      def context_menu_entry_text(entry)
+        note = entry.fetch("note", nil).to_s
+        label = entry.fetch("label", "").to_s
+        note.empty? || entry.fetch("enabled", true) ? label : "#{label} — #{note}"
+      end
+
+      def draw_context_menu(canvas, state, width, height)
+        geometry = context_menu_geometry(state, width: width, height: height)
+        return unless geometry
+
+        menu = context_menu_snapshot(state)
+        entries = geometry.fetch(:entries)
+        selected = menu.fetch("index", 0).to_i.clamp(0, entries.length - 1)
+        visible = geometry.fetch(:visible)
+        start = [[selected - visible + 1, 0].max, [entries.length - visible, 0].max].min
+        canvas.draw_box(
+          geometry.fetch(:x), geometry.fetch(:y), geometry.fetch(:width), geometry.fetch(:height),
+          title: menu.fetch("title", nil), style: Style::BORDER_ACTIVE, title_style: Style::PANEL_TITLE
+        )
+        entries.drop(start).first(visible).each_with_index do |entry, offset|
+          index = start + offset
+          chosen = index == selected
+          enabled = entry.fetch("enabled", true)
+          style = if !enabled
+                    Style::DIM
+                  else
+                    chosen ? Style::AGENT_TREE_SELECTED : Style::TEXT
+                  end
+          marker = chosen ? (ascii_glyphs? ? ">" : "›") : " "
+          canvas.write_segments(
+            geometry.fetch(:x) + 1,
+            geometry.fetch(:y) + 1 + offset,
+            [["#{marker} #{context_menu_entry_text(entry)}", style]],
+            max_width: [geometry.fetch(:width) - 2, 0].max
+          )
+        end
+      end
+
+      # Which entry a click at (x, y) lands on, or nil when the click is outside
+      # the menu entirely. The app uses nil to mean "dismiss".
+      def context_menu_entry_at(state, width:, height:, x:, y:)
+        geometry = context_menu_geometry(state, width: width, height: height)
+        return nil unless geometry
+
+        menu = context_menu_snapshot(state)
+        entries = geometry.fetch(:entries)
+        visible = geometry.fetch(:visible)
+        selected = menu.fetch("index", 0).to_i.clamp(0, entries.length - 1)
+        start = [[selected - visible + 1, 0].max, [entries.length - visible, 0].max].min
+        row = y.to_i - geometry.fetch(:y) - 1
+        return nil if row.negative? || row >= visible
+        return nil unless x.to_i >= geometry.fetch(:x) && x.to_i < geometry.fetch(:x) + geometry.fetch(:width)
+
+        index = start + row
+        index < entries.length ? index : nil
+      end
+
+      def context_menu_hit?(state, width:, height:, x:, y:)
+        geometry = context_menu_geometry(state, width: width, height: height)
+        return false unless geometry
+
+        x.to_i >= geometry.fetch(:x) && x.to_i < geometry.fetch(:x) + geometry.fetch(:width) &&
+          y.to_i >= geometry.fetch(:y) && y.to_i < geometry.fetch(:y) + geometry.fetch(:height)
       end
 
       def pane_at(state, width:, height:, x:, y:)
