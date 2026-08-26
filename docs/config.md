@@ -20,8 +20,8 @@ schema_version = 1
 
 [experiments]
 github_support = false
-worker_spawning_guidance = false
-# worker_spawning_guidance_prompt = "..."  # shown and applied only when the toggle is true
+agent_defaults_mode = "role-specific"  # shared | role-specific | guided
+# worker_spawning_guidance_prompt = "..."  # shown and applied only in guided mode
 ```
 
 New installations default GitHub support off. Existing installations with a pre-upgrade state file or onboarding marker migrate it on so upgrading does not silently remove PR behavior; an explicit value always wins. Disabling it performs no built-in `gh` subprocess/network lookup, hides GitHub-specific TUI commands and status, and preserves historical PR records. The worker model-selection prompt is editable inline through Settings → Experiments, Setup → Experiments, or `/worker guide \"...\"`, but its input is hidden and ignored while the toggle is off. When enabled, heads receive a privacy-filtered routing snapshot without configured or effective worker model/thinking defaults; guided head spawns must set both selections explicitly. See [`settings.md`](settings.md#github-support) and [`orchestration-experiments.md`](orchestration-experiments.md).
@@ -552,7 +552,7 @@ Supported provider names in this slice:
 - `pi`
 - `claude` for Claude Code (aliases: `claude_code`, `claude-code`, `cc`)
 
-The `split_defaults` experiment is enabled by default and makes head/worker harness, model, and thinking settings independent. Disable it only for a compatibility migration: role-specific values remain stored, but the shared values are used for both roles. Harness selection re-resolves incompatible future thinking values for each affected role in the same config transaction; it never rewrites an existing session.
+The `agent_defaults_mode` experiment defaults to `role-specific` and makes head/worker model and thinking settings independent. Set it to `shared` for one value across both roles: a role-named write then updates both roles, so what is saved is what is reported back. Role harnesses stay independent in every mode. Harness selection re-resolves incompatible future thinking values for each affected role in the same config transaction; it never rewrites an existing session.
 
 CLI flags override `config.toml`:
 

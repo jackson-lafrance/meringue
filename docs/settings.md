@@ -49,7 +49,7 @@ Long categories use a selected-row window and show `N–M of T`. Exact command/m
 
 ## Harness migration and split defaults
 
-The `split_defaults` experiment is registry-backed and enabled by default. It makes role-specific harness/model/thinking rows authoritative for their role; disabling it keeps the role rows for migration but uses shared values for both roles. Switching a harness re-resolves incompatible future thinking values for the affected shared or role-specific defaults in the same config transaction. Model references remain shape-validated rather than catalog-gated, so exact unverified references survive a stale or unavailable catalog. Existing sessions keep their stored effective settings.
+The `agent_defaults_mode` experiment is registry-backed and defaults to `role-specific`, which makes role-specific model/thinking rows authoritative for their role. In `shared` mode both roles read and write one value, so a role-named write updates both rather than storing a role value the reader would ignore. Switching a harness re-resolves incompatible future thinking values for the affected shared or role-specific defaults in the same config transaction. Model references remain shape-validated rather than catalog-gated, so exact unverified references survive a stale or unavailable catalog. Existing sessions keep their stored effective settings.
 
 ## Save transaction
 
@@ -84,12 +84,23 @@ The current experiment definitions are:
 ```toml
 [experiments]
 github_support = false
-split_defaults = true
-worker_spawning_guidance = false
-# worker_spawning_guidance_prompt is shown only while the toggle is enabled
+agent_defaults_mode = "role-specific"   # shared | role-specific | guided
+# worker_spawning_guidance_prompt is shown only in guided mode
 ```
 
-`split_defaults` is enabled by default and controls independent future head/worker defaults. Existing role values are preserved if it is disabled, but shared values are used for both roles. `worker_spawning_guidance` is off by default; when enabled, its additional model-selection prompt is edited inline in the Experiments section of both Settings and Setup, or through `/worker guide "..."`. The prompt row is hidden while disabled and its saved value is retained. Guided heads receive neither configured nor effective worker model/reasoning defaults, and guided `SpawnWorker` commands must set both selections explicitly. Goal loops, harness selection, focused workspaces, read-only workers, command blacklists, presentation preferences, and terminal launchers already have explicit activation or are core safety/preferences.
+`agent_defaults_mode` selects one of three arrangements for future model and reasoning defaults, and defaults to `role-specific`:
+
+| Mode | Shown as | Behavior |
+| --- | --- | --- |
+| `shared` | Shared | One model and one reasoning level for every future head and worker. Naming a role still writes the single shared value, and the pickers drop their Head/Worker tabs. |
+| `role-specific` | By role | Heads and workers keep independent values. `/model head …` and `/model worker …` write only that role. |
+| `guided` | Guided | As `role-specific`, and heads choose each worker's model and reasoning from a prompt you write. |
+
+The guided selection prompt is edited inline in the Experiments section of both Settings and Setup, or through `/worker guide "..."`. Its row appears only in guided mode and its saved value is retained when you switch away. Guided heads receive neither configured nor effective worker model/reasoning defaults, and guided `SpawnWorker` commands must set both selections explicitly.
+
+Role *harnesses* are independent of this mode: `/harness head …` and `/harness worker …` always apply per role, so the harness picker keeps its Head/Worker tabs in every mode.
+
+Goal loops, harness selection, focused workspaces, read-only workers, command blacklists, presentation preferences, and terminal launchers already have explicit activation or are core safety/preferences.
 
 ### GitHub support
 

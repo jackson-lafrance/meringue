@@ -15,7 +15,7 @@ schema_version = 1
 # New installations are local-first. Enable this for built-in gh title/status
 # lookups, delivery PR verification, markers, pickers, and opening actions.
 github_support = false
-# worker_spawning_guidance = false
+# agent_defaults_mode = "role-specific"   # shared | role-specific | guided
 # worker_spawning_guidance_prompt = "Choose lighter models for routine work and stronger models for ambiguous or high-impact work. Set both model and thinking_level explicitly on every SpawnWorker."
 
 [tui]

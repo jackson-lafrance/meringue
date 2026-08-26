@@ -56,25 +56,32 @@ class WorkerModelSelectionGuidanceTest < Minitest::Test
     assert_equal "For implementation use @openai/gpt-5.6-luna", models.first.fetch("completion")
   end
 
-  def test_prompt_row_is_hidden_when_toggle_is_disabled_and_visible_when_enabled
+  def test_prompt_row_is_revealed_by_guided_mode_and_hidden_by_the_others
     Dir.mktmpdir("meringue-guidance-settings") do |dir|
       path = File.join(dir, "config.toml")
       File.write(path, <<~TOML)
         [settings]
-        schema_version = 1
+        schema_version = 2
         [experiments]
-        worker_spawning_guidance = false
+        agent_defaults_mode = "role-specific"
         worker_spawning_guidance_prompt = "saved custom prompt"
       TOML
       config = Meringue::Config.load(path: path)
       draft = Meringue::TUI::Settings::Draft.new(config, env: {})
 
       refute_includes draft.definitions_for("Experiments").map(&:id), "experiments.worker_spawning_guidance_prompt"
-      draft.set("experiments.worker_spawning_guidance", true)
+
+      draft.set("experiments.agent_defaults_mode", "guided")
       assert_includes draft.definitions_for("Experiments").map(&:id), "experiments.worker_spawning_guidance_prompt"
       assert_equal "saved custom prompt", draft.value("experiments.worker_spawning_guidance_prompt")
       assert_includes Meringue::TUI::Settings::SetupFlow.setting_ids("Experiments", draft: draft),
                       "experiments.worker_spawning_guidance_prompt"
+
+      # The text is kept, not discarded, so switching away and back does not
+      # lose a prompt the user wrote.
+      draft.set("experiments.agent_defaults_mode", "shared")
+      refute_includes draft.definitions_for("Experiments").map(&:id), "experiments.worker_spawning_guidance_prompt"
+      assert_equal "saved custom prompt", draft.value("experiments.worker_spawning_guidance_prompt")
     end
   end
 
@@ -83,9 +90,9 @@ class WorkerModelSelectionGuidanceTest < Minitest::Test
       path = File.join(dir, "config.toml")
       File.write(path, <<~TOML)
         [settings]
-        schema_version = 1
+        schema_version = 2
         [experiments]
-        worker_spawning_guidance = true
+        agent_defaults_mode = "guided"
       TOML
       store = Meringue::State::Store.new(path: File.join(dir, "state.json"))
       store.save(Meringue::State::Models.empty_state)
@@ -307,9 +314,9 @@ class WorkerModelSelectionGuidanceTest < Minitest::Test
       config_path = File.join(dir, "config.toml")
       File.write(config_path, <<~TOML)
         [settings]
-        schema_version = 1
+        schema_version = 2
         [experiments]
-        worker_spawning_guidance = true
+        agent_defaults_mode = "guided"
       TOML
       state = Meringue::State::Models.empty_state
       state.fetch("projects") << {

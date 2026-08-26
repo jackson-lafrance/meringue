@@ -15,6 +15,12 @@ module Meringue
       :migration,
       :availability_probe,
       :actions,
+      # Present only on an experiment that selects among named modes rather than
+      # being on or off. Settings renders these as a selector instead of a
+      # checkbox, and `mode?` is what tells the two apart.
+      :modes,
+      :mode_labels,
+      :mode_descriptions,
       keyword_init: true
     ) do
       def initialize(**values)
@@ -24,7 +30,25 @@ module Meringue
         self.dependencies = Array(dependencies).map(&:to_s).freeze
         self.conflicts = Array(conflicts).map(&:to_s).freeze
         self.actions = Array(actions).map { |action| action.to_h.transform_keys(&:to_s).freeze }.freeze
+        self.modes = modes.nil? ? nil : Array(modes).map(&:to_s).freeze
+        self.mode_labels = (mode_labels || {}).transform_keys(&:to_s).transform_values(&:to_s).freeze
+        self.mode_descriptions = (mode_descriptions || {}).transform_keys(&:to_s).transform_values(&:to_s).freeze
         freeze
+      end
+
+      # A mode experiment stores one of `modes`; a plain experiment stores a
+      # boolean. Everything that renders or validates an experiment branches
+      # here rather than special-casing an id.
+      def mode?
+        !modes.nil?
+      end
+
+      def mode_label(mode)
+        mode_labels.fetch(mode.to_s, mode.to_s)
+      end
+
+      def mode_description(mode)
+        mode_descriptions.fetch(mode.to_s, "")
       end
 
       def action_setting_ids
@@ -67,13 +91,16 @@ module Meringue
           availability_probe: nil
         ),
         Definition.new(
-          id: "split_defaults",
-          config_path: %w[experiments split_defaults],
-          label: "Split head and worker defaults",
-          description: "Allow heads and workers to keep independent harness, model, and thinking defaults.",
-          default: true,
+          id: "agent_defaults_mode",
+          config_path: AgentDefaultsMode::CONFIG_PATH,
+          label: "Model and reasoning defaults",
+          description: "Choose how future heads and workers get their model and reasoning level.",
+          default: AgentDefaultsMode::DEFAULT,
+          modes: AgentDefaultsMode::MODES,
+          mode_labels: AgentDefaultsMode::LABELS,
+          mode_descriptions: AgentDefaultsMode::DESCRIPTIONS,
           restart_required: false,
-          risk: "Future heads and workers may intentionally use different providers and settings.",
+          risk: "Heads and workers may intentionally use different models, and guided mode lets heads assign them.",
           dependencies: [],
           conflicts: [],
           migration: "preserve_existing_role_defaults",
@@ -87,19 +114,6 @@ module Meringue
           default: false,
           restart_required: false,
           risk: "May start one isolated recovery worker per failed worker; recovery workers cannot recursively recover themselves.",
-          dependencies: [],
-          conflicts: [],
-          migration: nil,
-          availability_probe: nil
-        ),
-        Definition.new(
-          id: "worker_spawning_guidance",
-          config_path: %w[experiments worker_spawning_guidance],
-          label: "Worker model selection guidance",
-          description: "Append model and thinking-level selection guidance to head system prompts.",
-          default: false,
-          restart_required: false,
-          risk: "Changes the instructions future heads receive; it does not change worker defaults or spawn behavior.",
           dependencies: [],
           conflicts: [],
           migration: nil,

@@ -34,7 +34,7 @@ module Meringue
           return FIXED_SETTING_IDS.fetch(step.to_s, []) unless step.to_s == "Experiments"
 
           ids = Experiments::Registry.setting_ids.dup
-          if draft && draft.value("experiments.worker_spawning_guidance") == true
+          if draft && Experiments::AgentDefaultsMode.normalize(draft.value("experiments.agent_defaults_mode")) == Experiments::AgentDefaultsMode::GUIDED
             ids << "experiments.worker_spawning_guidance_prompt"
           end
           ids
@@ -223,16 +223,21 @@ module Meringue
             "advanced" => definition.advanced,
             "read_only" => definition.visibility == "read_only" || definition.type == "read_only",
             "apply_mode" => definition.apply_mode,
-            "options" => definition.option_values(config)
+            "options" => definition.option_values(config),
+            "option_labels" => definition.option_values(config).to_h { |option| [option, definition.option_label(option)] },
+            "option_descriptions" => definition.option_values(config).to_h { |option| [option, definition.option_description(option)] }
           }.compact
         end
 
         private
 
+        # The guided selection prompt only means something in guided mode, so it
+        # appears and disappears with that mode rather than sitting inert.
         def visible_definition?(definition)
           return true unless definition.id == "experiments.worker_spawning_guidance_prompt"
 
-          truthy?(value("experiments.worker_spawning_guidance"))
+          Experiments::AgentDefaultsMode.normalize(value("experiments.agent_defaults_mode")) ==
+            Experiments::AgentDefaultsMode::GUIDED
         rescue KeyError
           false
         end
@@ -273,6 +278,11 @@ module Meringue
 
         def display_value(definition, value)
           return "<redacted: #{value.is_a?(Hash) ? value.length : 1} entr#{value.is_a?(Hash) && value.length == 1 ? "y" : "ies"}>" if definition.sensitive && !value.to_h.empty?
+
+          # An enum that carries its own labels shows the label, so a row reads
+          # "By role" rather than the stored "role-specific".
+          labelled = definition.option_label(value) if definition.type == "enum"
+          return labelled if labelled && labelled != value.to_s
 
           case value
           when TrueClass then "on"

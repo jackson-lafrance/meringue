@@ -633,8 +633,15 @@ module Meringue
           model_picker_kind(state) == "harness"
         end
 
+        # Themes have no roles at all. Model and thinking have two only while
+        # heads and workers keep independent values; in shared mode there is one
+        # value and nothing to switch between. Role harnesses are always
+        # independent, so the harness picker keeps its tabs either way.
         def model_picker_role_tabs?(state)
-          !model_picker_theme?(state)
+          return false if model_picker_theme?(state)
+          return true if model_picker_harness_picker?(state)
+
+          model_picker_state(state).fetch("role_tabs", true) != false
         end
 
         def model_picker_tabs(state)

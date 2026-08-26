@@ -22,7 +22,7 @@ module Meringue
       ATTRIBUTES = %i[
         id path category type default aliases normalize validate description visibility editor
         apply_mode dependencies sensitive serialize label options advanced override_env minimum maximum
-        fallback_paths optional env_overrides env_value
+        fallback_paths optional env_overrides env_value option_labels option_descriptions
       ].freeze
 
       ATTRIBUTES.each { |attribute| attr_reader attribute }
@@ -45,6 +45,11 @@ module Meringue
         @label = (label || id.to_s.split(".").last.tr("_", " ").split.map(&:capitalize).join(" ")).freeze
         @description = description.to_s.freeze
         @options = options
+        # Present only on an enum whose stored values are not what a person
+        # should read: the mode experiment stores "role-specific" and shows
+        # "By role".
+        @option_labels = (option_labels || {}).transform_keys(&:to_s).transform_values(&:to_s).freeze
+        @option_descriptions = (option_descriptions || {}).transform_keys(&:to_s).transform_values(&:to_s).freeze
         @advanced = !!advanced
         @sensitive = !!sensitive
         @override_env = Array(override_env).map(&:to_s).freeze
@@ -61,6 +66,14 @@ module Meringue
       def option_values(config = nil)
         values = options.respond_to?(:call) ? options.call(config) : options
         Array(values).map(&:to_s)
+      end
+
+      def option_label(value)
+        option_labels.fetch(value.to_s, value.to_s)
+      end
+
+      def option_description(value)
+        option_descriptions.fetch(value.to_s, "")
       end
 
       def effective_value(config, env: ENV)
@@ -241,7 +254,9 @@ module Meringue
     end
 
     module Schema
-      VERSION = 1
+      # 2: the split-defaults and worker-guidance booleans became the three
+      # modes of experiments.agent_defaults_mode.
+      VERSION = 2
       CATEGORIES = [
         "Agent defaults",
         "Appearance",
@@ -398,18 +413,40 @@ module Meringue
 
       def add_experiments(settings)
         Meringue::Experiments::Registry.all.each do |experiment|
-          settings << definition(
-            "experiments.#{experiment.id}",
-            experiment.config_path,
-            "Experiments",
-            "boolean",
-            experiment.default,
-            editor: "checkbox",
-            apply_mode: experiment.apply_mode,
-            label: experiment.label,
-            description: "#{experiment.description} #{experiment.risk}".strip
-          )
-          if experiment.id == "worker_spawning_guidance"
+          settings << if experiment.mode?
+                        # A mode experiment is a selector over named modes, so it
+                        # carries its own per-mode labels for the picker rather
+                        # than rendering as a checkbox.
+                        definition(
+                          "experiments.#{experiment.id}",
+                          experiment.config_path,
+                          "Experiments",
+                          "enum",
+                          experiment.default,
+                          options: experiment.modes,
+                          option_labels: experiment.modes.to_h { |mode| [mode, experiment.mode_label(mode)] },
+                          option_descriptions: experiment.modes.to_h { |mode| [mode, experiment.mode_description(mode)] },
+                          editor: "selector",
+                          apply_mode: experiment.apply_mode,
+                          label: experiment.label,
+                          description: "#{experiment.description} #{experiment.risk}".strip
+                        )
+                      else
+                        definition(
+                          "experiments.#{experiment.id}",
+                          experiment.config_path,
+                          "Experiments",
+                          "boolean",
+                          experiment.default,
+                          editor: "checkbox",
+                          apply_mode: experiment.apply_mode,
+                          label: experiment.label,
+                          description: "#{experiment.description} #{experiment.risk}".strip
+                        )
+                      end
+          if experiment.id == "agent_defaults_mode"
+            # The guidance text is only meaningful in guided mode, so Settings
+            # reveals it with that mode rather than listing it always.
             settings << definition(
               "experiments.worker_spawning_guidance_prompt",
               %w[experiments worker_spawning_guidance_prompt],
@@ -418,8 +455,9 @@ module Meringue
               Meringue::Experiments::WorkerSpawningGuidance.default_text,
               editor: "text",
               apply_mode: "live",
-              label: "Worker model selection prompt",
-              description: "Additional system-prompt text supplied to heads when worker model selection guidance is enabled. Use @ for models and # for thinking levels."
+              label: "Guided selection prompt",
+              description: "Additional system-prompt text supplied to heads in guided mode. Use @ for models and # for thinking levels.",
+              dependencies: ["experiments.#{experiment.id}"]
             )
           end
           experiment.actions.each do |action|

@@ -219,6 +219,37 @@ class TuiModelPickerTest < Minitest::Test
     assert @app.send(:model_picker_entries, picker).none? { |entry| entry.key?("description") }
   end
 
+  # Shared mode keeps one model and one reasoning level, so the Head/Worker
+  # tabs have nothing to switch between and are not offered. The harness picker
+  # keeps its tabs either way: role harnesses are independent of this mode.
+  def test_shared_mode_hides_the_role_tabs_for_model_and_thinking
+    app = app_with_mode("shared")
+
+    assert_equal "models (pi)", @pane.popup_pane_title(open_picker_for(app, "/models"))
+    assert_equal "thinking", @pane.popup_pane_title(open_picker_for(app, "/thinking"))
+    assert_equal "harness · [Head]  Worker", @pane.popup_pane_title(open_picker_for(app, "/harness"))
+  end
+
+  def test_role_specific_and_guided_modes_show_the_role_tabs
+    %w[role-specific guided].each do |mode|
+      app = app_with_mode(mode)
+
+      assert_equal "models (pi) · [Head]  Worker", @pane.popup_pane_title(open_picker_for(app, "/models")), mode
+      assert_equal "thinking · [Head]  Worker", @pane.popup_pane_title(open_picker_for(app, "/thinking")), mode
+    end
+  end
+
+  # Left/right is how roles are switched, so in shared mode it must not move a
+  # picker that is showing one value.
+  def test_shared_mode_ignores_the_role_switch_keys
+    app = app_with_mode("shared")
+    open_picker_for(app, "/models")
+
+    app.send(:switch_model_picker_role, 1)
+
+    assert_equal "head", app.instance_variable_get(:@model_picker_role)
+  end
+
   def test_theme_alias_previews_and_escape_restores_without_chat_feedback
     Meringue::TUI::Style.configure!("meringue")
     picker = open_picker("/themes")
@@ -443,6 +474,28 @@ class TuiModelPickerTest < Minitest::Test
       ],
       source: "test_catalog"
     ).to_h
+  end
+
+  def app_with_mode(mode)
+    config = Meringue::Config.new(
+      { "experiments" => { "agent_defaults_mode" => mode } },
+      path: "/tmp/meringue-model-picker-test.toml"
+    )
+    Meringue::TUI::App.new(
+      layout: Meringue::TUI::Layout.new,
+      out: StringIO.new,
+      terminal: TUISupport::FakeTerminal.new(width: WIDTH, height: HEIGHT),
+      config: config
+    )
+  end
+
+  # Enter belongs to an open picker, so any previous one is dismissed before the
+  # composer can submit the next command.
+  def open_picker_for(app, text)
+    app.send(:handle_key, "\e", "", 0, -1, prompt_handler, compose_app_state(app, @state))
+    state = compose_app_state(app, @state)
+    app.send(:handle_key, "\r", text, text.length, -1, prompt_handler, state)
+    compose_app_state(app, @state)
   end
 
   def open_picker(text = "/models")

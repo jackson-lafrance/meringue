@@ -4514,7 +4514,16 @@ module Meringue
                       { "reference" => entry.fetch("reference"), "name" => entry.fetch("name", entry.fetch("reference")) }
                     end
                   else
-                    Array(row.fetch("options", [])).map(&:to_s)
+                    # An enum that carries labels shows them the way the model
+                    # picker does: the label reads, the stored value stays
+                    # visible beside it.
+                    labels = row.fetch("option_labels", {}) || {}
+                    values = Array(row.fetch("options", [])).map(&:to_s)
+                    if values.any? { |value| labels[value].to_s != "" && labels[value] != value }
+                      values.map { |value| { "reference" => value, "name" => labels.fetch(value, value) } }
+                    else
+                      values
+                    end
                   end
         current = @settings_draft.value(id).to_s
         unless options.any? { |option| option.is_a?(Hash) ? option.fetch("reference") == current : option == current }
@@ -4762,6 +4771,10 @@ module Meringue
           "query" => @model_picker_query.to_s,
           "harness" => @model_picker_harness,
           "role" => @model_picker_role,
+          # Model and thinking hold one shared value in shared mode, so the
+          # picker has nothing to switch between and hides its role tabs. The
+          # harness picker is unaffected: role harnesses are always independent.
+          "role_tabs" => @config.role_specific_agent_defaults?,
           "kind" => @model_picker_kind
         }.compact
       end
@@ -4988,6 +5001,8 @@ module Meringue
       end
 
       def switch_model_picker_role(step)
+        return if %w[model thinking].include?(@model_picker_kind.to_s) && !@config.role_specific_agent_defaults?
+
         roles = %w[head worker]
         index = roles.index(@model_picker_role) || 0
         @model_picker_role = roles[(index + step.to_i) % roles.length]
