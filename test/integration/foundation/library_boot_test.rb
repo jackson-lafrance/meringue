@@ -62,17 +62,25 @@ class FoundationLibraryBootTest < Minitest::Test
   # method definitions in lib/meringue/kernel/engine.rb (see
   # test/findings/foundation.md). This assertion still passes once those
   # duplicates are removed.
-  def test_verbose_load_emits_no_unexpected_warnings
+  # A silently discarded duplicate definition is how `Engine#harness_client` became private
+  # and how a whole `prompt_agent` body became dead code, so redefinition warnings are no
+  # longer tolerated: any warning from this repository's own files fails the suite.
+  def test_verbose_load_emits_no_warnings
     status, _stdout, stderr = FoundationSupport.run_ruby("-w", "-Ilib", "-e", 'require "meringue"')
 
     assert_equal 0, status
 
     local_warnings = stderr.lines.select { |line| line.include?(FoundationSupport::REPO_ROOT) }
-    unexpected = local_warnings.reject do |line|
-      line.match?(/warning: (?:method redefined; discarding old|previous definition of)/)
-    end
 
-    assert_empty unexpected.map(&:strip), "unexpected warnings while loading the library"
+    assert_empty local_warnings.map(&:strip), "warnings while loading the library"
+  end
+
+  # The two accessors an embedder (`Heads::PromptLoop`, `Heads::SimpleLoop`) needs in order to
+  # settle spawned workers. They were public readers shadowed by a duplicate pair defined
+  # below the engine's `private` keyword, so every caller raised `NoMethodError`.
+  def test_the_engine_exposes_its_harness_client_and_head_runner_publicly
+    assert Meringue::Kernel::Engine.public_method_defined?(:harness_client)
+    assert Meringue::Kernel::Engine.public_method_defined?(:head_runner)
   end
 
   private

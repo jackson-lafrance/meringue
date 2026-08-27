@@ -399,18 +399,21 @@ class InputSlashCommandParserTest < Minitest::Test
   # returning InvalidSlashCommand. This test accepts either outcome so it stays
   # green on any Ruby while still proving the input never becomes a normal
   # kernel command. See test/findings/input.md.
-  def test_unbalanced_quotes_never_produce_a_normal_kernel_command
-    outcome =
-      begin
-        slash_parser.parse('/answer Q1 "unterminated')
-      rescue StandardError => e
-        e
-      end
+  # `Shellwords.split` raises `ArgumentError` for an unbalanced quote. The parser used to
+  # rescue `Shellwords::ParseError`, which Ruby does not define, so evaluating the rescue
+  # clause raised `NameError` and the whole submission escaped the parser instead.
+  def test_unbalanced_quotes_become_a_usage_message_instead_of_raising
+    [
+      '/answer Q1 "unterminated',
+      '/project add "/tmp',
+      '/worker spawn P1-I1 "do the thing',
+      '/issue create P1 "title" "description'
+    ].each do |input|
+      parsed = slash_parser.parse(input).to_h
 
-    if outcome.is_a?(StandardError)
-      assert_kind_of StandardError, outcome
-    else
-      assert_equal "InvalidSlashCommand", outcome.to_h.fetch("type")
+      assert_equal "InvalidSlashCommand", parsed.fetch("type"), input
+      assert_includes parsed.fetch("payload").fetch("message"), "Could not parse slash command arguments", input
+      assert_equal "/help", parsed.fetch("payload").fetch("usage"), input
     end
   end
 

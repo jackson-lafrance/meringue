@@ -6006,6 +6006,10 @@ module Meringue
               @settings_draft.apply_save_failure("Configuration save failed: #{e.class}: #{e.message}")
             elsif assistant_message_id
               update_message(assistant_message_id, text: "Head loop failed: #{e.class}: #{e.message}", status: "errored", visible: true)
+            else
+              # A slash command has no queued assistant message to fail, so without this the
+              # composer cleared, the command never ran, and nothing at all was rendered.
+              append_message("meringue", "#{command_word(text)} failed: #{e.class}: #{e.message}", status: "errored")
             end
           ensure
             decrement_pending_count
@@ -6052,6 +6056,11 @@ module Meringue
         nil
       rescue StandardError
         nil
+      end
+
+      # The leading `/word` of a submitted slash command, for naming it in a failure line.
+      def command_word(text)
+        text.to_s.strip.split(/\s+/).first.to_s[0, 40]
       end
 
       def unavailable_prompt_handler_result

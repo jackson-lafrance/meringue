@@ -81,19 +81,46 @@ class StateStoreConcurrencyTest < Minitest::Test
     end
   end
 
-  def test_temp_file_name_is_shared_per_process_so_a_save_clobbers_another_writers_temp_file
-    # Current behavior, recorded in test/findings/state.md: the temporary file name is
-    # "<state path>.tmp.<pid>", so two Store instances saving whole snapshots at the same
-    # time inside one process reuse the same temporary path.
+  # The temp name used to be "<state path>.tmp.<pid>", so two Store instances saving whole
+  # snapshots at the same time inside one process reused the same temporary path and one
+  # writer's `ensure File.delete` removed the other's in-flight file.
+  def test_a_saves_temp_file_is_unique_and_never_touches_another_writers
     with_store do |store, path|
-      temp_path = "#{path}.tmp.#{Process.pid}"
-      File.write(temp_path, "another writer's in-flight snapshot")
+      other_writer_temp = "#{path}.tmp.#{Process.pid}"
+      File.write(other_writer_temp, "another writer's in-flight snapshot")
 
       store.save(Models.empty_state, preserve_log_buffer: false)
 
-      refute File.exist?(temp_path), "the shared temporary path is consumed by the save"
+      assert File.exist?(other_writer_temp), "another writer's in-flight temp file must survive"
+      assert_equal "another writer's in-flight snapshot", File.read(other_writer_temp)
       assert_kind_of Hash, read_state_file(path)
       assert_equal [], read_state_file(path).fetch("projects")
+    ensure
+      File.delete(other_writer_temp) if other_writer_temp && File.exist?(other_writer_temp)
+    end
+  end
+
+  def test_two_instances_saving_concurrently_never_lose_a_temp_file_to_each_other
+    with_store do |first, path|
+      second = Store.new(path: path)
+      errors = []
+
+      threads = [first, second].map do |store|
+        Thread.new do
+          30.times do |index|
+            state = Models.empty_state
+            state.fetch("metadata")["iteration"] = index
+            store.save(state, preserve_log_buffer: false)
+          rescue StandardError => e
+            errors << "#{e.class}: #{e.message}"
+          end
+        end
+      end
+      threads.each(&:join)
+
+      assert_empty errors
+      assert_kind_of Hash, read_state_file(path)
+      assert_empty Dir["#{path}.tmp.*"], "no temporary files may be left behind"
     end
   end
 

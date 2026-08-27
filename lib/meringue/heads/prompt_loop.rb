@@ -25,19 +25,46 @@ module Meringue
         record = submission.is_a?(Hash) ? submission : submission_queue.pending.find { |entry| entry.fetch("id") == submission.to_s }
         return nil unless record
 
-        result = route_submission(
-          record.fetch("text"),
-          selected_target: record.fetch("selected_target", nil),
-          submission_id: record.fetch("id"),
-          &on_event
-        )
+        begin
+          result = route_submission(
+            record.fetch("text"),
+            selected_target: record.fetch("selected_target", nil),
+            submission_id: record.fetch("id"),
+            &on_event
+          )
+        rescue StandardError
+          # A submission that raises on the way to the kernel still has to leave the queue.
+          # The composer was cleared the moment it was enqueued, so a record left pending is
+          # replayed by every later Meringue process, fails the same way each time, and is
+          # never visible to anyone. Completing it here keeps the failure to one turn; the
+          # exception still reaches the caller, which is what surfaces it in the dashboard.
+          submission_queue.complete(record.fetch("id"))
+          raise
+        end
         submission_queue.complete(record.fetch("id"))
         result
       end
 
+      # Replayed submissions run without a composer waiting on them, so an exception here has
+      # no caller to report it. Ruby's default `report_on_exception` would print the backtrace
+      # straight onto the rendered dashboard; emit it as an event instead.
       def recover_pending_submissions(&on_event)
         submission_queue.pending.map do |submission|
-          Thread.new { deliver_submission(submission, &on_event) }
+          Thread.new do
+            Thread.current.report_on_exception = false
+            begin
+              deliver_submission(submission, &on_event)
+            rescue StandardError => e
+              emit(
+                on_event,
+                "submission_recovery_failed",
+                "submission_id" => submission.fetch("id", nil),
+                "text" => submission.fetch("text", nil),
+                "error" => error_details(e)
+              )
+              nil
+            end
+          end
         end
       end
 

@@ -95,7 +95,10 @@ every state/config file lives under a per-test `Dir.mktmpdir`.
 
 ## Real-behavior notes / possible bugs (asserted as-is, not fixed here)
 
-1. **`AnswerQuestion` has no status guard.** `DismissQuestion` rejects a non-open question
+1. ~~**`AnswerQuestion` has no status guard.**~~ **Fixed for the dismissed case:** answering a
+   dismissed question is rejected with `question_not_open`. Re-answering an *answered* question
+   still overwrites it, which is a correction rather than a revival. Original report:
+   **`AnswerQuestion` has no status guard.** `DismissQuestion` rejects a non-open question
    with `question_not_open`, but `AnswerQuestion` accepts an already answered *or already
    dismissed* question and overwrites the stored answer, flipping a dismissed question back
    to `answered`. Asserted in

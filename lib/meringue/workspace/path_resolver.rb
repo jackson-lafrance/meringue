@@ -44,7 +44,7 @@ module Meringue
           agent["workspace_root_path"],
           plan["workspace_root_path"],
           plan["worktree_root_path"]
-        ].map { |value| value.to_s.strip }.reject(&:empty?)
+        ].map { |value| value.to_s.strip }.reject { |value| value.empty? || unusable_path?(value) }
       end
       private_class_method :candidate_paths
 
@@ -75,12 +75,21 @@ module Meringue
 
       def self.resolve_path(value)
         text = value.to_s.strip
-        return unavailable(nil) if text.empty?
+        return unavailable(nil) if text.empty? || unusable_path?(text)
 
         path = absolute_path(text, base: Dir.home)
         Dir.exist?(path) ? usable_result(path, path) : unavailable(path)
       end
       private_class_method :resolve_path
+
+      # A path containing a null byte cannot reach the filesystem at all: `File.expand_path`
+      # and `Dir.exist?` both raise `ArgumentError` for it, and `absolute_path`'s retry raises
+      # the same way. Every other unusable value is reported through the normal `unavailable`
+      # result, so this one is too instead of escaping into the render/input loop.
+      def self.unusable_path?(value)
+        value.to_s.include?("\0")
+      end
+      private_class_method :unusable_path?
 
       def self.usable_result(path, expected_path)
         {

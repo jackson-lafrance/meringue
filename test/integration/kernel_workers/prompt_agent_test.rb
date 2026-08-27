@@ -343,6 +343,31 @@ class KernelWorkersPromptAgentTest < Minitest::Test
     assert_includes result.fetch("errors"), "prompt is required"
   end
 
+  # `prompt_agent_command` already routes head takeovers and unreplayable-session
+  # continuations off `message`/`Message`, but the worker handler only read `prompt`/`Prompt`,
+  # so the identical payload was rejected as "prompt is required" depending on which branch
+  # the target agent happened to take. A dead duplicate of the handler that *did* accept the
+  # aliases sat above it in the same file, silently discarded by Ruby.
+  def test_a_message_payload_alias_prompts_the_worker_like_prompt_does
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+
+    result = apply!(engine, "PromptAgent", { "agent_id" => worker_id, "message" => "Also update the changelog." })
+
+    assert_equal "accepted", result.fetch("status")
+    assert_equal ["Also update the changelog."], @harness_client.prompts.map { |call| call.fetch("prompt") }
+  end
+
+  def test_the_capitalized_message_payload_alias_works_too
+    engine = build_engine
+    worker_id = spawned_worker(engine)
+
+    result = apply!(engine, "PromptAgent", { "agent_id" => worker_id, "Message" => "Also update the changelog." })
+
+    assert_equal "accepted", result.fetch("status")
+    assert_equal ["Also update the changelog."], @harness_client.prompts.map { |call| call.fetch("prompt") }
+  end
+
   def test_unknown_agent_is_rejected
     engine = build_engine
 

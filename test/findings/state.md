@@ -45,7 +45,10 @@ Files:
 
 ## Sharp edges and probable bugs (asserted as-is, not fixed)
 
-1. **Temporary file name is only process-scoped.** `Store#save_unlocked` uses
+1. ~~**Temporary file name is only process-scoped.**~~ **Fixed:** the temp name now carries a
+   per-Store, per-write sequence, so concurrent writers cannot consume each other's in-flight
+   file. Original report:
+   **Temporary file name is only process-scoped.** `Store#save_unlocked` uses
    `"#{path}.tmp.#{$$}"`. Two `Store` instances saving whole snapshots concurrently inside
    one process therefore share one temporary path: one writer's `ensure File.delete` can
    remove the other writer's in-flight temp file, and the loser raises
@@ -66,7 +69,11 @@ Files:
    list. Racing read-modify-write callers can therefore drop each other's newest messages
    even through one `Store` instance. Invariants that do hold: no duplicate ids, already
    persisted messages are not lost, orchestration sections are untouched.
-4. **Corrupt state files raise instead of degrading.** `Store#load` propagates
+4. ~~**Corrupt state files raise instead of degrading.**~~ **Fixed:** an unreadable state file
+   (unparseable, or valid JSON that is not an object) is moved to
+   `<state path>.unreadable-<timestamp>` and Meringue starts from an empty state with a
+   `warning` log entry naming the quarantined copy. Original report:
+   **Corrupt state files raise instead of degrading.** `Store#load` propagates
    `JSON::ParserError` for truncated/garbage files (an empty file included), and a valid
    but non-object document (e.g. `[]`) raises `TypeError: no implicit conversion of String
    into Integer` from normalization. There is no quarantine/backup-and-reset path. Note that

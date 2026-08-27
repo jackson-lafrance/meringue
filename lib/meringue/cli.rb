@@ -263,9 +263,15 @@ module Meringue
       ).run
     end
 
+    # `--state PATH` used to be dropped here, so `meringue reset-state --state ./scratch.json`
+    # silently wiped the *default* state file instead of the one that was named.
     def reset_state
-      state_store.save(State::Models.empty_state, preserve_log_buffer: false)
-      out.puts "Reset Meringue state at #{state_store.path}"
+      options = parse_runtime_options(default_state_path: State::Store.default_path)
+      return 1 unless options
+
+      store = state_store(path: options.fetch(:state_path))
+      store.save(State::Models.empty_state, preserve_log_buffer: false)
+      out.puts "Reset Meringue state at #{store.path}"
       0
     end
 

@@ -2,6 +2,15 @@
 
 Notes from building the test-suite foundation (Rakefile, `test/test_helper.rb`, boot/CLI/layout tests). Tests in this slice assert current actual behavior; nothing here is a test failure.
 
+## 1. ~~Duplicate method definitions in `lib/meringue/kernel/engine.rb`~~ **Fixed.**
+
+All four duplicates are gone: the dead `prompt_agent` body was deleted (and its `message`/`Message`
+payload aliases restored on the surviving one), the dead `issue_subtree_ids` copy was deleted, and
+`harness_client`/`head_runner` are defined once above `private`. `test_verbose_load_emits_no_warnings`
+now fails on *any* warning from this repo's files rather than tolerating redefinitions.
+
+Original report:
+
 ## 1. Duplicate method definitions in `lib/meringue/kernel/engine.rb` (real bug risk)
 
 Loading the library with warnings enabled shows that the kernel engine defines the same methods twice, so the earlier definitions are silently discarded:

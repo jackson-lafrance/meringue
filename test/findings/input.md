@@ -39,6 +39,15 @@ Natural-language replies that clearly reference one open question populate
 
 ## Confirmed real bugs / gaps
 
+### 1. ~~`Shellwords::ParseError` does not exist on modern Ruby~~ **Fixed.**
+
+The parser now rescues `ArgumentError`, so an unbalanced quote becomes the intended
+`InvalidSlashCommand` usage message everywhere. `PromptLoop#deliver_submission` also completes a
+submission whose routing raises, so a poison entry can no longer sit in the durable queue and
+replay on every start.
+
+Original report:
+
 ### 1. `Shellwords::ParseError` does not exist on modern Ruby
 
 `Input::SlashCommandParser#parse` ends with `rescue Shellwords::ParseError => e`.
@@ -53,6 +62,11 @@ usage error.
 outcome (raise, or `InvalidSlashCommand` on a Ruby that defines the constant) so it
 stays green everywhere while still proving that malformed quoting never becomes a
 normal kernel command. Suggested fix: `rescue ArgumentError`.
+
+### 2. ~~`SlashCommandParser.command_suggestion_records` requires a state hash~~ **Fixed earlier.**
+`records_for_context` now coerces a non-Hash `state:` to `{}`.
+
+Original report:
 
 ### 2. `SlashCommandParser.command_suggestion_records` requires a state hash
 
@@ -69,6 +83,12 @@ The CLI help lists only the TUI-local commands (`/help`, `/quit`, `/theme`,
 and `/clear` are only discoverable from in-app `/help`
 (`InputCLITest#test_help_does_not_yet_document_the_question_answer_slash_commands`
 pins this so the doc/help update for issue P1-I9 has to update the test too).
+
+### 4. ~~`reset-state` ignores `--state`~~ **Fixed.**
+`reset_state` parses runtime options, so `--state PATH` resets that file and an unknown flag is
+reported instead of resetting anything.
+
+Original report:
 
 ### 4. `reset-state` ignores `--state`
 

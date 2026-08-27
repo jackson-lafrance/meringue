@@ -103,4 +103,81 @@ class InputDurableSubmissionRecoveryTest < Minitest::Test
 
     assert_empty Meringue::Input::DurableSubmissionQueue.new(state_path: @store.path).pending
   end
+
+  # A submission that raises on the way to the kernel used to stay pending forever: the
+  # composer had already been cleared, so it was replayed on every start, failed the same way,
+  # and was never shown to anyone.
+  def test_a_submission_that_raises_leaves_the_queue_and_still_reaches_the_caller
+    engine = RaisingEngine.new(@store)
+    prompt_loop = Meringue::Heads::PromptLoop.new(engine: engine)
+    submission = prompt_loop.enqueue_submission("break this")
+
+    assert_raises(RuntimeError) { prompt_loop.deliver_submission(submission) }
+
+    assert_empty prompt_loop.submission_queue.pending, "the poison submission must not be replayed"
+    assert_empty Meringue::Heads::PromptLoop.new(engine: RaisingEngine.new(@store)).submission_queue.pending
+  end
+
+  # An unbalanced quote used to raise `NameError: uninitialized constant Shellwords::ParseError`
+  # out of the parser, which is exactly how a poison submission was produced in practice.
+  def test_an_unbalanced_quote_is_delivered_as_a_usage_message_and_drains_the_queue
+    engine = RecordingEngine.new(@store)
+    prompt_loop = Meringue::Heads::PromptLoop.new(engine: engine)
+
+    result = prompt_loop.call(%(/answer Q1 "unterminated))
+
+    assert_equal "InvalidSlashCommand", engine.applied.first.fetch("type")
+    assert_equal "slash_command_applied", result.fetch("event")
+    assert_empty prompt_loop.submission_queue.pending
+  end
+
+  # Recovered submissions have no composer waiting on them, so an exception there has no caller
+  # to report it and Ruby's default report_on_exception would print a backtrace onto the
+  # rendered dashboard.
+  def test_a_failing_recovered_submission_is_reported_as_an_event_rather_than_on_stderr
+    Meringue::Input::DurableSubmissionQueue.new(state_path: @store.path).enqueue(text: "break this")
+    events = []
+
+    prompt_loop = Meringue::Heads::PromptLoop.new(engine: RaisingEngine.new(@store))
+    prompt_loop.recover_pending_submissions { |event| events << event }.each(&:join)
+
+    failure = events.find { |event| event.fetch("event") == "submission_recovery_failed" }
+    refute_nil failure
+    assert_equal "break this", failure.fetch("text")
+    assert_equal "RuntimeError", failure.dig("error", "class")
+    assert_empty prompt_loop.submission_queue.pending
+  end
+
+  class RaisingEngine
+    attr_reader :store
+
+    def initialize(store)
+      @store = store
+    end
+
+    def apply(_command)
+      raise "kernel exploded"
+    end
+  end
+
+  class RecordingEngine
+    attr_reader :store, :applied
+
+    def initialize(store)
+      @store = store
+      @applied = []
+    end
+
+    def apply(command)
+      @applied << command
+      {
+        "status" => "rejected",
+        "command_type" => command.fetch("type"),
+        "target_id" => nil,
+        "message" => "nope",
+        "result" => nil,
+        "log_entry_ids" => []
+      }
+    end
+  end
 end

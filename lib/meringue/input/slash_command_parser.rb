@@ -853,8 +853,12 @@ module Meringue
         else
           invalid("Unknown slash command: /#{command_text}", usage: "/help")
         end
-      rescue Shellwords::ParseError => e
-        invalid("Could not parse slash command arguments: #{e.message}")
+      # `Shellwords.split` raises `ArgumentError` for an unbalanced quote. This used to
+      # rescue `Shellwords::ParseError`, a constant Ruby does not define, so evaluating the
+      # rescue clause raised `NameError` instead and `/answer Q1 "unterminated` escaped the
+      # parser entirely rather than becoming a usage message.
+      rescue ArgumentError => e
+        invalid("Could not parse slash command arguments: #{e.message}", usage: "/help")
       end
 
       private

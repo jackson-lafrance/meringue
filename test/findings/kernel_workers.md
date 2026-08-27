@@ -72,7 +72,10 @@ All tests assert **current actual behavior**. No production code was changed.
 
 ## Behavioral notes / possible bugs (behavior asserted as-is)
 
-1. **Duplicate `prompt_agent` definition in `lib/meringue/kernel/engine.rb`.** There are
+1. ~~**Duplicate `prompt_agent` definition in `lib/meringue/kernel/engine.rb`.**~~ **Fixed:** the
+   dead copy was deleted and the surviving handler accepts the `message`/`Message` payload
+   aliases that `prompt_agent_command` already routed on. Original report:
+   **Duplicate `prompt_agent` definition in `lib/meringue/kernel/engine.rb`.** There are
    two private `def prompt_agent` bodies (around lines 799 and 2147). Ruby keeps the last
    one, so the first implementation is dead code. The two differ meaningfully: the dead
    one rejects only `killed` agents (not `errored`), rejects on a blank `harness` with

@@ -166,13 +166,23 @@ class WorkspacePathResolverTest < Minitest::Test
     end
   end
 
-  # Current behavior: a null byte escapes as ArgumentError instead of being
-  # reported as an unusable destination. Recorded in test/findings/workspace.md.
-  def test_null_byte_paths_raise_argument_error_today
-    error = assert_raises(ArgumentError) do
-      Meringue::Workspace::PathResolver.resolve("/tmp/bad\u0000path")
-    end
+  # A null byte used to escape as `ArgumentError: path name contains null byte` into the
+  # render/input loop that every other unusable path is reported through.
+  def test_null_byte_paths_are_reported_as_unusable_rather_than_raising
+    resolution = Meringue::Workspace::PathResolver.resolve("/tmp/bad\u0000path")
 
-    assert_match(/null byte/, error.message)
+    assert_nil resolution["path"]
+    assert_includes resolution.fetch("message"), "no assigned workspace directory"
+  end
+
+  def test_a_null_byte_candidate_does_not_block_a_usable_fallback
+    Dir.mktmpdir("meringue-path-resolver") do |dir|
+      agent = worker_agent(workspace_path: "/tmp/bad\u0000path")
+      agent["harness_metadata"] = (agent["harness_metadata"] || {}).merge("cwd" => dir)
+
+      resolution = Meringue::Workspace::PathResolver.resolve(agent)
+
+      assert_equal File.expand_path(dir), resolution.fetch("path")
+    end
   end
 end
