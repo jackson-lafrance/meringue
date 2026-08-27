@@ -400,7 +400,7 @@ module Meringue
           {
             "context" => bottom_context_segments(state),
             "open_pull_requests" => bottom_open_pull_request_segments(state),
-            "workers" => bottom_agent_count_segments(workers, "worker", Style::WORKING),
+            "workers" => bottom_worker_count_segments(workers, Settings.quiet_worker_count(state)),
             "heads" => bottom_agent_count_segments(heads, "head", Style::ACCENT_BOLD),
             "harness" => compact_harness_status_segments(state),
             "model" => role_values ? bottom_model_segments(**role_values) : [],
@@ -485,6 +485,16 @@ module Meringue
           label = "#{count} #{singular}#{count == 1 ? "" : "s"}"
           count.positive? ? [["● ", active_style], [label, active_style]] : [[label, Style::MUTED]]
         end
+
+        # "3 workers" says how many are running, not whether any of them has stopped saying
+        # anything - which is the question a person with several agents in flight actually has.
+        def bottom_worker_count_segments(workers, quiet)
+          segments = bottom_agent_count_segments(workers, "worker", Style::WORKING)
+          return segments unless quiet.positive?
+
+          segments + [[" · ", Style::DIM], ["#{quiet} quiet", Style::WARNING]]
+        end
+
 
         def bottom_model_segments(head_model:, worker_model:, **)
           if head_model == worker_model

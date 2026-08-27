@@ -331,6 +331,9 @@ module Meringue
         return poll_result.merge("changed" => false, "log_entry_ids" => [], "skipped" => "terminal_status") if %w[completed killed paused].include?(agent.fetch("status", nil))
 
         now = timestamp
+        # A worker adopted from a state file has no clock yet; start it at the first pass that
+        # observes the session, so quiet is measured from when Meringue began watching.
+        seed_worker_activity!(agent, now)
         previous_agent = deep_copy(agent)
         previous_parent_statuses = worker_parent_statuses(state, agent)
         merge_session_ref_into_agent!(agent, poll_result.fetch("session_ref", {}), persist_heartbeat: false)
@@ -340,6 +343,13 @@ module Meringue
         log_ids = append_harness_event_logs(state, agent, poll_result.fetch("events", []))
         log_ids.concat(record_worker_progress!(state, agent, poll_result.fetch("progress", []), now))
         log_ids.concat(append_recovery_success_log(state, agent, poll_result))
+        # The activity clock is what tells the dashboard whether a `working` agent is producing
+        # anything. It is advanced here and nowhere else in the poll path, from evidence this
+        # pass actually observed, so Meringue's own bookkeeping writes below cannot reset it.
+        record_worker_activity!(
+          agent,
+          observed_worker_activity_at(poll_result.fetch("session_ref", {}), log_ids, now)
+        )
         refresh_worker_parent_statuses!(state, agent, now) if agent.fetch("type", nil) == "worker"
         changed = agent != previous_agent || worker_parent_statuses(state, agent) != previous_parent_statuses || log_ids.any?
         return poll_result.merge("agent_id" => agent.fetch("id"), "changed" => false, "log_entry_ids" => []) unless changed

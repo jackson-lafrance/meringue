@@ -60,6 +60,9 @@ module Meringue
         # deferred activation, so a goal whose attempt was queued behind another agent observes the
         # activated worker rather than a record that is still waiting.
         goal_steps = reconcile_step("advance_goal_loops", []) { advance_goal_loops }
+        # Last, so a worker whose output arrived in this same pass is never called quiet for the
+        # silence that preceded it.
+        quiet_worker_results = reconcile_step("warn_quiet_workers", []) { warn_quiet_workers }
         changed_count = applied_results.count { |result| result.fetch("changed", false) }
         changed_count += self_fixing_worker_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += completion_continuation_results.count { |result| result.fetch("status", nil) == "accepted" }
@@ -76,6 +79,7 @@ module Meringue
         changed_count += delivery_pr_refreshes.count { |refresh| refresh.fetch("changed", false) }
         changed_count += 1 if model_catalog_refresh.fetch("changed", false)
         changed_count += goal_steps.count { |step| step.fetch("changed", false) }
+        changed_count += quiet_worker_results.length
         accepted_result(
           command_id,
           command_type,
@@ -100,9 +104,10 @@ module Meringue
             "deferred_worker_results" => deferred_worker_results,
             "goal_loop_steps" => goal_steps,
             "poll_results" => applied_results,
-            "self_fixing_worker_results" => self_fixing_worker_results
+            "self_fixing_worker_results" => self_fixing_worker_results,
+            "quiet_worker_results" => quiet_worker_results
           },
-          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + interactive_focus_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pause_results.flat_map { |result| result.fetch("log_entry_ids", []) } + resume_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + completion_continuation_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + gate_check_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + self_fixing_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) }).uniq
+          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + interactive_focus_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pause_results.flat_map { |result| result.fetch("log_entry_ids", []) } + resume_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + completion_continuation_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + gate_check_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + self_fixing_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) } + quiet_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) }).uniq
         )
       rescue StandardError => e
         error = error_payload(e)

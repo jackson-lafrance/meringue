@@ -39,19 +39,37 @@ class InputCLITest < Minitest::Test
     end
   end
 
-  # Documented gap: the CLI help lists only the TUI-local slash commands, so the
-  # question flow (/questions, /answer, /dismiss) is not discoverable from
-  # `meringue --help`. See test/findings/input.md.
-  def test_help_does_not_yet_document_the_question_answer_slash_commands
+  # `meringue --help` used to carry its own hand-written list of 17 TUI controls, so two thirds
+  # of the slash commands - the whole question flow, goals, prune, retry - were discoverable
+  # only from inside a running dashboard, and a command added to the parser never reached this
+  # text at all. It is rendered from the parser's own table now, which is what makes this
+  # assertion possible rather than a second list to maintain.
+  def test_help_documents_every_slash_command_the_parser_accepts
     out = run_cli(["--help"]).fetch("out")
 
-    assert_includes out, "/help"
-    assert_includes out, "/recount"
-    assert_includes out, "/reload"
-    assert_includes out, "/update"
-    refute_includes out, "/answer"
-    refute_includes out, "/questions"
-    refute_includes out, "/dismiss"
+    Meringue::Input::SlashCommandParser::COMMAND_SPECS.each do |usage, _description|
+      assert_includes out, usage, "#{usage} is missing from `meringue --help`"
+    end
+    assert_includes out, "/answer"
+    assert_includes out, "/questions"
+    assert_includes out, "/goal status"
+    assert_includes out, "/prune"
+  end
+
+  # Three inventories used to describe the same commands: the parser's table, the kernel's
+  # in-app `/help`, and the CLI's own text. `/issue move` shipped in the parser and never
+  # reached `/help`, so a user who typed `/help` could not learn the command existed.
+  def test_the_parser_and_in_app_help_describe_the_same_commands
+    parser = Meringue::Input::SlashCommandParser::COMMAND_SPECS.map { |usage, _| slash_command_word(usage) }.uniq.sort
+    in_app = Meringue::Kernel::Engine::HELP_COMMANDS.map { |usage, _| slash_command_word(usage) }.uniq.sort
+
+    assert_equal parser, in_app
+  end
+
+  # `/worker spawn` and `/worker pause` are different commands; `/prune` has no subcommand.
+  def slash_command_word(usage)
+    parts = usage.split(/\s+/)
+    parts.first(parts[1].to_s.match?(/\A[a-z][a-z-]*\z/) ? 2 : 1).join(" ")
   end
 
   def test_workers_export_cli_writes_a_portable_bundle

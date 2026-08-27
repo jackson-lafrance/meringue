@@ -88,6 +88,34 @@ module Meringue
         (parse(now) || Time.now.getlocal).to_date
       end
 
+      # An elapsed span in the shortest form that still reads unambiguously, for a row chip that
+      # has to share its line with a title: `45s`, `12m`, `3h`, `2h 5m`. Deliberately coarse
+      # above an hour - by then the exact minute is not what the reader is deciding on.
+      def compact_duration(seconds)
+        total = seconds.to_i
+        return nil if total.negative?
+        return "#{total}s" if total < 60
+
+        minutes = total / 60
+        return "#{minutes}m" if minutes < 60
+
+        hours = minutes / 60
+        remainder = minutes % 60
+        remainder.zero? ? "#{hours}h" : "#{hours}h #{remainder}m"
+      end
+
+      # Whole elapsed minutes, for a presentation cache key. A chip that reads `12m` must
+      # re-render when it becomes `13m` and at no other time, so the cache is keyed on the
+      # number the chip shows rather than on the clock.
+      def elapsed_minutes(value, now: Time.now)
+        from = parse(value)
+        return nil unless from
+
+        current = parse(now) || Time.now.getlocal
+        elapsed = ((current - from) / 60).floor
+        elapsed.negative? ? 0 : elapsed
+      end
+
       def sort_key(value)
         parse(value)&.to_f || UNKNOWN_SORT_KEY
       end
