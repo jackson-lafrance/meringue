@@ -48,7 +48,11 @@ tests were updated to the shipped behavior:
 
 ## Behaviour worth flagging (tests assert current actual behaviour)
 
-1. **Recount aborts with `KeyError` for an orphaned issue.** An issue whose
+1. ~~**Recount aborts with `KeyError` for an orphaned issue.**~~ **Fixed:** the pass now refuses
+   up front with `Recounter::UnrecountableStateError`, naming the orphaned records and their
+   missing parents, and the kernel reports it as a `rejected` result rather than an opaque
+   `failed` one. State is still never written. Original report:
+   **Recount aborts with `KeyError` for an orphaned issue.** An issue whose
    `project_id` no longer exists is not in the id mapping, so building that mapping raises
    `KeyError: key not found: "<issue id>"` before the friendlier `validate_integrity!`
    `ArgumentError` can run. The kernel surfaces this as a

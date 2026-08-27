@@ -104,28 +104,31 @@ class HeadSimpleLoopTest < Minitest::Test
     assert_equal 0, payload.dig("state_summary", "agent_count")
   end
 
-  # Documents a real bug: `meringue heads` builds this loop with
-  # wait_for_workers: true, and Engine#harness_client is private, so the wait step
-  # raises. See test/findings/heads.md.
-  def test_waiting_for_workers_surfaces_the_private_harness_client_error
-    setup = simple_loop_setup(harness_client: SettlingHarnessClient.new)
+  # `meringue head-loop` builds this loop with wait_for_workers: true. It used to raise
+  # `NoMethodError: private method 'harness_client'` because a second definition below the
+  # engine's `private` keyword shadowed the public reader.
+  def test_waiting_for_workers_settles_the_spawned_worker
+    setup = simple_loop_setup(harness_client: SettlingHarnessClient.new(assistant_text: "finished"))
+    out = StringIO.new
     err = StringIO.new
 
     status = build_simple_loop(
       setup,
       input: "add a docs cleanup task\n/quit\n",
+      out: out,
       err: err,
       wait_for_workers: true
     ).run
 
     assert_equal 0, status
-    payload = JSON.parse(err.string)
-    assert_equal "error", payload.fetch("event")
-    assert_equal "NoMethodError", payload.dig("error", "class")
-    assert_includes payload.dig("error", "message"), "harness_client"
-    # The head batch was applied before the wait step raised.
-    assert_equal 1, payload.dig("state_summary", "agent_count")
-    assert_equal [["P1-I1-W1", "worker", "working"]],
+    assert_empty err.string
+    payload = JSON.parse(out.string[out.string.index("{")..])
+    wait_result = payload.fetch("worker_wait_results").first
+
+    assert_equal "P1-I1-W1", wait_result.fetch("agent_id")
+    assert_equal "settled", wait_result.fetch("status")
+    assert_equal "finished", wait_result.fetch("last_assistant_text")
+    assert_equal [["P1-I1-W1", "worker", "completed"]],
                  payload.dig("state_summary", "recent_agents").map { |agent| agent.values_at("id", "type", "status") }
   end
 

@@ -36,6 +36,12 @@ module Meringue
     #     routing, chat routing) and in text it is marked `(old id)`, so the line stays readable
     #     and attributable to something historical while resolving to no record at all.
     module Recounter
+      # The state document itself is inconsistent in a way the user has to repair (an issue
+      # whose project is gone, a worker whose issue is gone). Distinct from the `ArgumentError`
+      # that `validate_integrity!` raises, which reports a bug in the rewrite rather than
+      # something the user can act on.
+      class UnrecountableStateError < ArgumentError; end
+
       # Correlation and external workspace-ownership identifiers are compared against durable
       # copies outside the state document. They are never resolved back to an AgentTree record, so
       # they are preserved verbatim even when
@@ -102,6 +108,7 @@ module Meringue
       end
 
       def apply_recount!(state)
+        reject_orphaned_records!(state)
         project_map = sequential_map(state.fetch("projects"), /^P(\d+)$/) { |number, _record| "P#{number}" }
         issue_map = issue_id_map(state, project_map)
         worker_map = worker_id_map(state, issue_map)
@@ -138,6 +145,40 @@ module Meringue
 
       def goal_records(state)
         Array(state["goals"]).select { |goal| goal.is_a?(Hash) }
+      end
+
+      # An issue whose project is gone, or a worker whose issue is gone, never enters the id
+      # maps, so the very next `fetch` used to abort the pass with a bare
+      # `KeyError: key not found: "P1-I1"` - before `validate_integrity!` could say anything
+      # useful. Nothing is written either way (the pass runs on a copy), so the only thing at
+      # stake is whether the user is told what to repair.
+      def reject_orphaned_records!(state)
+        project_ids = id_lookup(state["projects"])
+        issues = Array(state["issues"]).select { |issue| issue.is_a?(Hash) }
+        orphans = issues.reject { |issue| project_ids.key?(issue.fetch("project_id", nil)) }
+                        .map { |issue| "#{issue.fetch("id", "(unnamed issue)")} -> project #{issue.fetch("project_id", nil).inspect}" }
+
+        issue_ids = id_lookup(issues)
+        orphans += Array(state["agents"]).select { |agent| agent.is_a?(Hash) && agent.fetch("type", nil) == "worker" }
+                                         .reject { |worker| issue_ids.key?(worker.fetch("issue_id", nil)) }
+                                         .map { |worker| "#{worker.fetch("id", "(unnamed worker)")} -> issue #{worker.fetch("issue_id", nil).inspect}" }
+
+        return if orphans.empty?
+
+        subject = orphans.length == 1 ? "1 record points" : "#{orphans.length} records point"
+        raise UnrecountableStateError,
+              "Cannot recount: #{subject} at a parent that no longer exists " \
+              "(#{orphans.first(5).join(", ")}#{orphans.length > 5 ? ", ..." : ""}). " \
+              "Kill or repair them first, then run /recount again."
+      end
+
+      def id_lookup(records)
+        Array(records).each_with_object({}) do |record, lookup|
+          next unless record.is_a?(Hash)
+
+          id = record.fetch("id", nil)
+          lookup[id] = true if id
+        end
       end
 
       def sequential_map(records, pattern)

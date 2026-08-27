@@ -11,6 +11,17 @@ changed in this slice.
 
 ## Bugs found
 
+### 1. ~~`Engine#harness_client` is private, so the worker-wait path raises~~ **Fixed.**
+
+The duplicate `harness_client`/`head_runner` definitions below the `private` keyword are gone;
+the provider-aware accessors are now defined once, above `private`, and the `attr_reader` no
+longer lists them. `HeadPromptLoopTest#test_worker_waiting_works_against_the_real_engine` and
+`HeadSimpleLoopTest#test_waiting_for_workers_settles_the_spawned_worker` cover the working path,
+and `FoundationLibraryBootTest#test_verbose_load_emits_no_warnings` fails the suite if any
+redefinition warning comes back. The `HarnessAccessibleEngine` shim was deleted.
+
+Original report:
+
 ### 1. `Engine#harness_client` is private, so the worker-wait path raises
 
 `lib/meringue/kernel/engine.rb:134` declares `attr_reader :harness_client`, but

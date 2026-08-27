@@ -251,18 +251,31 @@ class KernelHeadsQuestionsTest < KernelHeadsTestCase
     assert_equal 1, questions.length
   end
 
-  # Current behavior: unlike DismissQuestion, AnswerQuestion has no status guard, so a
-  # dismissed question can still be answered.
-  def test_answering_a_dismissed_question_is_currently_accepted
+  # AnswerQuestion used to have no status guard, so answering a dismissed question flipped it
+  # back to `answered` and re-opened routing for work the user had already waved off.
+  def test_answering_a_dismissed_question_is_rejected
     head_id = spawn_head!("Ambiguous request")
     ask_via_questions_array(head_id)
     apply_command("DismissQuestion", { "question_id" => "Q1" })
 
     result = apply_command("AnswerQuestion", { "question_id" => "Q1", "answer" => "Actually, meringue." })
 
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "question_not_open"
+    assert_equal "dismissed", questions.fetch(0).fetch("status")
+    assert_nil questions.fetch(0).fetch("answer")
+  end
+
+  # Re-answering an *answered* question stays allowed: that is a correction, not a revival.
+  def test_answering_an_answered_question_still_overwrites_it
+    head_id = spawn_head!("Ambiguous request")
+    ask_via_questions_array(head_id)
+    apply_command("AnswerQuestion", { "question_id" => "Q1", "answer" => "First" })
+
+    result = apply_command("AnswerQuestion", { "question_id" => "Q1", "answer" => "Second" })
+
     assert_equal "accepted", result.fetch("status")
-    assert_equal "answered", questions.fetch(0).fetch("status")
-    assert_equal "Actually, meringue.", questions.fetch(0).fetch("answer")
+    assert_equal "Second", questions.fetch(0).fetch("answer")
   end
 
   def test_dismiss_question_marks_an_open_question_dismissed

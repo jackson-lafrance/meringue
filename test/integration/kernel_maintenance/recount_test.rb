@@ -247,10 +247,9 @@ class KernelMaintenanceRecountTest < Minitest::Test
     assert_equal ["not-an-issue-id"], ids(read_state.fetch("issues"))
   end
 
-  # Current behaviour: an issue whose project is already gone aborts inside the id
-  # mapping with a KeyError, before the friendlier integrity validation runs.
-  # See test/findings/kernel_maintenance.md.
-  def test_orphaned_issue_aborts_the_recount_before_integrity_validation
+  # An issue whose project is gone used to abort inside the id mapping with a bare
+  # `KeyError: key not found: "P1-I1"`. It now names the record and what to do about it.
+  def test_orphaned_issue_is_refused_by_name_before_the_id_mapping_runs
     state = Meringue::State::Models.ensure_state_shape!(
       state_fixture(
         projects: [project_record(id: "P1", status: "working")],
@@ -258,12 +257,32 @@ class KernelMaintenanceRecountTest < Minitest::Test
       )
     )
 
-    error = assert_raises(KeyError) { Meringue::State::Recounter.recount!(state) }
+    error = assert_raises(Meringue::State::Recounter::UnrecountableStateError) do
+      Meringue::State::Recounter.recount!(state)
+    end
 
-    assert_match(/key not found/, error.message)
+    assert_includes error.message, "P1-I1"
+    assert_includes error.message, "P9"
+    assert_includes error.message, "/recount"
   end
 
-  def test_orphaned_issue_recount_fails_the_command_without_writing_state
+  def test_orphaned_worker_is_refused_by_name_too
+    state = Meringue::State::Models.ensure_state_shape!(
+      state_fixture(
+        projects: [project_record(id: "P1", status: "working")],
+        issues: [issue_record(id: "P1-I1", project_id: "P1", status: "working")],
+        agents: [worker_record(id: "P1-I2-W1", issue_id: "P1-I2", project_id: "P1", status: "working")]
+      )
+    )
+
+    error = assert_raises(Meringue::State::Recounter::UnrecountableStateError) do
+      Meringue::State::Recounter.recount!(state)
+    end
+
+    assert_includes error.message, "P1-I2-W1"
+  end
+
+  def test_orphaned_issue_recount_is_rejected_without_writing_state
     write_state(
       state_fixture(
         projects: [project_record(id: "P1", status: "working")],
@@ -274,7 +293,9 @@ class KernelMaintenanceRecountTest < Minitest::Test
 
     result = apply_command(engine, "Recount", {})
 
-    assert_equal "failed", result.fetch("status")
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "recount_refused"
+    assert_includes result.fetch("message"), "P1-I1"
     state = read_state
     assert_equal ["P1-I1"], ids(state.fetch("issues"))
     assert_equal "P9", issue_by_id(state, "P1-I1").fetch("project_id")

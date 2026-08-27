@@ -228,29 +228,6 @@ module HeadsSupport
     end
   end
 
-  # Exposes the engine's harness client, which the real engine keeps private even
-  # though PromptLoop-style worker waiting calls it. Test-only shim; see
-  # test/findings/heads.md.
-  class HarnessAccessibleEngine
-    def initialize(engine)
-      @engine = engine
-    end
-
-    def harness_client
-      @engine.send(:harness_client)
-    end
-
-    def respond_to_missing?(name, include_private = false)
-      @engine.respond_to?(name, include_private) || super
-    end
-
-    def method_missing(name, *args, **kwargs, &block)
-      return super unless @engine.respond_to?(name)
-
-      @engine.public_send(name, *args, **kwargs, &block)
-    end
-  end
-
   def wait_until(timeout: 10, description: "condition")
     deadline = Time.now + timeout
     loop do

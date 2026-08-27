@@ -341,7 +341,7 @@ class HeadPromptLoopTest < Minitest::Test
     events = []
 
     payload = Meringue::Heads::PromptLoop.new(
-      engine: HarnessAccessibleEngine.new(env.engine),
+      engine: env.engine,
       wait_for_workers: true,
       worker_wait_timeout: 5
     ).call("add a docs cleanup task") { |event| events << event }
@@ -370,7 +370,7 @@ class HeadPromptLoopTest < Minitest::Test
     events = []
 
     payload = Meringue::Heads::PromptLoop.new(
-      engine: HarnessAccessibleEngine.new(env.engine),
+      engine: env.engine,
       wait_for_workers: true
     ).call("add a docs cleanup task") { |event| events << event }
 
@@ -382,19 +382,28 @@ class HeadPromptLoopTest < Minitest::Test
     assert_equal "working", env.agents(type: "worker").first.fetch("status")
   end
 
-  # Documents a real bug: Engine#harness_client is private, so PromptLoop's
-  # worker-wait path (used by `meringue heads`) raises instead of waiting.
-  def test_worker_waiting_against_the_real_engine_raises_because_harness_client_is_private
-    env = build_head_environment(harness_client: SettlingHarnessClient.new)
+  # `Engine#harness_client` used to be shadowed by a second definition below the `private`
+  # keyword, so this whole path raised `NoMethodError: private method 'harness_client'`.
+  def test_worker_waiting_works_against_the_real_engine
+    harness_client = SettlingHarnessClient.new(assistant_text: "done")
+    env = build_head_environment(harness_client: harness_client)
 
-    error = assert_raises(NoMethodError) do
-      Meringue::Heads::PromptLoop.new(engine: env.engine, wait_for_workers: true).call("add a docs cleanup task")
-    end
+    assert_respond_to env.engine, :harness_client
+    assert_respond_to env.engine, :head_runner
 
-    assert_includes error.message, "harness_client"
-    refute env.engine.respond_to?(:harness_client)
-    # The head batch itself was still applied before the wait step raised.
+    payload = Meringue::Heads::PromptLoop.new(
+      engine: env.engine,
+      wait_for_workers: true,
+      worker_wait_timeout: 5
+    ).call("add a docs cleanup task")
+
+    wait_result = payload.fetch("worker_wait_results").first
+
+    assert_equal "P1-I1-W1", wait_result.fetch("agent_id")
+    assert_equal "settled", wait_result.fetch("status")
+    assert_equal "done", wait_result.fetch("last_assistant_text")
     assert_equal 1, env.agents(type: "worker").length
+    assert_equal "completed", env.agents(type: "worker").first.fetch("status")
   end
 
   def test_engine_mutex_is_shared_so_slash_commands_serialize

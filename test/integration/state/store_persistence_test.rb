@@ -195,24 +195,64 @@ class StateStorePersistenceTest < Minitest::Test
     end
   end
 
-  def test_corrupt_and_truncated_files_raise_a_json_parse_error
-    with_store do |store, path|
-      File.write(path, "{not json")
-      assert_raises(JSON::ParserError) { store.load }
+  # An unreadable state file used to end the process: `JSON::ParserError` out of every load
+  # for a truncated write, and an unrescued `TypeError`/`IndexError` from normalization for a
+  # valid-but-not-an-object document. Neither was recoverable without a shell, so Meringue now
+  # moves the file aside, keeps it verbatim, and starts from an empty state.
+  def test_an_unreadable_state_file_is_quarantined_and_meringue_still_starts
+    ["{not json", "", "[]\n", "\"a string\"\n"].each do |body|
+      with_store do |store, path|
+        File.write(path, body)
 
-      valid = JSON.pretty_generate(sample_state)
-      File.write(path, valid.byteslice(0, valid.bytesize / 2))
-      assert_raises(JSON::ParserError) { store.load }
+        state = store.load
 
-      File.write(path, "")
-      assert_raises(JSON::ParserError) { store.load }
+        assert_empty state.fetch("projects"), body.inspect
+        quarantined = Dir["#{path}.unreadable-*"]
+        assert_equal 1, quarantined.length, body.inspect
+        assert_equal body, File.read(quarantined.first), "the unreadable file is preserved verbatim"
+        refute File.exist?(path), "the unreadable file is moved, not copied"
+
+        warning = state.fetch("logs").first
+        assert_equal "warning", warning.fetch("level")
+        assert_includes warning.fetch("message"), "could not be read"
+        assert_includes warning.fetch("message"), quarantined.first
+        assert_equal quarantined.first, state.dig("metadata", "unreadable_state_recovery", "quarantined_path")
+      end
     end
   end
 
-  def test_non_object_json_document_raises_type_error
+  def test_a_truncated_state_file_is_quarantined_too
     with_store do |store, path|
-      File.write(path, "[]\n")
-      assert_raises(TypeError) { store.load }
+      valid = JSON.pretty_generate(sample_state)
+      File.write(path, valid.byteslice(0, valid.bytesize / 2))
+
+      assert_empty store.load.fetch("projects")
+      assert_equal 1, Dir["#{path}.unreadable-*"].length
+    end
+  end
+
+  # `save_agent_workspace`/`save_log_buffer` load inside the exclusive lock, and recovery has
+  # to take that same lock to move the bad file aside. Ruby's Mutex is not reentrant.
+  def test_saving_workspace_state_over_an_unreadable_file_recovers_instead_of_deadlocking
+    with_store do |store, path|
+      File.write(path, "{not json")
+
+      store.save_agent_workspace({ "view" => "terminal", "filter" => "tools" })
+
+      assert_equal "terminal", store.load.dig("ui", "agent_workspace", "view")
+      assert_equal "tools", store.load.dig("ui", "agent_workspace", "filter")
+      assert_equal 1, Dir["#{path}.unreadable-*"].length
+    end
+  end
+
+  def test_compacting_an_unreadable_file_recovers_instead_of_raising
+    with_store do |store, path|
+      File.write(path, "not json at all")
+
+      store.compact!
+
+      assert_empty store.load.fetch("projects")
+      assert_equal 1, Dir["#{path}.unreadable-*"].length
     end
   end
 

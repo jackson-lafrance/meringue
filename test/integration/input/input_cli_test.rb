@@ -147,9 +147,9 @@ class InputCLITest < Minitest::Test
     end
   end
 
-  # Documented behavior: reset-state does not parse runtime options, so --state
-  # is ignored and MERINGUE_STATE_PATH (or the default) always wins.
-  def test_reset_state_ignores_a_state_flag
+  # `reset-state` used to skip option parsing entirely, so `--state PATH` was dropped and the
+  # command wiped MERINGUE_STATE_PATH (or the default) instead of the file that was named.
+  def test_reset_state_resets_the_state_file_named_by_the_flag
     Dir.mktmpdir("meringue-cli-test") do |dir|
       env_path = File.join(dir, "env-state.json")
       flag_path = File.join(dir, "flag-state.json")
@@ -158,11 +158,41 @@ class InputCLITest < Minitest::Test
         result = run_cli(["reset-state", "--state", flag_path])
 
         assert_equal 0, result.fetch("status")
+        assert_includes result.fetch("out"), flag_path
+      end
+
+      assert File.file?(flag_path)
+      refute File.exist?(env_path), "the flag must not reset the environment's state file"
+    end
+  end
+
+  def test_reset_state_still_uses_the_environment_path_without_a_flag
+    Dir.mktmpdir("meringue-cli-test") do |dir|
+      env_path = File.join(dir, "env-state.json")
+
+      with_env("MERINGUE_STATE_PATH" => env_path) do
+        result = run_cli(["reset-state"])
+
+        assert_equal 0, result.fetch("status")
         assert_includes result.fetch("out"), env_path
       end
 
       assert File.file?(env_path)
-      refute File.exist?(flag_path)
+    end
+  end
+
+  def test_reset_state_reports_an_unknown_flag_instead_of_resetting_anything
+    Dir.mktmpdir("meringue-cli-test") do |dir|
+      env_path = File.join(dir, "env-state.json")
+
+      with_env("MERINGUE_STATE_PATH" => env_path) do
+        result = run_cli(["reset-state", "--nope"])
+
+        assert_equal 1, result.fetch("status")
+        assert_includes result.fetch("err"), "--nope"
+      end
+
+      refute File.exist?(env_path)
     end
   end
 

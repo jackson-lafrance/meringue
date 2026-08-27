@@ -26,7 +26,11 @@ recorded here.
    `#test_release_with_delete_branch_keeps_a_branch_that_carries_commits`, and
    `WorkspaceManagerFailedAllocationCleanupTest#test_cleanup_keeps_a_branch_that_carries_commits_and_says_why`.
 
-2. **`Workspace::PathResolver` raises `ArgumentError` on a path containing a
+2. ~~**`Workspace::PathResolver` raises `ArgumentError` on a path containing a
+   null byte instead of returning a rejected result.**~~ **Fixed.** A candidate
+   containing a null byte is treated as unusable and reported through the normal
+   `unavailable` result; a usable sibling candidate still wins. Original report:
+   **`Workspace::PathResolver` raises `ArgumentError` on a path containing a
    null byte instead of returning a rejected result.** `absolute_path` rescues
    `ArgumentError` and retries `File.expand_path`, which raises again, so the
    exception escapes into the render/input loop that every other unusable path

@@ -36,6 +36,8 @@ module Meringue
         @snapshot_json = nil
         @readonly_snapshot = nil
         @snapshot_misses = 0
+        @temp_sequence = 0
+        @temp_sequence_mutex = Mutex.new
       end
 
       # Saves publish a complete snapshot with an atomic rename, so readers can
@@ -111,7 +113,7 @@ module Meringue
         exclusive do
           return false unless File.exist?(path)
 
-          state = JSON.parse(File.read(path))
+          state = parse_state_document(File.read(path))
           previous_log_count = Array(state["logs"]).length
           Models.ensure_state_shape!(state)
           changed = state.fetch("logs").length != previous_log_count
@@ -168,8 +170,27 @@ module Meringue
         Thread.current[:meringue_store_save_transactions]&.fetch(object_id, nil)
       end
 
+      # Reentrant on the calling thread. `save_agent_workspace`/`save_log_buffer` already run a
+      # `load` inside the lock, and unreadable-state recovery has to take the lock from inside
+      # that read to move the bad file aside; Ruby's Mutex is not reentrant, so without this a
+      # corrupt state file would turn one of those saves into a `ThreadError` deadlock.
       def exclusive(&block)
-        file_lock.synchronize { @mutex.synchronize(&block) }
+        return yield if Thread.current[exclusive_key]
+
+        file_lock.synchronize do
+          @mutex.synchronize do
+            Thread.current[exclusive_key] = true
+            begin
+              yield
+            ensure
+              Thread.current[exclusive_key] = nil
+            end
+          end
+        end
+      end
+
+      def exclusive_key
+        @exclusive_key ||= :"meringue_store_exclusive_#{object_id}"
       end
 
       # The TUI reloads state on every rendered frame, and the kernel reloads it for
@@ -190,13 +211,83 @@ module Meringue
       def read_state_unlocked
         @snapshot_mutex.synchronize { @snapshot_misses += 1 }
         fingerprint = file_fingerprint
-        state = JSON.parse(File.read(path))
+        state = parse_state_document(File.read(path))
         # Normalize first so legacy oversized histories are pruned before the
         # deep string compactor visits entries that will not be retained.
         Models.ensure_state_shape!(state)
         Compactor.compact!(state)
         remember_snapshot(fingerprint, state)
         state
+      end
+
+      # A state file Meringue cannot read used to end the process: a truncated write raised
+      # `JSON::ParserError` out of every `load`, and a valid-but-not-an-object document
+      # (`[]`, `"hi"`) raised `TypeError`/`IndexError` from normalization, which nothing
+      # rescued at all. Neither is recoverable without a shell, and the only reachable repair
+      # was "delete the file", which throws away whatever was still readable in it.
+      #
+      # Instead the unreadable file is moved aside and Meringue starts from an empty state.
+      # The original is kept verbatim next to it, and the reason is recorded in the fresh
+      # state's metadata and as a warning log entry, so the dashboard says out loud what
+      # happened and where the old file went.
+      def parse_state_document(body)
+        parsed = JSON.parse(body)
+        raise TypeError, "state document is #{parsed.class}, not an object" unless parsed.is_a?(Hash)
+
+        parsed
+      rescue JSON::ParserError, TypeError => e
+        recover_unreadable_state(e)
+      end
+
+      def recover_unreadable_state(error)
+        quarantine_path = quarantine_unreadable_state!
+        state = Models.empty_state
+        reason = "#{error.class}: #{error.message}"
+        state.fetch("metadata")["unreadable_state_recovery"] = {
+          "recovered_at" => Time.now.utc.iso8601,
+          "error" => reason,
+          "quarantined_path" => quarantine_path
+        }.compact
+        state.fetch("counters")["logs"] = 1
+        state.fetch("logs") << {
+          "id" => "L1",
+          "created_at" => Time.now.utc.iso8601,
+          "source_type" => "system",
+          "source_id" => nil,
+          "level" => "warning",
+          "message" => if quarantine_path
+                         "Meringue state at #{path} could not be read (#{reason}). It was moved to " \
+                           "#{quarantine_path} and Meringue started from an empty state."
+                       else
+                         "Meringue state at #{path} could not be read (#{reason}). Meringue started from an empty state."
+                       end,
+          "details" => { "error" => reason, "quarantined_path" => quarantine_path }.compact
+        }
+        state
+      end
+
+      # Renaming needs the same exclusive lock as a save, and the file is re-read under it:
+      # another Meringue process may have replaced a half-written snapshot with a good one
+      # between the failed parse and this call, in which case nothing is moved.
+      def quarantine_unreadable_state!
+        destination = "#{path}.unreadable-#{Time.now.utc.strftime("%Y%m%dT%H%M%S%6N")}"
+        moved = exclusive do
+          if !File.exist?(path) || readable_state_document?
+            false
+          else
+            File.rename(path, destination)
+            true
+          end
+        end
+        moved ? destination : nil
+      rescue SystemCallError
+        nil
+      end
+
+      def readable_state_document?
+        JSON.parse(File.read(path)).is_a?(Hash)
+      rescue JSON::ParserError, SystemCallError
+        false
       end
 
       # Saves publish through an atomic rename of a fresh temp file, so a new
@@ -238,7 +329,11 @@ module Meringue
 
       def save_unlocked(state, preserve_log_buffer: true)
         FileUtils.mkdir_p(File.dirname(path))
-        temp_path = "#{path}.tmp.#{$$}"
+        # The temp name must be unique per write, not per process. Two Store instances in one
+        # process (the kernel's and the TUI's) hold different mutexes, so a process-scoped name
+        # let one writer's `ensure File.delete` remove the other's in-flight temp file and the
+        # loser raised `Errno::ENOENT` out of `File.rename`.
+        temp_path = "#{path}.tmp.#{$$}.#{next_temp_sequence}"
         Models.ensure_state_shape!(state)
         Compactor.compact!(state)
         merge_persisted_log_buffer!(state) if preserve_log_buffer
@@ -251,6 +346,16 @@ module Meringue
         state
       ensure
         File.delete(temp_path) if temp_path && File.exist?(temp_path)
+      end
+
+      # Unique within this Store, and combined with the object id it is unique within the
+      # process, so no two concurrent writers to the same state file can pick the same
+      # temp path.
+      def next_temp_sequence
+        @temp_sequence_mutex.synchronize do
+          @temp_sequence += 1
+          "#{object_id}-#{@temp_sequence}"
+        end
       end
 
       def merge_persisted_log_buffer!(state)

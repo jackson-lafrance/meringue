@@ -642,10 +642,25 @@ module Meringue
       HEAD_SESSION_STATE_RELEASED = "released"
       HEAD_SESSION_STATE_UNAVAILABLE = "unavailable"
 
-      attr_reader :store, :harness_client, :head_runner, :workspace_manager, :cwd, :forge_client, :config_path,
+      attr_reader :store, :workspace_manager, :cwd, :forge_client, :config_path,
                   :config, :state_lock, :instance_pid, :instance_id, :prune_forge_lookup_budget,
                   :prune_workspace_cleanup_budget, :post_prune_cleanup_budget, :metric_probe, :goal_advance_budget,
                   :delivery_pull_request_refresh_budget, :worker_provisioning_concurrency
+
+      # `harness_client` and `head_runner` are deliberately *not* plain readers: the
+      # constructor may be handed nil clients before any harness is configured, and the
+      # provider lambdas resolve the real backend for whichever harness state names now.
+      # They are public because embedders (`Heads::PromptLoop`, `Heads::SimpleLoop`) settle
+      # spawned workers through them. Defining them here, before `private`, is what keeps
+      # them public: an identical pair defined below the `private` keyword used to shadow
+      # the readers and silently make both callers raise `NoMethodError`.
+      def harness_client
+        active_harness_client
+      end
+
+      def head_runner
+        active_head_runner
+      end
 
       def initialize(store: State::Store.new, harness_client: Harness::FakeClient.new,
                      head_runner: Heads::FakeRunner.new,
@@ -4429,46 +4444,6 @@ module Meringue
         {}
       end
 
-      def prompt_agent(command_id, command_type, payload)
-        agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
-        prompt = value_at(payload, "prompt", "Prompt", "message", "Message")
-        mode = value_at(payload, "mode", "Mode") || "normal"
-        errors = []
-
-        errors << "agent_id is required" if blank?(agent_id)
-        errors << "prompt is required" if blank?(prompt)
-        return rejected_result(command_id, command_type, "Agent was not prompted.", errors) unless errors.empty?
-
-        state = normalized_state
-        agent = find_agent(state, agent_id)
-        return rejected_result(command_id, command_type, "Agent #{agent_id} does not exist.", ["agent_not_found"]) unless agent
-        return rejected_result(command_id, command_type, "Agent #{agent_id} is not a worker.", ["agent_is_not_worker"]) unless agent.fetch("type", nil) == "worker"
-        return rejected_result(command_id, command_type, "Agent #{agent_id} has no agent session.", ["agent_has_no_harness_session"]) if blank?(agent.fetch("harness", nil))
-        return rejected_result(command_id, command_type, "Agent #{agent_id} is killed.", ["agent_killed"]) if agent.fetch("status", nil) == "killed"
-
-        client = harness_client_for_agent(agent)
-        session_ref = session_ref_from_agent(agent)
-        updated_ref = client.prompt_session(session_ref, prompt.to_s, mode: mode.to_s)
-        now = timestamp
-        apply_session_ref_to_agent!(agent, updated_ref)
-        agent["status"] = "working"
-        agent["updated_at"] = now
-        refresh_worker_parent_statuses!(state, agent, now)
-
-        log_ids = append_log(
-          state,
-          source_type: "worker",
-          source_id: agent.fetch("id"),
-          level: "info",
-          message: "Prompted agent #{agent.fetch("id")}.",
-          details: { "mode" => mode.to_s, "prompt" => prompt.to_s }
-        )
-        touch_state!(state, now)
-        store.save(state)
-
-        accepted_result(command_id, command_type, agent.fetch("id"), "Prompted agent #{agent.fetch("id")}.", agent, log_ids)
-      end
-
       def kill(command_id, command_type, payload)
         target_id = value_at(payload, "target_id", "TargetID", "targetId", "id")
         return rejected_result(command_id, command_type, "Target was not killed.", ["target_id is required"]) if blank?(target_id)
@@ -6345,6 +6320,24 @@ module Meringue
           }
         end
 
+        # Dismissing is a decision not to answer. Accepting an answer afterwards silently
+        # flipped the record back to `answered` and re-opened routing for work the user had
+        # already waved off, so it is rejected the way `DismissQuestion` rejects a closed
+        # question. Re-answering an *answered* question stays allowed: that is a correction.
+        if question.fetch("status", nil) == "dismissed"
+          return {
+            "result" => rejected_result(
+              command_id,
+              command_type,
+              "Question #{question.fetch("id")} was dismissed, so it cannot be answered. " \
+                "Send the instruction as a normal message instead.",
+              ["question_not_open"]
+            ),
+            "question" => deep_copy(question),
+            "recorded" => false
+          }
+        end
+
         now = timestamp
         question["status"] = "answered"
         question["answer"] = answer.to_s
@@ -6720,7 +6713,14 @@ module Meringue
           )
         end
         now = timestamp
-        mappings = State::Recounter.recount!(state)
+        begin
+          mappings = State::Recounter.recount!(state)
+        rescue State::Recounter::UnrecountableStateError => e
+          # Recount validates on a copy, so a refusal never touches the state file. An
+          # inconsistency the user has to repair is reported with the recounter's own
+          # explanation instead of surfacing as `KeyError: key not found: "P1-I1"`.
+          return rejected_result(command_id, command_type, e.message, ["recount_refused"])
+        end
         changed_count = mappings.values.sum(&:length)
         state.fetch("metadata")["last_recount"] = {
           "recounted_at" => now,
@@ -8342,14 +8342,6 @@ module Meringue
         end
       end
 
-      def issue_subtree_ids(state, root_issue_id)
-        root = root_issue_id.to_s
-        return [] unless find_issue(state, root)
-
-        children = state.fetch("issues").select { |issue| issue.fetch("parent_issue_id", nil) == root }.map { |issue| issue.fetch("id") }
-        [root] + children.flat_map { |child_id| issue_subtree_ids(state, child_id) }
-      end
-
       def refresh_projects_after_prune!(state, project_ids, now)
         Array(project_ids).filter_map do |project_id|
           project = find_project(state, project_id)
@@ -9276,7 +9268,11 @@ module Meringue
 
       def prompt_agent(command_id, command_type, payload)
         agent_id = value_at(payload, "agent_id", "AgentID", "agentId")
-        prompt = value_at(payload, "prompt", "Prompt")
+        # `message`/`Message` are accepted because `prompt_agent_command` already routes
+        # head takeovers and unreplayable-session continuations off those aliases. Reading a
+        # narrower set here rejected the identical payload as "prompt is required" depending
+        # only on which branch the target agent happened to take.
+        prompt = value_at(payload, "prompt", "Prompt", "message", "Message")
         mode = (value_at(payload, "mode", "Mode") || "normal").to_s
         errors = []
 
@@ -17752,14 +17748,6 @@ module Meringue
 
       def synchronized_state(&block)
         @state_mutex.synchronize { @state_lock.synchronize(&block) }
-      end
-
-      def harness_client
-        active_harness_client
-      end
-
-      def head_runner
-        active_head_runner
       end
 
       def active_harness_client(provider: nil)
