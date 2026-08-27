@@ -427,6 +427,54 @@ class KernelWorkersDeferredChainingTest < Minitest::Test
     assert_equal [dependent_id], decision.fetch("deferred_dependent_worker_ids")
   end
 
+  # Waiting is not the only reason a predecessor must outlive its successor. Once that successor
+  # has started, the predecessor's record is the only thing still naming the report and lineage
+  # behind the work in flight, and it may own the checkout the successor is writing to.
+  def test_prune_retains_a_settled_predecessor_while_its_successor_is_still_running
+    engine = build_engine
+    context = project_with_issue(engine, title: "Research the crash")
+    implementation_issue_id = create_issue(engine, context.fetch("project_id"), title: "Fix the crash")
+    predecessor_id = spawn_worker(engine, context.fetch("issue_id"), prompt: "Research.").fetch("target_id")
+    patch_agent!(predecessor_id) { |record| record["status"] = "completed" }
+    successor_id = spawn_worker(engine, implementation_issue_id, prompt: "Fix it.", after_agent_id: predecessor_id).fetch("target_id")
+
+    # The successor is no longer queued: it started as soon as its settled predecessor allowed it.
+    patch_agent!(successor_id) { |record| record["status"] = "working" }
+    patch_state! do |state|
+      state.fetch("issues").each { |record| record["status"] = "completed" if record.fetch("id") == context.fetch("issue_id") }
+    end
+    result = apply!(engine, "Prune")
+    decision = result.dig("result", "issue_decisions").find { |entry| entry.fetch("issue_id") == context.fetch("issue_id") }
+
+    refute_nil agent(engine, predecessor_id), "the predecessor must survive while its successor runs"
+    assert_equal false, decision.fetch("prunable")
+    assert_includes decision.fetch("blockers"), "live_successor_workers"
+    assert_equal [successor_id], decision.fetch("live_successor_worker_ids")
+    assert(
+      log_messages(engine).any? { |message| message.include?("continues their work is still running") },
+      "a retention the user cannot see in the tree must be reported"
+    )
+  end
+
+  def test_prune_releases_a_predecessor_once_its_successor_settles
+    engine = build_engine
+    context = project_with_issue(engine, title: "Research the crash")
+    implementation_issue_id = create_issue(engine, context.fetch("project_id"), title: "Fix the crash")
+    predecessor_id = spawn_worker(engine, context.fetch("issue_id"), prompt: "Research.").fetch("target_id")
+    patch_agent!(predecessor_id) { |record| record["status"] = "completed" }
+    successor_id = spawn_worker(engine, implementation_issue_id, prompt: "Fix it.", after_agent_id: predecessor_id).fetch("target_id")
+
+    patch_agent!(successor_id) { |record| record["status"] = "completed" }
+    patch_state! do |state|
+      state.fetch("issues").each { |record| record["status"] = "completed" if record.fetch("id") == context.fetch("issue_id") }
+    end
+    result = apply!(engine, "Prune")
+    decision = result.dig("result", "issue_decisions").find { |entry| entry.fetch("issue_id") == context.fetch("issue_id") }
+
+    assert_equal true, decision.fetch("prunable")
+    assert_nil agent(engine, predecessor_id)
+  end
+
   # --- Replacement ----------------------------------------------------------------------------
 
   def test_replacing_the_predecessor_repoints_the_queued_worker_at_its_successor

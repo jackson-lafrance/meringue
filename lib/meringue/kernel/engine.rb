@@ -42,6 +42,8 @@ module Meringue
 
         Derive delivery names and prose only from the product task title and requested change. The current branch was already allocated under this policy; do not rename it unless it is unusable. If you must supply another name, sanitize unsafe supplied/generated values and use a short opaque suffix for uniqueness. Before delivery, inspect commit metadata and the rendered pull request title/body and remove prohibited text; update an existing compliant pull request rather than opening an agent-specific one.
 
+        Your final message is a handover, not a summary for a reader who watched you work. Meringue keeps sessions short: the work that follows yours normally happens in a new session that inherits your worktree and branch but never sees your transcript, so anything you learned and did not write down is lost. End by stating what you changed and where, what is committed versus still uncommitted, what you tried that did not work and why, what you verified and what you could not, and what the next step is. Be specific about approaches you ruled out: that is what stops the next session from repeating them.
+
         Report true blockers instead of asking for routine approval: missing credentials, authentication or authorization failures, missing or invalid remotes, branch/worktree collisions, unrelated uncommitted work that would be overwritten, or unsafe/destructive operations.
       PROMPT
       READ_ONLY_WORKER_SYSTEM_PROMPT = <<~PROMPT.freeze
@@ -55,6 +57,8 @@ module Meringue
         Inspect and synthesize with read-only tools, then return findings or an answer. Treat pre-existing uncommitted files as user-owned state: you may read them when relevant but must not alter them. Never claim to have changed, committed, pushed, or delivered anything.
 
         During longer work, keep progress visible by briefly reporting meaningful findings and decisions. Do not narrate routine tool use or invent progress when there is no substantive update.
+
+        Your final message is a handover, not a summary for a reader who watched you work. The work that follows yours normally happens in a new session that never sees your transcript, so anything you found and did not write down is lost. State your findings, the evidence behind them, what you checked and ruled out, and anything you could not determine.
       PROMPT
       WORKSPACE_MODE_ISOLATED = "isolated"
       WORKSPACE_MODE_SHARED_READ_ONLY = "shared_read_only"
@@ -5857,7 +5861,7 @@ module Meringue
         lines << "User answer: #{question.fetch("answer")}"
         lines << ""
         lines << "The question is already recorded as answered, so do not ask it again and do not propose AnswerQuestion for it."
-        lines << "Route the work this answer unblocks: reuse the question's issue when it still represents the durable goal, prompt the healthiest existing worker on that issue when its session context is relevant, and create or spawn only when nothing suitable exists."
+        lines << "Route the work this answer unblocks: reuse the question's issue when it still represents the durable goal, and continue it in a fresh worker queued behind the settled worker it follows (after_agent_id plus follow_up_of_agent_id) so it inherits that worktree, branch, and final report. Prompt an existing worker instead only when it is mid-turn and needs steering, or stopped mid-flight and must be resumed."
         lines << "Ask a new clarifying question only if the answer still leaves the routing genuinely ambiguous."
         lines.join("\n")
       end
@@ -7090,9 +7094,13 @@ module Meringue
             "nonterminal_issue_ids" => Array(decision.fetch("nonterminal_issue_ids", [])),
             "blocking_worker_ids" => Array(decision.fetch("blocking_worker_ids", [])),
             "open_question_ids" => Array(decision.fetch("open_question_ids", [])),
-            "workspace_cleanup_blocking_agent_ids" => Array(decision.fetch("workspace_cleanup_blocking_agent_ids", []))
+            "workspace_cleanup_blocking_agent_ids" => Array(decision.fetch("workspace_cleanup_blocking_agent_ids", [])),
+            "live_successor_worker_ids" => Array(decision.fetch("live_successor_worker_ids", []))
           }
         end
+        # A running successor can live on another issue, so this retention is not visible in the
+        # subtree the user is looking at. Name it like the other invisible reasons.
+        successor_retentions = reasons.reject { |reason| reason.fetch("live_successor_worker_ids").empty? }
         unverified_issue_ids = reasons.select { |reason| reason.fetch("unverified_pr_urls").any? }
                                      .filter_map { |reason| reason.fetch("issue_id") }
         blocked_cleanups = Array(prune_result.fetch("workspace_cleanup_outcomes", []))
@@ -7102,6 +7110,15 @@ module Meringue
           sentences << "Retained #{count_phrase(unverified_issue_ids.length, "issue")} because Meringue could not " \
                        "verify their pull request status: #{id_list_phrase(unverified_issue_ids)}" \
                        "#{prune_forge_lookup_clause(forge_lookup)}."
+        end
+        if successor_retentions.any?
+          listed = successor_retentions.first(PRUNE_RETENTION_REPORT_LIMIT).map do |reason|
+            "#{reason.fetch("issue_id")} (still needed by #{id_list_phrase(reason.fetch("live_successor_worker_ids"))})"
+          end
+          remainder = successor_retentions.length - listed.length
+          listed << "and #{remainder} more" if remainder.positive?
+          sentences << "Retained #{count_phrase(successor_retentions.length, "issue")} because a worker that " \
+                       "continues their work is still running: #{listed.join(", ")}."
         end
         if blocked_cleanups.any?
           listed = blocked_cleanups.first(PRUNE_RETENTION_REPORT_LIMIT).map do |outcome|
@@ -7393,6 +7410,12 @@ module Meringue
           # (possibly on another issue) with nothing to wait for. The same applies to a completed
           # worker whose completion still has a head-routing continuation to fire.
           deferred_dependents = waiting_deferred_dependents(state, workers.map { |worker| worker.fetch("id", nil) })
+          # A settled predecessor also outlives a successor that has already *started*. Because a
+          # follow-up now normally continues in a fresh session, the predecessor's record is the
+          # only thing still naming the report and lineage behind the work in flight, and it may
+          # own the checkout that successor is writing. Retaining it keeps that readable until the
+          # successor settles too.
+          live_successors = live_worker_successors(state, workers.map { |worker| worker.fetch("id", nil) })
           completion_continuations = workers.select { |worker| pending_completion_continuation?(worker) }
           # A live goal loop is retained work: pruning its issue would delete the loop, its
           # iteration history, and the worktrees it is still measuring.
@@ -7404,6 +7427,7 @@ module Meringue
           blockers << "open_questions" if open_questions.any?
           blockers << "unsettled_pull_requests" if pull_request_blockers.any?
           blockers << "pending_deferred_dependents" if deferred_dependents.any?
+          blockers << "live_successor_workers" if live_successors.any?
           blockers << "pending_completion_continuations" if completion_continuations.any?
           blockers << "active_goals" if active_goals.any?
 
@@ -7418,6 +7442,7 @@ module Meringue
             "blocking_worker_ids" => blocking_workers.map { |worker| worker.fetch("id", nil) }.compact,
             "workspace_cleanup_claimed_worker_ids" => cleanup_claimed_workers.map { |worker| worker.fetch("id", nil) }.compact,
             "deferred_dependent_worker_ids" => deferred_dependents.map { |dependent| dependent.fetch("id", nil) }.compact,
+            "live_successor_worker_ids" => live_successors.map { |successor| successor.fetch("id", nil) }.compact,
             "completion_continuation_worker_ids" => completion_continuations.map { |worker| worker.fetch("id", nil) }.compact,
             "open_question_ids" => open_questions.map { |question| question.fetch("id", nil) }.compact,
             "active_goal_ids" => active_goals.map { |goal| goal.fetch("id", nil) }.compact,
@@ -10795,7 +10820,11 @@ module Meringue
                        "issue_id" => current_goal.fetch("issue_id"),
                        "prompt" => prompt,
                        "title" => "#{current_goal.fetch("id")} iteration #{number}",
-                       "follow_up_of_agent_id" => goal_follow_up_agent_id(current_goal)
+                       "follow_up_of_agent_id" => goal_follow_up_agent_id(current_goal),
+                       # Lineage is recorded for both modes, but only `accumulate` continues in the
+                       # predecessor's checkout. `fresh_attempt` opts out of the continuation default
+                       # so its iterations really are independent attempts from a clean tree.
+                       "share_workspace" => (false if current_goal.fetch("continuity", nil).to_s == "fresh_attempt")
                      }.compact
                    )
                  end
@@ -12776,6 +12805,29 @@ module Meringue
       def deferred_worker_after_agent_id(agent)
         present_string(agent.fetch("after_agent_id", nil)) ||
           present_string(deferred_spawn_metadata(agent).fetch("after_agent_id", nil))
+      end
+
+      # Workers that are still running and whose lineage or shared checkout names one of these
+      # predecessors. A queued dependent is covered by `waiting_deferred_dependents`; this is the
+      # same protection once that successor is actually working.
+      def live_worker_successors(state, predecessor_ids)
+        wanted = Array(predecessor_ids).compact.map(&:to_s).reject(&:empty?)
+        return [] if wanted.empty?
+
+        state.fetch("agents").select do |agent|
+          next false unless agent.fetch("type", nil) == "worker"
+          next false unless PRUNE_BLOCKING_WORKER_STATUSES.include?(agent.fetch("status", nil).to_s)
+
+          references = [
+            agent.fetch("after_agent_id", nil),
+            agent.fetch("follow_up_of_agent_id", nil),
+            agent.fetch("replaces_agent_id", nil),
+            agent.dig("harness_metadata", "workspace_reuse", "of_agent_id")
+          ].compact
+          next false if references.empty?
+
+          references.any? { |reference| wanted.any? { |candidate| Ids.same?(candidate, reference) } }
+        end
       end
 
       def waiting_deferred_dependents(state, predecessor_ids)

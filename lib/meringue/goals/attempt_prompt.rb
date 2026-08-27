@@ -10,8 +10,8 @@ module Meringue
     # The reflection lives here, outside the agent session, on purpose: an agent asked to
     # critique itself with no external signal restates the same plan in new words, while a
     # short "you already tried X and the metric moved 61 → 62" carries the signal that
-    # actually changes behavior. Each iteration therefore gets the metric history and the
-    # previous iteration's directive instead of a growing transcript.
+    # actually changes behavior. Every iteration is therefore a new session that receives the
+    # metric history and the previous iteration's directive instead of a replayed transcript.
     module AttemptPrompt
       HISTORY_LIMIT = 5
 
@@ -31,9 +31,11 @@ module Meringue
         sections.join("\n\n")
       end
 
-      def header(goal, iteration_number, mode)
-        lead = if mode.to_s == "prompt"
-                 "Continue goal #{goal.fetch("id")} on issue #{goal.fetch("issue_id")} in this same workspace and branch."
+      def header(goal, iteration_number, _mode = "spawn")
+        lead = if accumulating?(goal) && iteration_number.to_i > 1
+                 "Continue goal #{goal.fetch("id")} on issue #{goal.fetch("issue_id")}. You are in the previous " \
+                   "iteration's workspace and branch, so its work is already here: start with `git status` and " \
+                   "`git log` and build on it rather than redoing it."
                else
                  "Work on goal #{goal.fetch("id")} for issue #{goal.fetch("issue_id")}."
                end
@@ -112,8 +114,12 @@ module Meringue
           else
             "- Meringue re-runs the metric after you finish and decides whether the goal is met; if it is not, you may be asked to iterate again with a new directive."
           end,
-          goal.fetch("continuity", nil).to_s == "accumulate" ? "- Stay in this workspace and branch across iterations." : nil
+          accumulating?(goal) ? "- Stay in this workspace and branch; every iteration of this goal delivers on it." : nil
         ].compact.join("\n")
+      end
+
+      def accumulating?(goal)
+        goal.fetch("continuity", nil).to_s != "fresh_attempt"
       end
 
       def comparator_text(comparator)

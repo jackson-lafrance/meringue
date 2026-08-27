@@ -41,8 +41,10 @@ module Meringue
       DEFERRED_JUDGE_MODES = %w[worker_when_metric_met worker_every_iteration].freeze
       DEFAULT_JUDGE_MODE = METRIC_JUDGE_MODE
 
-      # `fresh_attempt` spawns a new worker (and worktree) per iteration.
-      # `accumulate` re-prompts the previous worker so one branch keeps growing.
+      # Every iteration is a new worker session either way; the modes differ in the checkout.
+      # `accumulate` continues in the previous attempt's worktree and branch, so work and the
+      # metric are cumulative. `fresh_attempt` opts out of that and starts each attempt from a
+      # clean tree, so iterations are independent and the metric restarts from the baseline.
       CONTINUITY_MODES = %w[fresh_attempt accumulate].freeze
       DEFAULT_CONTINUITY = "accumulate"
 
@@ -212,8 +214,11 @@ module Meringue
         }
       end
 
+      # Every iteration spends one attempt session, and a reviewer-judged iteration spends a
+      # reviewer session too, so the floor is 2n. The slack covers an unreadable verdict's
+      # reviewer retry without stranding a goal short of its iteration budget.
       def default_max_workers(max_iterations)
-        (max_iterations.to_i * 2) + 2
+        (max_iterations.to_i * 2) + 4
       end
 
       def normalized_iterations(iterations)

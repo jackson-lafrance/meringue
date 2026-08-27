@@ -135,22 +135,45 @@ class KernelGoalsLoopTest < Minitest::Test
     assert_equal "completed", goal.fetch("status")
   end
 
-  def test_accumulate_continuity_reprompts_the_same_worker_and_worktree
+  # Every iteration is a new session; `accumulate` is about the checkout, not the session. The
+  # second attempt must land in the first one's worktree and branch so progress and the metric
+  # stay cumulative, and it must never re-prompt the settled attempt.
+  def test_accumulate_continuity_spawns_a_new_worker_in_the_previous_worktree
     fixture = project_with_issue
     probe.queue(61.0, 65.0, 68.0)
     create_goal!(fixture.fetch("issue_id"), continuity: "accumulate", max_iterations: 3)
 
     tick!
-    first_worker = workers.first.fetch("id")
+    first_worker = workers.first
     finish_attempt_session!
 
-    assert_equal 1, workers.length, "accumulate must reuse the worker instead of allocating a second worktree"
-    assert_equal first_worker, workers.first.fetch("id")
-    assert_equal 1, harness_client.spawns.length
-    assert_equal 1, harness_client.prompts.length
-    assert_equal "normal", harness_client.prompts.first.fetch("mode")
-    assert_includes harness_client.prompts.first.fetch("prompt"), "same workspace and branch"
-    assert_equal 1, goal.fetch("workers_spawned"), "a continuation does not consume the session budget"
+    assert_equal 2, workers.length, "accumulate still starts a new session per iteration"
+    second_worker = workers.last
+    assert_equal first_worker.fetch("id"), second_worker.fetch("follow_up_of_agent_id")
+    assert_equal first_worker.fetch("workspace_path"), second_worker.fetch("workspace_path"),
+                 "accumulate must continue in the previous attempt's worktree"
+    assert_equal first_worker.fetch("workspace_branch"), second_worker.fetch("workspace_branch")
+    assert_equal 2, harness_client.spawns.length
+    assert_empty harness_client.prompts, "an iteration never re-prompts the settled attempt"
+    assert_includes harness_client.spawns.last.fetch("prompt"), "Stay in this workspace and branch"
+    assert_equal 2, goal.fetch("workers_spawned"), "each iteration spends one session of the budget"
+  end
+
+  def test_fresh_attempt_continuity_starts_each_iteration_from_a_clean_tree
+    fixture = project_with_issue
+    probe.queue(61.0, 65.0, 68.0)
+    create_goal!(fixture.fetch("issue_id"), continuity: "fresh_attempt", max_iterations: 3)
+
+    tick!
+    first_worker = workers.first
+    finish_attempt_session!
+
+    second_worker = workers.last
+    refute_equal first_worker.fetch("workspace_path"), second_worker.fetch("workspace_path"),
+                 "fresh_attempt must not inherit the previous attempt's worktree"
+    assert_equal first_worker.fetch("id"), second_worker.fetch("follow_up_of_agent_id"),
+                 "lineage is still recorded even though the checkout is not shared"
+    refute_includes harness_client.spawns.last.fetch("prompt"), "Stay in this workspace and branch"
   end
 
   def test_fresh_attempt_continuity_links_each_iteration_to_the_previous_worker

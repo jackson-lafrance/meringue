@@ -182,8 +182,13 @@ module Meringue
           )
         end
 
+        # An iteration is atomic: an attempt that cannot be judged is a session spent for nothing.
+        # So the budget must have room for the whole iteration before one starts — two sessions
+        # for a reviewer-judged goal, one otherwise — rather than being checked per session and
+        # overshooting on the review.
         max_workers = goal.dig("budget", "max_workers").to_i
-        if goal.fetch("workers_spawned", 0).to_i >= max_workers
+        iteration_cost = Record.reviewer_judged?(goal) ? 2 : 1
+        if goal.fetch("workers_spawned", 0).to_i + iteration_cost > max_workers
           return stop(
             "blocked",
             "budget_exhausted",
@@ -231,38 +236,13 @@ module Meringue
         action("wait", "reason" => "rate_limited", "next_tick_at" => goal.fetch("next_tick_at"))
       end
 
-      def start_iteration_action(goal, agents)
+      # Every iteration is a new session. `accumulate` keeps the predecessor's worktree and
+      # branch so progress and the metric are cumulative; `fresh_attempt` starts from a clean
+      # tree. Neither re-prompts the previous attempt: the reflection an iteration needs is the
+      # metric history and directive that AttemptPrompt renders, not a replayed transcript.
+      def start_iteration_action(goal, _agents = nil)
         number = Record.settled_iterations(goal).length + 1
-        command_id = attempt_command_id(goal, number)
-        previous_worker = continuation_worker(goal, agents)
-        if previous_worker
-          return action(
-            "start_iteration",
-            "mode" => "prompt",
-            "number" => number,
-            "command_id" => command_id,
-            "worker_id" => previous_worker.fetch("id")
-          )
-        end
-
-        action("start_iteration", "mode" => "spawn", "number" => number, "command_id" => command_id)
-      end
-
-      # `accumulate` continues the previous attempt's session (and therefore its branch and
-      # worktree) instead of allocating a new worktree per iteration. A killed or errored
-      # worker cannot be continued, so the loop falls back to a fresh spawn.
-      def continuation_worker(goal, agents)
-        return nil unless goal.fetch("continuity", nil).to_s == "accumulate"
-
-        worker_id = Record.settled_iterations(goal).reverse.filter_map { |iteration| iteration.fetch("attempt_worker_id", nil) }.first
-        return nil unless worker_id
-
-        worker = find_agent(agents, worker_id)
-        return nil unless worker
-        return nil if %w[killed errored].include?(worker.fetch("status", nil).to_s)
-        return nil unless session_reference?(worker)
-
-        worker
+        action("start_iteration", "mode" => "spawn", "number" => number, "command_id" => attempt_command_id(goal, number))
       end
 
       # Deterministic per-iteration command id. Re-running the same iteration after a crash
@@ -288,12 +268,6 @@ module Meringue
 
       def terminal_agent?(agent)
         %w[completed errored killed].include?(agent.fetch("status", nil).to_s)
-      end
-
-      def session_reference?(agent)
-        %w[pid harness_session_id harness_session_file].any? do |key|
-          Record.present_string(agent.fetch(key, nil))
-        end
       end
 
       def elapsed_seconds(goal, now)

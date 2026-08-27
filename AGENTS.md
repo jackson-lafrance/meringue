@@ -225,12 +225,12 @@ user message
    -> TUI updates
    -> head agent is killed
 
-Head agents main purpose is to decide what project the work belongs in, whether an existing issue already represents the durable goal, and whether to prompt, follow up, or replace a previously used worker instead of spawning unnecessary sessions.
+Head agents main purpose is to decide what project the work belongs in, whether an existing issue already represents the durable goal, and how to continue it: normally a fresh worker session chained to the settled worker it follows, and only where a fresh session cannot do the job, a prompt to an existing one.
 
-For natural-language follow-ups, keep the head stateless and use existing Meringue records plus persisted harness session context:
-- Prefer `PromptAgent` on the best healthy worker for the issue when its session history is relevant.
-- Use `normal` for a settled resumable session, `steer` for an urgent correction to active work, and `follow_up` for a related next step that should wait.
-- Spawn another worker on the same issue only when continuation is unavailable or inappropriate, and record `follow_up_of_agent_id`.
+For natural-language follow-ups, keep the head stateless and carry context between steps through Meringue records and worker reports rather than through long-lived sessions:
+- Continue an issue with a fresh worker by default: one `SpawnWorker` with `after_agent_id` naming the settled predecessor and `follow_up_of_agent_id` for lineage. The kernel starts it immediately, hands over the predecessor's final report, and continues it in the predecessor's worktree and branch.
+- A session is short-lived; a worker's final report is the durable carrier of context. Sessions accumulate transcript that is replayed in full on every prompt, so a resumed session gets steadily more expensive and lets stale detail compete with current fact, while re-orientation is a bounded one-time cost that fails loudly instead of silently.
+- Use `PromptAgent` only where a fresh session cannot do the job: `steer` for an urgent correction to a mid-turn worker, `normal` for recovering a worker whose own turn died mid-flight or an explicit request to continue that session. Prefer a worker queued with `after_agent_id` over mode `follow_up`.
 - Replace a stale, unhealthy, or wrong-direction worker by spawning with `replace_agent_id`; the kernel should start the successor before killing the old session and preserve the visible relationship.
 - Create a new issue only for a genuinely distinct durable goal, and ask a question rather than guessing between plausible targets.
 
@@ -320,8 +320,8 @@ Not every worker issue requires a PR; for investigation-only or informational as
 All delivery-facing names and text must describe only the human product task. Branches, worktrees, commit subjects/bodies/trailers, tags, pull request titles/bodies, release notes, and similar artifacts must never contain Meringue branding or a `meringue/` prefix; project/issue/worker/head ids (including variants such as `P5-I2-W3`, `p5_i2_w3`, or `P5/I2/W3`); agent, harness, provider, or session identities; AI confidence scores; AI-authorship trailers; or statements about which agents worked on the change. Derive names from the product task, sanitize unsafe supplied/generated values, and use only a short opaque suffix when uniqueness is required. Before delivery, inspect commit metadata and the rendered PR title/body and remove prohibited text. See `docs/delivery-artifact-privacy.md`.
 
 They are attached to one specific issue, but multiple agents can be attached to one issue.
-They may follow up, but should not be used many times.
-They should automatically be pruned if they complete over 50% context full.
+They may follow up, but should not be used many times: a follow-up normally arrives as a new worker inheriting the predecessor's worktree, branch, and report rather than as another prompt to the same session.
+A settled worker's record is retained after its successor starts, so its report and lineage stay readable; `/prune` removes it only once nothing still depends on it.
 They will never know about the entire Meringue kernel and should be unaware of other workers, since they will be isolated in their assigned workspace.
 
 # Output

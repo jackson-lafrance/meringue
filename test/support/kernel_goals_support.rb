@@ -18,7 +18,9 @@ module KernelGoalsSupport
     REVIEW_MARKER = Meringue::Goals::ReviewPrompt::VERDICT_MARKER
 
     attr_reader :spawns, :prompts, :kills
-    attr_accessor :streaming, :spawn_error, :prompt_error
+    # `spawn_error` fails every session. `review_spawn_error` fails only reviewer sessions, which
+    # is how a goal whose attempts still start but whose review cannot be modelled.
+    attr_accessor :streaming, :spawn_error, :prompt_error, :review_spawn_error
 
     def initialize(streaming: true, provider: "pi")
       @spawns = []
@@ -48,8 +50,10 @@ module KernelGoalsSupport
       @counter += 1
       session_id = "goal-session-#{@counter}"
       @spawns << { "kind" => kind, "cwd" => cwd, "prompt" => prompt, "session_name" => session_name, "session_id" => session_id }
-      @review_sessions[session_id] = true if prompt.to_s.include?(REVIEW_MARKER)
+      review = prompt.to_s.include?(REVIEW_MARKER)
+      @review_sessions[session_id] = true if review
       raise @spawn_error if @spawn_error
+      raise @review_spawn_error if review && @review_spawn_error
 
       {
         "harness" => @provider,

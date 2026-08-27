@@ -107,7 +107,7 @@ A typical flow looks like this:
 1. A developer describes a goal in the Meringue chat.
 2. A stateless head agent reads lightweight project context and proposes structured kernel commands.
 3. The kernel validates those commands, creates or reuses issues, and prompts or spawns worker agents.
-4. Follow-up messages normally continue the best existing worker session so its persisted harness context remains available; the head can instead queue active work, spawn a related worker, or replace an unhealthy worker.
+4. Follow-up messages normally continue the goal in a fresh worker chained to the settled one it follows, inheriting its worktree, branch, and final report rather than its transcript; the head can instead steer active work, resume a worker whose turn died mid-flight, or replace an unhealthy worker.
 5. Each new worker receives an assigned workspace and runs through the configured harness.
 6. The TUI keeps the AgentTree, logs, follow-up/replacement relationships, questions, and delivery state visible so the developer can intervene only when needed.
 

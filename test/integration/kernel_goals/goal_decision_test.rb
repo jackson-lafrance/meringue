@@ -303,7 +303,9 @@ class KernelGoalsDecisionTest < Minitest::Test
     assert action.fetch("resumed")
   end
 
-  def test_accumulate_continuity_prompts_the_previous_worker_instead_of_spawning
+  # A resumable previous attempt is not a reason to re-prompt it. Both continuity modes start a
+  # new session; only the checkout the kernel gives it differs.
+  def test_accumulate_continuity_spawns_rather_than_prompting_a_resumable_worker
     action = Loop.next_action(
       goal: goal("continuity" => "accumulate", "iterations" => [settled(number: 1, value: 65.0, worker_id: "P1-I1-W1")]),
       agents: [{ "id" => "P1-I1-W1", "status" => "completed", "harness_session_id" => "sess-1" }],
@@ -311,19 +313,23 @@ class KernelGoalsDecisionTest < Minitest::Test
     )
 
     assert_equal "start_iteration", action.fetch("action")
-    assert_equal "prompt", action.fetch("mode")
-    assert_equal "P1-I1-W1", action.fetch("worker_id")
+    assert_equal "spawn", action.fetch("mode")
+    assert_nil action.fetch("worker_id", nil)
     assert_equal 2, action.fetch("number")
   end
 
-  def test_accumulate_falls_back_to_a_fresh_spawn_when_the_previous_worker_cannot_continue
-    action = Loop.next_action(
-      goal: goal("continuity" => "accumulate", "iterations" => [settled(number: 1, value: 65.0, worker_id: "P1-I1-W1")]),
-      agents: [{ "id" => "P1-I1-W1", "status" => "errored", "harness_session_id" => "sess-1" }],
-      now: now
-    )
+  def test_every_continuity_mode_starts_the_next_iteration_with_a_spawn
+    %w[accumulate fresh_attempt].each do |continuity|
+      %w[completed errored killed].each do |status|
+        action = Loop.next_action(
+          goal: goal("continuity" => continuity, "iterations" => [settled(number: 1, value: 65.0, worker_id: "P1-I1-W1")]),
+          agents: [{ "id" => "P1-I1-W1", "status" => status, "harness_session_id" => "sess-1" }],
+          now: now
+        )
 
-    assert_equal "spawn", action.fetch("mode")
+        assert_equal "spawn", action.fetch("mode"), "#{continuity} after a #{status} attempt"
+      end
+    end
   end
 
   def test_paused_and_terminal_goals_do_nothing
@@ -524,11 +530,28 @@ class KernelGoalsDecisionTest < Minitest::Test
     assert_includes prompt, "do not self-report it"
   end
 
-  def test_a_continuation_prompt_tells_the_worker_to_stay_on_its_branch
-    prompt = AttemptPrompt.render(goal: goal("continuity" => "accumulate"), iteration_number: 2, mode: "prompt")
+  # The new session lands in the previous attempt's checkout, so it has to be told the work is
+  # already there rather than starting as if the tree were clean.
+  def test_an_accumulating_iteration_tells_the_new_session_it_inherited_the_workspace
+    prompt = AttemptPrompt.render(goal: goal("continuity" => "accumulate"), iteration_number: 2)
 
-    assert_includes prompt, "same workspace and branch"
-    assert_includes prompt, "Stay in this workspace and branch across iterations."
+    assert_includes prompt, "previous iteration's workspace and branch"
+    assert_includes prompt, "`git status`"
+    assert_includes prompt, "Stay in this workspace and branch"
+  end
+
+  def test_a_fresh_attempt_iteration_is_not_told_it_inherited_anything
+    prompt = AttemptPrompt.render(goal: goal("continuity" => "fresh_attempt"), iteration_number: 2)
+
+    refute_includes prompt, "previous iteration's workspace and branch"
+    refute_includes prompt, "Stay in this workspace and branch"
+  end
+
+  # Iteration 1 has nothing to inherit even under accumulate.
+  def test_the_first_iteration_is_never_told_it_inherited_a_workspace
+    prompt = AttemptPrompt.render(goal: goal("continuity" => "accumulate"), iteration_number: 1)
+
+    refute_includes prompt, "previous iteration's workspace and branch"
   end
 
   # --- record normalization ---------------------------------------------------

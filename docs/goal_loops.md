@@ -32,9 +32,11 @@ A reviewer-judged goal **rejects** a metric command rather than ignoring it: an 
 
 One **iteration** is one attempt plus one judgement, serialized:
 
-1. **attempting** — a worker is producing work. The kernel re-prompts the previous worker (`accumulate`, the default) or spawns a new one (`fresh_attempt`).
+1. **attempting** — a worker is producing work. Every iteration spawns a **new worker session**; `continuity` decides which checkout it gets.
 
-`accumulate` is the default because each iteration should build on the last: the same worker, worktree, and branch carry forward, so a metric that moves 60 → 68 → 76 keeps its gains and the session budget is not consumed. `fresh_attempt` allocates a new worktree per iteration branched from the project's base ref, so iterations are *independent* attempts rather than cumulative ones; use it when an attempt should start from a clean tree, and expect the metric to restart from the baseline each time.
+`accumulate` is the default: the new worker continues in the previous attempt's worktree and branch, so a metric that moves 60 → 68 → 76 keeps its gains and the goal still delivers one branch and one pull request. `fresh_attempt` opts out of that inheritance and gives each attempt a clean tree, so iterations are *independent* attempts; expect the metric to restart from the baseline each time.
+
+No iteration re-prompts the previous attempt's session. The reflection an attempt needs is the metric history, the list of approaches already tried, and the previous judge's directive — all of which `AttemptPrompt` renders into a fresh prompt. Replaying a transcript instead would grow every iteration's input without adding signal, and a session asked to critique itself with its own reasoning still in context tends to restate its plan rather than change it. Because each iteration is a session, it also spends one unit of the goal's `max_workers` budget (as does each reviewer session), which is why the default budget is `2 × max_iterations + 4`.
 2. **measuring** — the attempt has settled, so the kernel runs the metric command and the guardrails against the attempt's own workspace/branch. A reviewer-judged goal has no metric command, so this phase only runs the guardrails and fingerprints the workspace.
 3. **reviewing** — *reviewer-judged goals only.* The kernel spawns one short-lived reviewer session and, on a later tick, reads its verdict.
 4. **judging** — the judge scores the measurement, or the reviewer's verdict, against the guardrails and writes the directive the next attempt receives.

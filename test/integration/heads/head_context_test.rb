@@ -653,6 +653,62 @@ class HeadContextTest < Minitest::Test
     assert_includes rule, "Never re-check state at the last moment"
   end
 
+  # Meringue keeps harness sessions short: a follow-up is a new worker that inherits the
+  # predecessor's worktree, branch, and final report, not another prompt onto a growing session.
+  # If the head's contract does not say so, every head defaults back to prompting.
+  def test_a_head_is_told_to_continue_an_issue_in_a_fresh_worker_session
+    context = build_head_context
+    prompt = context.system_prompt
+    rules = context.to_prompt_h.dig("routing_context", "decision_rules")
+    reference = File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md"))
+
+    assert_includes prompt, "Prefer a fresh worker session for a follow-up on an existing issue"
+    assert_includes prompt, "hands it the predecessor's complete final report"
+
+    continuation_rule = rules.find { |rule| rule.include?("Continue an existing issue with a fresh worker session by default") }
+    refute_nil continuation_rule, "expected a fresh-session continuation rule"
+    assert_includes continuation_rule, "after_agent_id"
+    assert_includes continuation_rule, "follow_up_of_agent_id"
+    assert_includes continuation_rule, "handover block"
+
+    assert_includes reference, "continue the work in a **fresh worker session** by default"
+    assert_includes reference, "Never spawn a bare worker with no relationship field"
+  end
+
+  # The exceptions have to be enumerated, or "prefer a fresh session" reads as "never prompt" and
+  # heads stop steering mid-turn work or recovering an interrupted one.
+  def test_a_head_is_told_the_cases_that_still_call_for_prompting_an_existing_worker
+    context = build_head_context
+    rules = context.to_prompt_h.dig("routing_context", "decision_rules")
+    reference = File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md"))
+
+    prompt_rule = rules.find { |rule| rule.start_with?("Prompt an existing worker only when") }
+    refute_nil prompt_rule, "expected an explicit rule for when prompting is still right"
+    assert_includes prompt_rule, "steer"
+    assert_includes prompt_rule, "stopped_without_finishing"
+    assert_includes prompt_rule, "explicitly asks to continue that same session"
+
+    mode_rule = rules.find { |rule| rule.include?("Prefer a fresh worker queued with after_agent_id over follow_up mode") }
+    refute_nil mode_rule, "a queued fresh worker should replace follow_up mode as the advice"
+
+    assert_includes reference, "This is the narrow path, not the default one"
+  end
+
+  # A fresh session only works if the report it inherits is worth inheriting, so the head has to
+  # write prompts with that in mind and the worker has to be told what its report is for.
+  def test_the_contract_makes_the_final_report_the_carrier_of_context
+    rules = build_head_context.to_prompt_h.dig("routing_context", "decision_rules")
+    reference = File.read(Meringue.root_path("docs", "head_agent_kernel_commands.md"))
+
+    report_rule = rules.find { |rule| rule.include?("usable by a successor that never sees the transcript") }
+    refute_nil report_rule, "expected the head to be told its prompts shape the successor's context"
+
+    assert_includes reference, "the durable carrier of context between steps, not its transcript"
+    assert_includes Meringue::Kernel::Engine::WORKER_SYSTEM_PROMPT, "Your final message is a handover"
+    assert_includes Meringue::Kernel::Engine::WORKER_SYSTEM_PROMPT, "what you tried that did not work and why"
+    assert_includes Meringue::Kernel::Engine::READ_ONLY_WORKER_SYSTEM_PROMPT, "Your final message is a handover"
+  end
+
   def test_routing_rules_explain_how_to_retry_an_errored_worker
     rules = build_head_context.to_prompt_h.dig("routing_context", "decision_rules")
     retry_rule = rules.find { |rule| rule.start_with?("To retry a worker that errored") }

@@ -374,7 +374,9 @@ class KernelGoalsReviewerTest < Minitest::Test
     create_reviewer_goal!(fixture.fetch("issue_id"), max_iterations: 3)
 
     tick!
-    harness_client.spawn_error = IOError.new("no harness available")
+    # Only the reviewer session fails: attempts must keep starting, or the goal would stop on the
+    # attempt failure instead of on the unavailable reviewer this test is about.
+    harness_client.review_spawn_error = IOError.new("no harness available")
     tick_until_settled!(max_ticks: 12)
 
     assert_equal "errored", goal.fetch("status")
@@ -396,8 +398,11 @@ class KernelGoalsReviewerTest < Minitest::Test
 
     tick_until_settled!
 
+    # An iteration costs two sessions here (attempt plus review), so a 3-session budget affords
+    # exactly one complete iteration. The loop stops rather than starting an attempt it could
+    # not have judged, which is why the budget is not spent down to the last session.
     assert_equal "budget_exhausted", goal.fetch("stop_reason")
-    assert_equal 3, goal.fetch("workers_spawned")
+    assert_equal 2, goal.fetch("workers_spawned")
     assert_operator workers.length, :<=, 3
   end
 
