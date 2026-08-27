@@ -38,6 +38,19 @@ which you can navigate and easily jump into the underlying coding agent session 
 Along with this, as your agents complete issues, their output gets captured and rendered in the main log to keep you updated on progress in a succinct manner.
 
 ## Foundation
+### Source layout
+The kernel and the dashboard are each one class split across a directory of files that reopen it:
+`lib/meringue/kernel/engine.rb` holds the constructor and `dispatch_command` (the index of every
+command and the method that answers it), and `lib/meringue/kernel/engine/*.rb` holds one file per
+command family. `lib/meringue/tui/app.rb` and `lib/meringue/tui/app/*.rb` follow the same shape per
+dashboard surface. Nothing is a mixin: each file reopens the class, so method lookup, constants,
+and instance variables are exactly as they would be in one file.
+
+Add a new command's handler to the file named for its family, and a new family to a new file.
+`test/integration/foundation/source_layout_test.rb` caps source files at 1,200 lines, with an
+explicit grandfathered list, because a 20,889-line class is how the same method came to be defined
+twice three separate times.
+
 We will be using ruby for the development of this app
 Terminal rendering with screen blitting of our three main sections
 

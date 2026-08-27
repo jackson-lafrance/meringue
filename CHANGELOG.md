@@ -39,6 +39,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - The goal session budget is now checked per iteration rather than per session, so a goal never starts an attempt it lacks the budget to judge. The default rose to `2 × max_iterations + 4` to cover a reviewer retry.
 - Workers are told their final message is a handover for a successor that never sees their transcript, and must state what they ruled out, what is committed, and what is left.
 - `/prune` retains a settled predecessor while a successor that continues its work is still running, not only while one is still queued behind it, and reports that retention.
+- Split the 20,940-line `Kernel::Engine` into `lib/meringue/kernel/engine/*.rb` by command family,
+  and the 7,106-line `TUI::App` into `lib/meringue/tui/app/*.rb` by dashboard surface. Both remain
+  one class; every method body, comment, constant, and visibility is unchanged.
+- Made `Models.ensure_state_shape!` skip the pull-request migration and the workspace-mode rewrite
+  for records that have nothing to migrate. It runs on every state read and every kernel command,
+  so a read-only command at 1,000 workers went from ~8ms to ~2.7ms and a reconciliation pass from
+  ~119ms to ~38ms.
+- Removed `Heads::SimpleLoop`'s unreachable second copy of the worker-wait path and `TUI::App`'s
+  compatibility shim for a `handle_key` signature nothing calls.
 - Replaced the unsafe push/PR gem publication job with separate CI and tag-only RubyGems trusted-publishing workflows.
 - Added strict package-content, isolated-install, and CLI smoke verification.
 - Documented the release gates and the recommended future Homebrew tap.

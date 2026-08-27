@@ -122,9 +122,12 @@ bin/meringue                       # executable CLI entrypoint
 bin/meringue-record                # macOS proof-video helper
 lib/meringue/cli.rb                # command parsing and runtime setup
 lib/meringue/app.rb                # TUI application lifecycle
-lib/meringue/kernel/               # command validation and state mutation
+lib/meringue/kernel/engine.rb      # the kernel's constructor and its command table
+lib/meringue/kernel/engine/        # one file per command family; all reopen the same class
 lib/meringue/heads/                # head-agent context, runners, and parsing
 lib/meringue/harness/              # harness integrations and the shared transports
+lib/meringue/tui/app.rb            # the dashboard's constructor and its key dispatch
+lib/meringue/tui/app/              # one file per dashboard surface; all reopen the same class
 lib/meringue/tui/                  # terminal rendering, panes, navigation, styles
 lib/meringue/state/                # JSON persistence models and store
 lib/meringue/goals/                # goal-loop record, decisions, judge, and metric probe

@@ -199,21 +199,24 @@ module Meringue
       # Older worker records predate the explicit safety contract. Their historical workspaces
       # were writable/isolated, so migration must never infer read-only sharing from prompts or
       # project-root paths.
+      # Runs on every state read, so it writes only where the value actually changes: four
+      # unconditional hash stores per worker cost real time once there are hundreds of them,
+      # and they dirty pages the caller then has to serialize again.
       def normalize_worker_workspace_modes!(state)
         Array(state["agents"]).each do |agent|
           next unless agent.is_a?(Hash) && agent["type"].to_s == "worker"
 
-          requested = agent["workspace_mode"].to_s
+          requested = agent["workspace_mode"]
           requested = "isolated" unless WORKER_WORKSPACE_MODES.include?(requested)
-          effective = agent["effective_workspace_mode"].to_s
+          effective = agent["effective_workspace_mode"]
           effective = "isolated" unless WORKER_WORKSPACE_MODES.include?(effective)
-          agent["workspace_mode"] = requested
-          agent["effective_workspace_mode"] = effective
+          agent["workspace_mode"] = requested unless agent["workspace_mode"] == requested
+          agent["effective_workspace_mode"] = effective unless agent["effective_workspace_mode"] == effective
           metadata = agent["harness_metadata"]
-          if metadata.is_a?(Hash)
-            metadata["workspace_mode"] ||= requested
-            metadata["effective_workspace_mode"] ||= effective
-          end
+          next unless metadata.is_a?(Hash)
+
+          metadata["workspace_mode"] ||= requested
+          metadata["effective_workspace_mode"] ||= effective
         end
       end
 
@@ -305,30 +308,55 @@ module Meringue
         state
       end
 
+      # This runs inside `ensure_state_shape!`, which means it runs on every state read *and*
+      # every kernel command, forever - not only on the one load that migrates an old file.
+      # Walking and rebuilding every worker and every issue each time made it ~75% of the cost
+      # of normalizing a snapshot (4.7ms of 6.3ms at 1,000 workers). Both halves are no-ops
+      # unless a record actually carries one of the pull-request keys, so the presence check
+      # comes first and the allocation-heavy work only visits the records that need it.
       def migrate_pull_requests_to_issues!(state)
-        issues_by_id = Array(state["issues"]).select { |issue| issue.is_a?(Hash) }.to_h { |issue| [issue["id"].to_s, issue] }
-        Array(state["agents"]).each do |agent|
-          next unless agent.is_a?(Hash)
-          next unless agent["type"].to_s == "worker"
+        legacy_workers = Array(state["agents"]).select { |agent| legacy_worker_pull_requests?(agent) }
+        issues = Array(state["issues"])
+        return state if legacy_workers.empty? && issues.none? { |issue| pull_request_keys?(issue) }
 
-          issue = issues_by_id[agent["issue_id"].to_s]
-          next unless issue
+        unless legacy_workers.empty?
+          issues_by_id = issues.select { |issue| issue.is_a?(Hash) }.to_h { |issue| [issue["id"].to_s, issue] }
+          legacy_workers.each do |agent|
+            issue = issues_by_id[agent["issue_id"].to_s]
+            next unless issue
 
-          metadata = agent["harness_metadata"].is_a?(Hash) ? agent["harness_metadata"] : {}
-          delivery_records = pull_request_records_from(agent) + pull_request_records_from(metadata)
-          candidate_urls = pull_request_urls_from(agent["candidate_pr_urls"]) + pull_request_urls_from(metadata["candidate_pr_urls"])
-          reported_urls = pull_request_urls_from(agent["reported_pr_urls"]) + pull_request_urls_from(metadata["reported_pr_urls"])
-          attach_pull_requests_to_issue!(
-            issue,
-            delivery_pull_requests: delivery_records,
-            candidate_urls: candidate_urls,
-            reported_urls: reported_urls
-          )
-          scrub_worker_pull_request_keys!(agent)
-          scrub_worker_pull_request_keys!(metadata)
+            metadata = agent["harness_metadata"].is_a?(Hash) ? agent["harness_metadata"] : {}
+            delivery_records = pull_request_records_from(agent) + pull_request_records_from(metadata)
+            candidate_urls = pull_request_urls_from(agent["candidate_pr_urls"]) + pull_request_urls_from(metadata["candidate_pr_urls"])
+            reported_urls = pull_request_urls_from(agent["reported_pr_urls"]) + pull_request_urls_from(metadata["reported_pr_urls"])
+            attach_pull_requests_to_issue!(
+              issue,
+              delivery_pull_requests: delivery_records,
+              candidate_urls: candidate_urls,
+              reported_urls: reported_urls
+            )
+            scrub_worker_pull_request_keys!(agent)
+            scrub_worker_pull_request_keys!(metadata)
+          end
         end
-        Array(state["issues"]).each { |issue| normalize_issue_pull_request_fields!(issue) if issue.is_a?(Hash) }
+        issues.each { |issue| normalize_issue_pull_request_fields!(issue) if pull_request_keys?(issue) }
         state
+      end
+
+      # An issue with none of these keys is already in its normalized shape:
+      # `normalize_issue_pull_request_fields!` would delete keys that are absent and decline to
+      # write empty arrays, observing nothing.
+      def pull_request_keys?(record)
+        record.is_a?(Hash) && PULL_REQUEST_STORAGE_KEYS.any? { |key| record.key?(key) }
+      end
+
+      # Pull requests used to live on the worker. A worker carrying none of those keys, on
+      # itself or in its harness metadata, has nothing left to move onto its issue.
+      def legacy_worker_pull_requests?(agent)
+        return false unless agent.is_a?(Hash)
+        return false unless agent["type"].to_s == "worker"
+
+        pull_request_keys?(agent) || pull_request_keys?(agent["harness_metadata"])
       end
 
       def attach_pull_requests_to_issue!(issue, delivery_pull_requests: [], candidate_urls: [], reported_urls: [])

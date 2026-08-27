@@ -354,4 +354,87 @@ class StateModelsShapeTest < Minitest::Test
       refute worker.fetch("harness_metadata").key?(key), "worker harness_metadata should no longer store #{key}"
     end
   end
+
+  # `ensure_state_shape!` runs on every state read and every kernel command, not only on the one
+  # load that migrates an old file. Rebuilding every worker and every issue each time was ~75% of
+  # the cost of normalizing a snapshot. Freezing the records is a structural way to assert the
+  # work is skipped: any write at all raises FrozenError, so this fails the moment normalization
+  # starts touching records that have nothing to migrate.
+  def test_normalizing_an_already_normal_state_does_not_write_to_its_records
+    state = {
+      "projects" => [{ "id" => "P1", "name" => "demo", "root_path" => "/tmp/demo", "status" => "working" }],
+      "issues" => (1..25).map { |n| { "id" => "P1-I#{n}", "project_id" => "P1", "title" => "issue #{n}", "status" => "working" } },
+      "agents" => (1..25).map do |n|
+        {
+          "id" => "P1-I#{n}-W1", "type" => "worker", "issue_id" => "P1-I#{n}", "project_id" => "P1",
+          "status" => "working", "workspace_mode" => "isolated", "effective_workspace_mode" => "isolated",
+          "harness_metadata" => { "workspace_mode" => "isolated", "effective_workspace_mode" => "isolated" }.freeze
+        }
+      end
+    }
+    state.fetch("issues").each(&:freeze)
+    state.fetch("agents").each(&:freeze)
+    state.fetch("projects").each(&:freeze)
+
+    Models.ensure_state_shape!(state)
+
+    assert_equal 25, state.fetch("issues").length
+    assert_equal 25, state.fetch("agents").length
+  end
+
+  # The skip is keyed on the pull-request keys actually being present, so a single legacy worker
+  # in an otherwise modern state is still migrated.
+  def test_one_legacy_worker_among_many_modern_ones_is_still_migrated
+    state = {
+      "issues" => (1..5).map { |n| { "id" => "P1-I#{n}", "project_id" => "P1" } },
+      "agents" => (1..5).map do |n|
+        agent = { "id" => "P1-I#{n}-W1", "type" => "worker", "issue_id" => "P1-I#{n}" }
+        agent["delivery_pull_request"] = { "url" => "https://github.com/o/r/pull/9", "state" => "open" } if n == 4
+        agent
+      end
+    }
+
+    Models.ensure_state_shape!(state)
+
+    migrated = state.fetch("issues").find { |issue| issue.fetch("id") == "P1-I4" }
+    assert_equal "https://github.com/o/r/pull/9", migrated.fetch("delivery_pull_request").fetch("url")
+    refute state.fetch("agents")[3].key?("delivery_pull_request")
+    state.fetch("issues").reject { |issue| issue.fetch("id") == "P1-I4" }.each do |issue|
+      refute issue.key?("delivery_pull_request"), "#{issue.fetch("id")} has no pull request to record"
+    end
+  end
+
+  # An issue whose only pull-request key is an empty array is still normalized: the key is
+  # present, so it is visited and deleted rather than left behind.
+  def test_an_empty_pull_request_array_on_an_issue_is_still_cleaned_up
+    state = {
+      "issues" => [{ "id" => "P1-I1", "project_id" => "P1", "candidate_pr_urls" => [], "reported_pr_urls" => [] }],
+      "agents" => []
+    }
+
+    Models.ensure_state_shape!(state)
+
+    issue = state.fetch("issues").first
+    refute issue.key?("candidate_pr_urls")
+    refute issue.key?("reported_pr_urls")
+  end
+
+  def test_a_worker_with_an_unusable_workspace_mode_is_still_corrected
+    state = {
+      "issues" => [],
+      "agents" => [
+        { "id" => "P1-I1-W1", "type" => "worker", "workspace_mode" => "nonsense", "harness_metadata" => {} },
+        { "id" => "P1-I1-W2", "type" => "worker", "harness_metadata" => {} }
+      ]
+    }
+
+    Models.ensure_state_shape!(state)
+
+    state.fetch("agents").each do |worker|
+      assert_equal "isolated", worker.fetch("workspace_mode")
+      assert_equal "isolated", worker.fetch("effective_workspace_mode")
+      assert_equal "isolated", worker.fetch("harness_metadata").fetch("workspace_mode")
+      assert_equal "isolated", worker.fetch("harness_metadata").fetch("effective_workspace_mode")
+    end
+  end
 end
