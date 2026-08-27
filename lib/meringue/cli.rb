@@ -355,6 +355,26 @@ module Meringue
       State::Store.new(path: Meringue.root_path("fixtures", "demo_state.json")).load
     end
 
+    # Rendered from the parser's own command table rather than a second hand-written list. The
+    # CLI help used to name 17 of the 47 slash commands, so `/answer`, `/goal`, `/prune`,
+    # `/retry`, and the rest were discoverable only from inside a running dashboard - and a
+    # command added to the parser never reached this text at all.
+    SLASH_COMMAND_HELP_COLUMN = 46
+
+    def slash_command_help
+      Input::SlashCommandParser::COMMAND_SPECS.map do |usage, description|
+        "  #{usage.ljust(SLASH_COMMAND_HELP_COLUMN)} # #{first_sentence(description)}"
+      end.join("\n")
+    end
+
+    # One line per command: the help is an inventory, and `/help` inside the dashboard carries
+    # the full description for any command the reader wants to know more about.
+    def first_sentence(description)
+      text = description.to_s.strip
+      sentence = text[/\A.*?[.!?](?:\s|\z)/m] || text
+      sentence.strip.delete_suffix(".")
+    end
+
     def print_help
       out.puts <<~HELP
         Meringue #{VERSION}
@@ -384,23 +404,12 @@ module Meringue
           TUI keybindings can be customized under [tui.keybindings]; omitted actions keep defaults.
           CLI flags override config.toml, and MERINGUE_HARNESS / MERINGUE_HEAD_HARNESS / MERINGUE_WORKER_HARNESS override both.
 
+        Slash commands (run these in the dashboard; /help repeats them there):
+        #{slash_command_help}
+
         TUI controls:
           Enter                     # send chat; when agent tree/logs is focused, enter jump mode
           /                         # show slash command suggestions in an otherwise empty prompt
-          /help                     # list command syntax
-          /quit                     # quit the TUI
-          /reload                   # restart Meringue with the current source and configuration
-          /update                   # update the source, install dependencies as needed, and reload
-          /theme [name]             # open the theme picker, or set and persist a named TUI theme
-          /themes                   # open the interactive theme picker
-          /harness [head|worker] <pi|claude|codex> # select role-aware harness defaults
-          /models [harness]         # open the searchable model picker; bare /model is an alias
-          /keybind                  # show all TUI keybindings
-          /config                   # open full-screen Settings (/config --text prints diagnostics)
-          /setup                    # review setup defaults, status-bar layout, and experiments
-          /status-bar               # open the status-bar layout composer
-          /jump [agent_id]          # open a focused workspace; omit id to navigate the AgentTree
-          /recount                  # compact AgentTree numbering after records are removed
           Ctrl-B                    # open the selected issue's verified delivery PR; with nothing selected, pick from the open PRs
           Enter in jump mode        # open selected issue/agent PR when one is available
           a in jump mode            # open the selected agent's focused workspace

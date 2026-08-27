@@ -66,6 +66,7 @@ module Meringue
 
         def lines(state, width: nil)
           @github_support_enabled = Settings.github_enabled?(state)
+          begin_quiet_window(state)
           key = presentation_cache_key(state, width)
           return @lines_cache.fetch(:value) if @lines_cache&.fetch(:key, nil) == key
 
@@ -86,6 +87,7 @@ module Meringue
 
         def line_item_ids(state, width: nil)
           @github_support_enabled = Settings.github_enabled?(state)
+          begin_quiet_window(state)
           key = presentation_cache_key(state, width)
           return @item_ids_cache.fetch(:value) if @item_ids_cache&.fetch(:key, nil) == key
 
@@ -158,7 +160,11 @@ module Meringue
                 # by default instead of requiring every future marker to remember this cache.
                 metadata.reject do |key, _value|
                   %w[synthetic_revision last_event_at lastEventAt messageCount message_count].include?(key.to_s)
-                end
+                end,
+                # The quiet chip is the one row value that changes with the clock rather than
+                # with state. Keying on the whole minute it displays re-renders it exactly when
+                # the number it shows changes, and never on the frames in between.
+                quiet_cache_bucket(item)
               ]
             end,
             Array(state["goals"]).map do |item|
@@ -168,6 +174,11 @@ module Meringue
                item["budget"], item["metric"], item["baseline_metric"], item["last_metric"], item["review"]]
             end
           ])
+        end
+
+        def quiet_cache_bucket(agent)
+          seconds = quiet_seconds(agent)
+          seconds && seconds / 60
         end
 
         def worker_agents_by_issue(agents)
@@ -856,8 +867,33 @@ module Meringue
             paused_marker(worker),
             provisioning_marker(worker),
             unfinished_marker(worker),
+            quiet_marker(worker),
             worker_relationship_marker(worker)
           ].reject(&:empty?).join(" ")
+        end
+
+        # Both entry points read the same clock and threshold so the rendered rows and the
+        # clickable-row map can never disagree about whether a chip is present.
+        def begin_quiet_window(state)
+          @now = Time.now
+          @quiet_threshold_seconds = Settings.quiet_worker_warning_seconds(state)
+        end
+
+        # How long a working agent has produced nothing. `working` alone said the same thing two
+        # seconds into a turn and forty minutes into silence, which is the one question a
+        # dashboard for ten parallel agents exists to answer.
+        #
+        # It says quiet, not stuck. A long tool call is quiet too, and from outside the harness
+        # Meringue cannot tell the difference; what it can say honestly is how long it has been.
+        def quiet_marker(worker)
+          seconds = quiet_seconds(worker)
+          return "" unless seconds
+
+          "quiet #{Timestamps.compact_duration(seconds)}"
+        end
+
+        def quiet_seconds(worker)
+          Settings.worker_quiet_seconds(worker, threshold: @quiet_threshold_seconds.to_i, now: @now || Time.now)
         end
 
         def paused_marker(worker)

@@ -137,6 +137,20 @@ module Meringue
       # Content is kept intact here; the log pane wraps it to the available width. Rate limiting
       # bounds log volume without making a worker's report unreadable.
       WORKER_PROGRESS_LOG_INTERVAL_SECONDS = 120
+      # How long a `working` worker may produce nothing before the dashboard says so, when the
+      # user has not configured `agent.quiet_worker_warning_seconds`. Deliberately generous:
+      # quiet is not the same as stuck, and a long tool call or a long think is quiet too. The
+      # signal answers "should I go look at this one?", so a false alarm every few minutes would
+      # be worse than useless.
+      WORKER_QUIET_WARNING_SECONDS = 900
+      # A worker is only marked quiet once per quiet stretch. `quiet_warning_at` records that the
+      # warning was written; observed activity clears it, so a worker that goes quiet, produces
+      # output, and goes quiet again is reported twice rather than once or forever.
+      WORKER_QUIET_WARNING_MARKER_KEY = "quiet_warning_at"
+      # The timestamp every quiet calculation is measured from. Advanced only by observed
+      # activity - drained harness events, session progress, a delivered prompt, or a harness
+      # heartbeat that moved - never by Meringue's own bookkeeping writes.
+      WORKER_LAST_ACTIVITY_KEY = "last_activity_at"
       # A harness turn that ends is not automatically a turn that finished. These are the
       # harness-reported turn outcomes that mean the work stopped without a result, so the
       # agent must settle as `errored` with a visible reason instead of as `completed`.
@@ -238,6 +252,7 @@ module Meringue
 
       HELP_COMMANDS = [
         ["/help", "Show slash command help."],
+        ["/quit", "TUI local: quit the interactive TUI."],
         ["/reload", "TUI local: restart Meringue with the current installed source and configuration."],
         ["/update", "TUI local: update the installed Meringue source, install missing dependencies, and reload."],
         ["/theme [name]", "Open the theme picker, or set and persist a named TUI theme. Available: catppuccin, gruvbox, kanagawa, meringue, rose-pine, tokyonight."],
@@ -246,6 +261,7 @@ module Meringue
         ["/project rename <project_id> \"<name>\"", "Rename a project."],
         ["/issue create <project_id> \"<title>\" [\"description\"]", "Create an issue under a project."],
         ["/issue rename <issue_id> \"<title>\"", "Rename an issue."],
+        ["/issue move <issue_id> <project_id|issue_id|top>", "Move an issue to another project on the same checkout, reparent it under another issue, or promote it to the top level. Its child issues and their workers move with it."],
         ["/move <agent_id> <issue_id>", "Move an existing worker to a different issue without restarting its harness session. The worker keeps its session, worktree, and branch; only its AgentTree assignment changes."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/worker guide \"<additional system prompt>\"", "Persist the additional worker model-selection system prompt when its experiment is enabled."],

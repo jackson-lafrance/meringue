@@ -97,6 +97,9 @@ module Meringue
         state["metadata"]["active_harness"] = public_worker
         state["metadata"]["active_harness_label"] = state["metadata"]["active_worker_harness_label"]
         state["metadata"]["harness_generation"] ||= 0
+        # Published so the dashboard can mark a quiet worker without reaching for the config file
+        # on every frame. The kernel owns the threshold; the panes only read it.
+        state["metadata"]["quiet_worker_warning_seconds"] = quiet_worker_warning_seconds
         state["metadata"]["agent_session_defaults"] = configured_session_defaults
         # Harness model catalogs are fetched in the background, so state only
         # guarantees the container exists; an empty map means "not fetched yet".

@@ -329,6 +329,54 @@ module Meringue
         value.is_a?(Hash) ? value : {}
       end
 
+      # Seconds a working agent may produce nothing before its row is marked quiet. The kernel
+      # publishes this into state metadata from `agent.quiet_worker_warning`; a dashboard that
+      # has not seen a reconciliation pass yet falls back to the same default the kernel uses,
+      # so the marker never depends on a race with the first pass. 0 turns the marker off.
+      DEFAULT_QUIET_WORKER_WARNING_SECONDS = 900
+
+      def quiet_worker_warning_seconds(state)
+        configured = (state || {}).fetch("metadata", {})
+        configured = {} unless configured.is_a?(Hash)
+        value = configured["quiet_worker_warning_seconds"]
+        return DEFAULT_QUIET_WORKER_WARNING_SECONDS unless value.is_a?(Numeric) || value.to_s.match?(/\A\d+\z/)
+
+        seconds = value.to_i
+        seconds.negative? ? 0 : seconds
+      end
+
+      # How long this worker has been silent, or nil when it is not quiet.
+      #
+      # The clock has to be `last_activity_at` and nothing else. Falling back to the record's own
+      # `updated_at` looked appealing - it is the only evidence a pre-upgrade record has - but
+      # routine reconciliation bookkeeping moves it, and a state file that has simply been sitting
+      # on disk would light up every `working` row at once. The kernel seeds the real clock on the
+      # first reconciliation pass it makes, so "no clock yet" means "not watched yet", and the
+      # honest answer to how long it has been silent is to say nothing.
+      def worker_quiet_seconds(worker, threshold:, now: Time.now)
+        return nil unless threshold.to_i.positive?
+        return nil unless worker.is_a?(Hash) && worker["type"] == "worker" && worker["status"] == "working"
+
+        metadata = worker["harness_metadata"]
+        metadata = {} unless metadata.is_a?(Hash)
+        # A worker still waiting on its worktree has not been given a session to be quiet in.
+        return nil if metadata["provisioning_state"].to_s.start_with?("provisioning", "allocating", "retry")
+
+        from = Timestamps.parse(metadata["last_activity_at"])
+        return nil unless from
+
+        elapsed = (now - from).to_i
+        elapsed >= threshold.to_i ? elapsed : nil
+      end
+
+      def quiet_worker_count(state)
+        threshold = quiet_worker_warning_seconds(state)
+        return 0 unless threshold.positive?
+
+        now = Time.now
+        (state || {}).fetch("agents", []).count { |agent| worker_quiet_seconds(agent, threshold: threshold, now: now) }
+      end
+
       def github_enabled?(state)
         capabilities = (state || {}).fetch("_capabilities", {}) || {}
         capabilities.fetch("github_support", true) != false

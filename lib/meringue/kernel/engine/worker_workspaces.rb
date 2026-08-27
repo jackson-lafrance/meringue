@@ -733,6 +733,9 @@ module Meringue
             "cwd" => session_ref.fetch("cwd", workspace.fetch("workspace_path")),
             "is_streaming" => session_ref.fetch("is_streaming", false),
             "last_event_at" => session_ref.fetch("last_event_at", nil),
+            # A worker is not quiet the instant it starts. Seeding the activity clock at spawn is
+            # what makes the quiet marker measure this session rather than the epoch.
+            WORKER_LAST_ACTIVITY_KEY => now,
             "harness_generation" => harness_generation,
             "workspace_note" => workspace.fetch("note", nil),
             "workspace_plan" => workspace.fetch("plan", nil),

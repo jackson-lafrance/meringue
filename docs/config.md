@@ -180,6 +180,15 @@ predecessor_failure = "cancel"
 
 `[conflicts].predecessor_failure` accepts `cancel` or `run`. It applies only when a dependent worker does not provide its own `if_predecessor_fails` value; it does not change the handling of git merge conflicts or overwrite project files. Settings reports the current/default value and provenance; `/keybind` reports only keybindings.
 
+### Quiet worker warning
+
+```toml
+[agent]
+quiet_worker_warning_seconds = 900       # default; 0 turns the signal off entirely
+```
+
+How long a `working` agent may produce nothing before the AgentTree marks its row `quiet 40m`, the bottom status bar counts it, and the logs pane records one warning for that stretch. The default is deliberately generous: the signal answers "should I go look at this one?", so a false alarm every few minutes would be worse than useless. See [`quiet-workers.md`](quiet-workers.md) for what advances the activity clock the duration is measured from, and why a worker Meringue has not been watching is never reported as quiet.
+
 ## Worker command blacklists
 
 Meringue can reject selected worker `bash` tool calls before the harness starts the
