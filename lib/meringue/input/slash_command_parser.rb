@@ -46,6 +46,7 @@ module Meringue
         ["/prs", "Open the picker for every tracked pull request that is still open."],
         ["/setup", "Reopen Setup for theme, separate head/worker defaults, status-bar layout, and Meringue Xtras."],
         ["/keybind", "Show all TUI keybindings."],
+        ["/glossary", "Show what head, worker, issue, project, and harness mean."],
         ["/config", "Open full-screen Settings; /config --text prints read-only diagnostics."],
         ["/status-bar", "Open the bottom status-bar component composer."],
         ["/github test", "Test read-only GitHub authentication and repository access."],
@@ -823,6 +824,8 @@ module Meringue
           invalid("/prs is a local TUI command. Run it in the interactive TUI to open the pull-request picker.", usage: "/prs")
         when "keybind"
           invalid("/keybind is a local TUI command. Run it in the interactive TUI to show keybindings.", usage: "/keybind")
+        when "glossary", "terms"
+          invalid("/glossary is a local TUI command. Run it in the interactive TUI to show the vocabulary.", usage: "/glossary")
         when "config"
           parse_config(arguments)
         when "status-bar", "statusbar", "layout"

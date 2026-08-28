@@ -121,9 +121,11 @@ module Meringue
 
       # Placeholder for an empty composer. A targeted composer says who it will
       # message; everything else keeps the familiar generic prompt.
+      # "enter a prompt" restated the widget. The placeholder is the one piece of
+      # copy every new user reads, so it shows the shape of a message that works.
       def placeholder(state)
         target = presentation(state)
-        return "enter a prompt" unless target.fetch("targeted")
+        return %(describe a goal, e.g. "fix the flaky signup test") unless target.fetch("targeted")
 
         "message #{primary_label(target)}"
       end

@@ -250,8 +250,42 @@ module Meringue
         "info" => "GetInfo"
       }.freeze
 
+      # 47 commands in one flat list is complete and unnavigable, which is the
+      # same problem `meringue --help` had. Grouping is by what someone is trying
+      # to do, and the first group is deliberately the short answer for a reader
+      # who has just opened the dashboard for the first time.
+      #
+      # Membership is matched on the command name, so a command added to
+      # HELP_COMMANDS lands in a real group or in "Everything else" - it can
+      # never silently vanish from the listing.
+      HELP_GROUPS = [
+        ["Start here", %w[/help /glossary /setup /project]],
+        ["Work", %w[/issue /goal /recount /move]],
+        ["Agents", %w[/worker /prompt /retry /jump /open-session /kill /prune]],
+        ["Questions", %w[/questions /answer /dismiss]],
+        ["Settings", %w[/config /theme /themes /harness /model /models /thinking /status-bar /keybind]],
+        ["Session", %w[/prs /github /tree /state /clear /reload /update /quit]]
+      ].freeze
+      OTHER_HELP_GROUP = "Everything else"
+
+      def self.help_group_for(usage)
+        name = usage.to_s.split(/\s+/).first.to_s
+        found = HELP_GROUPS.find { |_group, names| names.include?(name) }
+        found ? found.first : OTHER_HELP_GROUP
+      end
+
+      def self.grouped_help_commands(specs = HELP_COMMANDS)
+        by_group = specs.group_by { |usage, _description| help_group_for(usage) }
+        order = HELP_GROUPS.map(&:first) + [OTHER_HELP_GROUP]
+        order.filter_map do |group|
+          entries = by_group[group]
+          [group, entries] if entries&.any?
+        end
+      end
+
       HELP_COMMANDS = [
-        ["/help", "Show slash command help."],
+        ["/help", "Show slash command help, grouped by what you are trying to do."],
+        ["/glossary", "TUI local: show what head, worker, issue, project, and harness mean."],
         ["/quit", "TUI local: quit the interactive TUI."],
         ["/reload", "TUI local: restart Meringue with the current installed source and configuration."],
         ["/update", "TUI local: update the installed Meringue source, install missing dependencies, and reload."],

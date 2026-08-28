@@ -29,6 +29,8 @@ module Meringue
       when "demo-state"
         out.puts File.read(Meringue.root_path("fixtures", "demo_state.json"))
         0
+      when "doctor"
+        run_doctor
       when "reset-state"
         reset_state
       when "workers", "worker"
@@ -47,6 +49,45 @@ module Meringue
     private
 
     attr_reader :argv, :input, :out, :err
+
+    # Everything the quick start used to ask the reader to verify by hand, with
+    # the fix printed next to each failure instead of in a troubleshooting
+    # section they have to go and find.
+    def run_doctor
+      options = parse_runtime_options(default_state_path: State::Store.default_path)
+      return 1 unless options
+
+      config = runtime_config(options)
+      return 1 unless config
+
+      doctor = Doctor.new(
+        config: config,
+        config_path: options.fetch(:config_path),
+        state_path: options.fetch(:state_path),
+        registry: Harness::Registry.new(config: config)
+      )
+      checks = doctor.checks
+      out.puts "Meringue #{VERSION}"
+      out.puts
+      checks.each { |check| print_check(check) }
+      out.puts
+      problems = checks.count(&:problem?)
+      if problems.zero?
+        out.puts "Everything Meringue needs is in place."
+        0
+      else
+        out.puts "#{problems} problem#{problems == 1 ? "" : "s"} to fix before Meringue can run properly."
+        1
+      end
+    end
+
+    DOCTOR_MARKERS = { Doctor::OK => "ok", Doctor::PROBLEM => "FAIL", Doctor::NOTE => "note" }.freeze
+
+    def print_check(check)
+      out.puts "  [#{DOCTOR_MARKERS.fetch(check.status, "?").rjust(4)}] #{check.title}"
+      out.puts "         #{check.detail}" if check.detail.to_s != ""
+      out.puts "         → #{check.fix}" if check.fix.to_s != ""
+    end
 
     def run_workers
       action = argv.shift.to_s.downcase
@@ -174,7 +215,12 @@ module Meringue
           onboarding_enabled: enable_agents,
           # A registry-backed check lets the TUI force setup open and gate chat
           # when no role harness is configured yet, instead of exiting at startup.
-          harness_configured_check: -> { registry.provider_configured?("worker") || registry.provider_configured?("head") }
+          harness_configured_check: -> { registry.provider_configured?("worker") || registry.provider_configured?("head") },
+          # Setup asks the machine which backends it can actually run. Locating is
+          # cheap enough for a render path; probing starts the harness and is only
+          # reached from the check the user activates.
+          harness_availability_provider: -> { registry.provider_availability },
+          harness_probe: ->(provider) { registry.probe_provider(provider) }
         ),
         prompt_handler: prompt_loop,
         reconciler: engine ? -> { engine.reconcile_sessions } : nil
@@ -362,9 +408,11 @@ module Meringue
     SLASH_COMMAND_HELP_COLUMN = 46
 
     def slash_command_help
-      Input::SlashCommandParser::COMMAND_SPECS.map do |usage, description|
-        "  #{usage.ljust(SLASH_COMMAND_HELP_COLUMN)} # #{first_sentence(description)}"
-      end.join("\n")
+      Kernel::Engine.grouped_help_commands(Input::SlashCommandParser::COMMAND_SPECS).flat_map do |group, entries|
+        ["", "  #{group}"] + entries.map do |usage, description|
+          "    #{usage.ljust(SLASH_COMMAND_HELP_COLUMN)} # #{first_sentence(description)}"
+        end
+      end.drop(1).join("\n")
     end
 
     # One line per command: the help is an inventory, and `/help` inside the dashboard carries
@@ -389,6 +437,7 @@ module Meringue
           meringue tui --head-harness claude --worker-harness codex
           meringue demo                          # display the fake demo state fixture without agent prompting
           meringue demo-state                    # print the fake demo state fixture
+          meringue doctor                        # check Ruby, git, the configured harness, config, and state
           meringue reset-state                   # reset ~/.meringue/state.json to an empty Meringue state
           meringue workers export <PATH> [IDS]   # export current workers without machine-specific sessions or paths
           meringue workers import <PATH> --project <PATH> # import workers as fresh destination sessions

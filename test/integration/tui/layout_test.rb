@@ -114,9 +114,9 @@ class TuiLayoutTest < Minitest::Test
   def test_empty_state_renders_placeholder_content_in_every_pane
     frame = @layout.render(composed_state(empty_state), width: 90, height: 26)
 
-    assert_includes frame, "No AgentTree data yet."
-    assert_includes frame, "No logs yet."
-    assert_includes frame, "enter a prompt"
+    assert_includes frame, "No agents yet."
+    assert_includes frame, "Nothing here yet. Try one of these:"
+    assert_includes frame, "describe a goal"
   end
 
   def test_composer_grows_with_multiline_input_and_stays_bounded

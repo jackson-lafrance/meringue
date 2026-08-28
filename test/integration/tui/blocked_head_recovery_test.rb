@@ -66,7 +66,7 @@ class TuiBlockedHeadRecoveryTest < Minitest::Test
 
     pane = Meringue::TUI::Panes::ChatPane.new
     assert_equal "chat · H26 logs only", pane.composer_pane_title(state)
-    assert_equal "enter a prompt", Meringue::TUI::ChatTarget.placeholder(state)
+    assert_equal %(describe a goal, e.g. "fix the flaky signup test"), Meringue::TUI::ChatTarget.placeholder(state)
     refute_includes plain_line(pane.bottom_hint_line(state)), "head routes"
     assert_includes plain_line(pane.bottom_hint_line(state)), "Esc clears"
   end

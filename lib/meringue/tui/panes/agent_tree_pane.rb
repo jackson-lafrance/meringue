@@ -80,7 +80,9 @@ module Meringue
           output = []
           append_heads(output, agents, selected_agent_id, width)
           append_projects(output, projects, issues, agents_by_issue, selected_agent_id, width, goals)
-          output = [[['No AgentTree data yet.', Style::MUTED]]] if output.empty?
+          # "No AgentTree data yet." reported the absence without resolving it.
+          # The tree fills in from the chat, so that is what it should say.
+          output = FirstRun.agent_tree_lines if output.empty?
           @lines_cache = { key: key, value: output }
           output
         end

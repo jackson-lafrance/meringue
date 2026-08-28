@@ -30,6 +30,22 @@ module Meringue
       canonical_name(readme_name(root) || humanize_basename(File.basename(root)))
     end
 
+    # The nearest enclosing checkout, or nil outside one. Heads use this to decide
+    # what "this repo" means, and first-run setup uses it to offer the repository
+    # Meringue was started in; they must agree on the answer.
+    def git_root_for(path)
+      current = File.expand_path(path.to_s)
+
+      loop do
+        return current if File.exist?(File.join(current, ".git"))
+
+        parent = File.dirname(current)
+        return nil if parent == current
+
+        current = parent
+      end
+    end
+
     # Full cleanup for a name Meringue derived itself (README heading, path
     # basename). Safe to be aggressive here because nobody typed this name.
     def canonical_name(value)

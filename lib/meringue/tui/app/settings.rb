@@ -30,6 +30,11 @@ module Meringue
         @settings_discard_confirm = false
         @settings_saving = false
         @github_access_test_result = nil
+        @harness_check_result = nil
+        @settings_status_bar_customizing = false
+        @settings_adopt_project = setup_mode? && !setup_project_candidate.nil?
+        @harness_availability = harness_availability_snapshot
+        preselect_detected_harnesses if setup_mode?
         close_delivery_pr_picker
         close_model_picker
         close_question_picker
@@ -55,6 +60,11 @@ module Meringue
         @settings_discard_confirm = false
         @settings_saving = false
         @github_access_test_result = nil
+        @harness_check_result = nil
+        @harness_availability = nil
+        @settings_status_bar_customizing = false
+        @settings_adopt_project = false
+        remove_instance_variable(:@setup_project_candidate) if defined?(@setup_project_candidate)
         @settings_setup_auto = false
         @settings_setup_outcome = nil
         @settings_status_bar_draft = nil
@@ -67,6 +77,15 @@ module Meringue
 
       def setup_mode?
         @settings_mode == "setup"
+      end
+
+      # Welcome and Done carry no controls, so the navigation action is the only
+      # thing Enter can mean there. Derived rather than stored: whichever way the
+      # step was reached, a card with nothing to select focuses its action.
+      def settings_footer_focused?
+        return true if setup_mode? && settings_rows.empty?
+
+        @settings_footer_focus ? true : false
       end
 
       def setup_animation_phase
@@ -116,24 +135,6 @@ module Meringue
         rows
       end
 
-      def setup_rows
-        case settings_category
-        when "Welcome"
-          [synthetic_settings_row(
-            "_setup_begin",
-            "Begin Setup",
-            "Start choosing your setup defaults.",
-            "Enter"
-          )]
-        when "Status bar"
-          []
-        else
-          Settings::SetupFlow.setting_ids(settings_category, draft: @settings_draft).filter_map do |id|
-            definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
-            @settings_draft.row(definition) if definition
-          end
-        end
-      end
 
       def settings_row_visible?(row)
         return true unless row.fetch("id", nil) == "experiments.github_support_test_access"
@@ -267,7 +268,7 @@ module Meringue
           "keybinding_capture" => capture,
           "picker" => settings_picker_snapshot,
           "status_bar_composer" => inline_status_bar_composer_snapshot(state),
-          "footer_focus" => @settings_footer_focus,
+          "footer_focus" => settings_footer_focused?,
           "footer_button" => @settings_footer_button,
           "setup_last_step" => setup_mode? && @settings_category_index.to_i == settings_categories.length - 1,
           "discard_confirm" => @settings_discard_confirm.is_a?(String),
@@ -277,6 +278,8 @@ module Meringue
           "setup_step_count" => setup_mode? ? settings_categories.length : nil,
           "setup_animations" => setup_mode? ? @settings_draft.value("appearance.animations") == true : nil,
           "setup_animation_phase" => setup_mode? ? setup_animation_phase : nil,
+          "setup_summary" => (setup_summary_entries if setup_mode? && settings_category == Settings::SetupFlow::DONE),
+          "setup_status_bar_preview" => (setup_status_bar_preview if setup_mode? && settings_category == Settings::SetupFlow::STATUS_BAR),
           "error_count" => @settings_draft.errors.length,
           "global_error" => @settings_draft.global_error,
           "width" => render_width,
@@ -358,7 +361,7 @@ module Meringue
         elsif key == " "
           activate_settings_row(state, toggle_only: true, on_submit: on_submit) unless setup_mode?
         elsif ENTER_KEYS.include?(key)
-          if setup_mode? && @settings_footer_focus
+          if setup_mode? && settings_footer_focused?
             activate_setup_footer(on_submit, state)
           else
             activate_settings_row(state, on_submit: on_submit)
@@ -699,6 +702,10 @@ module Meringue
         @settings_row_index = 0
         @settings_footer_focus = false
         @settings_footer_button = "next"
+        # Leaving the step closes the drag surface, so coming back shows the
+        # layout as it now stands rather than reopening mid-edit.
+        @settings_status_bar_customizing = false
+        @settings_status_bar_drag = nil
       end
 
       def move_settings_row(delta)
@@ -817,8 +824,27 @@ module Meringue
           move_settings_category(1)
           return true
         end
+        if id == "setup.adopt_project"
+          @settings_adopt_project = !@settings_adopt_project
+          return true
+        end
+        if id == "setup.adopt_project_unavailable"
+          return true
+        end
+        if id == "setup.customize_status_bar"
+          return false if toggle_only
+
+          @settings_status_bar_customizing = true
+          @settings_row_index = 0
+          return true
+        end
         if id == "experiments.github_support_test_access"
           return test_github_access_from_settings(state, on_submit)
+        end
+        if id == "setup.check_harness"
+          return false if toggle_only
+
+          return check_harness_from_settings
         end
         return false if row.fetch("read_only", false)
 
@@ -894,7 +920,12 @@ module Meringue
                     end
                   end
         current = @settings_draft.value(id).to_s
-        unless options.any? { |option| option.is_a?(Hash) ? option.fetch("reference") == current : option == current }
+        # An exact model reference the catalog does not list stays selectable, so
+        # it is carried into the list. "Nothing chosen yet" is not a choice
+        # though: offering it as the first row of a required field is how the
+        # harness picker used to invite you to pick blank.
+        keep_current = !current.empty? || row.fetch("editor") == "model"
+        if keep_current && options.none? { |option| option.is_a?(Hash) ? option.fetch("reference") == current : option == current }
           options.unshift(row.fetch("editor") == "model" ? { "reference" => current, "name" => current } : current)
         end
         @settings_picker = {
@@ -923,6 +954,7 @@ module Meringue
             id = @settings_picker.fetch("id")
             value = option.is_a?(Hash) ? option.fetch("reference") : option
             @settings_draft.set(id, value)
+            pair_setup_harness(id, value) if setup_mode?
             @settings_draft.preview_theme if id == "appearance.theme"
             @settings_picker = nil
           end
@@ -1009,7 +1041,12 @@ module Meringue
 
       def save_settings(on_submit, state, onboarding_outcome: nil)
         return false if @settings_saving
-        unless @settings_draft.validate
+
+        # Completing setup is the one path that must not be able to produce an
+        # install Meringue cannot use. A skip deliberately writes only the marker,
+        # so it stays permissive.
+        required = onboarding_outcome == "completed" ? Settings::SetupFlow::REQUIRED_SETTING_IDS : []
+        unless @settings_draft.validate(required_ids: required)
           first_id = @settings_draft.errors.keys.first
           focus_settings_id(first_id) if first_id
           return false
@@ -1033,6 +1070,14 @@ module Meringue
         encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
         @settings_saving = true
         @settings_setup_outcome = onboarding_outcome
+        # Registering a project is orchestration state, not configuration, so it
+        # is a second command rather than a field in this one. It is submitted
+        # only after the save is accepted, so a rejected draft cannot leave a
+        # project behind from a setup that never finished.
+        @pending_project_adoption = if onboarding_outcome == "completed" && @settings_adopt_project
+                                      setup_project_candidate
+                                    end
+        @setup_submit_context = [on_submit, state]
         @settings_draft.clear_save_failure
         submit_prompt("/config save #{encoded}", on_submit, state)
         true

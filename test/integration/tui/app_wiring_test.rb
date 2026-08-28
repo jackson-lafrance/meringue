@@ -98,7 +98,7 @@ class TuiAppWiringTest < Minitest::Test
 
   def test_run_without_a_state_falls_back_to_an_empty_state
     assert_equal 0, @app.run
-    assert_includes @out.string, "No AgentTree data yet."
+    assert_includes @out.string, "No agents yet."
   end
 
   def test_mouse_input_failure_keeps_the_interactive_app_running_and_reports_the_error

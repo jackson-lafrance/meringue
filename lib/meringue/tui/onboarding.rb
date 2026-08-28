@@ -52,7 +52,8 @@ module Meringue
           "  Worker: #{role_summary(selected, "worker")}",
           "  Experiments: #{experiment_summary(selected)}",
           "",
-          "  Type a goal in plain English to begin. Run /config to change any setting."
+          "  Type a goal in plain English — Meringue opens the issue and starts the worker.",
+          "  /glossary explains the vocabulary, /help lists every command, /config changes any setting."
         ]
         lines.join("\n")
       end
@@ -63,7 +64,9 @@ module Meringue
 
       def role_summary(selected, role)
         harness = selected.fetch("agent.#{role}_harness")
-        parts = ["#{harness} harness"]
+        # The picker and the status bar both name the product; the completion
+        # card said "claude harness" for the same thing.
+        parts = [Harness::Registry.provider_label(harness)]
         # Model and reasoning are only worth reporting for a backend that actually accepts them.
         if Harness::Registry.session_defaults_supported_for?(harness)
           parts << selected.fetch("agent.#{role}_model")

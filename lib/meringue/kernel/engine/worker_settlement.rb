@@ -307,6 +307,19 @@ module Meringue
 
       private :with_deferred_worker_resolution
 
+      # `/config save` carries the whole Settings draft as one base64 payload, so
+      # echoing it verbatim spent six lines of the log on an unreadable blob —
+      # and on a first run those were the first six lines anyone saw. The command
+      # that ran is the useful part; the payload is already in `details`, and the
+      # settings it changed are named by the SaveConfiguration log right after it.
+      OPAQUE_PAYLOAD_COMMANDS = ["/config save"].freeze
+
+      def displayable_user_command(input)
+        text = input.to_s
+        prefix = OPAQUE_PAYLOAD_COMMANDS.find { |candidate| text.start_with?("#{candidate} ") }
+        prefix ? "#{prefix} …" : text
+      end
+
       def record_user_kernel_command(input:, commands: [])
         synchronized_state do
           state = normalized_state
@@ -320,7 +333,7 @@ module Meringue
             source_type: "user",
             source_id: nil,
             level: "info",
-            message: "User ran command: #{input.to_s}",
+            message: "User ran command: #{displayable_user_command(input)}",
             details: {
               "input" => input.to_s,
               "command_types" => command_types,

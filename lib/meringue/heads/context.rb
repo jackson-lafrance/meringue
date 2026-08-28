@@ -917,16 +917,7 @@ module Meringue
       end
 
       def nearest_git_root(path)
-        current = File.expand_path(path.to_s)
-
-        loop do
-          return current if File.exist?(File.join(current, ".git"))
-
-          parent = File.dirname(current)
-          return nil if parent == current
-
-          current = parent
-        end
+        ProjectNaming.git_root_for(path)
       end
 
       def discovery_starting_points

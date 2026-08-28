@@ -154,9 +154,24 @@ class TuiStatusBarComposerTest < Minitest::Test
     assert @app.instance_variable_get(:@status_bar_composer_saving)
   end
 
-  def test_setup_embeds_the_actual_composer_and_keeps_it_in_the_setup_transaction
+  def test_setup_step_shows_the_default_layout_before_offering_the_composer
     @app.send(:open_settings, @state, mode: "setup")
     show_setup_status_bar
+
+    frame = @app.render(compose, width: 100, height: 32, color: false)
+    refute_includes frame, "live bottom bar"
+    assert_includes frame, "Left: Context, Open PRs, Workers, Heads"
+    assert_includes frame, "Right: Harness, Model, Thinking"
+    assert_includes frame, "Customize layout"
+    assert_nil compose.dig("_settings", "status_bar_composer")
+
+    send_key(ENTER)
+    assert_includes @app.render(compose, width: 100, height: 32, color: false), "live bottom bar"
+  end
+
+  def test_setup_embeds_the_actual_composer_and_keeps_it_in_the_setup_transaction
+    @app.send(:open_settings, @state, mode: "setup")
+    customize_setup_status_bar
     settings = @app.instance_variable_get(:@settings_draft)
     settings.set("agent.head_harness", "pi")
     settings.set("agent.worker_harness", "claude")
@@ -181,6 +196,8 @@ class TuiStatusBarComposerTest < Minitest::Test
 
     send_key(TAB)
     assert_equal "Experiments", @app.send(:settings_category)
+    send_key(TAB)
+    assert_equal "Done", @app.send(:settings_category)
     send_key("\u0013")
     command = Meringue::Input::SlashCommandParser.new.parse(@submitted.pop)
     assert_equal "completed", command.payload.fetch("onboarding_outcome")
@@ -191,7 +208,7 @@ class TuiStatusBarComposerTest < Minitest::Test
 
   def test_inline_mouse_drag_reorders_components_and_resize_keeps_a_full_frame
     @app.send(:open_settings, @state, mode: "setup")
-    show_setup_status_bar
+    customize_setup_status_bar
     snapshot = compose
     view = @app.send(:layout).send(:settings_pane).setup_view(snapshot, width: 100, height: 32)
     bounds = view.fetch(:composer_bounds)
@@ -300,6 +317,13 @@ class TuiStatusBarComposerTest < Minitest::Test
     steps = @app.send(:settings_categories)
     @app.instance_variable_set(:@settings_category_index, steps.index("Status bar"))
     assert_equal "Status bar", @app.send(:settings_category)
+  end
+
+  # The step opens on the default layout; the drag surface is opt-in.
+  def customize_setup_status_bar
+    show_setup_status_bar
+    send_key(ENTER)
+    assert @app.instance_variable_get(:@settings_status_bar_customizing)
   end
 
   def composed_state(state, extras = {})

@@ -120,7 +120,7 @@ module Meringue
       # agent_session_service may open the generic live worker-session view.
       # Returning from this TUI workspace closes only that read handle and never
       # calls an abort/kill worker lifecycle operation.
-      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, workspace_controller: nil, agent_session_service: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default, config: nil, onboarding_enabled: false, harness_configured_check: nil, lifecycle: nil)
+      def initialize(layout: Layout.new, input: $stdin, out: $stdout, terminal: nil, session_opener: nil, pull_request_opener: nil, workspace_controller: nil, agent_session_service: nil, log_store: nil, conversation_store: nil, keybindings: Keybindings.default, config: nil, onboarding_enabled: false, harness_configured_check: nil, harness_availability_provider: nil, harness_probe: nil, lifecycle: nil)
         @layout = layout
         @out = out
         @terminal = terminal || Terminal.new(input: input, output: out)
@@ -206,6 +206,12 @@ module Meringue
         # chat when no backend is chosen yet; tests and demo default to "ready"
         # so existing behavior is unchanged.
         @harness_configured_check = harness_configured_check || -> { true }
+        # Setup says which backends this machine can actually run, so it never
+        # offers three equal choices and lets the user discover the answer later
+        # from a StartError. Both are supplied by the CLI; without them setup
+        # simply omits the availability notes.
+        @harness_availability_provider = harness_availability_provider
+        @harness_probe = harness_probe
         # Lifecycle is supplied by the CLI so update/reload can leave the TUI
         # through its normal ensure path before the process is replaced.
         @lifecycle = lifecycle
@@ -696,6 +702,7 @@ require_relative "app/presentation"
 require_relative "app/prompt_submission"
 require_relative "app/scrolling"
 require_relative "app/settings"
+require_relative "app/setup"
 require_relative "app/status_bar_composer"
 require_relative "app/text_selection"
 require_relative "app/workspace_lifecycle"

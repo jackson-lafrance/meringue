@@ -20,6 +20,7 @@ module Meringue
         return handle_local_open_session_command(text, state) if open_session_command?(text)
         return handle_local_setup_command(state) if setup_command?(text)
         return handle_local_keybind_command if keybind_command?(text)
+        return handle_local_glossary_command if glossary_command?(text)
         return handle_local_config_command(text, state) if config_command?(text)
         return handle_local_reload_command if reload_command?(text)
         return handle_local_update_command if update_command?(text)
@@ -41,6 +42,11 @@ module Meringue
 
       def handle_local_keybind_command
         append_jump_response(keybinding_help_text)
+        true
+      end
+
+      def handle_local_glossary_command
+        append_jump_response(Glossary.text)
         true
       end
 
@@ -236,6 +242,10 @@ module Meringue
 
       def jump_command?(text)
         text == "/jump" || text.start_with?("/jump ")
+      end
+
+      def glossary_command?(text)
+        %w[/glossary /terms].include?(text)
       end
 
       def keybind_command?(text)
