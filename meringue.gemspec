@@ -26,6 +26,7 @@ Gem::Specification.new do |spec|
       "LICENSE*",
       "README.md",
       "bin/meringue",
+      "install.sh",
       "docs/head_agent_kernel_commands.md",
       "fixtures/demo_state.json",
       "lib/**/*.rb",

@@ -65,13 +65,15 @@ bundle install
 bundle exec meringue
 ```
 
-A clone gives you `bundle exec meringue` rather than a global `meringue`. From inside the dashboard, `/update` updates a clean checkout and reloads; `/reload` restarts without updating. Both preserve your configuration and state, which live in `~/.meringue/` outside the source.
+`bundle install` also puts a `meringue` command on your PATH, pointed at this checkout, so you do not have to prefix it with `bundle exec` or run it from this directory. It writes one small launcher to `~/.local/bin` (or `MERINGUE_BIN_DIR`), tells you if that directory is not on your PATH, and never fails the install if it cannot. Set `MERINGUE_NO_SHIM=1` to skip it and use `bundle exec meringue` instead.
+
+From inside the dashboard, `/update` updates a clean checkout and reloads; `/reload` restarts without updating. Both preserve your configuration and state, which live in `~/.meringue/` outside the source.
 
 ### Troubleshooting
 
 Run `meringue doctor` first — it checks each of these and prints the fix. The recurring ones:
 
-- **`meringue: command not found`** — the installer's `~/.local/bin` is not on your PATH. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell startup file. From a clone, the command is `bundle exec meringue`.
+- **`meringue: command not found`** — `~/.local/bin` is not on your PATH. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell startup file. Both install paths put the command there and both say so if it is unreachable. `bundle exec meringue` from a clone always works.
 - **`bundle: command not found`** — `gem install --user-install bundler -v '~> 2.5'`, then put `$(ruby -r rubygems -e 'print Gem.user_dir')/bin` on your PATH.
 - **A harness is missing** — `command -v claude` (or `codex` / `pi`). Put it on PATH, or set that provider's `command` to an absolute path as described in [harness configuration](docs/config.md#provider-sections).
 
@@ -134,6 +136,7 @@ This repository also uses that workflow while developing Meringue itself, but se
 
 ```txt
 install.sh                         # one-line installer: clone, dependencies, and a meringue shim
+lib/meringue/shim.rb               # the launcher both install paths write to put meringue on PATH
 Gemfile                            # Bundler setup for running the executable from a clone
 meringue.gemspec                   # local gem metadata that exposes the meringue executable
 bin/meringue                       # executable CLI entrypoint

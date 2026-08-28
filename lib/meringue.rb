@@ -9,6 +9,7 @@ module Meringue
 end
 
 require_relative "meringue/version"
+require_relative "meringue/shim"
 require_relative "meringue/subprocess_environment"
 require_relative "meringue/lifecycle"
 require_relative "meringue/project_naming"
