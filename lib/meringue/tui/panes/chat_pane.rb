@@ -1243,14 +1243,7 @@ module Meringue
         end
 
         def empty_logs_lines(state, width: nil)
-          wrap_text_line(empty_logs_text(state), width && [width.to_i, 1].max).map { |line| [[line, Style::MUTED]] }
-        end
-
-        def empty_logs_text(state)
-          label = LogScope.label(state)
-          return "No logs yet. Type a prompt below and press Enter." if label.empty?
-
-          "No logs for #{label} yet. Click another AgentTree row to move this filter, or press Esc to clear it."
+          FirstRun.empty_logs_lines(state, wrap: ->(text) { wrap_text_line(text, width && [width.to_i, 1].max) })
         end
 
         # One PR only when the dashboard is actually looking at one node. Unscoped

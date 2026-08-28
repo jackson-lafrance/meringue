@@ -238,7 +238,7 @@ class TuiSelectedChatTargetTest < Minitest::Test
     assert_nil pane.composer_title_style(composed)
     refute_includes plain_line(pane.bottom_hint_line(composed)), "head routes"
     assert_includes plain_line(pane.bottom_hint_line(composed)), "Esc clears"
-    assert_equal "enter a prompt", Meringue::TUI::ChatTarget.placeholder(composed)
+    assert_equal %(describe a goal, e.g. "fix the flaky signup test"), Meringue::TUI::ChatTarget.placeholder(composed)
 
     submissions, handler = recording_prompt_handler
     @app.send(:handle_key, "\r", "try again", 9, -1, handler, composed)

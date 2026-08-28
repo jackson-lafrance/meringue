@@ -16,7 +16,7 @@ class TuiAgentTreePaneTest < Minitest::Test
   def test_empty_state_renders_a_single_placeholder_row
     lines = @pane.lines(composed_state(empty_state), width: 34)
 
-    assert_equal ["No AgentTree data yet."], plain_lines(lines)
+    assert_equal ["No agents yet.", "Describe a goal in the chat below."], plain_lines(lines)
     assert_equal [nil], @pane.line_item_ids(composed_state(empty_state), width: 34)
   end
 

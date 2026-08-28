@@ -26,9 +26,20 @@ class TuiLogsPaneTest < Minitest::Test
     @pane = Pane.new
   end
 
-  def test_empty_logs_show_the_placeholder
-    assert_equal ["No logs yet. Type a prompt below and press Enter."],
-                 plain_lines(@pane.log_lines(composed_state(empty_state), width: 60))
+  # A dashboard with nothing in it at all gets the first-run card; the terse
+  # placeholder is for a view that is empty because something else is going on.
+  def test_empty_logs_show_the_first_run_card
+    lines = plain_lines(@pane.log_lines(composed_state(empty_state), width: 60))
+
+    assert_equal "Nothing here yet. Try one of these:", lines.first
+    assert_includes lines.join("\n"), %(add tests for the login flow)
+    assert_includes lines.join("\n"), "No project is registered yet"
+  end
+
+  def test_a_filtered_view_that_is_empty_keeps_the_terse_placeholder
+    scoped = composed_state(empty_state).merge("_log_scope" => { "id" => "P9", "label" => "P9", "kind" => "project" })
+
+    assert_includes plain_lines(@pane.log_lines(scoped, width: 80)).join("\n"), "No logs for P9 yet"
   end
 
   def test_render_matches_the_plain_text_of_the_log_lines
