@@ -14,21 +14,39 @@ module Meringue
         COMPACT_HELP_TAGLINE = "Need help? Ask your agent."
         INLINE_GUIDANCE_ID = "experiments.worker_spawning_guidance_prompt"
         SETUP_HEADINGS = {
-          "Welcome" => "Welcome to Meringue",
-          "Theme" => "Make the workspace yours",
-          "Head defaults" => "Choose how heads think",
-          "Worker defaults" => "Choose how workers work",
-          "Status bar" => "Build your bottom bar",
-          "Experiments" => "Meringue Xtras"
+          Settings::SetupFlow::WELCOME => "Welcome to Meringue",
+          Settings::SetupFlow::HARNESS => "Pick the agent that does the work",
+          Settings::SetupFlow::PROJECT => "Point Meringue at a repository",
+          Settings::SetupFlow::THEME => "Make the workspace yours",
+          Settings::SetupFlow::STATUS_BAR => "Your bottom bar",
+          Settings::SetupFlow::EXPERIMENTS => "Meringue Xtras",
+          Settings::SetupFlow::DONE => "You're ready"
         }.freeze
         SETUP_INTROS = {
-          "Welcome" => "Set up the defaults for your future sessions.",
-          "Theme" => "Pick a comfortable look. Your preview stays local until you finish.",
-          "Head defaults" => "Heads route your requests. These defaults apply only to future heads.",
-          "Worker defaults" => "Workers do the work. Keep their future defaults independent from heads.",
-          "Status bar" => "Drag live components between the left and right sides. Focused-worker bars keep their familiar defaults.",
-          "Experiments" => "Optional capabilities start off until you choose them."
+          Settings::SetupFlow::WELCOME => "About a minute: one harness, one repository, one look.",
+          Settings::SetupFlow::HARNESS => "Meringue drives a coding agent you already have. It never installs one for you.",
+          Settings::SetupFlow::PROJECT => "Projects are the boards your issues and workers live on.",
+          Settings::SetupFlow::THEME => "Previewed live. Nothing is written until you finish.",
+          Settings::SetupFlow::STATUS_BAR => "This is the live bar. The default is ready to use.",
+          Settings::SetupFlow::EXPERIMENTS => "All optional, all off. Turn any of them on now or from /config later.",
+          Settings::SetupFlow::DONE => "Everything below is saved when you finish."
         }.freeze
+        # The Welcome card used to be two lines of copy inside eighteen blank
+        # rows, and two steps later it asked the reader to "choose how heads
+        # think". Three nouns carry the whole product; this is where they get
+        # introduced, in the space that was already there.
+        WELCOME_BODY = [
+          ["Meringue runs many coding agents at once, in one window.", :text],
+          ["", :blank],
+          ["  You describe a goal", :text],
+          ["    a head reads the repository and decides what should happen", :muted],
+          ["  The head opens an issue", :text],
+          ["    workers do the work, each in its own git worktree and branch", :muted],
+          ["  You watch the tree", :text],
+          ["    and jump into an agent only when you actually want to", :muted],
+          ["", :blank],
+          ["Esc skips setup. /setup reopens it any time.", :dim]
+        ].freeze
 
         def active?(state)
           Settings.enabled?(state)
@@ -362,8 +380,7 @@ module Meringue
 
           save_style = snap.fetch("saving", false) ? Style::DIM : Style::ACCENT_BOLD
           if snap.fetch("mode", "settings") == "setup"
-            next_label = snap.fetch("setup_last_step", false) ? FINISH_LABEL : NEXT_LABEL
-            return [[next_label, save_style == Style::DIM ? Style::DIM : Style::ACCENT_BOLD]]
+            return [[primary_label(snap), save_style == Style::DIM ? Style::DIM : Style::ACCENT_BOLD]]
           end
           [[primary_label(snap), save_style], [" ", Style::DIM], [CANCEL_LABEL, Style::MUTED]]
         end
@@ -470,21 +487,22 @@ module Meringue
         end
 
         def setup_heading(snap)
-          SETUP_HEADINGS.fetch(snap.fetch("category", "Welcome"), "Setup")
+          SETUP_HEADINGS.fetch(snap.fetch("category", Settings::SetupFlow::WELCOME), "Setup")
         end
 
+        NARRATIVE_STYLES = {
+          text: Style::TEXT,
+          muted: Style::MUTED,
+          dim: Style::DIM,
+          blank: Style::DIM
+        }.freeze
+
         def setup_preamble(snap, selected_row, width:)
-          category = snap.fetch("category", "Welcome")
+          category = snap.fetch("category", Settings::SetupFlow::WELCOME)
           intro = SETUP_INTROS.fetch(category, "Choose a value, then continue when it feels right.")
-          if category == "Welcome"
-            return [
-              [["A focused home for your coding agents.", Style::TEXT]],
-              [[intro, Style::MUTED]],
-              [["", Style::DIM]],
-              [["", Style::DIM]],
-              [["", Style::DIM]]
-            ]
-          end
+          return welcome_lines(intro, width: width) if category == Settings::SetupFlow::WELCOME
+          return done_lines(snap, intro, width: width) if category == Settings::SetupFlow::DONE
+          return status_bar_lines(snap, intro, width: width) if category == Settings::SetupFlow::STATUS_BAR
 
           description = selected_row ? selected_row.fetch("description", "").to_s : ""
           lines = wrap(intro, [width.to_i, 8].max).first(2).map { |line| [[line, Style::MUTED]] }
@@ -492,6 +510,61 @@ module Meringue
           unless description.empty?
             lines << [[wrap(description, [width.to_i, 8].max).first.to_s, Style::DIM]]
             lines << [["", Style::DIM]]
+          end
+          lines
+        end
+
+        # The default layout, spelled out. The drag surface is one keystroke away
+        # and stays out of the way of someone who has never seen the bar in use.
+        def status_bar_lines(snap, intro, width:)
+          lines = [[[intro, Style::MUTED]], [["", Style::DIM]]]
+          Array(snap.fetch("setup_status_bar_preview", [])).each do |line|
+            wrap(line.to_s, [width.to_i, 8].max).each { |wrapped| lines << [[wrapped, Style::TEXT]] }
+          end
+          lines << [["", Style::DIM]]
+          lines
+        end
+
+        def welcome_lines(intro, width:)
+          lines = [[[intro, Style::MUTED]], [["", Style::DIM]]]
+          WELCOME_BODY.each do |text, kind|
+            style = NARRATIVE_STYLES.fetch(kind, Style::TEXT)
+            if text.empty?
+              lines << [["", style]]
+              next
+            end
+            indented_wrap(text, width).each { |line| lines << [[line, style]] }
+          end
+          lines
+        end
+
+        # `wrap` splits on whitespace, which is right for a paragraph and wrong
+        # for a line whose leading spaces are the indentation carrying the
+        # structure. Wrap the text, then put the indent back on every line it
+        # produced.
+        def indented_wrap(text, width)
+          indent = text.to_s[/\A */].to_s
+          body = text.to_s.lstrip
+          limit = [width.to_i - indent.length, 8].max
+          wrap(body, limit).map { |line| "#{indent}#{line}" }
+        end
+
+        # The last card states what finishing will actually do, so "Complete" is
+        # a decision the reader can check rather than a button they hope about.
+        def done_lines(snap, intro, width:)
+          lines = [[[intro, Style::MUTED]], [["", Style::DIM]]]
+          Array(snap.fetch("setup_summary", [])).each do |entry|
+            label = entry.fetch("label", "").to_s
+            value = entry.fetch("value", "").to_s
+            next if label.empty?
+
+            wrap("#{label}: #{value}", [width.to_i, 8].max).each_with_index do |line, index|
+              lines << [[line, index.zero? ? Style::TEXT : Style::MUTED]]
+            end
+          end
+          lines << [["", Style::DIM]]
+          wrap("Then describe a goal in plain English — Meringue creates the issue and starts the worker.", [width.to_i, 8].max).each do |line|
+            lines << [[line, Style::DIM]]
           end
           lines
         end
@@ -519,11 +592,6 @@ module Meringue
           value = value.length > available ? "…#{value[-(available - 1), available - 1]}" : value
           style = selected ? Style::AGENT_TREE_SELECTED : Style::TEXT
           secondary = selected ? Style::AGENT_TREE_SELECTED_DIM : Style::MUTED
-          if selected && row.fetch("id", nil) == "_setup_begin"
-            button = "[ Begin Setup ]"
-            padding = [((width.to_i - button.length) / 2) - marker.length, 0].max
-            return [["#{" " * padding}#{button}", Style::ACCENT_BOLD]]
-          end
           [["#{marker}#{dirty} #{label}", style], ["  #{value}", secondary], [hint, Style::DIM]]
         end
 
@@ -538,7 +606,7 @@ module Meringue
         end
 
         def setup_counter(total, start, visible, snap)
-          return "" if total.zero? || snap.fetch("category", "") == "Welcome"
+          return "" if total.zero? || Settings::SetupFlow.narrative?(snap.fetch("category", ""))
 
           "#{start + 1}–#{start + visible} of #{total}"
         end
@@ -549,7 +617,7 @@ module Meringue
 
         def primary_label(snap)
           return SAVE_LABEL unless snap.fetch("mode", "settings") == "setup"
-          return BEGIN_LABEL if snap.fetch("category", "") == "Welcome"
+          return BEGIN_LABEL if snap.fetch("category", "") == Settings::SetupFlow::WELCOME
 
           snap.fetch("setup_last_step", false) ? FINISH_LABEL : NEXT_LABEL
         end

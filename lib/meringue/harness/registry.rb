@@ -364,6 +364,43 @@ module Meringue
         command.is_a?(Array) ? command.join(" ") : command.to_s
       end
 
+      # Whether each supported backend's executable is actually present, so a
+      # surface that offers the choice can say so instead of presenting three
+      # equal options and letting the user find out later from a StartError.
+      # Cached because setup redraws this on every frame; `reload_config!`
+      # invalidates it, since a changed provider command changes the answer.
+      def provider_availability
+        @provider_availability ||= PROVIDERS.to_h { |provider| [provider, availability_for(provider)] }
+      end
+
+      def availability_for(provider)
+        provider = self.class.normalize_provider!(provider)
+        provider_config = provider_config(provider)
+        Availability.locate(
+          command_argv(provider_config.fetch("command", "")),
+          env: env_for(provider_config)
+        )
+      rescue ArgumentError
+        Availability.result(Availability::UNCONFIGURED, detail: "unsupported harness")
+      end
+
+      # Runs the harness. Only ever reached from a control the user activated.
+      def probe_provider(provider, timeout: Availability::PROBE_TIMEOUT_SECONDS)
+        provider = self.class.normalize_provider!(provider)
+        provider_config = provider_config(provider)
+        Availability.probe(
+          command_argv(provider_config.fetch("command", "")),
+          env: env_for(provider_config),
+          timeout: timeout
+        )
+      end
+
+      # The providers Meringue can start right now. Setup preselects the single
+      # detected harness from this; with none or several it still asks.
+      def installed_providers
+        provider_availability.select { |_provider, located| Availability.installed?(located) }.keys
+      end
+
       # Authoritative model catalog for one harness provider, asked of that
       # provider's client. Providers without catalog support answer with an
       # explicit unsupported catalog, so callers never need provider branches.
@@ -527,6 +564,9 @@ module Meringue
           end
         end
         @config = Config.new(data, path: updated_config.path, loaded: updated_config.loaded?, file_data: updated_config.to_file_h)
+        # A provider's configured command can move with the config, and that is
+        # exactly what decides whether its executable resolves.
+        @provider_availability = nil
         PROVIDERS.each { |provider| reconfigure_cached_clients!(provider) }
         self
       end

@@ -16,13 +16,44 @@ module Meringue
       # and pane used by /config. Experiment ids are always derived from the
       # registry so setup cannot drift from the complete Settings surface.
       module SetupFlow
-        STEPS = ["Welcome", "Theme", "Head defaults", "Worker defaults", "Status bar", "Experiments"].freeze
+        WELCOME = "Welcome"
+        HARNESS = "Harness"
+        PROJECT = "Project"
+        THEME = "Theme"
+        STATUS_BAR = "Status bar"
+        # The step id stays the schema category it draws from; only the heading
+        # reads "Meringue Xtras".
+        EXPERIMENTS = "Experiments"
+        DONE = "Done"
+
+        # Head and worker used to be two separate steps, which asked a first-time
+        # user to make the same decision twice before they had been told what
+        # either word meant. They are one step now, and the two rows read as a
+        # confirmation rather than a decision whenever exactly one harness is
+        # actually installed. Welcome and Done carry no controls at all: a first
+        # run should open and close with something to read, not a form.
+        STEPS = [WELCOME, HARNESS, PROJECT, THEME, STATUS_BAR, EXPERIMENTS, DONE].freeze
+        NARRATIVE_STEPS = [WELCOME, DONE].freeze
+
         FIXED_SETTING_IDS = {
-          "Theme" => %w[appearance.theme appearance.animations].freeze,
-          "Head defaults" => %w[agent.head_harness agent.head_model agent.head_thinking].freeze,
-          "Worker defaults" => %w[agent.worker_harness agent.worker_model agent.worker_thinking].freeze,
-          "Status bar" => %w[appearance.status_bar_layout].freeze
+          HARNESS => %w[agent.head_harness agent.worker_harness].freeze,
+          THEME => %w[appearance.theme appearance.animations].freeze,
+          STATUS_BAR => %w[appearance.status_bar_layout].freeze
         }.freeze
+
+        # Model and reasoning both have per-harness defaults that are correct for
+        # a first session, and both are the kind of choice someone makes once they
+        # have opinions. They stay one keystroke away instead of sitting between a
+        # new user and a working install.
+        ADVANCED_SETTING_IDS = {
+          HARNESS => %w[agent.head_model agent.head_thinking agent.worker_model agent.worker_thinking].freeze
+        }.freeze
+
+        # Setup will not finish without these. Validation normally runs only over
+        # settings the user changed, which is right for /config — an unrelated save
+        # must not fail on a field nobody edited — but it is also how setup used to
+        # complete with no harness at all.
+        REQUIRED_SETTING_IDS = %w[agent.head_harness agent.worker_harness].freeze
 
         module_function
 
@@ -30,9 +61,24 @@ module Meringue
           STEPS
         end
 
-        def setting_ids(step, draft: nil)
-          return FIXED_SETTING_IDS.fetch(step.to_s, []) unless step.to_s == "Experiments"
+        def narrative?(step)
+          NARRATIVE_STEPS.include?(step.to_s)
+        end
 
+        def setting_ids(step, draft: nil, include_advanced: false)
+          ids = if step.to_s == EXPERIMENTS
+                  experiment_setting_ids(draft)
+                else
+                  FIXED_SETTING_IDS.fetch(step.to_s, []).dup
+                end
+          include_advanced ? ids + advanced_setting_ids(step) : ids
+        end
+
+        def advanced_setting_ids(step)
+          ADVANCED_SETTING_IDS.fetch(step.to_s, [])
+        end
+
+        def experiment_setting_ids(draft)
           ids = Experiments::Registry.setting_ids.dup
           if draft && Experiments::AgentDefaultsMode.normalize(draft.value("experiments.agent_defaults_mode")) == Experiments::AgentDefaultsMode::GUIDED
             ids << "experiments.worker_spawning_guidance_prompt"
@@ -42,7 +88,10 @@ module Meringue
 
         def step_for_setting(id)
           candidate = id.to_s
-          steps.find { |step| setting_ids(step).include?(candidate) || (step == "Experiments" && candidate == "experiments.worker_spawning_guidance_prompt") }
+          steps.find do |step|
+            setting_ids(step, include_advanced: true).include?(candidate) ||
+              (step == EXPERIMENTS && candidate == "experiments.worker_spawning_guidance_prompt")
+          end
         end
 
         def experiment_defaults(draft, explicit_only: false)
@@ -141,9 +190,22 @@ module Meringue
           set(id, !truthy?(value(id)))
         end
 
-        def validate
+        # Validation runs over `changes`, so a setting the user never touched is
+        # never checked. That is right for /config, where an unrelated save must
+        # not fail on a field nobody edited — but it is also exactly how first-run
+        # setup used to reach Complete with no harness chosen, write
+        # `outcome = "completed"`, and leave a dashboard that rejects the first
+        # prompt. Setup names the settings it will not finish without.
+        def validate(required_ids: [])
           @errors = {}
           Config::Schema.validate_changes(changes, config: config)
+          missing = Array(required_ids).each_with_object({}) do |id, result|
+            next unless value(id).to_s.strip.empty?
+
+            result[id.to_s] = "#{Config::Schema.fetch(id).label} is required — Meringue cannot start an agent without it."
+          end
+          raise Config::ValidationError, missing unless missing.empty?
+
           true
         rescue Config::ValidationError => e
           @errors = e.field_errors

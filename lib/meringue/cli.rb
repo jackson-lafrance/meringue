@@ -174,7 +174,12 @@ module Meringue
           onboarding_enabled: enable_agents,
           # A registry-backed check lets the TUI force setup open and gate chat
           # when no role harness is configured yet, instead of exiting at startup.
-          harness_configured_check: -> { registry.provider_configured?("worker") || registry.provider_configured?("head") }
+          harness_configured_check: -> { registry.provider_configured?("worker") || registry.provider_configured?("head") },
+          # Setup asks the machine which backends it can actually run. Locating is
+          # cheap enough for a render path; probing starts the harness and is only
+          # reached from the check the user activates.
+          harness_availability_provider: -> { registry.provider_availability },
+          harness_probe: ->(provider) { registry.probe_provider(provider) }
         ),
         prompt_handler: prompt_loop,
         reconciler: engine ? -> { engine.reconcile_sessions } : nil

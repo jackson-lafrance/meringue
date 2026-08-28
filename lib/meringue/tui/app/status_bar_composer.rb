@@ -178,8 +178,14 @@ module Meringue
         draft.place(component, zone, index)
       end
 
+      # The composer is a real editing surface, and it used to be the entire step,
+      # so every first run made someone lay out a bar they had never seen in use.
+      # The default is shown live above the row; dragging starts when asked for.
       def inline_status_bar_step?
-        setup_mode? && settings_category == "Status bar" && @settings_status_bar_draft
+        setup_mode? &&
+          settings_category == Settings::SetupFlow::STATUS_BAR &&
+          @settings_status_bar_customizing &&
+          @settings_status_bar_draft
       end
 
       def inline_status_bar_composer_snapshot(state)

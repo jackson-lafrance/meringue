@@ -74,13 +74,24 @@ class TuiTransactionalSetupTest < Minitest::Test
 
   def test_theme_roles_and_experiments_remain_draft_only_until_one_finish_command
     open_manual_setup
-    send_key(ENTER) # Welcome -> Theme
-    assert_equal "Theme", setup_snapshot.fetch("category")
+    send_key(ENTER) # Welcome -> Harness
+    assert_equal "Harness", setup_snapshot.fetch("category")
 
     send_key(RIGHT)
-    assert_equal "Theme", setup_snapshot.fetch("category")
+    assert_equal "Harness", setup_snapshot.fetch("category")
     refute setup_snapshot.fetch("dirty")
-    send_key("\e[A") # return focus to Theme
+    send_key(ENTER) # head harness opens its picker
+    send_key(DOWN)
+    send_key(ENTER)
+    head_harness = @app.instance_variable_get(:@settings_draft).value("agent.head_harness")
+    assert_includes Meringue::Harness::Registry.supported_provider_names, head_harness
+    # One harness decision covers both roles while the other is still unset.
+    assert_equal head_harness, @app.instance_variable_get(:@settings_draft).value("agent.worker_harness")
+
+    send_key(TAB) # Project
+    assert_equal "Project", setup_snapshot.fetch("category")
+    send_key(TAB) # Theme
+    assert_equal "Theme", setup_snapshot.fetch("category")
     send_key(ENTER) # Theme opens its picker
     assert setup_snapshot.fetch("picker")
     send_key(DOWN)
@@ -91,16 +102,6 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert_equal "[settings]\nschema_version = 1\n", File.read(@config_path)
     assert_empty submitted
 
-    send_key(TAB) # Head defaults
-    assert_equal "Head defaults", setup_snapshot.fetch("category")
-    send_key(ENTER) # head harness opens its picker
-    send_key(DOWN)
-    send_key(ENTER)
-    head_harness = @app.instance_variable_get(:@settings_draft).value("agent.head_harness")
-    assert_includes Meringue::Harness::Registry.supported_provider_names, head_harness
-    assert_nil @app.instance_variable_get(:@settings_draft).value("agent.worker_harness")
-
-    send_key(TAB) # Worker defaults
     send_key(TAB) # Status bar
     send_key(TAB) # Experiments
     assert_equal "Experiments", setup_snapshot.fetch("category")
@@ -108,9 +109,9 @@ class TuiTransactionalSetupTest < Minitest::Test
     send_key(ENTER) # checkbox-style controls use Enter
     assert @app.instance_variable_get(:@settings_draft).value("experiments.github_support")
 
+    send_key(TAB) # Done
+    assert_equal "Done", setup_snapshot.fetch("category")
     send_key(CTRL_S) # the final step completes directly
-    assert_equal "Experiments", setup_snapshot.fetch("category")
-    assert_empty submitted
     send_key(ENTER) unless @app.instance_variable_get(:@settings_saving)
 
     command = wait_for_command
@@ -119,14 +120,33 @@ class TuiTransactionalSetupTest < Minitest::Test
     changes = command.payload.fetch("changes")
     assert_equal preview, changes.fetch("appearance.theme")
     assert_equal head_harness, changes.fetch("agent.head_harness")
+    assert_equal head_harness, changes.fetch("agent.worker_harness")
     assert_equal true, changes.fetch("experiments.github_support")
-    refute changes.key?("agent.worker_harness")
     assert @app.instance_variable_get(:@settings_saving)
+  end
+
+  def test_setup_cannot_complete_without_a_harness
+    open_manual_setup
+    send_key(ENTER)
+    5.times { send_key(TAB) } # straight to Done, choosing nothing
+    assert_equal "Done", setup_snapshot.fetch("category")
+
+    send_key(CTRL_S)
+
+    # No command left the overlay, and setup is still open on the step that
+    # cannot be skipped.
+    assert_empty submitted
+    assert @app.instance_variable_get(:@settings_active)
+    assert_equal "Harness", setup_snapshot.fetch("category")
+    assert_includes setup_snapshot.fetch("rows").map { |row| row.fetch("error", "") }.join(" "), "required"
+    assert_includes render, "required"
+    assert_equal 0, Meringue::Config.load(path: @config_path).onboarding_version
   end
 
   def test_back_revisits_a_step_without_losing_edits_and_manual_cancel_discards_everything
     open_manual_setup
     send_key(ENTER)
+    2.times { send_key(TAB) } # Harness -> Project -> Theme
     send_key(ENTER)
     send_key(DOWN)
     send_key(ENTER)
@@ -164,6 +184,7 @@ class TuiTransactionalSetupTest < Minitest::Test
   def test_first_run_escape_requires_confirmation_and_skip_excludes_draft_changes
     @app.send(:maybe_open_onboarding, -> { @state })
     send_key(ENTER)
+    2.times { send_key(TAB) } # Harness -> Project -> Theme
     send_key(ENTER)
     send_key(DOWN)
     send_key(ENTER)
@@ -195,8 +216,9 @@ class TuiTransactionalSetupTest < Minitest::Test
     @handler = saving_handler
     open_manual_setup
     send_key(ENTER)
-    4.times { send_key(TAB) } # Experiments is final
-    assert_equal "Experiments", setup_snapshot.fetch("category")
+    choose_first_harness
+    5.times { send_key(TAB) } # Done is final
+    assert_equal "Done", setup_snapshot.fetch("category")
     send_key(CTRL_S)
     wait_until { !@app.instance_variable_get(:@settings_active) }
 
@@ -224,8 +246,9 @@ class TuiTransactionalSetupTest < Minitest::Test
     end
     open_manual_setup
     send_key(ENTER)
-    4.times { send_key(TAB) }
-    assert_equal "Experiments", setup_snapshot.fetch("category")
+    choose_first_harness
+    5.times { send_key(TAB) }
+    assert_equal "Done", setup_snapshot.fetch("category")
     send_key(CTRL_S)
     wait_until { !@app.instance_variable_get(:@settings_saving) }
 
@@ -242,6 +265,15 @@ class TuiTransactionalSetupTest < Minitest::Test
   end
 
   private
+
+  # Setup will not finish without a harness, so every completion path picks one.
+  def choose_first_harness
+    assert_equal "Harness", setup_snapshot.fetch("category")
+    send_key(ENTER)
+    send_key(DOWN)
+    send_key(ENTER)
+    refute_empty @app.instance_variable_get(:@settings_draft).value("agent.head_harness").to_s
+  end
 
   def build_app(config: @config, onboarding_enabled: true, terminal: nil, out: StringIO.new)
     Meringue::TUI::App.new(

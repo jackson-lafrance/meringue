@@ -269,6 +269,19 @@ module Meringue
       ].freeze
       THINKING_LEVELS = %w[off minimal low medium high xhigh max].freeze
       PROVIDERS = %w[pi claude codex].freeze
+      # The backend list is stored as ids and read as products. Setup and /config
+      # both used to render the raw id twice ("pi  pi"), which told a first-time
+      # user nothing about what they were choosing between.
+      PROVIDER_OPTION_LABELS = {
+        "pi" => "Pi",
+        "claude" => "Claude Code",
+        "codex" => "Codex CLI"
+      }.freeze
+      PROVIDER_OPTION_DESCRIPTIONS = {
+        "pi" => "Managed transport. Focusing a worker settles its turn first.",
+        "claude" => "Runs claude in its own interactive session. Focus attaches without interrupting.",
+        "codex" => "Runs codex in its own interactive session. Focus attaches without interrupting."
+      }.freeze
 
       module_function
 
@@ -373,14 +386,14 @@ module Meringue
 
       def add_role_defaults(settings)
         settings.concat([
-          definition("agent.head_harness", %w[harness head_provider], "Agent defaults", "enum", nil, fallback_paths: [%w[harness provider]], options: PROVIDERS, editor: "selector", apply_mode: "live", label: "Head harness", description: "Agent harness used for future routing heads.", override_env: %w[MERINGUE_HEAD_HARNESS MERINGUE_HARNESS], env_overrides: true),
+          definition("agent.head_harness", %w[harness head_provider], "Agent defaults", "enum", nil, fallback_paths: [%w[harness provider]], options: PROVIDERS, option_labels: PROVIDER_OPTION_LABELS, option_descriptions: PROVIDER_OPTION_DESCRIPTIONS, editor: "selector", apply_mode: "live", label: "Head harness", description: "Agent harness used for future routing heads.", override_env: %w[MERINGUE_HEAD_HARNESS MERINGUE_HARNESS], env_overrides: true),
           # Model and reasoning defaults follow whichever harness is selected rather than living
           # under one backend's section. The legacy [harness.pi] paths stay readable as fallbacks so
           # an existing configuration keeps working, and a value set under a specific backend still
           # wins for that backend.
           definition("agent.head_model", %w[harness head_model], "Agent defaults", "model_reference", ->(config, env) { default_model_for_role(config, env, "head") }, fallback_paths: [%w[harness model], %w[harness pi head_model], %w[harness pi model]], editor: "model", apply_mode: "live", label: "Head model", description: "Model for future heads; exact provider/model references remain allowed when the catalog is unavailable."),
           definition("agent.head_thinking", %w[harness head_thinking_level], "Agent defaults", "thinking_level", "max", fallback_paths: [%w[harness thinking_level], %w[harness pi head_thinking_level], %w[harness pi thinking_level]], options: THINKING_LEVELS, editor: "selector", apply_mode: "live", label: "Head reasoning", description: "Reasoning level for future heads."),
-          definition("agent.worker_harness", %w[harness worker_provider], "Agent defaults", "enum", nil, fallback_paths: [%w[harness provider]], options: PROVIDERS, editor: "selector", apply_mode: "live", label: "Worker harness", description: "Agent harness used for future workers.", override_env: %w[MERINGUE_WORKER_HARNESS MERINGUE_HARNESS], env_overrides: true),
+          definition("agent.worker_harness", %w[harness worker_provider], "Agent defaults", "enum", nil, fallback_paths: [%w[harness provider]], options: PROVIDERS, option_labels: PROVIDER_OPTION_LABELS, option_descriptions: PROVIDER_OPTION_DESCRIPTIONS, editor: "selector", apply_mode: "live", label: "Worker harness", description: "Agent harness used for future workers.", override_env: %w[MERINGUE_WORKER_HARNESS MERINGUE_HARNESS], env_overrides: true),
           definition("agent.worker_model", %w[harness worker_model], "Agent defaults", "model_reference", ->(config, env) { default_model_for_role(config, env, "worker") }, fallback_paths: [%w[harness model], %w[harness pi worker_model], %w[harness pi model]], editor: "model", apply_mode: "live", label: "Worker model", description: "Model for future workers; existing sessions are unchanged."),
           definition("agent.worker_thinking", %w[harness worker_thinking_level], "Agent defaults", "thinking_level", "max", fallback_paths: [%w[harness thinking_level], %w[harness pi worker_thinking_level], %w[harness pi thinking_level]], options: THINKING_LEVELS, editor: "selector", apply_mode: "live", label: "Worker reasoning", description: "Reasoning level for future workers."),
           # Watching many agents at once is the whole point of the dashboard, and "has this one
