@@ -61,6 +61,29 @@ module Meringue
         end
       end
 
+      # Grouped, and the usage column aligned, because a flat list of 47 lines is
+      # complete without being navigable.
+      def help_output_lines(result)
+        entries = Array(result)
+        return [] if entries.empty?
+
+        width = entries.map { |item| item.fetch("usage", "").to_s.length }.max
+        grouped = entries.group_by { |item| item.fetch("group", Engine::OTHER_HELP_GROUP) }
+        ordered = (Engine::HELP_GROUPS.map(&:first) + [Engine::OTHER_HELP_GROUP]).select { |group| grouped.key?(group) }
+        ordered.flat_map do |group|
+          ["", "  #{group}"] + grouped.fetch(group).map do |item|
+            "    #{item.fetch("usage", "").to_s.ljust(width)}  #{first_sentence(item.fetch("description", ""))}"
+          end
+        end
+      end
+
+      # One line per command here; the full description stays available in the
+      # README and in each command's own error text.
+      def first_sentence(description)
+        text = description.to_s.strip
+        (text[/\A.*?[.!?](?:\s|\z)/m] || text).strip.delete_suffix(".")
+      end
+
       def kernel_command_output_detail_lines(command_type, result)
         case command_type
         when "SetTheme"
@@ -71,7 +94,7 @@ module Meringue
           harness = result.is_a?(Hash) ? result["active_harness"] || result["harness"] : nil
           harness ? ["  harness: #{harness}"] : []
         when "Help"
-          Array(result).map { |item| "  #{item.fetch("usage", "")} — #{item.fetch("description", "")}" }
+          help_output_lines(result)
         when "GetModelCatalog"
           model_catalog_output_lines(result)
         when "ListQuestions"

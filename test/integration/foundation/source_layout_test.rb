@@ -28,7 +28,9 @@ class FoundationSourceLayoutTest < Minitest::Test
     # as headroom for the next accidental addition.
     "lib/meringue/tui/panes/chat_pane.rb" => 2_020,
     "lib/meringue/tui/layout.rb" => 1_522,
-    "lib/meringue/input/slash_command_parser.rb" => 1_302
+    # +3 for /glossary: one row in the command table and its two-line local-command
+    # rejection, the same shape every other TUI-local command already has here.
+    "lib/meringue/input/slash_command_parser.rb" => 1_305
   }.freeze
 
   def test_no_source_file_grows_past_the_ceiling

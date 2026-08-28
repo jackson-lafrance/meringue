@@ -742,7 +742,9 @@ module Meringue
           command_type,
           nil,
           "Loaded slash command help.",
-          HELP_COMMANDS.map { |usage, description| { "usage" => usage, "description" => description } },
+          HELP_COMMANDS.map do |usage, description|
+            { "usage" => usage, "description" => description, "group" => self.class.help_group_for(usage) }
+          end,
           []
         )
       end
