@@ -287,6 +287,64 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     end
   end
 
+  # Arrowing onto the action used to change nothing on screen, so you could not
+  # tell what Enter was about to do.
+  def test_the_navigation_action_shows_when_it_is_focused
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+
+    focused = @layout.send(:settings_pane).action_segments(compose)
+    assert_equal ["› [ Begin ] ‹"], focused.map(&:first), "Welcome has no rows, so its action is focused"
+    assert_includes render, "› [ Begin ] ‹"
+
+    send_key(ENTER) # Harness, which does have rows
+    unfocused = @layout.send(:settings_pane).action_segments(compose)
+    assert_equal ["[ Next ]"], unfocused.map(&:first)
+
+    snapshot.fetch("rows").length.times { send_key(DOWN) }
+    assert snapshot.fetch("footer_focus")
+    assert_equal ["› [ Next ] ‹"], @layout.send(:settings_pane).action_segments(compose).map(&:first)
+  end
+
+  # The markers carry the state when color is off, and stay ASCII-safe.
+  def test_the_focused_action_survives_ascii_glyph_mode
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+
+    with_env("MERINGUE_ASCII_GLYPHS" => "1") do
+      assert_equal ["> [ Begin ] <"], @layout.send(:settings_pane).action_segments(compose).map(&:first)
+    end
+  end
+
+  # The whole point of the gate: holding a direction key must not walk past a
+  # decision Meringue cannot run without.
+  def test_arrowing_to_the_action_cannot_walk_past_the_harness_step
+    @app = build_app(availability: availability("claude" => :installed, "codex" => :installed, "pi" => :installed))
+    open_setup
+    send_key(ENTER)
+    assert_equal "Harness", snapshot.fetch("category")
+
+    6.times do
+      snapshot.fetch("rows").length.times { send_key(DOWN) }
+      send_key(ENTER)
+    end
+
+    assert_equal "Harness", snapshot.fetch("category")
+    assert_empty drain_submitted
+  end
+
+  # Esc is still the way out, because skipping is a deliberate confirmed choice
+  # rather than something you do by leaning on a key.
+  def test_the_gate_does_not_block_going_backwards
+    @app = build_app(availability: availability("claude" => :installed, "codex" => :installed, "pi" => :installed))
+    open_setup
+    send_key(ENTER)
+    assert_equal "Harness", snapshot.fetch("category")
+
+    send_key("\u007f") # Backspace
+    assert_equal "Welcome", snapshot.fetch("category")
+  end
+
   # The last card is what makes Complete checkable rather than hopeful.
   def test_the_final_card_states_what_finishing_will_do
     in_repository do |_root, name|

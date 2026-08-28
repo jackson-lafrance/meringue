@@ -128,7 +128,11 @@ class TuiWorkerGuidanceEditorTest < Minitest::Test
     )
 
     send_key(ENTER, input_buffer: "/setup")
-    send_key(ENTER) # Welcome -> Theme
+    send_key(ENTER) # Welcome -> Harness
+    # Setup will not advance past the harness step until one is chosen.
+    %w[agent.head_harness agent.worker_harness].each do |id|
+      @app.instance_variable_get(:@settings_draft).set(id, "pi")
+    end
     4.times { send_key(TAB) }
     assert_equal "Experiments", snapshot.fetch("category")
 

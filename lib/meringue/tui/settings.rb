@@ -49,13 +49,28 @@ module Meringue
           HARNESS => %w[agent.head_model agent.head_thinking agent.worker_model agent.worker_thinking].freeze
         }.freeze
 
-        # Setup will not finish without these. Validation normally runs only over
-        # settings the user changed, which is right for /config — an unrelated save
-        # must not fail on a field nobody edited — but it is also how setup used to
-        # complete with no harness at all.
-        REQUIRED_SETTING_IDS = %w[agent.head_harness agent.worker_harness].freeze
+        # Settings a step will not let you walk past. Blocking at the step is what
+        # makes the requirement legible: checking only at Complete meant someone
+        # could arrow through every card and learn five screens later that the
+        # second one was mandatory.
+        #
+        # Esc still skips the whole flow — that is a deliberate, confirmed choice
+        # rather than something you can do by holding a direction key.
+        REQUIRED_SETTING_IDS_BY_STEP = {
+          HARNESS => %w[agent.head_harness agent.worker_harness].freeze
+        }.freeze
+
+        # The same values, as the backstop Complete checks. Validation normally
+        # runs only over settings the user changed, which is right for /config —
+        # an unrelated save must not fail on a field nobody edited — but it is
+        # also how setup used to complete with no harness at all.
+        REQUIRED_SETTING_IDS = REQUIRED_SETTING_IDS_BY_STEP.values.flatten.freeze
 
         module_function
+
+        def required_setting_ids(step)
+          REQUIRED_SETTING_IDS_BY_STEP.fetch(step.to_s, [])
+        end
 
         def steps
           STEPS

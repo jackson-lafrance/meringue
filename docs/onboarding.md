@@ -20,7 +20,9 @@ Welcome and Done carry no controls at all. The flow derives navigation from the 
 
 ## Harness is required
 
-Setup will not finish without a harness. Schema validation normally runs only over settings the user actually changed — correct for `/config`, where an unrelated save must not fail on a field nobody edited — but it is also how setup used to reach Complete with `agent.head_harness` and `agent.worker_harness` still empty, write `outcome = "completed"`, and leave a dashboard that rejected the first prompt with "No agent harness is configured."
+Setup will not advance past the Harness step until one is chosen, and it will not finish without one. Blocking at the step is what makes the requirement legible: checking only at Complete meant someone could hold Tab — or arrow onto the navigation action and press Enter — through every card and learn five screens later that the second one was mandatory. `SetupFlow::REQUIRED_SETTING_IDS_BY_STEP` names what each step will not let you walk past; a refused move writes the field error, drops focus off the action, and lands the cursor on the control that is missing.
+
+Backwards navigation is never gated — going back to re-read something is not a way to dodge the requirement — and `Esc` still skips the whole flow, because skipping is a deliberate confirmed choice rather than something you can do by leaning on a direction key. Schema validation normally runs only over settings the user actually changed — correct for `/config`, where an unrelated save must not fail on a field nobody edited — but it is also how setup used to reach Complete with `agent.head_harness` and `agent.worker_harness` still empty, write `outcome = "completed"`, and leave a dashboard that rejected the first prompt with "No agent harness is configured."
 
 `Settings::SetupFlow::REQUIRED_SETTING_IDS` names what completion cannot omit, and `Draft#validate(required_ids:)` checks those regardless of whether they changed. A missing harness moves setup to the Harness step and renders the field error, the same recovery path as any other validation failure. A confirmed first-run **skip** stays permissive: it deliberately writes only the marker and explicit experiment defaults.
 
@@ -46,6 +48,8 @@ The Project step's offer is applied as an ordinary `/project add <path> "<name>"
 - `Esc`: first-run skip or manual cancel, as described below.
 - Left-click: select controls, choose picker entries, or click the displayed **Next** or **Complete** navigation control. On the status-bar page, drag components within or between its left/right drop zones.
 - Mouse wheel: move the current list or status-bar component selection. Empty space and right-click remain inert.
+
+The navigation action shows when it is focused, as `› [ Next ] ‹` in the selection style (`> [ Next ] <` with `MERINGUE_ASCII_GLYPHS=1`). Without that, arrowing down onto it changed nothing on screen and pressing Enter was a guess.
 
 Every setup screen uses the same **Navigate** footer. The bordered card contains one centered **Begin**, **Next**, or **Complete** action; the redundant Back button is omitted because Backspace, Delete, and Shift-Tab already provide the documented backwards navigation, and the Welcome card's separate in-card "Begin Setup" row is gone because the footer action already started the flow.
 

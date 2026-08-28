@@ -125,27 +125,68 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert @app.instance_variable_get(:@settings_saving)
   end
 
-  def test_setup_cannot_complete_without_a_harness
+  # Holding Tab used to walk past every card and only refuse at the very end,
+  # which taught someone five screens too late that the second one mattered.
+  def test_the_harness_step_cannot_be_walked_past
     open_manual_setup
     send_key(ENTER)
-    5.times { send_key(TAB) } # straight to Done, choosing nothing
-    assert_equal "Done", setup_snapshot.fetch("category")
-
-    send_key(CTRL_S)
-
-    # No command left the overlay, and setup is still open on the step that
-    # cannot be skipped.
-    assert_empty submitted
-    assert @app.instance_variable_get(:@settings_active)
     assert_equal "Harness", setup_snapshot.fetch("category")
+
+    5.times { send_key(TAB) }
+
+    assert_equal "Harness", setup_snapshot.fetch("category"), "Tab must not escape the step"
     assert_includes setup_snapshot.fetch("rows").map { |row| row.fetch("error", "") }.join(" "), "required"
     assert_includes render, "required"
-    assert_equal 0, Meringue::Config.load(path: @config_path).onboarding_version
+    assert_empty submitted
+  end
+
+  # The refusal puts the cursor on the control that is missing, not on the
+  # action it just declined.
+  def test_a_refused_advance_focuses_the_setting_it_needs
+    open_manual_setup
+    send_key(ENTER)
+    snapshot_rows = setup_snapshot.fetch("rows")
+    snapshot_rows.length.times { send_key(DOWN) } # onto the navigation action
+    assert setup_snapshot.fetch("footer_focus")
+
+    send_key(ENTER)
+
+    refute setup_snapshot.fetch("footer_focus"), "focus should move off the refused action"
+    assert_equal "agent.head_harness", setup_snapshot.fetch("rows").fetch(setup_snapshot.fetch("row_index")).fetch("id")
+  end
+
+  # Choosing one satisfies both roles, so the step opens up immediately.
+  def test_choosing_a_harness_unblocks_the_step
+    open_manual_setup
+    send_key(ENTER)
+    send_key(TAB)
+    assert_equal "Harness", setup_snapshot.fetch("category")
+
+    choose_first_harness
+    send_key(TAB)
+
+    assert_equal "Project", setup_snapshot.fetch("category")
+  end
+
+  # The step gate makes Done unreachable without a harness, so this covers the
+  # backstop behind it: validation normally runs only over settings the user
+  # changed, and an untouched required field has to be checked anyway.
+  def test_completion_validation_checks_required_settings_that_were_never_touched
+    draft = Meringue::TUI::Settings::Draft.new(@config, env: {})
+    assert_empty draft.changes, "nothing has been edited"
+
+    refute draft.validate(required_ids: %w[agent.head_harness])
+    assert_includes draft.errors.fetch("agent.head_harness"), "required"
+
+    # Without the requirement it passes, which is what /config relies on.
+    assert draft.validate
+    assert_empty draft.errors
   end
 
   def test_back_revisits_a_step_without_losing_edits_and_manual_cancel_discards_everything
     open_manual_setup
     send_key(ENTER)
+    choose_first_harness
     2.times { send_key(TAB) } # Harness -> Project -> Theme
     send_key(ENTER)
     send_key(DOWN)
@@ -184,6 +225,7 @@ class TuiTransactionalSetupTest < Minitest::Test
   def test_first_run_escape_requires_confirmation_and_skip_excludes_draft_changes
     @app.send(:maybe_open_onboarding, -> { @state })
     send_key(ENTER)
+    choose_first_harness
     2.times { send_key(TAB) } # Harness -> Project -> Theme
     send_key(ENTER)
     send_key(DOWN)

@@ -381,7 +381,7 @@ module Meringue
 
           save_style = snap.fetch("saving", false) ? Style::DIM : Style::ACCENT_BOLD
           if snap.fetch("mode", "settings") == "setup"
-            return [[primary_label(snap), save_style == Style::DIM ? Style::DIM : Style::ACCENT_BOLD]]
+            return setup_action_segments(snap, dim: save_style == Style::DIM)
           end
           [[primary_label(snap), save_style], [" ", Style::DIM], [CANCEL_LABEL, Style::MUTED]]
         end
@@ -614,6 +614,19 @@ module Meringue
 
         def ascii_glyphs?
           defined?(Harness::Registry) && Harness::Registry.ascii_glyphs?
+        end
+
+        # Focus has to be visible on the action the same way it is on a row, or
+        # arrowing down to it looks like nothing happened and Enter becomes a
+        # guess. Selected reads as `› [ Next ] ‹` in the selection style; the
+        # markers carry it when color is off.
+        def setup_action_segments(snap, dim: false)
+          label = primary_label(snap)
+          return [[label, Style::DIM]] if dim
+          return [[label, Style::ACCENT_BOLD]] unless snap.fetch("footer_focus", false)
+
+          ascii = ascii_glyphs?
+          [["#{ascii ? ">" : "›"} #{label} #{ascii ? "<" : "‹"}", Style::AGENT_TREE_SELECTED]]
         end
 
         def primary_label(snap)
