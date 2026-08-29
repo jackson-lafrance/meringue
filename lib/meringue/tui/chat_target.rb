@@ -119,15 +119,10 @@ module Meringue
         title_style(state) || Style::ACCENT_BOLD
       end
 
-      # Placeholder for an empty composer. A targeted composer says who it will
-      # message; everything else keeps the familiar generic prompt.
-      # "enter a prompt" restated the widget. The placeholder is the one piece of
-      # copy every new user reads, so it shows the shape of a message that works.
-      def placeholder(state)
-        target = presentation(state)
-        return %(describe a goal, e.g. "fix the flaky signup test") unless target.fetch("targeted")
-
-        "message #{primary_label(target)}"
+      # Placeholder for an empty composer. The composer title identifies a
+      # selected destination, so the input itself can keep one simple prompt.
+      def placeholder(_state)
+        "Submit a prompt"
       end
 
       # Bottom hint line contribution: gestures only, never the target's
