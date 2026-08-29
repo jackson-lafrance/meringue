@@ -14,6 +14,13 @@ class InputGithubAccessCommandTest < Minitest::Test
     assert_empty command.payload
   end
 
+  def test_github_test_accepts_the_setup_draft_marker
+    command = @parser.parse("/github test --draft-support")
+
+    assert_equal "TestGitHubAccess", command.type
+    assert_equal true, command.payload.fetch("draft_github_support")
+  end
+
   def test_github_test_rejects_extra_arguments
     command = @parser.parse("/github test now")
 

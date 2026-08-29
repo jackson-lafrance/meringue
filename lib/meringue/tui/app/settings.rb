@@ -176,9 +176,12 @@ module Meringue
         {
           "testing" => "Testing…",
           "success" => "Ready",
+          "disabled" => "Disabled",
           "unavailable" => "Unavailable",
+          "missing_tooling" => "GitHub CLI missing",
           "unauthenticated" => "Not authenticated",
           "permission_denied" => "Permission denied",
+          "repository_read_failure" => "Repository not readable",
           "timeout" => "Timed out",
           "malformed_remote" => "Malformed remote"
         }.fetch(outcome.to_s, outcome.to_s.tr("_", " ").capitalize)
@@ -890,7 +893,11 @@ module Meringue
           "outcome" => "testing",
           "message" => "Testing GitHub authentication and read access…"
         }
-        submit_prompt("/github test", on_submit, state)
+        # Setup may test an opt-in before its draft is persisted. The marker is
+        # interpreted by the kernel only for this explicit command and does not
+        # mutate the saved configuration.
+        command = setup_mode? ? "/github test --draft-support" : "/github test"
+        submit_prompt(command, on_submit, state)
         true
       rescue StandardError => e
         @github_access_test_result = {

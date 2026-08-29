@@ -11,10 +11,14 @@ module Meringue
 
       def test_github_access(command_id, command_type, payload)
         enabled = synchronized_state { github_support_enabled?(normalized_state) }
+        # Setup sends this explicit marker while the user is editing the draft.
+        # It authorizes only this read-only diagnostic; it never changes the
+        # persisted setting or enables GitHub for other commands.
+        enabled ||= value_at(payload, "draft_github_support", "DraftGitHubSupport") == true
         unless enabled
           result = {
-            "outcome" => "unavailable",
-            "message" => "Enable GitHub support in Settings → Experiments before testing access."
+            "outcome" => "disabled",
+            "message" => "GitHub support is disabled. Enable it in Settings → Experiments before testing access."
           }
           return accepted_result(command_id, command_type, nil, result.fetch("message"), result, [])
         end
