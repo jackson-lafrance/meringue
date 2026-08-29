@@ -27,7 +27,8 @@ class InputSettingsSchemaStoreTest < Minitest::Test
   def test_preferred_editor_has_curated_presets_and_is_on_first_setup_page
     definition = Meringue::Config::Schema.fetch("workspace.editor")
 
-    assert_equal ["vim", "code --wait", "cursor --wait"], definition.option_values(empty_config)
+    assert_equal %w[vim nvim emacs cursor code], definition.option_values(empty_config)
+    refute definition.option_values(empty_config).any? { |command| command.include?("--wait") }
     assert_equal "editor_command", definition.editor
     assert definition.advanced, "the full Settings page keeps editor details advanced"
     assert_includes Meringue::TUI::Settings::SetupFlow.setting_ids(Meringue::TUI::Settings::SetupFlow::HARNESS), "workspace.editor"
@@ -38,6 +39,8 @@ class InputSettingsSchemaStoreTest < Minitest::Test
 
     assert_equal ["nvim", "--wait"], definition.default_value(empty_config, env: { "VISUAL" => "nvim --wait", "EDITOR" => "vi" })
     assert_equal ["emacs"], definition.default_value(empty_config, env: { "EDITOR" => "emacs" })
+    assert_equal ["code"], definition.validate_value("code", config: empty_config)
+    assert_equal ["emacs"], definition.validate_value("emacs", config: empty_config)
     assert_equal ["code", "--wait"], definition.validate_value("code --wait", config: empty_config)
   end
 

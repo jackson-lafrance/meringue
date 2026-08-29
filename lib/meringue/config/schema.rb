@@ -269,7 +269,10 @@ module Meringue
       ].freeze
       THINKING_LEVELS = %w[off minimal low medium high xhigh max].freeze
       PROVIDERS = %w[pi claude codex].freeze
-      EDITOR_PRESETS = ["vim", "code --wait", "cursor --wait"].freeze
+      # Keep the first-run list short and portable. GUI CLIs must not carry
+      # `--wait`: the workspace launcher detaches them, while terminal editors
+      # and custom commands remain available through the command editor.
+      EDITOR_PRESETS = %w[vim nvim emacs cursor code].freeze
       # The backend list is stored as ids and read as products. Setup and /config
       # both used to render the raw id twice ("pi  pi"), which told a first-time
       # user nothing about what they were choosing between.
