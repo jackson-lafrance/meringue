@@ -10,7 +10,7 @@ class TuiLayoutTest < Minitest::Test
 
   def setup
     @layout = Layout.new
-    @state = composed_state(demo_state)
+    @state = composed_state(tui_state)
   end
 
   def test_three_panes_render_at_the_default_size
@@ -310,7 +310,7 @@ class TuiLayoutTest < Minitest::Test
 
   def test_active_agent_workspace_replaces_the_dashboard
     workspace_state = composed_state(
-      demo_state,
+      tui_state,
       workspace: {
         "active" => true,
         "agent_id" => "P1-I1-W1",
@@ -335,7 +335,7 @@ class TuiLayoutTest < Minitest::Test
 
   def test_native_focus_replaces_only_logs_and_keeps_dashboard_panes_live
     workspace_state = composed_state(
-      demo_state,
+      tui_state,
       chat: { "input_buffer" => "monitor the other workers", "input_cursor" => 25 },
       workspace: {
         "active" => true,
@@ -555,7 +555,7 @@ class TuiLayoutTest < Minitest::Test
   end
 
   def test_focused_workspace_labels_effective_session_settings
-    state = demo_state
+    state = tui_state
     worker = state.fetch("agents").find { |agent| agent.fetch("id") == "P1-I1-W1" }
     worker["harness"] = "pi"
     worker["session_settings"] = {
@@ -589,7 +589,7 @@ class TuiLayoutTest < Minitest::Test
   private
 
   def state_with_input(buffer)
-    composed_state(demo_state, chat: { "input_buffer" => buffer, "input_cursor" => buffer.length })
+    composed_state(tui_state, chat: { "input_buffer" => buffer, "input_cursor" => buffer.length })
   end
 
   def composer_height(frame)

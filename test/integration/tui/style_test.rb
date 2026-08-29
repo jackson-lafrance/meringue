@@ -103,7 +103,7 @@ class TuiStyleTest < Minitest::Test
   end
 
   def test_every_colorscheme_renders_the_demo_dashboard_without_raising
-    state = composed_state(demo_state)
+    state = composed_state(tui_state)
 
     Style.colorschemes.each do |name|
       with_colorscheme(name) do

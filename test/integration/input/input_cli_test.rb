@@ -134,16 +134,6 @@ class InputCLITest < Minitest::Test
     end
   end
 
-  def test_demo_state_prints_the_fixture_as_json
-    result = run_cli(["demo-state"])
-
-    assert_equal 0, result.fetch("status")
-    state = JSON.parse(result.fetch("out"))
-    assert_kind_of Hash, state
-    assert state.key?("projects")
-    assert state.key?("agents")
-  end
-
   def test_reset_state_writes_an_empty_state_to_the_configured_state_path
     Dir.mktmpdir("meringue-cli-test") do |dir|
       state_path = File.join(dir, "state.json")

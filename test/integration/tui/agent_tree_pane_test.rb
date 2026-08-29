@@ -22,14 +22,14 @@ class TuiAgentTreePaneTest < Minitest::Test
 
   # Every row reads as status, id, title; harness glyphs are intentionally not
   # rendered or reserved in the AgentTree.
-  def test_demo_fixture_renders_a_filesystem_like_tree
-    rendered = plain_lines(@pane.lines(composed_state(demo_state), width: 34))
+  def test_tui_fixture_renders_a_filesystem_like_tree
+    rendered = plain_lines(@pane.lines(composed_state(tui_state), width: 34))
 
     assert_equal "HEADS", rendered.first
     assert_includes rendered, "  ├─ ● H1  Plan TUI rendering"
     assert_includes rendered, "  └─ ✓ H2  Classify dotfiles"
     assert_includes rendered.join("\n"), "● P1  Meringue"
-    assert_includes rendered.join("\n"), "  ├─ ● I1  Build fake TUI demo"
+    assert_includes rendered.join("\n"), "  ├─ ● I1  Build TUI rendering"
     assert_includes rendered.join("\n"), "    └─ ! W1  Wait for real"
     assert_includes rendered.join("\n"), "  │ ├─ ● W1  Draw three-pane"
     assert_includes rendered.join("\n"), "· P2  dotfiles"
@@ -82,7 +82,7 @@ class TuiAgentTreePaneTest < Minitest::Test
   end
 
   def test_render_matches_the_plain_text_of_the_segment_lines
-    state = composed_state(demo_state)
+    state = composed_state(tui_state)
 
     assert_equal plain_lines(@pane.lines(state, width: 34)).join("\n"), @pane.render(state, width: 34)
   end
@@ -546,7 +546,7 @@ class TuiAgentTreePaneTest < Minitest::Test
 
   def test_pane_lines_never_exceed_the_requested_width
     [20, 34, 42, 80].each do |width|
-      lines = plain_lines(@pane.lines(composed_state(demo_state), width: width))
+      lines = plain_lines(@pane.lines(composed_state(tui_state), width: width))
 
       assert lines.all? { |line| line.length <= width }, "width #{width}: #{lines.map(&:length).max}"
     end

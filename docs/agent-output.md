@@ -144,7 +144,3 @@ Two other surfaces reuse that same identity assignment, so one agent is one colo
 - **The chat composer.** While an AgentTree issue/agent is selected, the composer border, pane title, and `›` prompt marker take the selected node's palette entry, so the box you type into matches the tree row and log rows it will prompt. Typed input keeps its normal text style, and the composer pane title still names the target in plain text (the hint line below the chat bar carries gestures only, never the id). See [`docs/keybindings.md`](keybindings.md#the-composer-shows-its-target-by-color).
 
 Both cues survive `NO_COLOR` and limited color support: ids, harness glyphs, status glyphs, and the composer title text carry the same information without color.
-
-## Manual regression fixture
-
-`fixtures/demo_state.json` includes a completed worker whose stored assistant text contains ANSI styling, a duplicate Meringue header, an `output:` label, a titled box, and representative headings, emphasis, lists, a blockquote, inline code, a fenced code block, and a link. `bin/meringue demo` must show normalized, wrapped terminal Markdown without the transcript artifacts. The fixture exercises the same durable-log rendering path used for real completed workers.

@@ -9,7 +9,7 @@ require "stringio"
 # no raw mode is entered, no harness process is started, and nothing outside of a
 # caller-provided Dir.mktmpdir is written.
 module TUISupport
-  DEMO_STATE_PATH = File.expand_path("../../fixtures/demo_state.json", __dir__)
+  TUI_STATE_PATH = File.expand_path("../fixtures/tui_state.json", __dir__)
   ANSI_PATTERN = /\e\[[0-9;]*[A-Za-z]/
 
   # A non-interactive stand-in for TUI::Terminal. App#run takes the
@@ -83,9 +83,9 @@ module TUISupport
 
   module_function
 
-  # Fresh, mutable copy of the shipped demo fixture on every call.
-  def demo_state
-    JSON.parse(File.read(DEMO_STATE_PATH))
+  # Fresh, mutable copy of the TUI test fixture on every call.
+  def tui_state
+    JSON.parse(File.read(TUI_STATE_PATH))
   end
 
   def empty_state

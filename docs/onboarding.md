@@ -92,7 +92,6 @@ The old non-interactive `/setup complete` and `/setup skip` command spellings re
 
 Setup automatically opens only when:
 
-- a live kernel backs the TUI (`meringue demo` has none);
 - `[onboarding].completed_version` is below `1`;
 - stdin is interactive; and
 - the terminal is at least `32×10`, large enough to show recovery keys.

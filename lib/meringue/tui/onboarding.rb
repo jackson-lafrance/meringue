@@ -25,7 +25,7 @@ module Meringue
       end
 
       def unavailable_message
-        "Setup needs a live kernel. Run meringue (not meringue demo) to choose your defaults."
+        "Setup needs a live kernel. Run meringue to choose your defaults."
       end
 
       def collapsed_message

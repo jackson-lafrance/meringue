@@ -99,7 +99,7 @@ class TuiChatPaneTest < Minitest::Test
   end
 
   def test_bottom_hint_line_reports_active_agents_open_questions_and_pending_prompts
-    demo = plain_line(@pane.bottom_hint_line(composed_state(demo_state)))
+    demo = plain_line(@pane.bottom_hint_line(composed_state(tui_state)))
 
     # The lit dot plus the counts carry the meaning; the word "active" did not.
     assert_includes demo, "● 1W 1H"
@@ -118,7 +118,7 @@ class TuiChatPaneTest < Minitest::Test
   end
 
   def test_answered_questions_are_not_counted_in_the_hint_line
-    state = demo_state
+    state = tui_state
     state["questions"].each { |question| question["status"] = "answered" }
 
     refute_includes plain_line(@pane.bottom_hint_line(composed_state(state))), "? "
@@ -412,7 +412,7 @@ class TuiChatPaneTest < Minitest::Test
   def test_composer_lines_never_exceed_the_pane_width_after_canvas_clipping
     buffer = "y" * 400
     state = chat_state(buffer)
-    frame_lines = render_lines(composed_state(demo_state, chat: { "input_buffer" => buffer, "input_cursor" => buffer.length }), width: 100, height: 32)
+    frame_lines = render_lines(composed_state(tui_state, chat: { "input_buffer" => buffer, "input_cursor" => buffer.length }), width: 100, height: 32)
 
     assert_equal [100], frame_lines.map(&:length).uniq
     assert_operator @pane.composer_row_spans(state, width: 96).length, :>, 1

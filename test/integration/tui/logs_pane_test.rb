@@ -43,7 +43,7 @@ class TuiLogsPaneTest < Minitest::Test
   end
 
   def test_render_matches_the_plain_text_of_the_log_lines
-    state = composed_state(demo_state)
+    state = composed_state(tui_state)
 
     assert_equal plain_lines(@pane.log_lines(state)).join("\n"), @pane.render(state)
     assert_equal @pane.log_lines(state, width: 60), @pane.lines(state, width: 60)
@@ -387,7 +387,7 @@ class TuiLogsPaneTest < Minitest::Test
   end
 
   def test_log_lines_are_cached_until_presentation_state_changes
-    state = composed_state(demo_state)
+    state = composed_state(tui_state)
     first = @pane.log_lines(state, width: 60)
 
     assert_same first, @pane.log_lines(state, width: 60)
@@ -423,15 +423,15 @@ class TuiLogsPaneTest < Minitest::Test
   end
 
   def test_typing_does_not_invalidate_the_log_line_cache
-    state = composed_state(demo_state)
+    state = composed_state(tui_state)
     first = @pane.log_lines(state, width: 60)
-    typed = composed_state(demo_state, chat: { "input_buffer" => "typing", "input_cursor" => 6 })
+    typed = composed_state(tui_state, chat: { "input_buffer" => "typing", "input_cursor" => 6 })
 
     assert_same first, @pane.log_lines(typed, width: 60)
   end
 
   def test_agent_timestamp_changes_do_not_invalidate_the_log_line_cache
-    state = composed_state(demo_state)
+    state = composed_state(tui_state)
     first = @pane.log_lines(state, width: 60)
     updated_agents = state.fetch("agents").map do |agent|
       agent.merge("updated_at" => "2026-07-11T00:10:00Z")
@@ -534,8 +534,8 @@ class TuiLogsPaneTest < Minitest::Test
     assert_includes frame, "red"
   end
 
-  def test_demo_fixture_renders_normalized_markdown_without_transcript_artifacts
-    frame = render_frame(composed_state(demo_state), width: 100, height: 32)
+  def test_tui_fixture_renders_normalized_markdown_without_transcript_artifacts
+    frame = render_frame(composed_state(tui_state), width: 100, height: 32)
 
     assert_includes frame, "# Vim explorer delivered"
     assert_includes frame, "• Preserved existing keybindings"

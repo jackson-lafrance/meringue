@@ -9,13 +9,13 @@ class TuiAgentTreeNavigationTest < Minitest::Test
   Navigation = Meringue::TUI::AgentTreeNavigation
 
   def test_selectable_ids_follow_the_rendered_tree_order
-    ids = Navigation.selectable_agent_ids(composed_state(demo_state))
+    ids = Navigation.selectable_agent_ids(composed_state(tui_state))
 
     assert_equal %w[H1 H2 P1-I1 P1-I1-W1 P1-I1-W2 P1-I2 P1-I2-W1 P1-I3 P1-I3-W1 P2-I1 P2-I1-W1], ids
   end
 
   def test_selectable_ids_match_the_rendered_rows
-    state = composed_state(demo_state)
+    state = composed_state(tui_state)
     rendered_ids = Meringue::TUI::Panes::AgentTreePane.new.line_item_ids(state, width: 34).compact.uniq
 
     project_ids = state.fetch("projects").map { |project| project.fetch("id") }
@@ -51,7 +51,7 @@ class TuiAgentTreeNavigationTest < Minitest::Test
     )
 
     assert_equal %w[H1 P1-I1], Navigation.selectable_pr_agent_ids(state)
-    assert_empty Navigation.selectable_pr_agent_ids(composed_state(demo_state))
+    assert_empty Navigation.selectable_pr_agent_ids(composed_state(tui_state))
   end
 
   def test_sort_key_orders_numerically_and_falls_back_to_the_raw_id
@@ -61,10 +61,10 @@ class TuiAgentTreeNavigationTest < Minitest::Test
   end
 
   def test_navigation_snapshot_accessors_default_to_inactive
-    assert_nil Navigation.selected_agent_id(composed_state(demo_state))
-    refute Navigation.active?(composed_state(demo_state))
+    assert_nil Navigation.selected_agent_id(composed_state(tui_state))
+    refute Navigation.active?(composed_state(tui_state))
 
-    active = composed_state(demo_state, navigation: { "active" => true, "selected_agent_id" => "H1" })
+    active = composed_state(tui_state, navigation: { "active" => true, "selected_agent_id" => "H1" })
     assert_equal "H1", Navigation.selected_agent_id(active)
     assert Navigation.active?(active)
   end

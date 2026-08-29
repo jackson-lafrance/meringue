@@ -40,8 +40,7 @@ module Meringue
           ["  You watch the tree", :text],
           ["    and jump into an agent only when you actually want to", :muted],
           ["", :blank],
-          ["Esc skips setup and /setup reopens it. To look around a populated", :dim],
-          ["dashboard first, quit and run: meringue demo", :dim]
+          ["Esc skips setup and /setup reopens it when you are ready.", :dim]
         ].freeze
 
         def active?(state)

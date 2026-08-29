@@ -154,15 +154,15 @@ class StateStorePersistenceTest < Minitest::Test
     end
   end
 
-  def test_demo_state_fixture_loads_tolerantly_without_being_rewritten
+  def test_tui_state_fixture_loads_tolerantly_without_being_rewritten
     with_state_dir do |dir|
       path = File.join(dir, "state.json")
-      FileUtils.cp(DEMO_STATE_FIXTURE, path)
-      fixture = read_state_file(DEMO_STATE_FIXTURE)
+      FileUtils.cp(TUI_STATE_FIXTURE, path)
+      fixture = read_state_file(TUI_STATE_FIXTURE)
 
       state = Store.new(path: path).load
 
-      assert_equal read_state_file(DEMO_STATE_FIXTURE), read_state_file(path), "loading must not rewrite the file"
+      assert_equal read_state_file(TUI_STATE_FIXTURE), read_state_file(path), "loading must not rewrite the file"
       assert_equal fixture.fetch("projects").length, state.fetch("projects").length
       assert_equal fixture.fetch("issues").length, state.fetch("issues").length
       assert_equal fixture.fetch("agents").length, state.fetch("agents").length
@@ -181,10 +181,10 @@ class StateStorePersistenceTest < Minitest::Test
     end
   end
 
-  def test_demo_state_fixture_round_trips_through_save_and_load
+  def test_tui_state_fixture_round_trips_through_save_and_load
     with_state_dir do |dir|
       path = File.join(dir, "state.json")
-      FileUtils.cp(DEMO_STATE_FIXTURE, path)
+      FileUtils.cp(TUI_STATE_FIXTURE, path)
       store = Store.new(path: path)
 
       loaded = store.load

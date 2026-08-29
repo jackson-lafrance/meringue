@@ -4,8 +4,6 @@ require "json"
 
 module Meringue
   class App
-    DEMO_STATE_PATH = Meringue.root_path("fixtures", "demo_state.json")
-
     RECONCILE_INTERVAL = 2.0
     # Reconciliation is background bookkeeping. Ruby's GVL means its JSON/state
     # work can otherwise win scheduling quanta from the input/render thread even

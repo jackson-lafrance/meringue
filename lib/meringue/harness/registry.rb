@@ -204,7 +204,7 @@ module Meringue
       # 1. a shipped provider's mark (or its ASCII twin under
       #    MERINGUE_ASCII_GLYPHS);
       # 2. a plain ASCII initial for a provider Meringue does not ship, such as
-      #    the `fake` harness used by the demo fixture and the test suite, so an
+      #    the `fake` harness used by the test suite, so an
       #    unknown backend never masquerades as a shipped one;
       # 3. "?" when the record carries no harness at all.
       #
