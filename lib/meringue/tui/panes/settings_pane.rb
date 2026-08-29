@@ -296,6 +296,8 @@ module Meringue
                       "#{visible_settings} setting#{visible_settings == 1 ? "" : "s"} · #{hidden_advanced} advanced hidden"
                     elsif rows.empty?
                       "No settings in this category"
+                    elsif visible.length >= rows.length
+                      ""
                     else
                       "#{start + 1}–#{start + visible.length} of #{rows.length} settings"
                     end
@@ -491,10 +493,11 @@ module Meringue
           description = selected_row ? selected_row.fetch("description", "").to_s : setup_action_description(snap)
           lines = wrap(intro, [width.to_i, 8].max).first(2).map { |line| [[line, Style::MUTED]] }
           lines << [["", Style::DIM]]
-          unless description.empty?
-            lines << [[wrap(description, [width.to_i, 8].max).first.to_s, Style::DIM]]
-            lines << [["", Style::DIM]]
-          end
+          # Keep a fixed two-line description slot for every selected row. Some
+          # controls (notably the guided prompt editor) intentionally have no
+          # description; removing the slot makes focus reflow the whole card.
+          lines << [[wrap(description, [width.to_i, 8].max).first.to_s, Style::DIM]]
+          lines << [["", Style::DIM]]
           lines
         end
 
@@ -579,7 +582,7 @@ module Meringue
         end
 
         def setup_counter(total, start, visible, snap)
-          return "" if total.zero? || Settings::SetupFlow.narrative?(snap.fetch("category", ""))
+          return "" if total.zero? || visible >= total || Settings::SetupFlow.narrative?(snap.fetch("category", ""))
 
           "#{start + 1}–#{start + visible} of #{total}"
         end
@@ -689,7 +692,13 @@ module Meringue
             lines: lines.first([height.to_i, 1].max),
             window_start: start,
             visible_count: visible.length,
-            counter: options.empty? ? "No choices available" : "#{start + 1}–#{start + visible.length} of #{options.length}",
+            counter: if options.empty?
+                       "No choices available"
+                     elsif visible.length >= options.length
+                       ""
+                     else
+                       "#{start + 1}–#{start + visible.length} of #{options.length}"
+                     end,
             selected_row: row
           }
         end
