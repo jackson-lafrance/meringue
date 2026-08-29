@@ -15,6 +15,7 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
   ENTER = "\r"
   TAB = "\t"
   DOWN = "\e[B"
+  UP = "\e[A"
 
   def setup
     @tmpdir = Dir.mktmpdir("meringue-setup-harness")
@@ -285,6 +286,112 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
 
       assert_equal 1, drain_submitted.length
     end
+  end
+
+  # Arrowing onto the action used to change nothing on screen, so you could not
+  # tell what Enter was about to do.
+  def test_the_navigation_action_shows_when_it_is_focused
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+
+    focused = @layout.send(:settings_pane).action_segments(compose)
+    assert_equal ["› [ Begin ] ‹"], focused.map(&:first), "Welcome has no rows, so its action is focused"
+    assert_includes render, "› [ Begin ] ‹"
+
+    send_key(ENTER) # Harness, which does have rows
+    unfocused = @layout.send(:settings_pane).action_segments(compose)
+    assert_equal ["[ Next ]"], unfocused.map(&:first)
+
+    snapshot.fetch("rows").length.times { send_key(DOWN) }
+    assert snapshot.fetch("footer_focus")
+    assert_equal ["› [ Next ] ‹"], @layout.send(:settings_pane).action_segments(compose).map(&:first)
+  end
+
+  # Two things reading as selected at once left it ambiguous what Enter would do,
+  # because the row index is deliberately kept so arrowing back returns to it.
+  def test_focusing_the_action_deselects_the_list
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+    send_key(ENTER) # Harness
+    focus_setup_row("agent.head_harness")
+
+    assert_equal 1, render.scan("\u203a").length, "the selected row carries the only marker"
+    assert_includes render, "\u00b7 Enter open picker"
+
+    snapshot.fetch("rows").length.times { send_key(DOWN) }
+    assert snapshot.fetch("footer_focus")
+    focused = render
+    assert_equal 1, focused.scan("\u203a").length, "the action carries the only marker"
+    assert_includes focused, "\u203a [ Next ] \u2039"
+    refute_includes focused, "\u00b7 Enter open picker", "no row offers its control while the action has focus"
+  end
+
+  # Deselecting the list must not lose the place in it.
+  def test_arrowing_back_off_the_action_returns_to_the_row_it_left
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+    send_key(ENTER)
+    last = snapshot.fetch("rows").length - 1
+    snapshot.fetch("rows").length.times { send_key(DOWN) }
+    assert snapshot.fetch("footer_focus")
+
+    send_key(UP)
+    refute snapshot.fetch("footer_focus")
+    assert_equal last, @app.instance_variable_get(:@settings_row_index)
+  end
+
+  # The slot that describes the selected row cannot go on describing one once
+  # nothing is selected, and emptying it would reflow the card as focus lands.
+  def test_the_description_follows_focus_onto_the_action
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+    send_key(ENTER)
+    focus_setup_row("agent.head_harness")
+    before = render.lines.length
+
+    snapshot.fetch("rows").length.times { send_key(DOWN) }
+
+    assert_includes render, "Next: #{Meringue::TUI::Settings::SetupFlow::PROJECT}."
+    assert_equal before, render.lines.length, "the card must not reflow as focus lands on the action"
+  end
+
+  # The markers carry the state when color is off, and stay ASCII-safe.
+  def test_the_focused_action_survives_ascii_glyph_mode
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+
+    with_env("MERINGUE_ASCII_GLYPHS" => "1") do
+      assert_equal ["> [ Begin ] <"], @layout.send(:settings_pane).action_segments(compose).map(&:first)
+    end
+  end
+
+  # The whole point of the gate: holding a direction key must not walk past a
+  # decision Meringue cannot run without.
+  def test_arrowing_to_the_action_cannot_walk_past_the_harness_step
+    @app = build_app(availability: availability("claude" => :installed, "codex" => :installed, "pi" => :installed))
+    open_setup
+    send_key(ENTER)
+    assert_equal "Harness", snapshot.fetch("category")
+
+    6.times do
+      snapshot.fetch("rows").length.times { send_key(DOWN) }
+      send_key(ENTER)
+    end
+
+    assert_equal "Harness", snapshot.fetch("category")
+    assert_empty drain_submitted
+  end
+
+  # Esc is still the way out, because skipping is a deliberate confirmed choice
+  # rather than something you do by leaning on a key.
+  def test_the_gate_does_not_block_going_backwards
+    @app = build_app(availability: availability("claude" => :installed, "codex" => :installed, "pi" => :installed))
+    open_setup
+    send_key(ENTER)
+    assert_equal "Harness", snapshot.fetch("category")
+
+    send_key("\u007f") # Backspace
+    assert_equal "Welcome", snapshot.fetch("category")
   end
 
   # The last card is what makes Complete checkable rather than hopeful.

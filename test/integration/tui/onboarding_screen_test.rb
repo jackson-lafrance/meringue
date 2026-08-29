@@ -68,6 +68,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     refute_includes frame, "Continue"
 
     send_key(ENTER)
+    satisfy_harness_step
     4.times { send_key(TAB) }
     snap = snapshot
     assert_equal "Experiments", snap.fetch("category")
@@ -82,6 +83,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
   def test_experiment_checkboxes_are_registry_derived_and_mouse_toggleable
     open_setup
     send_key(ENTER)
+    satisfy_harness_step
     4.times { send_key(TAB) }
     assert_equal "Experiments", snapshot.fetch("category")
     assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, snapshot.fetch("rows").map { |row| row.fetch("id") }
@@ -135,6 +137,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     send_key(RIGHT)
     assert_equal "Harness", snapshot.fetch("category")
     refute snapshot.fetch("dirty")
+    satisfy_harness_step
     snapshot.fetch("rows").length.times { send_key("\e[B") } # focus the navigation footer
     assert snapshot.fetch("footer_focus")
     send_key(ENTER)
@@ -147,6 +150,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     send_key(RIGHT)
     assert_equal "Welcome", snapshot.fetch("category")
     send_key(ENTER)
+    satisfy_harness_step
     send_key(TAB)
     assert_equal "Project", snapshot.fetch("category")
     send_key(BACKSPACE)
@@ -158,6 +162,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
   def test_focused_controls_use_contextual_hints_and_enter_opens_pickers
     open_setup
     send_key(ENTER)
+    satisfy_harness_step
     2.times { send_key(TAB) }
     assert_equal "Theme", snapshot.fetch("category")
     assert_includes render, "Enter open picker"
@@ -228,13 +233,15 @@ class TuiSetupOverlayScreenTest < Minitest::Test
   def test_setup_has_one_centered_next_action_and_keeps_the_backspace_keybinding
     open_setup
     send_key(ENTER) # Harness
+    satisfy_harness_step
     rows = snapshot.fetch("rows")
     (rows.length - 1).times { send_key(DOWN) }
     send_key(DOWN)
 
     assert snapshot.fetch("footer_focus")
     assert_equal "next", snapshot.fetch("footer_button")
-    assert_equal ["[ Next ]"], @layout.send(:settings_pane).action_segments(compose).map(&:first)
+    assert_equal ["› [ Next ] ‹"], @layout.send(:settings_pane).action_segments(compose).map(&:first),
+                 "the focused action has to look focused"
     refute_includes render, "[ Back ]"
     send_key(LEFT)
     assert_equal "next", snapshot.fetch("footer_button")
@@ -295,6 +302,15 @@ class TuiSetupOverlayScreenTest < Minitest::Test
   def open_setup
     send_key(ENTER, input_buffer: "/setup")
     assert_equal "setup", snapshot.fetch("mode")
+  end
+
+  # Setup will not advance past the harness step until one is chosen, so any test
+  # that navigates through it has to satisfy that first. Choosing through the
+  # picker is covered separately; this just sets the value.
+  def satisfy_harness_step
+    draft = @app.instance_variable_get(:@settings_draft)
+    draft.set("agent.head_harness", "pi")
+    draft.set("agent.worker_harness", "pi")
   end
 
   # Model and reasoning sit behind the advanced reveal on the harness step.

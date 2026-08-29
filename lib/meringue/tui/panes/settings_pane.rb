@@ -193,7 +193,9 @@ module Meringue
           rows = Array(snap.fetch("rows", []))
           selected = snap.fetch("row_index", 0).to_i.clamp(0, [rows.length - 1, 0].max)
           editing_inline = inline_guidance_editor_active?(snap)
-          preamble = editing_inline ? [] : setup_preamble(snap, rows[selected], width: content_width)
+          on_action = snap.fetch("footer_focus", false)
+          described = on_action ? nil : rows[selected]
+          preamble = editing_inline ? [] : setup_preamble(snap, described, width: content_width)
           content_y = card.fetch(:y) + 6
           action_y = geometry.fetch(:action_y)
           content_limit = [action_y - content_y, 0].max
@@ -202,8 +204,11 @@ module Meringue
           capacity = [action_y - row_y - inline_height, 1].max
           start = window_start(rows.length, selected, capacity)
           visible = rows.drop(start).first(capacity)
+          # Focus is in one place at a time. With the action focused nothing in
+          # the list is selected, even though the index is kept so arrowing back
+          # up returns to the row it left rather than to the top.
           lines = preamble + visible.map.with_index do |row, offset|
-            setup_row_line(row, selected: start + offset == selected, width: content_width)
+            setup_row_line(row, selected: !on_action && start + offset == selected, width: content_width)
           end
           if inline_guidance_editor?(snap)
             editor_capacity = [content_limit - lines.length, 3].max
@@ -381,7 +386,7 @@ module Meringue
 
           save_style = snap.fetch("saving", false) ? Style::DIM : Style::ACCENT_BOLD
           if snap.fetch("mode", "settings") == "setup"
-            return [[primary_label(snap), save_style == Style::DIM ? Style::DIM : Style::ACCENT_BOLD]]
+            return setup_action_segments(snap, dim: save_style == Style::DIM)
           end
           [[primary_label(snap), save_style], [" ", Style::DIM], [CANCEL_LABEL, Style::MUTED]]
         end
@@ -505,7 +510,7 @@ module Meringue
           return done_lines(snap, intro, width: width) if category == Settings::SetupFlow::DONE
           return status_bar_lines(snap, intro, width: width) if category == Settings::SetupFlow::STATUS_BAR
 
-          description = selected_row ? selected_row.fetch("description", "").to_s : ""
+          description = selected_row ? selected_row.fetch("description", "").to_s : setup_action_description(snap)
           lines = wrap(intro, [width.to_i, 8].max).first(2).map { |line| [[line, Style::MUTED]] }
           lines << [["", Style::DIM]]
           unless description.empty?
@@ -513,6 +518,17 @@ module Meringue
             lines << [["", Style::DIM]]
           end
           lines
+        end
+
+        # The slot that describes the selected row describes the action once the
+        # action is what has focus: a row nobody selected should not be the thing
+        # explaining itself. It stays filled rather than collapsing so arrowing
+        # onto the action does not reflow the card underneath the cursor.
+        def setup_action_description(snap)
+          steps = Settings::SetupFlow.steps
+          index = steps.index(snap.fetch("category", ""))
+          destination = index && steps[index + 1]
+          destination ? "Next: #{destination}." : ""
         end
 
         # The default layout, spelled out. The drag surface is one keystroke away
@@ -614,6 +630,19 @@ module Meringue
 
         def ascii_glyphs?
           defined?(Harness::Registry) && Harness::Registry.ascii_glyphs?
+        end
+
+        # Focus has to be visible on the action the same way it is on a row, or
+        # arrowing down to it looks like nothing happened and Enter becomes a
+        # guess. Selected reads as `› [ Next ] ‹` in the selection style; the
+        # markers carry it when color is off.
+        def setup_action_segments(snap, dim: false)
+          label = primary_label(snap)
+          return [[label, Style::DIM]] if dim
+          return [[label, Style::ACCENT_BOLD]] unless snap.fetch("footer_focus", false)
+
+          ascii = ascii_glyphs?
+          [["#{ascii ? ">" : "›"} #{label} #{ascii ? "<" : "‹"}", Style::AGENT_TREE_SELECTED]]
         end
 
         def primary_label(snap)

@@ -694,6 +694,8 @@ module Meringue
         count = settings_categories.length
         return if count.zero?
 
+        return if setup_mode? && delta.to_i.positive? && block_setup_advance?
+
         @settings_category_index = if setup_mode?
                                      (@settings_category_index.to_i + delta.to_i).clamp(0, count - 1)
                                    else

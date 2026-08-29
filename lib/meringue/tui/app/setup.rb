@@ -173,6 +173,37 @@ module Meringue
         nil
       end
 
+      # What this step will not let you walk past, as {setting_id => message}.
+      # Empty for every step that has no required settings, which is all of them
+      # but Harness.
+      def setup_step_blockers(step = settings_category)
+        return {} unless @settings_draft
+
+        Settings::SetupFlow.required_setting_ids(step).each_with_object({}) do |id, blockers|
+          next unless @settings_draft.value(id).to_s.strip.empty?
+
+          blockers[id] = "#{Config::Schema.fetch(id).label} is required — Meringue cannot start an agent without it."
+        end
+      rescue KeyError
+        {}
+      end
+
+      # Refuses a forward move and shows why, on the control that is missing.
+      # Backwards navigation is never gated: going back to re-read something is
+      # not a way to dodge the requirement.
+      def block_setup_advance?
+        blockers = setup_step_blockers
+        return false if blockers.empty?
+
+        @settings_draft.errors.merge!(blockers)
+        # Land the cursor on the control that is missing rather than leaving it
+        # on the action that was just refused.
+        @settings_footer_focus = false
+        focus_setup_setting(blockers.keys.first)
+        @force_full_redraw = true
+        true
+      end
+
       def harness_availability_snapshot
         return nil unless @harness_availability_provider
 
