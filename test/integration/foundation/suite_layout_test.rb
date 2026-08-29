@@ -106,7 +106,7 @@ class FoundationSuiteLayoutTest < Minitest::Test
       assert_includes spec.files, path
     end
 
-    %w[AGENTS.md bin/meringue-record docs/testing.md fixtures/config.example.toml].each do |path|
+    %w[AGENTS.md docs/testing.md fixtures/config.example.toml].each do |path|
       refute_includes spec.files, path
     end
   end

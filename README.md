@@ -142,7 +142,6 @@ lib/meringue/shim.rb               # the launcher both install paths write to pu
 Gemfile                            # Bundler setup for running the executable from a clone
 meringue.gemspec                   # local gem metadata that exposes the meringue executable
 bin/meringue                       # executable CLI entrypoint
-bin/meringue-record                # macOS proof-video helper
 lib/meringue/cli.rb                # command parsing and runtime setup
 lib/meringue/doctor.rb             # meringue doctor: environment checks and their fixes
 lib/meringue/app.rb                # TUI application lifecycle
@@ -163,7 +162,6 @@ docs/commands.md                   # the complete slash-command inventory and da
 docs/config.md                     # config and harness provider reference
 docs/releasing.md                  # RubyGems release gates and Homebrew strategy
 docs/settings.md                   # full-screen settings, persistence, experiments, and shared setup UI
-docs/video-recording.md             # macOS proof-video workflow
 docs/commit-authorship.md          # worker commit identity policy and history audit
 docs/delivery-artifact-privacy.md  # branch, commit, and PR metadata privacy policy
 docs/head_agent_kernel_commands.md # compact head-agent command contract
