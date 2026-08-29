@@ -293,6 +293,18 @@ class TuiModelPickerTest < Minitest::Test
     assert_equal selected, Meringue::TUI::Style.current_colorscheme
   end
 
+  def test_hovering_a_theme_previews_it_without_submitting
+    Meringue::TUI::Style.configure!("meringue")
+    picker = open_picker("/theme")
+    row = screen_position_for_row(picker, 2)
+
+    send_key(mouse_motion_event(row))
+
+    assert_equal "kanagawa", Meringue::TUI::Style.current_colorscheme
+    assert @pane.model_picker?(compose)
+    assert_empty @submitted
+  end
+
   def test_harness_opens_in_the_shared_role_popup
     picker = open_picker("/harness")
 
@@ -569,6 +581,10 @@ class TuiModelPickerTest < Minitest::Test
 
   def press_event(position)
     { "type" => "mouse", "kind" => "button", "pressed" => true, "button" => 0 }.merge(position)
+  end
+
+  def mouse_motion_event(position)
+    { "type" => "mouse", "kind" => "motion", "pressed" => true, "button" => 32 }.merge(position)
   end
 
   def screen_position_for_row(state, index)
