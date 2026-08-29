@@ -23,7 +23,10 @@ class TuiSettingsOverlayTest < Minitest::Test
   ENTER = "\r"
   ESC = "\e"
   DOWN = "\e[B"
+  SHIFT_UP = "\e[1;2A"
+  SHIFT_DOWN = "\e[1;2B"
   RIGHT = "\e[C"
+  LEFT = "\e[D"
   UP = "\e[A"
   TAB = "\t"
   SHIFT_TAB = "\e[Z"
@@ -68,7 +71,54 @@ class TuiSettingsOverlayTest < Minitest::Test
     assert_includes frame, "Agent defaults"
     assert_includes frame, "Head harness"
     refute_includes frame, "Configuration (read-only)"
+    refute_includes frame, "Setup"
+    refute_includes frame, "File"
+    refute_includes frame, "  file"
     assert_equal "settings", @layout.pane_at(composed, width: 100, height: 30, x: 1, y: 1)
+  end
+
+  def test_command_defaults_display_the_current_effective_settings
+    draft = Meringue::TUI::Settings::Draft.new(@config, env: { "SHELL" => "/bin/fish", "EDITOR" => "nvim" })
+    shell = draft.row(Meringue::Config::Schema.fetch("workspace.shell"))
+    editor = draft.row(Meringue::Config::Schema.fetch("workspace.editor"))
+
+    assert_equal "/bin/fish", shell.fetch("value")
+    assert_equal shell.fetch("value"), shell.fetch("default_value")
+    assert_equal "nvim", editor.fetch("value")
+    assert_equal editor.fetch("value"), editor.fetch("default_value")
+  end
+
+  def test_shift_arrows_jump_between_sections_while_plain_arrows_move_rows
+    @app.send(:open_settings, @state)
+    categories = @app.send(:settings_categories)
+    assert_equal "Agent defaults", categories.fetch(0)
+
+    @app.instance_variable_set(:@settings_row_index, 1)
+    send_key(SHIFT_UP)
+    assert_equal 0, @app.instance_variable_get(:@settings_category_index)
+    assert_equal 1, @app.instance_variable_get(:@settings_row_index), "the first-section boundary should not wrap"
+
+    send_key(SHIFT_DOWN)
+    assert_equal "Appearance", @app.send(:settings_category)
+    assert_equal 0, @app.instance_variable_get(:@settings_row_index)
+
+    send_key(DOWN)
+    assert_equal 1, @app.instance_variable_get(:@settings_row_index), "plain Down moves one row"
+
+    send_key(SHIFT_DOWN)
+    assert_equal "Experiments", @app.send(:settings_category)
+    assert_equal 0, @app.instance_variable_get(:@settings_row_index)
+
+    send_key(SHIFT_UP)
+    assert_equal "Appearance", @app.send(:settings_category)
+    assert_equal @app.send(:settings_rows).length - 1, @app.instance_variable_get(:@settings_row_index)
+
+    last_category = categories.length - 1
+    @app.instance_variable_set(:@settings_category_index, last_category)
+    @app.instance_variable_set(:@settings_row_index, 1)
+    send_key(SHIFT_DOWN)
+    assert_equal last_category, @app.instance_variable_get(:@settings_category_index)
+    assert_equal 1, @app.instance_variable_get(:@settings_row_index), "the last-section boundary should not wrap"
   end
 
   def test_text_compatibility_form_keeps_the_diagnostic_dump
@@ -126,6 +176,25 @@ class TuiSettingsOverlayTest < Minitest::Test
     assert_equal "SaveConfiguration", command.type
     assert_equal({ "experiments.github_support" => true }, command.payload.fetch("changes"))
     assert_equal @config.fingerprint, command.payload.fetch("base_fingerprint")
+  end
+
+  def test_left_and_right_only_change_supported_focused_settings
+    @app.send(:open_settings, @state)
+    send_key(TAB) # Appearance
+    assert_equal "Appearance", @app.send(:settings_category)
+    assert_equal "appearance.theme", @app.send(:selected_settings_row).fetch("id")
+
+    send_key(RIGHT)
+    assert_equal "Appearance", @app.send(:settings_category)
+    assert_equal "appearance.theme", @app.send(:selected_settings_row).fetch("id")
+
+    send_key(DOWN) # animation checkbox
+    before = @app.send(:selected_settings_row).fetch("value")
+    send_key(RIGHT)
+    send_key(LEFT)
+    assert_equal "Appearance", @app.send(:settings_category)
+    assert_equal "appearance.animations", @app.send(:selected_settings_row).fetch("id")
+    assert_equal before, @app.send(:selected_settings_row).fetch("value")
   end
 
   def test_theme_preview_is_restored_after_confirmed_discard
@@ -193,14 +262,20 @@ class TuiSettingsOverlayTest < Minitest::Test
     assert_empty opener.urls
   end
 
-  def test_advanced_rows_are_collapsed_but_every_schema_row_is_reachable_once
+  def test_advanced_rows_are_collapsed_but_every_config_schema_row_is_reachable_once
     @app.send(:open_settings, @state)
     draft = @app.instance_variable_get(:@settings_draft)
     visible_ids = draft.categories.flat_map { |category| draft.definitions_for(category, include_advanced: true).map(&:id) }
 
-    expected_ids = draft.definitions.map(&:id).reject { |id| id == "experiments.worker_spawning_guidance_prompt" }.sort
+    expected_ids = draft.definitions.map(&:id).reject do |id|
+      id == "experiments.worker_spawning_guidance_prompt" || id.start_with?("setup.") || id.start_with?("runtime.")
+    end.sort
     assert_equal expected_ids, visible_ids.sort
-    assert_includes draft.definitions.map(&:id), "experiments.worker_spawning_guidance_prompt"
+    assert_includes draft.definitions.map(&:id), "setup.run_again"
+    refute_includes draft.categories, "Setup"
+    assert_includes draft.categories, "Keybindings"
+    assert_includes visible_ids, "keybindings.quit"
+    assert_includes visible_ids, "workspace.editor"
     refute_includes visible_ids, "experiments.worker_spawning_guidance_prompt"
     assert_equal visible_ids.length, visible_ids.uniq.length
 
@@ -275,8 +350,8 @@ class TuiSettingsOverlayTest < Minitest::Test
     @app.send(:open_settings, @state)
     6.times { send_key(TAB) }
     assert_equal "Keybindings", @app.send(:settings_category)
-    send_key("a") # every keybinding row is advanced; the reveal keeps the cursor
-    assert_equal "_show_advanced", @app.send(:selected_settings_row).fetch("id")
+    refute @app.send(:settings_snapshot).fetch("advanced_available")
+    assert_equal "keybindings.quit", @app.send(:selected_settings_row).fetch("id")
     @app.instance_variable_set(:@settings_row_index, @app.send(:settings_rows).index { |row| row.fetch("id") == "keybindings.quit" })
     row = @app.send(:selected_settings_row)
     assert_equal "keybindings.quit", row.fetch("id")

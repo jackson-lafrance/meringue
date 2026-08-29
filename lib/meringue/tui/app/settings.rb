@@ -319,6 +319,10 @@ module Meringue
           move_settings_category(1)
         elsif SHIFT_TAB_KEYS.include?(key)
           move_settings_category(-1)
+        elsif !setup_mode? && SHIFT_UP_KEYS.include?(key)
+          move_settings_section(-1)
+        elsif !setup_mode? && SHIFT_DOWN_KEYS.include?(key)
+          move_settings_section(1)
         elsif UP_KEYS.include?(key) || keybinding?("suggestion_previous", key)
           move_settings_row(-1)
         elsif DOWN_KEYS.include?(key) || keybinding?("suggestion_next", key)
@@ -685,6 +689,24 @@ module Meringue
         @settings_footer_button = "next"
       end
 
+      def move_settings_section(delta)
+        categories = settings_categories
+        return if setup_mode? || categories.empty?
+
+        current = @settings_category_index.to_i
+        target = (current + delta.to_i).clamp(0, categories.length - 1)
+        return if target == current
+
+        @settings_category_index = target
+        @settings_row_index = if delta.to_i.negative?
+                                [settings_rows.length - 1, 0].max
+                              else
+                                0
+                              end
+        @settings_footer_focus = false
+        @settings_footer_button = "next"
+      end
+
       def move_settings_row(delta)
         count = settings_rows.length
         return if count.zero?
@@ -730,24 +752,16 @@ module Meringue
         return move_settings_row(delta) if setup_mode? && !row
 
         if setup_mode?
-          if row.fetch("editor", nil) == "checkbox"
-            @settings_draft.set(row.fetch("id"), delta.to_i.positive?)
-          else
-            # In Setup, horizontal movement never changes pages. It either changes
-            # a focused boolean toggle or moves focus to another control.
-            move_settings_row(delta)
-          end
+          @settings_draft.set(row.fetch("id"), delta.to_i.positive?) if row.fetch("editor", nil) == "checkbox"
           return
         end
 
-        return move_settings_category(delta) unless row
+        return unless row
         if %w[selector enum].include?(row.fetch("editor", nil))
           @settings_draft.cycle(row.fetch("id"), delta)
           @settings_draft.preview_theme if row.fetch("id") == "appearance.theme"
         elsif row.fetch("editor", nil) == "model"
           cycle_settings_model(row, delta, state)
-        else
-          move_settings_category(delta)
         end
       end
 

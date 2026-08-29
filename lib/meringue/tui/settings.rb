@@ -150,7 +150,9 @@ module Meringue
         end
 
         def categories
-          Config::Schema.categories.select { |category| definitions.any? { |definition| definition.category == category } }
+          Config::Schema.categories.reject { |category| category == "Setup" }.select do |category|
+            definitions.any? { |definition| definition.category == category }
+          end
         end
 
         def definitions_for(category, include_advanced: true)
@@ -294,7 +296,10 @@ module Meringue
 
         def row(definition)
           current = value(definition.id)
-          default = definition.default_value(config, env: @env)
+          # The row starts from the effective value, including environment and
+          # compatibility fallbacks. This keeps command/list fields populated
+          # with what the current process will actually use.
+          default = current
           {
             "id" => definition.id,
             "label" => definition.label,

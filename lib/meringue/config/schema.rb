@@ -569,8 +569,7 @@ module Meringue
             editor: "keybinding",
             apply_mode: "live",
             label: (defined?(Meringue::TUI::Keybindings) ? Meringue::TUI::Keybindings.label_for(action) : action.tr("_", " ")),
-            description: "Keys for the #{action.tr("_", " ")} action.",
-            advanced: true
+            description: "Keys for the #{action.tr("_", " ")} action."
           )
         end
       end

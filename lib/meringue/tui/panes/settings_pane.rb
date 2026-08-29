@@ -220,7 +220,7 @@ module Meringue
           hint = if width.to_i < Settings::COMPACT_WIDTH
                    "Navigate"
                  else
-                   "Navigate: Enter or Arrow keys toggle · Tab advances · Backspace returns"
+                   "Navigate: Enter toggles · ↑↓ move · Tab advances · Backspace returns"
                  end
           segments = [[hint, Style::DIM]]
           advanced = advanced_hint(snap, hint: hint, width: width)
@@ -330,11 +330,11 @@ module Meringue
           setup = snap.fetch("mode", "settings") == "setup"
           cancel = snap.fetch("setup_auto", false) ? "skip" : "cancel"
           hint = if setup && width.to_i < Settings::WIDE_WIDTH
-                   "Esc #{cancel} · Tab next · Shift-Tab back · ↑↓ · ←→ change · Enter edit"
+                   "Esc #{cancel} · Tab next · Shift-Tab back · ↑↓ · ←→ change focused setting · Enter edit"
                  elsif setup && width.to_i < 100
-                   "Esc #{cancel} · Tab/S-Tab steps · ↑↓ · ←→ · Enter edit"
+                   "Esc #{cancel} · Tab/S-Tab steps · ↑↓ · ←→ change focused setting · Enter edit"
                  elsif setup
-                   "↑↓ · ←→ change · Tab next · S-Tab back · Space · Enter edit · Esc #{cancel}"
+                   "↑↓ · ←→ change focused setting · Tab next · S-Tab back · Space · Enter edit · Esc #{cancel}"
                  elsif compact?(width)
                    "Esc cancel · Ctrl-S save · ↑↓ · Enter edit"
                  elsif width.to_i < 100
@@ -634,7 +634,7 @@ module Meringue
           style = selected ? Style::AGENT_TREE_SELECTED : Style::TEXT
           secondary = selected ? Style::AGENT_TREE_SELECTED_DIM : Style::MUTED
           segments = [["#{marker}#{dirty} #{label}", style], ["  #{value}", secondary]]
-          unless compact?(width)
+          unless compact?(width) || source == "file"
             badge = "  #{source}#{restart}"
             segments << [badge, selected ? Style::AGENT_TREE_SELECTED_DIM : Style::DIM]
           end

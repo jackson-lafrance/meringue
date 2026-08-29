@@ -4,6 +4,8 @@ Use `/keybind` inside the interactive TUI to show the active keybinding list in 
 
 In `/config`, reveal the Keybindings category's advanced rows, select an action, and press `Enter` to enter dedicated key capture. The next single keyboard input is captured as the replacement binding, including arrows, function/control sequences, and `Enter`; navigation and editor controls do not pass through to the settings list. `Esc` cancels without changing the binding. `Backspace` or `Delete` clears it (an empty list intentionally unbinds the action). Mouse events, pastes, and other invalid multi-character input are rejected in place. Press `Enter` on the row again to capture a replacement; changes remain draft-only until Save succeeds.
 
+Within `/config`, plain `Up` and `Down` move one setting at a time. `Shift-Up` and `Shift-Down` jump to the previous or next category section, landing on its nearest edge; they stop at the first and last sections rather than wrapping.
+
 ## Customizing
 
 Add overrides under `[tui.keybindings]` in your Meringue config. Omitted actions keep defaults.
@@ -276,7 +278,7 @@ The first interactive launch opens Setup as a curated mode of the full-screen
 Settings overlay, and `/setup` reopens it any time.
 
 - `↑` / `↓`: move through controls; moving past the last ordinary control focuses the Navigate footer. On Status bar they select a component.
-- `←` / `→`: change a focused boolean toggle or move focus. Right Arrow never advances a setup step. On Status bar these keys reorder/change alignment.
+- `←` / `→`: change a focused boolean toggle; otherwise do nothing. They never move focus or advance a setup step. On Status bar these keys reorder/change alignment.
 - `Enter`: begin, toggle a checkbox, open a picker for theme/models and other list-backed values, or activate the single centered Next/Complete action.
 - `Delete` / `Backspace`: go back one setup step.
 - `Tab` / `Shift-Tab`: next/back through Welcome, Theme, Head defaults, Worker defaults, Status bar, and Experiments.
