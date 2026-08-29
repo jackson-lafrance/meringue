@@ -4,9 +4,9 @@ require "thread"
 
 module Meringue
   module Sessions
-    # Application boundary used by a selected-worker UI. Harness processes stay
-    # owned by the kernel/client; this service only exposes transcript polling,
-    # kernel-routed prompts, and turn-level cancellation.
+    # Application boundary used by a selected worker or live head UI. Harness processes stay
+    # owned by the kernel/client; this service exposes transcript polling for both, while
+    # prompting and turn-level cancellation remain worker-only operations.
     class WorkerSessionService
       class Error < StandardError; end
 
@@ -16,7 +16,7 @@ module Meringue
 
       def open(agent_id)
         handle = engine.open_agent_session_view(agent_id)
-        Session.new(engine: engine, agent_id: agent_id.to_s, handle: handle)
+        Session.new(engine: engine, agent_id: agent_id.to_s, agent_type: agent_type_for(agent_id), handle: handle)
       rescue StandardError => e
         raise Error, "Unable to open agent #{agent_id}: #{e.message}"
       end
@@ -61,14 +61,22 @@ module Meringue
 
       attr_reader :engine
 
+      def agent_type_for(agent_id)
+        record = engine.list_all.fetch("agents", []).find { |agent| agent.fetch("id", nil).to_s == agent_id.to_s }
+        record&.fetch("type", nil).to_s
+      rescue StandardError
+        "worker"
+      end
+
       class Session
         SNAPSHOT_REFRESH_INTERVAL = 0.35
 
         attr_reader :agent_id
 
-        def initialize(engine:, agent_id:, handle:)
+        def initialize(engine:, agent_id:, agent_type:, handle:)
           @engine = engine
           @agent_id = agent_id
+          @agent_type = agent_type.to_s
           @handle = handle
           @mutex = Mutex.new
           @condition = ConditionVariable.new
@@ -109,6 +117,8 @@ module Meringue
         # mode: "auto" matches a native coding-agent editor: an active turn is
         # steered, while idle/completed history receives a normal continuation.
         def submit(prompt, mode: "auto")
+          return invalid_result("Heads cannot receive focused prompts.", "head_session_read_only") if head_session?
+
           text = prompt.to_s
           return invalid_result("Prompt cannot be empty.", "prompt_required") if text.strip.empty?
 
@@ -187,6 +197,10 @@ module Meringue
           current_handle.snapshot
         rescue StandardError
           {}
+        end
+
+        def head_session?
+          @agent_type == "head"
         end
 
         def automatic_prompt_mode(snapshot)
