@@ -52,7 +52,7 @@ module Meringue
           "  Worker: #{role_summary(selected, "worker")}",
           "  Experiments: #{experiment_summary(selected)}",
           "",
-          "  Type a goal in plain English — Meringue opens the issue and starts the worker.",
+          "  Describe a goal — Meringue finds the project and starts the work.",
           "  /glossary explains the vocabulary, /help lists every command, /config changes any setting."
         ]
         lines.join("\n")

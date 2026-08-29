@@ -18,7 +18,6 @@ module Meringue
       module SetupFlow
         WELCOME = "Welcome"
         HARNESS = "Harness"
-        PROJECT = "Project"
         THEME = "Theme"
         STATUS_BAR = "Status bar"
         # The step id stays the schema category it draws from; only the heading
@@ -32,7 +31,7 @@ module Meringue
         # confirmation rather than a decision whenever exactly one harness is
         # actually installed. Welcome and Done carry no controls at all: a first
         # run should open and close with something to read, not a form.
-        STEPS = [WELCOME, HARNESS, PROJECT, THEME, STATUS_BAR, EXPERIMENTS, DONE].freeze
+        STEPS = [WELCOME, HARNESS, THEME, STATUS_BAR, EXPERIMENTS, DONE].freeze
         NARRATIVE_STEPS = [WELCOME, DONE].freeze
 
         FIXED_SETTING_IDS = {

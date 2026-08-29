@@ -16,16 +16,14 @@ module Meringue
         SETUP_HEADINGS = {
           Settings::SetupFlow::WELCOME => "Welcome to Meringue",
           Settings::SetupFlow::HARNESS => "Pick the agent that does the work",
-          Settings::SetupFlow::PROJECT => "Point Meringue at a repository",
           Settings::SetupFlow::THEME => "Make the workspace yours",
           Settings::SetupFlow::STATUS_BAR => "Your bottom bar",
           Settings::SetupFlow::EXPERIMENTS => "Meringue Xtras",
           Settings::SetupFlow::DONE => "You're ready"
         }.freeze
         SETUP_INTROS = {
-          Settings::SetupFlow::WELCOME => "About a minute: one harness, one repository, one look.",
+          Settings::SetupFlow::WELCOME => "About a minute: one harness, one look.",
           Settings::SetupFlow::HARNESS => "Meringue drives a coding agent you already have. It never installs one for you.",
-          Settings::SetupFlow::PROJECT => "Projects are the boards your issues and workers live on.",
           Settings::SetupFlow::THEME => "Previewed live. Nothing is written until you finish.",
           Settings::SetupFlow::STATUS_BAR => "This is the live bar. The default is ready to use.",
           Settings::SetupFlow::EXPERIMENTS => "All optional, all off. Turn any of them on now or from /config later.",

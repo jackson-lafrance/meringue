@@ -32,7 +32,6 @@ module Meringue
         @github_access_test_result = nil
         @harness_check_result = nil
         @settings_status_bar_customizing = false
-        @settings_adopt_project = setup_mode? && !setup_project_candidate.nil?
         @harness_availability = harness_availability_snapshot
         preselect_detected_harnesses if setup_mode?
         close_delivery_pr_picker
@@ -63,8 +62,6 @@ module Meringue
         @harness_check_result = nil
         @harness_availability = nil
         @settings_status_bar_customizing = false
-        @settings_adopt_project = false
-        remove_instance_variable(:@setup_project_candidate) if defined?(@setup_project_candidate)
         @settings_setup_auto = false
         @settings_setup_outcome = nil
         @settings_status_bar_draft = nil
@@ -824,13 +821,6 @@ module Meringue
           move_settings_category(1)
           return true
         end
-        if id == "setup.adopt_project"
-          @settings_adopt_project = !@settings_adopt_project
-          return true
-        end
-        if id == "setup.adopt_project_unavailable"
-          return true
-        end
         if id == "setup.customize_status_bar"
           return false if toggle_only
 
@@ -1070,14 +1060,6 @@ module Meringue
         encoded = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
         @settings_saving = true
         @settings_setup_outcome = onboarding_outcome
-        # Registering a project is orchestration state, not configuration, so it
-        # is a second command rather than a field in this one. It is submitted
-        # only after the save is accepted, so a rejected draft cannot leave a
-        # project behind from a setup that never finished.
-        @pending_project_adoption = if onboarding_outcome == "completed" && @settings_adopt_project
-                                      setup_project_candidate
-                                    end
-        @setup_submit_context = [on_submit, state]
         @settings_draft.clear_save_failure
         submit_prompt("/config save #{encoded}", on_submit, state)
         true

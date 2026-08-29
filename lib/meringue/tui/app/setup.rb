@@ -16,7 +16,6 @@ module Meringue
       def setup_rows
         step = settings_category
         return [] if Settings::SetupFlow.narrative?(step)
-        return setup_project_rows if step == Settings::SetupFlow::PROJECT
         return setup_status_bar_rows if step == Settings::SetupFlow::STATUS_BAR
 
         expanded = @settings_expanded_advanced.fetch(step, false)
@@ -77,31 +76,6 @@ module Meringue
         row.merge("option_labels" => annotated, "display_value" => display)
       end
 
-      def setup_project_rows
-        candidate = setup_project_candidate
-        rows = []
-        if candidate
-          rows << synthetic_settings_row(
-            "setup.adopt_project",
-            "Add #{candidate.fetch("name")}",
-            # Only the first line of a description is rendered, so the path — the
-            # part that answers "which directory?" — has to lead it.
-            "#{abbreviate_home(candidate.fetch("path"))} · registered when you finish setup.",
-            @settings_adopt_project ? "[x]" : "[ ]",
-            dirty: @settings_adopt_project
-          ).merge("editor" => "checkbox", "type" => "boolean", "value" => @settings_adopt_project)
-        else
-          rows << synthetic_settings_row(
-            "setup.adopt_project_unavailable",
-            "No repository here",
-            "Add one later with /project add <path>, or describe a goal and a head will offer to register what it finds.",
-            "skip",
-            source: "setup"
-          ).merge("read_only" => true)
-        end
-        rows
-      end
-
       # The composer is a real editing surface and it used to be the whole step,
       # so a first run made everyone lay out a bar they had never seen in use.
       # The default is shown live above; customizing is a deliberate choice.
@@ -114,27 +88,6 @@ module Meringue
           "Drag the open-PR, worker/head count, harness, model, and reasoning components between the left and right sides.",
           "Enter"
         )]
-      end
-
-      # A card is about 70 columns wide, and an absolute path under $HOME spends a
-      # third of that saying where home is.
-      def abbreviate_home(path)
-        home = File.expand_path("~")
-        value = path.to_s
-        value.start_with?("#{home}/") ? "~#{value[home.length..]}" : value
-      rescue StandardError
-        path.to_s
-      end
-
-      def setup_project_candidate
-        return @setup_project_candidate if defined?(@setup_project_candidate)
-
-        root = ProjectNaming.git_root_for(Dir.pwd) || Dir.pwd
-        @setup_project_candidate = if Dir.exist?(root)
-                                     { "path" => root, "name" => ProjectNaming.name_for(root) }
-                                   end
-      rescue StandardError
-        @setup_project_candidate = nil
       end
 
       # Setup preselects a harness only when the machine leaves no ambiguity.
@@ -241,11 +194,6 @@ module Meringue
         head = @settings_draft.value("agent.head_harness").to_s
         worker = @settings_draft.value("agent.worker_harness").to_s
         entries << { "label" => "Harness", "value" => setup_harness_summary(head, worker) }
-        if @settings_adopt_project && (candidate = setup_project_candidate)
-          entries << { "label" => "Project", "value" => "#{candidate.fetch("name")} · #{abbreviate_home(candidate.fetch("path"))}" }
-        else
-          entries << { "label" => "Project", "value" => "none yet — add one with /project add" }
-        end
         entries << { "label" => "Theme", "value" => @settings_draft.value("appearance.theme").to_s }
         entries << { "label" => "Xtras", "value" => setup_experiments_summary }
         entries
