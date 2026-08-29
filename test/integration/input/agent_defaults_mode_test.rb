@@ -172,7 +172,7 @@ class InputAgentDefaultsModeTest < Minitest::Test
 
     assert_predicate definition, :mode?
     assert_equal [Mode::SHARED, Mode::ROLE_SPECIFIC, Mode::GUIDED], definition.modes
-    assert_equal ["Shared", "By role", "Guided"], definition.modes.map { |mode| definition.mode_label(mode) }
+    assert_equal ["Shared", "Split", "Guided"], definition.modes.map { |mode| definition.mode_label(mode) }
   end
 
   def test_the_mode_setting_is_a_selector_over_its_three_modes
@@ -181,7 +181,7 @@ class InputAgentDefaultsModeTest < Minitest::Test
     assert_equal "enum", setting.type
     assert_equal "selector", setting.editor
     assert_equal Mode::MODES, setting.option_values
-    assert_equal "By role", setting.option_label(Mode::ROLE_SPECIFIC)
+    assert_equal "Split", setting.option_label(Mode::ROLE_SPECIFIC)
     # A mode experiment is not on/off, and asking that way is a mistake rather
     # than a silently wrong answer.
     assert_raises(ArgumentError) do

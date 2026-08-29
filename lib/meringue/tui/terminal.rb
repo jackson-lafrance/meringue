@@ -107,6 +107,34 @@ module Meringue
         input.raw { yield }
       end
 
+      # Temporarily give the terminal back to a full-screen external editor.
+      # Re-enter the dashboard screen and invalidate its diff baseline even when
+      # the editor fails, so stale rows cannot be patched over the editor output.
+      def with_external_editor
+        return yield unless interactive?
+
+        input.cooked do
+          output.write(DISABLE_MOUSE)
+          output.write(DISABLE_KEYBOARD_DISAMBIGUATION)
+          output.write(DISABLE_BRACKETED_PASTE)
+          output.write(ENABLE_AUTOWRAP)
+          output.write(SHOW_CURSOR)
+          output.write(EXIT_ALT_SCREEN)
+          output.flush
+          yield
+        ensure
+          output.write(ENTER_ALT_SCREEN)
+          output.write(HIDE_CURSOR)
+          output.write(DISABLE_AUTOWRAP)
+          output.write(ENABLE_BRACKETED_PASTE)
+          output.write(ENABLE_KEYBOARD_DISAMBIGUATION)
+          output.write(ENABLE_MOUSE)
+          output.write(CLEAR_SCREEN)
+          output.flush
+          invalidate_frame!
+        end
+      end
+
       def write_frame(frame)
         if interactive?
           write_interactive_frame(frame)

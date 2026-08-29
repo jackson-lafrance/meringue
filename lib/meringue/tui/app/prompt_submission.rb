@@ -239,6 +239,7 @@ module Meringue
           setup_was_active = @settings_active && setup_mode?
           composer_was_active = @status_bar_composer_active
           @config = config.reload_file
+          workspace_controller.reload_editor_config(@config) if workspace_controller&.respond_to?(:reload_editor_config)
           @keybindings = Keybindings.from_config(@config.section("tui", "keybindings"))
           close_settings(discard: outcome == "skipped") if @settings_active
           close_status_bar_composer if composer_was_active

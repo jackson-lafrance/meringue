@@ -173,9 +173,12 @@ module Meringue
         {
           "testing" => "Testing…",
           "success" => "Ready",
+          "disabled" => "Disabled",
           "unavailable" => "Unavailable",
+          "missing_tooling" => "GitHub CLI missing",
           "unauthenticated" => "Not authenticated",
           "permission_denied" => "Permission denied",
+          "repository_read_failure" => "Repository not readable",
           "timeout" => "Timed out",
           "malformed_remote" => "Malformed remote"
         }.fetch(outcome.to_s, outcome.to_s.tr("_", " ").capitalize)
@@ -808,6 +811,11 @@ module Meringue
         return false unless row
 
         id = row.fetch("id")
+        if id == "experiments.worker_spawning_guidance_prompt"
+          return false if toggle_only
+
+          return edit_guidance_prompt(row)
+        end
         if id == "_show_advanced"
           @settings_expanded_advanced[settings_category] = true
           @settings_row_index = 0
@@ -847,9 +855,13 @@ module Meringue
         when "keybinding"
           return false if toggle_only
           open_settings_keybinding_capture(row)
-        when "selector", "model"
+        when "selector", "model", "editor_command"
           return false if toggle_only
-          setup_mode? ? open_settings_picker(row, state) : (row.fetch("editor") == "model" ? open_settings_editor(row) : @settings_draft.cycle(id, 1))
+          if row.fetch("editor") == "editor_command"
+            open_settings_picker(row, state)
+          else
+            setup_mode? ? open_settings_picker(row, state) : (row.fetch("editor") == "model" ? open_settings_editor(row) : @settings_draft.cycle(id, 1))
+          end
           @settings_draft.preview_theme if id == "appearance.theme" && !@settings_picker
         else
           return false if toggle_only
@@ -871,7 +883,11 @@ module Meringue
           "outcome" => "testing",
           "message" => "Testing GitHub authentication and read access…"
         }
-        submit_prompt("/github test", on_submit, state)
+        # Setup may test an opt-in before its draft is persisted. The marker is
+        # interpreted by the kernel only for this explicit command and does not
+        # mutate the saved configuration.
+        command = setup_mode? ? "/github test --draft-support" : "/github test"
+        submit_prompt(command, on_submit, state)
         true
       rescue StandardError => e
         @github_access_test_result = {
@@ -897,6 +913,8 @@ module Meringue
                     ModelPicker.entries(state, harness: settings_model_harness(state, role: role), query: "").map do |entry|
                       { "reference" => entry.fetch("reference"), "name" => entry.fetch("name", entry.fetch("reference")) }
                     end
+                  elsif row.fetch("editor") == "editor_command"
+                    Array(row.fetch("options", [])).map(&:to_s) + [Settings::EDITOR_CUSTOM_OPTION]
                   else
                     # An enum that carries labels shows them the way the model
                     # picker does: the label reads, the stored value stays
@@ -909,7 +927,12 @@ module Meringue
                       values
                     end
                   end
-        current = @settings_draft.value(id).to_s
+        current_value = @settings_draft.value(id)
+        current = if row.fetch("editor") == "editor_command"
+                     Shellwords.join(Array(current_value))
+                   else
+                     current_value.to_s
+                   end
         # An exact model reference the catalog does not list stays selectable, so
         # it is carried into the list. "Nothing chosen yet" is not a choice
         # though: offering it as the first row of a required field is how the
@@ -942,11 +965,17 @@ module Meringue
           option = options[@settings_picker.fetch("index", 0).to_i]
           if option
             id = @settings_picker.fetch("id")
-            value = option.is_a?(Hash) ? option.fetch("reference") : option
-            @settings_draft.set(id, value)
-            pair_setup_harness(id, value) if setup_mode?
-            @settings_draft.preview_theme if id == "appearance.theme"
-            @settings_picker = nil
+            if id == "workspace.editor" && option == Settings::EDITOR_CUSTOM_OPTION
+              row = @settings_picker.fetch("row")
+              @settings_picker = nil
+              open_settings_editor(row)
+            else
+              value = option.is_a?(Hash) ? option.fetch("reference") : option
+              @settings_draft.set(id, value)
+              pair_setup_harness(id, value) if setup_mode?
+              @settings_draft.preview_theme if id == "appearance.theme"
+              @settings_picker = nil
+            end
           end
         elsif keybinding?("delete_word_backward", key)
           @settings_picker["query"] = ""
@@ -986,6 +1015,34 @@ module Meringue
           "row" => row,
           "error" => nil
         }
+      end
+
+      def edit_guidance_prompt(row)
+        original = @settings_draft.value(row.fetch("id")).to_s
+        launcher = if workspace_controller&.respond_to?(:edit_text)
+                     ->(text) { workspace_controller.edit_text(text: text, extension: ".md") }
+                   else
+                     editor = Workspace::EditorLauncher.from_config(config)
+                     ->(text) { editor.edit_text(text, extension: ".md") }
+                   end
+        result = if terminal.respond_to?(:with_external_editor)
+                   terminal.with_external_editor { launcher.call(original) }
+                 else
+                   launcher.call(original)
+                 end
+        if result.is_a?(Hash) && result.fetch("status", nil) == "edited"
+          @settings_draft.set(row.fetch("id"), result.fetch("text", original).to_s)
+          @settings_draft.clear_save_failure
+        elsif !result.is_a?(Hash) || result.fetch("status", nil) != "cancelled"
+          message = result.is_a?(Hash) ? result.fetch("message", "The original text was kept.") : "The original text was kept."
+          @settings_draft.apply_save_failure(message)
+        end
+        @force_full_redraw = true
+        true
+      rescue StandardError => e
+        @settings_draft.apply_save_failure("Could not edit the guided selection prompt: #{e.message}; the original text was kept.")
+        @force_full_redraw = true
+        true
       end
 
       def open_settings_editor(row)

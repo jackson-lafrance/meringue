@@ -6,13 +6,15 @@ module Meringue
       # Operating on a worker's harness session from outside a kernel command: reading its
       # transcript, cancelling its turn, exporting and importing it, and pausing or resuming it.
 
-      # Opens a read-only harness-neutral transcript handle. The handle cannot
-      # attach, detach, signal, or kill the managed process.
+      # Opens a read-only harness-neutral transcript handle for a worker or a live head.
+      # The handle cannot attach, detach, signal, or kill the managed process. Heads are
+      # intentionally supported only for viewing: their stateless lifecycle still owns all
+      # prompting and teardown decisions.
       def open_agent_session_view(agent_id)
         agent = synchronized_state do
           candidate = find_agent(normalized_state, agent_id.to_s)
           raise ArgumentError, "Agent #{agent_id} does not exist." unless candidate
-          raise ArgumentError, "Agent #{agent_id} is not a worker." unless candidate.fetch("type", nil) == "worker"
+          raise ArgumentError, "Agent #{agent_id} is not a worker or head." unless %w[worker head].include?(candidate.fetch("type", nil))
 
           deep_copy(candidate)
         end
