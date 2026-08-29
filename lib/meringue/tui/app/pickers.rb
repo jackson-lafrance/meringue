@@ -220,9 +220,16 @@ module Meringue
       end
 
       def handle_model_picker_mouse(key, unchanged, on_submit, state, entries)
+        hit = layout.model_picker_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+        if mouse_drag?(key)
+          if hit.is_a?(Integer) && hit < entries.length
+            @model_picker_index = hit
+            preview_theme_picker(state) if @model_picker_kind == "theme"
+          end
+          return unchanged
+        end
         return unchanged unless mouse_button_press?(key) || mouse_wheel?(key)
 
-        hit = layout.model_picker_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
         if mouse_wheel?(key)
           return nil if hit == :outside
 

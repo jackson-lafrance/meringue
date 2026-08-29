@@ -24,6 +24,7 @@ module Meringue
         @settings_expanded_advanced = {}
         @settings_editor = nil
         @settings_picker = nil
+        @settings_picker_theme_original = nil
         @settings_keybinding_capture = nil
         @settings_footer_focus = false
         @settings_footer_button = "next"
@@ -54,6 +55,7 @@ module Meringue
         @settings_expanded_advanced = {}
         @settings_editor = nil
         @settings_picker = nil
+        @settings_picker_theme_original = nil
         @settings_keybinding_capture = nil
         @settings_footer_focus = false
         @settings_footer_button = "next"
@@ -643,6 +645,14 @@ module Meringue
       end
 
       def handle_settings_mouse(key, unchanged, on_submit, state)
+        if mouse_drag?(key) && @settings_picker
+          hit = layout.settings_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
+          if hit.is_a?(Array) && hit.first == :picker
+            @settings_picker["index"] = hit.last.to_i
+            preview_settings_picker_theme
+          end
+          return unchanged
+        end
         if mouse_wheel_up?(key) || mouse_wheel_down?(key)
           hit = layout.settings_hit(state, width: render_width, height: render_height, x: mouse_x(key), y: mouse_y(key))
           move_settings_row(mouse_wheel_up?(key) ? -3 : 3) unless hit == :inert
@@ -666,6 +676,7 @@ module Meringue
               @settings_draft.set(id, value)
               @settings_draft.preview_theme if id == "appearance.theme"
               @settings_picker = nil
+              @settings_picker_theme_original = nil
             end
           elsif kind == :category
             @settings_category_index = index.to_i.clamp(0, [settings_categories.length - 1, 0].max)
@@ -928,6 +939,7 @@ module Meringue
         if keep_current && options.none? { |option| option.is_a?(Hash) ? option.fetch("reference") == current : option == current }
           options.unshift(row.fetch("editor") == "model" ? { "reference" => current, "name" => current } : current)
         end
+        @settings_picker_theme_original = Style.current_colorscheme.to_s if id == "appearance.theme"
         @settings_picker = {
           "id" => id,
           "row" => row,
@@ -936,6 +948,7 @@ module Meringue
           "query" => "",
           "index" => [options.index { |option| option.is_a?(Hash) ? option.fetch("reference") == current : option == current } || 0, 0].max
         }
+        preview_settings_picker_theme
         true
       end
 
@@ -946,8 +959,10 @@ module Meringue
         options = settings_picker_options
         if UP_KEYS.include?(key)
           @settings_picker["index"] = (@settings_picker.fetch("index", 0).to_i - 1) % [options.length, 1].max
+          preview_settings_picker_theme
         elsif DOWN_KEYS.include?(key)
           @settings_picker["index"] = (@settings_picker.fetch("index", 0).to_i + 1) % [options.length, 1].max
+          preview_settings_picker_theme
         elsif ENTER_KEYS.include?(key)
           option = options[@settings_picker.fetch("index", 0).to_i]
           if option
@@ -957,20 +972,45 @@ module Meringue
             pair_setup_harness(id, value) if setup_mode?
             @settings_draft.preview_theme if id == "appearance.theme"
             @settings_picker = nil
+            @settings_picker_theme_original = nil
           end
         elsif keybinding?("delete_word_backward", key)
           @settings_picker["query"] = ""
           @settings_picker["index"] = 0
+          preview_settings_picker_theme
         elsif keybinding?("delete_backward", key)
           @settings_picker["query"] = @settings_picker.fetch("query", "").to_s.chars[0...-1].join
           @settings_picker["index"] = 0
+          preview_settings_picker_theme
         elsif printable_key?(key)
           @settings_picker["query"] = "#{@settings_picker.fetch("query", "")}#{key}"
           @settings_picker["index"] = 0
+          preview_settings_picker_theme
         elsif key == "\e" || hard_escape_key?(key)
-          @settings_picker = nil
+          cancel_settings_picker
         end
         unchanged
+      end
+
+      def preview_settings_picker_theme
+        return unless @settings_picker&.fetch("id", nil) == "appearance.theme"
+
+        option = settings_picker_options[@settings_picker.fetch("index", 0).to_i]
+        theme = option.is_a?(Hash) ? option.fetch("reference", "") : option.to_s
+        Style.configure!(theme) unless theme.empty? || Style.current_colorscheme.to_s == theme
+      rescue ArgumentError
+        nil
+      end
+
+      def cancel_settings_picker
+        original = @settings_picker_theme_original
+        @settings_picker = nil
+        @settings_picker_theme_original = nil
+        return unless original && !original.empty? && Style.current_colorscheme.to_s != original
+
+        Style.configure!(original)
+      rescue ArgumentError
+        nil
       end
 
       def settings_picker_options
