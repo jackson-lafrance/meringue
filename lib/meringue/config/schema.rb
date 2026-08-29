@@ -488,10 +488,10 @@ module Meringue
               "Experiments",
               "string",
               Meringue::Experiments::WorkerSpawningGuidance.default_text,
-              editor: "text",
+              editor: "action",
               apply_mode: "live",
               label: "Guided selection prompt",
-              description: "Additional system-prompt text supplied to heads in guided mode. Use @ for models and # for thinking levels.",
+              description: "",
               dependencies: ["experiments.#{experiment.id}"]
             )
           end

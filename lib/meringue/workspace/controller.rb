@@ -466,6 +466,10 @@ module Meringue
         editor_launcher.open(agent)
       end
 
+      def edit_text(text:, extension: ".txt")
+        editor_launcher.edit_text(text, extension: extension)
+      end
+
       def close_terminal(agent:)
         @mutex.synchronize { @screens.delete(agent_key(agent)) }
         terminal_manager.close(agent)

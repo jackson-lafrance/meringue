@@ -811,6 +811,11 @@ module Meringue
         return false unless row
 
         id = row.fetch("id")
+        if id == "experiments.worker_spawning_guidance_prompt"
+          return false if toggle_only
+
+          return edit_guidance_prompt(row)
+        end
         if id == "_show_advanced"
           @settings_expanded_advanced[settings_category] = true
           @settings_row_index = 0
@@ -1013,6 +1018,34 @@ module Meringue
           "row" => row,
           "error" => nil
         }
+      end
+
+      def edit_guidance_prompt(row)
+        original = @settings_draft.value(row.fetch("id")).to_s
+        launcher = if workspace_controller&.respond_to?(:edit_text)
+                     ->(text) { workspace_controller.edit_text(text: text, extension: ".md") }
+                   else
+                     editor = Workspace::EditorLauncher.from_config(config)
+                     ->(text) { editor.edit_text(text, extension: ".md") }
+                   end
+        result = if terminal.respond_to?(:with_external_editor)
+                   terminal.with_external_editor { launcher.call(original) }
+                 else
+                   launcher.call(original)
+                 end
+        if result.is_a?(Hash) && result.fetch("status", nil) == "edited"
+          @settings_draft.set(row.fetch("id"), result.fetch("text", original).to_s)
+          @settings_draft.clear_save_failure
+        elsif !result.is_a?(Hash) || result.fetch("status", nil) != "cancelled"
+          message = result.is_a?(Hash) ? result.fetch("message", "The original text was kept.") : "The original text was kept."
+          @settings_draft.apply_save_failure(message)
+        end
+        @force_full_redraw = true
+        true
+      rescue StandardError => e
+        @settings_draft.apply_save_failure("Could not edit the guided selection prompt: #{e.message}; the original text was kept.")
+        @force_full_redraw = true
+        true
       end
 
       def open_settings_editor(row)

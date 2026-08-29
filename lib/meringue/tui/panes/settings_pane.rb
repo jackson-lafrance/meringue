@@ -708,8 +708,8 @@ module Meringue
           editor.is_a?(Hash) && editor.fetch("id", nil) == INLINE_GUIDANCE_ID
         end
 
-        def inline_guidance_editor?(snap)
-          Array(snap.fetch("rows", [])).any? { |row| row.fetch("id", nil) == INLINE_GUIDANCE_ID }
+        def inline_guidance_editor?(_snap)
+          false
         end
 
         def inline_guidance_editor_lines(snap, width:, height:)
