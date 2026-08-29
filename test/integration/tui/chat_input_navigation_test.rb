@@ -16,6 +16,9 @@ class TuiChatInputNavigationTest < Minitest::Test
   UP = "\e[A"
   DOWN = "\e[B"
   ENTER = "\r"
+  CTRL_C = "\u0003"
+  CTRL_Z = "\u001a"
+  CTRL_Y = "\u0019"
 
   def setup
     @layout = Meringue::TUI::Layout.new
@@ -65,6 +68,32 @@ class TuiChatInputNavigationTest < Minitest::Test
 
     restored = send_key(DOWN, recalled.fetch(0), recalled.fetch(1))
     assert_equal ["unfinished draft", "unfinished draft".length, -1], restored
+  end
+
+  def test_ctrl_c_clears_non_empty_input_but_quits_when_empty
+    assert_equal ["", 0, -1], send_key(CTRL_C, "draft", 5)
+    refute @app.send(:quit_key?, CTRL_C, "draft")
+    assert @app.send(:quit_key?, CTRL_C, "")
+  end
+
+  def test_ctrl_y_redoes_an_undoed_composer_edit
+    inserted = send_key("a", "", 0)
+    assert_equal ["a", 1, -1], inserted
+
+    undone = send_key(CTRL_Z, inserted.fetch(0), inserted.fetch(1))
+    assert_equal ["", 0, -1], undone
+
+    redone = send_key(CTRL_Y, undone.fetch(0), undone.fetch(1))
+    assert_equal inserted, redone
+  end
+
+  def test_new_edit_after_undo_clears_redo_history
+    inserted = send_key("a", "", 0)
+    undone = send_key(CTRL_Z, inserted.fetch(0), inserted.fetch(1))
+    replacement = send_key("b", undone.fetch(0), undone.fetch(1))
+
+    assert_equal ["b", 1, -1], replacement
+    assert_equal replacement, send_key(CTRL_Y, replacement.fetch(0), replacement.fetch(1))
   end
 
   def test_slash_suggestion_navigation_keeps_precedence_over_input_history

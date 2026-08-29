@@ -25,8 +25,16 @@ module Meringue
       end
 
       def dashboard_chat_undo_key?(key)
-        return false unless keybinding?("undo", key) && @focused_pane == "chat"
-        return false if @settings_active
+        chat_editing_key?("undo", key)
+      end
+
+      def dashboard_chat_redo_key?(key)
+        chat_editing_key?("redo", key)
+      end
+
+      def chat_editing_key?(action, key)
+        return false unless keybinding?(action, key) && @focused_pane == "chat"
+        return false if @settings_active || @status_bar_composer_active
         return false if @question_picker_active || @model_picker_active || @delivery_pr_picker_active
 
         true
@@ -46,7 +54,9 @@ module Meringue
 
       def update_chat_undo_history(key, prior_buffer, result, snapshot, prior_history_index)
         return result unless snapshot && result.is_a?(Array)
-        return result if keybinding?("undo", key)
+        if keybinding?("undo", key) || keybinding?("redo", key)
+          return result
+        end
 
         history_moved = (keybinding?("cursor_up", key) || keybinding?("cursor_down", key)) &&
                         prior_history_index != @chat_history_index
@@ -61,6 +71,7 @@ module Meringue
         else
           @chat_undo_history << snapshot
           @chat_undo_history.shift while @chat_undo_history.length > CHAT_UNDO_LIMIT
+          @chat_redo_history.clear
         end
         result
       end
@@ -69,6 +80,20 @@ module Meringue
         snapshot = @chat_undo_history.pop
         return [input_buffer, input_cursor, slash_suggestion_index] unless snapshot
 
+        @chat_redo_history << chat_undo_snapshot(input_buffer, input_cursor, slash_suggestion_index)
+        restore_chat_edit(snapshot)
+      end
+
+      def redo_chat_edit(input_buffer, input_cursor, slash_suggestion_index)
+        snapshot = @chat_redo_history.pop
+        return [input_buffer, input_cursor, slash_suggestion_index] unless snapshot
+
+        @chat_undo_history << chat_undo_snapshot(input_buffer, input_cursor, slash_suggestion_index)
+        @chat_undo_history.shift while @chat_undo_history.length > CHAT_UNDO_LIMIT
+        restore_chat_edit(snapshot)
+      end
+
+      def restore_chat_edit(snapshot)
         reset_chat_history_navigation
         @chat_pastes.restore!(snapshot.fetch(:pastes))
         clear_chat_selection
@@ -86,6 +111,7 @@ module Meringue
 
       def reset_chat_undo_history
         @chat_undo_history.clear
+        @chat_redo_history.clear
       end
 
       def slash_suggestion_key?(key)

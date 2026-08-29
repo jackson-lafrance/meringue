@@ -143,6 +143,7 @@ module Meringue
         @chat_history_index = nil
         @chat_history_draft = nil
         @chat_undo_history = []
+        @chat_redo_history = []
         @agent_tree_navigation_active = false
         @quit_requested = false
         @agent_tree_navigation_mode = :agent
@@ -480,6 +481,10 @@ module Meringue
 
         if dashboard_chat_undo_key?(key)
           return undo_chat_edit(input_buffer, input_cursor, slash_suggestion_index)
+        end
+
+        if dashboard_chat_redo_key?(key)
+          return redo_chat_edit(input_buffer, input_cursor, slash_suggestion_index)
         end
 
         @chat_pastes.sync!(input_buffer)
