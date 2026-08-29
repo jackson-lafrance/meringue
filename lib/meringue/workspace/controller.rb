@@ -462,6 +462,13 @@ module Meringue
         result
       end
 
+      # Settings can be saved without restarting the dashboard. Keep the focused
+      # workspace and setup prompt actions on the same freshly configured launcher.
+      def reload_editor_config(config, env: ENV)
+        @editor_launcher = EditorLauncher.from_config(config, env: env)
+        { "status" => "reloaded" }
+      end
+
       def open_editor(agent:, state: nil)
         editor_launcher.open(agent)
       end

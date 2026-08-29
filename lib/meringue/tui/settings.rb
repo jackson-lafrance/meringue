@@ -363,7 +363,7 @@ module Meringue
           return "<redacted: #{value.is_a?(Hash) ? value.length : 1} entr#{value.is_a?(Hash) && value.length == 1 ? "y" : "ies"}>" if definition.sensitive && !value.to_h.empty?
 
           # An enum that carries its own labels shows the label, so a row reads
-          # "By role" rather than the stored "role-specific".
+          # "Split" rather than the stored "role-specific".
           labelled = definition.option_label(value) if definition.type == "enum"
           return labelled if labelled && labelled != value.to_s
 

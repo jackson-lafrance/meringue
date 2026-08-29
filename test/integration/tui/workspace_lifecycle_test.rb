@@ -44,7 +44,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
   end
 
   class InteractiveController
-    attr_reader :keys, :terminal_keys, :closed, :opened_sizes, :resized_sizes
+    attr_reader :keys, :terminal_keys, :closed, :opened_sizes, :resized_sizes, :editors
     attr_accessor :snapshot_lines
 
     def initialize
@@ -54,6 +54,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       @opened_sizes = []
       @resized_sizes = []
       @snapshot_lines = ["Pi output"]
+      @editors = []
     end
 
     def open_workspace(agent:, state:, rows:, columns:)
@@ -100,6 +101,12 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       _ = [agent, state]
       @terminal_keys << key
       { "status" => "written", "bytes" => key.to_s.bytesize }
+    end
+
+    def open_editor(agent:, state: nil)
+      _ = state
+      @editors << agent
+      { "status" => "opened", "message" => "Opened #{agent.fetch("id")} in the editor." }
     end
 
     def close_workspace(agent:)
@@ -532,6 +539,34 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       app&.send(:close_agent_workspace)
       controller&.close
     end
+  end
+
+  def test_focused_worker_editor_action_uses_the_configured_workspace_controller
+    controller = InteractiveController.new
+    app = Meringue::TUI::App.new(
+      layout: Meringue::TUI::Layout.new,
+      terminal: TUISupport::FakeTerminal.new,
+      workspace_controller: controller
+    )
+    state = @state.merge(
+      "projects" => [project_record("P1")],
+      "issues" => [issue_record("P1-I1", "project_id" => "P1", "title" => "Edit worker files")],
+      "agents" => [agent_record(
+        "P1-I1-W1",
+        "type" => "worker",
+        "status" => "working",
+        "harness" => "pi",
+        "project_id" => "P1",
+        "issue_id" => "P1-I1",
+        "workspace" => { "path" => "/tmp/worker" }
+      )]
+    )
+
+    app.instance_variable_set(:@agent_workspace_agent_id, "P1-I1-W1")
+    app.send(:open_agent_workspace_editor, state)
+
+    assert_equal ["P1-I1-W1"], controller.editors.map { |agent| agent.fetch("id") }
+    assert_equal "Opened P1-I1-W1 in the editor.", app.instance_variable_get(:@agent_workspace_notice)
   end
 
   def test_embedded_native_focus_routes_input_by_pane_and_returns_to_prior_focus

@@ -47,7 +47,7 @@ module Meringue
         @options = options
         # Present only on an enum whose stored values are not what a person
         # should read: the mode experiment stores "role-specific" and shows
-        # "By role".
+        # "Split".
         @option_labels = (option_labels || {}).transform_keys(&:to_s).transform_values(&:to_s).freeze
         @option_descriptions = (option_descriptions || {}).transform_keys(&:to_s).transform_values(&:to_s).freeze
         @advanced = !!advanced

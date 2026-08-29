@@ -12,7 +12,6 @@ module Meringue
         CANCEL_LABEL = "[ Cancel ]"
         HELP_TAGLINE = "Not sure what to change? Ask your agent for help."
         COMPACT_HELP_TAGLINE = "Need help? Ask your agent."
-        INLINE_GUIDANCE_ID = "experiments.worker_spawning_guidance_prompt"
         SETUP_HEADINGS = {
           Settings::SetupFlow::WELCOME => "Welcome to Meringue",
           Settings::SetupFlow::HARNESS => "Pick the agent that does the work",
@@ -192,22 +191,16 @@ module Meringue
 
           rows = Array(snap.fetch("rows", []))
           selected = snap.fetch("row_index", 0).to_i.clamp(0, [rows.length - 1, 0].max)
-          editing_inline = inline_guidance_editor_active?(snap)
-          preamble = editing_inline ? [] : setup_preamble(snap, rows[selected], width: content_width)
+          preamble = setup_preamble(snap, rows[selected], width: content_width)
           content_y = card.fetch(:y) + 6
           action_y = geometry.fetch(:action_y)
           content_limit = [action_y - content_y, 0].max
           row_y = content_y + preamble.length
-          inline_height = inline_guidance_editor?(snap) ? [content_limit - preamble.length - [rows.length, 1].max, 3].max : 0
-          capacity = [action_y - row_y - inline_height, 1].max
+          capacity = [action_y - row_y, 1].max
           start = window_start(rows.length, selected, capacity)
           visible = rows.drop(start).first(capacity)
           lines = preamble + visible.map.with_index do |row, offset|
             setup_row_line(row, selected: start + offset == selected, width: content_width)
-          end
-          if inline_guidance_editor?(snap)
-            editor_capacity = [content_limit - lines.length, 3].max
-            lines.concat(inline_guidance_editor_lines(snap, width: content_width, height: editor_capacity))
           end
           row_error = rows[selected]&.fetch("error", nil).to_s
           lines << [["! #{row_error}", Style::ERROR]] unless row_error.empty?
@@ -288,8 +281,7 @@ module Meringue
 
           rows = Array(snap.fetch("rows", []))
           selected = snap.fetch("row_index", 0).to_i.clamp(0, [rows.length - 1, 0].max)
-          inline_height = inline_guidance_editor?(snap) ? [[height.to_i / 2, 9].min, 4].max : 0
-          reserved = 4 + inline_height
+          reserved = 4
           capacity = [[height.to_i - reserved, 1].max, 1].max
           start = window_start(rows.length, selected, capacity)
           visible = rows.drop(start).first(capacity)
@@ -298,17 +290,14 @@ module Meringue
           end
           selected_row = rows[selected]
           lines << [["", Style::DIM]]
-          if selected_row && !inline_guidance_editor_active?(snap)
+          if selected_row
             description = selected_row.fetch("description", "").to_s
             detail_text = wrap(description, [width.to_i - 2, 8].max).first(2)
             lines.concat(detail_text.map { |line| [[line, Style::MUTED]] })
-            unless selected_row.fetch("id", nil) == INLINE_GUIDANCE_ID
-              lines << [["current: ", Style::DIM], [selected_row.fetch("display_value", "").to_s, Style::TEXT], [" · default: ", Style::DIM], [selected_row.fetch("default_value", "").to_s, Style::MUTED]]
-            end
+            lines << [["current: ", Style::DIM], [selected_row.fetch("display_value", "").to_s, Style::TEXT], [" · default: ", Style::DIM], [selected_row.fetch("default_value", "").to_s, Style::MUTED]]
             error = selected_row.fetch("error", nil).to_s
             lines << [["! #{error}", Style::ERROR]] unless error.empty?
           end
-          lines.concat(inline_guidance_editor_lines(snap, width: width, height: inline_height)) if inline_height.positive?
           global_error = snap.fetch("global_error", nil).to_s
           lines << [["! #{global_error}", Style::ERROR]] unless global_error.empty?
           visible_settings = snap.fetch("visible_setting_count", rows.length).to_i
@@ -344,12 +333,6 @@ module Meringue
             return [["Press a key to bind", Style::ACCENT_BOLD], [" · Esc cancel · Backspace/Delete clear", Style::MUTED]]
           end
           if snap.fetch("editor", nil).is_a?(Hash)
-            if inline_guidance_editor_active?(snap)
-              return [
-                ["Enter apply", Style::ACCENT_BOLD],
-                [" · Shift-Enter newline · arrows/word keys move · Shift+arrows select · Esc cancel", Style::MUTED]
-              ]
-            end
             return [["Enter apply field", Style::ACCENT_BOLD], [" · Esc cancel field", Style::MUTED]]
           end
 
@@ -699,46 +682,7 @@ module Meringue
         end
 
         def modal_editor?(snap)
-          editor = snap.fetch("editor", nil)
-          editor.is_a?(Hash) && editor.fetch("id", nil) != INLINE_GUIDANCE_ID
-        end
-
-        def inline_guidance_editor_active?(snap)
-          editor = snap.fetch("editor", nil)
-          editor.is_a?(Hash) && editor.fetch("id", nil) == INLINE_GUIDANCE_ID
-        end
-
-        def inline_guidance_editor?(_snap)
-          false
-        end
-
-        def inline_guidance_editor_lines(snap, width:, height:)
-          return [] unless inline_guidance_editor?(snap) && height.to_i.positive?
-
-          active = inline_guidance_editor_active?(snap)
-          row = Array(snap.fetch("rows", [])).find { |candidate| candidate.fetch("id", nil) == INLINE_GUIDANCE_ID } || {}
-          editor = active ? snap.fetch("editor") : {}
-          buffer = active ? editor.fetch("buffer", "").to_s : row.fetch("value", "").to_s
-          cursor = active ? editor.fetch("cursor", buffer.chars.length).to_i : nil
-          selection = active ? editor.fetch("selection", nil) : nil
-          title = active ? "Worker selection guidance — editing" : "Worker selection guidance — Enter to edit"
-          lines = [[[title, active ? Style::ACCENT_BOLD : Style::PANEL_TITLE]]]
-          input_capacity = [height.to_i - 2, 1].max
-          input_lines = MultilineInput.lines(
-            buffer,
-            input_cursor: cursor,
-            width: width,
-            selection: selection,
-            placeholder: "describe how heads should choose worker model and thinking"
-          )
-          cursor_row = active ? MultilineInput.cursor_row(buffer, cursor, width: width) : 0
-          start = window_start(input_lines.length, cursor_row, input_capacity)
-          lines.concat(input_lines.drop(start).first(input_capacity))
-          error = row.fetch("error", nil).to_s
-          lines << [["! #{error}", Style::ERROR]] unless error.empty?
-          status = editor.fetch("status", nil).to_s
-          lines << [[status, Style::SUCCESS]] unless status.empty?
-          lines.first(height.to_i)
+          snap.fetch("editor", nil).is_a?(Hash)
         end
 
         def editor_detail(snap, width:, height:)
