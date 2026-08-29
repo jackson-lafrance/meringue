@@ -261,6 +261,70 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     )
   end
 
+  def test_live_head_opens_in_the_focused_workspace_and_renders_its_transcript
+    head = agent_record(
+      "H1",
+      "type" => "head",
+      "status" => "working",
+      "harness" => "pi",
+      "harness_metadata" => { "title" => "Route this request", "head_session_state" => "active" }
+    )
+    state = @state.merge("agents" => [head])
+
+    assert @app.send(:open_selected_agent, state)
+    assert_equal "H1", @app.instance_variable_get(:@agent_workspace_agent_id)
+    refute @app.instance_variable_get(:@agent_workspace_interactive)
+
+    snapshot = @app.send(:agent_workspace_snapshot, state, "", 0)
+    frame = @app.render(state.merge("_agent_workspace" => snapshot), width: 100, height: 32)
+    assert_includes frame, "focused head · H1"
+    assert_includes frame, "Route this request"
+    assert_equal "H1", @service.views.first.instance_variable_get(:@agent_id)
+  end
+
+  def test_head_workspace_closes_quietly_when_the_short_lived_record_settles
+    head = agent_record("H1", "type" => "head", "status" => "working", "harness" => "pi")
+    state = @state.merge("agents" => [head])
+    assert @app.send(:open_agent_workspace_by_id, state, "H1")
+
+    @app.send(:reconcile_workspace_selection!, @state.merge("agents" => []))
+
+    refute @app.instance_variable_get(:@agent_workspace_active)
+    assert @service.views.first.closed
+  end
+
+  def test_worker_focus_resets_all_chat_and_same_worker_toggles_back_to_filtered_logs
+    first_worker = agent_record("P1-I1-W1", "type" => "worker", "status" => "working")
+    state = @state.merge("agents" => [first_worker])
+    @app.send(:set_log_scope, "P1-I1-W1")
+
+    assert @app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+    assert_nil @app.instance_variable_get(:@log_scope_id), "entering focus must reset to All Chat"
+    view = @service.views.first
+
+    assert @app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+    refute @app.instance_variable_get(:@agent_workspace_active)
+    assert_equal "P1-I1-W1", @app.instance_variable_get(:@log_scope_id)
+    assert_equal "logs", @app.instance_variable_get(:@focused_pane)
+    assert view.closed, "toggling focus closes only the view handle"
+  end
+
+  def test_selecting_another_worker_closes_the_old_view_and_opens_the_new_one
+    workers = [
+      agent_record("P1-I1-W1", "type" => "worker", "status" => "working"),
+      agent_record("P1-I1-W2", "type" => "worker", "status" => "working")
+    ]
+    state = @state.merge("agents" => workers)
+
+    assert @app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+    first = @service.views.first
+    assert @app.send(:open_agent_workspace_by_id, state, "P1-I1-W2")
+
+    assert first.closed
+    refute @service.views.last.closed
+    assert_equal "P1-I1-W2", @app.instance_variable_get(:@agent_workspace_agent_id)
+  end
+
   def test_returning_to_dashboard_closes_only_the_view_and_reopens_the_same_stream
     assert @app.send(:open_agent_workspace_by_id, @state, "P1-I1-W1")
     first = @service.views.fetch(0)

@@ -188,7 +188,7 @@ module Meringue
       def reconcile_workspace_selection!(state)
         return if @agent_workspace_agent_id.to_s.empty?
         current = Array(state.fetch("agents", [])).find do |agent|
-          agent.is_a?(Hash) && agent["type"] == "worker" && agent["id"].to_s == @agent_workspace_agent_id.to_s
+          agent.is_a?(Hash) && %w[worker head].include?(agent["type"].to_s) && agent["id"].to_s == @agent_workspace_agent_id.to_s
         end
         if current
           status = current.fetch("status", nil).to_s

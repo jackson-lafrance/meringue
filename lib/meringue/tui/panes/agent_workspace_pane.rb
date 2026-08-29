@@ -32,7 +32,7 @@ module Meringue
                  elsif workspace.fetch("interactive", false)
                    "Agent session"
                  else
-                   "focused worker"
+                   workspace_agent(state)&.fetch("type", nil) == "head" ? "focused head" : "focused worker"
                  end
           id = agent&.fetch("id", nil) || workspace.fetch("agent_id", "worker")
           "#{view} · #{id}"

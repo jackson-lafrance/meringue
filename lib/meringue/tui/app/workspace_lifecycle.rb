@@ -18,16 +18,36 @@ module Meringue
           set_selection_status("#{item_id} has no focused workspace yet")
           return false
         end
+        if agent.fetch("type", nil) == "head" && !agent_session_service&.respond_to?(:open)
+          set_selection_status("#{item_id} has no focused session yet")
+          return false
+        end
 
         if @agent_workspace_active && @agent_workspace_agent_id.to_s != agent.fetch("id").to_s
           close_agent_workspace
         elsif @agent_workspace_active
+          # Re-selecting the focused worker is the dashboard toggle. Close only
+          # the read handle/visual focus, retain the managed session, and leave
+          # the normal logs scoped to that worker.
+          if agent.fetch("type", nil) == "worker"
+            close_agent_workspace
+            set_log_scope(agent.fetch("id"))
+            @focused_pane = "logs"
+          end
           return true
         end
 
+        # Focused workspaces always enter with the dashboard's unfiltered chat
+        # scope. The worker remains selected for navigation, but old log filters
+        # must not leak into the focused experience or its return path.
+        clear_log_scope if agent.fetch("type", nil) == "worker"
+
         # Whether this worker's backend has a session to embed is the backend's answer, not a
         # harness name the UI keeps a list of.
-        focus_mode = agent_workspace_focus_mode(agent)
+        # Heads are intentionally transcript-only. They are stateless and may be
+        # released as soon as their result is applied, so never hand one to the
+        # worker interactive-focus lifecycle.
+        focus_mode = agent.fetch("type", nil) == "head" ? "none" : agent_workspace_focus_mode(agent)
         native_focus = focus_mode != "none" && workspace_controller&.respond_to?(:open_workspace)
         restored_view = if native_focus
                           "agent"
@@ -70,7 +90,7 @@ module Meringue
         @selected_agent_id = agent.fetch("id")
         @agent_tree_navigation_active = !native_focus
         @focused_pane = native_focus ? "logs" : "agent_tree"
-        if workspace_controller&.respond_to?(:open_workspace)
+        if agent.fetch("type", nil) != "head" && workspace_controller&.respond_to?(:open_workspace)
           rows, columns = agent_workspace_terminal_dimensions(state, embedded: native_focus)
           workspace_result = begin
             if workspace_controller.respond_to?(:open_workspace_async) && focus_mode != "none"
@@ -204,7 +224,7 @@ module Meringue
       def agent_workspace_agent_for_item(state, item_id)
         agents = Array(state.fetch("agents", []))
         direct = Meringue::Ids.find_record(
-          agents.select { |agent| agent.fetch("type", nil) == "worker" },
+          agents.select { |agent| %w[worker head].include?(agent.fetch("type", nil)) },
           item_id
         )
         return direct if direct
