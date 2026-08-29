@@ -288,7 +288,7 @@ module Meringue
         ["/glossary", "TUI local: show what head, worker, issue, project, and harness mean."],
         ["/quit", "TUI local: quit the interactive TUI."],
         ["/reload", "TUI local: restart Meringue with the current installed source and configuration."],
-        ["/update", "TUI local: update the installed Meringue source, install missing dependencies, and reload."],
+        ["/update", "TUI local: fast-forward the installed Meringue source onto its tracked branch (main, or MERINGUE_BRANCH), install missing dependencies, and reload."],
         ["/theme [name]", "Open the theme picker, or set and persist a named TUI theme. Available: catppuccin, gruvbox, kanagawa, meringue, rose-pine, tokyonight."],
         ["/themes", "TUI local: open the interactive theme picker."],
         ["/project add <path> [name]", "Register a project directory."],

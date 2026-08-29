@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
+- `/update` follows the branch the installation tracks (`main`, or `MERINGUE_BRANCH`) instead of
+  pulling whatever branch happened to be checked out. An installation parked on a stale branch
+  used to fast-forward nothing, report success, and restart into the same code; it is now moved
+  back onto the tracked branch. A checkout that is already current says so and keeps running
+  rather than reloading, and a successful update names the commit it landed on.
 - Restored `Kernel::Engine#harness_client` and `#head_runner` as public accessors. Duplicate
   definitions below the class's `private` keyword had shadowed them, so `meringue head-loop`
   raised `NoMethodError` instead of settling the workers it spawned.

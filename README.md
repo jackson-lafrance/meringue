@@ -67,7 +67,9 @@ bundle exec meringue
 
 `bundle install` also puts a `meringue` command on your PATH, pointed at this checkout, so you do not have to prefix it with `bundle exec` or run it from this directory. It writes one small launcher to `~/.local/bin` (or `MERINGUE_BIN_DIR`), tells you if that directory is not on your PATH, and never fails the install if it cannot. Set `MERINGUE_NO_SHIM=1` to skip it and use `bundle exec meringue` instead.
 
-From inside the dashboard, `/update` updates a clean checkout and reloads; `/reload` restarts without updating. Both preserve your configuration and state, which live in `~/.meringue/` outside the source.
+From inside the dashboard, `/update` fast-forwards a clean checkout onto the branch it tracks and reloads; `/reload` restarts without updating. Both preserve your configuration and state, which live in `~/.meringue/` outside the source.
+
+That tracked branch is `main` unless `MERINGUE_BRANCH` names another one, the same variable the installer reads. An installation left on some other branch is switched back onto the tracked one, so `/update` cannot quietly restart into the code it was already running.
 
 ### Troubleshooting
 

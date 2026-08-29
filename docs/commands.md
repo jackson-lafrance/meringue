@@ -66,7 +66,7 @@ Useful slash commands inside the TUI include:
 - `/github test` — with GitHub support enabled, run the bounded read-only authentication and current-repository access check. It never mutates GitHub.
 - `/setup` — reopen the shared full-screen Setup overlay for theme, separate head/worker defaults, status-bar layout, and experiment checkboxes. Manual cancel writes nothing.
 - `/reload` — restart Meringue with the current source and configuration.
-- `/update` — update the clean source checkout, install missing dependencies, and reload automatically.
+- `/update` — fast-forward the clean source checkout onto the branch it tracks (`main`, or `MERINGUE_BRANCH`), install missing dependencies, and reload automatically. A checkout already on that commit is reported as up to date and left running.
 - `/questions` — open the picker for existing open questions; use `↑`/`↓` to move, `Enter` to insert `/answer <question_id>`, and `Esc` to close.
 - `/answer <question_id> "<answer>"` — answer an open question; the kernel records the answer and routes the work it unblocks.
 - `/dismiss <question_id>` — close an open question without answering it.

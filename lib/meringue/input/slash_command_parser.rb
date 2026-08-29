@@ -13,7 +13,7 @@ module Meringue
         ["/help", "Show slash command help."],
         ["/quit", "Quit the interactive TUI."],
         ["/reload", "Restart Meringue with the current installed source and configuration."],
-        ["/update", "Update the installed Meringue source, install missing dependencies, and reload."],
+        ["/update", "Fast-forward the installed Meringue source onto its tracked branch (main, or MERINGUE_BRANCH), install missing dependencies, and reload."],
         ["/theme [name]", "With no arguments, open the theme picker; otherwise set and persist the TUI theme."],
         ["/themes", "Open the interactive theme picker."],
         ["/project add <path> [name]", "Register a project directory."],
