@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
+- The advanced-settings reveal in Settings and first-run setup closes again. Opening it used to
+  remove the row that opened it, which left the setup harness step with no way back to the plain
+  card; the reveal now stays in place, toggles both ways under the same cursor, and `A` opens and
+  closes it from anywhere in the step or category, as the footer says.
 - `/update` follows the branch the installation tracks (`main`, or `MERINGUE_BRANCH`) instead of
   pulling whatever branch happened to be checked out. An installation parked on a stale branch
   used to fast-forward nothing, report success, and restart into the same code; it is now moved

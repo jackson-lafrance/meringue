@@ -207,9 +207,18 @@ class TuiSettingsOverlayTest < Minitest::Test
     3.times { send_key(TAB) }
     assert_equal "Harnesses", @app.send(:settings_category)
     assert_equal "_show_advanced", @app.send(:selected_settings_row).fetch("id")
+
+    # The reveal keeps its place and its cursor, so the key that opened the
+    # advanced rows is the key that puts them away.
     send_key(ENTER)
-    refute_equal "_show_advanced", @app.send(:selected_settings_row).fetch("id")
-    assert @app.send(:settings_rows).all? { |row| row.fetch("id") != "_show_advanced" }
+    assert_equal "_show_advanced", @app.send(:selected_settings_row).fetch("id")
+    assert_includes @app.send(:selected_settings_row).fetch("label"), "Hide advanced"
+    assert_includes @app.send(:settings_rows).map { |row| row.fetch("id") }, "harnesses.pi.command"
+
+    send_key(ENTER)
+    assert_equal "_show_advanced", @app.send(:selected_settings_row).fetch("id")
+    assert_includes @app.send(:selected_settings_row).fetch("label"), "Show advanced"
+    refute_includes @app.send(:settings_rows).map { |row| row.fetch("id") }, "harnesses.pi.command"
   end
 
   def test_invalid_field_stays_in_editor_and_renders_inline
@@ -252,14 +261,23 @@ class TuiSettingsOverlayTest < Minitest::Test
 
     send_key(SHIFT_TAB)
     assert_equal "Harnesses", @app.send(:settings_category)
-    refute @app.send(:settings_rows).any? { |row| row.fetch("id") == "_show_advanced" }
+    assert_equal 0, @app.send(:settings_snapshot).fetch("hidden_advanced_count")
+    toggle = @app.send(:settings_rows).find { |row| row.fetch("id") == "_show_advanced" }
+    assert_includes toggle.fetch("label"), "Hide advanced"
+
+    # A does the same thing from anywhere in the category, and the footer says so.
+    send_key("a")
+    assert_equal hidden, @app.send(:settings_snapshot).fetch("hidden_advanced_count")
+    assert_includes @app.render(compose, width: 100, height: 30, color: false), "A advanced"
   end
 
   def test_keybinding_enter_uses_isolated_capture_with_cancel_clear_invalid_and_repeat_paths
     @app.send(:open_settings, @state)
     6.times { send_key(TAB) }
     assert_equal "Keybindings", @app.send(:settings_category)
-    send_key("a")
+    send_key("a") # every keybinding row is advanced; the reveal keeps the cursor
+    assert_equal "_show_advanced", @app.send(:selected_settings_row).fetch("id")
+    @app.instance_variable_set(:@settings_row_index, @app.send(:settings_rows).index { |row| row.fetch("id") == "keybindings.quit" })
     row = @app.send(:selected_settings_row)
     assert_equal "keybindings.quit", row.fetch("id")
 
@@ -270,7 +288,7 @@ class TuiSettingsOverlayTest < Minitest::Test
     send_key(UP)
     refute @app.instance_variable_get(:@settings_keybinding_capture), "the navigation key should be captured, not navigate the list"
     assert_equal ["up"], @app.instance_variable_get(:@settings_draft).value("keybindings.quit")
-    assert_equal 0, @app.send(:settings_snapshot).fetch("row_index")
+    assert_equal "keybindings.quit", @app.send(:selected_settings_row).fetch("id")
 
     send_key(ENTER)
     send_key("xy")

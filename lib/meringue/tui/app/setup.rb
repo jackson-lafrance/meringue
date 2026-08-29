@@ -19,23 +19,39 @@ module Meringue
         return setup_status_bar_rows if step == Settings::SetupFlow::STATUS_BAR
 
         expanded = @settings_expanded_advanced.fetch(step, false)
-        rows = Settings::SetupFlow.setting_ids(step, draft: @settings_draft, include_advanced: expanded).filter_map do |id|
-          definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
-          next unless definition
-
-          decorate_setup_row(@settings_draft.row(definition))
+        rows = Settings::SetupFlow.setting_ids(step, draft: @settings_draft).filter_map do |id|
+          setup_definition_row(id)
         end
         rows << setup_harness_check_row if step == Settings::SetupFlow::HARNESS
-        hidden = Settings::SetupFlow.advanced_setting_ids(step).length
-        if !expanded && hidden.positive?
-          rows << synthetic_settings_row(
-            "_show_advanced",
-            "Model and reasoning",
-            "Each harness ships defaults that work. Open this only if you want to override them now.",
-            "#{hidden} settings"
-          )
-        end
+        advanced = Settings::SetupFlow.advanced_setting_ids(step)
+        return rows if advanced.empty?
+
+        # The card shows one wrapped line of the selected row's description, so
+        # the way back out has to fit on it.
+        description = if expanded
+                        "Enter or A puts model and reasoning back out of the way."
+                      else
+                        "Harness defaults already work. Enter or A opens them anyway."
+                      end
+        # The reveal is a disclosure, not a door. It stays on the card once it is
+        # open, in the same place, because the row someone pressed to get here is
+        # the row they look for to get back — and setup has no category rail to
+        # leave through.
+        rows << synthetic_settings_row(
+          "_show_advanced",
+          expanded ? "Hide model and reasoning" : "Model and reasoning",
+          description,
+          expanded ? "hide" : "#{advanced.length} settings"
+        )
+        rows.concat(advanced.filter_map { |id| setup_definition_row(id) }) if expanded
         rows
+      end
+
+      def setup_definition_row(id)
+        definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
+        return unless definition
+
+        decorate_setup_row(@settings_draft.row(definition))
       end
 
       # Locating an executable and running it are different questions, and only

@@ -197,6 +197,22 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     revealed = snapshot.fetch("rows").map { |row| row.fetch("id") }
     assert_includes revealed, "agent.head_model"
     assert_includes revealed, "agent.worker_thinking"
+
+    # Setup has no category rail to escape through, so the reveal has to stay on
+    # the card — under the cursor that opened it — and the footer has to say so.
+    assert_equal "_show_advanced", snapshot.fetch("rows").fetch(snapshot.fetch("row_index")).fetch("id")
+    assert_includes render, "A hide advanced"
+    send_key(ENTER)
+    refute_includes snapshot.fetch("rows").map { |row| row.fetch("id") }, "agent.head_model"
+    assert_equal "_show_advanced", snapshot.fetch("rows").fetch(snapshot.fetch("row_index")).fetch("id")
+
+    # A reaches the same reveal from anywhere on the step.
+    focus_setup_row("agent.head_harness")
+    send_key("a")
+    assert_includes snapshot.fetch("rows").map { |row| row.fetch("id") }, "agent.head_model"
+    send_key("a")
+    refute_includes snapshot.fetch("rows").map { |row| row.fetch("id") }, "agent.head_model"
+    assert_includes render, "A advanced"
   end
 
   # Setup completes with no registered project; discovery and registration happen

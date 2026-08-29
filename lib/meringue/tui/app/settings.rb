@@ -112,25 +112,21 @@ module Meringue
           end
         end
 
-        expanded = @settings_expanded_advanced.fetch(settings_category, false)
-        definitions = @settings_draft.definitions_for(settings_category, include_advanced: expanded)
-        rows = definitions.filter_map do |definition|
-          row = @settings_draft.row(definition)
-          decorate_github_access_action_row(row) if settings_row_visible?(row)
-        end
-        all_definitions = @settings_draft.definitions_for(settings_category, include_advanced: true)
-        hidden = all_definitions.count { |definition| definition.advanced && settings_row_visible?(@settings_draft.row(definition)) }
-        if !expanded && hidden.positive?
-          rows << synthetic_settings_row(
-            "_show_advanced",
-            "Show advanced settings (#{hidden})",
-            "Reveal #{hidden} advanced setting#{hidden == 1 ? "" : "s"} in #{settings_category}. Other categories keep their own advanced settings hidden.",
-            "#{hidden} hidden"
-          )
-        end
+        expanded = settings_advanced_expanded?
+        plain, advanced = @settings_draft
+                          .definitions_for(settings_category, include_advanced: true)
+                          .select { |definition| settings_row_visible?(@settings_draft.row(definition)) }
+                          .partition { |definition| !definition.advanced }
+        rows = plain.map { |definition| decorate_github_access_action_row(@settings_draft.row(definition)) }
+        return rows if advanced.empty?
+
+        # The reveal is a disclosure, not a door: it keeps its place in the list
+        # whether it is open or closed, so the row that revealed the advanced
+        # settings is also the row that puts them away.
+        rows << settings_advanced_toggle_row(advanced.length, expanded)
+        rows.concat(advanced.map { |definition| decorate_github_access_action_row(@settings_draft.row(definition)) }) if expanded
         rows
       end
-
 
       def settings_row_visible?(row)
         return true unless row.fetch("id", nil) == "experiments.github_support_test_access"
@@ -262,7 +258,8 @@ module Meringue
           "row_index" => @settings_row_index,
           "dirty" => @settings_draft.dirty?,
           "saving" => @settings_saving,
-          "advanced" => @settings_expanded_advanced.fetch(settings_category, false),
+          "advanced" => settings_advanced_expanded?,
+          "advanced_available" => settings_advanced_count.positive?,
           "editor" => editor,
           "keybinding_capture" => capture,
           "picker" => settings_picker_snapshot,
@@ -356,12 +353,8 @@ module Meringue
           else
             activate_settings_row(state, on_submit: on_submit)
           end
-        elsif key.to_s.downcase == "a" && !setup_mode?
-          category = settings_category
-          if @settings_draft.definitions_for(category, include_advanced: true).any?(&:advanced)
-            @settings_expanded_advanced[category] = !@settings_expanded_advanced.fetch(category, false)
-            @settings_row_index = 0
-          end
+        elsif key.to_s.downcase == "a"
+          toggle_settings_advanced
         end
         unchanged
       rescue StandardError => e
@@ -816,9 +809,7 @@ module Meringue
           return edit_guidance_prompt(row)
         end
         if id == "_show_advanced"
-          @settings_expanded_advanced[settings_category] = true
-          @settings_row_index = 0
-          return true
+          return toggle_settings_advanced
         end
         if id == "setup.run_again"
           close_settings(discard: true)

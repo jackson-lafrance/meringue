@@ -244,7 +244,23 @@ module Meringue
                  else
                    "Navigate: Enter or Arrow keys toggle · Tab advances · Backspace returns"
                  end
-          [[hint, Style::DIM]]
+          segments = [[hint, Style::DIM]]
+          advanced = advanced_hint(snap, hint: hint, width: width)
+          segments << [" · #{advanced}", Style::DIM] if advanced
+          segments
+        end
+
+        # The reveal is only worth a footer keystroke where the category has
+        # something behind it and the line has room left to say so. Without it
+        # the reveal row is the only way back out, which is fine on a list you
+        # can see and wrong on a setup card you are being walked through.
+        def advanced_hint(snap, hint:, width:, reserved: 0)
+          return nil unless snap.fetch("advanced_available", false)
+
+          text = snap.fetch("advanced", false) ? "A hide advanced" : "A advanced"
+          return nil if hint.to_s.length + 3 + text.length + reserved.to_i > width.to_i - 2
+
+          text
         end
 
         def category_lines(state, height:)
@@ -345,12 +361,24 @@ module Meringue
                    "Esc cancel · Ctrl-S save · ↑↓ · Enter edit"
                  elsif width.to_i < 100
                    "Esc cancel · Ctrl-S save · Tab category · ↑↓ · Enter edit"
+                 elsif snap.fetch("advanced_available", false) && width.to_i < 112
+                   "↑↓ · Tab category · Enter edit · Ctrl-S save · Esc cancel"
                  else
                    "↑↓ · Tab category · Space toggle · Enter edit · Ctrl-S save · Esc cancel"
                  end
           segments = [[hint, Style::DIM]]
+          advanced = advanced_hint(snap, hint: hint, width: width, reserved: action_segments_width(snap, width: width))
+          segments << [" · #{advanced}", Style::DIM] if advanced
           segments << [" · #{error_count} error#{error_count == 1 ? "" : "s"}", Style::ERROR] if error_count.positive?
           segments
+        end
+
+        # Settings draws its buttons on the footer row; setup draws them on the
+        # card, so only Settings has to leave room for them.
+        def action_segments_width(snap, width:)
+          return 0 if width.to_i < Settings::WIDE_WIDTH
+
+          primary_label(snap).length + 1 + CANCEL_LABEL.length
         end
 
         def action_segments(state)
