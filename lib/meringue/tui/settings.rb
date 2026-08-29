@@ -11,7 +11,7 @@ module Meringue
       MIN_HEIGHT = 10
       WIDE_WIDTH = 80
       COMPACT_WIDTH = 46
-      EDITOR_CUSTOM_OPTION = "custom command…"
+      EDITOR_CUSTOM_OPTION = "Custom"
 
       # Curated first-run mode over the same Draft, schema definitions, editors,
       # and pane used by /config. Experiment ids are always derived from the
