@@ -361,8 +361,11 @@ class KernelGoalsCommandTest < Minitest::Test
 
     # What the user actually reads in the logs pane.
     engine.record_user_kernel_command_output(input: "/goal status", command_results: [all])
-    assert logs_matching(/Command output: ListGoals: accepted/).any?
-    assert logs_matching(/it1: partially_met metric 70/).any?
+    output = logs_matching(/G1 working/).find { |message| message.include?("it1: partially_met metric 70") }
+    refute_nil output
+    refute_includes output, "Command output:"
+    refute_includes output, "ListGoals:"
+    refute_includes output, "accepted"
 
     one = apply!("ListGoals", { "goal_id" => "G1" })
     summary = one.fetch("result").fetch("goals").first

@@ -297,7 +297,7 @@ module Meringue
           # Same visible output as the typed slash path: the kernel's own command output reaches
           # the user, so a head summary never has to restate "Pruned N issues, ...".
           log_ids.concat(append_head_command_output_logs(state, head_id.to_s, command_results))
-          summary_log_ids = if unapplied_count.positive? || skipped_count.positive?
+          summary_log_ids = if skipped_count.positive?
                               append_log(
                                 state,
                                 source_type: "kernel",
@@ -832,7 +832,7 @@ module Meringue
             source_type: "kernel",
             source_id: head_id.to_s,
             level: result.fetch("status", nil) == "accepted" ? "info" : "warning",
-            message: "Command output: #{body}",
+            message: body,
             details: {
               "head_id" => head_id.to_s,
               "command_type" => result.fetch("command_type", nil),

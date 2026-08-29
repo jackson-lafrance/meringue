@@ -110,7 +110,7 @@ class KernelHeadsUserKernelCommandsTest < KernelHeadsTestCase
     assert results.all? { |entry| entry.fetch("status") == "accepted" }, results.inspect
     assert_equal results.length, find_agent_record(head_id).dig("harness_metadata", "head_result_command_journal").length
     assert_includes log_messages, results.find { |entry| entry.fetch("command_type") == "Prune" }.fetch("message")
-    assert log_messages.any? { |message| message.start_with?("Command output: GetInfo: accepted") }
+    assert log_messages.any? { |message| message.start_with?("  ") && !message.include?("Command output:") && !message.include?("GetInfo:") && !message.include?("accepted") }
   end
 
   def test_a_head_proposed_move_worker_reparents_a_worker_through_the_normal_dispatch_path
@@ -164,7 +164,7 @@ class KernelHeadsUserKernelCommandsTest < KernelHeadsTestCase
     assert_equal "accepted", command_results(explicit).first.fetch("status")
     assert_equal true, explicit.dig("result", "state_cleared")
     assert_empty state.fetch("projects")
-    assert log_messages.any? { |message| message.start_with?("Command output: ClearState: accepted") }
+    assert log_messages.any? { |message| message.include?("state: reset") && !message.include?("Command output:") && !message.include?("ClearState:") && !message.include?("accepted") }
   end
 
   def test_full_project_kill_requires_the_user_to_name_and_confirm_the_project

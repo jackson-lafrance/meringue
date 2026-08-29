@@ -103,11 +103,13 @@ class KernelHeadsLoggingTest < KernelHeadsTestCase
       )
     )
 
-    output_entries = logs.select { |entry| entry.fetch("message", "").start_with?("Command output: ListAll: accepted") }
+    output_entries = logs.select { |entry| entry.fetch("message", "").start_with?("  projects:") }
     assert_equal 1, output_entries.length, "one ListAll command must produce one log entry, not one per line"
     message = output_entries.first.fetch("message")
-    assert_includes message, "Command output: ListAll: accepted"
-    assert_includes message, "\n  projects:"
+    refute_includes message, "Command output:"
+    refute_includes message, "ListAll:"
+    refute_includes message, "accepted"
+    assert_includes message, "  projects:"
     assert_includes message, "\n  issues:"
     assert_includes message, "\n  agents:"
     assert_includes message, "\n  questions:"
@@ -135,9 +137,9 @@ class KernelHeadsLoggingTest < KernelHeadsTestCase
     )
 
     action_log = log_with_message("Created issue #{project_id}-I1")
-    output_log = log_with_message("Command output: ListAll: accepted")
+    output_log = log_with_message("  projects:")
     no_op_log = log_with_message("Head #{head_id} intentionally routed no work")
-    rejection_log = log_with_message("Rejected Frobnicate:")
+    rejection_log = logs.find { |log| log.dig("details", "command_type") == "Frobnicate" }
     [action_log, output_log, no_op_log, rejection_log].each do |entry|
       assert_equal "kernel", entry.fetch("source_type")
       assert_equal "head", entry.dig("details", "command_author_type")
@@ -220,7 +222,7 @@ class KernelHeadsLoggingTest < KernelHeadsTestCase
       cleanup_head: false
     )
 
-    entry = log_with_message("Rejected CreateIssue:")
+    entry = logs.find { |log| log.dig("details", "command_id") == "H1-C1" }
     refute_nil entry
     assert_equal "kernel", entry.fetch("source_type")
     assert_nil entry.fetch("source_id")
@@ -256,7 +258,7 @@ class KernelHeadsLoggingTest < KernelHeadsTestCase
     assert_equal "error", provisioning_error.fetch("level")
     assert_equal "#{project_id}-I1", provisioning_error.fetch("details").fetch("issue_id")
 
-    command_error = log_with_message("Failed SpawnWorker:", current_state: failing_state)
+    command_error = logs(current_state: failing_state).find { |log| log.dig("details", "command_id") == "H1-C2" }
     refute_nil command_error
     assert_nil command_error.fetch("source_id")
     assert_equal "error", command_error.fetch("level")
@@ -397,31 +399,17 @@ class KernelHeadsLoggingTest < KernelHeadsTestCase
       )
     )
 
-    entry = log_with_message("Head result for #{head_id}:")
-    refute_nil entry
-    assert_equal "kernel", entry.fetch("source_type")
-    assert_equal head_id, entry.fetch("source_id")
-    assert_equal "warning", entry.fetch("level")
-    assert_equal "Head result for #{head_id}: 1 accepted, 2 rejected, 0 failed.", entry.fetch("message")
-    details = entry.fetch("details")
-    assert_equal ["Q1"], details.fetch("question_ids")
-    assert_equal(
-      [%w[CreateIssue accepted], %w[CreateIssue rejected], %w[Frobnicate rejected]],
-      Array(details.fetch("command_results")).map { |result| [result.fetch("command_type"), result.fetch("status")] }
-    )
-    assert_equal "head_commands_v1", details.fetch("diagnostic_compaction")
-    assert_operator JSON.generate(details).bytesize, :<=, Meringue::State::Compactor::DIAGNOSTIC_DETAILS_MAX_BYTES
-    details.fetch("command_results").each do |command_result|
-      refute command_result.key?("result"), "summary logs must not recursively embed command result envelopes"
-      refute command_result.key?("log_entry_ids"), "individual command logs already retain their own IDs"
-    end
+    refute log_messages.any? { |message| message.start_with?("Head result for #{head_id}:") },
+           "command acceptance counts are not user-facing output"
+    assert log_messages.any? { |message| message.include?("Anything else?") },
+           "useful question information remains visible"
   end
 
   def test_user_slash_command_style_rejections_are_logged_without_a_head
     result = apply_command("CreateIssue", { "project_id" => "P1", "title" => "No project yet" })
 
     assert_equal "rejected", result.fetch("status")
-    entry = log_with_message("Rejected CreateIssue:")
+    entry = logs.find { |log| log.dig("details", "command_type") == "CreateIssue" }
     refute_nil entry
     assert_equal "kernel", entry.fetch("source_type")
     assert_nil entry.fetch("source_id")

@@ -61,7 +61,7 @@ class KernelWorkersWorkspaceProvisioningTest < Minitest::Test
     # this error is the only visible line the worker ever gets.
     assert_equal ["error"], worker_logs.map { |entry| entry.fetch("level") }.uniq
     assert_includes worker_logs.fetch(0).fetch("message"), "Worker workspace provisioning failed"
-    assert_includes log_messages(engine), "Failed SpawnWorker: #{result.fetch("message")}"
+    assert_includes log_messages(engine), result.fetch("message")
   end
 
   def test_large_workspace_failure_persists_bounded_actionable_log_details
