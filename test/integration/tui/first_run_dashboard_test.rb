@@ -89,7 +89,7 @@ class TuiFirstRunDashboardTest < Minitest::Test
   def test_the_composer_placeholder_is_a_simple_prompt
     placeholder = Meringue::TUI::ChatTarget.placeholder(composed_state(empty_state))
 
-    assert_equal "Submit a prompt", placeholder
+    assert_equal "Send a prompt", placeholder
   end
 
   # The card is a first-run affordance, not a permanent decoration, so it must

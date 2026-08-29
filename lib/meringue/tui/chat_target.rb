@@ -122,7 +122,7 @@ module Meringue
       # Placeholder for an empty composer. The composer title identifies a
       # selected destination, so the input itself can keep one simple prompt.
       def placeholder(_state)
-        "Submit a prompt"
+        "Send a prompt"
       end
 
       # Bottom hint line contribution: gestures only, never the target's

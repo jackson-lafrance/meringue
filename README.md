@@ -50,7 +50,7 @@ meringue doctor   # checks Ruby, git, your harness, config, and state, and names
 │   └─ ! I3  Reconcile stale sessions  │ │   Question Q1: Which project should get the fix?     │
 ╰──────────────────────────────────────╯ ╰──────────────────────────────────────────────────────╯
 ╭─ chat ─────────────────────────────────────────────────────────────────────────────────────────╮
-│ › Submit a prompt                                                                               │
+│ › Send a prompt                                                                                 │
 ╰────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 

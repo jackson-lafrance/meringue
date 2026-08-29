@@ -65,7 +65,7 @@ class TuiChatTargetComposerTest < Minitest::Test
     tint = Style.agent_chrome_style("P1-I1-W1", bold: true)
 
     empty_line = @pane.composer_lines(composed, width: 40).first
-    assert_equal "› Submit a prompt", plain_line(empty_line)
+    assert_equal "› Send a prompt", plain_line(empty_line)
     assert_equal tint, styles_in(empty_line).first
     assert_includes styles_in(empty_line), Style::MUTED
 
@@ -153,7 +153,7 @@ class TuiChatTargetComposerTest < Minitest::Test
     assert_nil @pane.composer_border_style(composed, active: true)
     assert_nil @pane.composer_title_style(composed)
     assert_equal Style::ACCENT_BOLD, ChatTarget.prompt_style(composed)
-    assert_equal "Submit a prompt", ChatTarget.placeholder(composed)
+    assert_equal "Send a prompt", ChatTarget.placeholder(composed)
     # The title carries the log-only label (`P1 logs only`) and the logs pane
     # title repeats it, so the bottom line keeps only the clear gesture.
     assert_equal [["Esc clears", Style::MUTED]], ChatTarget.hint_segments(composed)
@@ -180,7 +180,7 @@ class TuiChatTargetComposerTest < Minitest::Test
     # clear: the bottom line drops straight to the status/interaction hints.
     assert_empty ChatTarget.hint_segments(composed)
     refute_includes plain_line(@pane.bottom_hint_line(composed)), "Esc clears"
-    assert_equal ["› Submit a prompt"], plain_lines(@pane.composer_lines(composed, width: 40))
+    assert_equal ["› Send a prompt"], plain_lines(@pane.composer_lines(composed, width: 40))
   end
 
   # Regression for the nil selected-target crash class: an absent selection is
@@ -193,7 +193,7 @@ class TuiChatTargetComposerTest < Minitest::Test
       assert_equal "none", ChatTarget.presentation(state).fetch("kind")
       assert_equal "chat", @pane.composer_pane_title(state)
       assert_nil @pane.composer_border_style(state, active: true)
-      assert_equal ["› Submit a prompt"], plain_lines(@pane.composer_lines(state, width: 40))
+      assert_equal ["› Send a prompt"], plain_lines(@pane.composer_lines(state, width: 40))
     end
   end
 
