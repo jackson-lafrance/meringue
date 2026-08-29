@@ -45,12 +45,15 @@ class HeadSimpleLoopTest < Minitest::Test
     assert_equal ["P1-I1"], setup.fetch(:store).load.fetch("issues").map { |issue| issue.fetch("id") }
   end
 
-  def test_handle_input_routes_slash_commands
+  def test_handle_input_routes_slash_commands_through_prompt_loop
     setup = simple_loop_setup
-    payload = build_simple_loop(setup, input: "").handle_input("/questions")
+    loop_under_test = build_simple_loop(setup, input: "")
+    payload = loop_under_test.handle_input("/questions")
 
     assert_equal "slash_command_applied", payload.fetch("event")
     assert_equal "Loaded 0 questions.", payload.fetch("summary")
+    assert_empty Meringue::Heads::SimpleLoop.private_instance_methods(false) &
+      %i[state_summary error_payload error_details wait_for_spawned_workers wait_for_worker]
   end
 
   def test_all_exit_commands_stop_the_loop_before_spawning_a_head
@@ -102,34 +105,6 @@ class HeadSimpleLoopTest < Minitest::Test
     assert_equal "ArgumentError", payload.dig("error", "class")
     assert_equal "kernel exploded", payload.dig("error", "message")
     assert_equal 0, payload.dig("state_summary", "agent_count")
-  end
-
-  # `meringue head-loop` builds this loop with wait_for_workers: true. It used to raise
-  # `NoMethodError: private method 'harness_client'` because a second definition below the
-  # engine's `private` keyword shadowed the public reader.
-  def test_waiting_for_workers_settles_the_spawned_worker
-    setup = simple_loop_setup(harness_client: SettlingHarnessClient.new(assistant_text: "finished"))
-    out = StringIO.new
-    err = StringIO.new
-
-    status = build_simple_loop(
-      setup,
-      input: "add a docs cleanup task\n/quit\n",
-      out: out,
-      err: err,
-      wait_for_workers: true
-    ).run
-
-    assert_equal 0, status
-    assert_empty err.string
-    payload = JSON.parse(out.string[out.string.index("{")..])
-    wait_result = payload.fetch("worker_wait_results").first
-
-    assert_equal "P1-I1-W1", wait_result.fetch("agent_id")
-    assert_equal "settled", wait_result.fetch("status")
-    assert_equal "finished", wait_result.fetch("last_assistant_text")
-    assert_equal [["P1-I1-W1", "worker", "completed"]],
-                 payload.dig("state_summary", "recent_agents").map { |agent| agent.values_at("id", "type", "status") }
   end
 
   def test_initial_state_seeds_an_empty_store_and_is_reused_for_routing

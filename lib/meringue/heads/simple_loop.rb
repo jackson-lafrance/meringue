@@ -59,7 +59,7 @@ module Meringue
 
           out.puts JSON.pretty_generate(handle_input(text))
         rescue StandardError => e
-          err.puts JSON.pretty_generate(error_payload(e))
+          err.puts JSON.pretty_generate(prompt_loop.error_payload(e))
         end
 
         0
@@ -71,23 +71,9 @@ module Meringue
 
       private
 
-      # Every prompt, slash command, and worker wait is `PromptLoop`'s job; this class owns the
-      # console around it. It used to carry a second, unreachable copy of the worker-wait path.
-      attr_reader :input, :out, :err, :runner_name, :store, :engine, :cwd, :prompt_loop
-
-      def state_summary
-        state = store.load
-        {
-          "project_count" => state.fetch("projects", []).length,
-          "issue_count" => state.fetch("issues", []).length,
-          "agent_count" => state.fetch("agents", []).length,
-          "open_question_count" => state.fetch("questions", []).count { |question| question.fetch("status", nil) == "open" },
-          "recent_projects" => state.fetch("projects", []).last(3).map { |project| project.slice("id", "name", "status", "root_path") },
-          "recent_issues" => state.fetch("issues", []).last(5).map { |issue| issue.slice("id", "project_id", "title", "status", "agent_ids") },
-          "recent_agents" => state.fetch("agents", []).last(5).map { |agent| agent.slice("id", "type", "status", "project_id", "issue_id", "harness") },
-          "recent_logs" => state.fetch("logs", []).last(8).map { |log| log.slice("id", "source_type", "source_id", "level", "message") }
-        }
-      end
+      # PromptLoop owns prompt routing, command handling, summaries, and worker orchestration;
+      # this class only frames console input and output around it.
+      attr_reader :input, :out, :err, :runner_name, :store, :prompt_loop
 
       def seed_store!(initial_state)
         return if store.respond_to?(:path) && File.exist?(store.path)
@@ -115,24 +101,6 @@ module Meringue
         input.respond_to?(:tty?) && input.tty?
       end
 
-      def error_payload(error)
-        {
-          "event" => "error",
-          "state_mutated" => false,
-          "error" => error_details(error),
-          "state_summary" => state_summary
-        }
-      end
-
-      def error_details(error)
-        details = {
-          "class" => error.class.name,
-          "message" => error.message
-        }
-        details["validation_errors"] = error.validation_errors if error.respond_to?(:validation_errors)
-        details["raw_output"] = error.raw_output if error.respond_to?(:raw_output)
-        details
-      end
     end
   end
 end
