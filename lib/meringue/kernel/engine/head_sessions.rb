@@ -245,12 +245,12 @@ module Meringue
         pending_continuation = workers.any? { |worker| pending_completion_continuation?(worker) }
         issue["status"] = if workers.all? { |worker| worker.fetch("status", nil) == "completed" }
                             active_goal || pending_continuation ? "working" : "completed"
+                          elsif workers.any? { |worker| worker.fetch("status", nil) == "working" }
+                            "working"
                           elsif workers.any? { |worker| worker.fetch("status", nil) == "errored" }
                             "errored"
                           elsif workers.any? { |worker| worker.fetch("status", nil) == "blocked" }
                             "blocked"
-                          elsif workers.any? { |worker| worker.fetch("status", nil) == "working" }
-                            "working"
                           elsif workers.any? { |worker| worker.fetch("status", nil) == "paused" }
                             "idle"
                           else
@@ -265,12 +265,12 @@ module Meringue
 
         project["status"] = if issues.all? { |issue| issue.fetch("status", nil) == "completed" }
                               "completed"
+                            elsif issues.any? { |issue| issue.fetch("status", nil) == "working" }
+                              "working"
                             elsif issues.any? { |issue| issue.fetch("status", nil) == "errored" }
                               "errored"
                             elsif issues.any? { |issue| issue.fetch("status", nil) == "blocked" }
                               "blocked"
-                            elsif issues.any? { |issue| issue.fetch("status", nil) == "working" }
-                              "working"
                             elsif issues.all? { |issue| %w[idle paused].include?(issue.fetch("status", nil).to_s) }
                               "idle"
                             else
