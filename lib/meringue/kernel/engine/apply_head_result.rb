@@ -185,11 +185,40 @@ module Meringue
               end
             else
               resolved_command = resolution.fetch("command")
-              guard_result = head_command_guard_result(resolved_command, head: head_snapshot)
-              unless guard_result
-                log_ids.concat(log_head_batch_issue_remap(head_id.to_s, resolution))
+              # Resolution above established what was true while the command was being prepared.
+              # Refresh it again at the submission boundary: kill/prune may have committed between
+              # that lookup and this command's actual dispatch. The second pass also rebinds a
+              # prediction against the state that is about to receive the command.
+              fresh_resolution = fresh_head_command_target_refresh(
+                command: resolved_command,
+                head_id: head_id.to_s
+              )
+              if (fresh_skip = fresh_resolution.fetch("skip", nil))
+                skipped_result(
+                  value_at(resolved_command, "command_id", "id"),
+                  canonical_command_type(value_at(resolved_command, "type", "command_type")),
+                  fresh_skip.fetch("target_id", nil),
+                  with_dropped_intent(fresh_skip.fetch("message"), resolved_command),
+                  fresh_skip.fetch("errors"),
+                  level: fresh_skip.fetch("level", "info"),
+                  details: fresh_skip.fetch("details", {})
+                )
+              else
+                guard_result = head_command_guard_result(resolved_command, head: head_snapshot)
+                unless guard_result
+                  log_ids.concat(log_head_batch_issue_remap(head_id.to_s, resolution))
+                end
+                applied = guard_result || apply(resolved_command)
+                # The fresh check cannot make the check-and-use operation atomic with commands
+                # that perform external work. If removal wins that final race, use the durable
+                # removal ledger to preserve the request as an explicit skip rather than surfacing
+                # a generic not-found rejection (or, worse, provisioning onto a dead issue).
+                command_result_after_target_removal(
+                  applied,
+                  command: resolved_command,
+                  head_id: head_id.to_s
+                )
               end
-              guard_result || apply(resolved_command)
             end
           end
           command_results << result
@@ -234,7 +263,8 @@ module Meringue
           end
         end
 
-        synchronized_state do
+        auto_retry_plan = nil
+        final_result = synchronized_state do
           state = normalized_state
           head = find_agent(state, head_id)
           unless head
@@ -304,8 +334,17 @@ module Meringue
           metadata["head_result_apply_status"] = unapplied_count.positive? ? "partial" : "accepted"
           metadata["head_result_applied_at"] = now
           metadata["head_result_skipped_command_count"] = skipped_count if skipped_count.positive?
+          auto_retry_requested = skipped_count.positive? && !metadata.fetch("automatic_target_removal_retry_at", nil) &&
+                                 head_retry_count(head).zero?
+          if auto_retry_requested
+            # Checkpoint the recovery before any harness call. The replacement is intentionally
+            # limited to one automatic attempt: if the replacement sees another removal, it stays
+            # visible as an unrouted/manual-retry case instead of looping forever.
+            metadata["automatic_target_removal_retry_at"] = now
+            metadata["automatic_target_removal_retry_state"] = "pending"
+          end
           head["harness_metadata"] = metadata
-          head["status"] = unapplied_count.positive? ? "blocked" : "completed"
+          head["status"] = (unapplied_count.positive? || auto_retry_requested) ? "blocked" : "completed"
           head["updated_at"] = now
           # A completion head and the worker continuation that spawned it are checkpointed in the
           # same state transaction. If the process dies after this save but before the synchronous
@@ -316,14 +355,18 @@ module Meringue
           log_ids.concat(command_results.flat_map { |result| result.fetch("log_entry_ids", []) })
           log_ids.concat(summary_log_ids)
           log_ids.concat(unrouted_log_ids)
-          cleanup = if cleanup_head && unapplied_count.zero?
+          cleanup = if cleanup_head && unapplied_count.zero? && !auto_retry_requested
                       cleanup_applied_head!(state, head_id.to_s, now: now)
                     elsif cleanup_head
-                      { "changed" => false, "reason" => "partially_applied" }
+                      { "changed" => false, "reason" => auto_retry_requested ? "automatic_retry_pending" : "partially_applied" }
                     else
                       { "changed" => false, "reason" => "deferred" }
                     end
           log_ids.concat(cleanup.fetch("log_entry_ids", []))
+          if auto_retry_requested
+            auto_retry_plan = head_retry_plan(state, head_id.to_s)
+            auto_retry_plan = nil unless auto_retry_plan.fetch("eligible")
+          end
           touch_state!(state, now)
           store.save(state)
 
@@ -344,6 +387,97 @@ module Meringue
             log_ids.uniq
           )
         end
+
+        if auto_retry_plan
+          retry_result = automatic_target_removal_retry(auto_retry_plan)
+          final_result["result"] = (final_result.fetch("result", {}) || {}).merge(
+            "automatic_retry" => retry_result
+          )
+          final_result["log_entry_ids"] = Array(final_result.fetch("log_entry_ids", [])) + Array(retry_result.fetch("log_entry_ids", []))
+        end
+        final_result
+      end
+
+      # Automatic recovery deliberately shares the manual retry machinery: the same immutable plan
+      # and respawn path build the replacement prompt, carry the command journal, and atomically
+      # remove the predecessor. Only the trigger and the one-attempt guard differ.
+      def automatic_target_removal_retry(plan)
+        result = respawn_head_retry(nil, "AutomaticHeadRetry", plan)
+        return result unless result.fetch("status", nil) == "accepted"
+
+        result.merge(
+          "automatic" => true,
+          "message" => "Automatically retried unrouted work as head #{result.fetch("target_id", nil)}."
+        )
+      rescue StandardError => e
+        failed_result(nil, "AutomaticHeadRetry", "Automatic head retry was not started: #{sanitized_error_message(e)}", [e.class.name, sanitized_error_message(e)])
+      end
+
+      # Re-check only the already-resolved target at submission. The full batch resolver is not
+      # repeated here because a later alias pass could reinterpret an earlier command.
+      def fresh_head_command_target_refresh(command:, head_id:)
+        type = canonical_command_type(value_at(command, "type", "command_type"))
+        payload = value_at(command, "payload")
+        payload = {} unless payload.is_a?(Hash)
+        if BATCH_REMOVABLE_TARGET_COMMANDS.include?(type)
+          return resolve_batch_removed_target(payload: payload, command_type: type, head_id: head_id) || { "command" => command }
+        end
+        return { "command" => command } unless BATCH_ISSUE_GUARDED_COMMANDS.include?(type)
+
+        issue_id = present_string(value_at(payload, "issue_id", "IssueID", "issueId"))
+        return { "command" => command } unless issue_id
+        synchronized_state do
+          state = normalized_state
+          next({ "command" => command }) if find_issue(state, issue_id)
+          ledger = removed_under_head_result(state, head_id, "issue", issue_id)
+          next({ "command" => command }) unless ledger && ledger.fetch("after_spawn")
+          removal = ledger.fetch("removal")
+          { "skip" => { "target_id" => issue_id,
+                         "level" => type == "SpawnWorker" ? "warning" : "info",
+                         "message" => removed_batch_issue_target_message(command_type: type, head_id: head_id, issue_id: issue_id, removal: removal),
+                         "errors" => [REMOVED_BATCH_ISSUE_TARGET_ERROR],
+                         "details" => { "head_id" => head_id.to_s, "issue_id" => issue_id,
+                                        "reason" => REMOVED_BATCH_ISSUE_TARGET_ERROR,
+                                        "issue_removal" => removal,
+                                        "visibility_evidence" => "fresh_submission_check" } } }
+        end
+      end
+
+      # External provisioning leaves a final check/use gap. If removal wins it, convert only an
+      # exact not-found failure backed by the durable ledger; unrelated failures remain retryable.
+      def command_result_after_target_removal(result, command:, head_id:)
+        return result unless result.is_a?(Hash) && result.fetch("status", nil) != "accepted"
+        missing = %w[issue_not_found target_issue_not_found agent_not_found target_not_found reservation_issue_or_project_not_found]
+        return result unless Array(result.fetch("errors", [])).any? { |error| missing.include?(error.to_s) }
+        type = canonical_command_type(value_at(command, "type", "command_type"))
+        payload = value_at(command, "payload")
+        payload = {} unless payload.is_a?(Hash)
+        requested = if type == "PromptAgent"
+                      present_string(value_at(payload, "agent_id", "AgentID", "agentId"))
+                    elsif type == "Kill"
+                      present_string(value_at(payload, "target_id", "TargetID", "targetId", "id"))
+                    else
+                      present_string(value_at(payload, "issue_id", "IssueID", "issueId"))
+                    end
+        return result unless requested
+        removal = synchronized_state do
+          state = normalized_state
+          next nil if find_issue(state, requested) || find_agent(state, requested) || find_project(state, requested)
+          %w[issue agent].filter_map do |kind|
+            ledger = removed_under_head_result(state, head_id, kind, requested)
+            ledger && ledger.fetch("after_spawn") ? ledger.fetch("removal") : nil
+          end.first
+        end
+        return result unless removal
+        kind = removal.fetch("kind", type == "PromptAgent" ? "agent" : "issue").to_s
+        error = kind == "agent" ? REMOVED_BATCH_AGENT_TARGET_ERROR : REMOVED_BATCH_ISSUE_TARGET_ERROR
+        skipped_result(value_at(command, "command_id", "id") || result.fetch("command_id", nil), type, requested,
+                      with_dropped_intent(removed_batch_record_target_message(command_type: type, head_id: head_id,
+                                                                              record_id: requested, kind: kind,
+                                                                              removal: removal), command),
+                      [error], level: type == "Kill" ? "info" : "warning",
+                      details: { "head_id" => head_id.to_s, "target_id" => requested, "reason" => error,
+                                 "removed_record" => removal, "original_errors" => result.fetch("errors", []) })
       end
 
       # Stable identity for one head result, so a re-delivered or re-parsed copy of

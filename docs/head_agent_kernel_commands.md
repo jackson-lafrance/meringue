@@ -614,7 +614,7 @@ A head is stateless per user message, so a head that stops without routing the w
 
 Selecting the failed head and typing is ordinary chat, not retry. `/prompt H<n> "<message>"` takes over a head only while it is still routing; a stopped head remains on `/retry H<n>`.
 
-Three statuses leave a request unrouted, and all three are retryable: `errored` (its turn or session died), `killed` (the user stopped it), and `blocked` (its result was applied, but the kernel rejected or failed part of the batch). A `blocked` head is the common stranded case, because a rejected command means the work behind it never happened.
+Three statuses leave a request unrouted, and all three are retryable: `errored` (its turn or session died), `killed` (the user stopped it), and `blocked` (its result was applied, but the kernel rejected or failed part of the batch). A `blocked` head is the common stranded case, because a rejected command means the work behind it never happened. A target-removal skip is also treated as unrouted: the kernel automatically starts one fresh replacement head for that request, rather than requiring a resend.
 
 Every retry starts a fresh head. The old head/session is not messaged or resumed, even when a transport failure left the session open; the kernel releases that stale session and removes the old head from the active AgentTree while preserving lineage in logs and the retry head's metadata.
 
@@ -625,7 +625,7 @@ A retry does not re-run journal entries, it re-routes the request. So the fresh 
 
 So retrying a partially applied head is safe: the issue that was created is reused rather than recreated, and only the missing steps are routed. Lineage is recorded on the retry head (`harness_metadata.retry_of_head_id`, `head_retry_count`) and in the log once as `Retrying head H13 as head H14: <reason>. Re-running its original request with a fresh head.` The old head row is removed from active state instead of lingering as `retried as H14`.
 
-The head contract is unchanged by a retry or takeover: the replacement still returns `HeadResult` JSON, still proposes commands instead of doing the work, and is never turned into a worker. These are user routing actions, except that a head may explicitly spawn one direct follow-up of itself with `follow_up_of_head_id`; it may not propose `RetryHead`, take over another head, or prompt a head. Such commands are rejected with `command_not_proposable_by_head` or `head_cannot_prompt_head`.
+The head contract is unchanged by a retry or takeover: the replacement still returns `HeadResult` JSON, still proposes commands instead of doing the work, and is never turned into a worker. These are user routing actions, except that a head may explicitly spawn one direct follow-up of itself with `follow_up_of_head_id`; the kernel may additionally start the single automatic replacement described above. A head may not propose `RetryHead`, take over another head, or prompt a head. Such commands are rejected with `command_not_proposable_by_head` or `head_cannot_prompt_head`.
 
 Rejection codes, all of which should now be rare:
 
@@ -655,7 +655,7 @@ Validates and applies the structured result from a completed head. Head agents s
 
 The kernel applies each head command batch exactly once. It journals every command with its result and holds a refreshed apply lease on the head while it works, so a reconciliation pass or a second Meringue process sharing the same state file resumes only the commands that never completed instead of re-running the batch. Do not resend a batch to force progress, and do not repeat a command that was already accepted.
 
-If no work needs routing because the request is already satisfied, put the explanation in `response`; do not add `NoOp` solely to satisfy the command journal. A nonblank response with empty commands and questions is accepted, logged as `head_response`, rendered as conversational head output, and considered handled. Only a result with no commands, no questions, and no nonblank response is suspicious/unrouted.
+If no work needs routing because the request is already satisfied, put the explanation in `response`; do not add `NoOp` solely to satisfy the command journal. When kill or prune removes a target after a head has seen it, the kernel records the skip and automatically gives one replacement head the original request, the precise skip/failure context, and separate applied versus unrouted command lists. The replacement must reuse already-applied records and route only the missing work; a second removal is left for explicit `/retry` recovery so automatic retries cannot loop. A nonblank response with empty commands and questions is accepted, logged as `head_response`, rendered as conversational head output, and considered handled. Only a result with no commands, no questions, and no nonblank response is suspicious/unrouted.
 
 Payload:
 

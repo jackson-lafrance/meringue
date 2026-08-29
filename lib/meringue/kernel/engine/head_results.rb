@@ -113,7 +113,11 @@ module Meringue
                  else
                    "No command from head #{head_id} was applied, so this message still needs handling"
                  end
-        message = "#{reason}#{quoted} Retry it with /retry #{head_id}, resend it, or route it yourself with /prompt or /worker spawn."
+        message = if skipped_only
+                    "#{reason}#{quoted} Meringue will automatically start one fresh replacement head with the original request and command context; if that replacement also cannot route it, retry it with /retry or route it yourself."
+                  else
+                    "#{reason}#{quoted} Retry it with /retry #{head_id}, resend it, or route it yourself with /prompt or /worker spawn."
+                  end
         append_log(
           state,
           source_type: "kernel",
