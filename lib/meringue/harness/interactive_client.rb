@@ -287,6 +287,14 @@ module Meringue
         )
       end
 
+      # Reopen the provider session for a supervisor takeover. This is distinct
+      # from attach_session, which intentionally creates a read-only transcript
+      # view for the dashboard and must never create a second writer.
+      def resume_session(session_ref)
+        entry = ensure_running_entry(session_ref)
+        session_ref_for(entry, previous: session_ref)
+      end
+
       def open_session_view(session_ref)
         SessionView::Handle.new(
           snapshot_loader: lambda {

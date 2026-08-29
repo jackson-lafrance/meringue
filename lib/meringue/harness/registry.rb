@@ -349,6 +349,17 @@ module Meringue
         client_for(provider: agent.fetch("harness", worker_provider), kind: agent.fetch("type", "worker"))
       end
 
+      # Build the supervisor boundary for a managed session. The registry owns
+      # provider selection; the supervisor itself only sees TransportAdapter.
+      # A caller may pass one ownership store to share leases across all
+      # concurrent sessions in a process.
+      def supervisor_adapter_for(provider:, kind: "worker", transport_ownership: nil)
+        normalized = normalize_provider!(provider)
+        client = client_for(provider: normalized, kind: kind)
+        Meringue::Supervisor.adapter_for(normalized, client: client,
+                                         transport_ownership: transport_ownership)
+      end
+
       def terminal_session_opener
         TerminalSessionOpener.new(
           commands: PROVIDERS.each_with_object({}) { |provider, result| result[provider] = provider_command(provider) },

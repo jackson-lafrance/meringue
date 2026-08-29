@@ -4,6 +4,9 @@ require_relative "supervisor/errors"
 require_relative "supervisor/transport_adapter"
 require_relative "supervisor/state_store"
 require_relative "supervisor/pi_adapter"
+require_relative "supervisor/interactive_adapter"
+require_relative "supervisor/claude_adapter"
+require_relative "supervisor/codex_adapter"
 require_relative "supervisor/service"
 require_relative "supervisor/dashboard_client"
 
@@ -21,7 +24,9 @@ module Meringue
     # on the harness name. Kept mutable so backends can be registered at load
     # time (and in tests) without reworking the supervisor.
     ADAPTERS = {
-      "pi" => PiAdapter
+      "pi" => PiAdapter,
+      "claude" => ClaudeAdapter,
+      "codex" => CodexAdapter
     }
 
     class << self

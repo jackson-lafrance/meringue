@@ -12,7 +12,7 @@ class SupervisorTransportAdapterContractTest < HarnessIntegrationTest
   Contract = Meringue::Supervisor::TransportAdapter
 
   REQUIRED_METHODS = %i[
-    transport_key claim release record_for evidence attach prompt abort kill
+    capabilities transport_key claim release record_for evidence attach prompt abort kill
     get_state streaming? wait_for_settled harness_name
   ].freeze
 
@@ -42,6 +42,22 @@ class SupervisorTransportAdapterContractTest < HarnessIntegrationTest
     client&.kill_session("harness" => "pi", "pid" => nil, "cwd" => dir,
                          "session_id" => "cleanup", "session_file" => nil,
                          "is_streaming" => false, "last_event_at" => nil) rescue nil
+  end
+
+  def test_all_advertised_harnesses_have_concrete_adapters
+    assert_equal Meringue::Supervisor::PiAdapter, Meringue::Supervisor::ADAPTERS.fetch("pi")
+    assert_equal Meringue::Supervisor::ClaudeAdapter, Meringue::Supervisor::ADAPTERS.fetch("claude")
+    assert_equal Meringue::Supervisor::CodexAdapter, Meringue::Supervisor::ADAPTERS.fetch("codex")
+
+    Meringue::Supervisor::ADAPTERS.each_value do |adapter_class|
+      adapter = adapter_class.allocate
+      capabilities = adapter_class.instance_method(:capabilities).bind(adapter).call
+      assert capabilities.fetch("session_start")
+      assert capabilities.fetch("session_lookup")
+      assert capabilities.fetch("health_status")
+      assert capabilities.fetch("stop")
+      assert capabilities.fetch("concurrent_sessions")
+    end
   end
 
   def test_registering_a_new_backend_does_not_require_reworking_the_supervisor

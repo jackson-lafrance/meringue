@@ -14,9 +14,8 @@ module Meringue
     # existing capabilities through the harness-neutral `TransportAdapter`
     # contract so the supervisor never depends on Pi semantics directly.
     #
-    # Adding a Claude Code or Codex backend later means writing a new adapter
-    # that answers the same methods against that backend's transport model, not
-    # reworking the supervisor or the kernel.
+    # Claude Code and Codex use different interactive transports and have their
+    # own adapters; the supervisor never assumes that they are Pi RPC sessions.
     class PiAdapter
       include TransportAdapter
 
@@ -34,6 +33,19 @@ module Meringue
 
       def harness_name
         "pi"
+      end
+
+      def capabilities
+        {
+          "session_start" => true,
+          "session_lookup" => true,
+          "health_status" => true,
+          "attachment" => "rpc_and_session_file",
+          "recovery" => "rpc_reconnect",
+          "stop" => true,
+          "concurrent_sessions" => true,
+          "live_turn_survives_owner_loss" => true
+        }
       end
 
       def transport_key(session_ref)
