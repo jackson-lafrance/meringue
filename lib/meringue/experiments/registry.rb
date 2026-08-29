@@ -112,7 +112,7 @@ module Meringue
           actions: [
             {
               "id" => "customize_status_bar",
-              "label" => "Customize status bar with an agent",
+              "label" => "Customize your status bar",
               "description" => "Open a context-rich agent session to collaboratively customize the dashboard status bar."
             }
           ],

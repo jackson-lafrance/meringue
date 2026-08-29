@@ -74,13 +74,20 @@ class TuiTransactionalSetupTest < Minitest::Test
     @app.instance_variable_set(:@settings_category_index, index)
     row_index = @app.send(:settings_rows).index { |row| row.fetch("id") == "experiments.customize_status_bar" }
     @app.instance_variable_set(:@settings_row_index, row_index)
+    assert_equal "Customize your status bar", @app.send(:settings_rows).fetch(row_index).fetch("label")
 
     assert @app.send(:activate_settings_row, @state, on_submit: @handler)
+    refute Meringue::TUI::Settings.enabled?(compose)
     prompt = @submitted.pop
     assert_includes prompt, "customize Meringue's dashboard status bar"
-    assert_includes prompt, "current bottom-bar layout"
-    assert_includes prompt, "runtime status bar renderer"
-    assert_includes prompt, "existing status-bar configuration or extension surfaces"
+    assert_includes prompt, "lib/meringue/tui/status_bar_layout.rb"
+    assert_includes prompt, "lib/meringue/tui/app/status_bar_composer.rb"
+    assert_includes prompt, "appearance.status_bar_layout"
+    assert_includes prompt, "/status-bar"
+    assert_includes prompt, "test/integration/tui/status_bar_composer_test.rb"
+    assert_includes prompt, "rake test"
+    assert_includes prompt, "Do not reintroduce the removed Settings/Setup picker"
+    assert_includes prompt, "how to restore it"
   end
 
   def test_setup_is_disabled_without_a_live_kernel_and_noninteractive_runs_do_not_open_it
