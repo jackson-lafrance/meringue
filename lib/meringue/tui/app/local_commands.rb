@@ -100,12 +100,13 @@ module Meringue
           return true
         end
 
-        append_jump_response("Updating Meringue…")
+        update_message_id = append_jump_response("Updating Meringue…")
         @lifecycle_mutex.synchronize do
           @lifecycle_update_thread = Thread.new do
             begin
               result = lifecycle.update
               if lifecycle_update_succeeded?(result)
+                update_message(update_message_id, text: "Update completed")
                 request_reload
               else
                 append_jump_response(result_message(result, "Meringue update failed."))
