@@ -3,6 +3,23 @@
 require "test_helper"
 require "support/kernel_heads_support"
 
+# Runs a removal at the exact command submission boundary. This models the inter-process race
+# without sleeps: the head's fresh target check succeeds, then kill/prune wins before dispatch.
+class KernelHeadsSubmissionRaceEngine < Meringue::Kernel::Engine
+  def remove_before_next_issue_command!(command)
+    @submission_race_action = command
+  end
+
+  def apply(command)
+    if @submission_race_action && command.is_a?(Hash) && command.fetch("type", nil).to_s == "ModifyIssue"
+      action = @submission_race_action
+      @submission_race_action = nil
+      super(action)
+    end
+    super(command)
+  end
+end
+
 # A head is spawned against a snapshot of state and its result is applied seconds later. A /prune
 # or /kill can land in between, so the issue a head legitimately read can be gone by the time its
 # command is applied.
@@ -18,6 +35,56 @@ require "support/kernel_heads_support"
 # not apply, marked the head blocked, and dropped part of the user's intent behind a warning nobody
 # could act on.
 class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
+  # The kill lands after the fresh check but before ModifyIssue is dispatched. The result is
+  # converted from a generic issue_not_found failure into a safe skip and the user line is retained.
+  def test_kill_wins_the_submission_race_without_losing_the_request
+    project_id = add_project!
+    doomed_id = seed_issue!(project_id, "Concurrent kill target")
+    race_engine = build_submission_race_engine
+    head_id = spawn_head!("Update the target while another command kills it", target_engine: race_engine)
+    race_engine.remove_before_next_issue_command!("type" => "Kill", "payload" => { "target_id" => doomed_id })
+
+    result = apply_head_result(
+      head_id,
+      head_result(commands: [modify_issue_command(issue_id: doomed_id, status: "working")]),
+      cleanup_head: false,
+      target_engine: race_engine
+    )
+
+    skipped = command_results(result).fetch(0)
+    assert_equal ["issue_removed_before_head_result_applied"], skipped.fetch("errors")
+    assert_includes skipped.fetch("message"), "removed by a kill"
+    assert_equal "completed", find_agent_record(head_id, current_state: race_engine.list_all).fetch("status")
+    unrouted = logs(current_state: race_engine.list_all).find { |entry| entry.dig("details", "kind") == "unrouted_user_message" }
+    refute_nil unrouted
+    assert_includes unrouted.dig("details", "user_message"), "Update the target"
+  end
+
+  # The same boundary with prune exercises the removal ledger used by the bulk-removal path.
+  def test_prune_wins_the_submission_race_without_losing_the_request
+    project_id = add_project!
+    doomed_id = seed_issue!(project_id, "Concurrent prune target")
+    settle_issue!(doomed_id)
+    race_engine = build_submission_race_engine
+    head_id = spawn_head!("Update the finished target while prune runs", target_engine: race_engine)
+    race_engine.remove_before_next_issue_command!("type" => "Prune", "payload" => {})
+
+    result = apply_head_result(
+      head_id,
+      head_result(commands: [modify_issue_command(issue_id: doomed_id, status: "working")]),
+      cleanup_head: false,
+      target_engine: race_engine
+    )
+
+    skipped = command_results(result).fetch(0)
+    assert_equal ["issue_removed_before_head_result_applied"], skipped.fetch("errors")
+    assert_includes skipped.fetch("message"), "removed by a prune"
+    assert_equal "completed", find_agent_record(head_id, current_state: race_engine.list_all).fetch("status")
+    unrouted = logs(current_state: race_engine.list_all).find { |entry| entry.dig("details", "kind") == "unrouted_user_message" }
+    refute_nil unrouted
+    assert_includes unrouted.dig("details", "user_message"), "Update the finished target"
+  end
+
   # The reported failure, end to end: /prune removes an issue while a head result is in flight.
   def test_prune_during_a_head_result_skips_the_removed_issue_instead_of_blaming_the_head
     project_id = add_project!
@@ -440,6 +507,18 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
   end
 
   private
+
+  def build_submission_race_engine
+    KernelHeadsSubmissionRaceEngine.new(
+      store: Meringue::State::Store.new(path: @state_path),
+      harness_client: Meringue::Harness::FakeClient.new,
+      head_runner: KernelHeadsSupport::StubHeadRunner.new,
+      workspace_manager: KernelHeadsSupport::StubWorkspaceManager.new,
+      cwd: @project_path,
+      forge_client: KernelHeadsSupport::StubForgeClient.new,
+      config_path: @config_path
+    )
+  end
 
   def modify_issue_command(issue_id:, status: nil, description: nil, title: nil)
     payload = { "issue_id" => issue_id }
