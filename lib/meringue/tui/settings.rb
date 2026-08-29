@@ -36,18 +36,18 @@ module Meringue
         NARRATIVE_STEPS = [WELCOME, DONE].freeze
 
         FIXED_SETTING_IDS = {
-          HARNESS => %w[agent.head_harness agent.worker_harness].freeze,
+          HARNESS => %w[agent.head_harness].freeze,
           THEME => %w[appearance.theme appearance.animations].freeze,
           STATUS_BAR => %w[appearance.status_bar_layout].freeze
         }.freeze
 
-        # Model and reasoning both have per-harness defaults that are correct for
-        # a first session, and both are the kind of choice someone makes once they
-        # have opinions. They stay one keystroke away instead of sitting between a
-        # new user and a working install.
-        ADVANCED_SETTING_IDS = {
-          HARNESS => %w[agent.head_model agent.head_thinking agent.worker_model agent.worker_thinking].freeze
-        }.freeze
+        # Model and reasoning are not asked during a first run at all. Every
+        # harness ships defaults that work, and the model picker cannot even be
+        # answered here: its list comes from a catalog the harness reports once a
+        # session has run, so on a fresh install it is empty by construction and
+        # the only entry is the default that was already selected. Both settings
+        # live in /config, where the catalog exists.
+        ADVANCED_SETTING_IDS = {}.freeze
 
         # Settings a step will not let you walk past. Blocking at the step is what
         # makes the requirement legible: checking only at Complete meant someone
@@ -56,15 +56,21 @@ module Meringue
         #
         # Esc still skips the whole flow — that is a deliberate, confirmed choice
         # rather than something you can do by holding a direction key.
+        # Only settings the step actually shows: a refused advance puts the cursor
+        # on the control that is missing, which it cannot do for a row that is not
+        # rendered.
         REQUIRED_SETTING_IDS_BY_STEP = {
-          HARNESS => %w[agent.head_harness agent.worker_harness].freeze
+          HARNESS => %w[agent.head_harness].freeze
         }.freeze
 
         # The same values, as the backstop Complete checks. Validation normally
         # runs only over settings the user changed, which is right for /config —
         # an unrelated save must not fail on a field nobody edited — but it is
         # also how setup used to complete with no harness at all.
-        REQUIRED_SETTING_IDS = REQUIRED_SETTING_IDS_BY_STEP.values.flatten.freeze
+        # Setup asks once and applies the answer to both roles, so Complete still
+        # checks both: the mirror is what makes them equal, and a backstop that
+        # only checked the visible half would not notice if it stopped running.
+        REQUIRED_SETTING_IDS = %w[agent.head_harness agent.worker_harness].freeze
 
         module_function
 

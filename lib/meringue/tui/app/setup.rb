@@ -61,8 +61,19 @@ module Meringue
       # attached where the row is rendered rather than frozen into the schema.
       # A backend Meringue cannot find is never hidden — someone may be
       # configuring a machine they are about to install it on — it just says so.
+      # The harness row is one decision about the whole install, so in setup it
+      # loses the role in its name: "Head harness" is a distinction the flow no
+      # longer draws, and drawing it here invites someone to go looking for the
+      # other half.
+      SETUP_HARNESS_LABEL = "Harness"
+      # Only the first wrapped line of a description is rendered, so it has to be
+      # one line's worth or it dangles mid-sentence.
+      SETUP_HARNESS_DESCRIPTION = "The coding agent Meringue drives. Split the roles later in /config."
+
       def decorate_setup_row(row)
         return row unless %w[agent.head_harness agent.worker_harness].include?(row.fetch("id", nil))
+
+        row = row.merge("label" => SETUP_HARNESS_LABEL, "description" => SETUP_HARNESS_DESCRIPTION)
         return row unless @harness_availability
 
         labels = row.fetch("option_labels", {}) || {}
@@ -157,16 +168,17 @@ module Meringue
       end
 
       # Choosing a harness during setup means "run Meringue on this", not "run
-      # heads on this". The other role follows while it is still unset, so the
-      # step is one decision; a value already chosen is never overwritten, so
-      # deliberately splitting the roles still works.
+      # heads on this". A first run asks once and applies the answer to both
+      # roles, so the mirror is unconditional: setup no longer shows the roles
+      # separately, and a partner left behind at an older value would be a split
+      # nobody asked for and cannot see. Splitting the roles deliberately is what
+      # /config is for.
       def pair_setup_harness(id, value)
         partner = {
           "agent.head_harness" => "agent.worker_harness",
           "agent.worker_harness" => "agent.head_harness"
         }[id.to_s]
         return unless partner
-        return unless @settings_draft.value(partner).to_s.strip.empty?
 
         @settings_draft.set(partner, value)
       rescue KeyError
@@ -182,7 +194,10 @@ module Meringue
         Settings::SetupFlow.required_setting_ids(step).each_with_object({}) do |id, blockers|
           next unless @settings_draft.value(id).to_s.strip.empty?
 
-          blockers[id] = "#{Config::Schema.fetch(id).label} is required — Meringue cannot start an agent without it."
+          # The name the row is rendered under, not the schema's role-specific
+          # one, or the error names a control that is not on screen.
+          label = id == "agent.head_harness" ? SETUP_HARNESS_LABEL : Config::Schema.fetch(id).label
+          blockers[id] = "#{label} is required — Meringue cannot start an agent without it."
         end
       rescue KeyError
         {}
@@ -286,7 +301,7 @@ module Meringue
 
       def setup_harness_summary(head, worker)
         return "not chosen yet" if head.empty? && worker.empty?
-        return "#{Harness::Registry.provider_label(head)} for heads and workers" if head == worker
+        return Harness::Registry.provider_label(head).to_s if head == worker
 
         "#{Harness::Registry.provider_label(head)} heads · #{Harness::Registry.provider_label(worker)} workers"
       end

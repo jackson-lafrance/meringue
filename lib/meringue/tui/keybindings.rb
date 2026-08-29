@@ -139,9 +139,18 @@ module Meringue
         "workspace_close" => "After workspace leader: quit back to the AgentTree"
       }.freeze
 
+      # Escape is the one key the disambiguation modes actually rename. The app
+      # turns on kitty CSI-u (\e[>1u) and xterm modifyOtherKeys (\e[>4;2m) at
+      # startup, and the whole point of both is that Escape stops arriving as a
+      # bare \e so it cannot be confused with the start of a sequence: kitty
+      # reports \e[27u, xterm reports \e[27;1~. Listing only the bare byte left
+      # Escape dead in every terminal that honours either mode — pickers could be
+      # opened and not closed.
+      ESCAPE_KEYS = ["\e", "\e[27u", "\e[27;1u", "\e[27;1~", "\e[27;1;27~"].freeze
+
       KEY_ALIASES = {
-        "escape" => ["\e"],
-        "esc" => ["\e"],
+        "escape" => ESCAPE_KEYS,
+        "esc" => ESCAPE_KEYS,
         "ctrl-c" => ["\u0003", "\e[99;5u", "\e[67;5u", "\e[27;5;99~", "\e[27;5;67~"],
         "ctrl-d" => ["\u0004"],
         "ctrl-w" => ["\u0017"],

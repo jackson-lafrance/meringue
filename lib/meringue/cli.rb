@@ -17,7 +17,11 @@ module Meringue
 
       case command
       when nil, "tui"
-        run_tui(default_state_path: State::Store::DEFAULT_PATH, enable_agents: true)
+        # The env-aware reader, not the bare constant: every other subcommand
+        # resolves the state path through it, and the dashboard reading a
+        # different file than `meringue workers` or `meringue doctor` is how
+        # MERINGUE_STATE_PATH silently did nothing here.
+        run_tui(default_state_path: State::Store.default_path, enable_agents: true)
       when "demo"
         run_tui(default_state_path: App::DEMO_STATE_PATH, enable_agents: false)
       when "-v", "--version", "version"

@@ -10,6 +10,7 @@ class TuiTransactionalSetupTest < Minitest::Test
   ENTER = "\r"
   ESC = "\e"
   RIGHT = "\e[C"
+  LEFT = "\e[D"
   DOWN = "\e[B"
   TAB = "\t"
   SHIFT_TAB = "\e[Z"
@@ -77,10 +78,12 @@ class TuiTransactionalSetupTest < Minitest::Test
     send_key(ENTER) # Welcome -> Harness
     assert_equal "Harness", setup_snapshot.fetch("category")
 
+    # Horizontal movement moves focus within the step; it never changes pages.
     send_key(RIGHT)
     assert_equal "Harness", setup_snapshot.fetch("category")
     refute setup_snapshot.fetch("dirty")
-    send_key(ENTER) # head harness opens its picker
+    send_key(LEFT) # back onto the harness row
+    send_key(ENTER) # the harness row opens its picker
     send_key(DOWN)
     send_key(ENTER)
     head_harness = @app.instance_variable_get(:@settings_draft).value("agent.head_harness")
@@ -424,5 +427,36 @@ class TuiTransactionalSetupTest < Minitest::Test
 
   def messages_text(app = @app)
     app.instance_variable_get(:@messages).map { |message| message.fetch("text", "") }.join("\n")
+  end
+
+  # Not every experiment is a switch. Agent defaults is a mode, and the
+  # completion card tested its value against true — so a chosen mode was
+  # reported as "off" one screen after the setup card showed it as "By role".
+  def test_the_completion_card_reports_a_mode_by_its_name_not_as_off
+    config = Meringue::Config.new(
+      {
+        "harness" => { "provider" => "pi" },
+        "experiments" => { "agent_defaults_mode" => "role-specific" }
+      },
+      path: "/nonexistent/config.toml"
+    )
+
+    card = Meringue::TUI::Onboarding.completion_card(config).join(" ")
+
+    refute_includes card, "Model and reasoning defaults off"
+    assert_includes card, Meringue::Config::Schema.fetch("experiments.agent_defaults_mode").option_label("role-specific")
+  end
+
+  # The booleans still read as switches.
+  def test_the_completion_card_still_reports_switches_as_on_and_off
+    config = Meringue::Config.new(
+      { "harness" => { "provider" => "pi" }, "experiments" => { "github_support" => true } },
+      path: "/nonexistent/config.toml"
+    )
+
+    card = Meringue::TUI::Onboarding.completion_card(config).join(" ")
+
+    assert_includes card, "GitHub support on"
+    assert_includes card, "Self-fixing workers off"
   end
 end

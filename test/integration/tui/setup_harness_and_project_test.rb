@@ -73,8 +73,11 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     # The step reports what is selected; the picker is where the alternatives
     # and their availability are listed.
     frame = render
-    assert_includes frame, "Head harness  Claude Code · installed"
-    refute_includes frame, "Head harness  claude "
+    assert_includes frame, "Harness  Claude Code · installed"
+    refute_includes frame, "Harness  claude "
+    # The role is not a distinction setup draws any more.
+    refute_includes frame, "Head harness"
+    refute_includes frame, "Worker harness"
 
     focus_setup_row("agent.head_harness")
     send_key(ENTER)
@@ -92,7 +95,7 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     @app = build_app(availability: availability("claude" => :installed, "codex" => :missing, "pi" => :missing))
     open_setup
     send_key(ENTER)
-    focus_setup_row("agent.worker_harness")
+    focus_setup_row("agent.head_harness")
     send_key(ENTER)
 
     picker = snapshot.fetch("picker")
@@ -119,7 +122,10 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     assert_equal chosen, draft.value("agent.worker_harness")
   end
 
-  def test_a_role_already_chosen_is_never_overwritten_by_the_other
+  # Setup asks once and applies the answer to both roles. It used to leave a
+  # role that already had a value alone, which meant a first run could end with a
+  # split the flow never showed and the user never asked for.
+  def test_one_choice_sets_both_roles_even_when_one_already_had_a_value
     @app = build_app(availability: availability("claude" => :installed, "codex" => :installed, "pi" => :missing))
     open_setup
     draft = @app.instance_variable_get(:@settings_draft)
@@ -131,7 +137,7 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     choose_picker_entry("claude")
 
     assert_equal "claude", draft.value("agent.head_harness")
-    assert_equal "codex", draft.value("agent.worker_harness")
+    assert_equal "claude", draft.value("agent.worker_harness")
   end
 
   # Locating an executable and running it are different questions.
@@ -183,22 +189,23 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     assert_equal "pick one first", row.fetch("display_value")
   end
 
-  # Model and reasoning have per-harness defaults that work, so they stay one
-  # keystroke away instead of sitting between a new user and a working install.
-  def test_model_and_reasoning_are_behind_one_reveal
+  # Model and reasoning are not asked during a first run at all. The model picker
+  # cannot even be answered here: its list comes from a catalog the harness
+  # reports after a session has run, so on a fresh install it is empty by
+  # construction and the only entry is the default already selected.
+  def test_model_and_reasoning_are_not_part_of_setup
     @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
     open_setup
     send_key(ENTER)
 
     ids = snapshot.fetch("rows").map { |row| row.fetch("id") }
-    refute_includes ids, "agent.head_model"
-    assert_includes ids, "_show_advanced"
+    assert_equal %w[agent.head_harness setup.check_harness], ids
+    refute_includes ids, "_show_advanced", "there is nothing left to reveal"
 
-    focus_setup_row("_show_advanced")
-    send_key(ENTER)
-    revealed = snapshot.fetch("rows").map { |row| row.fetch("id") }
-    assert_includes revealed, "agent.head_model"
-    assert_includes revealed, "agent.worker_thinking"
+    Meringue::TUI::Settings::SetupFlow.steps.each do |step|
+      revealed = Meringue::TUI::Settings::SetupFlow.setting_ids(step, include_advanced: true)
+      assert_empty revealed.grep(/_model\z|_thinking\z/), "#{step} still offers model or reasoning"
+    end
   end
 
   def test_the_project_step_offers_the_repository_meringue_was_started_in
@@ -355,6 +362,46 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     assert_equal before, render.lines.length, "the card must not reflow as focus lands on the action"
   end
 
+  # The app turns on kitty CSI-u and xterm modifyOtherKeys at startup, and the
+  # point of both is that Escape stops arriving as a bare \e. Only the bare byte
+  # was bound, so Escape was dead in every terminal that honours either mode: a
+  # picker could be opened and not closed.
+  def test_escape_closes_a_picker_in_every_encoding_a_terminal_may_send
+    ["\e", "\e[27u", "\e[27;1u", "\e[27;1~", "\e[27;1;27~"].each do |encoding|
+      @app = build_app(availability: availability("claude" => :installed, "pi" => :installed, "codex" => :missing))
+      open_setup
+      send_key(ENTER)
+      focus_setup_row("agent.head_harness")
+      send_key(ENTER)
+      refute_nil @app.instance_variable_get(:@settings_picker), "picker did not open"
+
+      send_key(encoding)
+
+      assert_nil @app.instance_variable_get(:@settings_picker), "#{encoding.inspect} did not close the picker"
+    end
+  end
+
+  # Clicking an option used to take a shorter path than pressing Enter on it and
+  # skipped the harness mirror, so a first run driven by the mouse set one role
+  # and left the other empty.
+  def test_clicking_a_harness_sets_both_roles_the_way_the_key_does
+    @app = build_app(availability: availability("claude" => :installed, "codex" => :installed, "pi" => :missing))
+    open_setup
+    send_key(ENTER)
+    focus_setup_row("agent.head_harness")
+    send_key(ENTER)
+    draft = @app.instance_variable_get(:@settings_draft)
+    options = @app.send(:settings_picker_options)
+    wanted = options.index { |option| option.fetch("reference") == "codex" }
+    refute_nil wanted
+
+    click_settings_hit([:picker, wanted])
+
+    assert_nil @app.instance_variable_get(:@settings_picker), "the click did not commit"
+    assert_equal "codex", draft.value("agent.head_harness")
+    assert_equal "codex", draft.value("agent.worker_harness")
+  end
+
   # The markers carry the state when color is off, and stay ASCII-safe.
   def test_the_focused_action_survives_ascii_glyph_mode
     @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
@@ -404,7 +451,7 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
       assert_equal "Done", snapshot.fetch("category")
 
       frame = render
-      assert_includes frame, "Harness: Claude Code for heads and workers"
+      assert_includes frame, "Harness: Claude Code"
       assert_includes frame, "Project: #{name}"
       assert_includes frame, "Xtras: all off"
       assert_includes frame, "[ Complete ]"
@@ -487,6 +534,21 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
   def open_setup
     send_key(ENTER, input_buffer: "/setup")
     assert_equal "setup", snapshot.fetch("mode")
+  end
+
+  # Sweeps the card for the cell the layout resolves to this hit, so the test
+  # exercises the real mouse path without hardcoding the picker's geometry.
+  def click_settings_hit(target)
+    @app.instance_variable_set(:@last_render_width, WIDTH)
+    @app.instance_variable_set(:@last_render_height, HEIGHT)
+    HEIGHT.times do |y|
+      WIDTH.times do |x|
+        next unless @app.send(:layout).settings_hit(compose, width: WIDTH, height: HEIGHT, x: x, y: y) == target
+
+        return send_key({ "type" => "mouse", "kind" => "button", "pressed" => true, "button" => 0, "x" => x + 1, "y" => y + 1 })
+      end
+    end
+    flunk("no cell resolved to #{target.inspect}")
   end
 
   def focus_setup_row(id)
