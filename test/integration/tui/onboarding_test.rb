@@ -88,8 +88,6 @@ class TuiTransactionalSetupTest < Minitest::Test
     # One harness decision covers both roles while the other is still unset.
     assert_equal head_harness, @app.instance_variable_get(:@settings_draft).value("agent.worker_harness")
 
-    send_key(TAB) # Project
-    assert_equal "Project", setup_snapshot.fetch("category")
     send_key(TAB) # Theme
     assert_equal "Theme", setup_snapshot.fetch("category")
     send_key(ENTER) # Theme opens its picker
@@ -128,7 +126,7 @@ class TuiTransactionalSetupTest < Minitest::Test
   def test_setup_cannot_complete_without_a_harness
     open_manual_setup
     send_key(ENTER)
-    5.times { send_key(TAB) } # straight to Done, choosing nothing
+    4.times { send_key(TAB) } # straight to Done, choosing nothing
     assert_equal "Done", setup_snapshot.fetch("category")
 
     send_key(CTRL_S)
@@ -146,7 +144,7 @@ class TuiTransactionalSetupTest < Minitest::Test
   def test_back_revisits_a_step_without_losing_edits_and_manual_cancel_discards_everything
     open_manual_setup
     send_key(ENTER)
-    2.times { send_key(TAB) } # Harness -> Project -> Theme
+    send_key(TAB) # Harness -> Theme
     send_key(ENTER)
     send_key(DOWN)
     send_key(ENTER)
@@ -184,7 +182,7 @@ class TuiTransactionalSetupTest < Minitest::Test
   def test_first_run_escape_requires_confirmation_and_skip_excludes_draft_changes
     @app.send(:maybe_open_onboarding, -> { @state })
     send_key(ENTER)
-    2.times { send_key(TAB) } # Harness -> Project -> Theme
+    send_key(TAB) # Harness -> Theme
     send_key(ENTER)
     send_key(DOWN)
     send_key(ENTER)
@@ -217,7 +215,7 @@ class TuiTransactionalSetupTest < Minitest::Test
     open_manual_setup
     send_key(ENTER)
     choose_first_harness
-    5.times { send_key(TAB) } # Done is final
+    4.times { send_key(TAB) } # Done is final
     assert_equal "Done", setup_snapshot.fetch("category")
     send_key(CTRL_S)
     wait_until { !@app.instance_variable_get(:@settings_active) }
@@ -247,7 +245,7 @@ class TuiTransactionalSetupTest < Minitest::Test
     open_manual_setup
     send_key(ENTER)
     choose_first_harness
-    5.times { send_key(TAB) }
+    4.times { send_key(TAB) }
     assert_equal "Done", setup_snapshot.fetch("category")
     send_key(CTRL_S)
     wait_until { !@app.instance_variable_get(:@settings_saving) }

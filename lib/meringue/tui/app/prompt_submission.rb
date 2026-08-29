@@ -230,25 +230,6 @@ module Meringue
         }
       end
 
-      # Setup's project adoption rides on the save it was chosen in: the command
-      # is only sent once the configuration transaction has actually been
-      # accepted, using the submit context captured when Complete was pressed.
-      def submit_pending_project_adoption
-        candidate = @pending_project_adoption
-        context = @setup_submit_context
-        @pending_project_adoption = nil
-        @setup_submit_context = nil
-        return unless candidate && context
-
-        on_submit, state = context
-        name = candidate.fetch("name", "").to_s
-        command = "/project add #{candidate.fetch("path")}"
-        command = "#{command} \"#{name.gsub("\"", "")}\"" unless name.empty?
-        submit_prompt(command, on_submit, state)
-      rescue StandardError => e
-        append_jump_response("The project could not be registered automatically: #{e.message} — run /project add <path> when you are ready.")
-      end
-
       def apply_configuration_command_results(command_results)
         result = Array(command_results).reverse.find { |candidate| candidate.fetch("command_type", nil) == "SaveConfiguration" }
         return unless result
@@ -264,7 +245,6 @@ module Meringue
           close_status_bar_composer if composer_was_active
           if setup_was_active && outcome
             append_jump_response(outcome == "skipped" ? Onboarding.skip_card : Onboarding.completion_card(@config))
-            submit_pending_project_adoption
           end
         elsif @status_bar_composer_active && @status_bar_composer_draft
           @status_bar_composer_saving = false

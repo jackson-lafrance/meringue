@@ -63,7 +63,7 @@ class TuiGithubAccessActionTest < Minitest::Test
     assert_includes @app.render(compose, width: 100, height: 30, color: false), "read access to acme/app"
 
     @app.send(:open_settings, @state, mode: "setup")
-    5.times { send_key(TAB) }
+    4.times { send_key(TAB) }
     assert_equal "Experiments", @app.send(:settings_category)
     assert @app.send(:settings_rows).any? { |row| row.fetch("id") == "experiments.github_support_test_access" }
   end
@@ -95,7 +95,7 @@ class TuiGithubAccessActionTest < Minitest::Test
     assert_equal 0, @submitted.size
 
     @app.send(:open_settings, @state, mode: "setup")
-    5.times { send_key(TAB) }
+    4.times { send_key(TAB) }
     assert_equal "Experiments", @app.send(:settings_category)
     refute @app.send(:settings_rows).any? { |row| row.fetch("id") == "experiments.github_support_test_access" }
     refute_includes @app.render(compose, width: 100, height: 30, color: false), "Test GitHub access"

@@ -4,9 +4,8 @@ require "test_helper"
 require "support/tui_support"
 require "tmpdir"
 
-# Setup used to be able to finish with no harness and no project, leaving a
-# dashboard that rejected the first prompt and a tree that said "No AgentTree
-# data yet." These cover the two things that now make that impossible.
+# Setup must be able to finish without registering a project. Project discovery
+# and registration remain available after setup through the normal goal flow.
 class TuiSetupHarnessAndProjectTest < Minitest::Test
   include TUISupport
 
@@ -200,107 +199,48 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     assert_includes revealed, "agent.worker_thinking"
   end
 
-  def test_the_project_step_offers_the_repository_meringue_was_started_in
-    in_repository do |root, name|
-      @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
-      open_setup
-      send_key(ENTER)
-      send_key(TAB)
+  # Setup completes with no registered project; discovery and registration happen
+  # later when the first goal is routed.
+  def test_finishing_setup_saves_once_without_registering_a_project
+    @app = build_app(
+      availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing),
+      handler: accepting_handler
+    )
+    open_setup
+    complete_setup
 
-      assert_equal "Project", snapshot.fetch("category")
-      row = snapshot.fetch("rows").fetch(0)
-      assert_equal "setup.adopt_project", row.fetch("id")
-      assert_equal "Add #{name}", row.fetch("label")
-      assert_equal true, row.fetch("value"), "the offer is opted into by default"
-      assert_includes row.fetch("description"), File.basename(root)
-    end
-  end
-
-  def test_the_project_step_says_so_when_there_is_nothing_to_register
-    Dir.mktmpdir("meringue-not-a-repo") do |dir|
-      Dir.chdir(dir) do
-        @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
-        open_setup
-        send_key(ENTER)
-        send_key(TAB)
-
-        row = snapshot.fetch("rows").fetch(0)
-        # A directory that is not a checkout is still registerable, so the offer
-        # stands; only a path that has gone away leaves nothing to offer.
-        assert_includes %w[setup.adopt_project setup.adopt_project_unavailable], row.fetch("id")
-      end
-    end
-  end
-
-  # Registering the project is orchestration state, so it is its own command —
-  # and it only runs once the configuration transaction has been accepted.
-  def test_finishing_setup_registers_the_project_after_the_save_is_accepted
-    in_repository do |root, name|
-      @app = build_app(
-        availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing),
-        handler: accepting_handler
-      )
-      open_setup
-      complete_setup
-
-      commands = drain_submitted
-      assert_equal 2, commands.length, commands.inspect
-      assert commands.first.start_with?("/config save "), commands.first
-      assert_equal %(/project add #{root} "#{name}"), commands.last
-    end
-  end
-
-  def test_a_rejected_save_never_registers_the_project
-    in_repository do |_root, _name|
-      @app = build_app(
-        availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing),
-        handler: rejecting_handler
-      )
-      open_setup
-      complete_setup
-
-      commands = drain_submitted
-      assert_equal 1, commands.length
-      assert commands.first.start_with?("/config save ")
-    end
-  end
-
-  def test_declining_the_offer_registers_nothing
-    in_repository do |_root, _name|
-      @app = build_app(
-        availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing),
-        handler: accepting_handler
-      )
-      open_setup
-      send_key(ENTER)
-      send_key(TAB)
-      focus_setup_row("setup.adopt_project")
-      send_key(ENTER) # untick
-      refute @app.instance_variable_get(:@settings_adopt_project)
-
-      4.times { send_key(TAB) }
-      assert_equal "Done", snapshot.fetch("category")
-      send_key(ENTER)
-      wait_until { !@app.instance_variable_get(:@settings_saving) }
-
-      assert_equal 1, drain_submitted.length
-    end
+    commands = drain_submitted
+    assert_equal 1, commands.length, commands.inspect
+    assert commands.first.start_with?("/config save "), commands.first
+    assert_empty @state.fetch("projects")
   end
 
   # The last card is what makes Complete checkable rather than hopeful.
-  def test_the_final_card_states_what_finishing_will_do
-    in_repository do |_root, name|
-      @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
-      open_setup
-      send_key(ENTER)
-      5.times { send_key(TAB) }
-      assert_equal "Done", snapshot.fetch("category")
+  def test_the_final_card_states_that_projects_can_be_added_later
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+    send_key(ENTER)
+    4.times { send_key(TAB) }
+    assert_equal "Done", snapshot.fetch("category")
 
-      frame = render
-      assert_includes frame, "Harness: Claude Code for heads and workers"
-      assert_includes frame, "Project: #{name}"
-      assert_includes frame, "Xtras: all off"
-      assert_includes frame, "[ Complete ]"
+    frame = render
+    assert_includes frame, "Harness: Claude Code for heads and workers"
+    assert_includes frame, "Xtras: all off"
+    assert_includes frame, "[ Complete ]"
+  end
+
+  def test_project_prompt_guidance_wraps_at_supported_terminal_widths
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+    send_key(ENTER)
+    4.times { send_key(TAB) }
+
+    [100, 79, 46, 32].each do |width|
+      frame = render(width: width, height: 24)
+      assert_includes frame, "Send a prompt"
+      normalized = frame.gsub("│", " ").gsub(/\s+/, " ")
+      assert_includes normalized, Meringue::TUI::Onboarding::PROMPT_GUIDANCE
+      frame.lines.each { |line| assert_operator line.chomp.length, :<=, width, "#{width}: #{line.inspect}" }
     end
   end
 
@@ -371,7 +311,7 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
   # finished", not "the overlay closed".
   def complete_setup
     send_key(ENTER) # Welcome -> Harness
-    5.times { send_key(TAB) }
+    4.times { send_key(TAB) }
     assert_equal "Done", snapshot.fetch("category")
     send_key(ENTER)
     wait_until { !@app.instance_variable_get(:@settings_saving) }
