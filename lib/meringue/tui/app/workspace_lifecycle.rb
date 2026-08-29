@@ -26,8 +26,21 @@ module Meringue
         if @agent_workspace_active && @agent_workspace_agent_id.to_s != agent.fetch("id").to_s
           close_agent_workspace
         elsif @agent_workspace_active
+          # Re-selecting the focused worker is the dashboard toggle. Close only
+          # the read handle/visual focus, retain the managed session, and leave
+          # the normal logs scoped to that worker.
+          if agent.fetch("type", nil) == "worker"
+            close_agent_workspace
+            set_log_scope(agent.fetch("id"))
+            @focused_pane = "logs"
+          end
           return true
         end
+
+        # Focused workspaces always enter with the dashboard's unfiltered chat
+        # scope. The worker remains selected for navigation, but old log filters
+        # must not leak into the focused experience or its return path.
+        clear_log_scope if agent.fetch("type", nil) == "worker"
 
         # Whether this worker's backend has a session to embed is the backend's answer, not a
         # harness name the UI keeps a list of.
