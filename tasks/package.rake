@@ -18,7 +18,7 @@ module PackageVerification
     lib/meringue/version.rb
     lib/meringue/harness/extensions/command_blacklist.js
   ].freeze
-  FORBIDDEN_PATHS = %w[AGENTS.md bin/meringue-record].freeze
+  FORBIDDEN_PATHS = %w[AGENTS.md].freeze
   FORBIDDEN_PREFIXES = %w[benchmark/ proof/ test/].freeze
 
   module_function
