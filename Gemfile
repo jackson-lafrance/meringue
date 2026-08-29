@@ -2,7 +2,7 @@
 
 source "https://rubygems.org"
 
-gemspec
+gem "base64", ">= 0.2"
 
 group :development do
   gem "minitest", ">= 5.0"
@@ -10,14 +10,12 @@ group :development do
 end
 
 # Bundler evaluates this file, which makes it the only place `bundle install`
-# can finish the job it starts. Installing from a clone used to set up the
-# dependencies and leave nothing on PATH, so the command afterwards was still
-# `bundle exec meringue`, from this directory only — and the README's
-# troubleshooting section opened with "meringue: command not found".
+# can finish the job it starts. Installing from a clone also writes one small
+# launcher to MERINGUE_BIN_DIR (default ~/.local/bin), so the command is
+# available from anywhere.
 #
-# This runs on `bundle install` and nothing else, writes one small launcher to
-# MERINGUE_BIN_DIR (default ~/.local/bin), and never fails the install. Set
-# MERINGUE_NO_SHIM=1 to skip it.
+# This runs on `bundle install` and nothing else, and never fails the install.
+# Set MERINGUE_NO_SHIM=1 to skip it.
 if File.basename($PROGRAM_NAME) == "bundle" && ARGV.include?("install")
   require_relative "lib/meringue/shim"
   message = Meringue::Shim.install!(source_dir: __dir__).fetch("message", "")

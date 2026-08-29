@@ -6,8 +6,6 @@ The goal is simple: keep the developer in one place while many agents work in pa
 
 ## Quick start
 
-> **Pre-release:** Meringue is not on RubyGems yet. The installer below uses a source checkout; `gem install meringue` will work after the first announced release. See [Releasing and distribution](docs/releasing.md).
-
 Install it:
 
 ```bash
@@ -62,10 +60,10 @@ Type a goal in plain English. A **head** agent reads the repository and decides 
 git clone https://github.com/jackson-lafrance/meringue.git
 cd meringue
 bundle install
-bundle exec meringue
+bundle exec ruby -Ilib bin/meringue
 ```
 
-`bundle install` also puts a `meringue` command on your PATH, pointed at this checkout, so you do not have to prefix it with `bundle exec` or run it from this directory. It writes one small launcher to `~/.local/bin` (or `MERINGUE_BIN_DIR`), tells you if that directory is not on your PATH, and never fails the install if it cannot. Set `MERINGUE_NO_SHIM=1` to skip it and use `bundle exec meringue` instead.
+`bundle install` also puts a `meringue` command on your PATH, pointed at this checkout, so you do not have to prefix it with `bundle exec` or run it from this directory. It writes one small launcher to `~/.local/bin` (or `MERINGUE_BIN_DIR`), tells you if that directory is not on your PATH, and never fails the install if it cannot. Set `MERINGUE_NO_SHIM=1` to skip it and use `bundle exec ruby -Ilib bin/meringue` instead.
 
 From inside the dashboard, `/update` fast-forwards a clean checkout onto the branch it tracks and reloads; `/reload` restarts without updating. Both preserve your configuration and state, which live in `~/.meringue/` outside the source.
 
@@ -75,7 +73,7 @@ That tracked branch is `main` unless `MERINGUE_BRANCH` names another one, the sa
 
 Run `meringue doctor` first — it checks each of these and prints the fix. The recurring ones:
 
-- **`meringue: command not found`** — `~/.local/bin` is not on your PATH. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell startup file. Both install paths put the command there and both say so if it is unreachable. `bundle exec meringue` from a clone always works.
+- **`meringue: command not found`** — `~/.local/bin` is not on your PATH. Add `export PATH="$HOME/.local/bin:$PATH"` to your shell startup file. Both install paths put the command there and both say so if it is unreachable. `bundle exec ruby -Ilib bin/meringue` from a clone always works.
 - **`bundle: command not found`** — `gem install --user-install bundler -v '~> 2.5'`, then put `$(ruby -r rubygems -e 'print Gem.user_dir')/bin` on your PATH.
 - **A harness is missing** — `command -v claude` (or `codex` / `pi`). Put it on PATH, or set that provider's `command` to an absolute path as described in [harness configuration](docs/config.md#provider-sections).
 
@@ -140,7 +138,6 @@ This repository also uses that workflow while developing Meringue itself, but se
 install.sh                         # one-line installer: clone, dependencies, and a meringue shim
 lib/meringue/shim.rb               # the launcher both install paths write to put meringue on PATH
 Gemfile                            # Bundler setup for running the executable from a clone
-meringue.gemspec                   # local gem metadata that exposes the meringue executable
 bin/meringue                       # executable CLI entrypoint
 lib/meringue/cli.rb                # command parsing and runtime setup
 lib/meringue/doctor.rb             # meringue doctor: environment checks and their fixes
@@ -160,7 +157,6 @@ lib/meringue/state/                # JSON persistence models and store
 lib/meringue/goals/                # goal-loop record, decisions, judge, and metric probe
 docs/commands.md                   # the complete slash-command inventory and dashboard reference
 docs/config.md                     # config and harness provider reference
-docs/releasing.md                  # RubyGems release gates and Homebrew strategy
 docs/settings.md                   # full-screen settings, persistence, experiments, and shared setup UI
 docs/commit-authorship.md          # worker commit identity policy and history audit
 docs/delivery-artifact-privacy.md  # branch, commit, and PR metadata privacy policy

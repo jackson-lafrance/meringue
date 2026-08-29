@@ -357,7 +357,7 @@ class TuiAgentTreeGoalTest < Minitest::Test
     assert_includes styles_in(rows.first), Style::GOAL_MARKER
   end
 
-  # `bundle exec meringue demo` is how the AgentTree is reviewed without spawning real
+  # `bundle exec ruby -Ilib bin/meringue demo` is how the AgentTree is reviewed without spawning real
   # sessions, so the demo fixture carries a goal-driven issue.
   def test_the_demo_fixture_shows_a_goal_driven_issue
     rendered = plain_lines(pane.lines(composed_state(demo_state), width: 34)).join("\n")

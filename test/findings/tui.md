@@ -44,7 +44,7 @@ All tests are hermetic: no TTY, no raw mode, no network, no harness processes, n
 - the script's correctness check that a new durable log invalidates the presentation cache;
 - an added deterministic check that a keystroke only changes the composer rows.
 
-No other file referenced the script (checked `*.md`, `*.rb`, gemspec, Gemfile).
+No other file referenced the script (checked the project sources and documentation).
 
 ## Real behaviors recorded instead of "fixed"
 
