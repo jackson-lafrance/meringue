@@ -16,6 +16,7 @@ module Meringue
           Settings::SetupFlow::WELCOME => "Welcome to Meringue",
           Settings::SetupFlow::HARNESS => "Pick the agent that does the work",
           Settings::SetupFlow::THEME => "Make the workspace yours",
+          Settings::SetupFlow::VERSION_CONTROL => "Require isolated workspaces",
           Settings::SetupFlow::EXPERIMENTS => "Meringue Xtras",
           Settings::SetupFlow::DONE => "You're ready"
         }.freeze
@@ -23,6 +24,7 @@ module Meringue
           Settings::SetupFlow::WELCOME => "About a minute: one harness, one look.",
           Settings::SetupFlow::HARNESS => "Meringue drives a coding agent you already have. It never installs one for you.",
           Settings::SetupFlow::THEME => "Previewed live. Nothing is written until you finish.",
+          Settings::SetupFlow::VERSION_CONTROL => "Workers need a backend that proves each mutable workspace is isolated.",
           Settings::SetupFlow::EXPERIMENTS => "All optional, all off. Turn any of them on now or from /config later.",
           Settings::SetupFlow::DONE => "Everything below is saved when you finish."
         }.freeze

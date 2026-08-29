@@ -18,6 +18,13 @@ module Meringue
         errors << "path must be an existing directory" if expanded_path && !Dir.exist?(expanded_path)
         return rejected_result(command_id, command_type, "Project was not added.", errors) unless errors.empty?
 
+        capability = @version_control_backend.inspect_project(root_path: expanded_path)
+        unless capability.is_a?(Hash) && capability["available"] == true && capability.dig("capabilities", "isolated_workspaces") == true
+          diagnostics = Array(capability.is_a?(Hash) ? capability["diagnostics"] : nil).join(", ")
+          reason = diagnostics.empty? ? "isolated_workspace_capability_missing" : diagnostics
+          return rejected_result(command_id, command_type, "Project was not added: isolated mutable workspaces are unavailable (#{reason}).", ["version_control_backend_unavailable", reason])
+        end
+
         state = normalized_state
         requested_name = project_display_name(name)
         projects_at_path = state.fetch("projects").select do |project|
@@ -86,6 +93,10 @@ module Meringue
           "id" => project_id,
           "name" => requested_name || default_project_name(expanded_path),
           "root_path" => expanded_path,
+          "version_control_backend" => capability.fetch("backend", @version_control_backend.id),
+          "version_control_repository_identity" => capability["repository_identity"],
+          "version_control_capabilities" => capability.fetch("capabilities", {}),
+          "version_control_diagnostic_at" => capability["diagnostic_at"],
           "status" => "working",
           "created_at" => now,
           "updated_at" => now
@@ -100,6 +111,8 @@ module Meringue
           message: "Added project #{project_id}: #{project.fetch("name")}",
           details: {
             "root_path" => expanded_path,
+            "version_control_backend" => project.fetch("version_control_backend"),
+            "isolated_mutable_workspaces" => true,
             "projects_sharing_root_path" => projects_at_path.length + 1
           }
         )

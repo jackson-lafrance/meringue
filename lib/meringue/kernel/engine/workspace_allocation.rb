@@ -95,6 +95,10 @@ module Meringue
         return { "usable" => Dir.exist?(workspace.fetch("workspace_path", "")), "reason" => "basic_directory_check" } unless
           workspace_manager.respond_to?(:validate_worker_workspace)
 
+        backend_id = workspace.fetch("version_control_backend", nil)
+        if backend_id && @version_control_backend.respond_to?(:id) && @version_control_backend.id.to_s == backend_id.to_s
+          return @version_control_backend.validate_workspace(workspace: workspace, worker_id: agent_id)
+        end
         workspace_manager.validate_worker_workspace(workspace, agent_id: agent_id)
       rescue StandardError => e
         { "usable" => false, "reason" => "workspace_validation_error", "error" => sanitized_error_message(e) }
@@ -152,6 +156,7 @@ module Meringue
           unavailable_paths: unavailable_paths
         )
         isolated.merge(
+          "version_control_backend" => project.fetch("version_control_backend", nil),
           "workspace_mode" => requested_mode,
           "effective_workspace_mode" => WORKSPACE_MODE_ISOLATED,
           "workspace_mode_fallback_reason" => fallback_reason,
@@ -161,18 +166,25 @@ module Meringue
 
       def resolve_isolated_worker_workspace(project:, issue:, requested_workspace_path:, preview_agent_id:, task_title:, create: false,
                                              progress_agent_id: nil, unavailable_paths: [])
-        if present_string(requested_workspace_path)
-          expanded_path = File.expand_path(requested_workspace_path.to_s)
-          errors = Dir.exist?(expanded_path) ? [] : ["workspace_path must be an existing directory"]
-          strategy = same_path?(expanded_path, project.fetch("root_path")) ? "project_root" : "dedicated_directory"
-
+        capabilities = project.fetch("version_control_capabilities", {})
+        unless capabilities["isolated_workspaces"] == true
           return {
-            "workspace_path" => expanded_path,
-            "workspace_strategy" => strategy,
+            "workspace_path" => nil, "workspace_strategy" => "unavailable", "workspace_branch" => nil,
+            "plan" => nil, "created" => false,
+            "errors" => ["version_control_backend_unavailable"],
+            "failure_kind" => "version_control_backend_unavailable",
+            "note" => "Project has no validated isolated-workspace backend. Re-register or repair its version-control configuration."
+          }
+        end
+
+        if present_string(requested_workspace_path)
+          return {
+            "workspace_path" => File.expand_path(requested_workspace_path.to_s),
+            "workspace_strategy" => "unvalidated",
             "workspace_branch" => nil,
             "plan" => nil,
-            "note" => nil,
-            "errors" => errors
+            "note" => "Explicit mutable workspace paths must be provisioned by a version-control backend.",
+            "errors" => ["version_control_backend_required"]
           }
         end
 
@@ -213,17 +225,7 @@ module Meringue
           }
         end
 
-        if plan.fetch("strategy", nil) == "project_root"
-          return {
-            "workspace_path" => File.expand_path(plan.fetch("workspace_path", project.fetch("root_path"))),
-            "workspace_strategy" => "project_root",
-            "workspace_branch" => nil,
-            "plan" => plan.fetch("plan", nil),
-            "note" => plan.fetch("fallback_reason", nil),
-            "created" => false,
-            "errors" => Dir.exist?(project.fetch("root_path")) ? [] : ["project root must be an existing directory"]
-          }
-        end
+
 
         if create && plan.fetch("created", false) && Dir.exist?(plan.fetch("workspace_path"))
           provider_note = if present_string(plan.fetch("worktree_provider_fallback_reason", nil))
@@ -244,13 +246,14 @@ module Meringue
         end
 
         {
-          "workspace_path" => File.expand_path(project.fetch("root_path")),
-          "workspace_strategy" => "project_root",
-          "workspace_branch" => nil,
+          "workspace_path" => nil,
+          "workspace_strategy" => plan.fetch("strategy", "git_worktree"),
+          "workspace_branch" => plan.fetch("workspace_branch", nil),
           "plan" => plan,
-          "note" => create ? "Workspace manager did not create a git worktree, so the worker uses the project root cwd." : "Workspace manager planned a git worktree for this worker.",
+          "note" => "Version-control backend did not provision an isolated workspace.",
           "created" => false,
-          "errors" => Dir.exist?(project.fetch("root_path")) ? [] : ["project root must be an existing directory"]
+          "errors" => ["isolated_workspace_not_provisioned"],
+          "failure_kind" => "version_control_backend_unavailable"
         }
       end
 

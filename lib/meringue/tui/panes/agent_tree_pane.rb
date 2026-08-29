@@ -392,7 +392,10 @@ module Meringue
         # status word (written by an older Meringue, or not yet re-saved after the state
         # repair) is cleaned here too, so the user never reads the polluted label.
         def project_title(project)
-          ProjectNaming.without_status_suffix(project.fetch("name", nil)) || "Untitled project"
+          title = ProjectNaming.without_status_suffix(project.fetch("name", nil)) || "Untitled project"
+          capabilities = project.fetch("version_control_capabilities", {})
+          isolated = capabilities["isolated_workspaces"] == true
+          "#{title}  #{isolated ? "✓ isolated" : "! isolation unavailable"}"
         end
 
         def item_lines(prefix:, record:, id:, title:, suffix: "", selected: false, width: nil)

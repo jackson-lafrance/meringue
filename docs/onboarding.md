@@ -11,8 +11,9 @@ The centered card shows one dynamic `Step N of 5` indicator:
 1. **Welcome** — what Meringue is, in the three nouns the rest of the flow depends on: you describe a goal, a head decides what should happen, workers do the work in their own worktrees. No controls; the navigation action is focused so Enter continues.
 2. **Harness** — the one decision Meringue cannot run without, asked once. A first run does not distinguish head from worker: there is a single **Harness** row, and the answer is applied to both roles. Options carry the product name and whether this machine can actually start them (`Claude Code · installed`, `Codex CLI · not found`). The **Preferred editor** row offers the concise command list `vim`, `nvim`, `emacs`, `cursor`, and `code`, plus **Custom** for a terminal editor or another command. GUI presets omit `--wait`, so opening them does not hold up Meringue. **Check harness** runs the selected backend once and reports what it answered. Splitting the roles deliberately is what `/config` is for.
 3. **Theme** — theme and animation preference. Theme changes preview immediately in memory.
-4. **Meringue Xtras** — experiment controls derived directly from `Experiments::Registry`, all off until chosen. **Customize your status bar** opens a context-rich agent session; the read-only **Test GitHub access** action is completely absent until GitHub support is selected.
-5. **Done** — the harness, theme, and experiments the Complete action is about to save, so finishing is checkable rather than hopeful.
+4. **Version control** — the selected backend and whether isolated mutable workspaces are ready. The built-in GitHub-backed backend requires a GitHub repository; alternate backends are documented in `docs/version-control-backends.md`.
+5. **Meringue Xtras** — experiment controls derived directly from `Experiments::Registry`, all off until chosen.
+6. **Done** — the harness, theme, and experiments the Complete action is about to save, so finishing is checkable rather than hopeful.
 
 Welcome and Done carry no controls at all. The flow derives navigation from the step list, so future setup sections can be appended without introducing a review-only special case.
 
@@ -42,7 +43,8 @@ Setup preselects a harness only when exactly one is installed. With several, or 
 
 ## Registering a project
 
-Setup registers nothing. Project discovery and registration happen later, when the first goal is routed: registering a project is orchestration state rather than configuration, and a rejected draft must not be able to leave a project behind from a setup that never finished.
+Setup registers nothing. When a project is added, its version-control backend is probed and its capability snapshot is persisted. Registration is rejected unless isolated mutable workspaces are available; workers never fall back to the project root. See `docs/version-control-backends.md` for alternate backend integration.
+ Project discovery and registration happen later, when the first goal is routed: registering a project is orchestration state rather than configuration, and a rejected draft must not be able to leave a project behind from a setup that never finished.
 
 ## Interaction
 

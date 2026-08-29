@@ -39,7 +39,7 @@ module Meringue
         *harness_checks,
         config_check,
         state_check,
-        github_check,
+        version_control_check,
         repository_check
       ].compact
     end
@@ -150,17 +150,17 @@ module Meringue
       )
     end
 
-    # Only worth reporting when the experiment that uses it is actually on.
-    def github_check
-      return nil unless config.setting("experiments.github_support") == true
-
-      located = Harness::Availability.locate(["gh"])
-      return ok("GitHub CLI at #{located.fetch("path")}") if Harness::Availability.installed?(located)
+    def version_control_check
+      manager = Workspace::Manager.from_config(config)
+      backend = VersionControl::GitHubGitBackend.new(manager: manager)
+      root = ProjectNaming.git_root_for(cwd) || cwd
+      capability = backend.inspect_project(root_path: root)
+      return ok("Version control: isolated mutable workspaces ready", detail: capability["repository_identity"]) if capability["available"] == true
 
       problem(
-        "GitHub support is on but gh was not found",
-        detail: "PR tracking, /prs, and /github test all shell out to gh.",
-        fix: "Install the GitHub CLI, or turn GitHub support off in /config."
+        "Version control: isolated mutable workspaces unavailable",
+        detail: Array(capability["diagnostics"]).join(", "),
+        fix: "Use a GitHub repository with a usable base branch, or configure an alternate version-control backend."
       )
     end
 

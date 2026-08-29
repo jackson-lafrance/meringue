@@ -49,6 +49,7 @@ module Meringue
                      model_catalog_provider: nil,
                      runtime_config_updater: nil,
                      workspace_manager: Workspace::Manager.new,
+                     version_control_backend: nil,
                      cwd: Dir.pwd,
                      async_heads: false,
                      async_worker_provisioning: false,
@@ -78,12 +79,16 @@ module Meringue
         @model_catalog_provider = model_catalog_provider
         @runtime_config_updater = runtime_config_updater
         @workspace_manager = workspace_manager
+        @config_path = File.expand_path(config_path.to_s)
+        @config = config || Config.load(path: @config_path)
+        @version_control_backend = version_control_backend || begin
+          configured_backend = @config.setting("version_control.backend").to_s
+          configured_backend == "command" ? Meringue::VersionControl::UnavailableBackend.new("alternate") : Meringue::VersionControl::GitHubGitBackend.new(manager: workspace_manager)
+        end
         @cwd = File.expand_path(cwd)
         @async_heads = async_heads
         @forge_client = forge_client
         @metric_probe = metric_probe
-        @config_path = File.expand_path(config_path.to_s)
-        @config = config || Config.load(path: @config_path)
         @deferred_worker_default_failure_policy = @config.conflict_predecessor_failure
         # The dashboard enables this explicitly. Small synchronous embedders retain their existing
         # apply-and-observe contract unless they opt into the background executor.
