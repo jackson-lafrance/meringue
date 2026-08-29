@@ -40,9 +40,9 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     open_setup
 
     {
-      [100, 32] => ["Setup", "Welcome to Meringue", "Step 1 of 5", "Navigate: Enter or Arrow keys toggle", "[ Begin ]"],
-      [79, 24] => ["Setup", "Welcome to Meringue", "Step 1 of 5", "Navigate: Enter or Arrow keys toggle", "[ Begin ]"],
-      [46, 18] => ["Setup", "Welcome to Meringue", "Step 1 of 5", "Navigate: Enter or Arrow keys toggle"],
+      [100, 32] => ["Setup", "Welcome to Meringue", "Step 1 of 5", "Navigate: Enter toggles · ↑↓ move", "[ Begin ]"],
+      [79, 24] => ["Setup", "Welcome to Meringue", "Step 1 of 5", "Navigate: Enter toggles · ↑↓ move", "[ Begin ]"],
+      [46, 18] => ["Setup", "Welcome to Meringue", "Step 1 of 5", "Navigate: Enter toggles · ↑↓ move"],
       [32, 10] => ["Setup", "Welcome", "Step 1 of 5", "Navigate"],
       [31, 9] => ["Terminal too small for Setup", "Esc cancel"]
     }.each do |(width, height), expected|

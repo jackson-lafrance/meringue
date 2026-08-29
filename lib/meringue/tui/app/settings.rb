@@ -730,24 +730,16 @@ module Meringue
         return move_settings_row(delta) if setup_mode? && !row
 
         if setup_mode?
-          if row.fetch("editor", nil) == "checkbox"
-            @settings_draft.set(row.fetch("id"), delta.to_i.positive?)
-          else
-            # In Setup, horizontal movement never changes pages. It either changes
-            # a focused boolean toggle or moves focus to another control.
-            move_settings_row(delta)
-          end
+          @settings_draft.set(row.fetch("id"), delta.to_i.positive?) if row.fetch("editor", nil) == "checkbox"
           return
         end
 
-        return move_settings_category(delta) unless row
+        return unless row
         if %w[selector enum].include?(row.fetch("editor", nil))
           @settings_draft.cycle(row.fetch("id"), delta)
           @settings_draft.preview_theme if row.fetch("id") == "appearance.theme"
         elsif row.fetch("editor", nil) == "model"
           cycle_settings_model(row, delta, state)
-        else
-          move_settings_category(delta)
         end
       end
 

@@ -16,15 +16,17 @@ Categories:
 4. **Harnesses** — provider commands, environment, arguments, Pi session directory, head names/timeouts, and Claude schema mode.
 5. **Workspace** — managed root, provisioning limits, Git timeouts, shell/editor launchers, and terminal buffer.
 6. **Safety** — worker command blacklist and predecessor-failure policy.
-7. **Keybindings** — every action registered by `TUI::Keybindings`, including intentional unbinding with an empty list.
-8. **Setup** — completion metadata plus **Run setup again**.
+7. **Keybindings** — every action registered by `TUI::Keybindings`, including intentional unbinding with an empty list. These rows are shown directly; they are not Advanced settings.
 
 Advanced provider, workspace, and keybinding rows start collapsed **inside the category that owns them**. Each category shows its exact hidden count in the category rail and in a **Show advanced settings (N)** row; selecting it or pressing `a` reveals only that category's rows. The row keeps its place once open, reading **Hide advanced settings (N)** above the rows it revealed, so the control that opened them is the one that puts them away; the footer names the `A` key wherever the category has advanced rows and the line has room. Other categories keep their own advanced rows collapsed, so the reveal count never describes settings somewhere else. Every supported editable path is still reachable; internal compatibility keys are represented by their role-aware rows instead of duplicated.
 
 ## Interaction
 
 - `↑` / `↓`: move through rows.
-- `←` / `→`: change an enum/model selection; otherwise change category.
+- `←` / `→`: change the focused setting when the control supports it; otherwise do nothing. They never move focus or change category.
+- Keybindings are shown directly in their category; they are not hidden behind the Advanced settings disclosure.
+
+`/config` does not include the Setup category; setup metadata and the Run setup again action remain available through the dedicated `/setup` flow.
 - `Tab` / `Shift-Tab`: change category.
 - `PageUp` / `PageDown`, `Home` / `End`: move through long lists.
 - `Space`: toggle a checkbox.
@@ -36,7 +38,7 @@ Advanced provider, workspace, and keybinding rows start collapsed **inside the c
 
 Left-click selects a visible category or row. Clicking a checkbox toggles it. Save and Cancel are clickable in layouts that have room for the buttons. The wheel moves the visible row window. Empty space, chrome, right-click, release, and drag reports are inert. While key capture is active, mouse events and invalid multi-character input stay inside the capture view and never move or activate another row; `Esc` cancels, while `Backspace` or `Delete` clears/unbinds.
 
-Theme selection previews immediately in memory. Cancel/discard restores the original theme. No config or state write occurs until Save succeeds.
+Theme selection previews immediately in memory. Cancel/discard restores the original theme. No config or state write occurs until Save succeeds. Command and list fields begin with their current effective values, including environment overrides and compatibility fallbacks, rather than empty placeholders.
 
 ## Responsive layout
 

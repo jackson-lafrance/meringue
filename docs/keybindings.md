@@ -276,7 +276,7 @@ The first interactive launch opens Setup as a curated mode of the full-screen
 Settings overlay, and `/setup` reopens it any time.
 
 - `↑` / `↓`: move through controls; moving past the last ordinary control focuses the Navigate footer. On Status bar they select a component.
-- `←` / `→`: change a focused boolean toggle or move focus. Right Arrow never advances a setup step. On Status bar these keys reorder/change alignment.
+- `←` / `→`: change a focused boolean toggle; otherwise do nothing. They never move focus or advance a setup step. On Status bar these keys reorder/change alignment.
 - `Enter`: begin, toggle a checkbox, open a picker for theme/models and other list-backed values, or activate the single centered Next/Complete action.
 - `Delete` / `Backspace`: go back one setup step.
 - `Tab` / `Shift-Tab`: next/back through Welcome, Theme, Head defaults, Worker defaults, Status bar, and Experiments.
