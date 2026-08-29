@@ -229,6 +229,21 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     assert_includes frame, "[ Complete ]"
   end
 
+  def test_project_prompt_guidance_wraps_at_supported_terminal_widths
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+    send_key(ENTER)
+    4.times { send_key(TAB) }
+
+    [100, 79, 46, 32].each do |width|
+      frame = render(width: width, height: 24)
+      assert_includes frame, "Send a prompt"
+      normalized = frame.gsub("│", " ").gsub(/\s+/, " ")
+      assert_includes normalized, Meringue::TUI::Onboarding::PROMPT_GUIDANCE
+      frame.lines.each { |line| assert_operator line.chomp.length, :<=, width, "#{width}: #{line.inspect}" }
+    end
+  end
+
   private
 
   def availability(statuses)

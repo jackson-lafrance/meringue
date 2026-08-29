@@ -562,7 +562,7 @@ module Meringue
             end
           end
           lines << [["", Style::DIM]]
-          wrap("Then describe a goal in plain English — Meringue creates the issue and starts the worker.", [width.to_i, 8].max).each do |line|
+          wrap("  #{Onboarding::PROMPT_GUIDANCE}", [width.to_i, 8].max).each do |line|
             lines << [[line, Style::DIM]]
           end
           lines
