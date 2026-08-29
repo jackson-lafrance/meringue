@@ -54,7 +54,10 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     skipped = command_results(result).fetch(0)
     assert_equal ["issue_removed_before_head_result_applied"], skipped.fetch("errors")
     assert_includes skipped.fetch("message"), "removed by a kill"
-    assert_equal "completed", find_agent_record(head_id, current_state: race_engine.list_all).fetch("status")
+    replacement_id = result.dig("result", "automatic_retry", "target_id")
+    refute_nil replacement_id
+    assert_nil find_agent_record(head_id, current_state: race_engine.list_all)
+    assert_includes find_agent_record(replacement_id, current_state: race_engine.list_all).dig("harness_metadata", "head_request", "user_message"), "Update the target"
     unrouted = logs(current_state: race_engine.list_all).find { |entry| entry.dig("details", "kind") == "unrouted_user_message" }
     refute_nil unrouted
     assert_includes unrouted.dig("details", "user_message"), "Update the target"
@@ -79,7 +82,10 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     skipped = command_results(result).fetch(0)
     assert_equal ["issue_removed_before_head_result_applied"], skipped.fetch("errors")
     assert_includes skipped.fetch("message"), "removed by a prune"
-    assert_equal "completed", find_agent_record(head_id, current_state: race_engine.list_all).fetch("status")
+    replacement_id = result.dig("result", "automatic_retry", "target_id")
+    refute_nil replacement_id
+    assert_nil find_agent_record(head_id, current_state: race_engine.list_all)
+    assert_includes find_agent_record(replacement_id, current_state: race_engine.list_all).dig("harness_metadata", "head_request", "user_message"), "Update the finished target"
     unrouted = logs(current_state: race_engine.list_all).find { |entry| entry.dig("details", "kind") == "unrouted_user_message" }
     refute_nil unrouted
     assert_includes unrouted.dig("details", "user_message"), "Update the finished target"
@@ -142,7 +148,7 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     head_id = spawn_head!("Tidy up the finished work")
     apply_command("Prune", {})
 
-    apply_head_result(
+    result = apply_head_result(
       head_id,
       head_result(commands: [
         modify_issue_command(issue_id: live_id, status: "working"),
@@ -160,11 +166,14 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     )
     assert_equal 1, summary.dig("details", "skipped_command_count")
 
-    head = find_agent_record(head_id)
-    assert_equal "completed", head.fetch("status"), "a removed target does not block the head"
-    assert_equal "applied", head.fetch("harness_metadata").fetch("head_result_apply_state")
-    assert_equal "accepted", head.fetch("harness_metadata").fetch("head_result_apply_status")
-    assert_equal 1, head.fetch("harness_metadata").fetch("head_result_skipped_command_count")
+    replacement_id = result.dig("result", "automatic_retry", "target_id")
+    refute_nil replacement_id
+    assert_nil find_agent_record(head_id), "the routed head is replaced after the removal"
+    assert_equal true, result.dig("result", "automatic_retry", "automatic")
+    replacement_message = find_agent_record(replacement_id).dig("harness_metadata", "head_request", "user_message")
+    assert_includes replacement_message, "Tidy up the finished work"
+    assert_includes replacement_message, "ModifyIssue accepted"
+    assert_includes replacement_message, "ModifyIssue rejected"
   end
 
   # H36 in the reported logs: every command in the batch pointed at one pruned issue, so the head
@@ -196,9 +205,10 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     )
     assert_equal "info", summary.fetch("level")
 
-    head = find_agent_record(head_id)
-    assert_equal "completed", head.fetch("status"), "the head is not stranded as blocked"
-    assert_equal "applied", head.fetch("harness_metadata").fetch("head_result_apply_state")
+    replacement_id = result.dig("result", "automatic_retry", "target_id")
+    refute_nil replacement_id
+    assert_nil find_agent_record(head_id), "the unrouted request is handed to a replacement head"
+    assert_includes find_agent_record(replacement_id).dig("harness_metadata", "head_request", "user_message"), "take over the whole screen"
 
     # The request itself still needs handling, so it is restated once, in full, without blaming the
     # head and without an error the user cannot act on.
@@ -234,11 +244,17 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     assert_includes skipped.fetch("message"), "agent #{worker_id} was removed by a prune"
     assert_includes skipped.fetch("message"), "so the prompt was not delivered"
     assert_includes skipped.fetch("message"), "Dropped prompt \"Double-check the cleanup you reported.\""
+    replacement_id = result.dig("result", "automatic_retry", "target_id")
+    refute_nil replacement_id
+    assert_nil find_agent_record(head_id)
+    assert_includes find_agent_record(replacement_id).dig("harness_metadata", "head_request", "user_message"), "double-check its cleanup"
 
     skip_log = logs.find { |entry| entry.fetch("message", "").start_with?("Skipped PromptAgent:") }
     refute_nil skip_log
     assert_equal "warning", skip_log.fetch("level")
-    assert_equal "completed", find_agent_record(head_id).fetch("status")
+    replacement_id = result.dig("result", "automatic_retry", "target_id")
+    refute_nil replacement_id
+    assert_nil find_agent_record(head_id)
   end
 
   # Killing a record a prune already removed is a no-op whose intent is already satisfied.
@@ -261,7 +277,10 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     skip_log = logs.find { |entry| entry.fetch("message", "").start_with?("Skipped Kill:") }
     refute_nil skip_log
     assert_equal "info", skip_log.fetch("level")
-    assert_equal "completed", find_agent_record(head_id).fetch("status")
+    replacement_id = result.dig("result", "automatic_retry", "target_id")
+    refute_nil replacement_id
+    assert_nil find_agent_record(head_id)
+    assert_includes find_agent_record(replacement_id).dig("harness_metadata", "head_request", "user_message"), "Kill off the finished goal"
   end
 
   # A worker id the user types after a prune gets the same explanation, without the batch machinery.

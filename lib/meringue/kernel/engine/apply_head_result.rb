@@ -263,7 +263,8 @@ module Meringue
           end
         end
 
-        synchronized_state do
+        auto_retry_plan = nil
+        final_result = synchronized_state do
           state = normalized_state
           head = find_agent(state, head_id)
           unless head
@@ -333,8 +334,17 @@ module Meringue
           metadata["head_result_apply_status"] = unapplied_count.positive? ? "partial" : "accepted"
           metadata["head_result_applied_at"] = now
           metadata["head_result_skipped_command_count"] = skipped_count if skipped_count.positive?
+          auto_retry_requested = skipped_count.positive? && !metadata.fetch("automatic_target_removal_retry_at", nil) &&
+                                 head_retry_count(head).zero?
+          if auto_retry_requested
+            # Checkpoint the recovery before any harness call. The replacement is intentionally
+            # limited to one automatic attempt: if the replacement sees another removal, it stays
+            # visible as an unrouted/manual-retry case instead of looping forever.
+            metadata["automatic_target_removal_retry_at"] = now
+            metadata["automatic_target_removal_retry_state"] = "pending"
+          end
           head["harness_metadata"] = metadata
-          head["status"] = unapplied_count.positive? ? "blocked" : "completed"
+          head["status"] = (unapplied_count.positive? || auto_retry_requested) ? "blocked" : "completed"
           head["updated_at"] = now
           # A completion head and the worker continuation that spawned it are checkpointed in the
           # same state transaction. If the process dies after this save but before the synchronous
@@ -345,14 +355,18 @@ module Meringue
           log_ids.concat(command_results.flat_map { |result| result.fetch("log_entry_ids", []) })
           log_ids.concat(summary_log_ids)
           log_ids.concat(unrouted_log_ids)
-          cleanup = if cleanup_head && unapplied_count.zero?
+          cleanup = if cleanup_head && unapplied_count.zero? && !auto_retry_requested
                       cleanup_applied_head!(state, head_id.to_s, now: now)
                     elsif cleanup_head
-                      { "changed" => false, "reason" => "partially_applied" }
+                      { "changed" => false, "reason" => auto_retry_requested ? "automatic_retry_pending" : "partially_applied" }
                     else
                       { "changed" => false, "reason" => "deferred" }
                     end
           log_ids.concat(cleanup.fetch("log_entry_ids", []))
+          if auto_retry_requested
+            auto_retry_plan = head_retry_plan(state, head_id.to_s)
+            auto_retry_plan = nil unless auto_retry_plan.fetch("eligible")
+          end
           touch_state!(state, now)
           store.save(state)
 
@@ -373,6 +387,30 @@ module Meringue
             log_ids.uniq
           )
         end
+
+        if auto_retry_plan
+          retry_result = automatic_target_removal_retry(auto_retry_plan)
+          final_result["result"] = (final_result.fetch("result", {}) || {}).merge(
+            "automatic_retry" => retry_result
+          )
+          final_result["log_entry_ids"] = Array(final_result.fetch("log_entry_ids", [])) + Array(retry_result.fetch("log_entry_ids", []))
+        end
+        final_result
+      end
+
+      # Automatic recovery deliberately shares the manual retry machinery: the same immutable plan
+      # and respawn path build the replacement prompt, carry the command journal, and atomically
+      # remove the predecessor. Only the trigger and the one-attempt guard differ.
+      def automatic_target_removal_retry(plan)
+        result = respawn_head_retry(nil, "AutomaticHeadRetry", plan)
+        return result unless result.fetch("status", nil) == "accepted"
+
+        result.merge(
+          "automatic" => true,
+          "message" => "Automatically retried unrouted work as head #{result.fetch("target_id", nil)}."
+        )
+      rescue StandardError => e
+        failed_result(nil, "AutomaticHeadRetry", "Automatic head retry was not started: #{sanitized_error_message(e)}", [e.class.name, sanitized_error_message(e)])
       end
 
       # Re-check only the already-resolved target at submission. The full batch resolver is not
