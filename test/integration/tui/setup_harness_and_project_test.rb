@@ -14,6 +14,7 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
   ENTER = "\r"
   TAB = "\t"
   DOWN = "\e[B"
+  UP = "\e[A"
 
   def setup
     @tmpdir = Dir.mktmpdir("meringue-setup-harness")
@@ -257,6 +258,101 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
       normalized = frame.gsub("│", " ").gsub(/\s+/, " ")
       assert_includes normalized, Meringue::TUI::Onboarding::PROMPT_GUIDANCE
       frame.lines.each { |line| assert_operator line.chomp.length, :<=, width, "#{width}: #{line.inspect}" }
+    end
+  end
+
+  # PR #306 squash-merged from a branch state that predated its last commit, so
+  # main shipped a navigation action that never showed when it had focus.
+  def test_the_navigation_action_shows_when_it_is_focused
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+
+    focused = @layout.send(:settings_pane).action_segments(compose)
+    assert_equal ["› [ Begin ] ‹"], focused.map(&:first), "Welcome has no rows, so its action is focused"
+    assert_includes render, "› [ Begin ] ‹"
+
+    send_key(ENTER) # Harness, which does have rows
+    unfocused = @layout.send(:settings_pane).action_segments(compose)
+    assert_equal ["[ Next ]"], unfocused.map(&:first)
+
+    snapshot.fetch("rows").length.times { send_key(DOWN) }
+    assert snapshot.fetch("footer_focus")
+    assert_equal ["› [ Next ] ‹"], @layout.send(:settings_pane).action_segments(compose).map(&:first)
+  end
+
+  # Two things reading as selected at once left it ambiguous what Enter would do,
+  # because the row index is deliberately kept so arrowing back returns to it.
+  def test_focusing_the_action_deselects_the_list
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+    send_key(ENTER) # Harness
+    focus_setup_row("agent.head_harness")
+
+    assert_equal 1, render.scan("\u203a").length, "the selected row carries the only marker"
+    assert_includes render, "\u00b7 Enter open picker"
+
+    snapshot.fetch("rows").length.times { send_key(DOWN) }
+    assert snapshot.fetch("footer_focus")
+    focused = render
+    assert_equal 1, focused.scan("\u203a").length, "the action carries the only marker"
+    assert_includes focused, "\u203a [ Next ] \u2039"
+    refute_includes focused, "\u00b7 Enter open picker", "no row offers its control while the action has focus"
+  end
+
+  # Deselecting the list must not lose the place in it.
+  def test_arrowing_back_off_the_action_returns_to_the_row_it_left
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+    send_key(ENTER)
+    last = snapshot.fetch("rows").length - 1
+    snapshot.fetch("rows").length.times { send_key(DOWN) }
+    assert snapshot.fetch("footer_focus")
+
+    send_key(UP)
+    refute snapshot.fetch("footer_focus")
+    assert_equal last, @app.instance_variable_get(:@settings_row_index)
+  end
+
+  # The slot that describes the selected row cannot go on describing one once
+  # nothing is selected, and emptying it would reflow the card as focus lands.
+  def test_the_description_follows_focus_onto_the_action
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+    send_key(ENTER)
+    focus_setup_row("agent.head_harness")
+    before = render.lines.length
+
+    snapshot.fetch("rows").length.times { send_key(DOWN) }
+
+    assert_includes render, "Next: #{Meringue::TUI::Settings::SetupFlow::THEME}."
+    assert_equal before, render.lines.length, "the card must not reflow as focus lands on the action"
+  end
+
+  # The markers carry the state when color is off, and stay ASCII-safe.
+  def test_the_focused_action_survives_ascii_glyph_mode
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
+    open_setup
+
+    with_env("MERINGUE_ASCII_GLYPHS" => "1") do
+      assert_equal ["> [ Begin ] <"], @layout.send(:settings_pane).action_segments(compose).map(&:first)
+    end
+  end
+
+  # The app turns on kitty CSI-u and xterm modifyOtherKeys at startup, and the
+  # point of both is that Escape stops arriving as a bare \e. Binding only the
+  # bare byte left it dead: a picker could be opened and not closed.
+  def test_escape_closes_a_picker_in_every_encoding_a_terminal_may_send
+    ["\e", "\e[27u", "\e[27;1u", "\e[27;1~", "\e[27;1;27~"].each do |encoding|
+      @app = build_app(availability: availability("claude" => :installed, "pi" => :installed, "codex" => :missing))
+      open_setup
+      send_key(ENTER)
+      focus_setup_row("agent.head_harness")
+      send_key(ENTER)
+      refute_nil @app.instance_variable_get(:@settings_picker), "picker did not open"
+
+      send_key(encoding)
+
+      assert_nil @app.instance_variable_get(:@settings_picker), "#{encoding.inspect} did not close the picker"
     end
   end
 

@@ -368,7 +368,7 @@ module Meringue
           capture["error"] = "Mouse input cannot be bound here; press a keyboard key, Esc, or Backspace."
           return unchanged
         end
-        if key == "\e"
+        if hard_escape_key?(key)
           @settings_keybinding_capture = nil
           return unchanged
         end
@@ -1009,7 +1009,7 @@ module Meringue
           @settings_picker["query"] = "#{@settings_picker.fetch("query", "")}#{key}"
           @settings_picker["index"] = 0
           preview_settings_picker_theme
-        elsif key == "\e" || hard_escape_key?(key)
+        elsif hard_escape_key?(key)
           cancel_settings_picker
         end
         unchanged

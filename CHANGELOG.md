@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
+- Escape works again across the settings and setup UI. The app turns on kitty CSI-u and xterm
+  modifyOtherKeys at startup, and the point of both is that Escape stops arriving as a bare `\e`
+  — kitty sends `\e[27u`, xterm `\e[27;1~` — but only the bare byte was bound, so a picker could
+  be opened and not closed. All the encodings are bound now, as every other key already was.
+- The setup navigation action shows when it has focus, as `> [ Next ] <` in the selection style,
+  and the row list deselects while it does: focus is in one place at a time. The line that
+  describes the selected row describes the action instead once the action has focus, rather than
+  explaining a row nobody selected, and stays filled so the card does not reflow underneath the
+  cursor. The row index is still kept, so arrowing back up returns to the row it left.
 - The advanced-settings reveal in Settings and first-run setup closes again. Opening it used to
   remove the row that opened it, which left the setup harness step with no way back to the plain
   card; the reveal now stays in place, toggles both ways under the same cursor, and `A` opens and

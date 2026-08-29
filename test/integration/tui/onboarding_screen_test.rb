@@ -233,7 +233,8 @@ class TuiSetupOverlayScreenTest < Minitest::Test
 
     assert snapshot.fetch("footer_focus")
     assert_equal "next", snapshot.fetch("footer_button")
-    assert_equal ["[ Next ]"], @layout.send(:settings_pane).action_segments(compose).map(&:first)
+    assert_equal ["› [ Next ] ‹"], @layout.send(:settings_pane).action_segments(compose).map(&:first),
+                 "the focused action has to look focused"
     refute_includes render, "[ Back ]"
     send_key(LEFT)
     assert_equal "next", snapshot.fetch("footer_button")
