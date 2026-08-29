@@ -202,8 +202,13 @@ module Meringue
         was_embedded = embedded_agent_workspace?
         if @agent_workspace_open_pending && workspace_controller&.respond_to?(:cancel_workspace_open)
           workspace_controller.cancel_workspace_open(agent: @agent_workspace_agent_id)
-        elsif @agent_workspace_interactive && workspace_controller&.respond_to?(:close_workspace)
-          close_interactive_agent_workspace(@agent_workspace_agent_id)
+        elsif @agent_workspace_interactive && workspace_controller
+          # Reconciliation can remove the pane, but it must not settle an active focused turn.
+          if workspace_controller.respond_to?(:detach_workspace)
+            workspace_controller.detach_workspace(agent: @agent_workspace_agent_id)
+          else
+            close_interactive_agent_workspace(@agent_workspace_agent_id)
+          end
         else
           close_agent_workspace_session
         end

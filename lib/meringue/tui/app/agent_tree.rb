@@ -23,6 +23,17 @@ module Meringue
         record = agent_tree_record(state, item_id)
         return false unless record
 
+        # The focused worker is a selected node even while its log scope is temporarily
+        # suppressed. Clicking it again is therefore the same deselect gesture as clicking any
+        # other selected row: leave the view, clear the target, and return to the main chat.
+        if embedded_agent_workspace? && record.fetch("type", nil).to_s == "worker" &&
+           item_id.to_s == @agent_workspace_agent_id.to_s
+          close_agent_workspace(preserve_terminal: true)
+          deselect_agent_tree_item
+          @focused_pane = "chat"
+          return false
+        end
+
         action = agent_tree_double_click_action(record, item_id, key, state)
         double_click = action.fetch(:double_click)
         @last_worker_click = nil unless action.fetch(:track_click)
@@ -111,7 +122,13 @@ module Meringue
 
       def deselect_agent_tree_item
         clear_log_scope
-        exit_agent_tree_navigation if @agent_tree_navigation_active
+        if @agent_tree_navigation_active
+          exit_agent_tree_navigation
+        else
+          # A focused worker owns the visual surface without leaving tree navigation active.
+          # Deselecting it must still clear the sticky target before returning to chat.
+          @selected_agent_id = nil
+        end
         false
       end
 

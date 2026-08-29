@@ -44,13 +44,14 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
   end
 
   class InteractiveController
-    attr_reader :keys, :terminal_keys, :closed, :opened_sizes, :resized_sizes, :editors
+    attr_reader :keys, :terminal_keys, :closed, :detached, :opened_sizes, :resized_sizes, :editors
     attr_accessor :snapshot_lines
 
     def initialize
       @keys = []
       @terminal_keys = []
       @closed = 0
+      @detached = []
       @opened_sizes = []
       @resized_sizes = []
       @snapshot_lines = ["Pi output"]
@@ -112,6 +113,11 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     def close_workspace(agent:)
       @closed += 1
       { "status" => "closed", "message" => "resumed" }
+    end
+
+    def detach_workspace(agent:)
+      @detached << agent
+      { "status" => "closed", "message" => "detached" }
     end
   end
 
@@ -309,6 +315,25 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     assert view.closed, "toggling focus closes only the view handle"
   end
 
+  def test_clicking_the_focused_worker_deselects_and_returns_to_main_chat
+    worker = agent_record("P1-I1-W1", "type" => "worker", "status" => "working")
+    state = @state.merge("agents" => [worker])
+
+    @app.instance_variable_set(:@agent_workspace_active, true)
+    @app.instance_variable_set(:@agent_workspace_interactive, true)
+    @app.instance_variable_set(:@agent_workspace_agent_id, worker.fetch("id"))
+    @app.instance_variable_set(:@selected_agent_id, worker.fetch("id"))
+
+    @app.send(:handle_agent_tree_item_click, worker.fetch("id"), { "x" => 2, "y" => 3 }, state)
+
+    refute @app.instance_variable_get(:@agent_workspace_active)
+    refute @app.instance_variable_get(:@agent_tree_navigation_active)
+    assert_nil @app.instance_variable_get(:@selected_agent_id)
+    assert_nil @app.instance_variable_get(:@log_scope_id)
+    assert_equal "chat", @app.instance_variable_get(:@focused_pane)
+    assert_equal "agent", @app.instance_variable_get(:@agent_workspace_view)
+  end
+
   def test_selecting_another_worker_closes_the_old_view_and_opens_the_new_one
     workers = [
       agent_record("P1-I1-W1", "type" => "worker", "status" => "working"),
@@ -425,11 +450,8 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       assert_equal false, app.instance_variable_get(:@agent_workspace_open_pending)
       app.send(:close_agent_workspace)
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
-      while controller.agent_interactive?(agent: state.fetch("agents").first)
-        raise "native focus did not close" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
-        sleep 0.01
-      end
-      refute controller.agent_interactive?(agent: state.fetch("agents").first)
+      assert controller.agent_interactive?(agent: state.fetch("agents").first),
+             "leaving the view must not stop the focused harness session"
     ensure
       app&.send(:close_agent_workspace)
       controller&.close
@@ -495,7 +517,9 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
                    "submitting a prompt in focused workspace must notify the kernel lifecycle"
 
       app.send(:close_agent_workspace)
-      assert_equal "P1-I1-W1", Timeout.timeout(2) { focus.ended.pop }
+      assert_empty focus.ended,
+                   "leaving after a focused prompt must not settle or terminate the worker"
+      assert controller.agent_interactive?(agent: state.fetch("agents").first)
     ensure
       focus&.release unless released
       app&.send(:close_agent_workspace)
@@ -533,13 +557,8 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
         sleep 0.01
       end
 
-      # Model Pi autocompaction by holding dashboard reattachment after the native PTY closes.
-      # The old synchronous quit path blocked the complete render/input loop at this boundary.
-      releaser = Thread.new do
-        focus.resume_started.pop
-        sleep 0.5
-        focus.release_resume
-      end
+      # Leaving the view is immediate and does not begin dashboard reattachment, even if the
+      # provider is in a compaction-sensitive state.
       started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       app.send(:close_agent_workspace, preserve_terminal: true)
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
@@ -551,18 +570,11 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       assert_equal "m", buffer, "dashboard input must stay usable while ownership resumes"
       refute app.instance_variable_get(:@quit_requested)
 
-      releaser.join
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
-      while controller.interactive_close_pending?(agent: state.fetch("agents").first)
-        raise "dashboard ownership did not finish resuming" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
-        sleep 0.01
-      end
       compose_app_state(app, state)
-      assert_equal ["\e"], interactive_session.writes
-      assert_equal ["P1-I1-W1"], focus.ended
+      assert_empty interactive_session.writes
+      assert_empty focus.ended
     ensure
       focus&.release_resume
-      releaser&.join(0.1)
       app&.send(:close_agent_workspace)
       controller&.close
     end
@@ -718,7 +730,8 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     app.send(:handle_key, "q", "", 0, -1, handler, state)
     refute app.instance_variable_get(:@agent_workspace_active)
     assert_equal "chat", app.instance_variable_get(:@focused_pane)
-    assert_equal 1, controller.closed
+    assert_equal 0, controller.closed
+    assert_equal [state.fetch("agents").first.fetch("id")], controller.detached
   end
 
   def test_native_pi_focus_uses_controller_screen_and_forwards_input_without_custom_view
@@ -754,7 +767,8 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     assert_equal ["x", "\u001a", "y"], controller.keys
 
     app.send(:close_agent_workspace)
-    assert_equal 1, controller.closed
+    assert_equal 0, controller.closed
+    assert_equal [state.fetch("agents").first.fetch("id")], controller.detached
   end
 
   def test_embedded_native_sessions_forward_page_keys_and_wheel_to_harness_history
