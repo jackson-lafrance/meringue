@@ -319,6 +319,10 @@ module Meringue
           move_settings_category(1)
         elsif SHIFT_TAB_KEYS.include?(key)
           move_settings_category(-1)
+        elsif !setup_mode? && SHIFT_UP_KEYS.include?(key)
+          move_settings_section(-1)
+        elsif !setup_mode? && SHIFT_DOWN_KEYS.include?(key)
+          move_settings_section(1)
         elsif UP_KEYS.include?(key) || keybinding?("suggestion_previous", key)
           move_settings_row(-1)
         elsif DOWN_KEYS.include?(key) || keybinding?("suggestion_next", key)
@@ -681,6 +685,24 @@ module Meringue
                                      (@settings_category_index.to_i + delta.to_i) % count
                                    end
         @settings_row_index = 0
+        @settings_footer_focus = false
+        @settings_footer_button = "next"
+      end
+
+      def move_settings_section(delta)
+        categories = settings_categories
+        return if setup_mode? || categories.empty?
+
+        current = @settings_category_index.to_i
+        target = (current + delta.to_i).clamp(0, categories.length - 1)
+        return if target == current
+
+        @settings_category_index = target
+        @settings_row_index = if delta.to_i.negative?
+                                [settings_rows.length - 1, 0].max
+                              else
+                                0
+                              end
         @settings_footer_focus = false
         @settings_footer_button = "next"
       end

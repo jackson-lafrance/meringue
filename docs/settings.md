@@ -23,6 +23,7 @@ Advanced provider, workspace, and keybinding rows start collapsed **inside the c
 ## Interaction
 
 - `↑` / `↓`: move through rows.
+- `Shift-↑` / `Shift-↓`: jump to the previous or next category section. The jump lands on the last row of the previous section or the first row of the next section; at the first or last section it stays put.
 - `←` / `→`: change the focused setting when the control supports it; otherwise do nothing. They never move focus or change category.
 - Keybindings are shown directly in their category; they are not hidden behind the Advanced settings disclosure.
 

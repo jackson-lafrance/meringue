@@ -23,6 +23,8 @@ class TuiSettingsOverlayTest < Minitest::Test
   ENTER = "\r"
   ESC = "\e"
   DOWN = "\e[B"
+  SHIFT_UP = "\e[1;2A"
+  SHIFT_DOWN = "\e[1;2B"
   RIGHT = "\e[C"
   LEFT = "\e[D"
   UP = "\e[A"
@@ -84,6 +86,39 @@ class TuiSettingsOverlayTest < Minitest::Test
     assert_equal shell.fetch("value"), shell.fetch("default_value")
     assert_equal "nvim", editor.fetch("value")
     assert_equal editor.fetch("value"), editor.fetch("default_value")
+  end
+
+  def test_shift_arrows_jump_between_sections_while_plain_arrows_move_rows
+    @app.send(:open_settings, @state)
+    categories = @app.send(:settings_categories)
+    assert_equal "Agent defaults", categories.fetch(0)
+
+    @app.instance_variable_set(:@settings_row_index, 1)
+    send_key(SHIFT_UP)
+    assert_equal 0, @app.instance_variable_get(:@settings_category_index)
+    assert_equal 1, @app.instance_variable_get(:@settings_row_index), "the first-section boundary should not wrap"
+
+    send_key(SHIFT_DOWN)
+    assert_equal "Appearance", @app.send(:settings_category)
+    assert_equal 0, @app.instance_variable_get(:@settings_row_index)
+
+    send_key(DOWN)
+    assert_equal 1, @app.instance_variable_get(:@settings_row_index), "plain Down moves one row"
+
+    send_key(SHIFT_DOWN)
+    assert_equal "Experiments", @app.send(:settings_category)
+    assert_equal 0, @app.instance_variable_get(:@settings_row_index)
+
+    send_key(SHIFT_UP)
+    assert_equal "Appearance", @app.send(:settings_category)
+    assert_equal @app.send(:settings_rows).length - 1, @app.instance_variable_get(:@settings_row_index)
+
+    last_category = categories.length - 1
+    @app.instance_variable_set(:@settings_category_index, last_category)
+    @app.instance_variable_set(:@settings_row_index, 1)
+    send_key(SHIFT_DOWN)
+    assert_equal last_category, @app.instance_variable_get(:@settings_category_index)
+    assert_equal 1, @app.instance_variable_get(:@settings_row_index), "the last-section boundary should not wrap"
   end
 
   def test_text_compatibility_form_keeps_the_diagnostic_dump

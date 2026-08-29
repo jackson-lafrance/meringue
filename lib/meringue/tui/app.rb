@@ -83,6 +83,8 @@ module Meringue
       RIGHT_KEYS = ["\e[C", "\eOC"].freeze
       UP_KEYS = ["\e[A", "\eOA"].freeze
       DOWN_KEYS = ["\e[B", "\eOB"].freeze
+      SHIFT_UP_KEYS = ["\e[1;2A", "\e[2A"].freeze
+      SHIFT_DOWN_KEYS = ["\e[1;2B", "\e[2B"].freeze
       HOME_KEYS = ["\e[H", "\e[1~", "\eOH", "\u0001"].freeze
       END_KEYS = ["\e[F", "\e[4~", "\eOF", "\u0005"].freeze
       WORD_LEFT_KEYS = ["\eb", "\eB", "\e[1;3D", "\e[1;5D", "\e[1;9D"].freeze
