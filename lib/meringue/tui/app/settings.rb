@@ -14,10 +14,7 @@ module Meringue
         @settings_mode = mode.to_s == "setup" ? "setup" : "settings"
         @settings_setup_auto = @settings_mode == "setup" && setup_origin.to_s == "auto"
         @settings_setup_outcome = nil
-        @settings_status_bar_draft = StatusBarComposer::Draft.new(
-          config,
-          initial_value: @settings_draft.value("appearance.status_bar_layout")
-        )
+        @settings_status_bar_draft = nil
         @settings_status_bar_drag = nil
         @settings_category_index = 0
         @settings_row_index = 0
@@ -269,7 +266,6 @@ module Meringue
           "editor" => editor,
           "keybinding_capture" => capture,
           "picker" => settings_picker_snapshot,
-          "status_bar_composer" => inline_status_bar_composer_snapshot(state),
           "footer_focus" => settings_footer_focused?,
           "footer_button" => @settings_footer_button,
           "setup_last_step" => setup_mode? && @settings_category_index.to_i == settings_categories.length - 1,
@@ -281,7 +277,6 @@ module Meringue
           "setup_animations" => setup_mode? ? @settings_draft.value("appearance.animations") == true : nil,
           "setup_animation_phase" => setup_mode? ? setup_animation_phase : nil,
           "setup_summary" => (setup_summary_entries if setup_mode? && settings_category == Settings::SetupFlow::DONE),
-          "setup_status_bar_preview" => (setup_status_bar_preview if setup_mode? && settings_category == Settings::SetupFlow::STATUS_BAR),
           "error_count" => @settings_draft.errors.length,
           "global_error" => @settings_draft.global_error,
           "width" => render_width,
@@ -302,9 +297,6 @@ module Meringue
           return handle_settings_picker_key(key, unchanged, on_submit, state)
         end
         if mouse_event?(key)
-          inline_result = handle_inline_status_bar_mouse(key, unchanged, state) if inline_status_bar_step?
-          return inline_result if inline_result
-
           return handle_settings_mouse(key, unchanged, on_submit, state)
         end
 
@@ -325,10 +317,6 @@ module Meringue
         if @settings_editor
           return handle_settings_editor_key(key, unchanged, on_submit, state)
         end
-        if inline_status_bar_step?
-          return handle_inline_status_bar_key(key, unchanged, on_submit, state)
-        end
-
         rows = settings_rows
         if hard_save_key?(key)
           setup_mode? ? setup_next_or_finish(on_submit, state) : save_settings(on_submit, state)
@@ -850,6 +838,9 @@ module Meringue
         if id == "experiments.github_support_test_access"
           return test_github_access_from_settings(state, on_submit)
         end
+        if id == "experiments.customize_status_bar"
+          return request_agent_status_bar_customization(on_submit, state)
+        end
         if id == "setup.check_harness"
           return false if toggle_only
 
@@ -860,9 +851,6 @@ module Meringue
         case row.fetch("editor", nil)
         when "checkbox"
           @settings_draft.toggle(id)
-        when "status_bar"
-          return false if toggle_only
-          open_status_bar_composer(state, return_to_settings: true)
         when "keybinding"
           return false if toggle_only
           open_settings_keybinding_capture(row)
@@ -879,6 +867,30 @@ module Meringue
           open_settings_editor(row)
         end
         true
+      end
+
+      def request_agent_status_bar_customization(on_submit, state)
+        layout = StatusBarLayout.from_config(config) || StatusBarLayout.new
+        prompt = <<~PROMPT.strip
+          Help me customize Meringue's dashboard status bar collaboratively. First explain the proposed changes and wait for my approval; do not edit anything I have not approved.
+
+          Repository-specific context:
+          - The configurable surface is the dashboard bottom bar. Its current layout is #{JSON.generate(layout.to_h)}.
+          - Read `lib/meringue/tui/status_bar_layout.rb` for `StatusBarLayout` and its supported component/zone APIs, and `lib/meringue/tui/app/status_bar_composer.rb` for the existing preview and save flow.
+          - Read `lib/meringue/tui/layout.rb` for dashboard rendering and `lib/meringue/config/schema.rb` for the persisted `appearance.status_bar_layout` setting. Extension authors should use the existing status-bar extension surfaces; do not invent a parallel configuration format.
+          - Preview with the existing `/status-bar` command. Run `bundle exec ruby -Itest test/integration/tui/status_bar_composer_test.rb` for focused coverage and `rake test` for the full suite.
+
+          Constraints: preserve runtime status-bar rendering, component semantics, `/status-bar` compatibility, configuration persistence, and both focused-worker status bars. Do not reintroduce the removed Settings/Setup picker, hard-code machine-specific paths, or make broad unrelated changes. Keep the change reversible: show me the diff, retain the prior layout until I approve the replacement, and explain how to restore it (including the existing reset/configuration mechanisms) before applying it.
+        PROMPT
+        # Settings is a modal over the dashboard. Close it first so the prompt is
+        # delivered through the ordinary dashboard agent flow and its response is
+        # immediately visible in the focused chat session.
+        close_settings(discard: true)
+        submit_prompt(prompt, on_submit, state)
+        true
+      rescue StandardError => e
+        append_jump_response("Could not start status bar customization: #{e.message}")
+        false
       end
 
       def test_github_access_from_settings(state, on_submit)

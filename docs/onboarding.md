@@ -6,15 +6,14 @@ Setup is not a chat prompt and does not maintain a second settings implementatio
 
 ## Steps
 
-The centered card shows one dynamic `Step N of 7` indicator:
+The centered card shows one dynamic `Step N of 6` indicator:
 
 1. **Welcome** — what Meringue is, in the three nouns the rest of the flow depends on: you describe a goal, a head decides what should happen, workers do the work in their own worktrees. No controls; the navigation action is focused so Enter continues.
 2. **Harness** — the one decision Meringue cannot run without. Both role harnesses are listed with the product name and whether this machine can actually start them (`Claude Code · installed`, `Codex CLI · not found`). Choosing either role fills the other while it is still unset, so the common case is one selection. **Check harness** runs each selected backend once and reports what it answered. Model and reasoning sit behind a single **Model and reasoning** reveal, because every harness ships defaults that work.
 3. **Project** — offers the repository Meringue was started in, named from its README heading by the same `ProjectNaming` the heads use. Ticked by default; unticking registers nothing. Without a project there is nowhere for issues and workers to go, which is why the offer is here rather than left for the user to discover.
 4. **Theme** — theme and animation preference. Theme changes preview immediately in memory.
-5. **Status bar** — shows the default bottom-bar layout as it currently reads. **Customize layout** opens the live drag-and-drop composer inline; leaving the step closes it. The other two worker bars retain their built-in defaults.
-6. **Meringue Xtras** — experiment controls derived directly from `Experiments::Registry`, all off until chosen. The read-only **Test GitHub access** action is completely absent until GitHub support is selected.
-7. **Done** — the harness, project, theme, and experiments the Complete action is about to save, so finishing is checkable rather than hopeful.
+5. **Meringue Xtras** — experiment controls derived directly from `Experiments::Registry`, all off until chosen. The status-bar customization action opens a context-rich agent session; the read-only **Test GitHub access** action is completely absent until GitHub support is selected.
+6. **Done** — the harness, project, theme, and experiments the Complete action is about to save, so finishing is checkable rather than hopeful.
 
 Welcome and Done carry no controls at all. The flow derives navigation from the step list, so future setup sections can be appended without introducing a review-only special case.
 

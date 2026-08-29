@@ -62,7 +62,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     frame = render
     assert_includes frame, "Step 1 of 6"
     assert_includes frame, "Welcome to Meringue"
-    refute_includes frame, "Step 1 of 7 · Welcome"
+    refute_includes frame, "Step 1 of 6 · Welcome"
     refute_includes frame, "1●"
     refute_includes frame, "Review"
     refute_includes frame, "Continue"
@@ -72,7 +72,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     snap = snapshot
     assert_equal "Experiments", snap.fetch("category")
     refute snap.fetch("setup_last_step"), "Done is the last step now, so Experiments is not"
-    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, snap.fetch("rows").map { |row| row.fetch("id") }
+    assert_equal (Meringue::Experiments::Registry.setting_ids - ["experiments.github_support_test_access"]), snap.fetch("rows").map { |row| row.fetch("id") }
     send_key(TAB)
     assert_equal "Done", snapshot.fetch("category")
     assert snapshot.fetch("setup_last_step")
@@ -84,7 +84,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     send_key(ENTER)
     3.times { send_key(TAB) }
     assert_equal "Experiments", snapshot.fetch("category")
-    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, snapshot.fetch("rows").map { |row| row.fetch("id") }
+    assert_equal (Meringue::Experiments::Registry.setting_ids - ["experiments.github_support_test_access"]), snapshot.fetch("rows").map { |row| row.fetch("id") }
 
     geometry = @layout.send(:settings_pane).geometry(compose, width: WIDTH, height: HEIGHT)
     card = geometry.fetch(:card)

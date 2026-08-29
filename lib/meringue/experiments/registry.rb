@@ -109,6 +109,13 @@ module Meringue
           dependencies: [],
           conflicts: [],
           migration: "preserve_existing_role_defaults",
+          actions: [
+            {
+              "id" => "customize_status_bar",
+              "label" => "Customize your status bar",
+              "description" => "Open a context-rich agent session to collaboratively customize the dashboard status bar."
+            }
+          ],
           availability_probe: nil
         ),
         Definition.new(

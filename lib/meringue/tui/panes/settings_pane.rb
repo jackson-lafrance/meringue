@@ -16,7 +16,6 @@ module Meringue
           Settings::SetupFlow::WELCOME => "Welcome to Meringue",
           Settings::SetupFlow::HARNESS => "Pick the agent that does the work",
           Settings::SetupFlow::THEME => "Make the workspace yours",
-          Settings::SetupFlow::STATUS_BAR => "Your bottom bar",
           Settings::SetupFlow::EXPERIMENTS => "Meringue Xtras",
           Settings::SetupFlow::DONE => "You're ready"
         }.freeze
@@ -24,7 +23,6 @@ module Meringue
           Settings::SetupFlow::WELCOME => "About a minute: one harness, one look.",
           Settings::SetupFlow::HARNESS => "Meringue drives a coding agent you already have. It never installs one for you.",
           Settings::SetupFlow::THEME => "Previewed live. Nothing is written until you finish.",
-          Settings::SetupFlow::STATUS_BAR => "This is the live bar. The default is ready to use.",
           Settings::SetupFlow::EXPERIMENTS => "All optional, all off. Turn any of them on now or from /config later.",
           Settings::SetupFlow::DONE => "Everything below is saved when you finish."
         }.freeze
@@ -484,8 +482,6 @@ module Meringue
           intro = SETUP_INTROS.fetch(category, "Choose a value, then continue when it feels right.")
           return welcome_lines(intro, width: width) if category == Settings::SetupFlow::WELCOME
           return done_lines(snap, intro, width: width) if category == Settings::SetupFlow::DONE
-          return status_bar_lines(snap, intro, width: width) if category == Settings::SetupFlow::STATUS_BAR
-
           description = selected_row ? selected_row.fetch("description", "").to_s : ""
           lines = wrap(intro, [width.to_i, 8].max).first(2).map { |line| [[line, Style::MUTED]] }
           lines << [["", Style::DIM]]
@@ -493,17 +489,6 @@ module Meringue
             lines << [[wrap(description, [width.to_i, 8].max).first.to_s, Style::DIM]]
             lines << [["", Style::DIM]]
           end
-          lines
-        end
-
-        # The default layout, spelled out. The drag surface is one keystroke away
-        # and stays out of the way of someone who has never seen the bar in use.
-        def status_bar_lines(snap, intro, width:)
-          lines = [[[intro, Style::MUTED]], [["", Style::DIM]]]
-          Array(snap.fetch("setup_status_bar_preview", [])).each do |line|
-            wrap(line.to_s, [width.to_i, 8].max).each { |wrapped| lines << [[wrapped, Style::TEXT]] }
-          end
-          lines << [["", Style::DIM]]
           lines
         end
 

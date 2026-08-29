@@ -38,7 +38,7 @@ module Meringue
         FIXED_SETTING_IDS = {
           HARNESS => %w[agent.head_harness agent.worker_harness workspace.editor].freeze,
           THEME => %w[appearance.theme appearance.animations].freeze,
-          STATUS_BAR => %w[appearance.status_bar_layout].freeze
+          STATUS_BAR => %w[appearance.status_bar_layout].freeze,
         }.freeze
 
         # Model and reasoning both have per-harness defaults that are correct for
@@ -114,7 +114,12 @@ module Meringue
           @config = config
           @env = env
           @baseline_fingerprint = config.fingerprint
-          @definitions = Config::Schema.definitions.reject { |definition| definition.visibility == "internal" }
+          # The status-bar layout remains a durable configuration and direct
+          # composer surface, but it is not a Settings picker. Agent-assisted
+          # customization is offered from Experiments instead.
+          @definitions = Config::Schema.definitions.reject do |definition|
+            definition.visibility == "internal" || definition.id == "appearance.status_bar_layout"
+          end
           @values = Config::Schema.effective_values(config, env: env).slice(*@definitions.map(&:id))
           @original_values = Config.deep_copy(@values)
           @errors = {}

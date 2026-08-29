@@ -173,18 +173,6 @@ module Meringue
         { "summary" => failures.length == results.length ? "not ready" : "partly ready", "detail" => detail }
       end
 
-      # The bar as it currently reads, so the step shows what the default actually
-      # is instead of handing someone an empty canvas and a drag gesture.
-      def setup_status_bar_preview
-        layout = StatusBarLayout.new(@settings_draft.value("appearance.status_bar_layout"))
-        StatusBarLayout::ZONES.map do |zone|
-          labels = layout.items(zone).map { |component| StatusBarLayout.component_label(component) }
-          "#{zone.capitalize}: #{labels.empty? ? "empty" : labels.join(", ")}"
-        end
-      rescue StandardError
-        []
-      end
-
       # What finishing will do, in the order the steps asked it. Rendered on the
       # last card so Complete is checkable instead of hopeful.
       def setup_summary_entries
