@@ -10,41 +10,41 @@ inventory from a terminal.
 
 ## Usage
 
-The [quick start](#quick-start) covers the normal interactive launch and the harness-free demo. `bundle exec meringue tui` is an explicit equivalent of `bundle exec meringue`.
+The [quick start](#quick-start) covers the normal interactive launch and the harness-free demo. `bundle exec ruby -Ilib bin/meringue tui` is an explicit equivalent of `bundle exec ruby -Ilib bin/meringue`.
 
 The first interactive launch opens Setup as the same polished full-screen overlay used by `/config`. Choose a theme, review separate head and worker defaults, and opt into Meringue Xtras such as GitHub support. Experiments is the final step; the GitHub access test is absent until GitHub support is selected, and Complete atomically saves the settings and `[onboarding]` marker together. Backspace revisits a step without losing edits, while the single centered Next action keeps the page uncluttered. Automatic first-run `Esc` confirms a safe skip; `Esc` on a manual `/setup` rerun cancels without changing the marker. The overlay remains recoverable through resize, validation, and persistence failures. See [`docs/onboarding.md`](docs/onboarding.md).
 
 Print the CLI help:
 
 ```bash
-bundle exec meringue --help
+bundle exec ruby -Ilib bin/meringue --help
 ```
 
 Choose a harness at runtime:
 
 ```bash
-bundle exec meringue tui --harness claude
-bundle exec meringue tui --harness codex
-bundle exec meringue tui --head-harness claude --worker-harness codex
+bundle exec ruby -Ilib bin/meringue tui --harness claude
+bundle exec ruby -Ilib bin/meringue tui --harness codex
+bundle exec ruby -Ilib bin/meringue tui --head-harness claude --worker-harness codex
 ```
 
 Use a custom state or config file:
 
 ```bash
-bundle exec meringue tui --state /tmp/meringue-state.json
-bundle exec meringue tui --config ./fixtures/config.example.toml
+bundle exec ruby -Ilib bin/meringue tui --state /tmp/meringue-state.json
+bundle exec ruby -Ilib bin/meringue tui --config ./fixtures/config.example.toml
 ```
 
 Export and import workers without opening the TUI:
 
 ```bash
-bundle exec meringue workers export ./workers.json
-bundle exec meringue workers import ./workers.json --project /path/to/the/checkout
+bundle exec ruby -Ilib bin/meringue workers export ./workers.json
+bundle exec ruby -Ilib bin/meringue workers import ./workers.json --project /path/to/the/checkout
 ```
 
 See [`docs/worker-transfer.md`](docs/worker-transfer.md) for the portable format and its session limitations.
 
-From the checkout, the checked-in `bin/meringue` entrypoint accepts the same commands when you need to bypass Bundler's executable lookup.
+From the checkout, run the checked-in entrypoint directly with `bundle exec ruby -Ilib bin/meringue` when you need to bypass executable lookup.
 
 Useful slash commands inside the TUI include:
 

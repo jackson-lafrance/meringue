@@ -1,10 +1,8 @@
 #!/bin/sh
 # Meringue installer.
 #
-# Installing used to be four commands (clone, cd, bundle install, bundle exec)
-# that left nothing on PATH, so the README's troubleshooting section opened with
-# "meringue: command not found". This does the same four things and adds the
-# shim, so the command afterwards is `meringue`.
+# This clones Meringue, installs its dependencies, and adds a shim so the
+# command afterwards is `meringue`.
 #
 #   curl -fsSL https://raw.githubusercontent.com/jackson-lafrance/meringue/main/install.sh | sh
 #
@@ -37,7 +35,7 @@ printf '\nInstalling Meringue\n\n'
 need git "Install git and run this again."
 need ruby "Install Ruby 3.1 or newer and run this again."
 
-# Meringue's gemspec requires >= 3.1, and the failure without this check is an
+# Meringue requires Ruby >= 3.1, and the failure without this check is an
 # obscure syntax error from inside a library rather than a version message.
 if ! ruby -e 'exit(Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("3.1") ? 0 : 1)'; then
   die "Ruby $(ruby -e 'print RUBY_VERSION') is too old; Meringue needs 3.1 or newer."
@@ -70,10 +68,9 @@ else
   git clone --quiet --branch "$BRANCH" "$REPO_URL" "$SRC_DIR"
 fi
 
-# The Gemfile writes the shim on `bundle install` so that installing from a
-# clone lands in the same place as installing from here. This script wants it in
-# BIN_DIR specifically, so it takes that job itself rather than letting the two
-# disagree about where the command should go.
+# The Gemfile also writes a shim on `bundle install` for clone-based setup. This
+# script wants it in BIN_DIR specifically, so it takes that job itself rather
+# than letting the two disagree about where the command should go.
 note "installing dependencies"
 ( cd "$SRC_DIR" && MERINGUE_NO_SHIM=1 bundle install --quiet ) || die "bundle install failed in $SRC_DIR."
 

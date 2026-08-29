@@ -63,7 +63,7 @@ HEADS
 - **No reflow.** Issue and project rows have no harness of their own, so they reserve the same logo cell. Every id in the tree therefore starts in one column — including a child issue and a worker that are siblings at the same depth — and wrapped title rows hang under the title column.
 - **Selected rows.** The highlighted row keeps its logo but hands its foreground to the selection palette, which guarantees contrast on the highlight background in every theme. Its identity color is still visible: it is what the composer is tinted with while that row is selected.
 
-Run `ruby -Ilib -Itest test/integration/tui/agent_tree_identity_test.rb` for automated coverage of agent identity rendering; use `bundle exec meringue demo` when you need a manual visual pass in your own terminal.
+Run `ruby -Ilib -Itest test/integration/tui/agent_tree_identity_test.rb` for automated coverage of agent identity rendering; use `bundle exec ruby -Ilib bin/meringue demo` when you need a manual visual pass in your own terminal.
 
 ## AgentTree scrolling
 

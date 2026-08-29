@@ -1,6 +1,6 @@
 # Testing
 
-Meringue has one automated suite: Minitest, driven by Rake, with no dependencies beyond `rake` and `minitest` (both ship with Ruby). Assertions belong in this suite so `rake test` is the testing source of truth; do not add one-off check scripts for behavior that can be covered hermetically.
+Meringue has one automated suite: Minitest, driven by Rake. The source checkout declares `base64` for runtime and `rake`/`minitest` for development in `Gemfile`. Assertions belong in this suite so `rake test` is the testing source of truth; do not add one-off check scripts for behavior that can be covered hermetically.
 
 ## Running the suite
 
@@ -51,7 +51,6 @@ test/findings/                 # notes about real bugs found while writing tests
 - Tests are hermetic: no network, no real Pi, Claude Code, or Codex processes, no dependence on installed harness CLIs, and no reads or writes under `~/.meringue`. Use `Dir.mktmpdir` for any filesystem work, and `Meringue::Harness::FakeClient` / `Meringue::Heads::FakeRunner` for harness behavior.
 - Tests are fast and deterministic: no `sleep`-based coordination where an injected clock or a direct call will do, and no reliance on wall-clock ordering.
 - No failing tests and no `skip`. If a test reveals a real bug that is out of scope, assert the current actual behavior, say so in a comment, and record the bug in `test/findings/<area>.md`.
-- Tests are development-only: `meringue.gemspec` does not package `test/`.
 
 ## Not covered on purpose
 

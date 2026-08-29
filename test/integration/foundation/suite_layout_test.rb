@@ -4,7 +4,7 @@ require "test_helper"
 require "support/foundation_support"
 
 # Guards the plumbing the whole suite depends on: the Rakefile test task, the
-# test-file discovery glob, the shared conventions, and gemspec packaging.
+# test-file discovery glob, the shared conventions, and source dependencies.
 class FoundationSuiteLayoutTest < Minitest::Test
   def test_rakefile_defines_a_default_test_task
     status, stdout, = FoundationSupport.run_ruby(
@@ -13,29 +13,16 @@ class FoundationSuiteLayoutTest < Minitest::Test
     )
 
     assert_equal 0, status
-    tasks = stdout.strip.split(",")
-    %w[build default install package:verify release release:validate test].each do |task|
-      assert_includes tasks, task
-    end
+    assert_equal ["default", "test"], stdout.strip.split(",")
   end
 
   def test_rakefile_wires_lib_and_test_onto_the_load_path
     rakefile = File.read(FoundationSupport.repo_path("Rakefile"))
 
-    assert_includes rakefile, 'require "bundler/gem_tasks"'
     assert_includes rakefile, "Rake::TestTask.new(:test)"
     assert_includes rakefile, 't.libs = ["lib", "test"]'
     assert_includes rakefile, 't.test_files = FileList["test/**/*_test.rb"]'
     assert_includes rakefile, "task default: :test"
-
-    status, stdout, = FoundationSupport.run_ruby(
-      "-e",
-      'require "rake"; load "Rakefile"; print Rake::Task["release:guard_clean"].prerequisites.join(",")'
-    )
-    assert_equal 0, status
-    prerequisites = stdout.split(",")
-    assert_includes prerequisites, "release:validate"
-    assert_includes prerequisites, "release:trusted_publishing_only"
   end
 
   def test_test_helper_exposes_the_library_and_minitest
@@ -79,43 +66,12 @@ class FoundationSuiteLayoutTest < Minitest::Test
     end
   end
 
-  def test_gemspec_packages_the_expected_files
-    spec = Gem::Specification.load(FoundationSupport.repo_path("meringue.gemspec"))
+  def test_source_checkout_declares_runtime_and_development_dependencies
+    gemfile = File.read(FoundationSupport.repo_path("Gemfile"))
 
-    refute_nil spec
-    assert_equal "meringue", spec.name
-    assert_equal Meringue::VERSION, spec.version.to_s
-    assert_equal ["meringue"], spec.executables
-    assert_equal ["lib"], spec.require_paths
-    assert_equal "https://rubygems.org", spec.metadata["allowed_push_host"]
-    assert_equal "true", spec.metadata["rubygems_mfa_required"]
-    assert_equal "https://github.com/jackson-lafrance/meringue/issues", spec.metadata["bug_tracker_uri"]
-    assert_equal "https://github.com/jackson-lafrance/meringue/blob/main/CHANGELOG.md", spec.metadata["changelog_uri"]
-
-    %w[
-      CHANGELOG.md
-      README.md
-      bin/meringue
-      docs/head_agent_kernel_commands.md
-      fixtures/demo_state.json
-      lib/meringue.rb
-      lib/meringue/cli.rb
-      lib/meringue/kernel/engine.rb
-      lib/meringue/harness/extensions/command_blacklist.js
-    ].each do |path|
-      assert_includes spec.files, path
-    end
-
-    %w[AGENTS.md docs/testing.md fixtures/config.example.toml].each do |path|
-      refute_includes spec.files, path
-    end
-  end
-
-  def test_gemspec_does_not_ship_the_test_suite
-    spec = Gem::Specification.load(FoundationSupport.repo_path("meringue.gemspec"))
-    packaged_tests = spec.files.select { |path| path.start_with?("test/") }
-
-    assert_empty packaged_tests
+    assert_includes gemfile, 'gem "base64", ">= 0.2"'
+    assert_includes gemfile, 'gem "minitest", ">= 5.0"'
+    assert_includes gemfile, 'gem "rake", ">= 13.0"'
   end
 
   def test_one_off_behavior_check_scripts_are_not_tracked

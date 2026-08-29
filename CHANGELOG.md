@@ -99,6 +99,3 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - `meringue --help` now lists every slash command, rendered from the parser's own table instead of
   a hand-written subset that named 17 of 47. `/issue move`, which shipped without ever reaching
   the in-app `/help`, is documented there too.
-- Replaced the unsafe push/PR gem publication job with separate CI and tag-only RubyGems trusted-publishing workflows.
-- Added strict package-content, isolated-install, and CLI smoke verification.
-- Documented the release gates and the recommended future Homebrew tap.

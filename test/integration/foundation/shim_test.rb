@@ -3,9 +3,9 @@
 require "test_helper"
 require "tmpdir"
 
-# Installing from a clone set up the dependencies and left nothing on PATH, so
-# the command afterwards was still `bundle exec meringue` from that directory.
-# These cover the launcher both install paths now write.
+# Installing from a clone used to leave the command available only through a
+# checkout-local Bundler invocation. These cover the launcher both install paths
+# now write.
 class FoundationShimTest < Minitest::Test
   Shim = Meringue::Shim
 
@@ -97,7 +97,7 @@ class FoundationShimTest < Minitest::Test
       result = Shim.install!(source_dir: source, bin_dir: bin, env: path_env(bin))
 
       assert_equal Shim::FAILED, result.fetch("status")
-      assert_includes result.fetch("message"), "bundle exec meringue"
+      assert_includes result.fetch("message"), "bundle exec --gemfile="
     ensure
       FileUtils.chmod(0o700, bin)
     end
