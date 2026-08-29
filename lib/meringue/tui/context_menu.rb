@@ -92,6 +92,11 @@ module Meringue
         [
           Entry.new(id: "open_workspace", label: "Open workspace", action: "open_workspace"),
           Entry.new(id: "info", label: "Info", action: "info"),
+          Entry.new(
+            id: worker.fetch("prune_protected", false) ? "unprotect" : "protect",
+            label: worker.fetch("prune_protected", false) ? "Allow pruning" : "Protect from pruning",
+            draft: "/worker #{worker.fetch("prune_protected", false) ? "unprotect" : "protect"} #{id}"
+          ),
           Entry.new(id: "prompt", label: "Prompt…", draft: "/prompt #{id} "),
           if status == "paused"
             Entry.new(id: "resume", label: "Resume", draft: "/worker resume #{id}")
@@ -120,6 +125,11 @@ module Meringue
         id = head.fetch("id")
         [
           Entry.new(id: "info", label: "Info", action: "info"),
+          Entry.new(
+            id: head.fetch("prune_protected", false) ? "unprotect" : "protect",
+            label: head.fetch("prune_protected", false) ? "Allow pruning" : "Protect from pruning",
+            draft: "/worker #{head.fetch("prune_protected", false) ? "unprotect" : "protect"} #{id}"
+          ),
           Entry.new(id: "retry", label: "Retry", draft: "/retry #{id}"),
           Entry.new(
             id: "open_pr", label: "Open pull request", action: "open_pr",

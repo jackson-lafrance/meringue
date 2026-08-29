@@ -210,6 +210,9 @@ module Meringue
             agent.fetch("type", nil) == "worker" && subtree_ids.include?(agent.fetch("issue_id", nil))
           end
           blocking_workers = workers.select { |worker| PRUNE_BLOCKING_WORKER_STATUSES.include?(worker.fetch("status", nil).to_s) }
+          protected_agents = state.fetch("agents").select do |agent|
+            agent.fetch("prune_protected", false) && subtree_ids.include?(agent.fetch("issue_id", nil))
+          end
           cleanup_claimed_workers = workers.select { |worker| worker_prune_cleanup_claimed?(worker) }
           open_questions = state.fetch("questions").select do |question|
             question.fetch("status", nil) == "open" && subtree_ids.include?(question.fetch("issue_id", nil))
@@ -241,6 +244,7 @@ module Meringue
           blockers = []
           blockers << "nonterminal_issues" if nonterminal_issue_ids.any?
           blockers << "unresolved_workers" if blocking_workers.any?
+          blockers << "protected_agents" if protected_agents.any?
           blockers << "workspace_cleanup_in_progress" if cleanup_claimed_workers.any?
           blockers << "open_questions" if open_questions.any?
           blockers << "unsettled_pull_requests" if pull_request_blockers.any?
@@ -258,6 +262,7 @@ module Meringue
             "blockers" => blockers,
             "nonterminal_issue_ids" => nonterminal_issue_ids,
             "blocking_worker_ids" => blocking_workers.map { |worker| worker.fetch("id", nil) }.compact,
+            "protected_agent_ids" => protected_agents.map { |agent| agent.fetch("id", nil) }.compact,
             "workspace_cleanup_claimed_worker_ids" => cleanup_claimed_workers.map { |worker| worker.fetch("id", nil) }.compact,
             "deferred_dependent_worker_ids" => deferred_dependents.map { |dependent| dependent.fetch("id", nil) }.compact,
             "live_successor_worker_ids" => live_successors.map { |successor| successor.fetch("id", nil) }.compact,
@@ -282,11 +287,15 @@ module Meringue
           open_questions = state.fetch("questions").select do |question|
             question.fetch("status", nil) == "open" && question.fetch("project_id", nil) == project.fetch("id")
           end
+          protected_agents = state.fetch("agents").select do |agent|
+            agent.fetch("prune_protected", false) && agent.fetch("project_id", nil) == project.fetch("id")
+          end
           ineligible_issue_ids = issue_ids.reject { |issue_id| decisions_by_issue.fetch(issue_id).fetch("prunable", false) }
           blockers = []
           blockers << "project_not_terminal" unless PRUNE_ELIGIBLE_STATUSES.include?(project.fetch("status", nil).to_s)
           blockers << "ineligible_issues" if ineligible_issue_ids.any?
           blockers << "unresolved_workers" if blocking_workers.any?
+          blockers << "protected_agents" if protected_agents.any?
           blockers << "open_questions" if open_questions.any?
 
           {
@@ -296,6 +305,7 @@ module Meringue
             "blockers" => blockers,
             "ineligible_issue_ids" => ineligible_issue_ids,
             "blocking_worker_ids" => blocking_workers.map { |worker| worker.fetch("id", nil) }.compact,
+            "protected_agent_ids" => protected_agents.map { |agent| agent.fetch("id", nil) }.compact,
             "open_question_ids" => open_questions.map { |question| question.fetch("id", nil) }.compact
           }
         end

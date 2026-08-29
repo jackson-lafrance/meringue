@@ -22,6 +22,13 @@ module Meringue
           )
         end
         requested_selector = present_string(value_at(payload, "selector", "Selector", "kind", "status").to_s.downcase)
+        unless synchronized_state { github_support_enabled?(normalized_state) }
+          return rejected_result(
+            command_id, command_type,
+            "Prune is inactive because GitHub support is disabled; no records were removed. Enable it in Settings → Experiments to prune resolved records.",
+            ["github_support_disabled"]
+          )
+        end
         started_at = monotonic_time
         # Forge I/O and git worktree cleanup are both unbounded from the state layer's point of
         # view. Neither may run while the shared state lock is held: reconciliation and later TUI
@@ -385,7 +392,8 @@ module Meringue
           removable_issue_ids &= Array(prepared_plan.fetch("removable_issue_ids", []))
         end
         errored_head_ids = state.fetch("agents").select do |agent|
-          agent.fetch("type", nil) == "head" && agent.fetch("status", nil) == "errored" && !head_applying_batch?(agent)
+          agent.fetch("type", nil) == "head" && agent.fetch("status", nil) == "errored" &&
+            !agent.fetch("prune_protected", false) && !head_applying_batch?(agent)
         end.map { |agent| agent.fetch("id") }
         now = timestamp
         prune_result = remove_issue_bundles_and_agents!(
@@ -689,6 +697,7 @@ module Meringue
             "open_pr_urls" => unsettled.filter_map { |status| status.fetch("url", nil) }.uniq,
             "nonterminal_issue_ids" => Array(decision.fetch("nonterminal_issue_ids", [])),
             "blocking_worker_ids" => Array(decision.fetch("blocking_worker_ids", [])),
+            "protected_agent_ids" => Array(decision.fetch("protected_agent_ids", [])),
             "open_question_ids" => Array(decision.fetch("open_question_ids", [])),
             "workspace_cleanup_blocking_agent_ids" => Array(decision.fetch("workspace_cleanup_blocking_agent_ids", [])),
             "live_successor_worker_ids" => Array(decision.fetch("live_successor_worker_ids", []))
@@ -706,6 +715,11 @@ module Meringue
           sentences << "Retained #{count_phrase(unverified_issue_ids.length, "issue")} because Meringue could not " \
                        "verify their pull request status: #{id_list_phrase(unverified_issue_ids)}" \
                        "#{prune_forge_lookup_clause(forge_lookup)}."
+        end
+        protected_retentions = reasons.reject { |reason| reason.fetch("protected_agent_ids", []).empty? }
+        unless protected_retentions.empty?
+          ids = protected_retentions.flat_map { |reason| reason.fetch("protected_agent_ids", []) }.uniq
+          sentences << "Retained #{count_phrase(protected_retentions.length, "issue")} because protected agents must remain: #{id_list_phrase(ids)}."
         end
         if successor_retentions.any?
           listed = successor_retentions.first(PRUNE_RETENTION_REPORT_LIMIT).map do |reason|
