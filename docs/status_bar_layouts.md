@@ -2,7 +2,7 @@
 
 Only the dashboard's bottom status bar is configurable. The agent-information strip on an embedded worker and the focused-worker command/status bar always retain their hand-tuned built-in layouts.
 
-The composer appears directly on the **Status bar** page during first-run Setup and every manual `/setup` rerun; moving components never opens another page. It is also available full-screen with `/status-bar` (plus the `/statusbar` and `/layout` aliases).
+The composer is available full-screen with `/status-bar` (plus the `/statusbar` and `/layout` aliases). Setup and Settings do not open a status-bar picker; use the Experiments action to ask an agent for collaborative customization.
 
 ## Components and live preview
 
@@ -32,15 +32,13 @@ In the full-screen `/status-bar` composer:
 - `R` restores the useful default.
 - `Enter` or `Ctrl-S` saves; `Esc` cancels without writing.
 
-On the inline Setup page the component keys are the same, except `Enter`, `Ctrl-S`, and `Tab` activate the centered **Next** action. `Shift-Tab`, Backspace, and Delete retain the documented previous-step keybinding. `X` removes a component.
-
 A direct Save is one atomic configuration transaction. If the file changed after the composer opened, the save is rejected and the draft remains visible. In Setup, **Next** only keeps the layout in memory; final **Complete** persists it with every other setup choice and the onboarding marker in one transaction.
 
 ## Mouse workflow
 
 Drag any palette or placed component into either drop zone. Hovering a placed component while dragging chooses that insertion point, so the same gesture supports alignment changes and reordering. The direct composer footer also exposes Reset, Save, and Cancel. Mouse-wheel movement changes the selected component.
 
-The composer remains recoverable after terminal resizing. A full-screen composer below `48×12` shows an explicit warning and keeps `Esc` visible; the inline Setup page follows Setup's responsive card and always retains its navigation/recovery footer.
+The composer remains recoverable after terminal resizing. A full-screen composer below `48×12` shows an explicit warning and keeps `Esc` visible.
 
 ## Persistence and migration
 
@@ -55,4 +53,4 @@ Version 2 accepts only known components, rejects duplicates across zones, and re
 
 Version-1 documents are migrated from their old bottom `context`/`status` blocks. Their agent-information and focused-worker entries are intentionally ignored, restoring those two bars to their prior defaults.
 
-No layout is read from or written to orchestration `state.json`. `_status_bar_layout` and the inline composer snapshot are presentation-only; the config store and kernel remain the sole durable writers.
+No layout is read from or written to orchestration `state.json`. `_status_bar_layout` and the composer snapshot are presentation-only; the config store and kernel remain the sole durable writers.

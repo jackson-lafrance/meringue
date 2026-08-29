@@ -129,7 +129,7 @@ class TuiWorkerGuidanceEditorTest < Minitest::Test
 
     send_key(ENTER, input_buffer: "/setup")
     send_key(ENTER) # Welcome -> Theme
-    4.times { send_key(TAB) }
+    3.times { send_key(TAB) }
     assert_equal "Experiments", snapshot.fetch("category")
 
     # Guided is the third mode of the defaults selector, so reaching the prompt

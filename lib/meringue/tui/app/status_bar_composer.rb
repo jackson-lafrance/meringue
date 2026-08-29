@@ -47,6 +47,12 @@ module Meringue
         )
       end
 
+      # The preview is derived from live runtime state; the removed Setup/Settings
+      # picker no longer needs a second draft state layered onto it.
+      def status_bar_preview_state(state)
+        state
+      end
+
       def handle_status_bar_composer_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
         unchanged = [input_buffer, input_cursor, slash_suggestion_index]
         return unchanged unless @status_bar_composer_draft
@@ -176,139 +182,6 @@ module Meringue
         return false unless StatusBarLayout::ZONES.include?(zone.to_s)
 
         draft.place(component, zone, index)
-      end
-
-      # The composer is a real editing surface, and it used to be the entire step,
-      # so every first run made someone lay out a bar they had never seen in use.
-      # The default is shown live above the row; dragging starts when asked for.
-      def inline_status_bar_step?
-        setup_mode? &&
-          settings_category == Settings::SetupFlow::STATUS_BAR &&
-          @settings_status_bar_customizing &&
-          @settings_status_bar_draft
-      end
-
-      def inline_status_bar_composer_snapshot(state)
-        return nil unless inline_status_bar_step?
-
-        preview_state = status_bar_preview_state(state || State::Models.empty_state)
-        @settings_status_bar_draft.saving_snapshot(
-          inline: true,
-          preview_components: layout.status_bar_component_segments(preview_state)
-        )
-      end
-
-      def status_bar_preview_state(state)
-        return state unless @settings_draft
-
-        metadata = Config.deep_copy(state.fetch("metadata", {}) || {})
-        head_harness = @settings_draft.value("agent.head_harness").to_s.strip
-        worker_harness = @settings_draft.value("agent.worker_harness").to_s.strip
-        metadata["active_head_harness"] = head_harness unless head_harness.empty?
-        metadata["active_worker_harness"] = worker_harness unless worker_harness.empty?
-        if !head_harness.empty? && head_harness == worker_harness
-          metadata["active_harness"] = head_harness
-        else
-          metadata.delete("active_harness")
-          metadata.delete("active_harness_label")
-        end
-        metadata["agent_session_defaults"] = {
-          "roles" => {
-            "head" => {
-              "model" => @settings_draft.value("agent.head_model"),
-              "thinking_level" => @settings_draft.value("agent.head_thinking")
-            },
-            "worker" => {
-              "model" => @settings_draft.value("agent.worker_model"),
-              "thinking_level" => @settings_draft.value("agent.worker_thinking")
-            }
-          }
-        }
-        state.merge(
-          "metadata" => metadata,
-          "_capabilities" => { "github_support" => @settings_draft.value("experiments.github_support") == true }
-        )
-      rescue KeyError
-        state
-      end
-
-      def sync_inline_status_bar_layout
-        value = @settings_status_bar_draft.layout
-        @settings_draft.set("appearance.status_bar_layout", value.configured? ? value.serialized : "")
-        @force_full_redraw = true
-      end
-
-      def handle_inline_status_bar_key(key, unchanged, on_submit, state)
-        if hard_escape_key?(key)
-          request_settings_cancel
-        elsif hard_save_key?(key) || ENTER_KEYS.include?(key) || TAB_KEYS.include?(key) || FOCUS_FORWARD_KEYS.include?(key)
-          setup_next_or_finish(on_submit, state)
-        elsif SHIFT_TAB_KEYS.include?(key) || FOCUS_BACK_KEYS.include?(key) || BACKSPACE_KEYS.include?(key) || DELETE_KEYS.include?(key)
-          move_settings_category(-1)
-        elsif UP_KEYS.include?(key)
-          @settings_status_bar_draft.select_component(@settings_status_bar_draft.component_index - 1)
-        elsif DOWN_KEYS.include?(key)
-          @settings_status_bar_draft.select_component(@settings_status_bar_draft.component_index + 1)
-        elsif LEFT_KEYS.include?(key)
-          @settings_status_bar_draft.nudge_selected(-1)
-          sync_inline_status_bar_layout
-        elsif RIGHT_KEYS.include?(key)
-          @settings_status_bar_draft.nudge_selected(1)
-          sync_inline_status_bar_layout
-        elsif HOME_KEYS.include?(key)
-          @settings_status_bar_draft.move_to_edge("left")
-          sync_inline_status_bar_layout
-        elsif END_KEYS.include?(key)
-          @settings_status_bar_draft.move_to_edge("right")
-          sync_inline_status_bar_layout
-        elsif key == " "
-          @settings_status_bar_draft.cycle_selected_location
-          sync_inline_status_bar_layout
-        elsif key.to_s.downcase == "x"
-          @settings_status_bar_draft.remove
-          sync_inline_status_bar_layout
-        elsif key.to_s.downcase == "r"
-          @settings_status_bar_draft.reset!
-          sync_inline_status_bar_layout
-        end
-        unchanged
-      end
-
-      def handle_inline_status_bar_mouse(key, unchanged, state)
-        hit = layout.inline_status_bar_composer_hit(
-          state,
-          width: render_width,
-          height: render_height,
-          x: mouse_x(key),
-          y: mouse_y(key)
-        )
-        if mouse_wheel_up?(key) || mouse_wheel_down?(key)
-          delta = mouse_wheel_up?(key) ? -1 : 1
-          @settings_status_bar_draft.select_component(@settings_status_bar_draft.component_index + delta)
-          return unchanged
-        end
-        if mouse_button_press?(key) && hit.is_a?(Array)
-          snapshot = inline_status_bar_composer_snapshot(state)
-          component = status_bar_hit_component(snapshot, hit)
-          if component
-            @settings_status_bar_draft.select_component_id(component)
-            @settings_status_bar_drag = { component: component, moved: false }
-          end
-          return unchanged
-        end
-        if mouse_drag?(key) && @settings_status_bar_drag
-          if apply_status_bar_drop(@settings_status_bar_draft, @settings_status_bar_drag.fetch(:component), hit)
-            @settings_status_bar_drag[:moved] = true
-            sync_inline_status_bar_layout
-          end
-          return unchanged
-        end
-        if mouse_button_release?(key)
-          @settings_status_bar_drag = nil
-          return unchanged
-        end
-
-        nil
       end
 
       # --- full-screen settings --------------------------------------------

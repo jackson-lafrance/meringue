@@ -57,6 +57,32 @@ class TuiTransactionalSetupTest < Minitest::Test
     refute app.send(:onboarding_autostart?)
   end
 
+  def test_status_bar_picker_is_absent_but_configuration_and_runtime_surfaces_remain
+    assert_equal %w[Welcome Harness Project Theme Experiments Done], Meringue::TUI::Settings::SetupFlow.steps
+    refute_includes Meringue::TUI::Settings::SetupFlow.setting_ids("Experiments"), "appearance.status_bar_layout"
+
+    @app.send(:open_settings, @state)
+    refute_includes @app.send(:settings_categories), "Status bar"
+    refute @app.send(:settings_rows).any? { |row| row.fetch("id") == "appearance.status_bar_layout" }
+    assert Meringue::TUI::StatusBarLayout.valid_serialized?(Meringue::TUI::StatusBarLayout.new.serialized)
+    assert @app.send(:handle_local_navigation_command, "/status-bar", @state)
+  end
+
+  def test_experiments_action_starts_a_context_rich_status_bar_agent_prompt
+    @app.send(:open_settings, @state)
+    index = @app.send(:settings_categories).index("Experiments")
+    @app.instance_variable_set(:@settings_category_index, index)
+    row_index = @app.send(:settings_rows).index { |row| row.fetch("id") == "experiments.customize_status_bar" }
+    @app.instance_variable_set(:@settings_row_index, row_index)
+
+    assert @app.send(:activate_settings_row, @state, on_submit: @handler)
+    prompt = @submitted.pop
+    assert_includes prompt, "customize Meringue's dashboard status bar"
+    assert_includes prompt, "current bottom-bar layout"
+    assert_includes prompt, "runtime status bar renderer"
+    assert_includes prompt, "existing status-bar configuration or extension surfaces"
+  end
+
   def test_setup_is_disabled_without_a_live_kernel_and_noninteractive_runs_do_not_open_it
     demo = build_app(onboarding_enabled: false)
     demo.send(:handle_key, ENTER, "/setup", 6, -1, @handler, compose(demo))
@@ -102,10 +128,10 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert_equal "[settings]\nschema_version = 1\n", File.read(@config_path)
     assert_empty submitted
 
-    send_key(TAB) # Status bar
     send_key(TAB) # Experiments
     assert_equal "Experiments", setup_snapshot.fetch("category")
-    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, setup_rows.map { |row| row.fetch("id") }
+    expected_experiments = Meringue::Experiments::Registry.setting_ids - ["experiments.github_support_test_access"]
+    assert_equal expected_experiments, setup_rows.map { |row| row.fetch("id") }
     send_key(ENTER) # checkbox-style controls use Enter
     assert @app.instance_variable_get(:@settings_draft).value("experiments.github_support")
 

@@ -154,87 +154,6 @@ class TuiStatusBarComposerTest < Minitest::Test
     assert @app.instance_variable_get(:@status_bar_composer_saving)
   end
 
-  def test_setup_step_shows_the_default_layout_before_offering_the_composer
-    @app.send(:open_settings, @state, mode: "setup")
-    show_setup_status_bar
-
-    frame = @app.render(compose, width: 100, height: 32, color: false)
-    refute_includes frame, "live bottom bar"
-    assert_includes frame, "Left: Context, Open PRs, Workers, Heads"
-    assert_includes frame, "Right: Harness, Model, Thinking"
-    assert_includes frame, "Customize layout"
-    assert_nil compose.dig("_settings", "status_bar_composer")
-
-    send_key(ENTER)
-    assert_includes @app.render(compose, width: 100, height: 32, color: false), "live bottom bar"
-  end
-
-  def test_setup_embeds_the_actual_composer_and_keeps_it_in_the_setup_transaction
-    @app.send(:open_settings, @state, mode: "setup")
-    customize_setup_status_bar
-    settings = @app.instance_variable_get(:@settings_draft)
-    settings.set("agent.head_harness", "pi")
-    settings.set("agent.worker_harness", "claude")
-    settings.set("agent.head_model", "openai/gpt-5.6-sol")
-    settings.set("agent.worker_model", "anthropic/claude-opus-5")
-    settings.set("agent.head_thinking", "low")
-    settings.set("agent.worker_thinking", "max")
-
-    frame = @app.render(compose, width: 100, height: 32, color: false)
-    assert_includes frame, "live bottom bar"
-    composer = compose.dig("_settings", "status_bar_composer")
-    assert_equal "head model: openai/gpt-5.6-sol · worker model: anthropic/claude-opus-5", plain(composer.dig("preview_components", "model"))
-    assert_equal "head thinking: low · worker thinking: max", plain(composer.dig("preview_components", "thinking"))
-    refute @app.instance_variable_get(:@status_bar_composer_active)
-    assert composer.fetch("inline")
-
-    send_key(END_KEY)
-    value = settings.value("appearance.status_bar_layout")
-    assert_equal %w[harness model thinking context], Meringue::TUI::StatusBarLayout.normalize(value).dig("bottom", "right")
-    assert_empty submitted
-    refute File.exist?(@config_path)
-
-    send_key(TAB)
-    assert_equal "Experiments", @app.send(:settings_category)
-    send_key(TAB)
-    assert_equal "Done", @app.send(:settings_category)
-    send_key("\u0013")
-    command = Meringue::Input::SlashCommandParser.new.parse(@submitted.pop)
-    assert_equal "completed", command.payload.fetch("onboarding_outcome")
-    saved = Meringue::TUI::StatusBarLayout.normalize(command.payload.fetch("changes").fetch("appearance.status_bar_layout"))
-    assert_equal %w[open_pull_requests workers heads], saved.dig("bottom", "left")
-    assert_equal %w[harness model thinking context], saved.dig("bottom", "right")
-  end
-
-  def test_inline_mouse_drag_reorders_components_and_resize_keeps_a_full_frame
-    @app.send(:open_settings, @state, mode: "setup")
-    customize_setup_status_bar
-    snapshot = compose
-    view = @app.send(:layout).send(:settings_pane).setup_view(snapshot, width: 100, height: 32)
-    bounds = view.fetch(:composer_bounds)
-    pane = Meringue::TUI::StatusBarComposer::Pane.new
-    geometry = pane.geometry(width: 100, height: 32, bounds: bounds)
-    left = geometry.fetch(:left_zone)
-
-    right = geometry.fetch(:right_zone)
-    send_mouse("kind" => "button", "pressed" => true, "x" => left.fetch(:x) + 3, "y" => left.fetch(:y) + 3)
-    send_mouse("kind" => "motion", "pressed" => true, "x" => right.fetch(:x) + 3, "y" => right.fetch(:y) + 2)
-    send_mouse("kind" => "button", "pressed" => false, "x" => right.fetch(:x) + 3, "y" => right.fetch(:y) + 2)
-
-    draft = @app.instance_variable_get(:@settings_status_bar_draft)
-    assert_equal %w[context open_pull_requests heads], draft.layout.items("left")
-    assert_equal %w[harness workers model thinking], draft.layout.items("right")
-
-    send_mouse("kind" => "button", "pressed" => true, "x" => right.fetch(:x) + 3, "y" => right.fetch(:y) + 1)
-    send_mouse("kind" => "motion", "pressed" => true, "x" => right.fetch(:x) + 3, "y" => right.fetch(:y) + 3)
-    send_mouse("kind" => "button", "pressed" => false, "x" => right.fetch(:x) + 3, "y" => right.fetch(:y) + 3)
-    assert_equal %w[workers model harness thinking], draft.layout.items("right")
-    [[100, 32], [79, 24], [46, 18], [32, 10]].each do |width, height|
-      frame = @app.render(compose, width: width, height: height, color: false)
-      assert_equal height, frame.lines.length, "#{width}x#{height} should not clip its canvas"
-    end
-  end
-
   def test_custom_zones_render_shared_and_split_values_in_the_requested_order
     custom = Meringue::TUI::StatusBarLayout.default_configuration
     custom["bottom"] = {
@@ -311,19 +230,6 @@ class TuiStatusBarComposerTest < Minitest::Test
         "leader_commands" => [{ "action" => "workspace_switch_view", "key" => "T" }]
       }
     )
-  end
-
-  def show_setup_status_bar
-    steps = @app.send(:settings_categories)
-    @app.instance_variable_set(:@settings_category_index, steps.index("Status bar"))
-    assert_equal "Status bar", @app.send(:settings_category)
-  end
-
-  # The step opens on the default layout; the drag surface is opt-in.
-  def customize_setup_status_bar
-    show_setup_status_bar
-    send_key(ENTER)
-    assert @app.instance_variable_get(:@settings_status_bar_customizing)
   end
 
   def composed_state(state, extras = {})

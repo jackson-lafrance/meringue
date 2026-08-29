@@ -433,7 +433,7 @@ module Meringue
           editor: "status_bar",
           apply_mode: "live",
           label: "Bottom bar layout",
-          description: "Optional JSON layout for the dashboard bottom bar's left- and right-aligned components. Use /status-bar to edit it.",
+          description: "Optional JSON layout for the dashboard bottom bar's left- and right-aligned components. Use /status-bar or ask an agent to edit it.",
           advanced: true,
           normalize: ->(value) { value.nil? ? "" : value.to_s },
           validate: ->(value, _config) {

@@ -40,10 +40,10 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     open_setup
 
     {
-      [100, 32] => ["Setup", "Welcome to Meringue", "Step 1 of 7", "Navigate: Enter or Arrow keys toggle", "[ Begin ]"],
-      [79, 24] => ["Setup", "Welcome to Meringue", "Step 1 of 7", "Navigate: Enter or Arrow keys toggle", "[ Begin ]"],
-      [46, 18] => ["Setup", "Welcome to Meringue", "Step 1 of 7", "Navigate: Enter or Arrow keys toggle"],
-      [32, 10] => ["Setup", "Welcome", "Step 1 of 7", "Navigate"],
+      [100, 32] => ["Setup", "Welcome to Meringue", "Step 1 of 6", "Navigate: Enter or Arrow keys toggle", "[ Begin ]"],
+      [79, 24] => ["Setup", "Welcome to Meringue", "Step 1 of 6", "Navigate: Enter or Arrow keys toggle", "[ Begin ]"],
+      [46, 18] => ["Setup", "Welcome to Meringue", "Step 1 of 6", "Navigate: Enter or Arrow keys toggle"],
+      [32, 10] => ["Setup", "Welcome", "Step 1 of 6", "Navigate"],
       [31, 9] => ["Terminal too small for Setup", "Esc cancel"]
     }.each do |(width, height), expected|
       frame = render(width: width, height: height)
@@ -60,19 +60,19 @@ class TuiSetupOverlayScreenTest < Minitest::Test
   def test_wide_step_indicator_has_no_duplicate_listing_and_experiments_is_final
     open_setup
     frame = render
-    assert_includes frame, "Step 1 of 7"
+    assert_includes frame, "Step 1 of 6"
     assert_includes frame, "Welcome to Meringue"
-    refute_includes frame, "Step 1 of 7 · Welcome"
+    refute_includes frame, "Step 1 of 6 · Welcome"
     refute_includes frame, "1●"
     refute_includes frame, "Review"
     refute_includes frame, "Continue"
 
     send_key(ENTER)
-    4.times { send_key(TAB) }
+    3.times { send_key(TAB) }
     snap = snapshot
     assert_equal "Experiments", snap.fetch("category")
     refute snap.fetch("setup_last_step"), "Done is the last step now, so Experiments is not"
-    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, snap.fetch("rows").map { |row| row.fetch("id") }
+    assert_equal (Meringue::Experiments::Registry.setting_ids - ["experiments.github_support_test_access"]), snap.fetch("rows").map { |row| row.fetch("id") }
     send_key(TAB)
     assert_equal "Done", snapshot.fetch("category")
     assert snapshot.fetch("setup_last_step")
@@ -82,9 +82,9 @@ class TuiSetupOverlayScreenTest < Minitest::Test
   def test_experiment_checkboxes_are_registry_derived_and_mouse_toggleable
     open_setup
     send_key(ENTER)
-    4.times { send_key(TAB) }
+    3.times { send_key(TAB) }
     assert_equal "Experiments", snapshot.fetch("category")
-    assert_equal Meringue::Experiments::Registry.ids.map { |id| "experiments.#{id}" }, snapshot.fetch("rows").map { |row| row.fetch("id") }
+    assert_equal (Meringue::Experiments::Registry.setting_ids - ["experiments.github_support_test_access"]), snapshot.fetch("rows").map { |row| row.fetch("id") }
 
     geometry = @layout.send(:settings_pane).geometry(compose, width: WIDTH, height: HEIGHT)
     card = geometry.fetch(:card)
@@ -252,7 +252,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
       frame = render
       refute_includes frame, "✦"
       refute_includes frame, "●"
-      assert_includes frame, "Step 1 of 7"
+      assert_includes frame, "Step 1 of 6"
     end
 
     @app.instance_variable_get(:@settings_draft).set("appearance.animations", false)

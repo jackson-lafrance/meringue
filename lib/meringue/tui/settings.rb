@@ -20,7 +20,6 @@ module Meringue
         HARNESS = "Harness"
         PROJECT = "Project"
         THEME = "Theme"
-        STATUS_BAR = "Status bar"
         # The step id stays the schema category it draws from; only the heading
         # reads "Meringue Xtras".
         EXPERIMENTS = "Experiments"
@@ -32,13 +31,12 @@ module Meringue
         # confirmation rather than a decision whenever exactly one harness is
         # actually installed. Welcome and Done carry no controls at all: a first
         # run should open and close with something to read, not a form.
-        STEPS = [WELCOME, HARNESS, PROJECT, THEME, STATUS_BAR, EXPERIMENTS, DONE].freeze
+        STEPS = [WELCOME, HARNESS, PROJECT, THEME, EXPERIMENTS, DONE].freeze
         NARRATIVE_STEPS = [WELCOME, DONE].freeze
 
         FIXED_SETTING_IDS = {
           HARNESS => %w[agent.head_harness agent.worker_harness].freeze,
           THEME => %w[appearance.theme appearance.animations].freeze,
-          STATUS_BAR => %w[appearance.status_bar_layout].freeze
         }.freeze
 
         # Model and reasoning both have per-harness defaults that are correct for
@@ -114,7 +112,12 @@ module Meringue
           @config = config
           @env = env
           @baseline_fingerprint = config.fingerprint
-          @definitions = Config::Schema.definitions.reject { |definition| definition.visibility == "internal" }
+          # The status-bar layout remains a durable configuration and direct
+          # composer surface, but it is not a Settings picker. Agent-assisted
+          # customization is offered from Experiments instead.
+          @definitions = Config::Schema.definitions.reject do |definition|
+            definition.visibility == "internal" || definition.id == "appearance.status_bar_layout"
+          end
           @values = Config::Schema.effective_values(config, env: env).slice(*@definitions.map(&:id))
           @original_values = Config.deep_copy(@values)
           @errors = {}

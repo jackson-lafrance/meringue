@@ -17,8 +17,6 @@ module Meringue
         step = settings_category
         return [] if Settings::SetupFlow.narrative?(step)
         return setup_project_rows if step == Settings::SetupFlow::PROJECT
-        return setup_status_bar_rows if step == Settings::SetupFlow::STATUS_BAR
-
         expanded = @settings_expanded_advanced.fetch(step, false)
         rows = Settings::SetupFlow.setting_ids(step, draft: @settings_draft, include_advanced: expanded).filter_map do |id|
           definition = @settings_draft.definitions.find { |candidate| candidate.id == id }
@@ -100,20 +98,6 @@ module Meringue
           ).merge("read_only" => true)
         end
         rows
-      end
-
-      # The composer is a real editing surface and it used to be the whole step,
-      # so a first run made everyone lay out a bar they had never seen in use.
-      # The default is shown live above; customizing is a deliberate choice.
-      def setup_status_bar_rows
-        return [] if @settings_status_bar_customizing
-
-        [synthetic_settings_row(
-          "setup.customize_status_bar",
-          "Customize layout",
-          "Drag the open-PR, worker/head count, harness, model, and reasoning components between the left and right sides.",
-          "Enter"
-        )]
       end
 
       # A card is about 70 columns wide, and an absolute path under $HOME spends a
@@ -218,18 +202,6 @@ module Meringue
           "#{Harness::Registry.provider_label(provider)}: #{located.fetch("detail", Harness::Availability.summary(located))}"
         end.join(" · ")
         { "summary" => failures.length == results.length ? "not ready" : "partly ready", "detail" => detail }
-      end
-
-      # The bar as it currently reads, so the step shows what the default actually
-      # is instead of handing someone an empty canvas and a drag gesture.
-      def setup_status_bar_preview
-        layout = StatusBarLayout.new(@settings_draft.value("appearance.status_bar_layout"))
-        StatusBarLayout::ZONES.map do |zone|
-          labels = layout.items(zone).map { |component| StatusBarLayout.component_label(component) }
-          "#{zone.capitalize}: #{labels.empty? ? "empty" : labels.join(", ")}"
-        end
-      rescue StandardError
-        []
       end
 
       # What finishing will do, in the order the steps asked it. Rendered on the
