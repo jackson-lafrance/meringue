@@ -80,11 +80,22 @@ module Meringue
 
       def experiment_summary(selected)
         Experiments::Registry.all.map do |experiment|
-          enabled = selected.fetch("experiments.#{experiment.id}") == true
-          "#{experiment.label} #{enabled ? "on" : "off"}"
+          "#{experiment.label} #{experiment_state(experiment, selected.fetch("experiments.#{experiment.id}"))}"
         end.join(" · ")
       end
       private_class_method :experiment_summary
+
+      # Not every experiment is a switch. Agent defaults is a mode, and testing
+      # its value against true reported a chosen mode as "off" — the opposite of
+      # what the card the user had just left showed it as.
+      def experiment_state(experiment, value)
+        return value == true ? "on" : "off" if [true, false].include?(value)
+
+        Config::Schema.fetch("experiments.#{experiment.id}").option_label(value)
+      rescue KeyError
+        value.to_s
+      end
+      private_class_method :experiment_state
     end
   end
 end

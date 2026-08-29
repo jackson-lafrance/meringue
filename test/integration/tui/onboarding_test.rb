@@ -112,12 +112,11 @@ class TuiTransactionalSetupTest < Minitest::Test
     send_key(RIGHT)
     assert_equal "Harness", setup_snapshot.fetch("category")
     refute setup_snapshot.fetch("dirty")
-    send_key(ENTER) # head harness opens its picker
-    send_key(DOWN)
-    send_key(ENTER)
+
+    choose_first_harness
     head_harness = @app.instance_variable_get(:@settings_draft).value("agent.head_harness")
     assert_includes Meringue::Harness::Registry.supported_provider_names, head_harness
-    # One harness decision covers both roles while the other is still unset.
+    # Setup asks once and applies the answer to both roles.
     assert_equal head_harness, @app.instance_variable_get(:@settings_draft).value("agent.worker_harness")
 
     send_key(TAB) # Theme
@@ -158,27 +157,67 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert @app.instance_variable_get(:@settings_saving)
   end
 
-  def test_setup_cannot_complete_without_a_harness
+  # Holding Tab used to walk past every card and only refuse at the very end,
+  # which taught someone five screens too late that the second one mattered.
+  def test_the_harness_step_cannot_be_walked_past
     open_manual_setup
     send_key(ENTER)
-    4.times { send_key(TAB) } # straight to Done, choosing nothing
-    assert_equal "Done", setup_snapshot.fetch("category")
-
-    send_key(CTRL_S)
-
-    # No command left the overlay, and setup is still open on the step that
-    # cannot be skipped.
-    assert_empty submitted
-    assert @app.instance_variable_get(:@settings_active)
     assert_equal "Harness", setup_snapshot.fetch("category")
+
+    4.times { send_key(TAB) }
+
+    assert_equal "Harness", setup_snapshot.fetch("category"), "Tab must not escape the step"
     assert_includes setup_snapshot.fetch("rows").map { |row| row.fetch("error", "") }.join(" "), "required"
     assert_includes render, "required"
+    assert_empty submitted
     assert_equal 0, Meringue::Config.load(path: @config_path).onboarding_version
+  end
+
+  # The refusal puts the cursor on the control that is missing, not on the
+  # action it just declined.
+  def test_a_refused_advance_focuses_the_setting_it_needs
+    open_manual_setup
+    send_key(ENTER)
+    setup_rows.length.times { send_key(DOWN) } # onto the navigation action
+    assert setup_snapshot.fetch("footer_focus")
+
+    send_key(ENTER)
+
+    refute setup_snapshot.fetch("footer_focus"), "focus should move off the refused action"
+    assert_equal "agent.head_harness", setup_rows.fetch(setup_snapshot.fetch("row_index")).fetch("id")
+  end
+
+  # Choosing one satisfies both roles, so the step opens up immediately.
+  def test_choosing_a_harness_unblocks_the_step
+    open_manual_setup
+    send_key(ENTER)
+    send_key(TAB)
+    assert_equal "Harness", setup_snapshot.fetch("category")
+
+    choose_first_harness
+    send_key(TAB)
+
+    assert_equal "Theme", setup_snapshot.fetch("category")
+  end
+
+  # The step gate makes Done unreachable without a harness, so this covers the
+  # backstop behind it: validation normally runs only over settings the user
+  # changed, and an untouched required field has to be checked anyway.
+  def test_completion_validation_checks_required_settings_that_were_never_touched
+    draft = Meringue::TUI::Settings::Draft.new(@config, env: {})
+
+    refute draft.validate(required_ids: %w[agent.head_harness])
+    assert_includes draft.errors.fetch("agent.head_harness"), "required"
+
+    # Without the requirement it passes, which is what /config relies on.
+    assert draft.validate
+    assert_empty draft.errors
   end
 
   def test_back_revisits_a_step_without_losing_edits_and_manual_cancel_discards_everything
     open_manual_setup
     send_key(ENTER)
+    choose_first_harness
     send_key(TAB) # Harness -> Theme
     send_key(ENTER)
     send_key(DOWN)
@@ -217,6 +256,7 @@ class TuiTransactionalSetupTest < Minitest::Test
   def test_first_run_escape_requires_confirmation_and_skip_excludes_draft_changes
     @app.send(:maybe_open_onboarding, -> { @state })
     send_key(ENTER)
+    choose_first_harness
     send_key(TAB) # Harness -> Theme
     send_key(ENTER)
     send_key(DOWN)
@@ -297,6 +337,37 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert_equal "skipped", parser.parse("/setup skip").payload.fetch("outcome")
   end
 
+  # Not every experiment is a switch. Agent defaults is a mode, and the
+  # completion card tested its value against true — so a chosen mode was
+  # reported as "off" one screen after the setup card showed it as "By role".
+  def test_the_completion_card_reports_a_mode_by_its_name_not_as_off
+    config = Meringue::Config.new(
+      {
+        "harness" => { "provider" => "pi" },
+        "experiments" => { "agent_defaults_mode" => "role-specific" }
+      },
+      path: "/nonexistent/config.toml"
+    )
+
+    card = Meringue::TUI::Onboarding.completion_card(config)
+
+    refute_includes card, "Model and reasoning defaults off"
+    assert_includes card, Meringue::Config::Schema.fetch("experiments.agent_defaults_mode").option_label("role-specific")
+  end
+
+  # The booleans still read as switches.
+  def test_the_completion_card_still_reports_switches_as_on_and_off
+    config = Meringue::Config.new(
+      { "harness" => { "provider" => "pi" }, "experiments" => { "github_support" => true } },
+      path: "/nonexistent/config.toml"
+    )
+
+    card = Meringue::TUI::Onboarding.completion_card(config)
+
+    assert_includes card, "GitHub support on"
+    assert_includes card, "Self-fixing workers off"
+  end
+
   private
 
   # Setup will not finish without a harness, so every completion path picks one.
@@ -356,6 +427,18 @@ class TuiTransactionalSetupTest < Minitest::Test
         }]
       }
     end
+  end
+
+  # Setup asks for one harness, on the first row of the Harness step, and the
+  # step will not let anything past until it is answered.
+  def choose_first_harness
+    assert_equal "Harness", setup_snapshot.fetch("category")
+    @app.instance_variable_set(:@settings_row_index, setup_rows.index { |row| row.fetch("id") == "agent.head_harness" })
+    @app.instance_variable_set(:@settings_footer_focus, false)
+    send_key(ENTER)
+    send_key(DOWN)
+    send_key(ENTER)
+    refute_empty @app.instance_variable_get(:@settings_draft).value("agent.head_harness").to_s
   end
 
   def open_manual_setup

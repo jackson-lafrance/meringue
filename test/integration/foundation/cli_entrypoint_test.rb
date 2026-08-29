@@ -2,6 +2,8 @@
 
 require "test_helper"
 require "support/foundation_support"
+require "stringio"
+require "tmpdir"
 
 # The CLI must answer version/help/fixture questions without booting a TUI,
 # starting a harness process, or touching ~/.meringue.
@@ -134,7 +136,37 @@ class FoundationCliEntrypointTest < Minitest::Test
     end
   end
 
+  # Every other subcommand resolves the state path through State::Store
+  # .default_path, which honours MERINGUE_STATE_PATH. The dashboard passed the
+  # bare constant, so the env var silently did nothing for the one command that
+  # is the whole product: it read and wrote ~/.meringue/state.json regardless,
+  # and the schema migration then judged "is this a new install?" from a file
+  # the user had pointed away from.
+  def test_the_dashboard_honours_the_state_path_environment_variable
+    elsewhere = File.join(Dir.tmpdir, "meringue-cli-state", "state.json")
+    captured = nil
+    cli = Meringue::CLI.new([], out: StringIO.new, err: StringIO.new)
+    cli.define_singleton_method(:run_tui) { |**kwargs| captured = kwargs.fetch(:default_state_path) }
+
+    shared = nil
+    with_env("MERINGUE_STATE_PATH" => elsewhere) do
+      cli.run
+      shared = Meringue::State::Store.default_path
+    end
+
+    assert_equal elsewhere, captured
+    assert_equal shared, captured, "the dashboard must resolve the same path every other command does"
+  end
+
   private
+
+  def with_env(values)
+    previous = values.keys.to_h { |key| [key, ENV[key]] }
+    values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    yield
+  ensure
+    previous.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
 
   def with_replaced_new(klass, replacement)
     singleton = class << klass; self; end

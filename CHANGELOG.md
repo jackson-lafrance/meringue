@@ -8,6 +8,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
+- First-run setup asks for one harness and applies it to both roles, instead of asking twice and
+  then offering model and reasoning behind a reveal. The model picker could not be answered during
+  a first run anyway: its list comes from a catalog the harness reports once a session has run, so
+  on a fresh install it is empty by construction and the only entry is the default already
+  selected. Both settings live in `/config`, where the catalog exists.
+- Setup will not advance past the Harness step until one is chosen. Checking only at Complete meant
+  someone could hold Tab through every card and learn five screens later that the second one was
+  mandatory. A refused move writes the field error and lands the cursor on the control that is
+  missing; going backwards is never gated, and `Esc` still skips the flow.
+- Clicking a picker option now commits the same way pressing Enter on it does. The mouse path
+  skipped the harness mirror, so a first run driven by the mouse set one role and left the other
+  empty, and it ignored the editor's "custom command…" entry.
+- The role suffix in the model-picker lookup was stripped with `/_model\z/` — a literal backslash
+  and a `z` rather than the end anchor — so the head model row resolved its catalog through the
+  worker harness.
+- The dashboard resolves its state path the way every other subcommand does, so
+  `MERINGUE_STATE_PATH` applies to `meringue` itself. It read `State::Store::DEFAULT_PATH`, which
+  also let the schema migration judge "is this a new install?" from a file the user had pointed
+  away from.
+- The setup completion card reports a mode as the mode it is. It tested every experiment against
+  `true`, so agent defaults read as "off" one screen after the setup card showed it as "By role".
 - Escape works again across the settings and setup UI. The app turns on kitty CSI-u and xterm
   modifyOtherKeys at startup, and the point of both is that Escape stops arriving as a bare `\e`
   — kitty sends `\e[27u`, xterm `\e[27;1~` — but only the bare byte was bound, so a picker could
@@ -17,10 +38,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   describes the selected row describes the action instead once the action has focus, rather than
   explaining a row nobody selected, and stays filled so the card does not reflow underneath the
   cursor. The row index is still kept, so arrowing back up returns to the row it left.
-- The advanced-settings reveal in Settings and first-run setup closes again. Opening it used to
-  remove the row that opened it, which left the setup harness step with no way back to the plain
-  card; the reveal now stays in place, toggles both ways under the same cursor, and `A` opens and
-  closes it from anywhere in the step or category, as the footer says.
+- The advanced-settings reveal in `/config` closes again. Opening it used to remove the row that
+  opened it, so nothing was left to press to put the rows away; it now keeps its place, toggles
+  both ways under the same cursor, and `A` opens and closes it from anywhere in the category, as
+  the footer says.
 - `/update` follows the branch the installation tracks (`main`, or `MERINGUE_BRANCH`) instead of
   pulling whatever branch happened to be checked out. An installation parked on a stale branch
   used to fast-forward nothing, report success, and restart into the same code; it is now moved

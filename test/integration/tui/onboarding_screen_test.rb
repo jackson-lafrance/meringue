@@ -68,6 +68,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     refute_includes frame, "Continue"
 
     send_key(ENTER)
+    satisfy_harness_step
     3.times { send_key(TAB) }
     snap = snapshot
     assert_equal "Experiments", snap.fetch("category")
@@ -82,6 +83,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
   def test_experiment_checkboxes_are_registry_derived_and_mouse_toggleable
     open_setup
     send_key(ENTER)
+    satisfy_harness_step
     3.times { send_key(TAB) }
     assert_equal "Experiments", snapshot.fetch("category")
     assert_equal (Meringue::Experiments::Registry.setting_ids - ["experiments.github_support_test_access"]), snapshot.fetch("rows").map { |row| row.fetch("id") }
@@ -135,6 +137,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     send_key(RIGHT)
     assert_equal "Harness", snapshot.fetch("category")
     refute snapshot.fetch("dirty")
+    satisfy_harness_step
     snapshot.fetch("rows").length.times { send_key("\e[B") } # focus the navigation footer
     assert snapshot.fetch("footer_focus")
     send_key(ENTER)
@@ -147,6 +150,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     send_key(RIGHT)
     assert_equal "Welcome", snapshot.fetch("category")
     send_key(ENTER)
+    satisfy_harness_step
     send_key(TAB)
     assert_equal "Theme", snapshot.fetch("category")
     send_key(BACKSPACE)
@@ -158,6 +162,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
   def test_focused_controls_use_contextual_hints_and_enter_opens_pickers
     open_setup
     send_key(ENTER)
+    satisfy_harness_step
     send_key(TAB)
     assert_equal "Theme", snapshot.fetch("category")
     assert_includes render, "Enter open picker"
@@ -170,63 +175,46 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     send_key(ENTER)
     assert_equal true, snapshot.fetch("rows").fetch(snapshot.fetch("row_index")).fetch("value")
 
-    # Model lives behind the advanced reveal on the harness step now.
+    # The harness step's one control is a picker, and says so.
     send_key(BACKSPACE)
     assert_equal "Harness", snapshot.fetch("category")
-    reveal_setup_advanced
-    focus_setup_row("agent.head_model")
+    focus_setup_row("agent.head_harness")
     send_key(ENTER)
-    assert_equal "agent.head_model", snapshot.fetch("picker").fetch("id")
-    assert_includes render, "Choose Head model"
+    assert_equal "agent.head_harness", snapshot.fetch("picker").fetch("id")
+    assert_includes render, "Choose Harness"
   end
 
-  def test_setup_model_and_thinking_pickers_filter_with_typing_and_backspace
-    @state["metadata"] = {
-      "active_harness" => "pi",
-      "harness_model_catalogs" => {
-        "pi" => Meringue::Harness::ModelCatalog.available(
-          harness: "pi",
-          models: [
-            { "provider" => "openai", "id" => "gpt-5.6-sol", "name" => "GPT Sol" },
-            { "provider" => "anthropic", "id" => "claude-opus-5", "name" => "Claude Opus" }
-          ]
-        ).to_h
-      }
-    }
+  # Model and thinking are no longer asked during setup, so the harness picker is
+  # the one that has to filter. Typing narrows it, Backspace widens it again, and
+  # Escape closes it without choosing.
+  def test_the_setup_picker_filters_with_typing_and_backspace
     open_setup
     send_key(ENTER) # Harness
-    reveal_setup_advanced
-    focus_setup_row("agent.head_model")
+    focus_setup_row("agent.head_harness")
     send_key(ENTER)
 
-    assert_equal "agent.head_model", snapshot.fetch("picker").fetch("id")
+    assert_equal "agent.head_harness", snapshot.fetch("picker").fetch("id")
     original_count = snapshot.fetch("picker").fetch("options").length
-    "opus".each_char { |character| send_key(character) }
+    assert_operator original_count, :>, 1
+    "codex".each_char { |character| send_key(character) }
     picker = snapshot.fetch("picker")
-    assert_equal "opus", picker.fetch("query")
+    assert_equal "codex", picker.fetch("query")
     assert_operator picker.fetch("options").length, :<, original_count
-    assert picker.fetch("options").all? { |option| option.values_at("reference", "name").join(" ").downcase.include?("opus") }
+    assert picker.fetch("options").all? { |option| option.values_at("reference", "name").join(" ").downcase.include?("codex") }
 
     send_key(BACKSPACE)
-    assert_equal "opu", snapshot.fetch("picker").fetch("query")
+    assert_equal "code", snapshot.fetch("picker").fetch("query")
     send_key(ESC)
     assert_nil snapshot["picker"]
     assert_equal "Harness", snapshot.fetch("category")
-
-    focus_setup_row("agent.head_thinking")
-    send_key(ENTER)
-    assert_equal "agent.head_thinking", snapshot.fetch("picker").fetch("id")
-    "xhigh".each_char { |character| send_key(character) }
-    assert_equal ["xhigh"], snapshot.fetch("picker").fetch("options")
-    send_key(BACKSPACE)
-    assert_equal "xhigh"[0...-1], snapshot.fetch("picker").fetch("query")
-    send_key(ESC)
-    assert_nil snapshot["picker"]
+    assert_empty @app.instance_variable_get(:@settings_draft).value("agent.head_harness").to_s,
+                 "closing without choosing must not set a harness"
   end
 
   def test_setup_has_one_centered_next_action_and_keeps_the_backspace_keybinding
     open_setup
     send_key(ENTER) # Harness
+    satisfy_harness_step
     rows = snapshot.fetch("rows")
     (rows.length - 1).times { send_key(DOWN) }
     send_key(DOWN)
@@ -297,10 +285,13 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     assert_equal "setup", snapshot.fetch("mode")
   end
 
-  # Model and reasoning sit behind the advanced reveal on the harness step.
-  def reveal_setup_advanced
-    focus_setup_row("_show_advanced")
-    send_key(ENTER)
+  # Setup will not advance past the harness step until one is chosen, so any test
+  # that navigates through it has to satisfy that first. Choosing through the
+  # picker is covered separately; this just sets the value.
+  def satisfy_harness_step
+    draft = @app.instance_variable_get(:@settings_draft)
+    draft.set("agent.head_harness", "pi")
+    draft.set("agent.worker_harness", "pi")
   end
 
   def focus_setup_row(id)

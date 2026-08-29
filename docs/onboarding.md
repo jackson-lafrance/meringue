@@ -1,6 +1,6 @@
 # First-run setup
 
-The first interactive launch opens **Setup**, a centered welcome card distinct from the dense `/config` editor. It walks someone from a fresh checkout to a dashboard that can actually route work: a harness Meringue can start, a registered project for work to land in, and a look they chose — before anything is written.
+The first interactive launch opens **Setup**, a centered welcome card distinct from the dense `/config` editor. It walks someone from a fresh checkout to a dashboard that can actually route work: a harness Meringue can start and a look they chose — before anything is written.
 
 Setup is not a chat prompt and does not maintain a second settings implementation. It uses `Config::Schema`, `Settings::Draft`, the shared editors and hit testing, and the same `SaveConfiguration` transaction as `/config`; only the presentation and navigation are first-run friendly.
 
@@ -9,17 +9,23 @@ Setup is not a chat prompt and does not maintain a second settings implementatio
 The centered card shows one dynamic `Step N of 6` indicator:
 
 1. **Welcome** — what Meringue is, in the three nouns the rest of the flow depends on: you describe a goal, a head decides what should happen, workers do the work in their own worktrees. No controls; the navigation action is focused so Enter continues.
-2. **Harness** — the one decision Meringue cannot run without. Both role harnesses are listed with the product name and whether this machine can actually start them (`Claude Code · installed`, `Codex CLI · not found`). Choosing either role fills the other while it is still unset, so the common case is one selection. **Check harness** runs each selected backend once and reports what it answered. Model and reasoning sit behind a single **Model and reasoning** reveal, because every harness ships defaults that work.
-3. **Project** — offers the repository Meringue was started in, named from its README heading by the same `ProjectNaming` the heads use. Ticked by default; unticking registers nothing. Without a project there is nowhere for issues and workers to go, which is why the offer is here rather than left for the user to discover.
-4. **Theme** — theme and animation preference. Theme changes preview immediately in memory.
+2. **Harness** — the one decision Meringue cannot run without, asked once. A first run does not distinguish head from worker: there is a single **Harness** row, and the answer is applied to both roles. Options carry the product name and whether this machine can actually start them (`Claude Code · installed`, `Codex CLI · not found`). **Check harness** runs the selected backend once and reports what it answered. Splitting the roles deliberately is what `/config` is for.
+3. **Theme** — theme and animation preference. Theme changes preview immediately in memory.
+4. **Status bar** — the default bottom-bar layout as it currently reads, with **Customize layout** opening the live composer inline.
 5. **Meringue Xtras** — experiment controls derived directly from `Experiments::Registry`, all off until chosen. The status-bar customization action opens a context-rich agent session; the read-only **Test GitHub access** action is completely absent until GitHub support is selected.
-6. **Done** — the harness, project, theme, and experiments the Complete action is about to save, so finishing is checkable rather than hopeful.
+6. **Done** — the harness, theme, and experiments the Complete action is about to save, so finishing is checkable rather than hopeful.
 
 Welcome and Done carry no controls at all. The flow derives navigation from the step list, so future setup sections can be appended without introducing a review-only special case.
 
+## Model and reasoning are not asked here
+
+Neither setting appears in a first run. Every harness ships defaults that work, and the model picker cannot even be answered during setup: its list comes from a catalog the harness reports once a session has run, so on a fresh install `ModelPicker.entries` returns nothing usable and the only entry is the default that was already selected. Offering a picker whose sole option is the current value is worse than not offering it. Both settings live in `/config`, where the catalog exists.
+
 ## Harness is required
 
-Setup will not finish without a harness. Schema validation normally runs only over settings the user actually changed — correct for `/config`, where an unrelated save must not fail on a field nobody edited — but it is also how setup used to reach Complete with `agent.head_harness` and `agent.worker_harness` still empty, write `outcome = "completed"`, and leave a dashboard that rejected the first prompt with "No agent harness is configured."
+Setup will not advance past the Harness step until one is chosen, and it will not finish without one. Blocking at the step is what makes the requirement legible: checking only at Complete meant someone could hold Tab — or arrow onto the navigation action and press Enter — through every card and learn five screens later that the second one was mandatory. `SetupFlow::REQUIRED_SETTING_IDS_BY_STEP` names what each step will not let you walk past — only settings that step actually renders, because a refused move lands the cursor on the control that is missing and cannot do that for a row nobody drew. A refused move writes the field error, drops focus off the action, and lands the cursor on that control. `REQUIRED_SETTING_IDS`, the Complete backstop, still lists both role harnesses: the mirror is what makes them equal, and a backstop that checked only the visible half would not notice if the mirror stopped running.
+
+Backwards navigation is never gated — going back to re-read something is not a way to dodge the requirement — and `Esc` still skips the whole flow, because skipping is a deliberate confirmed choice rather than something you can do by leaning on a direction key. Schema validation normally runs only over settings the user actually changed — correct for `/config`, where an unrelated save must not fail on a field nobody edited — but it is also how setup used to reach Complete with `agent.head_harness` and `agent.worker_harness` still empty, write `outcome = "completed"`, and leave a dashboard that rejected the first prompt with "No agent harness is configured."
 
 `Settings::SetupFlow::REQUIRED_SETTING_IDS` names what completion cannot omit, and `Draft#validate(required_ids:)` checks those regardless of whether they changed. A missing harness moves setup to the Harness step and renders the field error, the same recovery path as any other validation failure. A confirmed first-run **skip** stays permissive: it deliberately writes only the marker and explicit experiment defaults.
 
@@ -31,9 +37,9 @@ Setup preselects a harness only when exactly one is installed. With several, or 
 
 **Check harness** is the only path that runs anything. It starts each selected harness once with `--version`, bounded by `Availability::PROBE_TIMEOUT_SECONDS`, and reports `ready`, `partly ready`, or `not ready` with what the harness said. Locating an executable and running it are different questions, and only the second one answers whether Meringue can start a session.
 
-## Registering the launch directory
+## Registering a project
 
-The Project step's offer is applied as an ordinary `/project add <path> "<name>"` command, submitted only after the `SaveConfiguration` transaction has been accepted. Registering a project is orchestration state rather than configuration, so it stays a separate command owned by the kernel; sequencing it behind the accepted save means a rejected draft cannot leave a project behind from a setup that never finished.
+Setup registers nothing. Project discovery and registration happen later, when the first goal is routed: registering a project is orchestration state rather than configuration, and a rejected draft must not be able to leave a project behind from a setup that never finished.
 
 ## Interaction
 
@@ -46,9 +52,13 @@ The Project step's offer is applied as an ordinary `/project add <path> "<name>"
 - Left-click: select controls, choose picker entries, or click the displayed **Next** or **Complete** navigation control. On the status-bar page, drag components within or between its left/right drop zones.
 - Mouse wheel: move the current list or status-bar component selection. Empty space and right-click remain inert.
 
+The navigation action shows when it is focused, as `› [ Next ] ‹` in the selection style (`> [ Next ] <` with `MERINGUE_ASCII_GLYPHS=1`). Without that, arrowing down onto it changed nothing on screen and pressing Enter was a guess.
+
+Focus is in one place at a time. While the action holds it no row is selected — no marker, no highlight, no `· Enter open picker` hint — even though the row index is kept so `↑` returns to the row it left rather than to the top. The line that describes the selected row describes the action instead (`Next: Theme.`); it stays filled rather than collapsing so arrowing onto the action does not reflow the card underneath the cursor.
+
 Every setup screen uses the same **Navigate** footer. The bordered card contains one centered **Begin**, **Next**, or **Complete** action; the redundant Back button is omitted because Backspace, Delete, and Shift-Tab already provide the documented backwards navigation, and the Welcome card's separate in-card "Begin Setup" row is gone because the footer action already started the flow.
 
-Exact model references remain supported when the catalog is unavailable. Enter opens the cached model picker for the selected harness without making a harness request; setup itself performs no model/network lookup.
+Setup makes no model or network lookup of any kind: the only thing it can run is **Check harness**, and only when asked.
 
 ## One draft, one write
 

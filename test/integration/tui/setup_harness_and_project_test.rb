@@ -15,6 +15,7 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
   TAB = "\t"
   DOWN = "\e[B"
   UP = "\e[A"
+  BACKSPACE = "\u007F"
 
   def setup
     @tmpdir = Dir.mktmpdir("meringue-setup-harness")
@@ -72,8 +73,10 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     # The step reports what is selected; the picker is where the alternatives
     # and their availability are listed.
     frame = render
-    assert_includes frame, "Head harness  Claude Code · installed"
-    refute_includes frame, "Head harness  claude "
+    assert_includes frame, "Harness  Claude Code · installed"
+    refute_includes frame, "Harness  claude "
+    refute_includes frame, "Head harness", "setup asks once, so the row does not carry a role"
+    refute_includes frame, "Worker harness"
 
     focus_setup_row("agent.head_harness")
     send_key(ENTER)
@@ -91,7 +94,7 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     @app = build_app(availability: availability("claude" => :installed, "codex" => :missing, "pi" => :missing))
     open_setup
     send_key(ENTER)
-    focus_setup_row("agent.worker_harness")
+    focus_setup_row("agent.head_harness")
     send_key(ENTER)
 
     picker = snapshot.fetch("picker")
@@ -118,7 +121,9 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     assert_equal chosen, draft.value("agent.worker_harness")
   end
 
-  def test_a_role_already_chosen_is_never_overwritten_by_the_other
+  # Setup shows one row, so a partner left behind at an older value would be a
+  # split nobody asked for and cannot see. /config is where roles are split.
+  def test_one_choice_sets_both_roles_even_when_one_already_had_a_value
     @app = build_app(availability: availability("claude" => :installed, "codex" => :installed, "pi" => :missing))
     open_setup
     draft = @app.instance_variable_get(:@settings_draft)
@@ -130,6 +135,26 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     choose_picker_entry("claude")
 
     assert_equal "claude", draft.value("agent.head_harness")
+    assert_equal "claude", draft.value("agent.worker_harness")
+  end
+
+  # Clicking an option used to take a shorter path than pressing Enter on it and
+  # skipped the harness mirror, so a first run driven by the mouse set one role
+  # and left the other empty.
+  def test_clicking_a_harness_sets_both_roles_the_way_the_key_does
+    @app = build_app(availability: availability("claude" => :installed, "codex" => :installed, "pi" => :missing))
+    open_setup
+    send_key(ENTER)
+    focus_setup_row("agent.head_harness")
+    send_key(ENTER)
+    draft = @app.instance_variable_get(:@settings_draft)
+    options = @app.send(:settings_picker_options)
+    wanted = options.index { |option| option.fetch("reference") == "codex" }
+    refute_nil wanted
+
+    click_settings_hit([:picker, wanted])
+
+    assert_equal "codex", draft.value("agent.head_harness")
     assert_equal "codex", draft.value("agent.worker_harness")
   end
 
@@ -182,38 +207,47 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     assert_equal "pick one first", row.fetch("display_value")
   end
 
-  # Model and reasoning have per-harness defaults that work, so they stay one
-  # keystroke away instead of sitting between a new user and a working install.
-  def test_model_and_reasoning_are_behind_one_reveal
+  # The model picker cannot be answered during a first run anyway: its list comes
+  # from a catalog the harness reports once a session has run, so on a fresh
+  # install it is empty by construction and the only entry is the default that
+  # was already selected. Both settings live in /config, where the catalog is.
+  def test_model_and_reasoning_are_not_part_of_setup
     @app = build_app(availability: availability("claude" => :installed, "pi" => :missing, "codex" => :missing))
     open_setup
     send_key(ENTER)
 
     ids = snapshot.fetch("rows").map { |row| row.fetch("id") }
-    refute_includes ids, "agent.head_model"
-    assert_includes ids, "_show_advanced"
+    assert_equal %w[agent.head_harness workspace.editor setup.check_harness], ids
+    refute_includes ids, "_show_advanced"
+  end
 
-    focus_setup_row("_show_advanced")
+  # The role suffix was stripped with /_model\\z/ — a literal backslash and a z
+  # rather than the end anchor — so the head model row resolved its catalog
+  # through the worker harness.
+  def test_the_model_row_resolves_its_catalog_through_its_own_role
+    @app = build_app(availability: availability("claude" => :installed, "pi" => :installed, "codex" => :missing))
+    @app.send(:open_settings, @state)
+    draft = @app.instance_variable_get(:@settings_draft)
+    draft.set("agent.head_harness", "claude")
+    draft.set("agent.worker_harness", "pi")
+
+    assert_equal "claude", @app.send(:settings_model_harness, @state, role: "head")
+    assert_equal "pi", @app.send(:settings_model_harness, @state, role: "worker")
+  end
+
+  # Going back to re-read something is not a way to dodge the requirement, so it
+  # is never gated.
+  def test_the_gate_does_not_block_going_backwards
+    @app = build_app(availability: availability("claude" => :installed, "codex" => :installed, "pi" => :installed))
+    open_setup
     send_key(ENTER)
-    revealed = snapshot.fetch("rows").map { |row| row.fetch("id") }
-    assert_includes revealed, "agent.head_model"
-    assert_includes revealed, "agent.worker_thinking"
+    assert_equal "Harness", snapshot.fetch("category")
 
-    # Setup has no category rail to escape through, so the reveal has to stay on
-    # the card — under the cursor that opened it — and the footer has to say so.
-    assert_equal "_show_advanced", snapshot.fetch("rows").fetch(snapshot.fetch("row_index")).fetch("id")
-    assert_includes render, "A hide advanced"
-    send_key(ENTER)
-    refute_includes snapshot.fetch("rows").map { |row| row.fetch("id") }, "agent.head_model"
-    assert_equal "_show_advanced", snapshot.fetch("rows").fetch(snapshot.fetch("row_index")).fetch("id")
+    send_key(TAB)
+    assert_equal "Harness", snapshot.fetch("category"), "forward is refused without a harness"
 
-    # A reaches the same reveal from anywhere on the step.
-    focus_setup_row("agent.head_harness")
-    send_key("a")
-    assert_includes snapshot.fetch("rows").map { |row| row.fetch("id") }, "agent.head_model"
-    send_key("a")
-    refute_includes snapshot.fetch("rows").map { |row| row.fetch("id") }, "agent.head_model"
-    assert_includes render, "A advanced"
+    send_key(BACKSPACE)
+    assert_equal "Welcome", snapshot.fetch("category")
   end
 
   # Setup completes with no registered project; discovery and registration happen
@@ -241,7 +275,8 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     assert_equal "Done", snapshot.fetch("category")
 
     frame = render
-    assert_includes frame, "Harness: Claude Code for heads and workers"
+    assert_includes frame, "Harness: Claude Code"
+    refute_includes frame, "for heads and workers", "setup asks once, so the summary does not split roles"
     assert_includes frame, "Xtras: all off"
     assert_includes frame, "[ Complete ]"
   end
@@ -439,6 +474,21 @@ class TuiSetupHarnessAndProjectTest < Minitest::Test
     refute_nil index, "no #{id} row in #{snapshot.fetch("rows").map { |row| row.fetch("id") }.inspect}"
     @app.instance_variable_set(:@settings_row_index, index)
     @app.instance_variable_set(:@settings_footer_focus, false)
+  end
+
+  # Drives a real click through the same hit testing the app uses, so the test
+  # exercises the mouse path rather than the method behind it.
+  def click_settings_hit(target)
+    @app.instance_variable_set(:@last_render_width, WIDTH)
+    @app.instance_variable_set(:@last_render_height, HEIGHT)
+    HEIGHT.times do |y|
+      WIDTH.times do |x|
+        next unless @app.send(:layout).settings_hit(compose, width: WIDTH, height: HEIGHT, x: x, y: y) == target
+
+        return send_key({ "type" => "mouse", "kind" => "button", "pressed" => true, "button" => 0, "x" => x + 1, "y" => y + 1 })
+      end
+    end
+    flunk("no cell resolved to #{target.inspect}")
   end
 
   def choose_picker_entry(reference)

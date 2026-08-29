@@ -18,32 +18,10 @@ module Meringue
         return [] if Settings::SetupFlow.narrative?(step)
         return setup_status_bar_rows if step == Settings::SetupFlow::STATUS_BAR
 
-        expanded = @settings_expanded_advanced.fetch(step, false)
         rows = Settings::SetupFlow.setting_ids(step, draft: @settings_draft).filter_map do |id|
           setup_definition_row(id)
         end
         rows << setup_harness_check_row if step == Settings::SetupFlow::HARNESS
-        advanced = Settings::SetupFlow.advanced_setting_ids(step)
-        return rows if advanced.empty?
-
-        # The card shows one wrapped line of the selected row's description, so
-        # the way back out has to fit on it.
-        description = if expanded
-                        "Enter or A puts model and reasoning back out of the way."
-                      else
-                        "Harness defaults already work. Enter or A opens them anyway."
-                      end
-        # The reveal is a disclosure, not a door. It stays on the card once it is
-        # open, in the same place, because the row someone pressed to get here is
-        # the row they look for to get back — and setup has no category rail to
-        # leave through.
-        rows << synthetic_settings_row(
-          "_show_advanced",
-          expanded ? "Hide model and reasoning" : "Model and reasoning",
-          description,
-          expanded ? "hide" : "#{advanced.length} settings"
-        )
-        rows.concat(advanced.filter_map { |id| setup_definition_row(id) }) if expanded
         rows
       end
 
@@ -72,12 +50,23 @@ module Meringue
         synthetic_settings_row("setup.check_harness", "Check harness", description, display)
       end
 
+      # The harness row is one decision about the whole install, so in setup it
+      # loses the role in its name: "Head harness" is a distinction the flow no
+      # longer draws, and drawing it here invites someone to go looking for the
+      # other half.
+      SETUP_HARNESS_LABEL = "Harness"
+      # Only the first wrapped line of a description is rendered, so it has to be
+      # one line's worth or it dangles mid-sentence.
+      SETUP_HARNESS_DESCRIPTION = "The coding agent Meringue drives. Split the roles later in /config."
+
       # Availability is a property of this machine at this moment, so it is
       # attached where the row is rendered rather than frozen into the schema.
       # A backend Meringue cannot find is never hidden — someone may be
       # configuring a machine they are about to install it on — it just says so.
       def decorate_setup_row(row)
         return row unless %w[agent.head_harness agent.worker_harness].include?(row.fetch("id", nil))
+
+        row = row.merge("label" => SETUP_HARNESS_LABEL, "description" => SETUP_HARNESS_DESCRIPTION)
         return row unless @harness_availability
 
         labels = row.fetch("option_labels", {}) || {}
@@ -126,20 +115,55 @@ module Meringue
       end
 
       # Choosing a harness during setup means "run Meringue on this", not "run
-      # heads on this". The other role follows while it is still unset, so the
-      # step is one decision; a value already chosen is never overwritten, so
-      # deliberately splitting the roles still works.
+      # heads on this". A first run asks once and applies the answer to both
+      # roles, so the mirror is unconditional: setup no longer shows the roles
+      # separately, and a partner left behind at an older value would be a split
+      # nobody asked for and cannot see. Splitting the roles deliberately is what
+      # /config is for.
       def pair_setup_harness(id, value)
         partner = {
           "agent.head_harness" => "agent.worker_harness",
           "agent.worker_harness" => "agent.head_harness"
         }[id.to_s]
         return unless partner
-        return unless @settings_draft.value(partner).to_s.strip.empty?
 
         @settings_draft.set(partner, value)
       rescue KeyError
         nil
+      end
+
+      # What this step will not let you walk past, as {setting_id => message}.
+      # Empty for every step that has no required settings, which is all of them
+      # but Harness.
+      def setup_step_blockers(step = settings_category)
+        return {} unless @settings_draft
+
+        Settings::SetupFlow.required_setting_ids(step).each_with_object({}) do |id, blockers|
+          next unless @settings_draft.value(id).to_s.strip.empty?
+
+          # The name the row is rendered under, not the schema's role-specific
+          # one, or the error names a control that is not on screen.
+          label = id == "agent.head_harness" ? SETUP_HARNESS_LABEL : Config::Schema.fetch(id).label
+          blockers[id] = "#{label} is required — Meringue cannot start an agent without it."
+        end
+      rescue KeyError
+        {}
+      end
+
+      # Refuses a forward move and shows why, on the control that is missing.
+      # Backwards navigation is never gated: going back to re-read something is
+      # not a way to dodge the requirement.
+      def block_setup_advance?
+        blockers = setup_step_blockers
+        return false if blockers.empty?
+
+        @settings_draft.errors.merge!(blockers)
+        # Land the cursor on the control that is missing rather than leaving it
+        # on the action that was just refused.
+        @settings_footer_focus = false
+        focus_setup_setting(blockers.keys.first)
+        @force_full_redraw = true
+        true
       end
 
       def harness_availability_snapshot
@@ -207,7 +231,7 @@ module Meringue
 
       def setup_harness_summary(head, worker)
         return "not chosen yet" if head.empty? && worker.empty?
-        return "#{Harness::Registry.provider_label(head)} for heads and workers" if head == worker
+        return Harness::Registry.provider_label(head).to_s if head == worker
 
         "#{Harness::Registry.provider_label(head)} heads · #{Harness::Registry.provider_label(worker)} workers"
       end

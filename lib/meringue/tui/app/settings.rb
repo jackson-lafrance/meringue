@@ -651,14 +651,7 @@ module Meringue
           kind, index = hit
           if kind == :picker
             option = settings_picker_options[index.to_i]
-            if option
-              id = @settings_picker.fetch("id")
-              value = option.is_a?(Hash) ? option.fetch("reference") : option
-              @settings_draft.set(id, value)
-              @settings_draft.preview_theme if id == "appearance.theme"
-              @settings_picker = nil
-              @settings_picker_theme_original = nil
-            end
+            apply_settings_picker_choice(option) if option
           elsif kind == :category
             @settings_category_index = index.to_i.clamp(0, [settings_categories.length - 1, 0].max)
             @settings_row_index = 0
@@ -685,6 +678,8 @@ module Meringue
       def move_settings_category(delta)
         count = settings_categories.length
         return if count.zero?
+
+        return if setup_mode? && delta.to_i.positive? && block_setup_advance?
 
         @settings_category_index = if setup_mode?
                                      (@settings_category_index.to_i + delta.to_i).clamp(0, count - 1)
@@ -788,7 +783,7 @@ module Meringue
       end
 
       def cycle_settings_model(row, delta, state)
-        role = row.fetch("id", "").to_s.split(".").fetch(1, "").sub(/_model\\z/, "")
+        role = row.fetch("id", "").to_s.split(".").fetch(1, "").sub(/_model\z/, "")
         options = ModelPicker.entries(state, harness: settings_model_harness(state, role: role), query: "").map { |entry| entry.fetch("reference") }
         current = @settings_draft.value(row.fetch("id")).to_s
         options.unshift(current) unless options.include?(current)
@@ -923,7 +918,7 @@ module Meringue
       def open_settings_picker(row, state)
         id = row.fetch("id")
         options = if row.fetch("editor") == "model"
-                    role = row.fetch("id", "").to_s.split(".").fetch(1, "").sub(/_model\\z/, "")
+                    role = row.fetch("id", "").to_s.split(".").fetch(1, "").sub(/_model\z/, "")
                     ModelPicker.entries(state, harness: settings_model_harness(state, role: role), query: "").map do |entry|
                       { "reference" => entry.fetch("reference"), "name" => entry.fetch("name", entry.fetch("reference")) }
                     end
@@ -981,22 +976,7 @@ module Meringue
           preview_settings_picker_theme
         elsif ENTER_KEYS.include?(key)
           option = options[@settings_picker.fetch("index", 0).to_i]
-          if option
-            id = @settings_picker.fetch("id")
-            if id == "workspace.editor" && option == Settings::EDITOR_CUSTOM_OPTION
-              row = @settings_picker.fetch("row")
-              @settings_picker = nil
-              @settings_picker_theme_original = nil
-              open_settings_editor(row)
-            else
-              value = option.is_a?(Hash) ? option.fetch("reference") : option
-              @settings_draft.set(id, value)
-              pair_setup_harness(id, value) if setup_mode?
-              @settings_draft.preview_theme if id == "appearance.theme"
-              @settings_picker = nil
-              @settings_picker_theme_original = nil
-            end
-          end
+          apply_settings_picker_choice(option) if option
         elsif keybinding?("delete_word_backward", key)
           @settings_picker["query"] = ""
           @settings_picker["index"] = 0
@@ -1013,6 +993,27 @@ module Meringue
           cancel_settings_picker
         end
         unchanged
+      end
+
+      # Committing a picker choice, for both the key and the mouse. They were two
+      # copies, and the mouse copy was missing the harness mirror: clicking a
+      # harness during setup set one role and left the other empty, where
+      # pressing Enter on the same row set both.
+      def apply_settings_picker_choice(option)
+        id = @settings_picker.fetch("id")
+        if id == "workspace.editor" && option == Settings::EDITOR_CUSTOM_OPTION
+          row = @settings_picker.fetch("row")
+          @settings_picker = nil
+          @settings_picker_theme_original = nil
+          return open_settings_editor(row)
+        end
+
+        value = option.is_a?(Hash) ? option.fetch("reference") : option
+        @settings_draft.set(id, value)
+        pair_setup_harness(id, value) if setup_mode?
+        @settings_draft.preview_theme if id == "appearance.theme"
+        @settings_picker = nil
+        @settings_picker_theme_original = nil
       end
 
       def preview_settings_picker_theme

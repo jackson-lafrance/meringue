@@ -63,6 +63,10 @@ class TuiGithubAccessActionTest < Minitest::Test
     assert_includes @app.render(compose, width: 100, height: 30, color: false), "read access to acme/app"
 
     @app.send(:open_settings, @state, mode: "setup")
+    # Setup will not advance past the harness step until one is chosen.
+    %w[agent.head_harness agent.worker_harness].each do |id|
+      @app.instance_variable_get(:@settings_draft).set(id, "pi")
+    end
     4.times { send_key(TAB) }
     assert_equal "Experiments", @app.send(:settings_category)
     assert @app.send(:settings_rows).any? { |row| row.fetch("id") == "experiments.github_support_test_access" }
@@ -72,7 +76,12 @@ class TuiGithubAccessActionTest < Minitest::Test
     write_config(false)
     @app = Meringue::TUI::App.new(layout: @layout, config: Meringue::Config.load(path: @config_path))
     @app.send(:open_settings, @state, mode: "setup")
-    5.times { send_key(TAB) }
+    # Setup will not advance past the harness step until one is chosen.
+    %w[agent.head_harness agent.worker_harness].each do |id|
+      @app.instance_variable_get(:@settings_draft).set(id, "pi")
+    end
+    4.times { send_key(TAB) }
+    assert_equal "Experiments", @app.send(:settings_category)
     @app.instance_variable_get(:@settings_draft).set("experiments.github_support", true)
     rows = @app.send(:settings_rows)
     @app.instance_variable_set(:@settings_row_index, rows.index { |row| row.fetch("id") == "experiments.github_support_test_access" })
@@ -95,6 +104,10 @@ class TuiGithubAccessActionTest < Minitest::Test
     assert_equal 0, @submitted.size
 
     @app.send(:open_settings, @state, mode: "setup")
+    # Setup will not advance past the harness step until one is chosen.
+    %w[agent.head_harness agent.worker_harness].each do |id|
+      @app.instance_variable_get(:@settings_draft).set(id, "pi")
+    end
     4.times { send_key(TAB) }
     assert_equal "Experiments", @app.send(:settings_category)
     refute @app.send(:settings_rows).any? { |row| row.fetch("id") == "experiments.github_support_test_access" }

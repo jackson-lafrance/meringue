@@ -28,34 +28,57 @@ module Meringue
 
         # Head and worker used to be two separate steps, which asked a first-time
         # user to make the same decision twice before they had been told what
-        # either word meant. They are one step now, and the two rows read as a
-        # confirmation rather than a decision whenever exactly one harness is
-        # actually installed. Welcome and Done carry no controls at all: a first
-        # run should open and close with something to read, not a form.
+        # either word meant. It is one step and one row now, and the answer is
+        # applied to both roles; splitting them is what /config is for. Welcome
+        # and Done carry no controls at all: a first run should open and close
+        # with something to read, not a form.
         STEPS = [WELCOME, HARNESS, THEME, STATUS_BAR, EXPERIMENTS, DONE].freeze
         NARRATIVE_STEPS = [WELCOME, DONE].freeze
 
         FIXED_SETTING_IDS = {
-          HARNESS => %w[agent.head_harness agent.worker_harness workspace.editor].freeze,
+          HARNESS => %w[agent.head_harness workspace.editor].freeze,
           THEME => %w[appearance.theme appearance.animations].freeze,
           STATUS_BAR => %w[appearance.status_bar_layout].freeze,
         }.freeze
 
-        # Model and reasoning both have per-harness defaults that are correct for
-        # a first session, and both are the kind of choice someone makes once they
-        # have opinions. They stay one keystroke away instead of sitting between a
-        # new user and a working install.
-        ADVANCED_SETTING_IDS = {
-          HARNESS => %w[agent.head_model agent.head_thinking agent.worker_model agent.worker_thinking].freeze
+        # Model and reasoning are not asked during a first run at all. Every
+        # harness ships defaults that work, and the model picker cannot even be
+        # answered here: its list comes from a catalog the harness reports once a
+        # session has run, so on a fresh install it is empty by construction and
+        # the only entry is the default that was already selected. Both settings
+        # live in /config, where the catalog exists.
+        ADVANCED_SETTING_IDS = {}.freeze
+
+        # Settings a step will not let you walk past. Blocking at the step is what
+        # makes the requirement legible: checking only at Complete meant someone
+        # could arrow through every card and learn five screens later that the
+        # second one was mandatory.
+        #
+        # Esc still skips the whole flow — that is a deliberate, confirmed choice
+        # rather than something you can do by holding a direction key.
+        #
+        # Only settings the step actually shows: a refused advance puts the cursor
+        # on the control that is missing, which it cannot do for a row that is not
+        # rendered.
+        REQUIRED_SETTING_IDS_BY_STEP = {
+          HARNESS => %w[agent.head_harness].freeze
         }.freeze
 
-        # Setup will not finish without these. Validation normally runs only over
-        # settings the user changed, which is right for /config — an unrelated save
-        # must not fail on a field nobody edited — but it is also how setup used to
-        # complete with no harness at all.
+        # The same requirement, as the backstop Complete checks. Validation normally
+        # runs only over settings the user changed, which is right for /config — an
+        # unrelated save must not fail on a field nobody edited — but it is also how
+        # setup used to complete with no harness at all.
+        #
+        # Setup asks once and applies the answer to both roles, so Complete still
+        # checks both: the mirror is what makes them equal, and a backstop that only
+        # checked the visible half would not notice if it stopped running.
         REQUIRED_SETTING_IDS = %w[agent.head_harness agent.worker_harness].freeze
 
         module_function
+
+        def required_setting_ids(step)
+          REQUIRED_SETTING_IDS_BY_STEP.fetch(step.to_s, [])
+        end
 
         def steps
           STEPS
