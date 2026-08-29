@@ -857,9 +857,13 @@ module Meringue
         when "keybinding"
           return false if toggle_only
           open_settings_keybinding_capture(row)
-        when "selector", "model"
+        when "selector", "model", "editor_command"
           return false if toggle_only
-          setup_mode? ? open_settings_picker(row, state) : (row.fetch("editor") == "model" ? open_settings_editor(row) : @settings_draft.cycle(id, 1))
+          if row.fetch("editor") == "editor_command"
+            open_settings_picker(row, state)
+          else
+            setup_mode? ? open_settings_picker(row, state) : (row.fetch("editor") == "model" ? open_settings_editor(row) : @settings_draft.cycle(id, 1))
+          end
           @settings_draft.preview_theme if id == "appearance.theme" && !@settings_picker
         else
           return false if toggle_only
@@ -907,6 +911,8 @@ module Meringue
                     ModelPicker.entries(state, harness: settings_model_harness(state, role: role), query: "").map do |entry|
                       { "reference" => entry.fetch("reference"), "name" => entry.fetch("name", entry.fetch("reference")) }
                     end
+                  elsif row.fetch("editor") == "editor_command"
+                    Array(row.fetch("options", [])).map(&:to_s) + [Settings::EDITOR_CUSTOM_OPTION]
                   else
                     # An enum that carries labels shows them the way the model
                     # picker does: the label reads, the stored value stays
@@ -919,7 +925,12 @@ module Meringue
                       values
                     end
                   end
-        current = @settings_draft.value(id).to_s
+        current_value = @settings_draft.value(id)
+        current = if row.fetch("editor") == "editor_command"
+                     Shellwords.join(Array(current_value))
+                   else
+                     current_value.to_s
+                   end
         # An exact model reference the catalog does not list stays selectable, so
         # it is carried into the list. "Nothing chosen yet" is not a choice
         # though: offering it as the first row of a required field is how the
@@ -952,11 +963,17 @@ module Meringue
           option = options[@settings_picker.fetch("index", 0).to_i]
           if option
             id = @settings_picker.fetch("id")
-            value = option.is_a?(Hash) ? option.fetch("reference") : option
-            @settings_draft.set(id, value)
-            pair_setup_harness(id, value) if setup_mode?
-            @settings_draft.preview_theme if id == "appearance.theme"
-            @settings_picker = nil
+            if id == "workspace.editor" && option == Settings::EDITOR_CUSTOM_OPTION
+              row = @settings_picker.fetch("row")
+              @settings_picker = nil
+              open_settings_editor(row)
+            else
+              value = option.is_a?(Hash) ? option.fetch("reference") : option
+              @settings_draft.set(id, value)
+              pair_setup_harness(id, value) if setup_mode?
+              @settings_draft.preview_theme if id == "appearance.theme"
+              @settings_picker = nil
+            end
           end
         elsif keybinding?("delete_word_backward", key)
           @settings_picker["query"] = ""
