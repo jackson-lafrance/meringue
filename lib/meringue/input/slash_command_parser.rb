@@ -898,7 +898,7 @@ module Meringue
       def parse_github(arguments)
         tokens = split_arguments(arguments)
         return kernel_command("TestGitHubAccess") if tokens == ["test"]
-
+        return kernel_command("TestGitHubAccess", "draft_github_support" => true) if tokens == ["test", "--draft-support"]
         invalid("Usage: /github test")
       end
 
