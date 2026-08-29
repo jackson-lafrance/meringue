@@ -359,7 +359,7 @@ module Meringue
               source_type: "kernel",
               source_id: nil,
               level: "info",
-              message: "Command output: #{body}",
+              message: body,
               details: {
                 "input" => input.to_s,
                 "kind" => "kernel_command_output",

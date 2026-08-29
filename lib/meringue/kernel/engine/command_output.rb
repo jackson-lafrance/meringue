@@ -15,14 +15,19 @@ module Meringue
 
           status = result.fetch("status", "unknown")
           command_type = result.fetch("command_type", "command")
-          message = result.fetch("message", "").to_s.strip
-          lines = ["#{command_type}: #{status}#{message.empty? ? "" : " — #{message}"}"]
           if status == "accepted"
-            lines.concat(kernel_command_output_detail_lines(command_type, result.fetch("result", nil)))
+            # The result's message is an internal acceptance summary (for example,
+            # "Loaded slash command help."). The detail formatter is the command's
+            # actual output and must stand on its own without a type/status wrapper.
+            kernel_command_output_detail_lines(command_type, result.fetch("result", nil))
           else
-            lines.concat(Array(result.fetch("errors", [])).map { |error| "  - #{error}" })
+            # Rejections and failures carry actionable information in errors. Keep
+            # that information, falling back to the result message for older or
+            # unusual commands that do not populate an errors array.
+            errors = Array(result.fetch("errors", [])).map(&:to_s)
+            errors = [result.fetch("message", "").to_s] if errors.empty?
+            errors
           end
-          lines
         end.reject { |line| line.to_s.strip.empty? }
       end
 

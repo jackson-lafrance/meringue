@@ -122,7 +122,7 @@ class KernelCoreAddProjectTest < Minitest::Test
     entry = log_entry(result.fetch("log_entry_ids").first)
     assert_equal "warning", entry.fetch("level")
     assert_equal "kernel", entry.fetch("source_type")
-    assert_match(/\ARejected AddProject: /, entry.fetch("message"))
+    refute_match(/\ARejected AddProject: /, entry.fetch("message"))
     assert_equal "cmd-add-1", entry.fetch("details").fetch("command_id")
     assert_equal "rejected", entry.fetch("details").fetch("status")
     assert_log_levels_valid

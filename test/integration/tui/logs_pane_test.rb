@@ -102,9 +102,7 @@ class TuiLogsPaneTest < Minitest::Test
         "L2",
         "source_type" => "kernel",
         "source_id" => "H127",
-        "message" => "Command output: SpawnWorker: accepted — Reserved worker P1-I1-W1; " \
-                      "workspace and harness provisioning will continue in the background.\n" \
-                      "  target: P1-I1-W1",
+        "message" => "  target: P1-I1-W1",
         "details" => {
           "head_id" => "H127",
           "command_type" => "SpawnWorker",
@@ -123,13 +121,14 @@ class TuiLogsPaneTest < Minitest::Test
     assert_equal 2, lines.count { |line| line.include?("▪ meringue · via H127") },
                  "every entry from the head batch must carry the via-H attribution"
 
-    # The SpawnWorker command is a single entry: one header, with the summary and the
-    # continuation target line as body rows underneath it.
+    # The SpawnWorker command is a single entry containing only its actual output.
     spawn_headers = lines.select do |line|
       line.start_with?("[") && line.include?("▪ meringue · via H127 · cmd")
     end
     assert_equal 1, spawn_headers.length, "one command result must render one header"
-    assert_includes joined, "Command output: SpawnWorker: accepted — Reserved worker P1-I1-W1"
+    refute_includes joined, "Command output:"
+    refute_includes joined, "SpawnWorker:"
+    refute_includes joined, "accepted"
     assert_includes joined, "    target: P1-I1-W1"
   end
 

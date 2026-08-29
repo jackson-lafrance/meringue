@@ -76,14 +76,14 @@ module Meringue
         )
       end
 
-      # One line per head batch, and it has to be readable on its own: a skipped command is not a
-      # rejection, so it is named as what it is instead of inflating the rejected count.
+      # A skipped target is useful warning information, but the accepted/rejected counts are
+      # internal command-journal status rather than command output. The individual command
+      # results already carry their actual output and actionable errors.
       def head_batch_summary_message(head_id:, accepted_count:, rejected_count:, failed_count:, skipped_count:)
-        message = "Head result for #{head_id}: #{accepted_count} accepted, #{rejected_count} rejected, #{failed_count} failed."
-        return message unless skipped_count.positive?
+        return "" unless skipped_count.positive?
 
         pronoun = skipped_count == 1 ? "its target" : "their targets"
-        "#{message} #{count_phrase(skipped_count, "command")} skipped because #{pronoun} #{skipped_count == 1 ? "was" : "were"} removed before this result was applied."
+        "#{count_phrase(skipped_count, "command")} skipped because #{pronoun} #{skipped_count == 1 ? "was" : "were"} removed before this result was applied."
       end
 
       def head_batch_summary_level(rejected_count:, failed_count:)

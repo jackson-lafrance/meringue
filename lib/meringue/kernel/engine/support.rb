@@ -337,7 +337,10 @@ module Meringue
           source_type: "kernel",
           source_id: nil,
           level: level,
-          message: "#{label || status.capitalize} #{command_type || "unknown"}: #{message}",
+          # Command type and status are structured metadata, not user-facing output. The
+          # message is already the actionable error or warning; rendering labels here made
+          # command results disagree with the shared output formatter.
+          message: message.to_s,
           details: {
             "command_id" => command_id,
             "command_type" => command_type,

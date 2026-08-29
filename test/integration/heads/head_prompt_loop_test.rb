@@ -224,7 +224,25 @@ class HeadPromptLoopTest < Minitest::Test
 
     messages = env.state.fetch("logs").map { |log| log.fetch("message") }
     assert_includes messages, "User ran command: /questions"
-    assert(messages.any? { |message| message.start_with?("Command output: ListQuestions: accepted") })
+    output = messages.find { |message| message.start_with?("  No questions.") }
+    refute_nil output
+    refute_includes output, "Command output:"
+    refute_includes output, "ListQuestions:"
+    refute_includes output, "accepted"
+  end
+
+  def test_help_output_contains_only_help_text
+    env = build_head_environment
+    Meringue::Heads::PromptLoop.new(engine: env.engine).call("/help")
+
+    messages = env.state.fetch("logs").map { |log| log.fetch("message") }
+    assert_includes messages, "User ran command: /help"
+    output = messages.find { |message| message.include?("/help") && message.include?("Start here") }
+    refute_nil output
+    refute_includes output, "Command output:"
+    refute_includes output, "Help:"
+    refute_includes output, "accepted"
+    refute_includes output, "Loaded slash command help."
   end
 
   def test_runner_failure_is_reported_without_mutating_state

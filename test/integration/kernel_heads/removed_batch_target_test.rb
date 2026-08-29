@@ -54,7 +54,7 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     refute_includes message, "could not have seen"
     refute_includes message, "issue_from_command"
 
-    skip_log = logs.find { |entry| entry.fetch("message", "").start_with?("Skipped ModifyIssue:") }
+    skip_log = logs.find { |entry| Array(entry.dig("details", "errors")).include?("issue_removed_before_head_result_applied") }
     refute_nil skip_log, "the skip is visible in the log"
     assert_equal "info", skip_log.fetch("level"), "a target removed by a prune is not a head mistake"
     assert_equal doomed_id, skip_log.dig("details", "issue_id")
@@ -84,11 +84,11 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
       cleanup_head: false
     )
 
-    summary = logs.find { |entry| entry.fetch("message", "").start_with?("Head result for #{head_id}:") }
+    summary = logs.find { |entry| entry.fetch("message", "").include?("command skipped because") }
     refute_nil summary
     assert_equal "info", summary.fetch("level")
     assert_equal(
-      "Head result for #{head_id}: 1 accepted, 0 rejected, 0 failed. 1 command skipped because its target was removed before this result was applied.",
+      "1 command skipped because its target was removed before this result was applied.",
       summary.fetch("message")
     )
     assert_equal 1, summary.dig("details", "skipped_command_count")
@@ -122,9 +122,9 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     statuses = command_results(result).map { |entry| entry.fetch("errors") }
     assert_equal [["issue_removed_before_head_result_applied"]] * 2, statuses
 
-    summary = logs.find { |entry| entry.fetch("message", "").start_with?("Head result for #{head_id}:") }
+    summary = logs.find { |entry| entry.fetch("message", "").include?("commands skipped because") }
     assert_equal(
-      "Head result for #{head_id}: 0 accepted, 0 rejected, 0 failed. 2 commands skipped because their targets were removed before this result was applied.",
+      "2 commands skipped because their targets were removed before this result was applied.",
       summary.fetch("message")
     )
     assert_equal "info", summary.fetch("level")
@@ -168,7 +168,7 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     assert_includes skipped.fetch("message"), "so the prompt was not delivered"
     assert_includes skipped.fetch("message"), "Dropped prompt \"Double-check the cleanup you reported.\""
 
-    skip_log = logs.find { |entry| entry.fetch("message", "").start_with?("Skipped PromptAgent:") }
+    skip_log = logs.find { |entry| Array(entry.dig("details", "errors")).include?("agent_removed_before_head_result_applied") }
     refute_nil skip_log
     assert_equal "warning", skip_log.fetch("level")
     assert_equal "completed", find_agent_record(head_id).fetch("status")
@@ -191,7 +191,7 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     skipped = command_results(result).fetch(0)
     assert_equal ["issue_removed_before_head_result_applied"], skipped.fetch("errors")
     assert_includes skipped.fetch("message"), "so there was nothing left to kill"
-    skip_log = logs.find { |entry| entry.fetch("message", "").start_with?("Skipped Kill:") }
+    skip_log = logs.find { |entry| Array(entry.dig("details", "errors")).include?("issue_removed_before_head_result_applied") }
     refute_nil skip_log
     assert_equal "info", skip_log.fetch("level")
     assert_equal "completed", find_agent_record(head_id).fetch("status")
@@ -241,8 +241,7 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     assert_equal "blocked", find_agent_record(head_id, current_state: engine_with_failing_spawn.list_all).fetch("status")
     summary = logs(current_state: engine_with_failing_spawn.list_all)
              .find { |entry| entry.fetch("message", "").start_with?("Head result for #{head_id}:") }
-    assert_equal "Head result for #{head_id}: 1 accepted, 1 rejected, 1 failed.", summary.fetch("message")
-    assert_equal "error", summary.fetch("level")
+    assert_nil summary, "acceptance counts are not rendered as a batch summary"
   end
 
   def test_killed_issue_target_names_the_kill_rather_than_a_prune
@@ -282,7 +281,7 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
     assert_includes skipped.fetch("message"), "Dropped worker \"Re-run the cleanup\""
     assert_empty agents(type: "worker").select { |agent| agent.fetch("issue_id", nil) == doomed_id }
 
-    skip_log = logs.find { |entry| entry.fetch("message", "").start_with?("Skipped SpawnWorker:") }
+    skip_log = logs.find { |entry| Array(entry.dig("details", "errors")).include?("issue_removed_before_head_result_applied") }
     refute_nil skip_log
     assert_equal "warning", skip_log.fetch("level"), "dropped work stays a warning"
 

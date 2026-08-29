@@ -288,11 +288,7 @@ class KernelHeadsApplyResultTest < KernelHeadsTestCase
     assert_equal "partially_applied", head.fetch("harness_metadata").fetch("head_result_apply_state")
 
     summary = logs(current_state: failing_state).find { |log| log.fetch("message", "").start_with?("Head result for #{head_id}:") }
-    refute_nil summary
-    assert_equal "kernel", summary.fetch("source_type")
-    assert_equal head_id, summary.fetch("source_id")
-    assert_equal "error", summary.fetch("level")
-    assert_equal "1 accepted, 0 rejected, 1 failed.", summary.fetch("message").split(": ").last
+    assert_nil summary, "failure output is rendered directly without an acceptance summary"
   end
 
   def test_rejected_commands_mark_the_head_blocked_with_a_warning_summary
@@ -300,9 +296,7 @@ class KernelHeadsApplyResultTest < KernelHeadsTestCase
     apply_head_result(head_id, head_result(commands: [create_issue_command(project_id: "P404", title: "Nope")]))
 
     summary = logs.find { |log| log.fetch("message", "").start_with?("Head result for #{head_id}:") }
-    refute_nil summary
-    assert_equal "warning", summary.fetch("level")
-    assert_equal 1, Array(summary.fetch("details").fetch("command_results")).length
+    assert_nil summary, "rejection output is rendered directly without an acceptance summary"
     assert_equal "blocked", find_agent_record(head_id).fetch("status")
   end
 
