@@ -8,7 +8,7 @@ module Meringue
     class GitHubClient
       DEFAULT_COMMAND_TIMEOUT_SECONDS = 5.0
       TERMINATION_GRACE_SECONDS = 0.1
-      ACCESS_RESULT_OUTCOMES = %w[success unavailable unauthenticated permission_denied timeout malformed_remote].freeze
+      ACCESS_RESULT_OUTCOMES = %w[success unavailable missing_tooling unauthenticated permission_denied repository_read_failure timeout malformed_remote].freeze
       MAX_ERROR_LENGTH = 300
 
       class CommandTimeout < StandardError; end
@@ -67,11 +67,11 @@ module Meringue
         )
         unless repo_status.success?
           output = join_command_output(repo_stdout, repo_stderr)
-          outcome = network_failure?(output) ? "unavailable" : "permission_denied"
+          outcome = network_failure?(output) ? "unavailable" : "repository_read_failure"
           message = if outcome == "unavailable"
                       "GitHub is unavailable while checking #{repository}: #{short_error(output)}"
                     else
-                      "GitHub authentication works, but #{repository} is not accessible with this account."
+                      "GitHub authentication works, but #{repository} could not be read with this account."
                     end
           return access_result(outcome, message, repository: repository, identity: identity, error: short_error(output), exit_status: repo_status.exitstatus)
         end
@@ -92,7 +92,7 @@ module Meringue
       rescue CommandTimeout => e
         access_result("timeout", "GitHub access test timed out. Try again; no GitHub resource was changed.", repository: repository, error: short_error(e.message))
       rescue Errno::ENOENT => e
-        access_result("unavailable", "GitHub CLI is unavailable: #{short_error(e.message)}", repository: repository, error: short_error(e.message))
+        access_result("missing_tooling", "GitHub CLI is missing: #{short_error(e.message)}", repository: repository, error: short_error(e.message))
       rescue JSON::ParserError => e
         access_result("unavailable", "GitHub returned an invalid response while checking #{repository}.", repository: repository, error: short_error(e.message))
       rescue ArgumentError => e

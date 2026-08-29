@@ -17,6 +17,28 @@ class KernelMaintenanceGithubAccessTest < Minitest::Test
     kernel_maintenance_teardown
   end
 
+  def test_saved_opt_in_allows_access_check_after_configuration_save
+    write_config(false)
+    forge = KernelMaintenanceSupport::StubForgeClient.new(
+      access_results: { "acme/app" => { "outcome" => "success", "message" => "read access confirmed" } }
+    )
+    engine = build_engine(forge_client: forge)
+    store = Meringue::Config::Store.new(path: tmp_path("config.toml"))
+    saved = engine.apply(
+      "type" => "SaveConfiguration",
+      "payload" => {
+        "base_fingerprint" => store.fingerprint,
+        "changes" => { "experiments.github_support" => true }
+      }
+    )
+    assert_equal "accepted", saved.fetch("status")
+
+    result = engine.apply("type" => "TestGitHubAccess", "payload" => { "repository" => "acme/app" })
+
+    assert_equal "success", result.dig("result", "outcome")
+    assert_equal true, Meringue::Config.load(path: tmp_path("config.toml")).value("experiments", "github_support")
+  end
+
   def test_enabled_access_check_calls_the_existing_client_with_a_bound
     write_enabled_config
     forge = KernelMaintenanceSupport::StubForgeClient.new(
@@ -42,6 +64,23 @@ class KernelMaintenanceGithubAccessTest < Minitest::Test
     assert_equal "github_access_test", read_state.fetch("logs").last.fetch("details").fetch("kind")
   end
 
+  def test_setup_draft_opt_in_runs_without_persisting_or_enabling_github
+    write_config(false)
+    forge = KernelMaintenanceSupport::StubForgeClient.new(
+      access_results: { "acme/app" => { "outcome" => "success", "message" => "read access confirmed" } }
+    )
+    engine = build_engine(forge_client: forge)
+
+    result = engine.apply(
+      "type" => "TestGitHubAccess",
+      "payload" => { "repository" => "acme/app", "draft_github_support" => true }
+    )
+
+    assert_equal "success", result.dig("result", "outcome")
+    assert_equal 1, forge.access_calls.length
+    assert_equal false, Meringue::Config.load(path: tmp_path("config.toml")).value("experiments", "github_support")
+  end
+
   def test_disabled_experiment_is_gated_without_calling_github
     write_config(false)
     forge = KernelMaintenanceSupport::StubForgeClient.new
@@ -50,8 +89,8 @@ class KernelMaintenanceGithubAccessTest < Minitest::Test
     result = engine.apply("type" => "TestGitHubAccess", "payload" => { "repository" => "acme/app" })
 
     assert_equal "accepted", result.fetch("status")
-    assert_equal "unavailable", result.dig("result", "outcome")
-    assert_match(/Enable GitHub support/, result.fetch("message"))
+    assert_equal "disabled", result.dig("result", "outcome")
+    assert_match(/GitHub support is disabled/, result.fetch("message"))
     assert_empty forge.access_calls
     refute File.exist?(state_path), "a disabled check must not create a state/log record"
   end

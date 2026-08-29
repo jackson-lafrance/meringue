@@ -85,7 +85,7 @@ class HarnessGithubAccessTest < HarnessIntegrationTest
     assert_equal 1, invocations.length
   end
 
-  def test_repository_failure_is_permission_denied_after_authentication
+  def test_repository_failure_is_distinguished_after_authentication
     script_gh(
       "repo_stderr" => "GraphQL: Could not resolve to a Repository with the name 'acme/app'.",
       "repo_exit" => 1
@@ -93,15 +93,15 @@ class HarnessGithubAccessTest < HarnessIntegrationTest
 
     result = @client.test_access(repository: "acme/app")
 
-    assert_equal "permission_denied", result.fetch("outcome")
-    assert_match(/not accessible/, result.fetch("message"))
+    assert_equal "repository_read_failure", result.fetch("outcome")
+    assert_match(/could not be read/, result.fetch("message"))
     assert_equal 2, invocations.length
   end
 
-  def test_missing_gh_is_unavailable
+  def test_missing_gh_is_distinguished_from_other_unavailability
     with_env("PATH" => @empty_bin_dir) do
       result = @client.test_access(repository: "acme/app")
-      assert_equal "unavailable", result.fetch("outcome")
+      assert_equal "missing_tooling", result.fetch("outcome")
     end
 
     assert_empty invocations

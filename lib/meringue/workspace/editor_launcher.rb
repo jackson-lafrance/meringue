@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "tempfile"
+
 module Meringue
   module Workspace
     # Launches the user's editor as a separate process rooted in a worker's
@@ -31,6 +33,30 @@ module Meringue
         @configuration_error = e.message
         @command = nil
         @arguments = []
+      end
+
+      # Open a temporary text file in the configured editor and return its edited
+      # contents only when the editor exits successfully. The caller owns whether
+      # those contents become a setting; cancellation and every failure preserve
+      # the original value.
+      def edit_text(text, extension: ".txt")
+        return rejected("Editor configuration is invalid: #{configuration_error}. Update [workspace] editor_command/editor_args in ~/.meringue/config.toml.") if configuration_error
+
+        Tempfile.create(["meringue-edit-", extension.to_s]) do |file|
+          file.write(text.to_s)
+          file.flush
+          executable = command.executable_path(cwd: Dir.pwd, path: env.fetch("PATH", ""))
+          return failed("Could not open the editor because #{command.executable.inspect} was not found or is not executable.") unless executable
+
+          pid = spawn.call(env, executable, *command.argv.drop(1), file.path)
+          _, status = Process.waitpid2(pid)
+          return edited(File.read(file.path)) if status.success?
+
+          detail = status.signaled? ? "signal #{status.termsig}" : "status #{status.exitstatus}"
+          failed("Editor command #{command.display} exited with #{detail}; the original text was kept.")
+        end
+      rescue StandardError => e
+        failed("Could not edit the text: #{e.class}: #{e.message}; the original text was kept.")
       end
 
       def open(agent_or_path)
@@ -137,6 +163,10 @@ module Meringue
 
       def opened(message)
         { "status" => "opened", "message" => message }
+      end
+
+      def edited(text)
+        { "status" => "edited", "text" => text }
       end
 
       def rejected(message)
