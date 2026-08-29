@@ -298,7 +298,6 @@ module Meringue
         { "active" => true, "index" => @question_picker_index }
       end
 
-      # --- status-bar composer ---------------------------------------------
     end
   end
 end

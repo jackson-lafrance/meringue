@@ -18,7 +18,7 @@ Welcome and Done carry no controls at all. The flow derives navigation from the 
 
 ## The status bar is not asked about here
 
-Arranging the bottom bar is not a first-run decision: it is a surface someone tunes once they have watched it in use. It has two homes, both outside setup — the **Customize your status bar** action in Meringue Xtras, and the standalone `/status-bar` composer. Setup carried a step for it whose one control set a flag that emptied the card: the inline drag surface that flag was for had no draft, no snapshot, and no key routing behind it, so the step went blank and the composer never appeared.
+The dashboard bottom bar is not a first-run decision. It always uses the built-in layout, while the focused worker's status surfaces retain their own built-in information.
 
 ## Model and reasoning are not asked here
 

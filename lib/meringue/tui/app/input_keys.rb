@@ -26,7 +26,7 @@ module Meringue
 
       def dashboard_chat_undo_key?(key)
         return false unless keybinding?("undo", key) && @focused_pane == "chat"
-        return false if @settings_active || @status_bar_composer_active
+        return false if @settings_active
         return false if @question_picker_active || @model_picker_active || @delivery_pr_picker_active
 
         true

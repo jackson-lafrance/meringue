@@ -24,7 +24,6 @@ module Meringue
         return handle_local_config_command(text, state) if config_command?(text)
         return handle_local_reload_command if reload_command?(text)
         return handle_local_update_command if update_command?(text)
-        return handle_local_status_bar_command(state) if status_bar_command?(text)
         return handle_local_quit_command if quit_command?(text)
 
         false
@@ -56,11 +55,6 @@ module Meringue
         else
           open_settings(state)
         end
-        true
-      end
-
-      def handle_local_status_bar_command(state)
-        open_status_bar_composer(state)
         true
       end
 
@@ -167,7 +161,6 @@ module Meringue
           Pull-request picker: /prs opens every tracked PR that is still open, regardless of the AgentTree selection; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} opens the highlighted PR, and #{keys_for("cancel_navigation")} closes. #{keys_for("open_delivery_pr")} keeps its selection-aware behavior: it opens the selected issue's PR, or this picker when chat is unscoped.
           Settings pickers: bare /model or /models opens models, bare /thinking opens thinking levels, bare /theme or /themes opens themes, and bare /harness opens harnesses. They are bordered popovers; #{keys_for("cursor_left")}/#{keys_for("cursor_right")} switches role tabs where shown, #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} moves, #{keys_for("submit")} applies, #{keys_for("refresh_model_catalog")} refreshes the model catalog, and #{keys_for("cancel_navigation")} closes. /models refresh re-fetches without opening the picker. /prs opens the pull-request popover.
           Question picker: /questions opens existing open questions with local 1-based display numbers; #{keys_for("suggestion_previous")}/#{keys_for("suggestion_next")} move, #{keys_for("submit")} inserts /answer <question_id> into chat, and #{keys_for("cancel_navigation")} closes.
-          Status-bar composer: /status-bar edits only the dashboard bottom bar; Up/Down selects components, Left/Right reorders or changes alignment, Home/End moves to an edge, Space places/removes, R resets, Enter/Ctrl-S saves, Esc cancels, and mouse drag moves items between the left and right drop zones.
           Jump mode: /jump starts navigation; #{keys_for("agent_select_previous")}/#{keys_for("agent_select_next")} selects an item; #{keys_for("open_agent_workspace")} opens the selected worker workspace or a selected head's saved harness session; #{keys_for("open_delivery_pr")} or Enter opens a verified delivery PR; #{keys_for("cancel_navigation")} cancels.
           Head/session debugging: select a head and press #{keys_for("open_agent_workspace")}, or use /open-session <agent_id>, to open its saved harness session externally without turning it into a chat target.
           Focused worker workspace (optional deep interaction): press #{keys_for("workspace_leader")}, then #{keys_for("workspace_switch_view")} to switch between terminal and agent view, #{keys_for("workspace_cycle_filter")} to cycle the transcript filter, #{keys_for("workspace_open_agent_session")} to open the underlying agent session externally, #{keys_for("workspace_open_editor")} for the editor, #{keys_for("workspace_open_pull_request")} for the delivery PR, or #{keys_for("workspace_close")} to quit back to the AgentTree while preserving the worker/terminal. PageUp/PageDown or the mouse wheel scrolls Meringue-rendered transcripts and is delivered directly to embedded harness applications for native history navigation. In the focused composer, type / for workspace commands (/help, /terminal, /filter, /session, /editor, /pr, /cwd, /cancel, /quit); anything else is sent to the worker. Use dashboard chat for normal head-agent orchestration.
@@ -401,17 +394,13 @@ module Meringue
         text.to_s.strip == "/update"
       end
 
-      def status_bar_command?(text)
-        ["/status-bar", "/statusbar", "/layout"].include?(text.to_s.strip.downcase)
-      end
-
       def quit_command?(text)
         text == "/quit"
       end
 
       def local_navigation_command_without_id?(input_buffer)
         text = input_buffer.to_s.strip.downcase
-        return true if ["/jump", "/prs", "/questions", "/theme", "/themes", "/setup", "/config", "/status-bar", "/statusbar", "/layout", "/open-session"].include?(text)
+        return true if ["/jump", "/prs", "/questions", "/theme", "/themes", "/setup", "/config", "/open-session"].include?(text)
         return true if models_picker_command?(text)
         return true if thinking_picker_command?(text)
         return true if theme_picker_command?(text)

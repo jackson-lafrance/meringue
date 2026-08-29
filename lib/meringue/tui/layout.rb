@@ -16,24 +16,16 @@ module Meringue
       def initialize(agent_tree_pane: Panes::AgentTreePane.new,
                      chat_pane: Panes::ChatPane.new,
                      agent_workspace_pane: Panes::AgentWorkspacePane.new,
-                     settings_pane: Panes::SettingsPane.new,
-                     status_bar_composer_pane: StatusBarComposer::Pane.new)
+                     settings_pane: Panes::SettingsPane.new)
         @agent_tree_pane = agent_tree_pane
         @chat_pane = chat_pane
         @agent_workspace_pane = agent_workspace_pane
         @settings_pane = settings_pane
-        @status_bar_composer_pane = status_bar_composer_pane
       end
 
       def render(state, width:, height:, color: false)
         raw_width = [width.to_i, 1].max
         raw_height = [height.to_i, 1].max
-        if status_bar_composer_active?(state)
-          width = bounded_width(width)
-          height = bounded_height(height)
-          canvas = Canvas.new(width: width, height: height)
-          return render_status_bar_composer(canvas, state, width, height, color: color)
-        end
         if settings_active?(state)
           canvas = Canvas.new(width: raw_width, height: raw_height)
           return render_setup(canvas, state, raw_width, raw_height, color: color) if Settings.snapshot(state).fetch("mode", "settings") == "setup"
@@ -257,7 +249,6 @@ module Meringue
       end
 
       def pane_at(state, width:, height:, x:, y:)
-        return "status_bar_composer" if status_bar_composer_active?(state)
         return "settings" if settings_active?(state)
         return "agent_workspace" if fullscreen_agent_workspace?(state)
 
@@ -578,16 +569,6 @@ module Meringue
         [bounds.fetch(:width).to_i - 4, 1].max
       end
 
-      def status_bar_composer_hit(state, width:, height:, x:, y:)
-        return :inert unless status_bar_composer_active?(state)
-
-        status_bar_composer_pane.hit(StatusBarComposer.snapshot(state), width: width, height: height, x: x, y: y)
-      end
-
-      def status_bar_component_segments(state)
-        chat_pane.bottom_status_bar_components(state)
-      end
-
       # Same three answers for the model picker: a row index, `:chrome` for its
       # own border/caption, and `:outside` for a click-away dismiss.
       def model_picker_hit(state, width:, height:, x:, y:)
@@ -736,7 +717,7 @@ module Meringue
       end
 
       def scroll_limits(state, width:, height:)
-        return { "agent_tree" => 0, "logs" => 0, "chat" => 0 } if settings_active?(state) || status_bar_composer_active?(state) || fullscreen_agent_workspace?(state)
+        return { "agent_tree" => 0, "logs" => 0, "chat" => 0 } if settings_active?(state) || fullscreen_agent_workspace?(state)
 
         width = [width.to_i, MIN_WIDTH].max
         height = [height.to_i, MIN_HEIGHT].max
@@ -752,7 +733,7 @@ module Meringue
 
       private
 
-      attr_reader :agent_tree_pane, :chat_pane, :agent_workspace_pane, :settings_pane, :status_bar_composer_pane
+      attr_reader :agent_tree_pane, :chat_pane, :agent_workspace_pane, :settings_pane
 
       def agent_workspace_active?(state)
         return false if settings_active?(state)
@@ -770,21 +751,22 @@ module Meringue
         agent_workspace_active?(state) && !embedded_agent_workspace?(state)
       end
 
-      def status_bar_composer_active?(state)
-        StatusBarComposer.enabled?(state)
-      end
-
-      def render_status_bar_composer(canvas, state, width, height, color:)
-        status_bar_composer_pane.render(StatusBarComposer.snapshot(state), width: width, height: height, color: color)
-      end
-
-      # Only the dashboard footer is configurable. Invalid or absent data uses
-      # the useful component default; the focused-worker surfaces never read this
-      # document and therefore retain their prior hand-tuned behavior.
+      # The dashboard always uses this built-in layout. The focused-worker surfaces
+      # have their own hand-tuned renderers and remain independent.
       def dashboard_status_bar_lines(state)
-        layout = StatusBarLayout.new(StatusBarLayout.from_state(state))
         components = chat_pane.bottom_status_bar_components(state)
-        [layout.compose("left", components), layout.compose("right", components)]
+        left = %w[context open_pull_requests workers heads].flat_map { |id| status_bar_component(components, id) }
+        right = %w[harness model thinking].flat_map { |id| status_bar_component(components, id) }
+        [join_status_bar_components(left), join_status_bar_components(right)]
+      end
+
+      def status_bar_component(components, id)
+        segments = components[id] || components[id.to_sym]
+        Array(segments).empty? ? [] : [segments]
+      end
+
+      def join_status_bar_components(components)
+        components.each_with_index.flat_map { |segments, index| index.zero? ? Array(segments) : [[" · ", Style::DIM]] + Array(segments) }
       end
 
       def render_setup(canvas, state, width, height, color:)

@@ -190,13 +190,6 @@ module Meringue
         # row is accepted, so cancelling it can restore the theme active when it opened.
         @settings_picker_theme_original = nil
         @context_menu = nil
-        # Status-bar composition is a separate in-memory draft. Preview changes
-        # never touch the config until the single SaveConfiguration transaction
-        # succeeds, so Esc and failed saves are deterministic.
-        @status_bar_composer_active = false
-        @status_bar_composer_draft = nil
-        @status_bar_composer_saving = false
-        @status_bar_composer_drag = nil
         # First-run setup is a curated mode of the same transactional Settings
         # draft and full-screen pane. It is disabled for `meringue demo`, where no
         # kernel exists to save the draft or completion marker.
@@ -415,7 +408,6 @@ module Meringue
         # restores any theme preview. No setup marker is written on process exit.
         close_settings(discard: true) if @settings_active
         close_model_picker
-        close_status_bar_composer if @status_bar_composer_active
         persist_agent_workspace if @agent_workspace_active
         if @agent_workspace_active
           close_agent_workspace(async_interactive: false)
@@ -489,12 +481,6 @@ module Meringue
         end
 
         @chat_pastes.sync!(input_buffer)
-
-        # Settings and its nested status-bar composer own the complete screen and
-        # keep Esc/Ctrl-S as hard recovery keys regardless of dashboard bindings.
-        if @status_bar_composer_active
-          return handle_status_bar_composer_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
-        end
 
         if @settings_active
           return handle_settings_key(key, input_buffer, input_cursor, slash_suggestion_index, on_submit, state)
@@ -704,7 +690,6 @@ require_relative "app/scrolling"
 require_relative "app/settings"
 require_relative "app/settings_advanced"
 require_relative "app/setup"
-require_relative "app/status_bar_composer"
 require_relative "app/text_selection"
 require_relative "app/workspace_lifecycle"
 require_relative "app/workspace_state"
