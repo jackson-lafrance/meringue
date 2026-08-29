@@ -44,7 +44,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
   end
 
   class InteractiveController
-    attr_reader :keys, :terminal_keys, :closed, :opened_sizes, :resized_sizes
+    attr_reader :keys, :terminal_keys, :closed, :opened_sizes, :resized_sizes, :editors
     attr_accessor :snapshot_lines
 
     def initialize
@@ -54,6 +54,7 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       @opened_sizes = []
       @resized_sizes = []
       @snapshot_lines = ["Pi output"]
+      @editors = []
     end
 
     def open_workspace(agent:, state:, rows:, columns:)
@@ -100,6 +101,12 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       _ = [agent, state]
       @terminal_keys << key
       { "status" => "written", "bytes" => key.to_s.bytesize }
+    end
+
+    def open_editor(agent:, state: nil)
+      _ = state
+      @editors << agent
+      { "status" => "opened", "message" => "Opened #{agent.fetch("id")} in the editor." }
     end
 
     def close_workspace(agent:)
@@ -252,6 +259,70 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
     @state = empty_state.merge(
       "agents" => [agent_record("P1-I1-W1", "project_id" => "P1", "issue_id" => "P1-I1")]
     )
+  end
+
+  def test_live_head_opens_in_the_focused_workspace_and_renders_its_transcript
+    head = agent_record(
+      "H1",
+      "type" => "head",
+      "status" => "working",
+      "harness" => "pi",
+      "harness_metadata" => { "title" => "Route this request", "head_session_state" => "active" }
+    )
+    state = @state.merge("agents" => [head])
+
+    assert @app.send(:open_selected_agent, state)
+    assert_equal "H1", @app.instance_variable_get(:@agent_workspace_agent_id)
+    refute @app.instance_variable_get(:@agent_workspace_interactive)
+
+    snapshot = @app.send(:agent_workspace_snapshot, state, "", 0)
+    frame = @app.render(state.merge("_agent_workspace" => snapshot), width: 100, height: 32)
+    assert_includes frame, "focused head · H1"
+    assert_includes frame, "Route this request"
+    assert_equal "H1", @service.views.first.instance_variable_get(:@agent_id)
+  end
+
+  def test_head_workspace_closes_quietly_when_the_short_lived_record_settles
+    head = agent_record("H1", "type" => "head", "status" => "working", "harness" => "pi")
+    state = @state.merge("agents" => [head])
+    assert @app.send(:open_agent_workspace_by_id, state, "H1")
+
+    @app.send(:reconcile_workspace_selection!, @state.merge("agents" => []))
+
+    refute @app.instance_variable_get(:@agent_workspace_active)
+    assert @service.views.first.closed
+  end
+
+  def test_worker_focus_resets_all_chat_and_same_worker_toggles_back_to_filtered_logs
+    first_worker = agent_record("P1-I1-W1", "type" => "worker", "status" => "working")
+    state = @state.merge("agents" => [first_worker])
+    @app.send(:set_log_scope, "P1-I1-W1")
+
+    assert @app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+    assert_nil @app.instance_variable_get(:@log_scope_id), "entering focus must reset to All Chat"
+    view = @service.views.first
+
+    assert @app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+    refute @app.instance_variable_get(:@agent_workspace_active)
+    assert_equal "P1-I1-W1", @app.instance_variable_get(:@log_scope_id)
+    assert_equal "logs", @app.instance_variable_get(:@focused_pane)
+    assert view.closed, "toggling focus closes only the view handle"
+  end
+
+  def test_selecting_another_worker_closes_the_old_view_and_opens_the_new_one
+    workers = [
+      agent_record("P1-I1-W1", "type" => "worker", "status" => "working"),
+      agent_record("P1-I1-W2", "type" => "worker", "status" => "working")
+    ]
+    state = @state.merge("agents" => workers)
+
+    assert @app.send(:open_agent_workspace_by_id, state, "P1-I1-W1")
+    first = @service.views.first
+    assert @app.send(:open_agent_workspace_by_id, state, "P1-I1-W2")
+
+    assert first.closed
+    refute @service.views.last.closed
+    assert_equal "P1-I1-W2", @app.instance_variable_get(:@agent_workspace_agent_id)
   end
 
   def test_returning_to_dashboard_closes_only_the_view_and_reopens_the_same_stream
@@ -532,6 +603,34 @@ class TuiWorkspaceLifecycleTest < Minitest::Test
       app&.send(:close_agent_workspace)
       controller&.close
     end
+  end
+
+  def test_focused_worker_editor_action_uses_the_configured_workspace_controller
+    controller = InteractiveController.new
+    app = Meringue::TUI::App.new(
+      layout: Meringue::TUI::Layout.new,
+      terminal: TUISupport::FakeTerminal.new,
+      workspace_controller: controller
+    )
+    state = @state.merge(
+      "projects" => [project_record("P1")],
+      "issues" => [issue_record("P1-I1", "project_id" => "P1", "title" => "Edit worker files")],
+      "agents" => [agent_record(
+        "P1-I1-W1",
+        "type" => "worker",
+        "status" => "working",
+        "harness" => "pi",
+        "project_id" => "P1",
+        "issue_id" => "P1-I1",
+        "workspace" => { "path" => "/tmp/worker" }
+      )]
+    )
+
+    app.instance_variable_set(:@agent_workspace_agent_id, "P1-I1-W1")
+    app.send(:open_agent_workspace_editor, state)
+
+    assert_equal ["P1-I1-W1"], controller.editors.map { |agent| agent.fetch("id") }
+    assert_equal "Opened P1-I1-W1 in the editor.", app.instance_variable_get(:@agent_workspace_notice)
   end
 
   def test_embedded_native_focus_routes_input_by_pane_and_returns_to_prior_focus

@@ -11,6 +11,7 @@ module Meringue
       MIN_HEIGHT = 10
       WIDE_WIDTH = 80
       COMPACT_WIDTH = 46
+      EDITOR_CUSTOM_OPTION = "custom command…"
 
       # Curated first-run mode over the same Draft, schema definitions, editors,
       # and pane used by /config. Experiment ids are always derived from the
@@ -18,8 +19,8 @@ module Meringue
       module SetupFlow
         WELCOME = "Welcome"
         HARNESS = "Harness"
-        PROJECT = "Project"
         THEME = "Theme"
+        STATUS_BAR = "Status bar"
         # The step id stays the schema category it draws from; only the heading
         # reads "Meringue Xtras".
         EXPERIMENTS = "Experiments"
@@ -31,12 +32,13 @@ module Meringue
         # confirmation rather than a decision whenever exactly one harness is
         # actually installed. Welcome and Done carry no controls at all: a first
         # run should open and close with something to read, not a form.
-        STEPS = [WELCOME, HARNESS, PROJECT, THEME, EXPERIMENTS, DONE].freeze
+        STEPS = [WELCOME, HARNESS, THEME, STATUS_BAR, EXPERIMENTS, DONE].freeze
         NARRATIVE_STEPS = [WELCOME, DONE].freeze
 
         FIXED_SETTING_IDS = {
-          HARNESS => %w[agent.head_harness agent.worker_harness].freeze,
+          HARNESS => %w[agent.head_harness agent.worker_harness workspace.editor].freeze,
           THEME => %w[appearance.theme appearance.animations].freeze,
+          STATUS_BAR => %w[appearance.status_bar_layout].freeze,
         }.freeze
 
         # Model and reasoning both have per-harness defaults that are correct for
@@ -282,8 +284,8 @@ module Meringue
             "type" => definition.type,
             "editor" => definition.editor,
             "value" => Config.deep_copy(current),
-            "display_value" => display_value(definition, current),
-            "default_value" => display_value(definition, default),
+            "display_value" => definition.editor == "action" ? "Enter" : display_value(definition, current),
+            "default_value" => definition.editor == "action" ? "Enter" : display_value(definition, default),
             "source" => definition.source(config, env: @env),
             "dirty" => changed?(definition.id),
             "error" => errors[definition.id],
@@ -365,7 +367,7 @@ module Meringue
           return "<redacted: #{value.is_a?(Hash) ? value.length : 1} entr#{value.is_a?(Hash) && value.length == 1 ? "y" : "ies"}>" if definition.sensitive && !value.to_h.empty?
 
           # An enum that carries its own labels shows the label, so a row reads
-          # "By role" rather than the stored "role-specific".
+          # "Split" rather than the stored "role-specific".
           labelled = definition.option_label(value) if definition.type == "enum"
           return labelled if labelled && labelled != value.to_s
 

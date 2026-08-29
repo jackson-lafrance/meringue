@@ -187,6 +187,9 @@ module Meringue
         @settings_setup_auto = false
         @settings_setup_outcome = nil
         @settings_status_bar_draft = nil
+        # A settings theme picker previews independently of the draft until its
+        # row is accepted, so cancelling it can restore the theme active when it opened.
+        @settings_picker_theme_original = nil
         @settings_status_bar_drag = nil
         @context_menu = nil
         # Status-bar composition is a separate in-memory draft. Preview changes

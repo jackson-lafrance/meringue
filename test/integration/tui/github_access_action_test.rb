@@ -68,6 +68,22 @@ class TuiGithubAccessActionTest < Minitest::Test
     assert @app.send(:settings_rows).any? { |row| row.fetch("id") == "experiments.github_support_test_access" }
   end
 
+  def test_setup_access_check_uses_the_draft_opt_in_without_saving_it
+    write_config(false)
+    @app = Meringue::TUI::App.new(layout: @layout, config: Meringue::Config.load(path: @config_path))
+    @app.send(:open_settings, @state, mode: "setup")
+    5.times { send_key(TAB) }
+    @app.instance_variable_get(:@settings_draft).set("experiments.github_support", true)
+    rows = @app.send(:settings_rows)
+    @app.instance_variable_set(:@settings_row_index, rows.index { |row| row.fetch("id") == "experiments.github_support_test_access" })
+
+    @app.send(:activate_settings_row, @state, on_submit: @handler)
+    command = Meringue::Input::SlashCommandParser.new.parse(@submitted.pop)
+
+    assert_equal true, command.payload.fetch("draft_github_support")
+    assert_equal false, Meringue::Config.load(path: @config_path).value("experiments", "github_support")
+  end
+
   def test_disabled_action_is_completely_absent_in_settings_and_setup
     write_config(false)
     @app = Meringue::TUI::App.new(layout: @layout, config: Meringue::Config.load(path: @config_path))
@@ -88,9 +104,12 @@ class TuiGithubAccessActionTest < Minitest::Test
   def test_all_client_outcomes_have_clear_configuration_labels
     expected = {
       "success" => "Ready",
+      "disabled" => "Disabled",
       "unavailable" => "Unavailable",
+      "missing_tooling" => "GitHub CLI missing",
       "unauthenticated" => "Not authenticated",
       "permission_denied" => "Permission denied",
+      "repository_read_failure" => "Repository not readable",
       "timeout" => "Timed out",
       "malformed_remote" => "Malformed remote"
     }

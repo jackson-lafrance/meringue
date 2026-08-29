@@ -138,7 +138,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     snapshot.fetch("rows").length.times { send_key("\e[B") } # focus the navigation footer
     assert snapshot.fetch("footer_focus")
     send_key(ENTER)
-    assert_equal "Project", snapshot.fetch("category")
+    assert_equal "Theme", snapshot.fetch("category")
     assert_empty drain_submitted
   end
 
@@ -148,7 +148,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     assert_equal "Welcome", snapshot.fetch("category")
     send_key(ENTER)
     send_key(TAB)
-    assert_equal "Project", snapshot.fetch("category")
+    assert_equal "Theme", snapshot.fetch("category")
     send_key(BACKSPACE)
     assert_equal "Harness", snapshot.fetch("category")
     send_key(DELETE)
@@ -158,7 +158,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
   def test_focused_controls_use_contextual_hints_and_enter_opens_pickers
     open_setup
     send_key(ENTER)
-    2.times { send_key(TAB) }
+    send_key(TAB)
     assert_equal "Theme", snapshot.fetch("category")
     assert_includes render, "Enter open picker"
 
@@ -171,7 +171,6 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     assert_equal true, snapshot.fetch("rows").fetch(snapshot.fetch("row_index")).fetch("value")
 
     # Model lives behind the advanced reveal on the harness step now.
-    send_key(BACKSPACE)
     send_key(BACKSPACE)
     assert_equal "Harness", snapshot.fetch("category")
     reveal_setup_advanced
@@ -239,7 +238,7 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     send_key(LEFT)
     assert_equal "next", snapshot.fetch("footer_button")
     send_key(ENTER)
-    assert_equal "Project", snapshot.fetch("category")
+    assert_equal "Theme", snapshot.fetch("category")
     send_key(BACKSPACE)
     assert_equal "Harness", snapshot.fetch("category")
   end

@@ -47,7 +47,7 @@ module Meringue
         @options = options
         # Present only on an enum whose stored values are not what a person
         # should read: the mode experiment stores "role-specific" and shows
-        # "By role".
+        # "Split".
         @option_labels = (option_labels || {}).transform_keys(&:to_s).transform_values(&:to_s).freeze
         @option_descriptions = (option_descriptions || {}).transform_keys(&:to_s).transform_values(&:to_s).freeze
         @advanced = !!advanced
@@ -269,6 +269,7 @@ module Meringue
       ].freeze
       THINKING_LEVELS = %w[off minimal low medium high xhigh max].freeze
       PROVIDERS = %w[pi claude codex].freeze
+      EDITOR_PRESETS = ["vim", "code --wait", "cursor --wait"].freeze
       # The backend list is stored as ids and read as products. Setup and /config
       # both used to render the raw id twice ("pi  pi"), which told a first-time
       # user nothing about what they were choosing between.
@@ -487,10 +488,10 @@ module Meringue
               "Experiments",
               "string",
               Meringue::Experiments::WorkerSpawningGuidance.default_text,
-              editor: "text",
+              editor: "action",
               apply_mode: "live",
               label: "Guided selection prompt",
-              description: "Additional system-prompt text supplied to heads in guided mode. Use @ for models and # for thinking levels.",
+              description: "",
               dependencies: ["experiments.#{experiment.id}"]
             )
           end
@@ -556,7 +557,7 @@ module Meringue
           definition("workspace.worktree_stall_timeout", %w[workspace worktree_stall_timeout], "Workspace", "duration", 120, editor: "integer", label: "Checkout stall timeout", description: "Seconds a worktree checkout may produce no output.", minimum: 1, maximum: 86_400, advanced: true),
           definition("workspace.worktree_checkout_timeout", %w[workspace worktree_checkout_timeout], "Workspace", "duration", 1800, editor: "integer", label: "Checkout ceiling", description: "Absolute seconds allowed for one worktree checkout.", minimum: 1, maximum: 604_800, advanced: true),
           definition("workspace.shell", %w[workspace shell_command], "Workspace", "command_argv", ->(_config, env) { [env["MERINGUE_SHELL"] || env["SHELL"] || "/bin/sh"] }, editor: "command", label: "Workspace shell", description: "Shell argv for focused workspace terminals.", override_env: %w[MERINGUE_SHELL SHELL], advanced: true),
-          definition("workspace.editor", %w[workspace editor_command], "Workspace", "command_argv", ->(_config, env) { [env["MERINGUE_EDITOR"] || env["VISUAL"] || env["EDITOR"] || "code"] }, editor: "command", label: "Workspace editor", description: "Editor argv launched from focused workspaces.", override_env: %w[MERINGUE_EDITOR VISUAL EDITOR], advanced: true),
+          definition("workspace.editor", %w[workspace editor_command], "Workspace", "command_argv", ->(_config, env) { Shellwords.split(env["MERINGUE_EDITOR"] || env["VISUAL"] || env["EDITOR"] || "code") }, editor: "editor_command", label: "Preferred editor", description: "Command used when Meringue opens a file or focused worker workspace. Choose a preset or enter your own command; arguments are passed safely without a shell.", override_env: %w[MERINGUE_EDITOR VISUAL EDITOR], options: EDITOR_PRESETS, advanced: true),
           definition("workspace.editor_args", %w[workspace editor_args], "Workspace", "string_list", ["."], editor: "list", label: "Editor arguments", description: "Arguments appended when opening a worker worktree.", advanced: true),
           definition("workspace.terminal_buffer_bytes", %w[workspace terminal_buffer_bytes], "Workspace", "integer", 4 * 1024 * 1024, editor: "integer", label: "Terminal buffer", description: "Maximum focused terminal output retained in bytes.", minimum: 4096, maximum: 256 * 1024 * 1024, advanced: true),
           definition("workspace.alacritty_command", %w[terminal alacritty_command], "Workspace", "command_argv", ->(_config, env) { env["MERINGUE_ALACRITTY_COMMAND"].to_s.empty? ? [] : [env["MERINGUE_ALACRITTY_COMMAND"]] }, editor: "command", label: "External terminal command", description: "Optional command used to open provider sessions externally.", override_env: %w[MERINGUE_ALACRITTY_COMMAND], advanced: true, optional: true)

@@ -8,6 +8,8 @@ module Meringue
     module Onboarding
       module_function
 
+      PROMPT_GUIDANCE = "Send a prompt for your project—Meringue handles the rest."
+
       def completed?(config)
         version_for(config) >= Meringue::Config::ONBOARDING_VERSION
       end
@@ -52,7 +54,7 @@ module Meringue
           "  Worker: #{role_summary(selected, "worker")}",
           "  Experiments: #{experiment_summary(selected)}",
           "",
-          "  Type a goal in plain English — Meringue opens the issue and starts the worker.",
+          "  #{PROMPT_GUIDANCE}",
           "  /glossary explains the vocabulary, /help lists every command, /config changes any setting."
         ]
         lines.join("\n")

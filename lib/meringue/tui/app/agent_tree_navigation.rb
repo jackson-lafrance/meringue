@@ -138,6 +138,13 @@ module Meringue
 
         selected_agent = Meringue::Ids.find_record(Array(state.fetch("agents", [])), selected_id)
         if selected_agent&.fetch("type", nil) == "head"
+          # Keep the detached debug opener for integrations that do not provide
+          # the focused transcript service. Once that service is configured, a
+          # live head uses the normal workspace experience.
+          if agent_session_service&.respond_to?(:open)
+            return open_agent_workspace_by_id(state, selected_id)
+          end
+
           open_head_session_for_debugging(selected_agent)
           return false
         end
@@ -146,9 +153,9 @@ module Meringue
         open_agent_workspace_by_id(state, selected_id)
       end
 
-      # Heads never gain a focused workspace or become chat targets. `a` is only
-      # a debugging affordance over the persisted harness history. Expected
-      # unavailability is transient dashboard feedback, not a durable log line.
+      # A head's session is read-only and short-lived, but it uses the same focused
+      # transcript surface as a worker while the head record is still alive. The
+      # external opener remains available through /open-session for settled/debug use.
       def open_head_session_for_debugging(head)
         result = external_agent_session_result(head)
         status = result.fetch("status", "failed").to_s
