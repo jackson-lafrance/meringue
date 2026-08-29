@@ -314,7 +314,10 @@ class FoundationLifecycleTest < Minitest::Test
     assert_equal ["", 0, -1], result
     lifecycle.updates.pop
     app.instance_variable_get(:@lifecycle_update_thread)&.join
+
     assert app.send(:reload_requested?)
+    messages = app.send(:chat_snapshot, "").fetch("messages")
+    assert_equal ["Update completed"], messages.map { |message| message.fetch("text") }
   end
 
   def test_update_failure_is_reported_without_requesting_a_reload
@@ -331,7 +334,9 @@ class FoundationLifecycleTest < Minitest::Test
     app.instance_variable_get(:@lifecycle_update_thread)&.join
 
     refute app.send(:reload_requested?)
-    assert_includes app.send(:chat_snapshot, "").fetch("messages").last.fetch("text"), "The checkout is dirty."
+    messages = app.send(:chat_snapshot, "").fetch("messages")
+    assert_equal "Updating Meringue…", messages.first.fetch("text")
+    assert_includes messages.last.fetch("text"), "The checkout is dirty."
   end
 
   def test_second_update_is_rejected_while_the_first_is_running
