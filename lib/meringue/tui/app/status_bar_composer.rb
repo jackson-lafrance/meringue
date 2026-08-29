@@ -8,15 +8,11 @@ module Meringue
       # Visibility does not carry across a reopened class body, so it is restated here.
       private
 
-      def open_status_bar_composer(_state, return_to_settings: false)
-        initial_value = if return_to_settings && @settings_draft
-                          @settings_draft.value("appearance.status_bar_layout")
-                        end
-        @status_bar_composer_draft = StatusBarComposer::Draft.new(config, initial_value: initial_value)
+      def open_status_bar_composer(_state)
+        @status_bar_composer_draft = StatusBarComposer::Draft.new(config)
         @status_bar_composer_active = true
         @status_bar_composer_saving = false
         @status_bar_composer_drag = nil
-        @status_bar_composer_return_to_settings = return_to_settings == true
         close_delivery_pr_picker
         close_model_picker
         close_question_picker
@@ -32,7 +28,6 @@ module Meringue
         @status_bar_composer_draft = nil
         @status_bar_composer_saving = false
         @status_bar_composer_drag = nil
-        @status_bar_composer_return_to_settings = false
         @force_full_redraw = true
         true
       end
@@ -135,14 +130,6 @@ module Meringue
         return false if @status_bar_composer_saving
         unless @status_bar_composer_draft.validate
           return false
-        end
-
-        if @status_bar_composer_return_to_settings && @settings_draft
-          layout = @status_bar_composer_draft.layout
-          value = layout.configured? ? layout.serialized : ""
-          @settings_draft.set("appearance.status_bar_layout", value)
-          close_status_bar_composer
-          return true
         end
 
         changes = @status_bar_composer_draft.changes

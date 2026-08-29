@@ -57,9 +57,17 @@ class TuiTransactionalSetupTest < Minitest::Test
     refute app.send(:onboarding_autostart?)
   end
 
-  def test_status_bar_picker_is_absent_but_configuration_and_runtime_surfaces_remain
-    assert_equal %w[Welcome Harness Theme Status\ bar Experiments Done], Meringue::TUI::Settings::SetupFlow.steps
-    refute_includes Meringue::TUI::Settings::SetupFlow.setting_ids("Experiments"), "appearance.status_bar_layout"
+  # The status bar is not part of a first run at all. Arranging it is an
+  # Experiments action and the standalone `/status-bar` composer; setup used to
+  # carry a step whose one control opened nothing.
+  def test_the_status_bar_is_absent_from_setup_but_its_other_surfaces_remain
+    assert_equal %w[Welcome Harness Theme Experiments Done], Meringue::TUI::Settings::SetupFlow.steps
+    Meringue::TUI::Settings::SetupFlow.steps.each do |step|
+      refute_includes Meringue::TUI::Settings::SetupFlow.setting_ids(step), "appearance.status_bar_layout"
+    end
+
+    @app.send(:open_settings, @state, mode: "setup")
+    assert_includes Meringue::TUI::Settings::SetupFlow.setting_ids("Experiments"), "experiments.customize_status_bar"
 
     @app.send(:open_settings, @state)
     refute @app.send(:settings_rows).any? { |row| row.fetch("id") == "appearance.status_bar_layout" }
@@ -130,9 +138,6 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert_equal preview, @app.instance_variable_get(:@settings_draft).value("appearance.theme")
     assert_equal "[settings]\nschema_version = 1\n", File.read(@config_path)
     assert_empty submitted
-
-    send_key(TAB) # Status bar
-    assert_equal "Status bar", setup_snapshot.fetch("category")
 
     send_key(TAB) # Experiments
     assert_equal "Experiments", setup_snapshot.fetch("category")

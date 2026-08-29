@@ -158,33 +158,6 @@ module Meringue
                    end
           return setup_modal_view(snap, detail, geometry) if detail
 
-          if snap.fetch("category", "") == "Status bar" && snap.fetch("status_bar_composer", nil).is_a?(Hash)
-            composer_y = card.fetch(:y) + 5
-            return {
-              geometry: geometry,
-              card_title: setup_card_title(snap),
-              heading: setup_heading(snap),
-              progress: setup_progress(snap, width: content_width),
-              content_x: card.fetch(:x) + 2,
-              content_y: composer_y,
-              content_width: content_width,
-              lines: [],
-              row_y: nil,
-              window_start: 0,
-              visible_count: 0,
-              selected_row: nil,
-              counter: "",
-              modal: false,
-              composer: snap.fetch("status_bar_composer"),
-              composer_bounds: {
-                x: card.fetch(:x) + 2,
-                y: composer_y,
-                width: content_width,
-                height: [geometry.fetch(:action_y) - composer_y, 1].max
-              }
-            }
-          end
-
           rows = Array(snap.fetch("rows", []))
           selected = snap.fetch("row_index", 0).to_i.clamp(0, [rows.length - 1, 0].max)
           on_action = snap.fetch("footer_focus", false)

@@ -584,18 +584,6 @@ module Meringue
         status_bar_composer_pane.hit(StatusBarComposer.snapshot(state), width: width, height: height, x: x, y: y)
       end
 
-      def inline_status_bar_composer_hit(state, width:, height:, x:, y:)
-        snap = Settings.snapshot(state)
-        composer = snap.fetch("status_bar_composer", nil)
-        return :inert unless composer.is_a?(Hash)
-
-        view = settings_pane.setup_view(state, width: width, height: height)
-        bounds = view.fetch(:composer_bounds, nil)
-        return :inert unless bounds
-
-        status_bar_composer_pane.hit(composer, width: width, height: height, x: x, y: y, bounds: bounds)
-      end
-
       def status_bar_component_segments(state)
         chat_pane.bottom_status_bar_components(state)
       end
@@ -822,12 +810,8 @@ module Meringue
         progress = view.fetch(:progress)
         write_centered_segments(canvas, card.fetch(:x) + 2, card.fetch(:y) + 2, content_width, progress.fetch(:caption))
         write_centered_segments(canvas, card.fetch(:x) + 2, card.fetch(:y) + 3, content_width, progress.fetch(:bar)) unless progress.fetch(:bar).empty?
-        if view.fetch(:composer, nil).is_a?(Hash) && view.fetch(:composer_bounds, nil)
-          status_bar_composer_pane.draw_inline(canvas, view.fetch(:composer), bounds: view.fetch(:composer_bounds))
-        else
-          view.fetch(:lines).each_with_index do |line, index|
-            draw_line(canvas, view.fetch(:content_x), view.fetch(:content_y) + index, content_width, line)
-          end
+        view.fetch(:lines).each_with_index do |line, index|
+          draw_line(canvas, view.fetch(:content_x), view.fetch(:content_y) + index, content_width, line)
         end
         footer_y = geometry.fetch(:footer_y)
         footer = settings_pane.setup_footer_segments(state, width: width)

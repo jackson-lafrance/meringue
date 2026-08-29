@@ -20,7 +20,6 @@ module Meringue
         WELCOME = "Welcome"
         HARNESS = "Harness"
         THEME = "Theme"
-        STATUS_BAR = "Status bar"
         # The step id stays the schema category it draws from; only the heading
         # reads "Meringue Xtras".
         EXPERIMENTS = "Experiments"
@@ -32,13 +31,12 @@ module Meringue
         # applied to both roles; splitting them is what /config is for. Welcome
         # and Done carry no controls at all: a first run should open and close
         # with something to read, not a form.
-        STEPS = [WELCOME, HARNESS, THEME, STATUS_BAR, EXPERIMENTS, DONE].freeze
+        STEPS = [WELCOME, HARNESS, THEME, EXPERIMENTS, DONE].freeze
         NARRATIVE_STEPS = [WELCOME, DONE].freeze
 
         FIXED_SETTING_IDS = {
           HARNESS => %w[agent.head_harness workspace.editor].freeze,
           THEME => %w[appearance.theme appearance.animations].freeze,
-          STATUS_BAR => %w[appearance.status_bar_layout].freeze,
         }.freeze
 
         # Model and reasoning are not asked during a first run at all. Every

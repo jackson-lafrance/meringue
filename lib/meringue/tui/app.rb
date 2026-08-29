@@ -186,11 +186,9 @@ module Meringue
         @settings_footer_button = "next"
         @settings_setup_auto = false
         @settings_setup_outcome = nil
-        @settings_status_bar_draft = nil
         # A settings theme picker previews independently of the draft until its
         # row is accepted, so cancelling it can restore the theme active when it opened.
         @settings_picker_theme_original = nil
-        @settings_status_bar_drag = nil
         @context_menu = nil
         # Status-bar composition is a separate in-memory draft. Preview changes
         # never touch the config until the single SaveConfiguration transaction
@@ -199,7 +197,6 @@ module Meringue
         @status_bar_composer_draft = nil
         @status_bar_composer_saving = false
         @status_bar_composer_drag = nil
-        @status_bar_composer_return_to_settings = false
         # First-run setup is a curated mode of the same transactional Settings
         # draft and full-screen pane. It is disabled for `meringue demo`, where no
         # kernel exists to save the draft or completion marker.

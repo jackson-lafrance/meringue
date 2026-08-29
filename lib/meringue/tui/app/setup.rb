@@ -16,7 +16,6 @@ module Meringue
       def setup_rows
         step = settings_category
         return [] if Settings::SetupFlow.narrative?(step)
-        return setup_status_bar_rows if step == Settings::SetupFlow::STATUS_BAR
 
         rows = Settings::SetupFlow.setting_ids(step, draft: @settings_draft).filter_map do |id|
           setup_definition_row(id)
@@ -79,20 +78,6 @@ module Meringue
         display = row.fetch("display_value", "").to_s
         display = "#{display} · #{Harness::Availability.summary(located)}" if located && !display.empty?
         row.merge("option_labels" => annotated, "display_value" => display)
-      end
-
-      # The composer is a real editing surface and it used to be the whole step,
-      # so a first run made everyone lay out a bar they had never seen in use.
-      # The default is shown live above; customizing is a deliberate choice.
-      def setup_status_bar_rows
-        return [] if @settings_status_bar_customizing
-
-        [synthetic_settings_row(
-          "setup.customize_status_bar",
-          "Customize layout",
-          "Drag the open-PR, worker/head count, harness, model, and reasoning components between the left and right sides.",
-          "Enter"
-        )]
       end
 
       # Setup preselects a harness only when the machine leaves no ambiguity.

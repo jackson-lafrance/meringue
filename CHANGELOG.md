@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
+- Setup no longer has a Status bar step. Activating its **Customize layout** control set a flag
+  that emptied the card: the inline drag surface behind that flag had no draft, no snapshot, and
+  no key routing, so the step went blank and no composer ever appeared. Arranging the bar stays
+  where it already worked — the **Customize your status bar** action in Meringue Xtras, and the
+  standalone `/status-bar` composer — and the unreachable inline scaffolding is gone.
 - First-run setup asks for one harness and applies it to both roles, instead of asking twice and
   then offering model and reasoning behind a reveal. The model picker could not be answered during
   a first run anyway: its list comes from a catalog the harness reports once a session has run, so

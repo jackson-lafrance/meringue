@@ -14,8 +14,6 @@ module Meringue
         @settings_mode = mode.to_s == "setup" ? "setup" : "settings"
         @settings_setup_auto = @settings_mode == "setup" && setup_origin.to_s == "auto"
         @settings_setup_outcome = nil
-        @settings_status_bar_draft = nil
-        @settings_status_bar_drag = nil
         @settings_category_index = 0
         @settings_row_index = 0
         @settings_expanded_advanced = {}
@@ -29,7 +27,6 @@ module Meringue
         @settings_saving = false
         @github_access_test_result = nil
         @harness_check_result = nil
-        @settings_status_bar_customizing = false
         @harness_availability = harness_availability_snapshot
         preselect_detected_harnesses if setup_mode?
         close_delivery_pr_picker
@@ -60,11 +57,8 @@ module Meringue
         @github_access_test_result = nil
         @harness_check_result = nil
         @harness_availability = nil
-        @settings_status_bar_customizing = false
         @settings_setup_auto = false
         @settings_setup_outcome = nil
-        @settings_status_bar_draft = nil
-        @settings_status_bar_drag = nil
         @settings_mode = "settings"
         close_question_picker
         @force_full_redraw = true
@@ -689,10 +683,6 @@ module Meringue
         @settings_row_index = 0
         @settings_footer_focus = false
         @settings_footer_button = "next"
-        # Leaving the step closes the drag surface, so coming back shows the
-        # layout as it now stands rather than reopening mid-edit.
-        @settings_status_bar_customizing = false
-        @settings_status_bar_drag = nil
       end
 
       def move_settings_row(delta)
@@ -812,13 +802,6 @@ module Meringue
         end
         if id == "_setup_begin"
           move_settings_category(1)
-          return true
-        end
-        if id == "setup.customize_status_bar"
-          return false if toggle_only
-
-          @settings_status_bar_customizing = true
-          @settings_row_index = 0
           return true
         end
         if id == "experiments.github_support_test_access"

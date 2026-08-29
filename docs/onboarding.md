@@ -6,16 +6,19 @@ Setup is not a chat prompt and does not maintain a second settings implementatio
 
 ## Steps
 
-The centered card shows one dynamic `Step N of 6` indicator:
+The centered card shows one dynamic `Step N of 5` indicator:
 
 1. **Welcome** — what Meringue is, in the three nouns the rest of the flow depends on: you describe a goal, a head decides what should happen, workers do the work in their own worktrees. No controls; the navigation action is focused so Enter continues.
 2. **Harness** — the one decision Meringue cannot run without, asked once. A first run does not distinguish head from worker: there is a single **Harness** row, and the answer is applied to both roles. Options carry the product name and whether this machine can actually start them (`Claude Code · installed`, `Codex CLI · not found`). **Check harness** runs the selected backend once and reports what it answered. Splitting the roles deliberately is what `/config` is for.
 3. **Theme** — theme and animation preference. Theme changes preview immediately in memory.
-4. **Status bar** — the default bottom-bar layout as it currently reads, with **Customize layout** opening the live composer inline.
-5. **Meringue Xtras** — experiment controls derived directly from `Experiments::Registry`, all off until chosen. The status-bar customization action opens a context-rich agent session; the read-only **Test GitHub access** action is completely absent until GitHub support is selected.
-6. **Done** — the harness, theme, and experiments the Complete action is about to save, so finishing is checkable rather than hopeful.
+4. **Meringue Xtras** — experiment controls derived directly from `Experiments::Registry`, all off until chosen. **Customize your status bar** opens a context-rich agent session; the read-only **Test GitHub access** action is completely absent until GitHub support is selected.
+5. **Done** — the harness, theme, and experiments the Complete action is about to save, so finishing is checkable rather than hopeful.
 
 Welcome and Done carry no controls at all. The flow derives navigation from the step list, so future setup sections can be appended without introducing a review-only special case.
+
+## The status bar is not asked about here
+
+Arranging the bottom bar is not a first-run decision: it is a surface someone tunes once they have watched it in use. It has two homes, both outside setup — the **Customize your status bar** action in Meringue Xtras, and the standalone `/status-bar` composer. Setup carried a step for it whose one control set a flag that emptied the card: the inline drag surface that flag was for had no draft, no snapshot, and no key routing behind it, so the step went blank and the composer never appeared.
 
 ## Model and reasoning are not asked here
 
@@ -43,14 +46,14 @@ Setup registers nothing. Project discovery and registration happen later, when t
 
 ## Interaction
 
-- `↑` / `↓`: move through the current card's controls; moving past the last ordinary control focuses the navigation footer. A card with no controls at all (Welcome, Done) focuses its navigation action from the start, so Enter always continues. On the status-bar composer these keys select a component.
-- `←` / `→`: change a focused boolean toggle or move focus; they never advance to another setup step. On the status-bar page they reorder the selected component and move it across the center alignment boundary.
-- `Enter`: begin, toggle a checkbox, open a picker for list-backed values such as theme and models, or activate the single centered **Next** action. On the status-bar page `Space` places/removes the selected component and `X` removes it.
+- `↑` / `↓`: move through the current card's controls; moving past the last ordinary control focuses the navigation footer. A card with no controls at all (Welcome, Done) focuses its navigation action from the start, so Enter always continues.
+- `←` / `→`: change a focused boolean toggle or move focus; they never advance to another setup step.
+- `Enter`: begin, toggle a checkbox, open a picker for list-backed values such as theme and models, or activate the single centered **Next** action.
 - `Delete` / `Backspace`: go back one setup step.
 - `Tab`: next setup step; `Shift-Tab` remains available as a backwards step shortcut.
 - `Esc`: first-run skip or manual cancel, as described below.
-- Left-click: select controls, choose picker entries, or click the displayed **Next** or **Complete** navigation control. On the status-bar page, drag components within or between its left/right drop zones.
-- Mouse wheel: move the current list or status-bar component selection. Empty space and right-click remain inert.
+- Left-click: select controls, choose picker entries, or click the displayed **Next** or **Complete** navigation control.
+- Mouse wheel: move the current list selection. Empty space and right-click remain inert.
 
 The navigation action shows when it is focused, as `› [ Next ] ‹` in the selection style (`> [ Next ] <` with `MERINGUE_ASCII_GLYPHS=1`). Without that, arrowing down onto it changed nothing on screen and pressing Enter was a guess.
 
@@ -98,7 +101,7 @@ Setup automatically opens only when:
 
 Responsive presentation keeps the setup card centered without requiring a large terminal:
 
-- **80+ columns:** a spacious centered card with centered Begin and Next/Complete actions plus, once asked for, the inline status-bar drag-and-drop surface.
+- **80+ columns:** a spacious centered card with centered Begin and Next/Complete actions.
 - **46–79 columns:** the same card shrinks to the available width while retaining the heading, single step indicator, and keyboard hints.
 - **32–45 columns:** compact card copy and the single step indicator, with `Esc` recovery always visible.
 - **below 32×10:** terminal-too-small message and `Esc cancel` only.
