@@ -17,7 +17,7 @@ class WorkspaceManagerCollisionTest < Minitest::Test
       project = File.basename(File.expand_path(arguments.fetch(:project_root)))
       plan.merge(
         "workspace_path" => File.join(root_path, project, "forced-candidate"),
-        "workspace_branch" => "meringue/forced-candidate"
+        "workspace_branch" => "forced-candidate-deadbeef"
       )
     end
   end

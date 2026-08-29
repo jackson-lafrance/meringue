@@ -121,7 +121,7 @@ module Meringue
       def pull_request_records(record)
         return [] unless record.is_a?(Hash)
 
-        [record["delivery_pull_request"], *Array(record["delivery_pull_requests"])].compact.filter_map do |entry|
+        Array(record["delivery_pull_requests"]).filter_map do |entry|
           case entry
           when Hash then entry.transform_keys(&:to_s)
           when String then { "url" => entry }

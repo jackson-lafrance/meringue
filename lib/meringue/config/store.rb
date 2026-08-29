@@ -52,7 +52,6 @@ module Meringue
             set_path!(data, definition.path, serialized_value(definition, value))
             definition.aliases.each { |alias_path| delete_path!(data, alias_path) }
           end
-          canonicalize_role_defaults!(data, normalized.keys)
           validate_cross_fields!(data, changed_ids: normalized.keys)
           if outcome
             set_path!(data, %w[onboarding completed_version], Config::ONBOARDING_VERSION)

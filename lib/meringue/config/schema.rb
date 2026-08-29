@@ -22,7 +22,7 @@ module Meringue
       ATTRIBUTES = %i[
         id path category type default aliases normalize validate description visibility editor
         apply_mode dependencies sensitive serialize label options advanced override_env minimum maximum
-        fallback_paths optional env_overrides env_value option_labels option_descriptions
+        optional env_overrides env_value option_labels option_descriptions
       ].freeze
 
       ATTRIBUTES.each { |attribute| attr_reader attribute }
@@ -37,7 +37,6 @@ module Meringue
         @category = category.to_s.freeze
         @type = type.to_s.freeze
         @aliases = Array(aliases).map { |alias_path| Array(alias_path).map(&:to_s).freeze }.freeze
-        @fallback_paths = Array(fallback_paths).map { |fallback_path| Array(fallback_path).map(&:to_s).freeze }.freeze
         @dependencies = Array(dependencies).map(&:to_s).freeze
         @visibility = (visibility || "normal").to_s.freeze
         @editor = (editor || type).to_s.freeze
@@ -83,7 +82,7 @@ module Meringue
                             end
         return environment_value if env_overrides && environment_key
 
-        configured_path = ([path] + aliases + fallback_paths).compact.find { |candidate| config.path_present?(*candidate) }
+        configured_path = path if path && config.path_present?(*path)
         return Config.deep_copy(config.value(*configured_path)) if configured_path
         return environment_value if environment_key
 
@@ -94,7 +93,7 @@ module Meringue
         environment_key = override_env.find { |key| env.key?(key) && !env[key].to_s.empty? }
         return "env:#{environment_key}" if env_overrides && environment_key
 
-        configured_path = ([path] + aliases + fallback_paths).compact.find { |candidate| config.path_present?(*candidate) }
+        configured_path = path if path && config.path_present?(*path)
         if configured_path
           override_source = config.override_source_for(*configured_path)
           return override_source if override_source
@@ -321,7 +320,7 @@ module Meringue
       end
 
       def paths
-        definitions.flat_map { |definition| [definition.path, *definition.aliases] }.compact
+        definitions.filter_map(&:path)
       end
 
       def validate_registry!
@@ -329,7 +328,7 @@ module Meringue
         duplicate_paths = paths.map { |path| path.join(".") }.group_by(&:itself).select { |_path, values| values.length > 1 }.keys
         errors = []
         errors << "duplicate setting ids: #{duplicate_ids.join(", ")}" unless duplicate_ids.empty?
-        errors << "duplicate setting paths/aliases: #{duplicate_paths.join(", ")}" unless duplicate_paths.empty?
+        errors << "duplicate setting paths: #{duplicate_paths.join(", ")}" unless duplicate_paths.empty?
         raise ArgumentError, errors.join("; ") unless errors.empty?
 
         true
@@ -390,31 +389,23 @@ module Meringue
 
       def add_role_defaults(settings)
         settings.concat([
-          definition("agent.head_harness", %w[harness head_provider], "Agent defaults", "enum", nil, fallback_paths: [%w[harness provider]], options: PROVIDERS, option_labels: PROVIDER_OPTION_LABELS, option_descriptions: PROVIDER_OPTION_DESCRIPTIONS, editor: "selector", apply_mode: "live", label: "Head harness", description: "Agent harness used for future routing heads.", override_env: %w[MERINGUE_HEAD_HARNESS MERINGUE_HARNESS], env_overrides: true),
-          # Model and reasoning defaults follow whichever harness is selected rather than living
-          # under one backend's section. The legacy [harness.pi] paths stay readable as fallbacks so
-          # an existing configuration keeps working, and a value set under a specific backend still
-          # wins for that backend.
-          definition("agent.head_model", %w[harness head_model], "Agent defaults", "model_reference", ->(config, env) { default_model_for_role(config, env, "head") }, fallback_paths: [%w[harness model], %w[harness pi head_model], %w[harness pi model]], editor: "model", apply_mode: "live", label: "Head model", description: "Model for future heads; exact provider/model references remain allowed when the catalog is unavailable."),
-          definition("agent.head_thinking", %w[harness head_thinking_level], "Agent defaults", "thinking_level", "max", fallback_paths: [%w[harness thinking_level], %w[harness pi head_thinking_level], %w[harness pi thinking_level]], options: THINKING_LEVELS, editor: "selector", apply_mode: "live", label: "Head reasoning", description: "Reasoning level for future heads."),
-          definition("agent.worker_harness", %w[harness worker_provider], "Agent defaults", "enum", nil, fallback_paths: [%w[harness provider]], options: PROVIDERS, option_labels: PROVIDER_OPTION_LABELS, option_descriptions: PROVIDER_OPTION_DESCRIPTIONS, editor: "selector", apply_mode: "live", label: "Worker harness", description: "Agent harness used for future workers.", override_env: %w[MERINGUE_WORKER_HARNESS MERINGUE_HARNESS], env_overrides: true),
-          definition("agent.worker_model", %w[harness worker_model], "Agent defaults", "model_reference", ->(config, env) { default_model_for_role(config, env, "worker") }, fallback_paths: [%w[harness model], %w[harness pi worker_model], %w[harness pi model]], editor: "model", apply_mode: "live", label: "Worker model", description: "Model for future workers; existing sessions are unchanged."),
-          definition("agent.worker_thinking", %w[harness worker_thinking_level], "Agent defaults", "thinking_level", "max", fallback_paths: [%w[harness thinking_level], %w[harness pi worker_thinking_level], %w[harness pi thinking_level]], options: THINKING_LEVELS, editor: "selector", apply_mode: "live", label: "Worker reasoning", description: "Reasoning level for future workers."),
+          definition("agent.head_harness", %w[harness head_provider], "Agent defaults", "enum", nil, options: PROVIDERS, option_labels: PROVIDER_OPTION_LABELS, option_descriptions: PROVIDER_OPTION_DESCRIPTIONS, editor: "selector", apply_mode: "live", label: "Head harness", description: "Agent harness used for future routing heads.", override_env: %w[MERINGUE_HEAD_HARNESS], env_overrides: true),
+          definition("agent.head_model", %w[harness head_model], "Agent defaults", "model_reference", ->(config, env) { default_model_for_role(config, env, "head") }, editor: "model", apply_mode: "live", label: "Head model", description: "Model for future heads; exact provider/model references remain allowed when the catalog is unavailable."),
+          definition("agent.head_thinking", %w[harness head_thinking_level], "Agent defaults", "thinking_level", "max", options: THINKING_LEVELS, editor: "selector", apply_mode: "live", label: "Head reasoning", description: "Reasoning level for future heads."),
+          definition("agent.worker_harness", %w[harness worker_provider], "Agent defaults", "enum", nil, options: PROVIDERS, option_labels: PROVIDER_OPTION_LABELS, option_descriptions: PROVIDER_OPTION_DESCRIPTIONS, editor: "selector", apply_mode: "live", label: "Worker harness", description: "Agent harness used for future workers.", override_env: %w[MERINGUE_WORKER_HARNESS], env_overrides: true),
+          definition("agent.worker_model", %w[harness worker_model], "Agent defaults", "model_reference", ->(config, env) { default_model_for_role(config, env, "worker") }, editor: "model", apply_mode: "live", label: "Worker model", description: "Model for future workers; existing sessions are unchanged."),
+          definition("agent.worker_thinking", %w[harness worker_thinking_level], "Agent defaults", "thinking_level", "max", options: THINKING_LEVELS, editor: "selector", apply_mode: "live", label: "Worker reasoning", description: "Reasoning level for future workers."),
           # Watching many agents at once is the whole point of the dashboard, and "has this one
           # stopped, or is it still thinking?" is the question it could not answer. A worker that
           # has produced no output for this long is marked quiet in the AgentTree and logged once.
           # Quiet is not the same as stuck - a long tool call is quiet too - so the default is
           # generous and 0 turns the signal off entirely.
           definition("agent.quiet_worker_warning", %w[agent quiet_worker_warning_seconds], "Agent defaults", "duration", 900, editor: "integer", apply_mode: "live", label: "Quiet worker warning", description: "Seconds a working agent may produce no output before the AgentTree marks it quiet. 0 turns the marker off.", minimum: 0, maximum: 86_400),
-          definition("agent.shared_harness_compatibility", %w[harness provider], "Agent defaults", "read_only", nil, visibility: "internal", apply_mode: "none", label: "Shared harness compatibility", description: "Backward-compatible shared harness fallback."),
-          definition("agent.shared_model_compatibility", %w[harness model], "Agent defaults", "read_only", "anthropic/claude-opus-5", visibility: "internal", apply_mode: "none", label: "Shared model compatibility", description: "Backward-compatible shared model fallback."),
-          definition("agent.shared_thinking_compatibility", %w[harness thinking_level], "Agent defaults", "read_only", "max", visibility: "internal", apply_mode: "none", label: "Shared reasoning compatibility", description: "Backward-compatible shared reasoning fallback.")
         ])
       end
 
       def default_model_for_role(config, env, role)
-        role_provider = env["MERINGUE_#{role.upcase}_HARNESS"] || env["MERINGUE_HARNESS"] ||
-                        config&.value("harness", "#{role}_provider") || config&.value("harness", "provider")
+        role_provider = env["MERINGUE_#{role.upcase}_HARNESS"] || config&.value("harness", "#{role}_provider")
         if defined?(Meringue::Harness::Registry) && !role_provider.to_s.strip.empty?
           Meringue::Harness::Registry.default_model_for(role_provider)
         else
@@ -425,7 +416,7 @@ module Meringue
       end
 
       def add_appearance(settings)
-        settings << definition("appearance.theme", %w[tui colorscheme], "Appearance", "enum", "meringue", aliases: [%w[tui color_scheme]], options: ->(_config) { defined?(Meringue::TUI::Style) ? Meringue::TUI::Style.colorschemes : %w[meringue rose-pine tokyonight gruvbox catppuccin kanagawa] }, editor: "selector", apply_mode: "live", label: "Theme", description: "Dashboard colorscheme. Highlighting previews the theme; only Save persists it.")
+        settings << definition("appearance.theme", %w[tui colorscheme], "Appearance", "enum", "meringue", options: ->(_config) { defined?(Meringue::TUI::Style) ? Meringue::TUI::Style.colorschemes : %w[meringue rose-pine tokyonight gruvbox catppuccin kanagawa] }, editor: "selector", apply_mode: "live", label: "Theme", description: "Dashboard colorscheme. Highlighting previews the theme; only Save persists it.")
         settings << definition("appearance.animations", %w[tui animations], "Appearance", "boolean", true, editor: "checkbox", apply_mode: "live", label: "Animations", description: "Use motion where the terminal can render it safely.", override_env: %w[MERINGUE_NO_ANIMATION], env_overrides: true, env_value: ->(_key, _value, _env) { false })
       end
 

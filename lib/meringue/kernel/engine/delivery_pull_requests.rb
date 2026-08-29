@@ -150,7 +150,6 @@ module Meringue
 
           candidate_urls = (
             Array(issue.fetch("candidate_pr_urls", nil)) +
-            workers.flat_map { |worker| worker_legacy_candidate_pr_urls(worker) } +
             workers.flat_map { |worker| discovered_worker_candidate_pr_urls(agent: worker, project: project, issue: issue) }
           ).map(&:to_s).map(&:strip).reject(&:empty?).uniq
           next [] if candidate_urls.empty?
@@ -190,7 +189,7 @@ module Meringue
       def prune_pull_request_checks(state)
         workers_by_issue = worker_agents_by_issue(state)
         state.fetch("issues").filter_map do |issue|
-          urls = (issue_pr_urls(issue) + workers_by_issue.fetch(issue.fetch("id", nil), []).flat_map { |worker| worker_legacy_pr_urls(worker) }).uniq
+          urls = issue_pr_urls(issue).uniq
           next if urls.empty?
 
           {
@@ -662,7 +661,6 @@ module Meringue
       def issue_pull_request_summary(issue)
         {
           "id" => issue.fetch("id", nil),
-          "delivery_pull_request" => issue.fetch("delivery_pull_request", nil),
           "delivery_pull_requests" => Array(issue.fetch("delivery_pull_requests", [])),
           "reported_pr_urls" => Array(issue.fetch("reported_pr_urls", [])),
           "candidate_pr_urls" => Array(issue.fetch("candidate_pr_urls", []))
@@ -671,31 +669,11 @@ module Meringue
 
       def issue_pr_urls(issue)
         State::Models.pull_request_urls_from([
-          issue.fetch("delivery_pull_request", nil),
           *Array(issue.fetch("delivery_pull_requests", nil)),
           *Array(issue.fetch("reported_pr_urls", nil))
         ])
       end
 
-      def worker_legacy_pr_urls(agent)
-        metadata = agent.fetch("harness_metadata", {}) || {}
-        State::Models.pull_request_urls_from([
-          agent.fetch("delivery_pull_request", nil),
-          metadata.fetch("delivery_pull_request", nil),
-          *Array(agent.fetch("delivery_pull_requests", nil)),
-          *Array(metadata.fetch("delivery_pull_requests", nil)),
-          *Array(agent.fetch("reported_pr_urls", nil)),
-          *Array(metadata.fetch("reported_pr_urls", nil))
-        ])
-      end
-
-      def worker_legacy_candidate_pr_urls(agent)
-        metadata = agent.fetch("harness_metadata", {}) || {}
-        State::Models.pull_request_urls_from([
-          *Array(agent.fetch("candidate_pr_urls", nil)),
-          *Array(metadata.fetch("candidate_pr_urls", nil))
-        ])
-      end
     end
   end
 end

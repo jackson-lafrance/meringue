@@ -18,8 +18,6 @@ class InputSlashCommandParserTest < Minitest::Test
       "/recount" => ["Recount", {}],
       "/clear" => ["ClearState", {}],
       "/prune" => ["Prune", {}],
-      "/prune resolved" => ["Prune", { "selector" => "resolved" }],
-      "/prune errored" => ["Prune", { "selector" => "errored" }],
       "/theme rose-pine" => ["SetTheme", { "theme" => "rose-pine" }],
       "/harness claude" => ["SetHarness", { "provider" => "claude" }],
       "/model openai/gpt-5.6-sol" => ["SetDefaultSessionModel", { "model" => "openai/gpt-5.6-sol" }],
@@ -920,17 +918,6 @@ class InputSlashCommandParserTest < Minitest::Test
 
     assert_equal themes, suggestion_usages("/theme ", sample_state)
     assert_equal themes.select { |theme| theme.include?("r") }, suggestion_usages("/theme r", sample_state)
-  end
-
-  # The legacy selector words still parse so existing muscle memory keeps working, but they are
-  # inert: the kernel prunes everything eligible either way.
-  def test_legacy_prune_selector_words_are_accepted_as_no_op_aliases
-    Meringue::Input::SlashCommandParser::PRUNE_COMPATIBILITY_ARGUMENTS.each do |word|
-      parsed = parse_slash("/prune #{word}")
-
-      assert_equal "Prune", parsed.fetch("type"), "type for /prune #{word}"
-      assert_equal({ "selector" => word }, parsed.fetch("payload"), "payload for /prune #{word}")
-    end
   end
 
   private

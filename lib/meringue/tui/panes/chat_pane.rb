@@ -390,7 +390,7 @@ module Meringue
 
         # The dashboard footer is assembled from semantic components so shared and
         # split role defaults use one resolution path.
-        def bottom_status_bar_components(state)
+        def status_bar_components(state)
           metadata = state.fetch("metadata", {}) || {}
           defaults = metadata.fetch("agent_session_defaults", {}) || {}
           role_values = defaults.empty? ? nil : normalized_agent_role_defaults(defaults)

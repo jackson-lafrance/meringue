@@ -29,6 +29,7 @@ module Meringue
       return new({}, path: expanded_path, loaded: false, file_data: {}) unless File.file?(expanded_path)
 
       parsed = parse(File.read(expanded_path), path: expanded_path)
+      reject_obsolete_settings!(parsed, path: expanded_path)
       new(parsed, path: expanded_path, loaded: true, file_data: parsed)
     end
 
@@ -117,43 +118,25 @@ module Meringue
       return config if config.value("settings", "schema_version").to_i >= Schema::VERSION
 
       explicit_github = config.value("experiments", "github_support")
-      legacy_install = config.onboarding_version.positive? || preexisting_state?(state_path)
-      github_support = explicit_github == true || (explicit_github.nil? && legacy_install)
+      github_support = explicit_github == true
       patches = {
         "settings.schema_version" => Schema::VERSION,
         "experiments.github_support" => github_support
       }
-      # "Split head and worker defaults" and "worker model selection guidance"
-      # became the three modes of one setting. An installation that set either
-      # boolean keeps the arrangement it had; the retired keys are dropped so
-      # they cannot contradict the mode later.
-      if Experiments::AgentDefaultsMode.normalize(config.value(*Experiments::AgentDefaultsMode::CONFIG_PATH)).nil?
-        legacy_split = config.value(*Experiments::AgentDefaultsMode::LEGACY_SPLIT_PATH)
-        legacy_guidance = config.value(*Experiments::AgentDefaultsMode::LEGACY_GUIDANCE_PATH)
-        unless legacy_split.nil? && legacy_guidance.nil?
-          patches["experiments.agent_defaults_mode"] =
-            Experiments::AgentDefaultsMode.from_legacy(split: legacy_split, guidance: legacy_guidance)
-        end
-      end
       store = Store.new(path: expanded_path)
       store.patch_paths(base_fingerprint: store.fingerprint, patches: patches)
     end
 
-    def self.preexisting_state?(state_path)
-      return false if state_path.nil? || state_path.to_s.strip.empty?
-      return false unless File.file?(File.expand_path(state_path.to_s))
+    def self.reject_obsolete_settings!(data, path:)
+      obsolete = []
+      obsolete << "harness.provider" if data.dig("harness", "provider")
+      obsolete.concat(%w[model thinking_level].select { |key| data.dig("harness", key) })
+      obsolete.concat(%w[head_model worker_model head_thinking_level worker_thinking_level].select { |key| data.dig("harness", "pi", key) })
+      obsolete << "harness.pi" if data.dig("harness", "pi").is_a?(Hash)
+      obsolete << "tui.color_scheme" if data.dig("tui", "color_scheme")
+      return if obsolete.empty?
 
-      state = JSON.parse(File.read(File.expand_path(state_path.to_s)))
-      return true if Array(state["issues"]).any? do |issue|
-        issue.is_a?(Hash) && %w[delivery_pull_request delivery_pull_requests reported_pr_urls candidate_pr_urls].any? do |key|
-          value = issue[key]
-          value.is_a?(Array) ? !value.empty? : !value.nil?
-        end
-      end
-
-      true
-    rescue JSON::ParserError, SystemCallError
-      true
+      raise ParseError, "Obsolete configuration settings in #{path}: #{obsolete.uniq.join(", ")}. Use the current schema (harness.head_provider/worker_provider, harness.head_model/worker_model, harness.head_thinking_level/worker_thinking_level, and tui.colorscheme)."
     end
 
     def self.write_toml(path, data)

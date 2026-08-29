@@ -236,8 +236,6 @@ module Meringue
 
       def delivery_context(issue, agent, metadata, scrub: lambda { |value| redact_text(value) })
         records = State::Models.pull_request_records_from(issue)
-        records += State::Models.pull_request_records_from(agent)
-        records += State::Models.pull_request_records_from(metadata)
         records = State::Models.merge_pull_request_records(records).filter_map do |record|
           url = scrub.call(State::Models.pull_request_record_url(record))
           next if url.empty?
@@ -251,8 +249,8 @@ module Meringue
             "head_branch" => scrub.call(record["head_branch"] || record["head_ref"])
           }.compact
         end.uniq { |record| record.fetch("url") }
-        candidate_urls = (Array(issue["candidate_pr_urls"]) + Array(metadata["candidate_pr_urls"])).filter_map { |url| safe_public_url(scrub.call(url)) }.uniq
-        reported_urls = (Array(issue["reported_pr_urls"]) + Array(metadata["reported_pr_urls"])).filter_map { |url| safe_public_url(scrub.call(url)) }.uniq
+        candidate_urls = Array(issue["candidate_pr_urls"]).filter_map { |url| safe_public_url(scrub.call(url)) }.uniq
+        reported_urls = Array(issue["reported_pr_urls"]).filter_map { |url| safe_public_url(scrub.call(url)) }.uniq
         {
           "branch" => scrub.call(agent["workspace_branch"] || metadata["delivery_branch"]),
           "pull_requests" => records,

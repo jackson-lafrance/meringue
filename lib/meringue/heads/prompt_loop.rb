@@ -412,9 +412,7 @@ module Meringue
         metadata = result.fetch("harness_metadata", {}) || {}
         issue = result.fetch("issue", {}) || {}
         delivery_pull_requests = [
-          issue["delivery_pull_request"],
           *Array(issue["delivery_pull_requests"]),
-          metadata["delivery_pull_request"],
           *Array(metadata["delivery_pull_requests"])
         ].compact
         delivery_pull_requests.filter_map { |pull_request| pull_request.is_a?(Hash) ? pull_request["url"] : pull_request.to_s }.uniq

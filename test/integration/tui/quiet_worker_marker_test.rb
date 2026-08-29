@@ -106,7 +106,7 @@ class TuiQuietWorkerMarkerTest < Minitest::Test
     state.fetch("agents") << agent_record("P1-I1-W2", "issue_id" => "P1-I1",
                                                       "harness_metadata" => { "title" => "busy", "last_activity_at" => Time.now.utc.iso8601 })
 
-    segments = Meringue::TUI::Panes::ChatPane.new.bottom_status_bar_components(state).fetch("workers")
+    segments = Meringue::TUI::Panes::ChatPane.new.status_bar_components(state).fetch("workers")
     text = segments.map(&:first).join
 
     assert_includes text, "2 workers"
@@ -116,7 +116,7 @@ class TuiQuietWorkerMarkerTest < Minitest::Test
   def test_the_status_bar_says_nothing_about_quiet_when_none_are
     state = quiet_state(quiet_for: 10)
 
-    text = Meringue::TUI::Panes::ChatPane.new.bottom_status_bar_components(state).fetch("workers").map(&:first).join
+    text = Meringue::TUI::Panes::ChatPane.new.status_bar_components(state).fetch("workers").map(&:first).join
 
     assert_includes text, "1 worker"
     refute_includes text, "quiet"

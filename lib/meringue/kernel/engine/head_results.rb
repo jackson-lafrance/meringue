@@ -189,7 +189,7 @@ module Meringue
             )
           end
 
-          inferred = recovering && infer_legacy_head_command_result(state, head_id, command)
+          inferred = nil
           {
             "command_id" => command_id,
             "index" => index,
@@ -206,45 +206,6 @@ module Meringue
             "completed_at" => inferred ? timestamp : nil
           }.compact
         end
-      end
-
-      def infer_legacy_head_command_result(state, head_id, command)
-        command_id = value_at(command, "command_id", "id")
-        command_type = canonical_command_type(value_at(command, "type", "command_type"))
-        payload = value_at(command, "payload") || {}
-        target = case command_type
-                 when "AddProject"
-                   path = value_at(payload, "path", "Path", "root_path", "RootPath")
-                   expanded = present_string(path) && File.expand_path(path.to_s)
-                   expanded && state.fetch("projects").find { |project| File.expand_path(project.fetch("root_path")) == expanded }
-                 when "CreateIssue"
-                   project_id = value_at(payload, "project_id", "ProjectID", "projectId").to_s
-                   title = value_at(payload, "title", "Title").to_s.strip
-                   state.fetch("issues").find do |issue|
-                     issue.fetch("originating_head_id", nil) == head_id ||
-                       (issue.fetch("project_id", nil) == project_id && issue.fetch("title", "").to_s.strip == title)
-                   end
-                 when "SpawnWorker"
-                   issue_id = value_at(payload, "issue_id", "IssueID", "issueId").to_s
-                   state.fetch("agents").find do |agent|
-                     next false unless agent.fetch("type", nil) == "worker"
-
-                     metadata = agent.fetch("harness_metadata", {}) || {}
-                     command_matches = metadata.fetch("spawn_command_id", nil).to_s == command_id.to_s
-                     issue_matches = agent.fetch("issue_id", nil) == issue_id
-                     command_matches || (issue_matches && blank?(metadata.fetch("spawn_command_id", nil)))
-                   end
-                 when "PromptAgent"
-                   agent_id = value_at(payload, "agent_id", "AgentID", "agentId").to_s
-                   state.fetch("agents").find do |agent|
-                     next false unless agent.fetch("type", nil) == "worker" && agent.fetch("id", nil).to_s == agent_id
-
-                     Array((agent.fetch("harness_metadata", {}) || {}).fetch("prompt_command_ids", [])).map(&:to_s).include?(command_id.to_s)
-                   end
-                 end
-        return nil unless target
-
-        accepted_result(command_id, command_type, target.fetch("id", nil), "Recovered previously applied #{command_type} command.", deep_copy(target), [])
       end
 
       def ensure_head_questions!(state, head_id, questions, log_ids)

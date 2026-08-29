@@ -153,7 +153,7 @@ module Meringue
             "last_assistant_text" => present_string(last_assistant_text)
           }.compact
           completion_details["candidate_pr_urls"] = candidate_pr_urls unless candidate_pr_urls.empty?
-          completion_details["delivery_pull_request"] = delivery_pull_request if delivery_pull_request
+          completion_details["delivery_pull_requests"] = [delivery_pull_request] if delivery_pull_request
 
           log_ids = append_harness_event_logs(state, agent, harness_events)
           log_ids.concat(append_log(
