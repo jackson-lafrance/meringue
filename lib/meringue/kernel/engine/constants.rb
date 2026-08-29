@@ -263,7 +263,7 @@ module Meringue
         ["Work", %w[/issue /goal /recount /move]],
         ["Agents", %w[/worker /prompt /retry /jump /open-session /kill /prune]],
         ["Questions", %w[/questions /answer /dismiss]],
-        ["Settings", %w[/config /theme /themes /harness /model /models /thinking /status-bar /keybind]],
+        ["Settings", %w[/config /theme /themes /harness /model /models /thinking /keybind]],
         ["Session", %w[/prs /github /tree /state /clear /reload /update /quit]]
       ].freeze
       OTHER_HELP_GROUP = "Everything else"
@@ -319,11 +319,10 @@ module Meringue
         ["/jump [agent_id]", "TUI local: open an agent's focused workspace, or navigate the AgentTree when no id is provided."],
         ["/prs", "TUI local: open the picker for every tracked pull request that is still open."],
         ["/open-session <agent_id>", "TUI local: open an agent's underlying harness session for debugging."],
-        ["/setup", "TUI local: reopen Setup for theme, separate head/worker defaults, status-bar layout, and Meringue Xtras."],
+        ["/setup", "TUI local: reopen Setup for theme, separate head/worker defaults, and Meringue Xtras."],
         ["/keybind", "TUI local: show all keybindings."],
         ["/config", "TUI local: open full-screen Settings; /config --text prints diagnostics."],
         ["/github test", "Test read-only GitHub authentication and repository access."],
-        ["/status-bar", "TUI local: compose and save the dashboard bottom bar's left/right component layout."],
         ["/tree", "Show the current AgentTree state."],
         ["/state", "Show the raw Meringue state."],
         ["/questions", "Open the picker for existing open questions."],

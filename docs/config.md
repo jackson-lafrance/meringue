@@ -8,7 +8,7 @@ Meringue reads an optional TOML config file from:
 
 Use `--config PATH` to load a different file for a single run.
 
-Run `/config` for the full-screen schema-driven editor covering every supported setting. `/config --text` retains the read-only diagnostic listing. Bare `/theme` (or `/themes`) opens a preview picker; `/theme <name>`, `/model [head|worker] <provider>/<model-id>`, `/thinking [head|worker] <level>`, `/harness [head|worker] <provider>`, `/status-bar`, and setup compatibility commands use the same validated atomic persistence layer. First-run Setup is a curated mode of this same overlay. See [`settings.md`](settings.md) for interaction, responsive layouts, transactional save/cancel behavior, and provenance.
+Run `/config` for the full-screen schema-driven editor covering every supported setting. `/config --text` retains the read-only diagnostic listing. Bare `/theme` (or `/themes`) opens a preview picker; `/theme <name>`, `/model [head|worker] <provider>/<model-id>`, `/thinking [head|worker] <level>`, and setup compatibility commands use the same validated atomic persistence layer. First-run Setup is a curated mode of this same overlay. See [`settings.md`](settings.md) for interaction, responsive layouts, transactional save/cancel behavior, and provenance.
 
 ## Settings schema and experiments
 
@@ -31,7 +31,7 @@ When GitHub support is enabled, **Test GitHub access** appears as a non-persiste
 ## First-run setup marker
 
 The first interactive launch opens the shared Settings overlay for a theme,
-separate head/worker defaults, status-bar layout, and experiment checkboxes. Finishing or confirming
+separate head/worker defaults and experiment checkboxes. Finishing or confirming
 a first-run skip records one marker here:
 
 ```toml
@@ -648,4 +648,4 @@ Do not store API keys or secrets in the config file. Prefer each provider CLI's 
 
 ### Status-bar layouts
 
-Use `/status-bar` to open the live dashboard bottom-bar composer. Setup and Settings omit the broken picker; the Experiments action can instead open a context-rich agent session for collaborative customization. Components can be reordered and moved between left/right alignment zones. The focused worker's other two bars remain on their built-in renderers. The saved `tui.status_bar_layout` value is versioned JSON; an absent or invalid value uses the complete default. See [`status_bar_layouts.md`](status_bar_layouts.md) for the keyboard, mouse, cancellation, resize, and version-1 migration workflow.
+The dashboard always uses its default bottom status bar. The focused worker's agent-information and command/status bars remain on their built-in renderers.

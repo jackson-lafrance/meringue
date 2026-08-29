@@ -388,9 +388,8 @@ module Meringue
           segments
         end
 
-        # The bottom-bar composer works with real semantic components rather
-        # than opaque precomposed presets. Both the dashboard and Setup preview
-        # call this method, so shared/split role defaults use one resolution path.
+        # The dashboard footer is assembled from semantic components so shared and
+        # split role defaults use one resolution path.
         def bottom_status_bar_components(state)
           metadata = state.fetch("metadata", {}) || {}
           defaults = metadata.fetch("agent_session_defaults", {}) || {}

@@ -359,9 +359,7 @@ Key letters and labels come from the active bindings, so custom bindings render 
 
 ### Status-bar composer
 
-`/status-bar` opens a full-screen editor only for the dashboard bottom bar. `Up`/`Down` selects open-PR, worker/head count, harness, model, and thinking components; `Left`/`Right` reorders or moves the selected component across the left/right alignment boundary; `Home`/`End` moves it to an outer edge; `Space` places/removes it; `R` restores the useful default; `Enter`/`Ctrl-S` saves; and `Esc` cancels. Components can also be dragged within or between the two drop zones.
-
-Setup and Settings do not expose a status-bar picker. The Experiments action opens a context-rich agent session for collaborative customization, while the focused worker's agent-information and focused-worker bars retain their built-in layouts. Invalid configuration falls back to the complete bottom-bar default. See [`status_bar_layouts.md`](status_bar_layouts.md) for persistence and migration details.
+The dashboard and focused worker always use their built-in status-bar layouts. There is no status-bar customization command or setting.
 
 ### Workspace slash commands
 

@@ -80,10 +80,7 @@ module Meringue
             end
           rescue StandardError => e
             restore_pending_theme_picker if slash_command && text.start_with?("/theme ")
-            if slash_command && text.start_with?("/config save ") && @status_bar_composer_active && @status_bar_composer_draft
-              @status_bar_composer_saving = false
-              @status_bar_composer_draft.apply_save_failure("Configuration save failed: #{e.class}: #{e.message}")
-            elsif slash_command && text.start_with?("/config save ") && @settings_active && @settings_draft
+            if slash_command && text.start_with?("/config save ") && @settings_active && @settings_draft
               @settings_saving = false
               @settings_draft.apply_save_failure("Configuration save failed: #{e.class}: #{e.message}")
             elsif assistant_message_id
@@ -237,22 +234,13 @@ module Meringue
         if result.fetch("status", nil) == "accepted"
           outcome = result.dig("result", "onboarding_outcome") || @settings_setup_outcome
           setup_was_active = @settings_active && setup_mode?
-          composer_was_active = @status_bar_composer_active
           @config = config.reload_file
           workspace_controller.reload_editor_config(@config) if workspace_controller&.respond_to?(:reload_editor_config)
           @keybindings = Keybindings.from_config(@config.section("tui", "keybindings"))
           close_settings(discard: outcome == "skipped") if @settings_active
-          close_status_bar_composer if composer_was_active
           if setup_was_active && outcome
             append_jump_response(outcome == "skipped" ? Onboarding.skip_card : Onboarding.completion_card(@config))
           end
-        elsif @status_bar_composer_active && @status_bar_composer_draft
-          @status_bar_composer_saving = false
-          details = result.fetch("result", {}) || {}
-          @status_bar_composer_draft.apply_save_failure(
-            result.fetch("message", "Configuration was not saved."),
-            details.fetch("field_errors", {})
-          )
         elsif @settings_active && @settings_draft
           @settings_saving = false
           details = result.fetch("result", {}) || {}
@@ -262,10 +250,7 @@ module Meringue
           )
         end
       rescue StandardError => e
-        if @status_bar_composer_active && @status_bar_composer_draft
-          @status_bar_composer_saving = false
-          @status_bar_composer_draft.apply_save_failure("Configuration result could not be applied: #{e.message}")
-        elsif @settings_active && @settings_draft
+        if @settings_active && @settings_draft
           @settings_saving = false
           @settings_draft.apply_save_failure("Configuration result could not be applied: #{e.message}")
         end

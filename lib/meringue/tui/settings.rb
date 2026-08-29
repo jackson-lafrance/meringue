@@ -135,11 +135,8 @@ module Meringue
           @config = config
           @env = env
           @baseline_fingerprint = config.fingerprint
-          # The status-bar layout remains a durable configuration and direct
-          # composer surface, but it is not a Settings picker. Agent-assisted
-          # customization is offered from Experiments instead.
           @definitions = Config::Schema.definitions.reject do |definition|
-            definition.visibility == "internal" || definition.id == "appearance.status_bar_layout"
+            definition.visibility == "internal"
           end
           @values = Config::Schema.effective_values(config, env: env).slice(*@definitions.map(&:id))
           @original_values = Config.deep_copy(@values)

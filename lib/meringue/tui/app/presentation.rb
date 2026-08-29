@@ -23,8 +23,6 @@ module Meringue
         composed_state = state.merge(
           "_chat" => chat_snapshot(input_buffer, slash_suggestion_index, input_cursor),
           Settings::STATE_KEY => settings_snapshot(state),
-          StatusBarComposer::STATE_KEY => status_bar_composer_snapshot(state),
-          "_status_bar_layout" => StatusBarLayout.from_config(config),
           "_capabilities" => { "github_support" => github_support_enabled?(state) },
           "_agent_tree_navigation" => agent_tree_navigation_snapshot,
           LogScope::STATE_KEY => LogScope.snapshot(state, @log_scope_id),
