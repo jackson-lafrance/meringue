@@ -187,8 +187,15 @@ module Meringue
         @agent_workspace_open_generation += 1
         @chat_mutex.synchronize { @agent_workspace_open_result = nil }
         close_agent_workspace_session
-        if @agent_workspace_interactive && workspace_controller&.respond_to?(:close_workspace)
-          close_interactive_agent_workspace(@agent_workspace_agent_id, asynchronous: async_interactive)
+        if @agent_workspace_interactive && workspace_controller
+          # Leaving the dashboard view is not a harness lifecycle operation. In particular, a
+          # focused prompt may still be running, so never send the provider shutdown key or ask
+          # the kernel to settle/reattach merely because the pane was closed.
+          if workspace_controller.respond_to?(:detach_workspace)
+            workspace_controller.detach_workspace(agent: @agent_workspace_agent_id)
+          else
+            close_interactive_agent_workspace(@agent_workspace_agent_id, asynchronous: async_interactive)
+          end
         elsif !preserve_terminal && workspace_controller&.respond_to?(:close_terminal)
           workspace_controller.close_terminal(agent: @agent_workspace_agent_id)
         end

@@ -135,6 +135,17 @@ module Meringue
         resolution = PathResolver.resolve(agent)
         path = resolution.fetch("path", nil)
         return rejected(resolution.fetch("message", "Selected worker has no assigned workspace.")) unless path
+        existing = @mutex.synchronize { @interactive_sessions[agent_key(agent)] }
+        if existing && existing.fetch("detached", false)
+          @mutex.synchronize { existing.delete("detached") }
+          return {
+            "status" => "active",
+            "interactive" => true,
+            "pid" => existing.fetch("session").respond_to?(:pid) ? existing.fetch("session").pid : nil,
+            "workspace_path" => path,
+            "message" => "Reopened Agent session for #{agent.fetch("id", "worker")} in #{path}."
+          }.compact
+        end
         return { "status" => "opened", "message" => "Focused #{agent.fetch("id", "worker")} in #{path}." } unless focus_session_service
 
         case focus_mode(agent: agent)
@@ -388,6 +399,23 @@ module Meringue
 
         interactive_screen(agent, rows: rows, columns: columns).resize(rows: rows, columns: columns) unless failed_result?(result)
         result
+      end
+
+      # Detach only the dashboard's view of a handoff session. The interactive process remains
+      # registered and owns the harness transport, so an in-flight focused prompt can finish
+      # without being interrupted or being interpreted as a settled turn. Explicit cleanup still
+      # uses close_workspace (for controller shutdown and failed handoffs).
+      def detach_workspace(agent:)
+        key = agent_key(agent)
+        entry = @mutex.synchronize { @interactive_sessions[key] }
+        return { "status" => "closed", "message" => "Agent session was already detached." } unless entry
+
+        if live_terminal_entry?(entry)
+          detach_live_terminal(agent.is_a?(Hash) ? agent.fetch("id") : agent.to_s)
+        else
+          @mutex.synchronize { entry["detached"] = true }
+        end
+        { "status" => "closed", "message" => "Detached from the Agent view; the worker session is still running." }
       end
 
       def close_workspace(agent:)
