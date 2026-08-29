@@ -39,6 +39,8 @@ class InputSlashCommandParserTest < Minitest::Test
       "/kill P1-I1" => ["Kill", { "target_id" => "P1-I1" }],
       "/worker pause P1-I1-W1" => ["PauseWorker", { "agent_id" => "P1-I1-W1" }],
       "/worker resume P1-I1-W1" => ["ResumeWorker", { "agent_id" => "P1-I1-W1" }],
+      "/worker protect P1-I1-W1" => ["SetAgentPruneProtection", { "agent_id" => "P1-I1-W1", "protected" => true }],
+      "/worker unprotect P1-I1-W1" => ["SetAgentPruneProtection", { "agent_id" => "P1-I1-W1", "protected" => false }],
       "/worker export /tmp/workers.json P1-I1-W1" => ["ExportWorkers", { "path" => "/tmp/workers.json", "worker_ids" => ["P1-I1-W1"] }],
       "/worker import /tmp/workers.json --project /tmp/project" => ["ImportWorkers", { "path" => "/tmp/workers.json", "project_path" => "/tmp/project" }],
       "/dismiss Q1" => ["DismissQuestion", { "question_id" => "Q1" }],

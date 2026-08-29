@@ -112,10 +112,16 @@ module Meringue
       def maintenance_commands(user_message:, snapshot:)
         message = user_message.to_s
         return [command("ClearState", "confirmed_by_user" => true)] if clear_state_request?(message)
+        target = referenced_record_id(snapshot, message)
+        if target && message.match?(/\b(unprotect|allow\s+prun)/i)
+          return [command("SetAgentPruneProtection", "agent_id" => target, "protected" => false)]
+        end
+        if target && message.match?(/\bprotect\b/i)
+          return [command("SetAgentPruneProtection", "agent_id" => target, "protected" => true)]
+        end
         return [command("Prune")] if prune_request?(message)
         return [command("Recount")] if message.match?(/\b(recount|renumber)\b/i)
 
-        target = referenced_record_id(snapshot, message)
         return [command("Kill", "target_id" => target, "confirmed_by_user" => true)] if target && kill_request?(message)
         return [command("GetInfo", "target_id" => target)] if target && info_request?(message)
 

@@ -242,6 +242,7 @@ module Meringue
         "list_questions" => "ListQuestions",
         "reconcile_sessions" => "ReconcileSessions",
         "prune" => "Prune",
+        "set_agent_prune_protection" => "SetAgentPruneProtection",
         "recount" => "Recount",
         "clear" => "ClearState",
         "clear_state" => "ClearState",
@@ -301,6 +302,8 @@ module Meringue
         ["/worker guide \"<additional system prompt>\"", "Persist the additional worker model-selection system prompt when its experiment is enabled."],
         ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."],
         ["/worker resume <agent_id>", "Resume a paused worker session."],
+        ["/worker protect <agent_id>", "Protect an agent and its containing issue/project from pruning."],
+        ["/worker unprotect <agent_id>", "Clear an agent's durable prune protection."],
         ["/worker export <bundle_path> [agent_id...]", "Export current workers for a fresh retry on another computer."],
         ["/worker import <bundle_path> --project <path>", "Import workers as fresh sessions in a destination project."],
         ["/prompt <agent_id> \"<message>\"", "Continue a worker session or take over a still-routing head."],
@@ -343,7 +346,7 @@ module Meringue
         AddProject ModifyProject CreateIssue ModifyIssue MoveWorker MoveIssue SpawnWorker PromptAgent SpawnHead NoOp
         CreateGoal ModifyGoal StopGoal ListGoals
         AskQuestion AnswerQuestion DismissQuestion
-        PauseWorker ResumeWorker ExportWorkers ImportWorkers
+        PauseWorker ResumeWorker ExportWorkers ImportWorkers SetAgentPruneProtection
         Kill Prune Recount ClearState SetTheme SetHarness ReconcileSessions
       ].freeze
       HEAD_BLOCKED_COMMANDS = %w[ApplyHeadResult InvalidSlashCommand RetryHead SaveConfiguration].freeze

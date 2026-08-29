@@ -24,8 +24,8 @@ module Meringue
         ["/move <agent_id> <issue_id>", "Move an existing worker to a different issue without restarting its harness session."],
         ["/worker spawn <issue_id> \"<prompt>\"", "Spawn a worker for an issue."],
         ["/worker guide \"<additional system prompt>\"", "Persist the additional worker model-selection system prompt when its experiment is enabled."],
-        ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."],
-        ["/worker resume <agent_id>", "Resume a paused worker session."],
+        ["/worker pause <agent_id>", "Pause a worker without killing its resumable session."], ["/worker protect <agent_id>", "Protect an agent and its containing issue/project from pruning."],
+        ["/worker resume <agent_id>", "Resume a paused worker session."], ["/worker unprotect <agent_id>", "Clear an agent's durable prune protection."],
         ["/worker export <bundle_path> [agent_id...]", "Export current workers for a fresh retry on another computer."],
         ["/worker import <bundle_path> --project <path>", "Import workers as fresh sessions in a destination project."],
         ["/prompt <agent_id> \"<message>\"", "Continue a worker session or take over a still-routing head."],
@@ -1077,6 +1077,10 @@ module Meringue
           return invalid("Usage: /worker #{tokens.first.downcase} <agent_id>") unless tokens.length == 2
 
           kernel_command(tokens.first.to_s.downcase == "pause" ? "PauseWorker" : "ResumeWorker", "agent_id" => tokens[1])
+        when "protect", "unprotect"
+          return invalid("Usage: /worker #{tokens.first.downcase} <agent_id>") unless tokens.length == 2
+
+          kernel_command("SetAgentPruneProtection", "agent_id" => tokens[1], "protected" => tokens.first.to_s.downcase == "protect")
         when "export"
           return invalid("Usage: /worker export <bundle_path> [agent_id...]") if tokens.length < 2
 
@@ -1090,7 +1094,7 @@ module Meringue
 
           kernel_command("ImportWorkers", "path" => tokens[1], "project_path" => tokens[3])
         else
-          invalid("Usage: /worker spawn <issue_id> \"<prompt>\" | /worker guide \"<additional system prompt>\" | /worker pause <agent_id> | /worker resume <agent_id> | /worker export <bundle_path> [agent_id...] | /worker import <bundle_path> --project <path>")
+          invalid("Usage: /worker spawn <issue_id> \"<prompt>\" | /worker guide \"<additional system prompt>\" | /worker pause <agent_id> | /worker resume <agent_id> | /worker protect <agent_id> | /worker unprotect <agent_id> | /worker export <bundle_path> [agent_id...] | /worker import <bundle_path> --project <path>")
         end
       end
 
@@ -1239,9 +1243,6 @@ module Meringue
         end
       end
 
-      # Ids are passed through exactly as typed. The kernel canonicalizes them against state, so
-      # `/answer q8` resolves to Q8 while an unknown id keeps the text the user typed in its
-      # rejection message. See Meringue::Ids.
       def parse_answer(arguments)
         tokens = split_arguments(arguments)
         kernel_command(
@@ -1258,8 +1259,6 @@ module Meringue
         kernel_command("DismissQuestion", "question_id" => tokens[0])
       end
 
-      # A bare `/prune` performs the full cleanup. A single legacy selector word is accepted as a
-      # no-op compatibility alias; anything else is rejected with the short usage message.
       def parse_prune(arguments)
         tokens = split_arguments(arguments)
         return kernel_command("Prune") if tokens.empty?

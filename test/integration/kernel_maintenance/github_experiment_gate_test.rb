@@ -71,6 +71,7 @@ class KernelMaintenanceGithubExperimentGateTest < Minitest::Test
     prune = @engine.apply("type" => "Prune", "payload" => {})
 
     assert_equal "accepted", completion.fetch("status")
+    assert_equal "rejected", prune.fetch("status")
     assert_empty @forge.status_calls
     assert_empty @forge.branch_calls
     issue = @store.load.fetch("issues").find { |record| record["id"] == "P1-I1" }

@@ -173,6 +173,8 @@ module Meringue
           @worker_spawn_mutex.synchronize { import_workers(command_id, command_type, payload) }
         elsif command_type == "Prune"
           @prune_mutex.synchronize { prune(command_id, command_type, payload) }
+        elsif command_type == "SetAgentPruneProtection"
+          set_agent_prune_protection(command_id, command_type, payload)
         elsif command_type == "SaveConfiguration"
           # The config lock must be acquired before the state lock. Validation and
           # atomic publication happen first; runtime/state mirrors follow.
@@ -292,6 +294,8 @@ module Meringue
           reconcile_sessions(command_id: command_id, command_type: command_type)
         when "Prune"
           prune(command_id, command_type, payload)
+        when "SetAgentPruneProtection"
+          set_agent_prune_protection(command_id, command_type, payload)
         when "Recount"
           recount(command_id, command_type, payload)
         when "ClearState"
@@ -338,6 +342,7 @@ require_relative "engine/kill"
 require_relative "engine/projects_and_issues"
 require_relative "engine/prompting"
 require_relative "engine/prune"
+require_relative "engine/prune_protection"
 require_relative "engine/questions"
 require_relative "engine/quiet_workers"
 require_relative "engine/reconciliation"

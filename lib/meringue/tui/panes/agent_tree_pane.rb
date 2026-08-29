@@ -456,6 +456,7 @@ module Meringue
             ["#{prefix} ", Style::DIM],
             [status_dot(record), status_style(record)],
             [" #{id}", identity_style(record) || Style::MUTED],
+            *([ [prune_protection_marker(record), Style::PR_MARKER] ] unless prune_protection_marker(record).empty?),
             ["  ", Style::DIM]
           ]
           wrapped_lines(
@@ -479,6 +480,7 @@ module Meringue
             [" #{prefix} ", Style::AGENT_TREE_SELECTED_DIM],
             [status_dot(record), Style::AGENT_TREE_SELECTED_STATUS],
             [" #{id}", Style::AGENT_TREE_SELECTED_DIM],
+            *([ [prune_protection_marker(record), Style::AGENT_TREE_SELECTED_STATUS] ] unless prune_protection_marker(record).empty?),
             ["  ", Style::AGENT_TREE_SELECTED_DIM]
           ]
           wrapped_lines(
@@ -704,6 +706,10 @@ module Meringue
 
           remaining = width.to_i - plain_text(segments).length
           remaining.positive? ? segments + [[" " * remaining, Style::AGENT_TREE_SELECTED_DIM]] : segments
+        end
+
+        def prune_protection_marker(record)
+          agent_record?(record) && record.fetch("prune_protected", false) ? " 🔒" : ""
         end
 
         def status_dot(record)
