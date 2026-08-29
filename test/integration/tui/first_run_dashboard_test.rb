@@ -86,11 +86,10 @@ class TuiFirstRunDashboardTest < Minitest::Test
     assert_equal ["No agents yet.", "Describe a goal in the chat below."], lines
   end
 
-  def test_the_composer_placeholder_shows_the_shape_of_a_first_message
+  def test_the_composer_placeholder_is_a_simple_prompt
     placeholder = Meringue::TUI::ChatTarget.placeholder(composed_state(empty_state))
 
-    assert_includes placeholder, "describe a goal"
-    refute_equal "enter a prompt", placeholder
+    assert_equal "Send a prompt", placeholder
   end
 
   # The card is a first-run affordance, not a permanent decoration, so it must

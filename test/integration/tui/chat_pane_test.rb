@@ -16,7 +16,7 @@ class TuiChatPaneTest < Minitest::Test
   def test_empty_composer_shows_the_prompt_placeholder
     lines = @pane.composer_lines(chat_state(""), width: 40)
 
-    assert_equal ["› describe a goal, e.g. \"fix the flaky signup test\""], plain_lines(lines)
+    assert_equal ["› Send a prompt"], plain_lines(lines)
     assert_equal [], @pane.composer_row_spans(chat_state(""), width: 40)
   end
 
