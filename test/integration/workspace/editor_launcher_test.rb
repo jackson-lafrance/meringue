@@ -8,6 +8,32 @@ require "support/workspace_support"
 class WorkspaceEditorLauncherTest < Minitest::Test
   include WorkspaceSupport
 
+  def test_successful_text_edit_returns_contents_and_removes_temporary_file
+    with_workspace_tmpdir do |tmp|
+      editor = stub_executable(File.join(tmp, "edit"), body: "#!/bin/sh\nprintf '%s' 'changed' > \"$1\"\n")
+      launcher = Meringue::Workspace::EditorLauncher.new(command: [editor], env: { "PATH" => "" })
+
+      result = launcher.edit_text("original", extension: ".md")
+
+      assert_equal "edited", result.fetch("status")
+      assert_equal "changed", result.fetch("text")
+      assert_empty Dir.glob(File.join(Dir.tmpdir, "meringue-edit-*"))
+    end
+  end
+
+  def test_failed_text_edit_does_not_return_or_save_replacement
+    with_workspace_tmpdir do |tmp|
+      editor = stub_executable(File.join(tmp, "edit"), body: "#!/bin/sh\nexit 7\n")
+      launcher = Meringue::Workspace::EditorLauncher.new(command: [editor], env: { "PATH" => "" })
+
+      result = launcher.edit_text("original")
+
+      assert_equal "failed", result.fetch("status")
+      refute result.key?("text")
+      assert_includes result.fetch("message"), "status 7"
+    end
+  end
+
   def test_builds_argv_with_resolved_executable_workspace_arguments_and_chdir
     with_workspace_tmpdir do |tmp|
       editor = stub_executable(File.join(tmp, "bin", "my editor"))

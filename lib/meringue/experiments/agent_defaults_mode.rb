@@ -34,13 +34,13 @@ module Meringue
 
       LABELS = {
         SHARED => "Shared",
-        ROLE_SPECIFIC => "By role",
+        ROLE_SPECIFIC => "Split",
         GUIDED => "Guided"
       }.freeze
 
       DESCRIPTIONS = {
         SHARED => "One model and reasoning level for every future head and worker.",
-        ROLE_SPECIFIC => "Future heads and workers keep independent model and reasoning defaults.",
+        ROLE_SPECIFIC => "Split head and worker model and reasoning defaults independently.",
         GUIDED => "Heads choose each worker's model and reasoning from guidance you write; roles stay independent."
       }.freeze
 
