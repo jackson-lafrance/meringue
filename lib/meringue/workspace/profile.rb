@@ -102,9 +102,15 @@ module Meringue
         return nil unless path_template_valid?
 
         root_path = File.expand_path(root.to_s)
-        expanded = File.expand_path(expand_template(
+        expanded_template = expand_template(
           template, root: root_path, project: project_slug.to_s, task: task_slug.to_s, suffix: suffix.to_s
-        ))
+        )
+        # The default allocator no longer needs an opaque suffix. Avoid leaving
+        # a dangling separator in older custom templates that used
+        # `{{task}}-{{suffix}}`; numeric collision attempts append their own
+        # `-2`, `-3`, ... later in the allocation loop.
+        expanded_template = expanded_template.sub(/-+\z/, "") if suffix.to_s.empty?
+        expanded = File.expand_path(expanded_template)
         return nil unless expanded == root_path || expanded.start_with?("#{root_path}#{File::SEPARATOR}")
 
         expanded

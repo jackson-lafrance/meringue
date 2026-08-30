@@ -308,15 +308,12 @@ module Meringue
         profile = resolve_provisioning_profile(project_root, profile, repository: repository)
         safe_project_name = project_slug(File.basename(File.expand_path(project_root))) || "project"
         safe_task_name = DeliveryArtifactPolicy.slug(task_title)
-        unique_suffix = Digest::SHA256.hexdigest(
-          [File.expand_path(project_root), project_id, issue_id, agent_id, safe_task_name].join("\0")
-        )[0, 8]
-        workspace_name = [safe_task_name, unique_suffix].join("-")
+        workspace_name = safe_task_name
         branch = workspace_name
         workspace_path = default_workspace_path(root_path, safe_project_name, workspace_name)
         if profile&.custom_path_template?
           expanded = profile.expand_path(root: root_path, project_slug: safe_project_name,
-                                         task_slug: safe_task_name, suffix: unique_suffix)
+                                         task_slug: safe_task_name, suffix: "")
           workspace_path = expanded || workspace_path
         end
 

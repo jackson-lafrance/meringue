@@ -38,7 +38,8 @@ class FoundationDocsPolicyTest < Minitest::Test
     end
     assert_includes agents, "Never include a managed workspace path"
     assert_includes contract, "Unsafe supplied/generated values must be sanitized"
-    assert_includes policy, "fix-signup-validation-a1b2c3d4"
+    assert_includes policy, "fix-signup-validation"
+    assert_includes policy, "fix-signup-validation-2"
   end
 
   def test_agents_md_keeps_one_durable_goal_on_one_issue

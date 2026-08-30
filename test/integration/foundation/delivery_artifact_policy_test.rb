@@ -46,10 +46,13 @@ class FoundationDeliveryArtifactPolicyTest < Minitest::Test
   end
 
   def test_managed_branch_recognizes_new_names_and_legacy_names_for_lifecycle_compatibility
+    assert Policy.managed_branch?("fix-checkout-retries")
+    assert Policy.managed_branch?("fix-checkout-retries-2")
     assert Policy.managed_branch?("fix-checkout-retries-a1b2c3d4")
     assert Policy.managed_branch?("fix-checkout-retries-a1b2c3d4-2")
     assert Policy.managed_branch?("meringue/fix-checkout-retries-a1b2c3d4")
     refute Policy.managed_branch?("feature/fix-checkout-retries")
+    refute Policy.managed_branch?("deadbeef")
     refute Policy.managed_branch?("P5-I2-W3")
   end
 end

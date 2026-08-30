@@ -8,9 +8,9 @@ require "support/workspace_support"
 class WorkspaceManagerCollisionTest < Minitest::Test
   include WorkspaceSupport
 
-  # Forces independent workers onto the same preferred candidate so ownership—not the normal
-  # agent-id hash in the name—is what must prevent adoption. This reproduces legacy plans and any
-  # future naming collision without weakening production branch naming.
+  # Forces independent workers onto the same preferred candidate so ownership—not a
+  # name similarity—is what must prevent adoption. This reproduces legacy plans and
+  # future naming collisions without weakening production branch naming.
   class SameCandidateManager < Meringue::Workspace::Manager
     def plan_worker_workspace(**arguments)
       plan = super
