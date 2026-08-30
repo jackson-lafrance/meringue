@@ -48,8 +48,9 @@ class TuiAgentTreePaneTest < Minitest::Test
 
     rendered = plain_lines(@pane.lines(state, width: 40))
 
-    assert_includes rendered, "● P1  Meringue"
-    assert_includes rendered, "· P2  World"
+    # The isolation chip is part of the row; the lifecycle status never is.
+    assert_project_row(rendered, "● P1  Meringue")
+    assert_project_row(rendered, "· P2  World")
     Pane::STATUS_DOTS.each_key do |status|
       refute_includes rendered.join("\n"), "Meringue #{status}"
       refute_includes rendered.join("\n"), "World #{status}"
@@ -69,16 +70,25 @@ class TuiAgentTreePaneTest < Minitest::Test
 
     rendered = plain_lines(@pane.lines(state, width: 40))
 
-    assert_includes rendered, "● P1  Meringue"
-    assert_includes rendered, "· P2  World"
-    assert_includes rendered, "○ P3  Untitled project"
+    assert_project_row(rendered, "● P1  Meringue")
+    assert_project_row(rendered, "· P2  World")
+    assert_project_row(rendered, "○ P3  Untitled project")
   end
 
   # "Working Copy" is a product name, not a status. Only a trailing status word goes.
   def test_project_row_keeps_a_name_that_only_looks_like_a_status
     state = tree_state(projects: [project_record("P1", "name" => "Working Copy")])
 
-    assert_includes plain_lines(@pane.lines(state, width: 40)), "● P1  Working Copy"
+    assert_project_row(plain_lines(@pane.lines(state, width: 40)), "● P1  Working Copy")
+  end
+
+  # A project row is the dot, the id, the product name, and the isolation chip. Matching
+  # on the prefix keeps these about the name without restating the chip in every case.
+  def assert_project_row(rendered, prefix)
+    assert(
+      rendered.any? { |line| line.start_with?(prefix) },
+      "expected a project row starting with #{prefix.inspect} in #{rendered.inspect}"
+    )
   end
 
   def test_render_matches_the_plain_text_of_the_segment_lines
@@ -280,7 +290,7 @@ class TuiAgentTreePaneTest < Minitest::Test
         issue_record(
           "P1-I1",
           "title" => "Keep the flake rate under control for the whole integration suite",
-          "delivery_pull_request" => { "url" => "https://github.com/owner/repo/pull/12", "state" => "open" }
+          "delivery_pull_requests" => [{ "url" => "https://github.com/owner/repo/pull/12", "state" => "open" }]
         )
       ],
       agents: []
@@ -409,10 +419,10 @@ class TuiAgentTreePaneTest < Minitest::Test
       projects: [project_record("P1")],
       issues: [issue_record("P1-I1")],
       agents: [
-        agent_record("H1", "delivery_pull_request" => open_pr),
+        agent_record("H1", "delivery_pull_requests" => [open_pr]),
         # Pre-migration state may still carry the record on the worker. The marker
         # belongs on the issue row even while that compatibility fallback is used.
-        agent_record("P1-I1-W1", "issue_id" => "P1-I1", "delivery_pull_request" => open_pr)
+        agent_record("P1-I1-W1", "issue_id" => "P1-I1", "delivery_pull_requests" => [open_pr])
       ]
     )
     lines = @pane.lines(state, width: 60)
@@ -433,7 +443,7 @@ class TuiAgentTreePaneTest < Minitest::Test
     long_title = "Rework the delivery pull request marker so it survives a title that fills the whole pane"
     state = tree_state(
       projects: [project_record("P1")],
-      issues: [issue_record("P1-I1", "title" => long_title, "delivery_pull_request" => open_pr)],
+      issues: [issue_record("P1-I1", "title" => long_title, "delivery_pull_requests" => [open_pr])],
       agents: []
     )
 
@@ -450,7 +460,7 @@ class TuiAgentTreePaneTest < Minitest::Test
     merged_pr = { "url" => "https://github.com/owner/repo/pull/12", "state" => "merged" }
     state = tree_state(
       projects: [project_record("P1")],
-      issues: [issue_record("P1-I1", "delivery_pull_request" => merged_pr)],
+      issues: [issue_record("P1-I1", "delivery_pull_requests" => [merged_pr])],
       agents: [agent_record("P1-I1-W1", "issue_id" => "P1-I1")]
     )
 
@@ -749,7 +759,7 @@ class TuiAgentTreePaneTest < Minitest::Test
     tree_state(
       projects: [project_record("P1")],
       issues: [
-        issue_record("P1-I1", "delivery_pull_request" => { "url" => "https://github.com/owner/repo/pull/12", "state" => "open" })
+        issue_record("P1-I1", "delivery_pull_requests" => [{ "url" => "https://github.com/owner/repo/pull/12", "state" => "open" }])
       ],
       agents: [
         agent_record("P1-I1-W1", "issue_id" => "P1-I1", "status" => "completed", "harness_metadata" => { "title" => "research" }),

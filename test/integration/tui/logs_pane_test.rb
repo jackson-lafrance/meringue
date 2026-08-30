@@ -556,7 +556,7 @@ class TuiLogsPaneTest < Minitest::Test
                        "timestamp" => "2026-07-11T00:03:00Z",
                        "details" => {
                          "last_assistant_text" => "P1-I1-W1 output:\nAll done **now**",
-                         "delivery_pull_request" => { "url" => "https://github.com/owner/repo/pull/42" }
+                         "delivery_pull_requests" => [{ "url" => "https://github.com/owner/repo/pull/42" }]
                        }),
       log_record("L4", "source_type" => "harness", "source_id" => "P1-I1-W1", "level" => "warning",
                        "message" => "retrying", "timestamp" => "2026-07-11T00:04:00Z"),

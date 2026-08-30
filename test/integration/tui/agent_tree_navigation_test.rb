@@ -41,12 +41,12 @@ class TuiAgentTreeNavigationTest < Minitest::Test
     merged_pr = { "url" => "https://github.com/owner/repo/pull/5", "state" => "merged" }
     state = tree_state(
       projects: [project_record("P1")],
-      issues: [issue_record("P1-I1"), issue_record("P1-I2", "delivery_pull_request" => merged_pr)],
+      issues: [issue_record("P1-I1"), issue_record("P1-I2", "delivery_pull_requests" => [merged_pr])],
       agents: [
-        agent_record("H1", "delivery_pull_request" => open_pr),
+        agent_record("H1", "delivery_pull_requests" => [open_pr]),
         agent_record("H2"),
-        agent_record("P1-I1-W1", "issue_id" => "P1-I1", "delivery_pull_request" => open_pr),
-        agent_record("P1-I2-W1", "issue_id" => "P1-I2", "delivery_pull_request" => merged_pr)
+        agent_record("P1-I1-W1", "issue_id" => "P1-I1", "delivery_pull_requests" => [open_pr]),
+        agent_record("P1-I2-W1", "issue_id" => "P1-I2", "delivery_pull_requests" => [merged_pr])
       ]
     )
 
@@ -82,14 +82,15 @@ class TuiAgentTreeNavigationTest < Minitest::Test
   end
 
   def test_reported_urls_are_never_treated_as_active_pull_requests
-    record = { "harness_metadata" => { "reported_pr_urls" => ["https://github.com/owner/repo/pull/3"] } }
+    # Pull request records live on the record itself now, not in harness metadata.
+    record = { "reported_pr_urls" => ["https://github.com/owner/repo/pull/3"] }
 
     assert_equal "https://github.com/owner/repo/pull/3", Navigation.agent_pr_url(record)
     assert_nil Navigation.active_agent_pr_url(record)
   end
 
   def test_active_pull_request_state_is_case_insensitive
-    record = { "delivery_pull_request" => { "url" => "https://github.com/owner/repo/pull/3", "state" => "OPEN" } }
+    record = { "delivery_pull_requests" => [{ "url" => "https://github.com/owner/repo/pull/3", "state" => "OPEN" }] }
 
     assert_equal "https://github.com/owner/repo/pull/3", Navigation.active_agent_pr_url(record)
   end

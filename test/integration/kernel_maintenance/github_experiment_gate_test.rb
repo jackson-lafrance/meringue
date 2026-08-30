@@ -142,8 +142,8 @@ class KernelMaintenanceGithubExperimentGateTest < Minitest::Test
     }
     state["issues"] << {
       "id" => "P1-I1", "project_id" => "P1", "title" => "Delivery", "status" => "completed",
-      "agent_ids" => ["P1-I1-W1"], "delivery_pull_request" => record,
-      "delivery_pull_requests" => [record], "reported_pr_urls" => [PR_URL],
+      "agent_ids" => ["P1-I1-W1"], "delivery_pull_requests" => [record],
+      "reported_pr_urls" => [PR_URL],
       "created_at" => "2026-08-16T00:00:00Z", "updated_at" => "2026-08-16T00:00:00Z"
     }
     state["agents"] << {

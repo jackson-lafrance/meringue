@@ -267,8 +267,9 @@ module KernelMaintenanceSupport
       head_runner: head_runner,
       harness_client_resolver: harness_client_resolver,
       workspace_manager: workspace_manager,
-      # Fixture projects are directories, not repositories: the capability probe is
-      # answered by the fake backend so these tests stay about maintenance.
+      # Fixture projects are directories, not repositories: the capability probe and the
+      # isolated workspace are both faked so these tests stay about maintenance. Tests
+      # that are about real worktrees pass a real Workspace::Manager instead.
       version_control_backend: Meringue::VersionControl::FakeBackend.new(manager: workspace_manager),
       cwd: @kernel_maintenance_tmp,
       forge_client: forge_client,
@@ -487,7 +488,6 @@ module KernelMaintenanceSupport
       agent_ids: agent_ids,
       parent_issue_id: parent_issue_id,
       extra: {
-        "delivery_pull_request" => { "url" => url, "state" => "open" },
         "delivery_pull_requests" => [{ "url" => url, "state" => "open" }],
         "reported_pr_urls" => [url]
       }

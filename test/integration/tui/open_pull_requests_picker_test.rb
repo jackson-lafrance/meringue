@@ -115,7 +115,7 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
   end
 
   def test_tracked_but_settled_pull_requests_read_as_none_open
-    state = empty_state.merge("issues" => [issue_record("P1-I1", "delivery_pull_request" => pull_request("70", "state" => "merged"))])
+    state = empty_state.merge("issues" => [issue_record("P1-I1", "delivery_pull_requests" => [pull_request("70", "state" => "merged")])])
 
     assert_equal "no open PRs", OpenPullRequests.summary_label(state)
     assert_includes plain_line(@pane.bottom_hint_line(composed_state(state))), "no open PRs"
@@ -235,7 +235,7 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
         issue_record(
           "P1-I1",
           "title" => "Waiting for forge status",
-          "delivery_pull_request" => pull_request("88", "availability" => "unavailable")
+          "delivery_pull_requests" => [pull_request("88", "availability" => "unavailable")]
         )
       ]
     )
@@ -252,7 +252,7 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
 
   def test_empty_untracked_and_scoped_summaries_are_not_actionable
     settled = empty_state.merge(
-      "issues" => [issue_record("P1-I1", "delivery_pull_request" => pull_request("70", "state" => "merged"))]
+      "issues" => [issue_record("P1-I1", "delivery_pull_requests" => [pull_request("70", "state" => "merged")])]
     )
     settled_state = compose_app_state(@app, settled)
     assert_includes plain_line(@pane.bottom_hint_line(settled_state)), "no open PRs"
@@ -301,7 +301,7 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
   end
 
   def test_slash_prs_keeps_an_empty_picker_feedback_in_the_popup
-    state = empty_state.merge("issues" => [issue_record("P1-I1", "delivery_pull_request" => pull_request("70", "state" => "merged"))])
+    state = empty_state.merge("issues" => [issue_record("P1-I1", "delivery_pull_requests" => [pull_request("70", "state" => "merged")])])
 
     result = @app.send(:handle_key, "\r", "/prs", 4, -1, nil, composed_state(state, chat: { "input_buffer" => "/prs" }))
     picker = compose_app_state(@app, state)
@@ -399,7 +399,7 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
   end
 
   def test_ctrl_b_with_nothing_open_keeps_the_empty_picker_in_the_popup
-    state = empty_state.merge("issues" => [issue_record("P1-I1", "delivery_pull_request" => pull_request("70", "state" => "merged"))])
+    state = empty_state.merge("issues" => [issue_record("P1-I1", "delivery_pull_requests" => [pull_request("70", "state" => "merged")])])
     @app.send(:handle_key, "\u0002", "", 0, -1, nil, composed_state(state))
     picker = compose_app_state(@app, state)
 
@@ -449,7 +449,7 @@ class TuiOpenPullRequestsPickerTest < Minitest::Test
           ]
         ),
         # Never refreshed by the kernel yet, so its own status is still unverified.
-        issue_record("P1-I2", "title" => "Add the open PR picker", "delivery_pull_request" => pull_request("151"))
+        issue_record("P1-I2", "title" => "Add the open PR picker", "delivery_pull_requests" => [pull_request("151")])
       ],
       "agents" => [
         agent_record("P1-I1-W1", "issue_id" => "P1-I1", "workspace_branch" => "meringue/first-pass-a1"),

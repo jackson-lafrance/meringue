@@ -279,6 +279,7 @@ module Meringue
         "Experiments",
         "Harnesses",
         "Workspace",
+        "Version control",
         "Safety",
         "Keybindings",
         "Setup"
@@ -343,9 +344,14 @@ module Meringue
       def validate_registry!
         duplicate_ids = setting_ids.group_by(&:itself).select { |_id, values| values.length > 1 }.keys
         duplicate_paths = paths.map { |path| path.join(".") }.group_by(&:itself).select { |_path, values| values.length > 1 }.keys
+        # A category the list does not name is a category /config never renders, so its
+        # settings can be written by hand or by first-run setup and then never found
+        # again. That is how the version-control backend became a one-way choice.
+        unlisted_categories = definitions.map(&:category).uniq.reject { |category| CATEGORIES.include?(category) }
         errors = []
         errors << "duplicate setting ids: #{duplicate_ids.join(", ")}" unless duplicate_ids.empty?
         errors << "duplicate setting paths: #{duplicate_paths.join(", ")}" unless duplicate_paths.empty?
+        errors << "settings in unlisted categories: #{unlisted_categories.join(", ")}" unless unlisted_categories.empty?
         raise ArgumentError, errors.join("; ") unless errors.empty?
 
         true
