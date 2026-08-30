@@ -379,13 +379,12 @@ module Meringue
           {
             "goal" => deep_copy(current),
             "iteration" => deep_copy(iteration),
-            "workspace_path" => iteration.fetch("attempt_workspace_path", nil),
+            "attempt_worker_id" => iteration.fetch("attempt_worker_id", nil),
             "retry_reason" => attempt > 1 ? iteration.dig("review", "error") || iteration.fetch("review_error", nil) : nil
           }
         end
 
         current_goal = checkpoint.fetch("goal")
-        cwd = goal_review_cwd(current_goal, workspace_path: checkpoint.fetch("workspace_path", nil))
         prompt = Goals::ReviewPrompt.render(
           goal: current_goal,
           iteration: checkpoint.fetch("iteration"),
@@ -398,7 +397,12 @@ module Meringue
             "issue_id" => current_goal.fetch("issue_id"),
             "prompt" => prompt,
             "title" => "#{current_goal.fetch("id")} iteration #{number} review",
-            "workspace_path" => cwd
+            # The review reads the branch the attempt produced, so it takes the attempt's
+            # own isolated workspace over rather than naming a path. A path carries no
+            # isolation evidence and is refused, which is what stopped every review from
+            # starting. Without an attempt worker to inherit from, the reviewer is
+            # provisioned a fresh isolated workspace like any other worker.
+            "inherit_workspace_from_agent_id" => present_string(checkpoint.fetch("attempt_worker_id", nil))
           }.compact
         )
 
@@ -742,13 +746,6 @@ module Meringue
       # A reviewer reads the attempt's own worktree and branch. The workspace is adopted,
       # not allocated: the reviewer never gets a worktree of its own, so it cannot review a
       # copy of the work and its session is never charged a branch.
-      def goal_review_cwd(goal, workspace_path: nil)
-        path = present_string(workspace_path)
-        return path if path && Dir.exist?(path)
-
-        project_root_for_goal(goal)
-      end
-
       # The metric runs on the attempt's own workspace by default, so it measures the branch
       # the attempt actually produced. `project_root` metrics and the pre-attempt baseline
       # fall back to the registered project root.

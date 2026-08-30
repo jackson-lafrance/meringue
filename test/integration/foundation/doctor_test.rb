@@ -2,6 +2,7 @@
 
 require "test_helper"
 require "tmpdir"
+require "open3"
 
 # The quick start used to be "run git --version, ruby --version, bundle --version
 # and check them yourself", with the fixes in a troubleshooting section further
@@ -12,7 +13,7 @@ class FoundationDoctorTest < Minitest::Test
 
   def test_a_healthy_environment_reports_no_problems
     in_repository do |root|
-      doctor = build(root: root, config: config_with("harness" => { "provider" => "pi" }), harness: "pi")
+      doctor = build(root: root, config: config_with("harness" => { "head_provider" => "pi", "worker_provider" => "pi" }), harness: "pi")
 
       assert_empty doctor.problems
       assert_includes titles(doctor), "Harness: Pi"
@@ -35,7 +36,7 @@ class FoundationDoctorTest < Minitest::Test
   # checked — and naming it is what makes the failure actionable.
   def test_a_missing_harness_names_the_command_it_looked_for
     in_repository do |root|
-      config = config_with("harness" => { "provider" => "codex", "codex" => { "command" => "/nowhere/codex" } })
+      config = config_with("harness" => { "head_provider" => "codex", "worker_provider" => "codex", "codex" => { "command" => "/nowhere/codex" } })
       doctor = build(root: root, config: config, harness: nil)
       check = doctor.problems.find { |candidate| candidate.title.include?("Codex") }
 
@@ -48,7 +49,7 @@ class FoundationDoctorTest < Minitest::Test
   # Two roles on one backend is the normal case and saying it twice adds nothing.
   def test_matching_roles_are_reported_once_and_split_roles_separately
     in_repository do |root|
-      shared = build(root: root, config: config_with("harness" => { "provider" => "pi" }), harness: "pi")
+      shared = build(root: root, config: config_with("harness" => { "head_provider" => "pi", "worker_provider" => "pi" }), harness: "pi")
       assert_equal 1, titles(shared).count { |title| title.include?("arness") }
 
       split = build(
@@ -63,7 +64,7 @@ class FoundationDoctorTest < Minitest::Test
 
   def test_an_old_ruby_is_reported_with_the_minimum
     in_repository do |root|
-      doctor = build(root: root, config: config_with("harness" => { "provider" => "pi" }), harness: "pi", ruby_version: "3.0.6")
+      doctor = build(root: root, config: config_with("harness" => { "head_provider" => "pi", "worker_provider" => "pi" }), harness: "pi", ruby_version: "3.0.6")
       check = doctor.problems.find { |candidate| candidate.title.include?("Ruby") }
 
       refute_nil check
@@ -76,7 +77,7 @@ class FoundationDoctorTest < Minitest::Test
       path = File.join(root, "config.toml")
       File.write(path, "this is not = = toml\n")
       doctor = Doctor.new(
-        config: config_with("harness" => { "provider" => "pi" }),
+        config: config_with("harness" => { "head_provider" => "pi", "worker_provider" => "pi" }),
         config_path: path,
         state_path: File.join(root, "state.json"),
         registry: nil,
@@ -95,7 +96,7 @@ class FoundationDoctorTest < Minitest::Test
     in_repository do |root|
       state_path = File.join(root, "state.json")
       File.write(state_path, "{ not json")
-      doctor = build(root: root, config: config_with("harness" => { "provider" => "pi" }), harness: "pi", state_path: state_path)
+      doctor = build(root: root, config: config_with("harness" => { "head_provider" => "pi", "worker_provider" => "pi" }), harness: "pi", state_path: state_path)
 
       assert_empty doctor.problems.select { |check| check.title.include?("State") }
       assert(doctor.checks.any? { |check| check.status == Doctor::NOTE && check.title.include?("State") })
@@ -105,12 +106,12 @@ class FoundationDoctorTest < Minitest::Test
   # gh only matters when the experiment that shells out to it is on.
   def test_the_github_cli_is_only_checked_when_github_support_is_enabled
     in_repository do |root|
-      off = build(root: root, config: config_with("harness" => { "provider" => "pi" }), harness: "pi")
+      off = build(root: root, config: config_with("harness" => { "head_provider" => "pi", "worker_provider" => "pi" }), harness: "pi")
       refute(titles(off).any? { |title| title.include?("GitHub") })
 
       on = build(
         root: root,
-        config: config_with("harness" => { "provider" => "pi" }, "experiments" => { "github_support" => true }),
+        config: config_with("harness" => { "head_provider" => "pi", "worker_provider" => "pi" }, "experiments" => { "github_support" => true }),
         harness: "pi"
       )
       assert(titles(on).any? { |title| title.include?("GitHub") })
@@ -119,7 +120,7 @@ class FoundationDoctorTest < Minitest::Test
 
   def test_running_outside_a_repository_is_a_note_not_a_failure
     Dir.mktmpdir("meringue-doctor-bare") do |dir|
-      doctor = build(root: File.realpath(dir), config: config_with("harness" => { "provider" => "pi" }), harness: "pi")
+      doctor = build(root: File.realpath(dir), config: config_with("harness" => { "head_provider" => "pi", "worker_provider" => "pi" }), harness: "pi")
       check = doctor.checks.find { |candidate| candidate.title.include?("git repository") }
 
       refute_nil check
@@ -168,11 +169,27 @@ class FoundationDoctorTest < Minitest::Test
     ENV["PATH"] = original
   end
 
+  # A real repository with a GitHub origin, because "healthy" now includes the
+  # version-control backend being able to prove isolated mutable workspaces. The origin
+  # URL is read for its host, never contacted.
   def in_repository
     Dir.mktmpdir("meringue-doctor") do |dir|
       root = File.realpath(dir)
-      FileUtils.mkdir_p(File.join(root, ".git"))
+      git!(root, "init", "--quiet", "--initial-branch=main")
+      git!(root, "config", "user.email", "doctor@example.com")
+      git!(root, "config", "user.name", "Meringue Doctor")
+      File.write(File.join(root, "README.md"), "# doctor fixture\n")
+      git!(root, "add", "README.md")
+      git!(root, "commit", "--quiet", "--no-verify", "-m", "initial commit")
+      git!(root, "remote", "add", "origin", "git@github.com:example/doctor-fixture.git")
       yield root
     end
+  end
+
+  def git!(root, *argv)
+    _stdout, stderr, status = Open3.capture3("git", "-C", root, *argv)
+    raise "git #{argv.join(" ")} failed: #{stderr}" unless status.success?
+
+    true
   end
 end

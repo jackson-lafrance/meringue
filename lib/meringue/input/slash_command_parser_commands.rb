@@ -369,12 +369,13 @@ module Meringue
         kernel_command("DismissQuestion", "question_id" => tokens[0])
       end
 
+      # `/prune` takes no arguments. The selector it used to accept is gone, along with
+      # the list of spellings that were tolerated for compatibility - which this still
+      # named, so any argument at all raised NameError instead of printing the usage.
       def parse_prune(arguments)
-        tokens = split_arguments(arguments)
-        return kernel_command("Prune") if tokens.empty?
-        return invalid(PRUNE_USAGE_MESSAGE) if tokens.length > 1 || !PRUNE_COMPATIBILITY_ARGUMENTS.include?(tokens[0].to_s.downcase)
+        return kernel_command("Prune") if split_arguments(arguments).empty?
 
-        kernel_command("Prune", "selector" => tokens[0].downcase)
+        invalid(PRUNE_USAGE_MESSAGE)
       end
 
       def parse_recount(arguments)

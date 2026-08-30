@@ -9,68 +9,6 @@ require "tmpdir"
 # Everything here is hermetic: temporary directories only, no network, no real
 # harness processes, and no reads or writes under ~/.meringue.
 module HeadsSupport
-  # Stands in for Workspace::Manager so head/worker integration tests never shell
-  # out to git. It mirrors the small contract the kernel depends on.
-  class StubWorkspaceManager
-    attr_reader :root_path, :plans, :allocations, :releases
-
-    def initialize(root_path:, create: true)
-      @root_path = File.expand_path(root_path)
-      @create = create
-      @plans = []
-      @allocations = []
-      @releases = []
-    end
-
-    def plan_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil)
-      plan = build_plan(
-        project_root: project_root,
-        project_id: project_id,
-        issue_id: issue_id,
-        agent_id: agent_id,
-        task_title: task_title
-      )
-      @plans << plan
-      plan
-    end
-
-    def allocate_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil)
-      plan = build_plan(
-        project_root: project_root,
-        project_id: project_id,
-        issue_id: issue_id,
-        agent_id: agent_id,
-        task_title: task_title
-      )
-      if @create
-        FileUtils.mkdir_p(plan.fetch("workspace_path"))
-        plan = plan.merge("created" => true)
-      end
-      @allocations << plan
-      plan
-    end
-
-    def release_worker_workspace(workspace, delete_branch: false)
-      @releases << { "workspace" => workspace, "delete_branch" => delete_branch }
-      true
-    end
-
-    private
-
-    def build_plan(project_root:, project_id:, issue_id:, agent_id:, task_title:)
-      name = [project_id, issue_id, agent_id].compact.join("-").downcase
-      {
-        "strategy" => "git_worktree",
-        "project_root" => File.expand_path(project_root),
-        "workspace_path" => File.join(root_path, name),
-        "workspace_branch" => "meringue/#{name}",
-        "task_title" => task_title,
-        "created" => false,
-        "errors" => []
-      }
-    end
-  end
-
   # A head runner double. It records every call and returns scripted HeadResults,
   # raises a scripted error, or defers to a block so a test can observe kernel
   # state at the exact moment a head is "thinking".
@@ -271,13 +209,16 @@ module HeadsSupport
     state_path = File.join(root, "state.json")
     store = Meringue::State::Store.new(path: state_path)
     store.save(normalized_seed_state(initial_state)) if initial_state
-    workspace_manager = StubWorkspaceManager.new(root_path: workspace_root)
+    workspace_manager = Meringue::Workspace::FakeManager.new(root_path: workspace_root)
 
     engine = Meringue::Kernel::Engine.new(
       store: store,
       harness_client: harness_client,
       head_runner: runner,
       workspace_manager: workspace_manager,
+      # Fixture projects are directories, not repositories: the capability probe is
+      # answered by the fake backend so these tests stay about head behaviour.
+      version_control_backend: Meringue::VersionControl::FakeBackend.new(manager: workspace_manager),
       cwd: project_path,
       async_heads: async_heads,
       default_harness_provider: "fake",
@@ -330,6 +271,12 @@ module HeadsSupport
           "name" => "meringue",
           "root_path" => "/tmp/meringue-project",
           "status" => "working",
+          # Registration records the backend's isolation evidence, and workers are only
+          # provisioned for a project that carries it.
+          "version_control_backend" => "github_git",
+          "version_control_repository_identity" => "git@github.com:example/meringue.git",
+          "version_control_capabilities" => { "isolated_workspaces" => true, "mutable_workspace" => true },
+          "version_control_diagnostic_at" => "2024-01-01T00:00:00Z",
           "created_at" => "2024-01-01T00:00:00Z",
           "updated_at" => "2024-01-02T00:00:00Z"
         }
@@ -343,7 +290,7 @@ module HeadsSupport
           "description" => "Answering an open question should drive a head.",
           "status" => "working",
           "agent_ids" => ["P1-I1-W1"],
-          "delivery_pull_request" => { "url" => "https://example.test/pr/1" },
+          "delivery_pull_requests" => [{ "url" => "https://example.test/pr/1" }],
           "created_at" => "2024-01-01T00:00:00Z",
           "updated_at" => "2024-01-03T00:00:00Z"
         },

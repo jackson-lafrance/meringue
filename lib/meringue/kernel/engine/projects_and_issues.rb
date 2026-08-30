@@ -122,6 +122,83 @@ module Meringue
         accepted_result(command_id, command_type, project_id, "Added project #{project_id}.", project, log_ids)
       end
 
+      # Isolation evidence became part of the project record, and the records written
+      # before it carry none. Nothing backfilled them, so an install that had been
+      # working read as "isolation unavailable" in the tree and refused every worker a
+      # workspace — the state file predated the field, not the capability.
+      #
+      # This re-probes any project that does not currently hold isolation evidence and
+      # writes the backend's verdict onto the record, exactly as registration does. It
+      # is therefore also the repair path for a project that lost isolation for a real
+      # reason (a moved checkout, a `version_control.backend` set to `command` and put
+      # back): the project heals on its own instead of having to be re-registered.
+      def backfill_project_version_control
+        due = synchronized_state do
+          normalized_state.fetch("projects").select { |project| version_control_probe_due?(project) }.map { |project| deep_copy(project) }
+        end
+        return [] if due.empty?
+
+        # Probing shells out to git, so it happens outside the state lock.
+        probes = due.filter_map do |project|
+          capability = @version_control_backend.inspect_project(root_path: project.fetch("root_path"))
+          next unless capability.is_a?(Hash)
+
+          [project.fetch("id"), capability]
+        end
+        return [] if probes.empty?
+
+        synchronized_state do
+          state = normalized_state
+          now = timestamp
+          results = probes.filter_map { |project_id, capability| record_project_version_control(state, project_id, capability, now) }
+          next [] if results.empty?
+
+          touch_state!(state, now)
+          store.save(state)
+          results
+        end
+      end
+
+      def version_control_probe_due?(project)
+        return false unless project.is_a?(Hash)
+        return false if project.dig("version_control_capabilities", "isolated_workspaces") == true
+
+        probed_at = parse_time_or_nil(project["version_control_diagnostic_at"])
+        return true if probed_at.nil?
+
+        (Time.now.utc - probed_at) >= PROJECT_VERSION_CONTROL_REPROBE_INTERVAL_SECONDS
+      end
+
+      # Always records the verdict — the recorded probe time is what throttles the next
+      # pass — but only logs when the verdict actually moved, so a project that stays
+      # unbackable re-probes quietly instead of narrating it every minute.
+      def record_project_version_control(state, project_id, capability, now)
+        project = state.fetch("projects").find { |candidate| candidate.fetch("id", nil) == project_id }
+        return nil if project.nil?
+
+        was_isolated = project.dig("version_control_capabilities", "isolated_workspaces") == true
+        capabilities = capability.fetch("capabilities", {})
+        project["version_control_backend"] = capability.fetch("backend", @version_control_backend.id)
+        project["version_control_repository_identity"] = capability["repository_identity"]
+        project["version_control_capabilities"] = capabilities
+        project["version_control_diagnostic_at"] = capability["diagnostic_at"] || now
+        is_isolated = capabilities["isolated_workspaces"] == true
+        return { "status" => "recorded", "project_id" => project_id, "isolated" => is_isolated, "log_entry_ids" => [] } unless is_isolated && !was_isolated
+
+        log_ids = append_log(
+          state,
+          source_type: "kernel",
+          source_id: project_id,
+          level: "info",
+          message: "Recorded isolated-workspace evidence for project #{project_id}.",
+          details: {
+            "version_control_backend" => project.fetch("version_control_backend"),
+            "isolated_mutable_workspaces" => true
+          }
+        )
+        { "status" => "accepted", "project_id" => project_id, "isolated" => true, "log_entry_ids" => log_ids }
+      end
+
       # ModifyProject is the only command that renames a project (ModifyIssue retitles an issue).
       # A `Rename` wrapper used to sit above this method and sniff whether a bare target id was a
       # project or an issue, but it existed only to back the removed `/rename <id> "<name>"` slash

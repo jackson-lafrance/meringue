@@ -297,8 +297,8 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_equal "low", head.extra_args.last
     assert_includes worker.extra_args.each_cons(2).to_a, ["--thinking", Registry::DEFAULT_THINKING_LEVEL]
     saved = Meringue::Config.load(path: subject.config.path)
-    assert_equal "low", saved.value("harness", "pi", "head_thinking_level")
-    assert_nil saved.value("harness", "pi", "worker_thinking_level")
+    assert_equal "low", saved.value("harness", "head_thinking_level")
+    assert_nil saved.value("harness", "worker_thinking_level")
   end
 
   def test_role_specific_model_defaults_override_the_legacy_shared_value
@@ -335,8 +335,8 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_equal "openai/gpt-5.6-sol", head.extra_args.each_cons(2).select { |flag, _v| flag == "--model" }.last[1]
     assert_equal Registry::DEFAULT_MODEL, worker.extra_args.each_cons(2).select { |flag, _v| flag == "--model" }.last[1]
     saved = Meringue::Config.load(path: subject.config.path)
-    assert_equal "openai/gpt-5.6-sol", saved.value("harness", "pi", "head_model")
-    assert_nil saved.value("harness", "pi", "worker_model")
+    assert_equal "openai/gpt-5.6-sol", saved.value("harness", "head_model")
+    assert_nil saved.value("harness", "worker_model")
   end
 
   def test_updating_pi_session_defaults_persists_and_reconfigures_cached_clients_in_place
@@ -356,8 +356,10 @@ class HarnessRegistryTest < HarnessIntegrationTest
     assert_equal "xhigh", defaults.fetch("thinking_level")
     assert_equal ["--model", "openai/gpt-5.6-sol", "--thinking", "xhigh"], worker.extra_args.last(4)
     saved = Meringue::Config.load(path: subject.config.path)
-    assert_equal "openai/gpt-5.6-sol", saved.value("harness", "pi", "model")
-    assert_equal "xhigh", saved.value("harness", "pi", "thinking_level")
+    assert_equal "openai/gpt-5.6-sol", saved.value("harness", "head_model")
+    assert_equal "openai/gpt-5.6-sol", saved.value("harness", "worker_model")
+    assert_equal "xhigh", saved.value("harness", "head_thinking_level")
+    assert_equal "xhigh", saved.value("harness", "worker_thinking_level")
   end
 
   def test_role_specific_pi_argv_is_reported_as_mixed_until_scalar_defaults_are_set

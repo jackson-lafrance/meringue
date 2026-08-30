@@ -246,7 +246,7 @@ class TuiSettingsOverlayTest < Minitest::Test
     @app = Meringue::TUI::App.new(layout: @layout, config: @config, pull_request_opener: opener)
     url = "https://github.com/acme/app/pull/8"
     @state["projects"] << project_record("P1", "issue_ids" => ["P1-I1"])
-    @state["issues"] << issue_record("P1-I1", "agent_ids" => ["P1-I1-W1"], "delivery_pull_request" => { "url" => url, "state" => "open" })
+    @state["issues"] << issue_record("P1-I1", "agent_ids" => ["P1-I1-W1"], "delivery_pull_requests" => [{ "url" => url, "state" => "open" }])
     @state["agents"] << agent_record("P1-I1-W1", "project_id" => "P1", "issue_id" => "P1-I1")
 
     frame = @app.render(compose, width: 100, height: 30, color: false)
@@ -348,7 +348,7 @@ class TuiSettingsOverlayTest < Minitest::Test
 
   def test_keybinding_enter_uses_isolated_capture_with_cancel_clear_invalid_and_repeat_paths
     @app.send(:open_settings, @state)
-    6.times { send_key(TAB) }
+    7.times { send_key(TAB) }
     assert_equal "Keybindings", @app.send(:settings_category)
     refute @app.send(:settings_snapshot).fetch("advanced_available")
     assert_equal "keybindings.quit", @app.send(:selected_settings_row).fetch("id")

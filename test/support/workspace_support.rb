@@ -70,6 +70,10 @@ module WorkspaceSupport
     run_git!(project_root, "commit", "-m", "seed commit", env: env)
     run_git!(project_root, "remote", "add", "origin", origin_path, env: env)
     run_git!(project_root, "push", "origin", "main", env: env)
+    # A bare common repository can be registered as a project in its own right, and
+    # registration proves isolated workspaces from a GitHub origin. The URL is read for
+    # its host, never contacted.
+    run_git!(origin_path, "remote", "add", "origin", "git@github.com:example/#{name}.git", env: env)
 
     {
       "project_root" => project_root,

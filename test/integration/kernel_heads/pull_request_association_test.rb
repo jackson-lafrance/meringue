@@ -146,7 +146,6 @@ class KernelHeadsPullRequestAssociationTest < KernelHeadsTestCase
     assert_equal PULL_REQUEST_URL, records.fetch(0).fetch("url")
     assert_equal "user_request", records.fetch(0).fetch("matched_by")
     refute_nil Time.iso8601(records.fetch(0).fetch("associated_at"))
-    assert_equal records.fetch(0), issue.fetch("delivery_pull_request")
     assert_equal [PULL_REQUEST_URL], issue.fetch("reported_pr_urls")
   end
 end

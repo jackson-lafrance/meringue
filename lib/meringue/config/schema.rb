@@ -105,7 +105,7 @@ module Meringue
         "default"
       end
 
-      def normalize_value(value)
+      def normalize_value(value, config: nil)
         return normalize.call(value) if normalize.respond_to?(:call)
 
         case type
@@ -117,7 +117,7 @@ module Meringue
         when "integer", "duration"
           Integer(value)
         when "enum", "thinking_level"
-          value.to_s.strip.downcase.tr("_", "-")
+          canonical_option(value, config: config)
         when "model_reference", "path", "string", "read_only", "action"
           value.nil? ? "" : value.to_s
         when "command_argv"
@@ -134,7 +134,7 @@ module Meringue
       end
 
       def validate_value(value, config: nil)
-        normalized = normalize_value(value)
+        normalized = normalize_value(value, config: config)
         built_in_validate(normalized, config: config)
         custom = validate.respond_to?(:call) ? validate.call(normalized, config) : nil
         raise ArgumentError, custom.to_s unless custom.nil? || custom == true
@@ -143,6 +143,23 @@ module Meringue
       end
 
       private
+
+      # An option id is matched case- and separator-insensitively, so a hand-edited
+      # `rose_pine` still selects `rose-pine`, but what gets stored is always the
+      # option's own spelling. Rewriting every underscore to a hyphen instead made
+      # any option that contains one — `github_git`, `native_git` — impossible to
+      # select: normalization turned the id into a value its own list did not hold.
+      def canonical_option(value, config:)
+        text = value.to_s.strip.downcase
+        allowed = option_values(config)
+        return text if allowed.include?(text)
+
+        allowed.find { |option| comparable_option(option) == comparable_option(text) } || text
+      end
+
+      def comparable_option(value)
+        value.to_s.tr("_", "-")
+      end
 
       def built_in_validate(value, config:)
         if %w[integer duration].include?(type)
@@ -262,6 +279,7 @@ module Meringue
         "Experiments",
         "Harnesses",
         "Workspace",
+        "Version control",
         "Safety",
         "Keybindings",
         "Setup"
@@ -326,9 +344,14 @@ module Meringue
       def validate_registry!
         duplicate_ids = setting_ids.group_by(&:itself).select { |_id, values| values.length > 1 }.keys
         duplicate_paths = paths.map { |path| path.join(".") }.group_by(&:itself).select { |_path, values| values.length > 1 }.keys
+        # A category the list does not name is a category /config never renders, so its
+        # settings can be written by hand or by first-run setup and then never found
+        # again. That is how the version-control backend became a one-way choice.
+        unlisted_categories = definitions.map(&:category).uniq.reject { |category| CATEGORIES.include?(category) }
         errors = []
         errors << "duplicate setting ids: #{duplicate_ids.join(", ")}" unless duplicate_ids.empty?
         errors << "duplicate setting paths: #{duplicate_paths.join(", ")}" unless duplicate_paths.empty?
+        errors << "settings in unlisted categories: #{unlisted_categories.join(", ")}" unless unlisted_categories.empty?
         raise ArgumentError, errors.join("; ") unless errors.empty?
 
         true

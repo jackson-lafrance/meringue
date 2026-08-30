@@ -87,6 +87,9 @@ class KernelWorkersSharedReadOnlyWorkspaceTest < Minitest::Test
     bare = tmp_path("world-linked.git")
     shared_main = tmp_path("world-main")
     run_git(tmpdir, "clone", "--bare", source, bare)
+    # The clone's origin is the local source path; registration proves isolated
+    # workspaces from a GitHub origin, which is read for its host and never contacted.
+    run_git(bare, "remote", "set-url", "origin", "git@github.com:example/world.git")
     run_git(bare, "worktree", "add", shared_main, "main")
     manager = AllocationRejectingManager.new(root_path: workspace_root)
     engine = build_engine(workspace_manager: manager)
@@ -106,6 +109,7 @@ class KernelWorkersSharedReadOnlyWorkspaceTest < Minitest::Test
     root = create_git_repo
     bare = tmp_path("world.git")
     run_git(tmpdir, "clone", "--bare", root, bare)
+    run_git(bare, "remote", "set-url", "origin", "git@github.com:example/world.git")
     engine = build_engine
     project_id = add_project(engine, bare, name: "World")
     first_issue = create_issue(engine, project_id, title: "Investigate World")

@@ -130,7 +130,7 @@ class WorkspaceManagerSharedWorktreeTest < Minitest::Test
 
       outcome = manager.inspect_shared_worktree(
         worktree_root: project.fetch("project_root"),
-        branch: "meringue/whatever",
+        branch: "whatever-a1b2c3d4",
         git_root: project.fetch("project_root")
       )
 

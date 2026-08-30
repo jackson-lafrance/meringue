@@ -110,48 +110,6 @@ module KernelHeadsSupport
   end
 
   # Never touches git; every worker gets the project root as its workspace.
-  class StubWorkspaceManager
-    attr_reader :released
-
-    def initialize
-      @released = []
-    end
-
-    def plan_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil)
-      {
-        "strategy" => "project_root",
-        "project_root" => File.expand_path(project_root),
-        "workspace_path" => File.expand_path(project_root),
-        "workspace_branch" => nil,
-        "created" => false,
-        "fallback_reason" => "test stub workspace manager"
-      }
-    end
-
-    def allocate_worker_workspace(project_root:, project_id:, issue_id:, agent_id:, task_title: nil)
-      plan_worker_workspace(
-        project_root: project_root,
-        project_id: project_id,
-        issue_id: issue_id,
-        agent_id: agent_id,
-        task_title: task_title
-      ).merge("errors" => [])
-    end
-
-    def release_worker_workspace(workspace, delete_branch: false)
-      @released << { "workspace" => workspace, "delete_branch" => delete_branch }
-      false
-    end
-
-    # These workers never own a git worktree, so prune cleanup is the same idempotent "nothing to
-    # remove" success the real manager reports for a project-root workspace.
-    def cleanup_pruned_worker_workspace(workspace, protected_paths: [])
-      @cleaned ||= []
-      @cleaned << { "workspace" => workspace, "protected_paths" => Array(protected_paths) }
-      { "status" => "skipped", "reason" => "not_a_managed_worktree", "success" => true, "attempted" => false }
-    end
-  end
-
   # Guarantees the kernel never shells out to `gh` during tests.
   class StubForgeClient
     def pull_request_urls_for_branch(repository:, branch:)
@@ -203,7 +161,10 @@ class KernelHeadsTestCase < Minitest::Test
       store: Meringue::State::Store.new(path: state_path || @state_path),
       harness_client: harness_client || Meringue::Harness::FakeClient.new,
       head_runner: head_runner || KernelHeadsSupport::StubHeadRunner.new,
-      workspace_manager: KernelHeadsSupport::StubWorkspaceManager.new,
+      workspace_manager: (heads_workspace_manager = Meringue::Workspace::FakeManager.new(root_path: File.join(@temp_root, "workspaces"))),
+      # Fixture projects are directories, not repositories: the capability probe and the
+      # isolated workspace are both faked so these tests stay about head routing.
+      version_control_backend: Meringue::VersionControl::FakeBackend.new(manager: heads_workspace_manager),
       cwd: cwd || @project_path,
       async_heads: async_heads,
       forge_client: KernelHeadsSupport::StubForgeClient.new,

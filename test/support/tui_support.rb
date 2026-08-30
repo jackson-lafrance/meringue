@@ -180,12 +180,19 @@ module TUISupport
     }.merge(stringify(overrides))
   end
 
+  # Registration records the backend's isolation evidence on the project, and the tree
+  # reads it from there. Override `version_control_capabilities` to model a project that
+  # cannot host isolated workspaces.
   def project_record(id, overrides = {})
     {
       "id" => id,
       "name" => "Project #{id}",
       "root_path" => ".",
       "status" => "working",
+      "version_control_backend" => "github_git",
+      "version_control_repository_identity" => "git@github.com:example/#{id.to_s.downcase}.git",
+      "version_control_capabilities" => { "isolated_workspaces" => true, "mutable_workspace" => true },
+      "version_control_diagnostic_at" => "2026-07-11T00:00:00Z",
       "created_at" => "2026-07-11T00:00:00Z",
       "updated_at" => "2026-07-11T00:00:00Z"
     }.merge(stringify(overrides))

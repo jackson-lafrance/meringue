@@ -106,6 +106,8 @@ class TuiTransactionalSetupTest < Minitest::Test
     assert_equal "[settings]\nschema_version = 1\n", File.read(@config_path)
     assert_empty submitted
 
+    send_key(TAB) # Version control
+    assert_equal "Version control", setup_snapshot.fetch("category")
     send_key(TAB) # Experiments
     assert_equal "Experiments", setup_snapshot.fetch("category")
     expected_experiments = Meringue::Experiments::Registry.setting_ids - ["experiments.github_support_test_access"]

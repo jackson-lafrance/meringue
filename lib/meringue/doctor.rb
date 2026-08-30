@@ -39,6 +39,7 @@ module Meringue
         *harness_checks,
         config_check,
         state_check,
+        github_cli_check,
         version_control_check,
         repository_check
       ].compact
@@ -75,6 +76,28 @@ module Meringue
       )
     end
 
+    # `gh` is only ever launched by the GitHub-support experiment, so it is only asked
+    # about when that is on. Reporting a missing gh to someone working locally would be
+    # reporting a tool they were never going to run.
+    def github_cli_check
+      return nil unless github_support_enabled?
+
+      located = Harness::Availability.locate(["gh"])
+      return ok("GitHub CLI at #{located.fetch("path")}") if Harness::Availability.installed?(located)
+
+      problem(
+        "GitHub CLI was not found",
+        detail: "GitHub support looks up pull request titles and states with gh.",
+        fix: "Install the GitHub CLI and run gh auth login, or turn GitHub support off in /config."
+      )
+    end
+
+    def github_support_enabled?
+      config.experiment_enabled?("github_support")
+    rescue StandardError
+      false
+    end
+
     # The harness is the one thing Meringue cannot run without, so it is checked
     # the way the launcher resolves it rather than by looking for a command name.
     def harness_checks
@@ -109,7 +132,7 @@ module Meringue
       problem(
         "#{subject} is not configured",
         detail: "Meringue is harness-agnostic and never guesses a backend.",
-        fix: "Run meringue and choose one in first-run setup, or set [harness] provider in #{config_path}."
+        fix: "Run meringue and choose one in first-run setup, or set [harness] head_provider and worker_provider in #{config_path}."
       )
     end
 

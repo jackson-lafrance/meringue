@@ -82,7 +82,10 @@ module InputSupport
         store: @store,
         harness_client: Meringue::Harness::FakeClient.new,
         head_runner: @head_runner,
-        workspace_manager: Meringue::Workspace::Manager.new,
+        workspace_manager: (input_workspace_manager = Meringue::Workspace::FakeManager.new(root_path: File.join(dir, "workspaces"))),
+        # Fixture projects are directories, not repositories: the capability probe and the
+        # isolated workspace are both faked so these tests stay about input routing.
+        version_control_backend: Meringue::VersionControl::FakeBackend.new(manager: input_workspace_manager),
         cwd: @project_path,
         async_heads: false,
         config_path: @config_path

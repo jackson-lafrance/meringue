@@ -52,11 +52,15 @@ module KernelCoreSupport
   end
 
   def build_engine(store: @store, head_runner: @head_runner, **options)
+    # Fixture projects are directories, not repositories: the capability probe and the
+    # isolated workspace are both faked so these tests stay about the kernel.
+    workspace_manager = Meringue::Workspace::FakeManager.new(root_path: File.join(@tmp_root, "workspaces"))
     Meringue::Kernel::Engine.new(
       store: store,
       harness_client: Meringue::Harness::FakeClient.new,
       head_runner: head_runner,
-      workspace_manager: Meringue::Workspace::Manager.new(root_path: File.join(@tmp_root, "workspaces")),
+      workspace_manager: workspace_manager,
+      version_control_backend: Meringue::VersionControl::FakeBackend.new(manager: workspace_manager),
       cwd: @tmp_root,
       config_path: File.join(@tmp_root, "config.toml"),
       **options
@@ -154,16 +158,12 @@ module KernelCoreSupport
     result
   end
 
-  # Spawns a worker without provisioning a git worktree by pointing the worker at an
-  # existing directory. This keeps the test hermetic (no git subprocesses) while still
-  # exercising the real SpawnWorker code path.
-  def spawn_worker!(issue_id, workspace_path:, prompt: "Do the work")
-    result = apply_command(
-      "SpawnWorker",
-      "issue_id" => issue_id,
-      "prompt" => prompt,
-      "workspace_path" => workspace_path
-    )
+  # A worker's workspace has to be one a backend provisioned, so this spawns normally and
+  # lets the fake workspace manager allocate an isolated directory. Pointing the worker at
+  # a directory of the test's own choosing is refused by the kernel, whether or not the
+  # directory exists.
+  def spawn_worker!(issue_id, prompt: "Do the work")
+    result = apply_command("SpawnWorker", "issue_id" => issue_id, "prompt" => prompt)
     assert_accepted(result)
     result
   end

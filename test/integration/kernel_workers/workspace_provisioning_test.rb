@@ -165,24 +165,19 @@ class KernelWorkersWorkspaceProvisioningTest < Minitest::Test
     assert_equal worker.fetch("workspace_path"), @harness_client.spawns.last.fetch("cwd")
   end
 
-  def test_non_git_project_root_falls_back_to_the_project_root_cwd
+  # A worker used to fall back to running in the project root when no worktree could be
+  # allocated. It does not any more: a directory that cannot host an isolated workspace is
+  # refused at registration, so no worker ever reaches it.
+  def test_a_non_git_project_root_is_refused_at_registration
     engine = build_engine
     root = create_plain_directory
-    project_id = add_project(engine, root)
-    issue_id = create_issue(engine, project_id, title: "Draft the onboarding doc")
 
-    result = spawn_worker(engine, issue_id)
-    worker = agent(engine, result.fetch("target_id"))
+    result = apply_raw(engine, "AddProject", { "path" => root, "name" => "Plain" })
 
-    assert_equal "accepted", result.fetch("status")
-    assert_equal "project_root", worker.fetch("workspace_strategy")
-    assert_equal File.realpath(root), File.realpath(worker.fetch("workspace_path"))
-    assert_nil worker.fetch("workspace_branch")
-    assert_equal(
-      "project root is not inside a git repository",
-      worker.fetch("harness_metadata").fetch("workspace_note")
-    )
-    assert_equal worker.fetch("workspace_path"), @harness_client.spawns.fetch(0).fetch("cwd")
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "version_control_backend_unavailable"
+    assert_includes result.fetch("errors"), "not_a_git_repository"
+    assert_empty state(engine).fetch("projects")
   end
 
   def test_harness_spawn_failure_fails_the_command_and_releases_the_workspace

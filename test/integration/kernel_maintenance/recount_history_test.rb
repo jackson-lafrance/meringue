@@ -167,7 +167,7 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
           "issue_id" => "P2-I2",
           "project_id" => "P2",
           "last_assistant_text" => "Assessed the two open review comments on P2-I2. PR https://github.com/jackson-lafrance/meringue/pull/160",
-          "delivery_pull_request" => { "url" => "https://github.com/jackson-lafrance/meringue/pull/160" }
+          "delivery_pull_requests" => [{ "url" => "https://github.com/jackson-lafrance/meringue/pull/160" }]
         }
       ),
       log_record(id: "L401", source_id: "P2-I2",
@@ -421,7 +421,7 @@ class KernelMaintenanceRecountHistoryTest < Minitest::Test
     assert_equal ["pi", "--mode", "rpc", "--append-system-prompt", "Work only on P4-I3."],
                  worker.dig("harness_metadata", "command")
     assert_equal "https://github.com/jackson-lafrance/meringue/pull/160",
-                 log_by_id(state, "L400").dig("details", "delivery_pull_request", "url")
+                 log_by_id(state, "L400").dig("details", "delivery_pull_requests", 0, "url")
     # A previous pass's mapping records a rename that happened; both spellings stay as written.
     assert_equal({ "project_ids" => { "P3" => "P2" } }, log_by_id(state, "L407").dig("details", "mappings"))
   end
