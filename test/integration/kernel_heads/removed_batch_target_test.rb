@@ -531,7 +531,7 @@ class KernelHeadsRemovedBatchTargetTest < KernelHeadsTestCase
       store: Meringue::State::Store.new(path: @state_path),
       harness_client: Meringue::Harness::FakeClient.new,
       head_runner: KernelHeadsSupport::StubHeadRunner.new,
-      workspace_manager: KernelHeadsSupport::StubWorkspaceManager.new,
+      workspace_manager: Meringue::Workspace::FakeManager.new(root_path: File.join(@temp_root, "workspaces")),
       cwd: @project_path,
       forge_client: KernelHeadsSupport::StubForgeClient.new,
       config_path: @config_path

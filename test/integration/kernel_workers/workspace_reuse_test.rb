@@ -250,23 +250,28 @@ class KernelWorkersWorkspaceReuseTest < Minitest::Test
     assert_nil reuse_log(engine, successor_id), "opting out is the caller's decision, not an event to explain"
   end
 
-  def test_an_explicit_workspace_path_is_never_overridden_by_reuse
+  # An explicit path used to win over reuse. It is now refused outright - it carries no
+  # isolation evidence - so the choice between the two never arises.
+  def test_an_explicit_workspace_path_is_refused_rather_than_preferred_over_reuse
     engine = build_engine
     context = project_with_issue(engine)
     predecessor_id = settled_predecessor(engine, context)
     elsewhere = tmp_path("chosen-directory")
     FileUtils.mkdir_p(elsewhere)
 
-    successor_id = spawn_worker(
+    result = apply_raw(
       engine,
-      context.fetch("issue_id"),
-      prompt: "Work here.",
-      follow_up_of_agent_id: predecessor_id,
-      workspace_path: elsewhere
-    ).fetch("target_id")
+      "SpawnWorker",
+      {
+        "issue_id" => context.fetch("issue_id"),
+        "prompt" => "Work here.",
+        "follow_up_of_agent_id" => predecessor_id,
+        "workspace_path" => elsewhere
+      }
+    )
 
-    assert_equal elsewhere, agent(engine, successor_id).fetch("workspace_path")
-    assert_nil reuse_record(engine, successor_id)
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "version_control_backend_required"
   end
 
   # --- refusals: state --------------------------------------------------------------------------
@@ -368,21 +373,17 @@ class KernelWorkersWorkspaceReuseTest < Minitest::Test
     assert_equal "https://github.com/acme/demo/pull/7", reuse.fetch("pull_request_url")
   end
 
-  def test_a_worker_in_the_project_root_has_no_worktree_to_share
+  # There is no such worker any more: a project whose root cannot host an isolated
+  # worktree never gets registered, so no predecessor can be sitting in a project root
+  # with nothing to share.
+  def test_a_project_root_that_cannot_host_a_worktree_is_refused_at_registration
     engine = build_engine
     root = create_plain_directory
-    project_id = add_project(engine, root, name: "Plain")
-    issue_id = create_issue(engine, project_id)
-    predecessor_id = spawn_worker(engine, issue_id).fetch("target_id")
-    engine.mark_worker_completed(agent_id: predecessor_id, last_assistant_text: "Done.")
 
-    successor_id = spawn_worker(engine, issue_id, prompt: "Next.", follow_up_of_agent_id: predecessor_id).fetch("target_id")
+    result = apply_raw(engine, "AddProject", { "path" => root, "name" => "Plain" })
 
-    successor = agent(engine, successor_id)
-
-    assert_equal "project_root", successor.fetch("workspace_strategy")
-    assert_equal File.realpath(root), File.realpath(successor.fetch("workspace_path"))
-    assert_equal "predecessor_workspace_is_not_a_worktree", reuse_record(engine, successor_id).fetch("reason")
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "version_control_backend_unavailable"
   end
 
   # --- refusals: git ----------------------------------------------------------------------------
@@ -545,7 +546,7 @@ class KernelWorkersWorkspaceReuseTest < Minitest::Test
   def test_two_workers_on_one_shared_branch_report_one_delivery_pull_request
     engine = build_engine
     context = project_with_issue(engine)
-    run_git(context.fetch("root"), "remote", "add", "origin", "https://github.com/acme/demo.git")
+    run_git(context.fetch("root"), "remote", "set-url", "origin", "https://github.com/acme/demo.git")
     predecessor_id = spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
     branch = agent(engine, predecessor_id).fetch("workspace_branch")
     forge = SingleBranchForgeClient.new(branch: branch)

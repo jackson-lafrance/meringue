@@ -156,7 +156,7 @@ class HeadSimpleLoopTest < Minitest::Test
       out: out,
       err: StringIO.new,
       cwd: head_temp_root,
-      workspace_manager: StubWorkspaceManager.new(root_path: File.join(head_temp_root, "workspaces"))
+      workspace_manager: Meringue::Workspace::FakeManager.new(root_path: File.join(head_temp_root, "workspaces"))
     )
 
     assert_equal 0, loop_under_test.run
@@ -193,7 +193,7 @@ class HeadSimpleLoopTest < Minitest::Test
       root: root,
       project_path: project_path,
       store: Meringue::State::Store.new(path: File.join(root, "state.json")),
-      workspace_manager: StubWorkspaceManager.new(root_path: workspace_root),
+      workspace_manager: Meringue::Workspace::FakeManager.new(root_path: workspace_root),
       runner: runner,
       harness_client: harness_client
     }

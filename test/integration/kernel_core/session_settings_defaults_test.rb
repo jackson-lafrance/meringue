@@ -169,8 +169,10 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal ["P1-I1-W1"], model_result.dig("result", "existing_session_ids_unchanged")
     assert_equal first_before, persisted_agents.fetch(0).fetch("session_settings")
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
-    assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "model")
-    assert_equal "xhigh", config.value("harness", "pi", "thinking_level")
+    assert_equal "openai/gpt-5.6-sol", config.value("harness", "head_model")
+    assert_equal "openai/gpt-5.6-sol", config.value("harness", "worker_model")
+    assert_equal "xhigh", config.value("harness", "head_thinking_level")
+    assert_equal "xhigh", config.value("harness", "worker_thinking_level")
 
     spawn_worker!("P1-I1")
     second = persisted_agents.find { |agent| agent.fetch("id") == "P1-I1-W2" }
@@ -191,8 +193,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal "xhigh", worker_result.dig("result", "roles", "worker", "thinking_level")
 
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
-    assert_equal "low", config.value("harness", "pi", "head_thinking_level")
-    assert_equal "xhigh", config.value("harness", "pi", "worker_thinking_level")
+    assert_equal "low", config.value("harness", "head_thinking_level")
+    assert_equal "xhigh", config.value("harness", "worker_thinking_level")
   end
 
   def test_shared_thinking_command_resets_role_specific_overrides
@@ -206,8 +208,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal "high", result.dig("result", "roles", "head", "thinking_level")
     assert_equal "high", result.dig("result", "roles", "worker", "thinking_level")
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
-    assert_nil config.value("harness", "pi", "head_thinking_level")
-    assert_nil config.value("harness", "pi", "worker_thinking_level")
+    assert_equal "high", config.value("harness", "head_thinking_level")
+    assert_equal "high", config.value("harness", "worker_thinking_level")
   end
 
   def test_role_specific_model_commands_persist_independent_defaults_and_scope_their_results
@@ -224,9 +226,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_match(/for future workers\./, worker_result.fetch("message"))
 
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
-    assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "head_model")
-    assert_equal "anthropic/claude-opus-5", config.value("harness", "pi", "model")
-    assert_nil config.value("harness", "pi", "worker_model"), "the worker inherits the shared compatibility fallback"
+    assert_equal "openai/gpt-5.6-sol", config.value("harness", "head_model")
+    assert_equal "anthropic/claude-opus-5", config.value("harness", "worker_model")
   end
 
   def test_shared_model_command_resets_role_specific_overrides
@@ -241,9 +242,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", result.dig("result", "roles", "worker", "model")
     assert_match(/for all future heads and workers\./, result.fetch("message"))
     config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
-    assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", config.value("harness", "pi", "model")
-    assert_nil config.value("harness", "pi", "head_model")
-    assert_nil config.value("harness", "pi", "worker_model")
+    assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", config.value("harness", "head_model")
+    assert_equal "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast", config.value("harness", "worker_model")
   end
 
   def test_role_specific_model_command_rejects_an_invalid_role
@@ -263,13 +263,10 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
   def test_spawn_worker_partial_override_uses_other_default_and_does_not_change_future_defaults
     add_project!(name: "per-worker")
     create_issue!("P1", title: "Exercise per-worker settings")
-    workspace = make_project_dir("worker-override")
-
     result = apply_command(
       "SpawnWorker",
       "issue_id" => "P1-I1",
       "prompt" => "Do the work",
-      "workspace_path" => workspace,
       "model" => "openai/gpt-5.6-sol"
     )
     assert_accepted(result)
@@ -395,7 +392,8 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
       assert_includes result.fetch("message"), "Set the default model to #{reference}"
 
       config = Meringue::Config.load(path: File.join(tmp_root, "config.toml"))
-      assert_equal reference, config.value("harness", "pi", "model")
+      assert_equal reference, config.value("harness", "head_model")
+      assert_equal reference, config.value("harness", "worker_model")
     end
 
     # The value round-trips into a session spawned after the change.

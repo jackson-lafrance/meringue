@@ -114,6 +114,22 @@ module Meringue
         expanded_project_path = File.expand_path(project_path.to_s)
         return rejected_result(command_id, command_type, "Workers were not imported.", ["project_path must be an existing directory"]) unless Dir.exist?(expanded_project_path)
 
+        # Import registers a destination project, so it has to clear the same bar as
+        # AddProject: an imported worker needs an isolated mutable workspace like any
+        # other. Skipping the probe created a project no worker could ever be given a
+        # workspace in, and reported every worker as "spawn_failed" instead of saying so.
+        capability = @version_control_backend.inspect_project(root_path: expanded_project_path)
+        unless capability.is_a?(Hash) && capability["available"] == true && capability.dig("capabilities", "isolated_workspaces") == true
+          diagnostics = Array(capability.is_a?(Hash) ? capability["diagnostics"] : nil).join(", ")
+          reason = diagnostics.empty? ? "isolated_workspace_capability_missing" : diagnostics
+          return rejected_result(
+            command_id,
+            command_type,
+            "Workers were not imported: isolated mutable workspaces are unavailable (#{reason}).",
+            ["version_control_backend_unavailable", reason]
+          )
+        end
+
         imported = []
         skipped = []
         log_ids = []
@@ -121,7 +137,7 @@ module Meringue
         issue_ids = {}
         synchronized_state do
           state = normalized_state
-          project = import_project!(state, bundle, expanded_project_path, payload)
+          project = import_project!(state, bundle, expanded_project_path, payload, capability: capability)
           project_id = project.fetch("id")
           bundle.fetch("workers").each do |entry|
             source_issue_id = entry.dig("issue", "source_id").to_s

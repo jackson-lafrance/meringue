@@ -262,7 +262,8 @@ class WorkerModelSelectionGuidanceTest < Minitest::Test
         [settings]
         schema_version = 1
         [harness]
-        provider = "pi"
+        head_provider = "pi"
+        worker_provider = "pi"
         head_model = "public/head-model"
         worker_model = "private/configured-worker-model"
         head_thinking_level = "low"
@@ -320,7 +321,11 @@ class WorkerModelSelectionGuidanceTest < Minitest::Test
       TOML
       state = Meringue::State::Models.empty_state
       state.fetch("projects") << {
-        "id" => "P1", "name" => "Project", "root_path" => project_path, "status" => "working"
+        "id" => "P1", "name" => "Project", "root_path" => project_path, "status" => "working",
+        # Registration records isolation evidence, and a worker is only provisioned for a
+        # project that carries it.
+        "version_control_backend" => "github_git",
+        "version_control_capabilities" => { "isolated_workspaces" => true, "mutable_workspace" => true }
       }
       state.fetch("issues") << {
         "id" => "P1-I1", "project_id" => "P1", "parent_issue_id" => nil,
@@ -337,7 +342,7 @@ class WorkerModelSelectionGuidanceTest < Minitest::Test
       engine = Meringue::Kernel::Engine.new(
         store: store,
         harness_client: Meringue::Harness::FakeClient.new,
-        workspace_manager: Meringue::Workspace::Manager.new(root_path: File.join(dir, "workspaces")),
+        workspace_manager: Meringue::Workspace::FakeManager.new(root_path: File.join(dir, "workspaces")),
         config: Meringue::Config.load(path: config_path),
         config_path: config_path,
         cwd: project_path

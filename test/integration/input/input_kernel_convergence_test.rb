@@ -132,9 +132,10 @@ class InputKernelConvergenceTest < Minitest::Test
         sandbox.config_path,
         <<~TOML
           [harness]
-          provider = "pi"
-          model = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"
-          thinking_level = "off"
+          head_provider = "pi"
+          worker_provider = "pi"
+          head_model = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"
+          worker_model = "fireworks/fireworks:accounts/fireworks/routers/glm-5p2-fast"
           head_thinking_level = "minimal"
           worker_thinking_level = "off"
         TOML
@@ -161,14 +162,16 @@ class InputKernelConvergenceTest < Minitest::Test
       assert_equal [%w[SetDefaultSessionModel accepted]], sandbox.command_result_pairs(model)
       assert_equal [%w[SetDefaultSessionThinkingLevel accepted]], sandbox.command_result_pairs(thinking)
       config = Meringue::Config.load(path: sandbox.config_path)
-      assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "model")
-      assert_equal "xhigh", config.value("harness", "pi", "thinking_level")
+      assert_equal "openai/gpt-5.6-sol", config.value("harness", "head_model")
+      assert_equal "openai/gpt-5.6-sol", config.value("harness", "worker_model")
+      assert_equal "xhigh", config.value("harness", "head_thinking_level")
+      assert_equal "xhigh", config.value("harness", "worker_thinking_level")
 
       rejected = sandbox.submit("/thinking ultra")
       result = sandbox.command_results(rejected).first
       assert_equal "rejected", result.fetch("status")
       assert_includes result.fetch("errors").join(" "), "thinking level must be one of"
-      assert_equal "xhigh", Meringue::Config.load(path: sandbox.config_path).value("harness", "pi", "thinking_level")
+      assert_equal "xhigh", Meringue::Config.load(path: sandbox.config_path).value("harness", "head_thinking_level")
     end
   end
 
@@ -181,7 +184,7 @@ class InputKernelConvergenceTest < Minitest::Test
       applied = sandbox.submit("/model #{reference}")
 
       assert_equal [%w[SetDefaultSessionModel accepted]], sandbox.command_result_pairs(applied)
-      assert_equal reference, Meringue::Config.load(path: sandbox.config_path).value("harness", "pi", "model")
+      assert_equal reference, Meringue::Config.load(path: sandbox.config_path).value("harness", "head_model")
 
       # A rejection names its reason in the message the user sees, not only in
       # the errors detail.
@@ -189,7 +192,7 @@ class InputKernelConvergenceTest < Minitest::Test
       assert_equal "rejected", rejected.fetch("status")
       assert_includes rejected.fetch("message"), "has no provider prefix"
       assert_includes rejected.fetch("message"), "Use <provider>/<model-id>"
-      assert_equal reference, Meringue::Config.load(path: sandbox.config_path).value("harness", "pi", "model")
+      assert_equal reference, Meringue::Config.load(path: sandbox.config_path).value("harness", "head_model")
     end
   end
 
