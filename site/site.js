@@ -31,6 +31,45 @@ function showToast(message) {
   showToast.timer = window.setTimeout(() => toast.classList.remove("visible"), 3000);
 }
 
+const stageDescriptions = [
+  ["Send a prompt", "Type a goal in the dashboard chat. You stay in the same terminal while Meringue takes it from here."],
+  ["The head finds the fit", "A short lived head reads the project context and creates the issue in the right project."],
+  ["A worker performs it", "The kernel gives the worker an isolated worktree and the worker starts the task."],
+  ["Progress reaches complete", "Logs capture the result and the AgentTree shows the completed issue and worker."],
+];
+const stageButtons = [...document.querySelectorAll("[data-stage-button]")];
+const stageViews = [...document.querySelectorAll("[data-stage]")];
+const stageDescription = document.querySelector("#stage-description");
+let currentStage = 0;
+
+function showStage(stage, moveFocus = false) {
+  currentStage = (stage + stageDescriptions.length) % stageDescriptions.length;
+  stageViews.forEach((view) => { view.hidden = Number(view.dataset.stage) !== currentStage; });
+  stageButtons.forEach((button) => {
+    const selected = Number(button.dataset.stageButton) === currentStage;
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  });
+  stageDescription.querySelector("strong").textContent = stageDescriptions[currentStage][0];
+  stageDescription.querySelector("span").textContent = stageDescriptions[currentStage][1];
+  if (moveFocus) stageButtons[currentStage].focus();
+}
+
+stageButtons.forEach((button) => {
+  button.addEventListener("click", () => showStage(Number(button.dataset.stageButton)));
+  button.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowRight") { event.preventDefault(); showStage(currentStage + 1, true); }
+    if (event.key === "ArrowLeft") { event.preventDefault(); showStage(currentStage - 1, true); }
+    if (event.key === "Home") { event.preventDefault(); showStage(0, true); }
+    if (event.key === "End") { event.preventDefault(); showStage(stageDescriptions.length - 1, true); }
+  });
+});
+document.querySelectorAll("[data-carousel]").forEach((button) => {
+  button.addEventListener("click", () => showStage(currentStage + (button.dataset.carousel === "next" ? 1 : -1), true));
+});
+
+showStage(0);
+
 document.querySelectorAll("[data-copy]").forEach((button) => {
   button.addEventListener("click", async () => {
     const target = button.dataset.copyTarget && document.getElementById(button.dataset.copyTarget);
