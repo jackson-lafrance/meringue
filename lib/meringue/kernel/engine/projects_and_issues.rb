@@ -19,7 +19,7 @@ module Meringue
         return rejected_result(command_id, command_type, "Project was not added.", errors) unless errors.empty?
 
         capability = @version_control_backend.inspect_project(root_path: expanded_path)
-        unless capability.is_a?(Hash) && capability["available"] == true && capability.dig("capabilities", "isolated_workspaces") == true
+        unless usable_capability?(capability)
           diagnostics = Array(capability.is_a?(Hash) ? capability["diagnostics"] : nil).join(", ")
           reason = diagnostics.empty? ? "isolated_workspace_capability_missing" : diagnostics
           return rejected_result(command_id, command_type, "Project was not added: isolated mutable workspaces are unavailable (#{reason}).", ["version_control_backend_unavailable", reason])
@@ -52,6 +52,12 @@ module Meringue
                              projects_at_path.find { |project| same_project_name?(project.fetch("name"), requested_name) }
                            end
         if existing_project
+          # A project registered before isolated-workspace evidence was recorded has
+          # no capability block, and the allocation gate then refuses every worker
+          # against it forever. Re-registering the path is what the gate's own note
+          # tells you to do, so make that actually repair the record.
+          repaired = repair_project_version_control!(existing_project, capability)
+
           if head_request
             now = timestamp
             log_ids = append_log(
@@ -63,7 +69,8 @@ module Meringue
               details: {
                 "root_path" => expanded_path,
                 "head_id" => head_id,
-                "reused" => true
+                "reused" => true,
+                "version_control_repaired" => repaired
               }
             )
             touch_state!(state, now)
@@ -79,11 +86,19 @@ module Meringue
             )
           end
 
+          # The command is still rejected -- no second board is opened -- but a
+          # repair that already happened has to survive the rejection.
+          if repaired
+            touch_state!(state, timestamp)
+            store.save(state)
+          end
+
           message = if requested_name && same_project_name?(existing_project.fetch("name"), requested_name)
                       "Project #{existing_project.fetch("id")} is already registered at that path under the name #{requested_name.inspect}."
                     else
                       "Project is already registered."
                     end
+          message += " Its version-control capabilities were repaired." if repaired
           return rejected_result(command_id, command_type, message, ["project_already_exists"])
         end
 
@@ -469,6 +484,35 @@ module Meringue
       # Two logical projects are the same checkout when their roots resolve to
       # one directory. Comparing expanded paths keeps `.`/symlink spellings and a
       # trailing slash from reading as different repositories.
+      def usable_capability?(capability)
+        capability.is_a?(Hash) &&
+          capability["available"] == true &&
+          capability.dig("capabilities", "isolated_workspaces") == true
+      end
+
+      # Backfills or refreshes the version-control evidence on an already registered
+      # project. Returns true only when the record actually changed, so callers
+      # persist and report a repair rather than a no-op re-registration.
+      def repair_project_version_control!(project, capability)
+        return false unless usable_capability?(capability)
+
+        desired = {
+          "version_control_backend" => capability.fetch("backend", @version_control_backend.id),
+          "version_control_repository_identity" => capability["repository_identity"],
+          "version_control_capabilities" => capability.fetch("capabilities", {}),
+          "version_control_diagnostic_at" => capability["diagnostic_at"]
+        }
+        # `diagnostic_at` is a fresh probe timestamp on every call, so comparing it
+        # would make every re-registration look like a repair. Identity is the
+        # backend, the repository, and the capabilities themselves.
+        return false if desired.reject { |key, _| key == "version_control_diagnostic_at" }
+                               .all? { |key, value| project[key] == value }
+
+        project.merge!(desired)
+        project["updated_at"] = timestamp
+        true
+      end
+
       def projects_share_root_path?(state, source_project_id, target_project)
         source_project = find_project(state, source_project_id)
         return false unless source_project && target_project

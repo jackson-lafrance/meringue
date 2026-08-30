@@ -242,20 +242,25 @@ class KernelWorkersSpawnTest < Minitest::Test
     assert_includes second.fetch("message"), "was already spawned"
   end
 
-  def test_requested_workspace_path_is_used_verbatim_without_a_branch
+  # A mutable workspace may only come from a version-control backend that can prove
+  # isolation, so a hand-picked directory is refused however ordinary it looks --
+  # otherwise a worker edits a tree nothing owns and no one can clean up.
+  def test_a_requested_workspace_path_is_refused_because_only_a_backend_may_provision_one
     engine = build_engine
     context = project_with_issue(engine)
     requested = tmp_path("scratch-workspace")
     FileUtils.mkdir_p(requested)
 
-    result = spawn_worker(engine, context.fetch("issue_id"), workspace_path: requested)
-    worker = agent(engine, result.fetch("target_id"))
+    result = apply_raw(
+      engine,
+      "SpawnWorker",
+      { "issue_id" => context.fetch("issue_id"), "prompt" => "Go.", "workspace_path" => requested }
+    )
 
-    assert_equal requested, worker.fetch("workspace_path")
-    assert_equal "dedicated_directory", worker.fetch("workspace_strategy")
-    assert_nil worker.fetch("workspace_branch")
-    assert_equal requested, @harness_client.spawns.fetch(0).fetch("cwd")
-    assert_equal requested, worker.fetch("harness_metadata").fetch("requested_workspace_path")
+    assert_equal "rejected", result.fetch("status")
+    assert_includes result.fetch("errors"), "version_control_backend_required"
+    assert_empty @harness_client.spawns
+    assert_empty state(engine).fetch("agents")
   end
 
   def test_reconciliation_recovers_a_reservation_that_never_reached_the_harness
@@ -289,7 +294,9 @@ class KernelWorkersSpawnTest < Minitest::Test
     assert_equal 2, @harness_client.spawns.length
   end
 
-  def test_requested_workspace_path_must_exist
+  # The backend requirement is checked before the path is, so a missing directory is
+  # refused for the same reason an existing one is; either way nothing is reserved.
+  def test_a_missing_requested_workspace_path_is_refused_without_reserving_anything
     engine = build_engine
     context = project_with_issue(engine)
 
@@ -300,7 +307,7 @@ class KernelWorkersSpawnTest < Minitest::Test
     )
 
     assert_equal "rejected", result.fetch("status")
-    assert_includes result.fetch("errors"), "workspace_path must be an existing directory"
+    assert_includes result.fetch("errors"), "version_control_backend_required"
     assert_empty @harness_client.spawns
     assert_empty state(engine).fetch("agents")
   end

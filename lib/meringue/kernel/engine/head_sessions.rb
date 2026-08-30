@@ -584,6 +584,7 @@ module Meringue
 
         first_project = bundle.fetch("workers").first.fetch("project", {})
         now = timestamp
+        capability = @version_control_backend.inspect_project(root_path: expanded)
         project = {
           "id" => next_project_id!(state),
           "name" => project_display_name(value_at(payload, "project_name", "projectName")) ||
@@ -597,6 +598,10 @@ module Meringue
           "created_at" => now,
           "updated_at" => now
         }
+        # Import does not gate on isolation the way registration does, but a project
+        # born without capability evidence can never spawn an isolated worker, so
+        # stamp whatever the backend can prove right now.
+        repair_project_version_control!(project, capability)
         state.fetch("projects") << project
         append_log(
           state,

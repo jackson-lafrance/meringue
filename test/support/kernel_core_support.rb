@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "open3"
 
 # Shared harness for the kernel_core integration slice.
 #
@@ -128,10 +129,39 @@ module KernelCoreSupport
 
   # --- fixtures -----------------------------------------------------------------------
 
+  # The isolated-workspace gate accepts a project only when its backend can prove
+  # isolation, so a bare directory is no longer a usable fixture: it needs to be a
+  # real repository with a GitHub origin and a resolvable base ref.
   def make_project_dir(name = "app")
     path = File.join(tmp_root, "projects", name)
+    return path if Dir.exist?(path)
+
     FileUtils.mkdir_p(path)
+    File.write(File.join(path, "README.md"), "# #{name}\n")
+    run_git(path, "init", "--initial-branch=main")
+    run_git(path, "config", "user.email", "meringue-tests@example.com")
+    run_git(path, "config", "user.name", "Meringue Tests")
+    run_git(path, "add", ".")
+    run_git(path, "commit", "-m", "initial commit")
+    # Never fetched; `git remote get-url` only has to report a GitHub identity.
+    run_git(path, "remote", "add", "origin", "https://github.com/example/#{name}.git")
     path
+  end
+
+  def run_git(root, *args)
+    env = {
+      "GIT_CONFIG_GLOBAL" => "/dev/null",
+      "GIT_CONFIG_SYSTEM" => "/dev/null",
+      "GIT_TERMINAL_PROMPT" => "0",
+      "GIT_AUTHOR_NAME" => "Meringue Tests",
+      "GIT_AUTHOR_EMAIL" => "meringue-tests@example.com",
+      "GIT_COMMITTER_NAME" => "Meringue Tests",
+      "GIT_COMMITTER_EMAIL" => "meringue-tests@example.com"
+    }
+    stdout, stderr, status = Open3.capture3(env, "git", "-C", root.to_s, *args.map(&:to_s))
+    raise "git #{args.join(" ")} failed: #{stderr}#{stdout}" unless status.success?
+
+    stdout
   end
 
   # Positional-only on purpose so callers can pass a braceless payload hash.
@@ -154,15 +184,13 @@ module KernelCoreSupport
     result
   end
 
-  # Spawns a worker without provisioning a git worktree by pointing the worker at an
-  # existing directory. This keeps the test hermetic (no git subprocesses) while still
-  # exercising the real SpawnWorker code path.
-  def spawn_worker!(issue_id, workspace_path:, prompt: "Do the work")
+  # Explicit workspace paths are refused now that only a version-control backend may
+  # provision a mutable workspace, so the worker gets a real worktree cut from the
+  # fixture repository. Still hermetic -- every path stays inside the per-test tmpdir.
+  def spawn_worker!(issue_id, prompt: "Do the work", **payload)
     result = apply_command(
       "SpawnWorker",
-      "issue_id" => issue_id,
-      "prompt" => prompt,
-      "workspace_path" => workspace_path
+      { "issue_id" => issue_id, "prompt" => prompt }.merge(payload)
     )
     assert_accepted(result)
     result

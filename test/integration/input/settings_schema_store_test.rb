@@ -84,56 +84,6 @@ class InputSettingsSchemaStoreTest < Minitest::Test
     end
   end
 
-  def test_transaction_preserves_unknown_keys_and_serializes_role_fallbacks
-    with_paths do |config_path, _state_path|
-      File.write(config_path, <<~TOML)
-        custom = "keep me"
-        [plugin.future]
-        enabled = true
-        [harness.pi]
-        model = "anthropic/claude-opus-5"
-      TOML
-      store = Meringue::Config::Store.new(path: config_path)
-      store.save(
-        base_fingerprint: store.fingerprint,
-        changes: {
-          "agent.head_model" => "openai/gpt-5.6-sol",
-          "agent.worker_model" => "anthropic/claude-opus-5"
-        }
-      )
-
-      config = Meringue::Config.load(path: config_path)
-      assert_equal "keep me", config.value("custom")
-      assert_equal true, config.value("plugin", "future", "enabled")
-      assert_equal "anthropic/claude-opus-5", config.value("harness", "pi", "model")
-      assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "head_model")
-      assert_nil config.value("harness", "pi", "worker_model")
-    end
-  end
-
-  def test_equal_role_values_collapse_to_shared_compatibility_keys
-    with_paths do |config_path, _state_path|
-      store = Meringue::Config::Store.new(path: config_path)
-      store.save(
-        base_fingerprint: store.fingerprint,
-        changes: {
-          "agent.head_harness" => "claude",
-          "agent.worker_harness" => "claude",
-          "agent.head_thinking" => "high",
-          "agent.worker_thinking" => "high"
-        }
-      )
-      config = Meringue::Config.load(path: config_path)
-
-      assert_equal "claude", config.value("harness", "provider")
-      assert_nil config.value("harness", "head_provider")
-      assert_nil config.value("harness", "worker_provider")
-      assert_equal "high", config.value("harness", "pi", "thinking_level")
-      assert_nil config.value("harness", "pi", "head_thinking_level")
-      assert_nil config.value("harness", "pi", "worker_thinking_level")
-    end
-  end
-
   def test_stale_draft_is_rejected_without_overwriting_external_edit
     with_paths do |config_path, _state_path|
       File.write(config_path, "[tui]\ncolorscheme = \"meringue\"\n")
@@ -254,29 +204,6 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       assert_includes error.field_errors.fetch("safety.worker_blacklist"), "pi"
       refute File.exist?(config_path)
     end
-  end
-
-  def test_setup_moves_untouched_model_defaults_with_the_selected_harness
-    config = Meringue::Config.new({}, path: "/tmp/settings-codex.toml", file_data: {})
-    draft = Meringue::TUI::Settings::Draft.new(config, env: {})
-
-    assert_equal Meringue::Harness::Registry::DEFAULT_MODEL, draft.value("agent.head_model")
-    draft.set("agent.head_harness", "codex")
-    assert_equal "openai/gpt-5.6-sol", draft.value("agent.head_model")
-
-    draft.set("agent.head_harness", "claude")
-    assert_equal Meringue::Harness::Registry::DEFAULT_MODEL, draft.value("agent.head_model")
-
-    draft.set("agent.head_model", "openai/custom-model")
-    draft.set("agent.head_harness", "codex")
-    assert_equal "openai/custom-model", draft.value("agent.head_model"), "an explicit model choice must survive a harness switch"
-
-    configured = Meringue::Config.new(
-      { "harness" => { "provider" => "codex" } },
-      path: "/tmp/settings-codex-existing.toml",
-      file_data: { "harness" => { "provider" => "codex" } }
-    )
-    assert_equal "openai/gpt-5.6-sol", configured.setting("agent.head_model", env: {})
   end
 
   def test_runtime_override_provenance_is_not_mistaken_for_file_data

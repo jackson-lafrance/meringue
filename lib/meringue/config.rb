@@ -117,14 +117,32 @@ module Meringue
       config = load(path: expanded_path)
       return config if config.value("settings", "schema_version").to_i >= Schema::VERSION
 
+      # An explicit value always wins. Otherwise `state_path` decides: a state file
+      # that already exists means this is an upgrade, and an upgrade must not
+      # silently withdraw GitHub support that was already in use. Only a genuinely
+      # new installation records the opt-in default (off). This is the experiment's
+      # declared `enable_for_existing_installations` migration.
       explicit_github = config.value("experiments", "github_support")
-      github_support = explicit_github == true
+      github_support = if [true, false].include?(explicit_github)
+                         explicit_github
+                       else
+                         existing_installation?(state_path)
+                       end
       patches = {
         "settings.schema_version" => Schema::VERSION,
         "experiments.github_support" => github_support
       }
       store = Store.new(path: expanded_path)
       store.patch_paths(base_fingerprint: store.fingerprint, patches: patches)
+    end
+
+    # Resolved at call time, never at load time: config.rb is required before
+    # state/store.rb, so the constant is only guaranteed to exist once a caller runs.
+    def self.existing_installation?(state_path)
+      resolved = state_path || State::Store.default_path
+      File.file?(File.expand_path(resolved.to_s))
+    rescue StandardError
+      false
     end
 
     def self.reject_obsolete_settings!(data, path:)

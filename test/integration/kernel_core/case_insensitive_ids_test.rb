@@ -13,7 +13,7 @@ class KernelCoreCaseInsensitiveIdsTest < Minitest::Test
     super
     add_project!(name: "app")
     create_issue!("P1", title: "Fix signup validation")
-    spawn_worker!("P1-I1", workspace_path: make_project_dir("worker"))
+    spawn_worker!("P1-I1")
     spawn_head!
     ask_question!("H1", question: "Which environment?", "project_id" => "P1", "issue_id" => "P1-I1")
   end
@@ -124,8 +124,7 @@ class KernelCoreCaseInsensitiveIdsTest < Minitest::Test
     result = apply_command(
       "SpawnWorker",
       "issue_id" => "p1-i1",
-      "prompt" => "keep going",
-      "workspace_path" => make_project_dir("worker-two")
+      "prompt" => "keep going"
     )
 
     assert_accepted(result)
@@ -165,7 +164,7 @@ class KernelCoreCaseInsensitiveIdsTest < Minitest::Test
 
   # A worker id that only differs by case must never be treated as its neighbour.
   def test_case_insensitive_resolution_does_not_conflate_distinct_ids
-    apply_command("SpawnWorker", "issue_id" => "P1-I1", "prompt" => "second", "workspace_path" => make_project_dir("worker-two"))
+    apply_command("SpawnWorker", "issue_id" => "P1-I1", "prompt" => "second")
 
     assert_equal "P1-I1-W2", apply_command("GetInfo", "target_id" => "p1-i1-w2").fetch("target_id")
     assert_equal "P1-I1-W1", apply_command("GetInfo", "target_id" => "p1-i1-w1").fetch("target_id")

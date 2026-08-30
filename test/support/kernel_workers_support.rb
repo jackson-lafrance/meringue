@@ -318,6 +318,9 @@ module KernelWorkersSupport
     run_git(root, "config", "user.name", "Meringue Tests")
     run_git(root, "add", ".")
     run_git(root, "commit", "-m", "initial commit")
+    # The isolated-workspace gate requires a GitHub identity. Never fetched; only
+    # `git remote get-url origin` has to report one.
+    run_git(root, "remote", "add", "origin", "https://github.com/example/#{name}.git")
     root
   end
 

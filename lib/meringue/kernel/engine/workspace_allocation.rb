@@ -227,7 +227,23 @@ module Meringue
 
 
 
-        if create && plan.fetch("created", false) && Dir.exist?(plan.fetch("workspace_path"))
+        # A preview only has to prove the backend can plan an isolated workspace. Nothing
+        # is on disk yet, so `created` is legitimately false and the path legitimately
+        # absent; treating that as a provisioning failure rejects every spawn whose
+        # workspace is allocated later.
+        unless create
+          return {
+            "workspace_path" => File.expand_path(plan.fetch("workspace_path")),
+            "workspace_strategy" => plan.fetch("strategy", "git_worktree"),
+            "workspace_branch" => plan.fetch("workspace_branch", nil),
+            "plan" => plan,
+            "note" => nil,
+            "created" => false,
+            "errors" => []
+          }
+        end
+
+        if plan.fetch("created", false) && Dir.exist?(plan.fetch("workspace_path"))
           provider_note = if present_string(plan.fetch("worktree_provider_fallback_reason", nil))
                             "Requested #{plan.fetch("requested_worktree_provider", "external")} worktree provider was unavailable; " \
                               "used native Git (#{plan.fetch("worktree_provider_fallback_reason")})."
