@@ -33,10 +33,11 @@ function showToast(message) {
 
 document.querySelectorAll("[data-copy]").forEach((button) => {
   button.addEventListener("click", async () => {
-    const text = button.dataset.copy === "snippet" ? SNIPPET : INSTALL_COMMAND;
+    const target = button.dataset.copyTarget && document.getElementById(button.dataset.copyTarget);
+    const text = target ? target.textContent.trim() : (button.dataset.copyText || (button.dataset.copy === "snippet" ? SNIPPET : INSTALL_COMMAND));
     try {
       await copyText(text);
-      showToast(button.dataset.copy === "snippet" ? "Install and run command copied." : "Install command copied.");
+      showToast(button.dataset.copy === "snippet" ? "Install and run command copied." : "Command copied.");
     } catch {
       showToast("Unable to copy. Please select the command manually.");
     }
