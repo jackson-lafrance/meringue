@@ -45,6 +45,12 @@ module Meringue
         @harness_name_value
       end
 
+      def capabilities
+        { "session_start" => true, "session_lookup" => true, "health_status" => true,
+          "attachment" => "fake", "recovery" => "fake", "stop" => true,
+          "concurrent_sessions" => true }
+      end
+
       def transport_key(session_ref)
         session_id = session_ref.fetch("session_id", nil) || session_ref.fetch(:session_id, nil)
         "#{harness_name_value}-#{session_id}"

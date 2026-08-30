@@ -2,7 +2,7 @@
 
 ## Problem this solves
 
-Today Pi transport ownership is tied to the interactive dashboard/TUI process:
+Today harness transport ownership is tied to the interactive dashboard/TUI process:
 the dashboard holds a harness session's RPC pipes, and when that process exits
 every worker loses its RPC transport until another Meringue process detects the
 dead owner, attaches to the durable session, and resumes it. The completed
@@ -19,8 +19,9 @@ re-prompting or restarting a turn that can remain alive.
 
 ## Harness-agnostic by design
 
-Pi is the current backend, but Claude Code, Codex, and other harnesses are
-planned as optional backends. The supervisor never references a specific
+Pi, Claude Code, and Codex are all supported backends. Their transport
+mechanisms differ, so each adapter publishes explicit capabilities while the
+supervisor consumes only the common contract. The supervisor never references a specific
 backend. It talks to every backend through the
 `Meringue::Supervisor::TransportAdapter` contract:
 
@@ -36,9 +37,13 @@ backend. It talks to every backend through the
 
 Adding a backend means writing a new adapter and registering it with
 `Meringue::Supervisor.register_adapter`. It does not require reworking the
-supervisor, the kernel, or the TUI. `Meringue::Supervisor::PiAdapter` is the
-reference implementation and wraps the existing `PiClient` plus
-`Meringue::Harness::TransportOwnership` durable lease.
+supervisor, the kernel, or the TUI. `PiAdapter` owns Pi's RPC reconnect path;
+`ClaudeAdapter` owns Claude's interactive PTY/transcript and `--resume` path;
+`CodexAdapter` owns Codex's interactive PTY/rollout and thread-resume path.
+All three use `TransportOwnership`, so sessions are independently keyed and
+multiple sessions can be supervised concurrently. The registry exposes
+`supervisor_adapter_for` to select the concrete adapter without provider logic
+in the supervisor.
 
 ## The supervisor service
 
@@ -123,12 +128,11 @@ with `MERINGUE_TRANSPORT_LOCK_DIR`.
 
 ## Integration scope
 
-This slice delivers the supervisor abstraction, the Pi adapter, the durable
-state store, the dashboard client, the `supervision_lost` lifecycle status, and
-regression coverage for handoff, dashboard exit/restart, `supervision_lost`
-transitions, downtime accounting, and recovery without duplicate prompting.
-
-Routing every kernel transport operation through the supervisor (replacing the
-dashboard-owned transport path in `PiClient` reconciliation) and rendering
-`supervision_lost` in the AgentTree from live supervision evidence is the next
-vertical slice. The contract and durable state above are the foundation for it.
+The supervisor abstraction, durable state store, dashboard client, and
+`supervision_lost` lifecycle are integrated with Pi, Claude Code, and Codex.
+Each advertised harness has concrete start/lookup/status, attach or provider
+resume recovery, abort/stop, and handoff behavior. The adapters use separate
+transport keys, so concurrent sessions cannot claim one another's leases.
+Provider-specific limitations are explicit in `adapter.capabilities`; notably,
+interactive PTY sessions cannot preserve an in-flight turn across a dead owner,
+while Pi's RPC transport can.

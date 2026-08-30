@@ -28,6 +28,12 @@ module Meringue
     # isolated-process-exit behaviour for backends that cannot report a shared
     # supervisor.
     module TransportAdapter
+      # Explicit backend capabilities. Values describe the transport boundary,
+      # rather than claiming that every harness has Pi's RPC features.
+      def capabilities
+        raise NotImplementedError, "transport adapters must implement #capabilities"
+      end
+
       # A stable, filesystem-safe key that names one session's transport across
       # Meringue processes. Two instances cooperate on the same key to claim or
       # release the durable ownership lease.
