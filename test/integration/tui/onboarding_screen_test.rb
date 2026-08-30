@@ -80,6 +80,29 @@ class TuiSetupOverlayScreenTest < Minitest::Test
     assert_includes render, "[ Complete ]"
   end
 
+  def test_guided_prompt_follows_model_defaults_and_focus_keeps_setup_layout_stable
+    open_setup
+    send_key(ENTER)
+    satisfy_harness_step
+    2.times { send_key(TAB) }
+    draft = @app.instance_variable_get(:@settings_draft)
+    draft.set("experiments.agent_defaults_mode", "guided")
+
+    snap = snapshot
+    ids = snap.fetch("rows").map { |row| row.fetch("id") }
+    mode_index = ids.index("experiments.agent_defaults_mode")
+    prompt_index = ids.index("experiments.worker_spawning_guidance_prompt")
+    assert_equal mode_index + 1, prompt_index
+
+    pane = @layout.send(:settings_pane)
+    mode_view = pane.setup_view(compose, width: WIDTH, height: HEIGHT)
+    assert_equal "", mode_view.fetch(:counter)
+    @app.instance_variable_set(:@settings_row_index, prompt_index)
+    prompt_view = pane.setup_view(compose, width: WIDTH, height: HEIGHT)
+    assert_equal mode_view.fetch(:row_y), prompt_view.fetch(:row_y)
+    assert_equal mode_view.fetch(:lines).length, prompt_view.fetch(:lines).length
+  end
+
   def test_experiment_checkboxes_are_registry_derived_and_mouse_toggleable
     open_setup
     send_key(ENTER)

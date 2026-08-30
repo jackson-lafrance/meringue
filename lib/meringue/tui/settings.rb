@@ -102,7 +102,8 @@ module Meringue
         def experiment_setting_ids(draft)
           ids = Experiments::Registry.setting_ids.dup
           if draft && Experiments::AgentDefaultsMode.normalize(draft.value("experiments.agent_defaults_mode")) == Experiments::AgentDefaultsMode::GUIDED
-            ids << "experiments.worker_spawning_guidance_prompt"
+            mode_index = ids.index("experiments.agent_defaults_mode")
+            ids.insert(mode_index ? mode_index + 1 : ids.length, "experiments.worker_spawning_guidance_prompt")
           end
           ids
         end
