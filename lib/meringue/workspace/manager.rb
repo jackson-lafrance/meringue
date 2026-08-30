@@ -313,7 +313,7 @@ module Meringue
         workspace_path = default_workspace_path(root_path, safe_project_name, workspace_name)
         if profile&.custom_path_template?
           expanded = profile.expand_path(root: root_path, project_slug: safe_project_name,
-                                         task_slug: safe_task_name, suffix: "")
+                                         task_slug: safe_task_name)
           workspace_path = expanded || workspace_path
         end
 

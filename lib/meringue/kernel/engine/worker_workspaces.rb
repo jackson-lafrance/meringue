@@ -376,7 +376,6 @@ module Meringue
         "worktree_missing" => "that worktree is no longer on disk",
         "outside_managed_workspace_root" => "that worktree is outside the Meringue workspace root",
         "branch_not_delivery_managed" => "that branch is not allocator-managed",
-        "branch_not_meringue_managed" => "that legacy branch is not allocator-managed",
         "git_root_missing" => "the repository that worktree belongs to is gone",
         "worktree_list_failed" => "git could not list the repository's worktrees",
         "worktree_not_registered" => "git no longer registers that directory as a worktree",

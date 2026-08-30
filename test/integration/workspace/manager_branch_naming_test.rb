@@ -73,7 +73,7 @@ class WorkspaceManagerBranchNamingTest < Minitest::Test
     with_workspace_tmpdir do |tmp|
       profile = Meringue::Workspace::Profile.new(
         name: "clean",
-        path_template: "{{root}}/{{project}}/{{task}}-{{suffix}}"
+        path_template: "{{root}}/{{project}}/{{task}}"
       )
       plan = workspace_manager(tmp).plan_worker_workspace(
         project_root: File.join(tmp, "meringue"),
@@ -86,7 +86,7 @@ class WorkspaceManagerBranchNamingTest < Minitest::Test
 
       assert_equal "clean-workspace-names", plan.fetch("workspace_branch")
       assert_equal File.join(tmp, "workspaces", "meringue", "clean-workspace-names"), plan.fetch("workspace_path")
-      refute_match(/[0-9a-f]{8}/, File.basename(plan.fetch("workspace_path")))
+      refute_includes File.basename(plan.fetch("workspace_path")), "{{suffix}}"
     end
   end
 

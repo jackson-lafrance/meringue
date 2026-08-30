@@ -16,7 +16,7 @@ If that task slug is already reserved, allocation deterministically tries
 `fix-signup-validation-2`, then `-3`, and so on. These numeric suffixes are
 collision handling, not orchestration identifiers.
 
-The issue id is stripped before slugging. New branches and default worktree names have no product-branded allocator prefix or opaque hexadecimal suffix. Existing legacy branches remain recognizable by workspace lifecycle code solely so upgrades can safely reuse or clean their worktrees; compatibility must never become a new-name generation path. Git object SHAs remain unchanged wherever Git reports revisions.
+The issue id is stripped before slugging. New branches and default worktree names have no product-branded allocator prefix or opaque hexadecimal suffix. Historical prefixed and hash-suffixed names are not allocator-managed and are never adopted or cleaned by this lifecycle. Git object SHAs remain unchanged wherever Git reports revisions.
 
 ## Prohibited content
 

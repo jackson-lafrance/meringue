@@ -6,10 +6,10 @@ module Meringue
   # records may still use orchestration ids; delivery artifacts may not.
   module DeliveryArtifactPolicy
     MAX_SLUG_LENGTH = 48
-    # Current allocator branches are task slugs with numeric collision suffixes.
-    # Keep accepting the old hash form so upgrades can safely inspect and clean
-    # worktrees created before the naming change.
-    MANAGED_BRANCH_PATTERN = %r{\A(?![0-9a-f]{8}\z)(?![0-9a-f]{40}\z)[a-z0-9][a-z0-9-]*(?:-\d+)?\z|\Ameringue\/[a-z0-9][a-z0-9-]*-[0-9a-f]{8}(?:-\d+)?\z}.freeze
+    # Allocator branches are task slugs with deterministic numeric collision
+    # suffixes. Pure Git object SHAs and the retired hash-suffixed format are
+    # deliberately not managed branches.
+    MANAGED_BRANCH_PATTERN = %r{\A(?![0-9a-f]{8}\z)(?![0-9a-f]{40}\z)(?![a-z0-9-]+-[0-9a-f]{8}(?:-\d+)?\z)[a-z0-9][a-z0-9-]*(?:-\d+)?\z}.freeze
 
     # Includes punctuation/case variants such as P5-I2-W3, p5_i2_w3,
     # P5/I2/W3, P5 I2 W3, and the shorter project/issue forms.

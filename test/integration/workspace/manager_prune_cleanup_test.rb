@@ -123,7 +123,7 @@ class WorkspaceManagerPruneCleanupTest < Minitest::Test
         "strategy" => "git_worktree",
         "git_root" => project.fetch("project_root"),
         "worktree_root_path" => project.fetch("project_root"),
-        "workspace_branch" => "meringue/not-the-main-checkout"
+        "workspace_branch" => "not-the-main-checkout"
       }
 
       main_outcome = broad_manager.cleanup_pruned_worker_workspace(main_record)
@@ -151,7 +151,7 @@ class WorkspaceManagerPruneCleanupTest < Minitest::Test
       workspace = allocate_workspace(manager, project, task_title: "Branch mismatch")
 
       outcome = manager.cleanup_pruned_worker_workspace(
-        workspace.merge("workspace_branch" => "meringue/someone-elses-branch")
+        workspace.merge("workspace_branch" => "someone-elses-branch")
       )
 
       assert_equal "failed", outcome.fetch("status")

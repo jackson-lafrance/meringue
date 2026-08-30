@@ -235,7 +235,7 @@ class WorkspaceManagerFailedAllocationCleanupTest < Minitest::Test
       assert_equal "disk_exhausted", failed.fetch("failure_kind")
       assert_equal "deleted", failed.dig("cleanup", "branch_result")
       assert branch_exists?(project, plan.fetch("workspace_branch")),
-             "the legacy branch has no ownership record and must never be adopted or deleted"
+             "an unrelated branch has no ownership record and must never be adopted or deleted"
       refute Dir.exist?(plan.fetch("workspace_path"))
 
       retried = allocate_workspace(manager, project, task_title: "Retry existing branch")
