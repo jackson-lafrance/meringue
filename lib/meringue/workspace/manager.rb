@@ -378,7 +378,7 @@ module Meringue
           repository: repository
         )
         plan["project_root"] = project_path
-        return project_root_workspace(project_path, plan, "project root is not inside a git repository") unless repository
+        return failed_workspace(plan, ["isolated workspace unavailable: project root is not inside a git repository"], failure_kind: "version_control_backend_unavailable", recovery: RECOVERY_RESUME) unless repository
 
         git_root = repository.fetch("git_root")
         worktree_root = File.expand_path(plan.fetch("workspace_path"))
@@ -589,7 +589,7 @@ module Meringue
 
         return reuse_outcome(false, "workspace_not_editable") unless File.writable?(path)
         return reuse_outcome(false, "workspace_is_bare_repository") if bare_repository?(path)
-        return reuse_outcome(true, "workspace_ready", workspace_path: canonical_path(path)) unless strategy == "git_worktree"
+        return reuse_outcome(false, "isolated_workspace_proof_missing") unless strategy == "git_worktree"
 
         plan = workspace["plan"].is_a?(Hash) ? workspace.fetch("plan") : workspace
         root = workspace["worktree_root_path"] || workspace["workspace_root_path"] ||
@@ -930,6 +930,35 @@ module Meringue
           workspace_branch: defined?(branch) && branch,
           git_root: defined?(git_root) && git_root
         )
+      end
+
+      # Read-only capability probe used at project registration and by Doctor.
+      # A directory is not a workspace capability: only a Git repository with a
+      # usable base and a GitHub origin is accepted by the built-in backend.
+      def inspect_project(root_path)
+        project_path = canonical_path(root_path)
+        repository = repository_context(project_path)
+        return { "available" => false, "capabilities" => { "isolated_workspaces" => false }, "diagnostics" => ["not_a_git_repository"] } unless repository
+
+        git_root = repository.fetch("git_root")
+        base = preferred_base_ref(git_root)
+        remote = run_command("git", "-C", git_root, "remote", "get-url", "origin")
+        remote_url = remote.fetch("stdout").to_s.strip
+        github = remote.fetch("status").success? && remote_url.match?(%r{(?:github\.com[:/])}i)
+        diagnostics = []
+        diagnostics << "github_origin_missing" unless github
+        diagnostics << "base_ref_missing" unless base
+        ready = github && !base.nil?
+        {
+          "available" => !!ready, "backend" => "github_git",
+          "repository_identity" => (github ? remote_url : git_root),
+          "capabilities" => { "isolated_workspaces" => !!ready, "mutable_workspace" => !!ready,
+                               "shared_read_only_workspace" => true, "delivery" => github },
+          "diagnostics" => diagnostics, "diagnostic_at" => Time.now.utc.iso8601
+        }
+      rescue StandardError => e
+        { "available" => false, "capabilities" => { "isolated_workspaces" => false },
+          "diagnostics" => ["backend_probe_failed: #{e.message}"] }
       end
 
       private
@@ -1280,19 +1309,6 @@ module Meringue
           "success" => success,
           "attempted" => attempted
         }.merge(details.transform_keys(&:to_s)).compact
-      end
-
-      def project_root_workspace(project_path, plan, reason)
-        {
-          "strategy" => "project_root",
-          "project_root" => project_path,
-          "workspace_path" => project_path,
-          "workspace_branch" => nil,
-          "created" => false,
-          "fallback_reason" => reason,
-          "plan" => plan,
-          "errors" => []
-        }
       end
 
       def failed_workspace(plan, errors, git_root: nil, worktree_root: nil, base_ref: nil, stdout: nil, stderr: nil,

@@ -85,13 +85,7 @@ module Meringue
           dependencies: [],
           conflicts: [],
           migration: "enable_for_existing_installations",
-          actions: [
-            {
-              "id" => "github_support_test_access",
-              "label" => "Test GitHub access",
-              "description" => "Check GitHub authentication and read access to this repository without changing GitHub."
-            }
-          ],
+          actions: [],
           availability_probe: nil
         ),
         Definition.new(
