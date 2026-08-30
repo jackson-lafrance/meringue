@@ -122,6 +122,7 @@ module Meringue
         end
 
         composer_active = scroll_pane_active?(state, "chat")
+        composer_lines = chat_pane.composer_lines(state, width: metrics.fetch(:composer_content_width))
         draw_pane(
           canvas,
           metrics.fetch(:composer_x),
@@ -129,9 +130,12 @@ module Meringue
           metrics.fetch(:composer_width),
           metrics.fetch(:composer_height),
           composer_pane_title(state),
-          chat_pane.composer_lines(state, width: metrics.fetch(:composer_content_width)),
+          composer_lines,
           active: composer_active,
           overflow: :tail,
+          # The composer follows the caret rather than exposing a separate scroll
+          # control, so upward navigation never leaves it above the viewport.
+          scroll_offset: composer_viewport_offset(state, metrics, composer_lines),
           # The composer is tinted with the selected chat target's own color, so
           # the box the user types into matches the AgentTree row it prompts.
           border_style: composer_border_style(state, active: composer_active),
@@ -826,6 +830,38 @@ module Meringue
 
       # Shared visible window for tail panes so rendering, scroll bounds, and
       # selection hit-testing always agree on which content line is on which row.
+      def composer_viewport_offset(state, metrics, lines)
+        content_height = metrics.fetch(:composer_height).to_i - 2
+        line_count = Array(lines).length
+        return 0 if content_height <= 0 || line_count <= content_height
+
+        visible_capacity = [content_height - 1, 0].max
+        return 0 if visible_capacity.zero?
+
+        chat = state.fetch("_chat", {}) || {}
+        input = chat.fetch("input_buffer", "").to_s
+        cursor = chat.fetch("input_cursor", input.length).to_i
+        cursor_row = MultilineInput.cursor_row(input, cursor, width: metrics.fetch(:composer_content_width))
+        # tail_window reserves its first row for the hidden-content marker.
+        # Offsets are measured back from the newest row.
+        [line_count - cursor_row - visible_capacity, 0].max
+          .clamp(0, tail_scroll_max(line_count, content_height))
+      end
+
+      def tail_window(line_count, content_height, scroll_offset)
+        line_count = line_count.to_i
+        content_height = content_height.to_i
+        if line_count <= content_height
+          return { start_index: 0, finish_index: line_count, row_offset: 0, label: nil }
+        end
+
+        visible_capacity = [content_height - 1, 0].max
+        offset = scroll_offset.to_i.clamp(0, tail_scroll_max(line_count, content_height))
+        finish_index = line_count - offset
+        start_index = [finish_index - visible_capacity, 0].max
+        label = offset.positive? ? "… #{start_index} earlier · #{offset} later" : "… #{start_index} earlier"
+        { start_index: start_index, finish_index: finish_index, row_offset: 1, label: label }
+      end
 
       # Selection only restyles cells that were already drawn for this pane, so a
       # highlight cannot escape the pane and costs nothing extra to redraw.

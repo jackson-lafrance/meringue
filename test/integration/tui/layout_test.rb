@@ -130,6 +130,38 @@ class TuiLayoutTest < Minitest::Test
     assert_operator tall, :>, 3
   end
 
+  def test_composer_viewport_follows_cursor_up_through_multiline_input
+    buffer = (1..12).map { |index| "line#{index}" }.join("\n")
+    at_end = state_with_input(buffer)
+    metrics = @layout.send(:layout_metrics, 80, 32, at_end)
+    lines = @layout.send(:chat_pane).composer_lines(at_end, width: metrics.fetch(:composer_content_width))
+
+    assert_equal 0, @layout.send(:composer_viewport_offset, at_end, metrics, lines)
+
+    at_top = composed_state(tui_state, chat: { "input_buffer" => buffer, "input_cursor" => 0 })
+    top_lines = @layout.send(:chat_pane).composer_lines(at_top, width: metrics.fetch(:composer_content_width))
+    offset = @layout.send(:composer_viewport_offset, at_top, metrics, top_lines)
+
+    assert_operator offset, :>, 0
+    visible = @layout.send(:tail_window, top_lines.length, metrics.fetch(:composer_height) - 2, offset)
+    assert_equal 0, visible.fetch(:start_index)
+    assert_operator visible.fetch(:finish_index), :>, 0
+  end
+
+  def test_composer_viewport_follows_cursor_across_soft_wraps
+    buffer = "x" * 400
+    at_top = composed_state(tui_state, chat: { "input_buffer" => buffer, "input_cursor" => 0 })
+    metrics = @layout.send(:layout_metrics, 40, 32, at_top)
+    lines = @layout.send(:chat_pane).composer_lines(at_top, width: metrics.fetch(:composer_content_width))
+
+    offset = @layout.send(:composer_viewport_offset, at_top, metrics, lines)
+    visible = @layout.send(:tail_window, lines.length, metrics.fetch(:composer_height) - 2, offset)
+    cursor_row = Meringue::TUI::MultilineInput.cursor_row(buffer, 0, width: metrics.fetch(:composer_content_width))
+
+    assert_operator cursor_row, :>=, visible.fetch(:start_index)
+    assert_operator cursor_row, :<, visible.fetch(:finish_index)
+  end
+
   def test_slash_suggestion_pane_appears_above_the_composer
     frame = @layout.render(state_with_input("/"), width: 100, height: 32)
 
