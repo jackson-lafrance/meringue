@@ -44,6 +44,34 @@ class InputSettingsSchemaStoreTest < Minitest::Test
     assert_equal ["code", "--wait"], definition.validate_value("code --wait", config: empty_config)
   end
 
+  # Enum normalization used to rewrite every underscore to a hyphen, which meant an
+  # option id that contains one could be read out of the file but never written back:
+  # picking "github_git" in Settings produced "github-git", which its own option list
+  # rejected. Switching the backend away from Git was therefore a one-way door.
+  def test_enum_options_containing_an_underscore_round_trip_through_validation
+    config = empty_config
+
+    %w[version_control.backend workspace.worktree_provider workspace.worktree_provider_fallback].each do |id|
+      definition = Meringue::Config::Schema.fetch(id)
+      definition.option_values(config).each do |option|
+        assert_equal option, definition.validate_value(option, config: config), "#{id} must accept its own option #{option}"
+      end
+    end
+  end
+
+  def test_enum_values_are_matched_case_and_separator_insensitively
+    config = empty_config
+
+    assert_equal "github_git", Meringue::Config::Schema.fetch("version_control.backend").validate_value("GitHub-Git", config: config)
+    assert_equal "rose-pine", Meringue::Config::Schema.fetch("appearance.theme").validate_value("rose_pine", config: config)
+    assert_equal "role-specific", Meringue::Config::Schema.fetch("experiments.agent_defaults_mode").validate_value("role_specific", config: config)
+
+    error = assert_raises(ArgumentError) do
+      Meringue::Config::Schema.fetch("version_control.backend").validate_value("mercurial", config: config)
+    end
+    assert_includes error.message, "must be one of: github_git, command"
+  end
+
   def test_removed_harness_is_absent_from_settings_choices_and_validation
     config = empty_config
     definitions = Meringue::Config::Schema.definitions

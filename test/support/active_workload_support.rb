@@ -14,8 +14,15 @@ module ActiveWorkloadSupport
 
   def state
     state = Meringue::State::Models.empty_state(now: BASE_TIME)
+    # Carries isolation evidence, as a registered project does. Without it the project
+    # reads as unbacked, and reconciliation would re-probe the version-control backend
+    # on the very passes this fixture exists to keep quiet.
     state["projects"] << {
       "id" => "P1", "name" => "Active workload", "root_path" => ".", "status" => "working",
+      "version_control_backend" => "github_git",
+      "version_control_repository_identity" => "git@github.com:example/active-workload.git",
+      "version_control_capabilities" => { "isolated_workspaces" => true, "mutable_workspace" => true },
+      "version_control_diagnostic_at" => BASE_TIME,
       "created_at" => BASE_TIME, "updated_at" => BASE_TIME
     }
 

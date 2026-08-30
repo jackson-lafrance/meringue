@@ -16,6 +16,10 @@ module Meringue
         # Each step is isolated: a single unhealthy record must not turn a routine
         # reconciliation pass into a user-visible "Failed ReconcileSessions" error.
         normalized_state_changed = reconcile_step("normalize_state", false) { persist_normalized_state_if_changed }
+        # Early, and before anything asks a project for a workspace: a project whose
+        # record predates the isolation contract has to regain its evidence before the
+        # workers it owns are provisioned in this same pass.
+        version_control_backfills = reconcile_step("backfill_project_version_control", []) { backfill_project_version_control }
         recovered_worker_results = reconcile_step("recover_worker_reservations", []) { recover_worker_reservations }
         pause_results = reconcile_step("finish_worker_pauses", []) { reconcile_pending_worker_pauses }
         resume_results = reconcile_step("finish_worker_resumes", []) { reconcile_pending_worker_resumes }
@@ -74,6 +78,7 @@ module Meringue
         changed_count += resume_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += pending_prompt_results.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += recovered_results.count { |result| result.fetch("status", nil) == "accepted" }
+        changed_count += version_control_backfills.count { |result| result.fetch("status", nil) == "accepted" }
         changed_count += 1 if normalized_state_changed
         changed_count += 1 if prune_result.fetch("changed", false)
         changed_count += delivery_pr_refreshes.count { |refresh| refresh.fetch("changed", false) }
@@ -91,6 +96,7 @@ module Meringue
             "pruned_issue_ids" => prune_result.fetch("removed_issue_ids", []),
             "pruned_agent_ids" => prune_result.fetch("removed_agent_ids", []),
             "pruned_project_ids" => prune_result.fetch("removed_project_ids", []),
+            "version_control_backfills" => version_control_backfills,
             "recovered_worker_results" => recovered_worker_results,
             "interactive_focus_results" => interactive_focus_results,
             "pause_results" => pause_results,
@@ -107,7 +113,7 @@ module Meringue
             "self_fixing_worker_results" => self_fixing_worker_results,
             "quiet_worker_results" => quiet_worker_results
           },
-          (recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + interactive_focus_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pause_results.flat_map { |result| result.fetch("log_entry_ids", []) } + resume_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + completion_continuation_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + gate_check_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + self_fixing_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) } + quiet_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) }).uniq
+          (version_control_backfills.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + recovered_worker_results.flat_map { |result| result.fetch("log_entry_ids", []) } + interactive_focus_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pause_results.flat_map { |result| result.fetch("log_entry_ids", []) } + resume_results.flat_map { |result| result.fetch("log_entry_ids", []) } + pending_prompt_results.flat_map { |result| result.fetch("log_entry_ids", []) } + recovered_results.flat_map { |result| result.fetch("log_entry_ids", []) } + prune_result.fetch("log_entry_ids", []) + applied_results.flat_map { |result| result.fetch("log_entry_ids", []) } + completion_continuation_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + gate_check_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + deferred_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + self_fixing_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) } + goal_steps.flat_map { |step| step.fetch("log_entry_ids", []) } + quiet_worker_results.flat_map { |result| Array(result.fetch("log_entry_ids", [])) }).uniq
         )
       rescue StandardError => e
         error = error_payload(e)

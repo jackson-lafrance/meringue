@@ -659,6 +659,11 @@ module Meringue
       # on disk after their worker records are removed. A post-commit retry runs the same safe
       # removal with a fresh budget and never force-removes dirty, locked, or referenced worktrees.
       POST_PRUNE_CLEANUP_BUDGET_SECONDS = 30.0
+      # A project that reports no isolated-workspace capability is re-probed on this
+      # cadence rather than on every 2-second pass: the probe shells out to git, and a
+      # project that is genuinely unbackable would otherwise pay for it continuously.
+      # Projects that already carry isolation evidence are never re-probed.
+      PROJECT_VERSION_CONTROL_REPROBE_INTERVAL_SECONDS = 60
       # Harness model catalogs change when a user logs into a provider, installs an
       # extension, or edits models.json, so a persisted snapshot is refreshed
       # periodically in the background instead of on every completion keystroke.

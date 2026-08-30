@@ -99,6 +99,36 @@ class InputConfigTest < Minitest::Test
     end
   end
 
+  # The rejection used to name the leaf key, so the same sentence said `head_model`
+  # was obsolete and that `harness.head_model` was the replacement. What was actually
+  # stale was the provider-scoped `harness.pi.head_model`.
+  def test_obsolete_settings_are_reported_as_full_paths
+    Dir.mktmpdir("meringue-config-test") do |dir|
+      contents = <<~TOML
+        [harness]
+        provider = "pi"
+        head_model = "openai-codex/gpt-5.6-sol"
+
+        [harness.pi]
+        head_model = "pi/legacy"
+        worker_thinking_level = "medium"
+
+        [tui]
+        color_scheme = "gruvbox"
+      TOML
+      path = write_config(File.join(dir, "config.toml"), contents)
+
+      error = assert_raises(Meringue::Config::ParseError) { Meringue::Config.load(path: path) }
+
+      assert_includes error.message, path
+      reported = error.message[/settings in .+?: (.+?)\. Delete/, 1].split(", ")
+
+      # Every entry is a full path, and the current `harness.head_model` this file also
+      # sets is not among them.
+      assert_equal %w[harness.pi.head_model harness.pi.worker_thinking_level harness.provider tui.color_scheme], reported.sort
+    end
+  end
+
   def test_comments_and_quoting_are_handled
     Dir.mktmpdir("meringue-config-test") do |dir|
       contents = <<~TOML

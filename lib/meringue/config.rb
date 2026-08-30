@@ -127,16 +127,21 @@ module Meringue
       store.patch_paths(base_fingerprint: store.fingerprint, patches: patches)
     end
 
+    # Every entry is reported as the full dotted path it occupies in the file.
+    # Naming the leaf alone told the reader that `head_model` was obsolete in the
+    # same sentence that told them to use `harness.head_model`, when what was
+    # actually stale was `harness.pi.head_model` — the provider-scoped table.
     def self.reject_obsolete_settings!(data, path:)
       obsolete = []
       obsolete << "harness.provider" if data.dig("harness", "provider")
-      obsolete.concat(%w[model thinking_level].select { |key| data.dig("harness", key) })
-      obsolete.concat(%w[head_model worker_model head_thinking_level worker_thinking_level].select { |key| data.dig("harness", "pi", key) })
-      obsolete << "harness.pi" if data.dig("harness", "pi").is_a?(Hash)
+      obsolete.concat(%w[model thinking_level].select { |key| data.dig("harness", key) }.map { |key| "harness.#{key}" })
+      provider_scoped = %w[head_model worker_model head_thinking_level worker_thinking_level].select { |key| data.dig("harness", "pi", key) }
+      obsolete.concat(provider_scoped.map { |key| "harness.pi.#{key}" })
+      obsolete << "harness.pi" if provider_scoped.empty? && data.dig("harness", "pi").is_a?(Hash)
       obsolete << "tui.color_scheme" if data.dig("tui", "color_scheme")
       return if obsolete.empty?
 
-      raise ParseError, "Obsolete configuration settings in #{path}: #{obsolete.uniq.join(", ")}. Use the current schema (harness.head_provider/worker_provider, harness.head_model/worker_model, harness.head_thinking_level/worker_thinking_level, and tui.colorscheme)."
+      raise ParseError, "Obsolete configuration settings in #{path}: #{obsolete.uniq.join(", ")}. Delete those entries; the current schema is harness.head_provider/worker_provider, harness.head_model/worker_model, harness.head_thinking_level/worker_thinking_level, and tui.colorscheme."
     end
 
     def self.write_toml(path, data)
