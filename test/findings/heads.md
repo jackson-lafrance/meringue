@@ -16,8 +16,7 @@ changed in this slice.
 The duplicate `harness_client`/`head_runner` definitions below the `private` keyword are gone;
 the provider-aware accessors are now defined once, above `private`, and the `attr_reader` no
 longer lists them. `HeadPromptLoopTest#test_worker_waiting_works_against_the_real_engine` and
-`HeadSimpleLoopTest#test_waiting_for_workers_settles_the_spawned_worker` cover the working path,
-and `FoundationLibraryBootTest#test_verbose_load_emits_no_warnings` fails the suite if any
+`FoundationLibraryBootTest#test_verbose_load_emits_no_warnings` fails the suite if any
 redefinition warning comes back. The `HarnessAccessibleEngine` shim was deleted.
 
 Original report:
@@ -29,9 +28,8 @@ Original report:
 `head_runner`) *after* the `private` keyword at line 493. The public reader is
 therefore replaced by a private method.
 
-`Heads::PromptLoop#wait_for_worker_results` (`prompt_loop.rb:173`) and
-`Heads::SimpleLoop#wait_for_spawned_workers` (`simple_loop.rb:83`) both call
-`engine.harness_client`, so any run with `wait_for_workers: true` raises:
+`Heads::PromptLoop#wait_for_worker_results` calls `engine.harness_client`, so any run with
+`wait_for_workers: true` raises:
 
 ```
 NoMethodError: private method 'harness_client' called for an instance of Meringue::Kernel::Engine
@@ -39,7 +37,7 @@ NoMethodError: private method 'harness_client' called for an instance of Meringu
 
 Impact: `meringue heads` (`lib/meringue/cli.rb:140` passes
 `wait_for_workers: true`) applies the head batch, then blows up before it can
-settle the spawned worker; `SimpleLoop#run` swallows it into an `event: "error"`
+settle the spawned worker; the console loop reports the failure as an `event: "error"`
 payload on stderr. The TUI path is unaffected because `lib/meringue/cli.rb:78`
 uses `wait_for_workers: false`, which returns early before touching the reader.
 
@@ -47,14 +45,7 @@ Likely fix: move the `harness_client` / `head_runner` overrides above the
 `private` keyword (or re-expose them with `public :harness_client, :head_runner`).
 
 Covered by:
-- `HeadPromptLoopTest#test_worker_waiting_against_the_real_engine_raises_because_harness_client_is_private`
-- `HeadSimpleLoopTest#test_waiting_for_workers_surfaces_the_private_harness_client_error`
-
-The happy path of the wait/settle/complete flow is still exercised through a
-test-only shim (`HeadsSupport::HarnessAccessibleEngine`) in
-`HeadPromptLoopTest#test_waiting_for_workers_settles_them_and_records_pull_requests`.
-Those two tests should start failing (and can be simplified) once the visibility
-bug is fixed.
+- `HeadPromptLoopTest#test_worker_waiting_works_against_the_real_engine`
 
 ### 2. Question-answer routing is now covered (resolved P1-I9)
 
@@ -88,14 +79,6 @@ The head contract now also exposes the data needed for implicit answers:
   (`HeadPromptLoopTest#test_unknown_command_types_are_rejected_and_block_head_cleanup`).
   Intentional, but the head record stays in state indefinitely from the loop's
   point of view.
-- `Heads::SimpleLoop` carries a private copy of the worker-wait helpers
-  (`wait_for_spawned_workers`, `wait_for_worker`, `state_summary`,
-  `head_result_from`, …) that `PromptLoop` already implements. The copies are
-  dead code today; `handle_input` delegates to `PromptLoop`.
-- `SimpleLoop#state_summary` and `PromptLoop#state_summary` return different
-  shapes (`working_worker_count`/`active_head_count` only exist in the latter),
-  so the stderr error payload from `SimpleLoop` is not comparable to the payload
-  from a normal iteration.
 
 ## Verified-good behaviour worth keeping
 

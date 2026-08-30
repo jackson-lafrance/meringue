@@ -72,6 +72,15 @@ module Meringue
         deliver_submission(enqueue_submission(text, selected_target: selected_target), &on_event)
       end
 
+      def error_payload(error)
+        {
+          "event" => "error",
+          "state_mutated" => false,
+          "error" => error_details(error),
+          "state_summary" => state_summary
+        }
+      end
+
       def route_submission(text, selected_target: nil, submission_id: nil, &on_event)
         route = if selected_target
                   router.route(text, selected_target: selected_target)
