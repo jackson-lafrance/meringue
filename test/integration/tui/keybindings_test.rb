@@ -35,6 +35,8 @@ class TuiKeybindingsTest < Minitest::Test
     assert @keys.match?("clear_or_quit", "\u0003")
     assert @keys.match?("undo", "\u001a")
     assert @keys.match?("undo", "\e[122;5u")
+    assert @keys.match?("redo", "\u0019")
+    assert @keys.match?("redo", "\e[121;5u")
     assert @keys.match?("cancel_navigation", "\e")
     assert @keys.match?("focus_next", "\t")
     assert @keys.match?("focus_previous", "\e[Z")
@@ -175,6 +177,8 @@ class TuiKeybindingsTest < Minitest::Test
     assert_includes documentation, "`Ctrl-B`"
     assert_includes documentation, "`Shift-Tab`"
     assert_includes documentation, "`Ctrl-Z`: undo the most recent composer edit"
+    assert_includes documentation, "`Ctrl-Y`: redo the most recently undone composer edit"
+    assert_includes documentation, "`Ctrl-C`: clear the composer when it contains text; quit the application when it is empty."
     assert @keys.match?("open_delivery_pr", "\u0002")
   end
 end

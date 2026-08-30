@@ -101,6 +101,7 @@ Supported action names:
 - `quit`
 - `clear_or_quit`
 - `undo` (defaults to `ctrl-z`; only active while the chat input is focused)
+- `redo` (defaults to `ctrl-y`; only active while the chat input is focused)
 - `cancel_navigation`
 - `open_delivery_pr` (defaults to `ctrl-b`)
 - `refresh_model_catalog` (defaults to `ctrl-r`; only active inside the `/models` model picker)
