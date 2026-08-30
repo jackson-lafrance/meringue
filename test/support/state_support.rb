@@ -8,7 +8,7 @@ require "time"
 # processes, and never a read or write against ~/.meringue.
 module StateSupport
   REPO_ROOT = File.expand_path("../..", __dir__)
-  DEMO_STATE_FIXTURE = File.join(REPO_ROOT, "fixtures", "demo_state.json")
+  TUI_STATE_FIXTURE = File.join(REPO_ROOT, "test", "fixtures", "tui_state.json")
 
   Models = Meringue::State::Models
   Compactor = Meringue::State::Compactor

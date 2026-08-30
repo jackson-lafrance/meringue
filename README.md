@@ -22,11 +22,7 @@ meringue
 
 The first launch walks you through setup: which coding agent to drive, the repository to register, and a theme. It reports which harnesses it can actually find on your machine, and it will not finish without one.
 
-**You also need a coding-agent CLI**, installed and signed in. Meringue drives [Claude Code](https://claude.com/claude-code) (`claude`), Codex CLI (`codex`), or Pi (`pi`) — it orchestrates them and never installs one for you. To look around before setting one up:
-
-```bash
-meringue demo     # a populated dashboard, no harness and no agents required
-```
+**You also need a coding-agent CLI**, installed and signed in. Meringue drives [Claude Code](https://claude.com/claude-code) (`claude`), Codex CLI (`codex`), or Pi (`pi`) — it orchestrates them and never installs one for you.
 
 If something looks wrong:
 
@@ -42,7 +38,7 @@ meringue doctor   # checks Ruby, git, your harness, config, and state, and names
 │   └─ ✓ H2  Classify dotfiles prompt  │ │   Update vim config to use oil instead of mini.      │
 │                                      │ │ [10/07 20:04] ◆ H2 · Classify dotfiles prompt        │
 │ ● P1  Meringue                       │ │ ▌ Created the dotfiles task                          │
-│   ├─ ● I1  Build fake TUI demo 0/2   │ │ [10/07 20:05] ✓ P2-I1-W1 · Update vim config · done  │
+│   ├─ ● I1  Build TUI rendering 0/2   │ │ [10/07 20:05] ✓ P2-I1-W1 · Update vim config · done  │
 │   │ ├─ ● W1  Draw three-pane layout  │ │ ▌ Replaced mini with `oil.nvim`.                     │
 │   │ └─ · W2  Polish fixture state    │ │ [10/07 20:07] ▪ meringue                             │
 │   └─ ! I3  Reconcile stale sessions  │ │   Question Q1: Which project should get the fix?     │
@@ -171,7 +167,6 @@ docs/quiet-workers.md              # how long an agent has been silent, and what
 docs/scalability.md                # hermetic process-level responsiveness sweep
 docs/testing.md                    # test-suite guide and coverage boundaries
 fixtures/config.example.toml       # example local config
-fixtures/demo_state.json           # demo state for the TUI
 test/integration/                  # hermetic component and area tests
 test/e2e/                          # end-to-end flows across CLI/kernel/heads
 test/support/                      # shared test helpers and fakes

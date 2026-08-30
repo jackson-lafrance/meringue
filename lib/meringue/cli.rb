@@ -21,17 +21,12 @@ module Meringue
         # resolves the state path through it, and the dashboard reading a
         # different file than `meringue workers` or `meringue doctor` is how
         # MERINGUE_STATE_PATH silently did nothing here.
-        run_tui(default_state_path: State::Store.default_path, enable_agents: true)
-      when "demo"
-        run_tui(default_state_path: App::DEMO_STATE_PATH, enable_agents: false)
+        run_tui(default_state_path: State::Store.default_path)
       when "-v", "--version", "version"
         out.puts VERSION
         0
       when "-h", "--help", "help"
         print_help
-        0
-      when "demo-state"
-        out.puts File.read(Meringue.root_path("fixtures", "demo_state.json"))
         0
       when "doctor"
         run_doctor
@@ -41,8 +36,6 @@ module Meringue
         run_workers
       when "head-loop"
         run_head_loop
-      when "fake-head-loop"
-        run_fake_head_loop
       else
         err.puts "Unknown command: #{command}"
         print_help
@@ -176,7 +169,7 @@ module Meringue
       1
     end
 
-    def run_tui(default_state_path:, enable_agents:)
+    def run_tui(default_state_path:)
       options = parse_runtime_options(default_state_path: default_state_path)
       return 1 unless options
 
@@ -189,14 +182,14 @@ module Meringue
       registry = Harness::Registry.new(config: config)
       lifecycle = Lifecycle::Manager.new(arguments: @original_argv)
       store = state_store(path: options.fetch(:state_path))
-      engine = enable_agents ? tui_engine(store, registry, config: config, config_path: options.fetch(:config_path)) : nil
+      engine = tui_engine(store, registry, config: config, config_path: options.fetch(:config_path))
       agent_session_service = engine ? Sessions::WorkerSessionService.new(engine: engine) : nil
       workspace_controller = Workspace::Controller.from_config(
         config,
         focus_session_service: agent_session_service,
         session_environment_patterns: Harness::Registry.managed_session_environment_patterns
       )
-      prompt_loop = engine ? Heads::PromptLoop.new(engine: engine, wait_for_workers: false) : nil
+      prompt_loop = Heads::PromptLoop.new(engine: engine, wait_for_workers: false)
       result = App.new(
         input: input,
         out: out,
@@ -214,9 +207,7 @@ module Meringue
           config: config,
           lifecycle: lifecycle,
           # First-run setup saves its Settings draft through the kernel, so it is
-          # only offered when there is a kernel behind the UI. `meringue demo`
-          # has none and must never open it.
-          onboarding_enabled: enable_agents,
+          onboarding_enabled: true,
           # A registry-backed check lets the TUI force setup open and gate chat
           # when no role harness is configured yet, instead of exiting at startup.
           harness_configured_check: -> { registry.provider_configured?("worker") || registry.provider_configured?("head") },
@@ -227,7 +218,7 @@ module Meringue
           harness_probe: ->(provider) { registry.probe_provider(provider) }
         ),
         prompt_handler: prompt_loop,
-        reconciler: engine ? -> { engine.reconcile_sessions } : nil
+        reconciler: -> { engine.reconcile_sessions }
       ).run
       return 0 unless result == :reload
 
@@ -300,17 +291,6 @@ module Meringue
     rescue ArgumentError => e
       err.puts e.message
       1
-    end
-
-    def run_fake_head_loop
-      Heads::SimpleLoop.new(
-        initial_state: demo_state,
-        out: out,
-        err: err,
-        runner: Heads::FakeRunner.new,
-        runner_name: "fake",
-        harness_client: Harness::FakeClient.new
-      ).run
     end
 
     # `--state PATH` used to be dropped here, so `meringue reset-state --state ./scratch.json`
@@ -401,10 +381,6 @@ module Meringue
       TUI::Keybindings.from_config(config.section("tui", "keybindings"))
     end
 
-    def demo_state
-      State::Store.new(path: Meringue.root_path("fixtures", "demo_state.json")).load
-    end
-
     # Rendered from the parser's own command table rather than a second hand-written list. The
     # CLI help used to name 17 of the 47 slash commands, so `/answer`, `/goal`, `/prune`,
     # `/retry`, and the rest were discoverable only from inside a running dashboard - and a
@@ -439,14 +415,11 @@ module Meringue
           meringue tui --harness claude          # use Claude Code for both heads and workers
           meringue tui --harness codex           # use Codex CLI for both heads and workers
           meringue tui --head-harness claude --worker-harness codex
-          meringue demo                          # display the fake demo state fixture without agent prompting
-          meringue demo-state                    # print the fake demo state fixture
           meringue doctor                        # check Ruby, git, the configured harness, config, and state
           meringue reset-state                   # reset ~/.meringue/state.json to an empty Meringue state
           meringue workers export <PATH> [IDS]   # export current workers without machine-specific sessions or paths
           meringue workers import <PATH> --project <PATH> # import workers as fresh destination sessions
           meringue head-loop [--harness NAME]    # run the manual configured head -> kernel -> worker loop
-          meringue fake-head-loop                # run the manual fake head -> kernel -> worker loop
           meringue --version                     # print the app version
           meringue --help                        # print this help
 

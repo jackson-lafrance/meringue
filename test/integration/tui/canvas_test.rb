@@ -72,14 +72,14 @@ class TuiCanvasTest < Minitest::Test
   end
 
   def test_render_without_color_contains_no_escape_sequences
-    state = composed_state(demo_state)
+    state = composed_state(tui_state)
     frame = render_frame(state, width: 100, height: 32, color: false)
 
     refute_match TUISupport::ANSI_PATTERN, frame
   end
 
   def test_render_with_color_keeps_the_same_plain_text_as_the_uncolored_frame
-    state = composed_state(demo_state)
+    state = composed_state(tui_state)
     plain = render_frame(state, width: 100, height: 32, color: false)
     colored = render_frame(state, width: 100, height: 32, color: true)
 

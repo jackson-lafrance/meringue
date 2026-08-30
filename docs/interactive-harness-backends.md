@@ -80,10 +80,5 @@ Backends that cannot do this — Pi, today — keep the older handoff path (`pre
 
 `test/integration/harness/interactive_client_test.rb` drives a real PTY against `test/fixtures/fake_interactive_agent.rb`, a stand-in agent CLI. `test/integration/harness/codex_interactive_client_test.rb` adds a Codex-shaped stand-in that assigns its own session id after first input and writes rollout records below a temporary `CODEX_HOME`. It is deliberately unhelpful — it renders a banner before it is ready, echoes pasted text, takes visible time to "think", and writes its transcript incrementally — because those are the behaviours the transport has to cope with against a real agent. No network call, no vendor install.
 
-`test/e2e/claude_interactive_proof.rb` is the live Claude counterpart. Codex provider behavior remains covered hermetically so the automated suite never needs Codex credentials or spends tokens. It talks to a real `claude` install and spends real tokens, so it is not part of `rake test`; run it directly when changing the transport:
 
-```bash
-ruby -Ilib test/e2e/claude_interactive_proof.rb
-```
-
-It proves the properties the design rests on: a session spawns and answers with no per-turn process, a second prompt reuses the same pid, the viewer attaches **mid-turn** without stopping the work, a prompt typed in the viewer lands in the same session Meringue is reading, and the whole exchange happens on one process.
+These tests cover the properties the design rests on: a session spawns and answers with no per-turn process, a second prompt reuses the same pid, the viewer attaches **mid-turn** without stopping the work, and a prompt typed in the viewer reaches the same session Meringue is reading.

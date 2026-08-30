@@ -57,14 +57,7 @@ test/findings/                 # notes about real bugs found while writing tests
 These need real credentials, real processes, or a real terminal, so they stay manual:
 
 - Real harness backends (Pi, Claude Code, and Codex CLI): spawning, resuming, or prompting an actual harness process, and anything requiring an authenticated harness CLI. The interactive *transport* is an exception and is covered for real — `test/integration/harness/interactive_client_test.rb` drives an actual PTY against `test/fixtures/fake_interactive_agent.rb`, a stand-in agent CLI, and `codex_interactive_client_test.rb` drives `fake_codex_agent.rb`, because bracketed paste, provider-assigned session discovery, the interrupt/queue keys, and a transcript written while work happens cannot be exercised any other way. They still touch no network and write only inside `Dir.mktmpdir`.
-- Live backend proofs. `test/e2e/claude_interactive_proof.rb` and `test/e2e/claude_head_proof.rb` talk to a real `claude` install and spend real tokens, so they are deliberately outside `rake test`. Run them by hand when changing the interactive transport:
 
-  ```bash
-  ruby -Ilib test/e2e/claude_interactive_proof.rb
-  ruby -Ilib test/e2e/claude_head_proof.rb
-  ```
-
-  Between them they prove a worker spawns and answers on one process, the focused viewer attaches mid-turn without interrupting the work, a prompt typed in the viewer reaches the same session, and a head returns a valid HeadResult without modifying its workspace.
 - Network calls of any kind, including GitHub/forge API access, PR verification against real repositories, and `gh` invocations.
 - Interactive terminal behavior that needs a live TTY/PTY: raw-mode key handling, PTY echo timing, decoding real SGR mouse reports off the wire, and true-color rendering fidelity. Rendering logic is tested through the pane/canvas objects instead, and already-parsed mouse events (clicks, double-/triple-clicks, drags, wheel) are driven through `TUI::App` in `test/integration/tui/mouse_word_selection_test.rb`.
 - Editor and terminal launches into external applications.

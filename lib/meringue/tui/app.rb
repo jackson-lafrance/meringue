@@ -194,12 +194,11 @@ module Meringue
         @settings_picker_theme_original = nil
         @context_menu = nil
         # First-run setup is a curated mode of the same transactional Settings
-        # draft and full-screen pane. It is disabled for `meringue demo`, where no
-        # kernel exists to save the draft or completion marker.
+        # draft and full-screen pane.
         @onboarding_enabled = onboarding_enabled ? true : false
         # Truthful only when at least one role harness is configured. The CLI
         # supplies a registry-backed check so the app can open setup and gate
-        # chat when no backend is chosen yet; tests and demo default to "ready"
+        # chat when no backend is chosen yet; tests default to "ready"
         # so existing behavior is unchanged.
         @harness_configured_check = harness_configured_check || -> { true }
         # Setup says which backends this machine can actually run, so it never

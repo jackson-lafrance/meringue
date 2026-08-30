@@ -73,8 +73,8 @@ module Meringue
         []
       end
 
-      # Deterministic stand-in catalog so tests and the demo state can exercise
-      # catalog-driven UI without spawning a harness process.
+      # Deterministic stand-in catalog so tests can exercise catalog-driven UI
+      # without spawning a harness process.
       FAKE_MODELS = [
         { "provider" => "fake", "id" => "fake-large", "name" => "Fake Large",
           "thinking_levels" => %w[off low medium high], "reasoning" => true, "context_window" => 200_000 },

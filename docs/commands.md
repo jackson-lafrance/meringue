@@ -10,7 +10,7 @@ inventory from a terminal.
 
 ## Usage
 
-The [quick start](#quick-start) covers the normal interactive launch and the harness-free demo. `bundle exec ruby -Ilib bin/meringue tui` is an explicit equivalent of `bundle exec ruby -Ilib bin/meringue`.
+The [quick start](#quick-start) covers the normal interactive launch. `bundle exec meringue tui` is an explicit equivalent of `bundle exec meringue`.
 
 The first interactive launch opens Setup as the same polished full-screen overlay used by `/config`. Choose a theme, review separate head and worker defaults, and opt into Meringue Xtras such as GitHub support. Experiments is the final step; the GitHub access test is absent until GitHub support is selected, and Complete atomically saves the settings and `[onboarding]` marker together. Backspace revisits a step without losing edits, while the single centered Next action keeps the page uncluttered. Automatic first-run `Esc` confirms a safe skip; `Esc` on a manual `/setup` rerun cancels without changing the marker. The overlay remains recoverable through resize, validation, and persistence failures. See [`docs/onboarding.md`](docs/onboarding.md).
 

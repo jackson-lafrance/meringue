@@ -21,9 +21,6 @@ Files:
   buffer and agent-workspace UI state is byte-stable: `save` → file → `load` are equal.
 - ISO8601 timestamps are preserved verbatim (`2026-07-11T00:08:00Z` style) and generated
   timestamps parse with `Time.iso8601`.
-- `fixtures/demo_state.json` loads tolerantly: the omitted `conversation`/`ui`/`metadata`
-  sections are materialized with defaults, counters are derived from the records, and the
-  fixture file itself is not rewritten by a load.
 - Unknown top-level sections and unknown record fields survive normalization and a round
   trip, so a newer state file is not silently pruned.
 - Log retention behaves exactly as `docs/log-retention.md` describes: 500 newest entries,

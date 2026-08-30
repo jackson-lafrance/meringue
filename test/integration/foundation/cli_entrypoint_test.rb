@@ -5,7 +5,7 @@ require "support/foundation_support"
 require "stringio"
 require "tmpdir"
 
-# The CLI must answer version/help/fixture questions without booting a TUI,
+# The CLI must answer version/help questions without booting a TUI,
 # starting a harness process, or touching ~/.meringue.
 class FoundationCliEntrypointTest < Minitest::Test
   def test_version_flags_print_the_version_and_succeed
@@ -27,7 +27,6 @@ class FoundationCliEntrypointTest < Minitest::Test
       assert_includes stdout, "Meringue #{Meringue::VERSION}"
       assert_includes stdout, "Usage:"
       assert_includes stdout, "meringue tui"
-      assert_includes stdout, "meringue demo"
       assert_includes stdout, "--version"
       assert_includes stdout, "/reload"
       assert_includes stdout, "/update"
@@ -93,18 +92,6 @@ class FoundationCliEntrypointTest < Minitest::Test
     assert_equal 1, status
     assert_includes stderr, "Unknown command: definitely-not-a-command"
     assert_includes stdout, "Usage:"
-  end
-
-  def test_demo_state_prints_the_checked_in_fixture_as_json
-    status, stdout, stderr = FoundationSupport.run_cli("demo-state")
-
-    assert_equal 0, status
-    assert_empty stderr
-
-    parsed = JSON.parse(stdout)
-
-    assert_kind_of Hash, parsed
-    refute_empty parsed
   end
 
   def test_executable_entrypoint_reports_version_and_help

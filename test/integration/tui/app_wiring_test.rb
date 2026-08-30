@@ -76,7 +76,7 @@ class TuiAppWiringTest < Minitest::Test
   end
 
   def test_render_delegates_to_the_layout_at_the_requested_size
-    frame = @app.render(composed_state(demo_state), width: 80, height: 20)
+    frame = @app.render(composed_state(tui_state), width: 80, height: 20)
     lines = frame.split("\n", -1)
 
     assert_equal 20, lines.length
@@ -84,7 +84,7 @@ class TuiAppWiringTest < Minitest::Test
   end
 
   def test_non_interactive_run_renders_one_frame_and_exits_cleanly
-    provider = TUISupport::RecordingStateProvider.new(demo_state)
+    provider = TUISupport::RecordingStateProvider.new(tui_state)
 
     assert_equal 0, @app.run(state_provider: provider.to_proc)
     assert_equal 1, provider.calls
@@ -115,7 +115,7 @@ class TuiAppWiringTest < Minitest::Test
     )
     app = MouseFailureApp.new(layout: Meringue::TUI::Layout.new, out: output, terminal:)
 
-    assert_equal 0, app.run(state: demo_state)
+    assert_equal 0, app.run(state: tui_state)
     assert_operator terminal.frames.length, :>=, 2
     rendered_output = TUISupport.strip_ansi(output.string).gsub(/\s+/, " ")
     assert_includes rendered_output, "Could not handle mouse input: RuntimeError: agent tree"
@@ -124,23 +124,23 @@ class TuiAppWiringTest < Minitest::Test
   end
 
   def test_compose_state_only_adds_presentation_keys
-    provider = TUISupport::RecordingStateProvider.new(demo_state)
+    provider = TUISupport::RecordingStateProvider.new(tui_state)
     composed = compose_app_state(@app, provider.to_proc, "typed")
 
     assert_equal(
       %w[_agent_tree_navigation _agent_workspace _capabilities _chat _context_menu _log_scope _scroll _selection _settings],
-      (composed.keys - demo_state.keys).sort
+      (composed.keys - tui_state.keys).sort
     )
     # Settings is nil unless /config or the shared first-run Setup mode is active.
     assert_nil composed.fetch("_settings")
     assert composed.fetch("_capabilities").key?("github_support")
-    demo_state.each_key { |key| assert composed.key?(key), "kernel key #{key} must survive composition" }
-    assert_equal demo_state.fetch("agents"), composed.fetch("agents")
-    assert_equal demo_state.fetch("questions"), composed.fetch("questions")
+    tui_state.each_key { |key| assert composed.key?(key), "kernel key #{key} must survive composition" }
+    assert_equal tui_state.fetch("agents"), composed.fetch("agents")
+    assert_equal tui_state.fetch("questions"), composed.fetch("questions")
   end
 
   def test_compose_state_does_not_mutate_the_kernel_snapshot
-    shared = demo_state
+    shared = tui_state
     before = JSON.parse(JSON.generate(shared))
 
     compose_app_state(@app, -> { shared }, "typed")
@@ -149,7 +149,7 @@ class TuiAppWiringTest < Minitest::Test
   end
 
   def test_composed_presentation_state_matches_the_documented_shape
-    composed = compose_app_state(@app, -> { demo_state }, "typed")
+    composed = compose_app_state(@app, -> { tui_state }, "typed")
 
     assert_equal "typed", composed.dig("_chat", "input_buffer")
     assert_equal 5, composed.dig("_chat", "input_cursor")
@@ -214,7 +214,7 @@ class TuiAppWiringTest < Minitest::Test
   end
 
   def test_remember_existing_log_events_does_not_mutate_state
-    state = demo_state
+    state = tui_state
     before = JSON.parse(JSON.generate(state))
 
     @app.remember_existing_log_events!(state)
