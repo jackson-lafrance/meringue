@@ -55,7 +55,14 @@ module Meringue
         root_issue_ids = (effective_issue_ids + project_issue_ids(state, effective_project_ids)).uniq
         issue_ids_to_remove = root_issue_ids.flat_map { |issue_id| issue_subtree_ids(state, issue_id) }.uniq
         issues_to_remove = state.fetch("issues").select { |issue| issue_ids_to_remove.include?(issue.fetch("id", nil)) }
-        affected_project_ids = (issues_to_remove.map { |issue| issue.fetch("project_id", nil) } + effective_project_ids).compact.uniq
+        affected_issue_ids = (issues_to_remove.map { |issue| issue.fetch("id", nil) } +
+                              initial_worker_ids.filter_map do |agent_id|
+                                state.fetch("agents").find { |agent| agent.fetch("id", nil) == agent_id }&.fetch("issue_id", nil)
+                              end).compact.uniq
+        affected_project_ids = (issues_to_remove.map { |issue| issue.fetch("project_id", nil) } +
+                                initial_worker_ids.filter_map do |agent_id|
+                                  state.fetch("agents").find { |agent| agent.fetch("id", nil) == agent_id }&.fetch("project_id", nil)
+                                end + effective_project_ids).compact.uniq
         empty_project_ids = if remove_empty_projects
                               affected_project_ids.select do |project_id|
                                 state.fetch("issues").none? do |issue|
@@ -98,6 +105,7 @@ module Meringue
           # issue it never belonged to.
           clear_dangling_issue_routing_pointer!(issue, agent_ids_to_remove, now)
         end
+        updated_issue_ids = refresh_issues_after_prune!(state, affected_issue_ids - issue_ids_to_remove, now)
         updated_project_ids = refresh_projects_after_prune!(state, affected_project_ids - removed_project_ids, now)
 
         {
@@ -108,6 +116,7 @@ module Meringue
           "removed_goal_ids" => removed_goal_ids,
           "removed_standalone_agent_ids" => standalone_agent_ids,
           "removed_project_ids" => removed_project_ids,
+          "updated_issue_ids" => updated_issue_ids,
           "updated_project_ids" => updated_project_ids,
           "released_head_session_agent_ids" => released_head_ids,
           "workspace_cleanup_outcomes" => workspace_cleanups,
@@ -479,6 +488,16 @@ module Meringue
         elsif (agent = find_agent(state, target))
           ids.fetch("issue_ids") << agent.fetch("issue_id", nil)
           ids.fetch("project_ids") << agent.fetch("project_id", nil)
+        end
+      end
+
+      def refresh_issues_after_prune!(state, issue_ids, now)
+        Array(issue_ids).filter_map do |issue_id|
+          issue = find_issue(state, issue_id)
+          next unless issue
+
+          update_issue_status_from_workers!(state, issue, now)
+          issue.fetch("id")
         end
       end
 

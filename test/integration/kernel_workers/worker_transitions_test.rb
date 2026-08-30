@@ -57,6 +57,45 @@ class KernelWorkersTransitionsTest < Minitest::Test
     assert_equal 1, logs_matching(engine, /Worker #{worker_id} completed\./).length
   end
 
+  def test_removing_an_errored_predecessor_recalculates_surviving_successor
+    client = RecordingHarnessClient.new(provider: "pi")
+    engine = build_engine(harness_client: client)
+    context = project_with_issue(engine)
+    predecessor_id = spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
+
+    patch_agent!(predecessor_id) { |worker| worker["status"] = "errored" }
+    patch_state! do |state|
+      state.fetch("issues").find { |record| record.fetch("id") == context.fetch("issue_id") }["status"] = "errored"
+      state.fetch("projects").find { |record| record.fetch("id") == context.fetch("project_id") }["status"] = "errored"
+    end
+    successor_id = spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
+    engine.mark_worker_completed(agent_id: successor_id, last_assistant_text: "Recovery complete.")
+
+    assert_equal "errored", issue(engine, context.fetch("issue_id")).fetch("status"),
+                 "the failed predecessor still contributes until it is removed"
+
+    apply!(engine, "Kill", { "target_id" => predecessor_id })
+
+    assert_nil agent(engine, predecessor_id)
+    assert_equal "completed", issue(engine, context.fetch("issue_id")).fetch("status")
+    assert_equal "completed", project(engine, context.fetch("project_id")).fetch("status")
+  end
+
+  def test_working_worker_takes_precedence_over_errored_sibling
+    engine = build_engine
+    context = project_with_issue(engine)
+    errored_id = spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
+    working_id = spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
+    completed_id = spawn_worker(engine, context.fetch("issue_id")).fetch("target_id")
+
+    patch_agent!(errored_id) { |worker| worker["status"] = "errored" }
+    engine.mark_worker_completed(agent_id: completed_id, last_assistant_text: "Partial progress.")
+
+    assert_equal "working", issue(engine, context.fetch("issue_id")).fetch("status")
+    assert_equal "working", project(engine, context.fetch("project_id")).fetch("status")
+    assert_equal "working", agent(engine, working_id).fetch("status")
+  end
+
   def test_completing_an_unknown_agent_is_rejected
     engine = build_engine
 
