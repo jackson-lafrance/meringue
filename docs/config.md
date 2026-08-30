@@ -70,7 +70,7 @@ Every colorscheme also defines an eight-color agent palette. Each agent id is ha
 
 AgentTree rows also show which harness backs each session: `π` Pi, `✳` Claude Code, and `◇` Codex CLI. A harness Meringue does not ship renders a plain ASCII initial and a record with no harness renders `?`, always in exactly one column. Set `MERINGUE_ASCII_GLYPHS=1` to render `p` / `c` / `x` instead of the marks when a font cannot draw them.
 
-`color_scheme` is accepted as a compatibility alias for `colorscheme`. Running `/theme <name>` writes a single `colorscheme` value and removes the older `color_scheme` alias from the `[tui]` section.
+Themes are stored under `[tui] colorscheme`.
 
 ## Turning off animation
 
@@ -169,7 +169,7 @@ A value set under a specific backend still wins for that backend, which is where
 model = "openai-codex/gpt-5.6-sol"       # used only when the harness is Pi
 ```
 
-The older `[harness.pi] model` / `thinking_level` keys are still read as fallbacks, so an existing configuration keeps working without being rewritten.
+Model and reasoning defaults use the role-specific keys under `[harness]`.
 
 ```toml
 

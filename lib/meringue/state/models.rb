@@ -28,7 +28,7 @@ module Meringue
       # persistence indefinitely. Logs remain chronological within this window.
       LOG_RETENTION_LIMIT = 500
       PULL_REQUEST_STORAGE_KEYS = %w[
-        delivery_pull_request delivery_pull_requests reported_pr_urls candidate_pr_urls
+        delivery_pull_requests reported_pr_urls candidate_pr_urls
       ].freeze
       AGENT_WORKSPACE_VIEWS = %w[agent terminal].freeze
       AGENT_WORKSPACE_FILTERS = %w[all output final reasoning tools].freeze
@@ -130,11 +130,8 @@ module Meringue
         state["counters"]["issues_by_project"] ||= {}
         state["counters"]["workers_by_issue"] ||= {}
         state["metadata"] ||= {}
-        migrate_active_harness_defaults!(state)
-        migrate_agent_session_defaults!(state)
         state["metadata"]["created_at"] ||= now
         state["metadata"]["updated_at"] ||= state["metadata"].fetch("created_at")
-        migrate_pull_requests_to_issues!(state)
         repair_project_names!(state)
         state
       end
@@ -366,7 +363,6 @@ module Meringue
         merged_records = merge_pull_request_records(records)
         unless merged_records.empty?
           issue["delivery_pull_requests"] = merged_records
-          issue["delivery_pull_request"] = merged_records.first
         end
 
         record_urls = merged_records.filter_map { |record| pull_request_record_url(record) }
@@ -378,11 +374,9 @@ module Meringue
       def normalize_issue_pull_request_fields!(issue)
         records = merge_pull_request_records(pull_request_records_from(issue))
         if records.empty?
-          issue.delete("delivery_pull_request")
           issue.delete("delivery_pull_requests")
         else
           issue["delivery_pull_requests"] = records
-          issue["delivery_pull_request"] = records.first
         end
         merge_url_array!(issue, "candidate_pr_urls", [])
         merge_url_array!(issue, "reported_pr_urls", [])
@@ -395,7 +389,6 @@ module Meringue
         return [] unless record.is_a?(Hash)
 
         [
-          record["delivery_pull_request"],
           *Array(record["delivery_pull_requests"])
         ].compact
       end

@@ -142,15 +142,10 @@ module Meringue
       end
 
       def pull_request_records_from_record(record)
-        metadata = record.fetch("harness_metadata", {}) || {}
         [
-          record["delivery_pull_request"],
-          metadata["delivery_pull_request"],
           *Array(record["delivery_pull_requests"]),
-          *Array(metadata["delivery_pull_requests"]),
-          *Array(record["reported_pr_urls"]),
-          *Array(metadata["reported_pr_urls"])
-        ].compact
+          *Array(record["reported_pr_urls"])
+        ]
       end
 
       def issue_record?(record)

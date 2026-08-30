@@ -754,7 +754,7 @@ module Meringue
       # The dashboard always uses this built-in layout. The focused-worker surfaces
       # have their own hand-tuned renderers and remain independent.
       def dashboard_status_bar_lines(state)
-        components = chat_pane.bottom_status_bar_components(state)
+        components = chat_pane.status_bar_components(state)
         left = %w[context open_pull_requests workers heads].flat_map { |id| status_bar_component(components, id) }
         right = %w[harness model thinking].flat_map { |id| status_bar_component(components, id) }
         [join_status_bar_components(left), join_status_bar_components(right)]

@@ -139,9 +139,6 @@ module Meringue
         "--accumulate" => ["continuity", "accumulate"]
       }.freeze
 
-      # `/prune` takes no arguments. These legacy words are still accepted as no-op aliases so
-      # existing muscle memory (`/prune resolved`) keeps working and prunes everything eligible.
-      PRUNE_COMPATIBILITY_ARGUMENTS = %w[all resolved errored completed merged].freeze
       # Words that make `/models` force a catalog re-fetch rather than reuse the
       # cached snapshot the kernel refreshes in the background.
       MODEL_CATALOG_REFRESH_WORDS = %w[refresh reload force --refresh].freeze
@@ -1260,11 +1257,9 @@ module Meringue
       end
 
       def parse_prune(arguments)
-        tokens = split_arguments(arguments)
-        return kernel_command("Prune") if tokens.empty?
-        return invalid(PRUNE_USAGE_MESSAGE) if tokens.length > 1 || !PRUNE_COMPATIBILITY_ARGUMENTS.include?(tokens[0].to_s.downcase)
+        return kernel_command("Prune") if split_arguments(arguments).empty?
 
-        kernel_command("Prune", "selector" => tokens[0].downcase)
+        invalid(PRUNE_USAGE_MESSAGE)
       end
 
       def parse_recount(arguments)

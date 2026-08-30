@@ -10,8 +10,7 @@ module Meringue
       private
 
       # Prune takes no options. One pass removes resolved (completed/killed) and errored records
-      # that are eligible for cleanup. A legacy `selector` value is still accepted for
-      # compatibility and recorded for traceability, but it never changes what is pruned.
+      # that are eligible for cleanup.
       def prune(command_id, command_type, payload)
         input_submission_id = present_string(value_at(payload, "_input_submission_id", "input_submission_id"))
         if input_submission_id && (receipt = completed_prune_submission(input_submission_id))
@@ -21,7 +20,6 @@ module Meringue
             receipt.fetch("details", {}), [receipt.fetch("id")]
           )
         end
-        requested_selector = present_string(value_at(payload, "selector", "Selector", "kind", "status").to_s.downcase)
         unless synchronized_state { github_support_enabled?(normalized_state) }
           return rejected_result(
             command_id, command_type,
@@ -53,7 +51,6 @@ module Meringue
             prune_records(
               command_id,
               command_type,
-              requested_selector: requested_selector,
               prepared_plan: preparation.fetch("plan"),
               prepared_workspace_cleanups: workspace_cleanups,
               prune_operation_id: operation_id,
@@ -373,7 +370,7 @@ module Meringue
       # in the same pass. Managed worktree cleanup is attempted before worker records leave state,
       # but a cleanup failure never changes logical eligibility: the unsafe worktree is preserved
       # and its structured outcome is reported for manual/future cleanup.
-      def prune_records(command_id, command_type, requested_selector: nil, prepared_plan: nil,
+      def prune_records(command_id, command_type, prepared_plan: nil,
                         prepared_workspace_cleanups: nil, prune_operation_id: nil,
                         input_submission_id: nil, timings: nil)
         state = normalized_state
@@ -417,7 +414,6 @@ module Meringue
         details = prune_result.merge(
           "kind" => "prune_result",
           "input_submission_id" => input_submission_id,
-          "requested_selector" => requested_selector,
           "checked_pr_urls" => checked_urls,
           "blocked_pr_urls" => blocked_urls,
           "pull_request_checks" => pull_request_checks,

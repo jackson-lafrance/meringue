@@ -707,7 +707,7 @@ module Meringue
       def issue_delivery?(issue)
         return false unless issue.is_a?(Hash)
 
-        present_value?(issue.fetch("delivery_pull_request", nil)) || Array(issue.fetch("delivery_pull_requests", [])).any?
+        Array(issue.fetch("delivery_pull_requests", [])).any?
       end
 
       # A worker that errored because its turn was cut short by a transport failure (a dropped

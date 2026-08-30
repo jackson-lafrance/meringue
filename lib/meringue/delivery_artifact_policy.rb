@@ -6,7 +6,6 @@ module Meringue
   # records may still use orchestration ids; delivery artifacts may not.
   module DeliveryArtifactPolicy
     MAX_SLUG_LENGTH = 48
-    LEGACY_BRANCH_PATTERN = %r{\Ameringue/[a-z0-9][a-z0-9-]*\z}i.freeze
     MANAGED_BRANCH_PATTERN = /\A[a-z0-9][a-z0-9-]*-[0-9a-f]{8}(?:-\d+)?\z/.freeze
 
     # Includes punctuation/case variants such as P5-I2-W3, p5_i2_w3,
@@ -70,11 +69,8 @@ module Meringue
       end.join("\n")
     end
 
-    # Legacy names are accepted only so existing workspaces remain reusable and
-    # cleanable after upgrade. New names are emitted only in the unprefixed form.
     def managed_branch?(branch)
-      text = branch.to_s
-      text.match?(MANAGED_BRANCH_PATTERN) || text.match?(LEGACY_BRANCH_PATTERN)
+      branch.to_s.match?(MANAGED_BRANCH_PATTERN)
     end
   end
 end

@@ -63,14 +63,6 @@ module Meringue
         "workspace_close" => ["q"]
       }.freeze
 
-      # Older config files bound the harness-specific action name. Keep them
-      # working by folding the legacy name onto the harness-agnostic action.
-      ACTION_ALIASES = {
-        "workspace_open_pi_session" => "workspace_open_agent_session",
-        "workspace_open_harness_session" => "workspace_open_agent_session",
-        "workspace_open_session" => "workspace_open_agent_session"
-      }.freeze
-
       # Short, harness-agnostic labels for the focused-workspace leader line.
       WORKSPACE_COMMAND_LABELS = {
         "workspace_switch_view" => "terminal/agent",
@@ -238,7 +230,7 @@ module Meringue
 
       def self.canonical_action(action)
         normalized = action.to_s.strip.downcase.tr("- ", "__").gsub(/_+/, "_")
-        ACTION_ALIASES.fetch(normalized, normalized)
+        normalized
       end
 
       # Display form used by hint lines: single letters read as command keys,

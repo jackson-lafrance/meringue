@@ -114,15 +114,9 @@ class TuiKeybindingsTest < Minitest::Test
     assert_equal ["\e[99~"], Keybindings.compile_names([raw])
   end
 
-  def test_action_names_are_canonicalized_and_legacy_aliases_resolve
-    assert_equal "focus_next", Keybindings.canonical_action(" Focus Next ")
-    assert_equal "workspace_open_agent_session", Keybindings.canonical_action("workspace_open_pi_session")
-    assert_equal "workspace_open_agent_session", Keybindings.canonical_action("workspace-open-harness-session")
-  end
-
   def test_workspace_command_labels_are_short_and_harness_agnostic
     assert_equal "terminal/agent", Keybindings.workspace_command_label("workspace_switch_view")
-    assert_equal "agent session", Keybindings.workspace_command_label("workspace_open_pi_session")
+    assert_equal "agent session", Keybindings.workspace_command_label("workspace_open_agent_session")
     refute_includes Keybindings::WORKSPACE_COMMAND_LABELS.values.join(" ").downcase, "pi "
   end
 
