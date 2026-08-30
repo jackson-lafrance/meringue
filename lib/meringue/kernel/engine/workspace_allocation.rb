@@ -225,7 +225,23 @@ module Meringue
           }
         end
 
-
+        # A reservation is a preview: it names the isolated worktree the backend will
+        # create, and the workspace itself is provisioned later under that reservation.
+        # Nothing is on disk yet, so `created` is false — which is not a failure, and is
+        # the difference between planning a worktree and failing to provision one. Losing
+        # this return is what made every SpawnWorker reservation report "Worker workspace
+        # is invalid", because a preview fell through to the provisioning failure below.
+        if !create && plan.fetch("strategy", nil) == "git_worktree" && present_string(plan.fetch("workspace_path", nil))
+          return {
+            "workspace_path" => File.expand_path(plan.fetch("workspace_path")),
+            "workspace_strategy" => "git_worktree",
+            "workspace_branch" => plan.fetch("workspace_branch", nil),
+            "plan" => plan,
+            "note" => "Version-control backend planned an isolated workspace for this worker.",
+            "created" => false,
+            "errors" => []
+          }
+        end
 
         if create && plan.fetch("created", false) && Dir.exist?(plan.fetch("workspace_path"))
           provider_note = if present_string(plan.fetch("worktree_provider_fallback_reason", nil))

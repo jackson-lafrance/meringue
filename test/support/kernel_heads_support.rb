@@ -203,7 +203,10 @@ class KernelHeadsTestCase < Minitest::Test
       store: Meringue::State::Store.new(path: state_path || @state_path),
       harness_client: harness_client || Meringue::Harness::FakeClient.new,
       head_runner: head_runner || KernelHeadsSupport::StubHeadRunner.new,
-      workspace_manager: KernelHeadsSupport::StubWorkspaceManager.new,
+      workspace_manager: (heads_workspace_manager = Meringue::Workspace::FakeManager.new(root_path: File.join(@temp_root, "workspaces"))),
+      # Fixture projects are directories, not repositories: the capability probe and the
+      # isolated workspace are both faked so these tests stay about head routing.
+      version_control_backend: Meringue::VersionControl::FakeBackend.new(manager: heads_workspace_manager),
       cwd: cwd || @project_path,
       async_heads: async_heads,
       forge_client: KernelHeadsSupport::StubForgeClient.new,

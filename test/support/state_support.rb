@@ -52,8 +52,13 @@ module StateSupport
   # A kernel Engine wired to fakes and confined to the given temporary directory.
   # Config lives inside the temporary directory so no user config is read or written.
   def build_engine(store:, dir:)
+    workspace_manager = Meringue::Workspace::FakeManager.new(root_path: File.join(dir, "workspaces"))
     Meringue::Kernel::Engine.new(
       store: store,
+      workspace_manager: workspace_manager,
+      # Fixture projects are directories, not repositories: the capability probe and the
+      # isolated workspace are both faked so these tests stay about state.
+      version_control_backend: Meringue::VersionControl::FakeBackend.new(manager: workspace_manager),
       cwd: dir,
       config_path: File.join(dir, "config.toml")
     )

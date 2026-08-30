@@ -157,7 +157,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
   def test_global_commands_persist_future_defaults_without_mutating_existing_sessions
     add_project!(name: "defaults")
     create_issue!("P1", title: "Exercise defaults")
-    spawn_worker!("P1-I1", workspace_path: make_project_dir("worker-one"))
+    spawn_worker!("P1-I1")
     first_before = persisted_agents.fetch(0).fetch("session_settings")
 
     model_result = apply_command("SetDefaultSessionModel", "model" => "openai/gpt-5.6-sol")
@@ -172,7 +172,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
     assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "model")
     assert_equal "xhigh", config.value("harness", "pi", "thinking_level")
 
-    spawn_worker!("P1-I1", workspace_path: make_project_dir("worker-two"))
+    spawn_worker!("P1-I1")
     second = persisted_agents.find { |agent| agent.fetch("id") == "P1-I1-W2" }
     assert_equal "openai/gpt-5.6-sol", second.dig("session_settings", "model", "reference")
     assert_equal "xhigh", second.dig("session_settings", "thinking_level")
@@ -284,7 +284,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
   def test_targeted_commands_change_one_existing_session_without_changing_defaults
     add_project!(name: "targeted")
     create_issue!("P1", title: "Exercise targeted settings")
-    spawn_worker!("P1-I1", workspace_path: make_project_dir("worker"))
+    spawn_worker!("P1-I1")
 
     model_result = apply_command(
       "SetSessionModel",
@@ -312,7 +312,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
   def test_targeted_session_commands_accept_lowercase_and_mixed_case_agent_ids
     add_project!(name: "targeted")
     create_issue!("P1", title: "Exercise targeted settings")
-    spawn_worker!("P1-I1", workspace_path: make_project_dir("worker"))
+    spawn_worker!("P1-I1")
 
     model_result = apply_command("SetSessionModel", "agent_id" => "p1-i1-w1", "model" => "openai/gpt-5.6-sol")
     thinking_result = apply_command("SetSessionThinkingLevel", "agent_id" => "P1-i1-W1", "level" => "xhigh")
@@ -342,7 +342,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
   def test_get_session_settings_is_no_longer_a_kernel_command
     add_project!(name: "removed")
     create_issue!("P1", title: "Exercise removed inspection")
-    spawn_worker!("P1-I1", workspace_path: make_project_dir("worker"))
+    spawn_worker!("P1-I1")
 
     removed = apply_command("GetSessionSettings", "agent_id" => "P1-I1-W1")
 
@@ -400,7 +400,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
 
     # The value round-trips into a session spawned after the change.
     apply_command("SetDefaultSessionModel", "model" => MULTI_SEGMENT_MODEL)
-    spawn_worker!("P1-I1", workspace_path: make_project_dir("multi-segment-worker"))
+    spawn_worker!("P1-I1")
     spawned = persisted_agents.fetch(0)
     assert_equal MULTI_SEGMENT_MODEL, spawned.dig("session_settings", "model", "reference")
     assert_equal "fireworks", spawned.dig("session_settings", "model", "provider")
@@ -410,7 +410,7 @@ class KernelCoreSessionSettingsDefaultsTest < Minitest::Test
   def test_a_multi_segment_model_reference_is_accepted_for_one_existing_session
     add_project!(name: "multi-segment-session")
     create_issue!("P1", title: "Exercise multi-segment models")
-    spawn_worker!("P1-I1", workspace_path: make_project_dir("worker"))
+    spawn_worker!("P1-I1")
 
     result = apply_command("SetSessionModel", "agent_id" => "P1-I1-W1", "model" => MULTI_SEGMENT_MODEL)
 

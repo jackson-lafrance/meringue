@@ -742,15 +742,6 @@ module Meringue
 
 
 
-      # The dashboard always uses this built-in layout. The focused-worker surfaces
-      # have their own hand-tuned renderers and remain independent.
-      def dashboard_status_bar_lines(state)
-        components = chat_pane.status_bar_components(state)
-        left = %w[context open_pull_requests workers heads].flat_map { |id| status_bar_component(components, id) }
-        right = %w[harness model thinking].flat_map { |id| status_bar_component(components, id) }
-        [join_status_bar_components(left), join_status_bar_components(right)]
-      end
-
 
 
 
@@ -846,21 +837,6 @@ module Meringue
         # Offsets are measured back from the newest row.
         [line_count - cursor_row - visible_capacity, 0].max
           .clamp(0, tail_scroll_max(line_count, content_height))
-      end
-
-      def tail_window(line_count, content_height, scroll_offset)
-        line_count = line_count.to_i
-        content_height = content_height.to_i
-        if line_count <= content_height
-          return { start_index: 0, finish_index: line_count, row_offset: 0, label: nil }
-        end
-
-        visible_capacity = [content_height - 1, 0].max
-        offset = scroll_offset.to_i.clamp(0, tail_scroll_max(line_count, content_height))
-        finish_index = line_count - offset
-        start_index = [finish_index - visible_capacity, 0].max
-        label = offset.positive? ? "… #{start_index} earlier · #{offset} later" : "… #{start_index} earlier"
-        { start_index: start_index, finish_index: finish_index, row_offset: 1, label: label }
       end
 
       # Selection only restyles cells that were already drawn for this pane, so a

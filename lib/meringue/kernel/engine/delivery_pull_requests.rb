@@ -187,7 +187,6 @@ module Meringue
       end
 
       def prune_pull_request_checks(state)
-        workers_by_issue = worker_agents_by_issue(state)
         state.fetch("issues").filter_map do |issue|
           urls = issue_pr_urls(issue).uniq
           next if urls.empty?

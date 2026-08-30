@@ -278,6 +278,9 @@ module HeadsSupport
       harness_client: harness_client,
       head_runner: runner,
       workspace_manager: workspace_manager,
+      # Fixture projects are directories, not repositories: the capability probe is
+      # answered by the fake backend so these tests stay about head behaviour.
+      version_control_backend: Meringue::VersionControl::FakeBackend.new(manager: workspace_manager),
       cwd: project_path,
       async_heads: async_heads,
       default_harness_provider: "fake",

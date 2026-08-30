@@ -17,7 +17,12 @@ class KernelCoreAddProjectTest < Minitest::Test
     assert_equal "Added project P1.", result.fetch("message")
 
     project = result.fetch("result")
-    assert_equal %w[created_at id name root_path status updated_at], project.keys.sort
+    # Registration records the backend's isolation evidence on the project, and the tree
+    # and every workspace allocation read it from here.
+    assert_equal %w[created_at id name root_path status updated_at version_control_backend version_control_capabilities
+                    version_control_diagnostic_at version_control_repository_identity], project.keys.sort
+    assert_equal "github_git", project.fetch("version_control_backend")
+    assert_equal true, project.fetch("version_control_capabilities").fetch("isolated_workspaces")
     assert_equal "P1", project.fetch("id")
     assert_equal "checkout", project.fetch("name")
     assert_equal File.expand_path(path), project.fetch("root_path")

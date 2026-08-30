@@ -112,14 +112,16 @@ class InputSettingsSchemaStoreTest < Minitest::Test
     end
   end
 
-  def test_transaction_preserves_unknown_keys_and_serializes_role_fallbacks
+  # A key the schema does not know about belongs to whoever wrote it, so a transaction
+  # that rewrites one section must carry the rest of the file across untouched.
+  def test_transaction_preserves_unknown_keys
     with_paths do |config_path, _state_path|
       File.write(config_path, <<~TOML)
         custom = "keep me"
         [plugin.future]
         enabled = true
         [harness.pi]
-        model = "anthropic/claude-opus-5"
+        command = "pi"
       TOML
       store = Meringue::Config::Store.new(path: config_path)
       store.save(
@@ -133,13 +135,16 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       config = Meringue::Config.load(path: config_path)
       assert_equal "keep me", config.value("custom")
       assert_equal true, config.value("plugin", "future", "enabled")
-      assert_equal "anthropic/claude-opus-5", config.value("harness", "pi", "model")
-      assert_equal "openai/gpt-5.6-sol", config.value("harness", "pi", "head_model")
-      assert_nil config.value("harness", "pi", "worker_model")
+      assert_equal "pi", config.value("harness", "pi", "command")
+      assert_equal "openai/gpt-5.6-sol", config.value("harness", "head_model")
+      assert_equal "anthropic/claude-opus-5", config.value("harness", "worker_model")
     end
   end
 
-  def test_equal_role_values_collapse_to_shared_compatibility_keys
+  # Roles are stored independently even when they agree. There is no shared key that a
+  # matching pair collapses into any more, and no provider-scoped one either: writing
+  # both spellings is what let a role-named save report back the value it had replaced.
+  def test_role_values_are_stored_per_role_even_when_they_match
     with_paths do |config_path, _state_path|
       store = Meringue::Config::Store.new(path: config_path)
       store.save(
@@ -153,12 +158,12 @@ class InputSettingsSchemaStoreTest < Minitest::Test
       )
       config = Meringue::Config.load(path: config_path)
 
-      assert_equal "claude", config.value("harness", "provider")
-      assert_nil config.value("harness", "head_provider")
-      assert_nil config.value("harness", "worker_provider")
-      assert_equal "high", config.value("harness", "pi", "thinking_level")
-      assert_nil config.value("harness", "pi", "head_thinking_level")
-      assert_nil config.value("harness", "pi", "worker_thinking_level")
+      assert_equal "claude", config.value("harness", "head_provider")
+      assert_equal "claude", config.value("harness", "worker_provider")
+      assert_equal "high", config.value("harness", "head_thinking_level")
+      assert_equal "high", config.value("harness", "worker_thinking_level")
+      assert_nil config.value("harness", "provider")
+      assert_equal({}, config.section("harness", "pi"))
     end
   end
 
@@ -300,9 +305,9 @@ class InputSettingsSchemaStoreTest < Minitest::Test
     assert_equal "openai/custom-model", draft.value("agent.head_model"), "an explicit model choice must survive a harness switch"
 
     configured = Meringue::Config.new(
-      { "harness" => { "provider" => "codex" } },
+      { "harness" => { "head_provider" => "codex" } },
       path: "/tmp/settings-codex-existing.toml",
-      file_data: { "harness" => { "provider" => "codex" } }
+      file_data: { "harness" => { "head_provider" => "codex" } }
     )
     assert_equal "openai/gpt-5.6-sol", configured.setting("agent.head_model", env: {})
   end

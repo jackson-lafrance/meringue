@@ -267,6 +267,9 @@ module KernelMaintenanceSupport
       head_runner: head_runner,
       harness_client_resolver: harness_client_resolver,
       workspace_manager: workspace_manager,
+      # Fixture projects are directories, not repositories: the capability probe is
+      # answered by the fake backend so these tests stay about maintenance.
+      version_control_backend: Meringue::VersionControl::FakeBackend.new(manager: workspace_manager),
       cwd: @kernel_maintenance_tmp,
       forge_client: forge_client,
       prune_forge_lookup_budget: prune_forge_lookup_budget,
