@@ -111,6 +111,7 @@ module Meringue
         end
 
         expanded_cwd = validate_cwd!(session_ref["cwd"] || session_ref[:cwd])
+        PiWorkspaceTrust.trust!(expanded_cwd)
         session = resume_session_argument(session_ref)
         session_name = metadata_value(session_ref, "session_name")
         workspace_mode = metadata_value(session_ref, "workspace_mode") || "isolated"
@@ -170,7 +171,13 @@ module Meringue
       end
 
       def prepare_interactive_session(session_ref)
-        current_ref = preserve_session_identity(get_state(session_ref), session_ref)
+        cwd = validate_cwd!(session_ref["cwd"] || session_ref[:cwd])
+        PiWorkspaceTrust.trust!(cwd)
+        current_ref = if process_for_session(session_ref, required: false)
+                        get_state(session_ref)
+                      else
+                        attach_session(session_ref)
+                      end
         current_ref = current_ref.merge(
           "metadata" => metadata_with(session_ref, current_ref.fetch("metadata", {}))
         )

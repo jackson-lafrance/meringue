@@ -75,6 +75,7 @@ module Meringue
         )
         session_arguments = without_flags(session_arguments, "--no-session", "--continue", "-c", "--resume", "-r", "--print", "-p")
         session_arguments += session_setting_arguments(session_ref.fetch("session_settings", {}))
+        session_arguments << "--approve" unless session_arguments.any? { |argument| %w[--approve -a --no-approve -na].include?(argument) }
         session_arguments = enforce_read_only_tools(session_arguments) if metadata_value(session_ref, "workspace_mode") == "shared_read_only"
         argv += session_arguments
         argv

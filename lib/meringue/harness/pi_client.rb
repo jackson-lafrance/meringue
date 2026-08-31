@@ -173,6 +173,7 @@ module Meringue
 
       def spawn_session(kind:, cwd:, prompt:, system_prompt:, session_name:, session_settings: {}, workspace_mode: "isolated")
         expanded_cwd = validate_cwd!(cwd)
+        PiWorkspaceTrust.trust!(expanded_cwd)
         argv = build_argv(
           session_name: session_name,
           system_prompt: system_prompt,

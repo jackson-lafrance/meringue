@@ -668,6 +668,13 @@ module Meringue
       # same PageUp/PageDown bytes as the corresponding keyboard action. Other
       # keys and pastes keep the terminal pass-through contract.
       def agent_key_bytes(key)
+        if key.is_a?(String)
+          # In the focused Pi transcript, the dashboard's up/down bindings mean transcript
+          # navigation rather than editing. Keep normal terminal input on its separate path.
+          return "\e[5~" if key == "\e[A"
+          return "\e[6~" if key == "\e[B"
+          return key
+        end
         return terminal_key_bytes(key) unless key.is_a?(Hash) && key.fetch("type", nil) == "mouse"
 
         kind = key.fetch("kind", nil).to_s
